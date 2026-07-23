@@ -127,6 +127,8 @@ We verified, with measured data (issue numbers, 👍 counts), the needs that the
 ### 6.1 UX — "feels like Claude Code, keeps the k9s experience"
 
 - `Ctrl-A` (tentative) toggles the agent panel — slides in as a right-side 30–40% panel. The rest of the screen remains a live TUI
+- **The panel is collapsible at any time** (same `Ctrl-A` toggle). Collapsing reclaims the full screen width for the resource views; the agent session — conversation history, in-flight tool calls, pending state — persists in the background
+- **Collapsed-state indicator**: while collapsed, a compact status badge lives in the status bar (e.g., `⚡AI ● working` / `⚡AI ✓ done` / `⚡AI ⏸ approval pending`). New agent output or a pending approval surfaces as a badge change (never a modal steal-focus), and re-expanding restores the full conversation exactly where it was. Approval dialogs are never auto-opened from the collapsed state — the badge invites the user to expand first
 - Panel contents: streaming markdown responses + a **tool-call log** (collapsible entries like Claude Code: "🔧 get_pod_logs(checkout-7d9f…) ✓") + an input box
 - **Automatic context injection**: the current screen state (active view, selected resource, applied filters, ns/ctx) is always provided as system context. From a selected resource, a shortcut fires an instant "what's wrong with this?" question
 - **Agent-drive mode**: when the agent manipulates the screen via UI-control tools, the affected panel is visually marked (border highlight + an "agent" badge). Any user keystroke immediately takes priority
