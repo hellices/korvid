@@ -154,8 +154,12 @@ An in-house tool-use loop (max iterations default 15, configurable):
 
 ### 6.3 LLM providers & activation model
 
-- Adapter interface: `complete(messages, tools, stream=True)` — adapters for OpenAI-compatible (OpenAI/Azure/Ollama/vLLM), Anthropic, and Gemini
-- Model/keys via config or env. With no provider configured, only the agent features are disabled and the TUI is fully functional (**it must be a useful tool even without an LLM**)
+- Adapter interface: `complete(messages, tools, stream=True)` — **no provider is bundled or defaulted; every provider is a pluggable adapter activated purely by config injection**
+- Two adapter families:
+  - **API-key adapters**: OpenAI-compatible (OpenAI/Azure/Ollama/vLLM), Anthropic, Gemini — keys via config or env
+  - **Subscription-backed adapters**: Claude Code (reuses the `claude` CLI / Agent SDK credentials) and GitHub Copilot (reuses `gh` auth) — lets users ride existing subscriptions without managing raw API keys
+- With no provider configured, **the agent mode and all agent-dependent features are disabled cleanly** (no dead buttons: agent keybindings, panel, and agent-only commands are hidden or show the setup hint) and the TUI is fully functional (**it must be a useful tool even without an LLM**)
+- **Install-time recommendation**: first run without a provider shows a one-time onboarding hint strongly recommending provider setup (with copy-paste config examples per provider). Dismissible and never blocking
 
 **Activation model — "provide a provider and it merges in" (config-detected auto-activation + explicit safety switches)**:
 
@@ -269,8 +273,8 @@ Five diagnostic features deliverable at the level of the **vanilla Kubernetes AP
 ## 12. Open Questions (owner decisions needed)
 
 1. ~~**Product name**~~ → **`korvid` finalized** (2026-07-23; naming research confirmed the GitHub K8s niche and PyPI are conflict-free. corvid = crow family, tool-using birds → a metaphor for agentic tool use)
-2. Recommended default LLM provider (whether an internal standard exists)
-3. Distribution channels (PyPI only? Homebrew? internal-only?)
+2. ~~Recommended default LLM provider~~ → **No default — strictly pluggable** (2026-07-24). Config injection activates a provider (Claude Code, GitHub Copilot, OpenAI, Anthropic, Gemini, OpenAI-compatible local); without one, agent mode and dependent features are cleanly disabled. Install/first-run strongly recommends configuring a provider (§6.3)
+3. ~~Distribution channels~~ → **PyPI first (install via `uv tool install korvid` / pipx), Homebrew tap in Phase 2** (2026-07-24). krew is out of scope (korvid is a standalone app, not a kubectl subcommand); single-binary packaging (PyInstaller/PyApp) stays a Phase 3 evaluation item
 4. License (whether to open-source)
 5. **(Evaluation only) Cilium/Hubble network flow view** — technical feasibility confirmed: Hubble Relay gRPC (`GetFlows` streaming; insecure connection possible after port-forward), Python stubs can be generated from the protos, and the Hubble UI service map is itself built by aggregating flows, so the same approach is available. No existing tool renders a network topology in a TUI (a differentiation opportunity). However, given the fallback story for clusters without Hubble, TLS, and proto-maintenance risks, this stays an evaluation item for Phase 3 only (first candidate for the plugin API)
 
