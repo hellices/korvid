@@ -139,6 +139,7 @@
 |---|---|---|
 | k8s read | `list_resources`, `get_resource`, `get_logs`, `get_events`, `top_pods`, `explain_rbac` | 없음 (RBAC 준수) |
 | k8s write | `apply`, `delete`, `scale`, `rollout_restart`, `cordon` | **승인 필수** — 명령/diff 미리보기 다이얼로그 |
+| debug | `launch_debug_session` (이미지·타깃·프로파일 구성), `suggest_debug_commands` | **승인 필수** (pod spec 변경) |
 | UI control | `navigate`, `set_filter`, `open_logs`, `split_pane`, `highlight_resource` | 없음 (화면만 변경, 시각 표시) |
 | shell | `run_kubectl(args)` (화이트리스트 검증) | read 동사는 통과, write 동사는 승인 |
 
@@ -151,6 +152,34 @@
 
 - 어댑터 인터페이스: `complete(messages, tools, stream=True)` — OpenAI-호환(OpenAI/Azure/Ollama/vLLM), Anthropic, Gemini 어댑터 제공
 - 모델/키는 config 또는 env. 프로바이더 미설정 시 에이전트 기능만 비활성화되고 TUI는 완전 동작 (**LLM 없이도 쓸모 있는 도구**여야 함)
+
+### 6.4 라이브 디버깅 — `kubectl debug` 통합 (k9s에 없는 기능)
+
+운영 중인 pod에 대한 무중단 디버깅을 1급 기능으로 제공한다. kubectl debug의 세 모드를 모두 커버하되 단계적으로 도입한다.
+
+| 모드 | 용도 | UX | 단계 |
+|---|---|---|---|
+| **Ephemeral container** | 운영 pod 무중단 디버깅. distroless/최소 이미지라 셸이 없는 pod에 필수 | pod 뷰에서 `d` → 디버그 다이얼로그 → attach | **MVP** |
+| Copy-of-pod (`--copy-to`) | 원본 불가침 실험 (명령/이미지 교체) | 다이얼로그에서 모드 선택. 세션 종료 시 사본 pod 정리 여부 확인 | Phase 2 |
+| Node debug | 노드 레벨 진단 (호스트 네임스페이스) | node 뷰에서 `d` | Phase 2 |
+
+**디버그 다이얼로그** — kubectl debug의 복잡한 플래그 조합을 폼 UI로 해결:
+- 디버그 이미지: 프리셋(busybox, nicolaka/netshoot, ubuntu) + 사용자 정의(config의 `debug.images`에 사내 레지스트리 이미지 등록 가능)
+- `--target` 컨테이너 선택 (프로세스 네임스페이스 공유 대상)
+- 프로파일: `general`(기본) / `netadmin` / `sysadmin` / `restricted` — 각 프로파일의 권한 차이를 다이얼로그에 설명 표기
+
+**터미널 attach**: MVP는 TUI suspend → PTY로 `kubectl debug -it` 실행 → 종료 시 TUI 복귀 (k9s shell-in과 동일 패턴, 검증된 방식). Phase 3에서 분할 패널 내 임베디드 터미널 검토.
+
+**안전 설계**:
+- Ephemeral container 주입은 pod spec 변경(write)이므로 **승인 다이얼로그 + 감사 로그** 경유
+- ⚠️ **주입된 ephemeral container는 pod 재시작 전까지 제거 불가** — 이 caveat를 승인 다이얼로그에 명시하고, 활성 디버그 컨테이너가 있는 pod는 목록에 배지 표시
+- RBAC 사전 검증: `pods/ephemeralcontainers` update 권한 없으면 "권한 부족: pods/ephemeralcontainers" 명시 (§5 페인 #5 원칙)
+- 클러스터 버전 검증: EphemeralContainers는 K8s 1.25+ stable — 미만 버전에서는 기능 비활성화 + 사유 표시
+
+**🌟 에이전트 통합 (차별화 킬러 워크플로)**:
+- `launch_debug_session` 도구: 에이전트가 진단 맥락에 맞는 디버그 구성을 스스로 결정해 제안 — "이 pod 네트워크가 왜 안 돼?" → netshoot 이미지 + `--target app` + netadmin 프로파일 구성 → 사용자 승인 → 셸 진입
+- `suggest_debug_commands` 도구: 진입 후 실행할 진단 명령 시퀀스 제안 (예: `nslookup svc`, `ss -tlnp`, `tcpdump -i eth0`)
+- 시나리오 완결성: "증상 질문 → 에이전트 조사 → 디버그 세션 자동 구성 → 셸에서 검증"이 한 흐름으로 이어짐. 이것이 kubectl-ai(REPL)와 k9s(수동 shell-in)가 각각 반쪽만 하는 것을 결합하는 지점
 
 ---
 
@@ -179,9 +208,9 @@
 
 | 단계 | 범위 | 완료 기준 |
 |---|---|---|
-| **Phase 1 — MVP** | pods/deploy/svc/events/ns/ctx 뷰, `:` 팔레트, `/` 필터, 2-pane 분할, 1급 로그 뷰어(멀티-pod/JSON/재연결), 계층형 안전장치, RBAC 에러 매핑, 선택적 watch, 단일 config, 키바인딩 오버라이드, **에이전트 패널(read 도구 + UI 제어 + 승인 기반 kubectl write)**, 감사 로그 | 일상 진단 워크플로를 k9s 없이 수행 가능 |
-| **Phase 2** | 전체 리소스+CRD 자동 감지, shell-in, 포트포워드, Secret 디코드 편집, 메트릭(top) 정렬, 커맨드 팔레트 발견성, 세션 상태 복원, anonymize | k9s 일상 사용 대체 가능 |
-| **Phase 3** | Python 플러그인 API(패널/컬럼/에이전트 도구 등록), 외부 MCP 서버 연결(에이전트 도구 확장), 멀티 클러스터 동시 뷰, 진단 플레이북 | 생태계 확장 개시 |
+| **Phase 1 — MVP** | pods/deploy/svc/events/ns/ctx 뷰, `:` 팔레트, `/` 필터, 2-pane 분할, 1급 로그 뷰어(멀티-pod/JSON/재연결), 계층형 안전장치, RBAC 에러 매핑, 선택적 watch, 단일 config, 키바인딩 오버라이드, **에이전트 패널(read 도구 + UI 제어 + 승인 기반 kubectl write)**, **라이브 디버깅(ephemeral container + 에이전트 debug 도구, §6.4)**, 감사 로그 | 일상 진단 워크플로를 k9s 없이 수행 가능 |
+| **Phase 2** | 전체 리소스+CRD 자동 감지, shell-in, 포트포워드, copy-of-pod/node debug, Secret 디코드 편집, 메트릭(top) 정렬, 커맨드 팔레트 발견성, 세션 상태 복원, anonymize | k9s 일상 사용 대체 가능 |
+| **Phase 3** | Python 플러그인 API(패널/컬럼/에이전트 도구 등록), 외부 MCP 서버 연결(에이전트 도구 확장), 멀티 클러스터 동시 뷰, 임베디드 디버그 터미널 패널, 진단 플레이북 | 생태계 확장 개시 |
 | **비목표** | 웹 UI, 클러스터 내 상주 에이전트(kagent 영역), Helm 관리(초기), 1000+노드 초대형 클러스터 최적화 | — |
 
 ## 11. 리스크 & 완화
