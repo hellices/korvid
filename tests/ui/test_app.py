@@ -7,6 +7,7 @@ from korvid.core.watch import WatchManager, WatchSource
 from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.resource_table import ResourceTable
+from korvid.ui.widgets.status_bar import StatusBar
 
 
 def _pod(name: str, phase: str = "Running") -> PodSummary:
@@ -95,3 +96,13 @@ async def test_watch_update_preserves_filter() -> None:
         await pilot.pause(0.1)
         # Filter must still apply: checkout-2 + checkout-3 visible; api-1 filtered out.
         assert table.row_count == 2
+
+
+async def test_status_bar_shows_ns_and_agent_state() -> None:
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        bar = app.query_one(StatusBar)
+        text = str(bar.render())
+        assert "default" in text
+        assert "AI off" in text

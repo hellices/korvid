@@ -23,6 +23,7 @@ from korvid.ui.messages import (
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.resource_table import ResourceTable
+from korvid.ui.widgets.status_bar import StatusBar
 
 
 class KorvidApp(App[None]):
@@ -50,6 +51,7 @@ class KorvidApp(App[None]):
         yield ResourceTable()
         yield CommandBar()
         yield FilterBar()
+        yield StatusBar()
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -65,6 +67,7 @@ class KorvidApp(App[None]):
         self.store.subscribe(_on_store_update)
         self.watch_manager.on_error = _on_watch_error
         await self.watch_manager.start("pods", self.current_namespace)
+        self._refresh_status()
 
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
         table = self.query_one(ResourceTable)
@@ -97,12 +100,19 @@ class KorvidApp(App[None]):
             self.current_namespace = message.namespace
             await self.watch_manager.start("pods", self.current_namespace)
         self.post_message(ResourcesUpdated("pods"))
+        self._refresh_status()
 
     def on_quit_command(self, message: QuitCommand) -> None:
         self.exit()
 
     def on_unknown_command(self, message: UnknownCommand) -> None:
         self.notify(f"Unknown command: {message.text}", severity="warning")
+
+    def _refresh_status(self) -> None:
+        label = "AI on" if self.config.agent_enabled else "AI off"
+        self.query_one(StatusBar).update_status(
+            self.config.kube_context, self.current_namespace, label
+        )
 
     async def on_unmount(self) -> None:
         await self.watch_manager.stop_all()
