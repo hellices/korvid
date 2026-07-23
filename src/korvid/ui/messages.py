@@ -57,3 +57,17 @@ class ShowError(Message):
         super().__init__()
         self.title = title
         self.detail = detail
+
+
+class QuitCommand(Message):
+    """Command to quit the application."""
+
+    pass
+
+
+class UnknownCommand(Message):
+    """Command that was not recognised — future agent fallthrough hook."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        super().__init__()

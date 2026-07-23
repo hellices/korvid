@@ -51,3 +51,15 @@ async def test_watch_update_refreshes_table() -> None:
         await pilot.pause(0.1)
         table = app.query_one(ResourceTable)
         assert table.row_count == 2
+
+
+async def test_colon_opens_command_bar_and_ns_switch() -> None:
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("colon")
+        for ch in "ns prod":
+            await pilot.press(ch if ch != " " else "space")
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert app.current_namespace == "prod"
