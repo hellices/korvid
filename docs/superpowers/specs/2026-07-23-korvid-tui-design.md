@@ -181,6 +181,37 @@
 - `suggest_debug_commands` 도구: 진입 후 실행할 진단 명령 시퀀스 제안 (예: `nslookup svc`, `ss -tlnp`, `tcpdump -i eth0`)
 - 시나리오 완결성: "증상 질문 → 에이전트 조사 → 디버그 세션 자동 구성 → 셸에서 검증"이 한 흐름으로 이어짐. 이것이 kubectl-ai(REPL)와 k9s(수동 shell-in)가 각각 반쪽만 하는 것을 결합하는 지점
 
+### 6.5 확장 진단 기능 — 바닐라 K8s API만 사용 (2026-07-23 리서치)
+
+외부 생태계 도구(Helm/GitOps/보안 스캐너/비용/멀티클러스터) 없이 **바닐라 Kubernetes API + metrics-server(사실상 표준)** 수준에서 제공 가능한 진단 기능 5종. 각각 krew 인기 플러그인으로 수요가 검증됐고, k9s에는 없으며, 에이전트 시너지가 높은 것만 선별했다.
+
+| # | 기능 | 수요 증거 | 사용 API | 단계 |
+|---|---|---|---|---|
+| 1 | **이벤트 인텔리전스** | k9s 이벤트 뷰는 단순 목록. 트러블슈팅 1순위 정보원 | core v1 Events (`fieldSelector`, watch) | **MVP** |
+| 2 | **소유권 트리** | kubectl-tree 3.4k⭐ + kube-lineage 0.5k⭐ | `ownerReferences` 재귀 탐색 | **MVP** |
+| 3 | **RBAC 분석** | rakkess 1.4k⭐ + who-can 0.9k⭐ + rbac-lookup 1.0k⭐ | `SubjectAccessReview`, `SelfSubjectRulesReview`, Role/Binding | Phase 2 |
+| 4 | **사용량 vs Requests/Limits** | kube-capacity 2.7k⭐ | `metrics.k8s.io/v1beta1` + Pod spec resources | Phase 2 |
+| 5 | **PDB/Quota 인식 + drain 시뮬레이션** | 도구 공백 지점, SRE 필수 작업 | `policy/v1` PDB, ResourceQuota, LimitRange | Phase 2 |
+
+**설계 포인트:**
+
+- **이벤트 인텔리전스**: 오브젝트 컨텍스트 이벤트 뷰(선택 리소스의 이벤트만 `fieldSelector` 필터), Warning 타임라인, 반복 패턴 배지(count 기반). 에이전트가 비정형 `.message`를 해석하는 **LLM 최대 강점 영역** — "지난 30분 Warning 요약"이 즉시 가치를 낸다. 소유권 트리와 결합해 장애 타임라인 자동 구성
+- **소유권 트리**: MVP는 순방향만(Deployment→RS→Pod, ownerReferences 필드 그대로). 역방향 인덱싱(전체 리소스 스캔)은 Phase 2. **에이전트 컨텍스트 공급 장치** — 진단 시 선택 리소스의 소유권 체인을 자동으로 시스템 컨텍스트에 포함해 진단 정확도를 올림
+- **RBAC 분석**: "내 권한 목록"(SelfSubjectRulesReview, 1콜)부터 시작. 에이전트 write 도구 실행 전 `SubjectAccessReview`로 **승인 게이트에서 권한 사전 검증** — 실패 시 "권한 부족: {verb} {resource}"를 승인 다이얼로그 단계에서 알림(§5 페인 #5와 동일 원칙, §6.4 RBAC 사전 검증의 일반화)
+- **사용량 vs Requests/Limits**: pod/node 뷰에 usage/requests/limits 3열 + 퍼센티지 바. 오버프로비저닝 감지(실사용 ≪ requests). metrics-server 미설치 시 usage 열만 비활성 + 사유 표시 (graceful degradation)
+- **PDB/drain 시뮬레이션**: node 뷰에서 drain 전 "이 노드의 pod ↔ PDB 매칭 → disruptionsAllowed 검사" 결과를 승인 다이얼로그에 표시. **승인 게이트의 가장 구체적인 활용 사례**. ResourceQuota 잔량 게이지는 ns 뷰에 표시
+
+**에이전트 도구 추가분** (§6.2 테이블 확장):
+
+| 도구 | 그룹 | 게이트 |
+|---|---|---|
+| `get_owner_chain`, `get_object_events`, `summarize_events` | k8s read | 없음 |
+| `check_access` (SubjectAccessReview), `list_my_permissions` | k8s read | 없음 |
+| `analyze_resource_usage` (metrics + spec 비교) | k8s read | 없음 |
+| `simulate_drain` (PDB 위반 사전 검사) | k8s read | 없음 (drain 실행 자체는 write 게이트) |
+
+**검토했으나 제외한 것**: rollout 관리(k9s 기본 제공, 차별화 약함), TUI 인라인 YAML 에디터(난이도 高 — dry-run diff는 승인 다이얼로그에 이미 포함), NetworkPolicy 시뮬레이션(바닐라 API는 "허용 규칙"만 보여주고 실제 플로우 불가, CNI별 enforcement 상이), 다중 port-forward 관리(asyncio+SPDY+Textual 기술 리스크, LLM 시너지 낮음 — 단일 포워딩은 Phase 2 유지).
+
 ---
 
 ## 7. 데이터 계층
@@ -208,9 +239,9 @@
 
 | 단계 | 범위 | 완료 기준 |
 |---|---|---|
-| **Phase 1 — MVP** | pods/deploy/svc/events/ns/ctx 뷰, `:` 팔레트, `/` 필터, 2-pane 분할, 1급 로그 뷰어(멀티-pod/JSON/재연결), 계층형 안전장치, RBAC 에러 매핑, 선택적 watch, 단일 config, 키바인딩 오버라이드, **에이전트 패널(read 도구 + UI 제어 + 승인 기반 kubectl write)**, **라이브 디버깅(ephemeral container + 에이전트 debug 도구, §6.4)**, 감사 로그 | 일상 진단 워크플로를 k9s 없이 수행 가능 |
-| **Phase 2** | 전체 리소스+CRD 자동 감지, shell-in, 포트포워드, copy-of-pod/node debug, Secret 디코드 편집, 메트릭(top) 정렬, 커맨드 팔레트 발견성, 세션 상태 복원, anonymize | k9s 일상 사용 대체 가능 |
-| **Phase 3** | Python 플러그인 API(패널/컬럼/에이전트 도구 등록), 외부 MCP 서버 연결(에이전트 도구 확장), 멀티 클러스터 동시 뷰, 임베디드 디버그 터미널 패널, 진단 플레이북 | 생태계 확장 개시 |
+| **Phase 1 — MVP** | pods/deploy/svc/events/ns/ctx 뷰, `:` 팔레트, `/` 필터, 2-pane 분할, 1급 로그 뷰어(멀티-pod/JSON/재연결), 계층형 안전장치, RBAC 에러 매핑, 선택적 watch, 단일 config, 키바인딩 오버라이드, **에이전트 패널(read 도구 + UI 제어 + 승인 기반 kubectl write)**, **라이브 디버깅(ephemeral container + 에이전트 debug 도구, §6.4)**, **이벤트 인텔리전스·소유권 트리(순방향, §6.5)**, 감사 로그 | 일상 진단 워크플로를 k9s 없이 수행 가능 |
+| **Phase 2** | 전체 리소스+CRD 자동 감지, shell-in, 포트포워드, copy-of-pod/node debug, Secret 디코드 편집, 메트릭(top) 정렬, **RBAC 분석·사용량 vs Req/Limits·PDB/drain 시뮬레이션(§6.5)**, 소유권 트리 역방향 인덱싱, 커맨드 팔레트 발견성, 세션 상태 복원, anonymize | k9s 일상 사용 대체 가능 |
+| **Phase 3** | Python 플러그인 API(패널/컬럼/에이전트 도구 등록), 외부 MCP 서버 연결(에이전트 도구 확장), 멀티 클러스터 동시 뷰, 임베디드 디버그 터미널 패널, 진단 플레이북, (검토) Cilium/Hubble 플로우 뷰 | 생태계 확장 개시 |
 | **비목표** | 웹 UI, 클러스터 내 상주 에이전트(kagent 영역), Helm 관리(초기), 1000+노드 초대형 클러스터 최적화 | — |
 
 ## 11. 리스크 & 완화
@@ -229,3 +260,4 @@
 2. 기본 LLM 프로바이더 권장값 (사내 표준 유무)
 3. 대상 배포 채널 (PyPI만? Homebrew? 사내 전용?)
 4. 라이선스 (OSS 공개 여부)
+5. **(검토 수준) Cilium/Hubble 네트워크 플로우 뷰** — 기술 타당성 확인됨: Hubble Relay gRPC(`GetFlows` 스트림, 포트포워드 후 insecure 접속 가능), proto에서 Python stub 생성 가능, Hubble UI 서비스맵도 플로우 집계 방식이라 동일 접근 가능. TUI에서 네트워크 토폴로지를 그린 기존 도구 전무(차별화 기회). 단 Hubble 미설치 fallback·TLS·proto 유지보수 리스크가 있어 Phase 3 검토 항목으로만 유지 (플러그인 API의 1호 후보)
