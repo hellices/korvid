@@ -1,0 +1,29 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.22
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.41.0
+    hooks:
+      - id: typos
+        pass_filenames: false
+  - repo: https://github.com/abravalheri/validate-pyproject
+    rev: v0.25
+    hooks:
+      - id: validate-pyproject
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: no-bare-type-ignore
+        name: "No bare 'type: ignore'"
+        language: pygrep
+        entry: '# type: ignore(?!\[)'
+        types: [python]
