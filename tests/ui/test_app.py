@@ -78,3 +78,20 @@ async def test_slash_filter_narrows_rows() -> None:
         await pilot.press("escape")
         await pilot.pause(0.1)
         assert table.row_count == 2
+
+
+async def test_watch_update_preserves_filter() -> None:
+    app = make_app([_pod("api-1"), _pod("checkout-2")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("slash")
+        for ch in "check":
+            await pilot.press(ch)
+        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        assert table.row_count == 1  # only checkout-2
+        # A new pod arrives while the filter is active.
+        app.store.apply_event("pods", "ADDED", _pod("checkout-3"))
+        await pilot.pause(0.1)
+        # Filter must still apply: checkout-2 + checkout-3 visible; api-1 filtered out.
+        assert table.row_count == 2

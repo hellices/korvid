@@ -74,9 +74,13 @@ class KorvidApp(App[None]):
         self.notify(message.detail, title=message.title, severity="error")
 
     def action_open_command(self) -> None:
+        # Dismiss the filter bar first so no invisible filter stays active.
+        self.query_one(FilterBar).dismiss_bar()
         self.query_one(CommandBar).open()
 
     def action_open_filter(self) -> None:
+        # Dismiss the command bar first to enforce mutual exclusion.
+        self.query_one(CommandBar).dismiss_bar()
         self.query_one(FilterBar).open()
 
     def on_filter_command(self, message: FilterCommand) -> None:
