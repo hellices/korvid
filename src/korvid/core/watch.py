@@ -61,9 +61,9 @@ class WatchManager:
         while True:
             try:
                 async for event_type, obj in self._source(namespace):
-                    failures = 0
                     self._store.apply_event(kind, event_type, obj)
                 # Stream ended normally (server-side watch timeout) -> reconnect.
+                failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # report + retry, never die silently
