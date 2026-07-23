@@ -25,4 +25,10 @@ class LLMProvider(ABC):
         *,
         stream: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Yield completion events (text deltas and tool calls)."""
+        """Yield completion events (text deltas and tool calls).
+
+        Implementations must be async generators (async def with yield),
+        which satisfy this AsyncIterator signature under mypy --strict.
+        Do NOT write a plain async function returning an iterator—that
+        produces a coroutine and fails the override check.
+        """
