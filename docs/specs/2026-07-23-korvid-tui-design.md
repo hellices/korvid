@@ -151,6 +151,7 @@ An in-house tool-use loop (max iterations default 15, configurable):
 - **Audit log**: every write execution (user- or agent-initiated) is recorded in `~/.local/state/korvid/audit.jsonl` (who/when/command/approved-by). The file is created with `0600` permissions and rotated by size (default 50 MB, configurable retention). Auditing is **fail-closed**: if the audit entry cannot be written, the write action is blocked
 - **UI-control hardening**: UI-control tools are ungated (screen-only), but cluster-sourced content (labels, annotations, log lines) is a prompt-injection vector that could steer the agent into misleading screen manipulation. Therefore every UI-control action is also recorded in the tool-call log (§6.1), agent-driven panels are visually marked, and — as above — approval confirmation is reserved exclusively for user input
 - Privacy: an anonymize option for data sent to the LLM (k8sgpt style); Secret values masked by default
+- **Token/cost budget**: the iteration cap alone does not bound spend — each iteration can attach large context (resource specs, log tails, events), especially with §6.1 automatic context injection. A per-session token budget (`agent.max_tokens_per_session`, default 200k) tracks cumulative input+output tokens; on breach the loop pauses and asks the user whether to continue (showing tokens consumed so far). Context attachments are also trimmed at the source: log tails and event lists are truncated to configurable line/entry caps before entering the prompt
 
 ### 6.3 LLM providers & activation model
 
