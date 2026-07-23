@@ -9,6 +9,10 @@ class NavigateCommand(Message):
     """Command to navigate to a view, optionally in a specific namespace."""
 
     view: str
+    # `namespace` is a ClassVar on Message used only in __init_subclass__ to derive
+    # handler_name ("on_navigate_command") at class-definition time. Dispatch reads
+    # message.handler_name (class var), never message.namespace at runtime, so this
+    # instance-attribute shadow is safe. Mypy cannot model this; suppression required.
     namespace: str | None  # type: ignore[misc,assignment]
 
     def __init__(self, view: str, namespace: str | None = None) -> None:
