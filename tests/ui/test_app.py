@@ -63,3 +63,18 @@ async def test_colon_opens_command_bar_and_ns_switch() -> None:
         await pilot.press("enter")
         await pilot.pause(0.1)
         assert app.current_namespace == "prod"
+
+
+async def test_slash_filter_narrows_rows() -> None:
+    app = make_app([_pod("api-1"), _pod("checkout-2")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("slash")
+        for ch in "check":
+            await pilot.press(ch)
+        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        assert table.row_count == 1
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert table.row_count == 2

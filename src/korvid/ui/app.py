@@ -12,6 +12,8 @@ from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore
 from korvid.core.watch import WatchManager
 from korvid.ui.messages import (
+    ClearFilter,
+    FilterCommand,
     NavigateCommand,
     QuitCommand,
     ResourcesUpdated,
@@ -19,6 +21,7 @@ from korvid.ui.messages import (
     UnknownCommand,
 )
 from korvid.ui.widgets.command_bar import CommandBar
+from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.resource_table import ResourceTable
 
 
@@ -26,6 +29,7 @@ class KorvidApp(App[None]):
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         ("q", "quit", "Quit"),
         ("colon", "open_command", "Command"),
+        ("slash", "open_filter", "Filter"),
     ]
 
     def __init__(
@@ -45,6 +49,7 @@ class KorvidApp(App[None]):
         yield Header()
         yield ResourceTable()
         yield CommandBar()
+        yield FilterBar()
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -70,6 +75,17 @@ class KorvidApp(App[None]):
 
     def action_open_command(self) -> None:
         self.query_one(CommandBar).open()
+
+    def action_open_filter(self) -> None:
+        self.query_one(FilterBar).open()
+
+    def on_filter_command(self, message: FilterCommand) -> None:
+        self.filter_pattern = message.pattern
+        self.post_message(ResourcesUpdated("pods"))
+
+    def on_clear_filter(self, message: ClearFilter) -> None:
+        self.filter_pattern = ""
+        self.post_message(ResourcesUpdated("pods"))
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
         if message.namespace and message.namespace != self.current_namespace:
