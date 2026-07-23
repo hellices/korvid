@@ -141,11 +141,13 @@ An in-house tool-use loop (max iterations default 15, configurable):
 | k8s write | `apply`, `delete`, `scale`, `rollout_restart`, `cordon` | **Approval required** — command/diff preview dialog |
 | debug | `launch_debug_session` (configures image/target/profile), `suggest_debug_commands` | **Approval required** (pod spec mutation) |
 | UI control | `navigate`, `set_filter`, `open_logs`, `split_pane`, `highlight_resource` | None (screen-only changes, visually marked) |
-| shell | `run_kubectl(args)` (whitelist-validated) | Read verbs pass; write verbs require approval |
+| shell | `run_kubectl(args)` (allowlist-validated) | Triple validation (verb × resource × flags); write verbs require approval |
 
 - Combines a **read-only-by-default** philosophy (HolmesGPT style) with **approval-based execution** (kubectl-ai style)
-- Approval dialog: shows the exact command to run + target resource + dry-run diff (when available); Y/n/edit
-- **Audit log**: every write execution (user- or agent-initiated) is recorded in `~/.local/state/korvid/audit.jsonl` (who/when/command/approved-by)
+- **Shell tool validation is not verb-only**: `run_kubectl` validates the (verb × resource × flags) triple. Read verbs can still be dangerous — e.g., `get secrets -o yaml` (leaks secret payloads into LLM context), `proxy`/`port-forward` (long-running, network exposure), `--raw`, or flag smuggling into exec-like paths. Reads of sensitive resources (Secrets, ServiceAccount tokens) are forced through the masking pipeline; long-running and raw-API verbs are rejected outright
+- Approval dialog: shows the exact command to run + target resource + dry-run diff (when available); Y/n/edit. **Approval dialogs can only be confirmed by a user keystroke — no agent tool can open, focus, or confirm an approval dialog** (see UI-control hardening below)
+- **Audit log**: every write execution (user- or agent-initiated) is recorded in `~/.local/state/korvid/audit.jsonl` (who/when/command/approved-by). The file is created with `0600` permissions and rotated by size (default 50 MB, configurable retention). Auditing is **fail-closed**: if the audit entry cannot be written, the write action is blocked
+- **UI-control hardening**: UI-control tools are ungated (screen-only), but cluster-sourced content (labels, annotations, log lines) is a prompt-injection vector that could steer the agent into misleading screen manipulation. Therefore every UI-control action is also recorded in the tool-call log (§6.1), agent-driven panels are visually marked, and — as above — approval confirmation is reserved exclusively for user input
 - Privacy: an anonymize option for data sent to the LLM (k8sgpt style); Secret values masked by default
 
 ### 6.3 LLM providers & activation model
