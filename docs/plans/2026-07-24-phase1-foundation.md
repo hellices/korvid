@@ -543,7 +543,8 @@ class PodSummary:
         status = obj.get("status") or {}
         statuses: list[dict[str, Any]] = status.get("containerStatuses") or []
         ready_count = sum(1 for s in statuses if s.get("ready"))
-        restarts = max((int(s.get("restartCount", 0)) for s in statuses), default=0)
+        # kubectl's RESTARTS column is the SUM across containers — match that expectation.
+        restarts = sum(int(s.get("restartCount", 0)) for s in statuses)
         return cls(
             name=str(meta.get("name", "")),
             namespace=str(meta.get("namespace", "")),
@@ -726,6 +727,19 @@ def test_subscriber_notified_with_kind() -> None:
     assert seen == ["pods"]
 
 
+def test_broken_subscriber_does_not_block_others() -> None:
+    store = ResourceStore()
+    seen: list[str] = []
+
+    def broken(kind: str) -> None:
+        raise RuntimeError("subscriber bug")
+
+    store.subscribe(broken)
+    store.subscribe(seen.append)
+    store.apply_event("pods", "ADDED", _pod("a"))  # must not raise
+    assert seen == ["pods"]
+
+
 def test_namespaces_isolated() -> None:
     store = ResourceStore()
     store.apply_event("pods", "ADDED", _pod("a", ns="prod"))
@@ -742,13 +756,20 @@ Expected: FAIL — module not found
 
 `src/korvid/core/store.py`:
 ```python
-"""In-memory resource cache fed by watch events; the UI's single read model."""
+"""In-memory resource cache fed by watch events; the UI's single read model.
+
+Subscriber callbacks are isolated: a buggy subscriber must never propagate
+into the watch loop that calls apply_event (it would kill the whole watch).
+"""
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from korvid.k8s.models import PodSummary
+
+logger = logging.getLogger(__name__)
 
 
 class ResourceStore:
@@ -764,7 +785,10 @@ class ResourceStore:
         else:  # ADDED / MODIFIED
             bucket[obj.name] = obj
         for callback in self._subscribers:
-            callback(kind)
+            try:
+                callback(kind)
+            except Exception:  # noqa: BLE001 - subscriber bugs must not kill the watch loop
+                logger.exception("resource store subscriber failed")
 
     def get(self, kind: str, namespace: str) -> list[PodSummary]:
         bucket = self._data.get((kind, namespace), {})
@@ -777,7 +801,7 @@ class ResourceStore:
 - [ ] **Step 4: Run to verify pass**
 
 Run: `uv run pytest tests/core/test_store.py -v`
-Expected: 5 passed
+Expected: 6 passed
 
 - [ ] **Step 5: Gates + commit**
 
@@ -797,7 +821,8 @@ git commit -m "feat: resource store with watch-event application and subscriptio
 
 **Interfaces:**
 - Consumes: `ResourceStore.apply_event`; a watch-source callable with the same shape as `KubeClient.watch_pods`
-- Produces: `WatchManager(store: ResourceStore, watch_source: WatchSource)` where `WatchSource = Callable[[str], AsyncIterator[tuple[str, PodSummary]]]`; methods `async start(kind: str, namespace: str) -> None` (idempotent), `async stop(kind: str, namespace: str) -> None`, `async stop_all() -> None`, property `active: set[tuple[str, str]]`. Selective-watch principle (design doc §5-6): only what's on screen gets a watch task.
+- Produces: `WatchManager(store: ResourceStore, watch_source: WatchSource, *, on_error: Callable[[str], None] | None = None, retry_delay: float = 1.0, max_retries: int = 5)` where `WatchSource = Callable[[str], AsyncIterator[tuple[str, PodSummary]]]`; methods `async start(kind: str, namespace: str) -> None` (idempotent), `async stop(kind: str, namespace: str) -> None`, `async stop_all() -> None`, property `active: set[tuple[str, str]]`. Selective-watch principle (design doc §5-6): only what's on screen gets a watch task.
+- Resilience contract (k8s API servers periodically close watch streams): a stream that **ends normally reconnects forever**; a stream that **raises** retries up to `max_retries` consecutive failures with `retry_delay` between attempts, then gives up — the dead task is removed from `active` and `on_error` receives a human-readable message. Watch tasks must never die silently while still appearing active.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -852,6 +877,39 @@ async def test_stop_cancels() -> None:
     await mgr.start("pods", "default")
     await mgr.stop("pods", "default")
     assert mgr.active == set()
+
+
+async def test_stream_end_reconnects() -> None:
+    store = ResourceStore()
+    calls = 0
+
+    async def flaky(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+        nonlocal calls
+        calls += 1
+        yield ("ADDED", _pod(f"p{calls}"))
+        # stream ends -> k8s watch timeout simulation; manager must reconnect
+
+    mgr = WatchManager(store, flaky, retry_delay=0)
+    await mgr.start("pods", "default")
+    await asyncio.sleep(0.05)
+    assert calls >= 2
+    await mgr.stop_all()
+
+
+async def test_failing_watch_reports_and_removes_task() -> None:
+    store = ResourceStore()
+    errors: list[str] = []
+
+    async def broken(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+        raise RuntimeError("boom")
+        yield ("", _pod(""))  # pragma: no cover - makes this an async generator
+
+    mgr = WatchManager(store, broken, on_error=errors.append, retry_delay=0, max_retries=2)
+    await mgr.start("pods", "default")
+    await asyncio.sleep(0.05)
+    assert mgr.active == set()  # dead task removed, not lying around as "active"
+    assert errors
+    assert "boom" in errors[0]
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -863,7 +921,13 @@ Expected: FAIL — module not found
 
 `src/korvid/core/watch.py`:
 ```python
-"""Selective watch: one task per (kind, namespace) actually on screen (§5-6)."""
+"""Selective watch: one task per (kind, namespace) actually on screen (§5-6).
+
+Streams that end normally (k8s API servers close watches periodically)
+reconnect forever. Streams that raise retry up to max_retries consecutive
+failures, then the task is removed from `active` and on_error is notified —
+watch tasks never die silently.
+"""
 
 from __future__ import annotations
 
@@ -878,9 +942,20 @@ WatchSource = Callable[[str], AsyncIterator[tuple[str, PodSummary]]]
 
 
 class WatchManager:
-    def __init__(self, store: ResourceStore, watch_source: WatchSource) -> None:
+    def __init__(
+        self,
+        store: ResourceStore,
+        watch_source: WatchSource,
+        *,
+        on_error: Callable[[str], None] | None = None,
+        retry_delay: float = 1.0,
+        max_retries: int = 5,
+    ) -> None:
         self._store = store
         self._source = watch_source
+        self.on_error = on_error  # public: the UI wires this after construction
+        self._retry_delay = retry_delay
+        self._max_retries = max_retries
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
 
     @property
@@ -905,21 +980,36 @@ class WatchManager:
             await self.stop(kind, namespace)
 
     async def _run(self, kind: str, namespace: str) -> None:
-        async for event_type, obj in self._source(namespace):
-            self._store.apply_event(kind, event_type, obj)
+        failures = 0
+        while True:
+            try:
+                async for event_type, obj in self._source(namespace):
+                    failures = 0
+                    self._store.apply_event(kind, event_type, obj)
+                # Stream ended normally (server-side watch timeout) -> reconnect.
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - report + retry, never die silently
+                failures += 1
+                if failures >= self._max_retries:
+                    if self.on_error is not None:
+                        self.on_error(f"watch {kind}/{namespace} failed: {exc}")
+                    break
+            await asyncio.sleep(self._retry_delay)
+        self._tasks.pop((kind, namespace), None)
 ```
 
 - [ ] **Step 4: Run to verify pass**
 
 Run: `uv run pytest tests/core/test_watch.py -v`
-Expected: 3 passed
+Expected: 5 passed
 
 - [ ] **Step 5: Gates + commit**
 
 ```bash
 make check
 git add src/korvid/core/watch.py tests/core/test_watch.py
-git commit -m "feat: selective watch manager feeding the resource store"
+git commit -m "feat: selective watch manager with reconnect and failure reporting"
 ```
 
 ---
@@ -1174,7 +1264,7 @@ from textual.widgets import Footer, Header
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore
 from korvid.core.watch import WatchManager
-from korvid.ui.messages import ResourcesUpdated
+from korvid.ui.messages import ResourcesUpdated, ShowError
 from korvid.ui.widgets.resource_table import ResourceTable
 
 
@@ -1200,7 +1290,13 @@ class KorvidApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
+        # Both callbacks fire from watch tasks on the same loop; post_message is
+        # loop-safe. Watch tasks are cancelled in on_unmount before shutdown to
+        # avoid posting to a closing app.
         self.store.subscribe(lambda kind: self.post_message(ResourcesUpdated(kind)))
+        self.watch_manager.on_error = lambda detail: self.post_message(
+            ShowError("Watch failed", detail)
+        )
         await self.watch_manager.start("pods", self.current_namespace)
 
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
@@ -1209,13 +1305,22 @@ class KorvidApp(App[None]):
             self.store.get(message.kind, self.current_namespace), self.filter_pattern
         )
 
+    def on_show_error(self, message: ShowError) -> None:
+        self.notify(message.detail, title=message.title, severity="error")
+
     async def on_unmount(self) -> None:
         await self.watch_manager.stop_all()
 ```
 
 `src/korvid/__main__.py`:
 ```python
-"""Composition root — the only place real dependencies are wired together."""
+"""Composition root — the only place real dependencies are wired together.
+
+Everything (connect, app, close) runs inside ONE event loop via run_async:
+kubernetes_asyncio's ApiClient binds its aiohttp session to the loop it was
+created on, so separate asyncio.run() calls would break with
+"Event loop is closed" / "attached to a different loop".
+"""
 
 from __future__ import annotations
 
@@ -1228,17 +1333,21 @@ from korvid.k8s.client import KubeClient
 from korvid.ui.app import KorvidApp
 
 
-def main() -> None:
+async def _run() -> None:
     config = load_config()
     kube = KubeClient()
-    asyncio.run(kube.connect(config.kube_context))
+    await kube.connect(config.kube_context)
     store = ResourceStore()
     watch_manager = WatchManager(store, kube.watch_pods)
     app = KorvidApp(config=config, store=store, watch_manager=watch_manager)
     try:
-        app.run()
+        await app.run_async()
     finally:
-        asyncio.run(kube.close())
+        await kube.close()
+
+
+def main() -> None:
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
