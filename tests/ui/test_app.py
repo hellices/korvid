@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore
-from korvid.core.watch import WatchManager
+from korvid.core.watch import WatchManager, WatchSource
 from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.resource_table import ResourceTable
@@ -15,7 +15,7 @@ def _pod(name: str, phase: str = "Running") -> PodSummary:
     )
 
 
-def fake_source(pods: list[PodSummary]):
+def fake_source(pods: list[PodSummary]) -> WatchSource:
     async def source(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
         for p in pods:
             yield ("ADDED", p)

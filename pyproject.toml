@@ -59,7 +59,7 @@ fixture-parentheses = false
 strict = true
 warn_unused_ignores = true
 mypy_path = "src"
-packages = ["korvid"]
+files = ["src", "tests"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
