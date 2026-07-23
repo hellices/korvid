@@ -25,6 +25,7 @@
 **Files:**
 - Create: `pyproject.toml`, `tach.toml`, `.pre-commit-config.yaml`, `Makefile`, `.github/workflows/ci.yml`, `.claude/settings.json`, `.claude/hooks/protect-files.sh`
 - Create: `src/korvid/__init__.py`, `src/korvid/py.typed`, and empty `__init__.py` in `src/korvid/{ui,core,agent,k8s,providers}/`
+- Generate + commit: `uv.lock` (via `uv sync` in Step 9 — CI uses `uv sync --locked`, so the lockfile MUST be checked in)
 - Test: `tests/test_sanity.py`
 
 **Interfaces:**
@@ -50,7 +51,8 @@ dependencies = [
 korvid = "korvid.__main__:main"
 
 [build-system]
-requires = ["hatchling"]
+# hatchling >=1.26 required: PEP 639 SPDX string form of `license` above
+requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -330,17 +332,18 @@ def test_version() -> None:
 - [ ] **Step 9: Install and run all gates**
 
 ```bash
-uv sync --dev
+uv sync --dev                 # also generates uv.lock — commit it (CI runs `uv sync --locked`)
 uv run pre-commit autoupdate
 uv run pytest -x -q          # expect: 1 passed
 make check                    # expect: all green
 uv run pre-commit install
 ```
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 10: Commit (verify `uv.lock` is included)**
 
 ```bash
 git add -A
+git status --short | grep uv.lock   # must show uv.lock staged
 git commit -m "feat: repository gates scaffold (pyproject, tach, pre-commit, CI, claude hooks)"
 ```
 
