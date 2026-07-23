@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from korvid.ui.messages import NavigateCommand, QuitCommand, UnknownCommand
+from korvid.ui.messages import FilterCommand, NavigateCommand, QuitCommand, UnknownCommand
 
 _VIEWS = {"pods"}
 
 
-def parse_command(text: str) -> NavigateCommand | QuitCommand | UnknownCommand:
+def parse_command(text: str) -> NavigateCommand | FilterCommand | QuitCommand | UnknownCommand:
     parts = text.strip().split()
     if not parts:
         return UnknownCommand(text)

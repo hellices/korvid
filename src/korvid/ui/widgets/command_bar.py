@@ -29,3 +29,4 @@ class CommandBar(Input):
     async def on_key(self, event: Key) -> None:
         if event.key == "escape":
             self.dismiss_bar()
+            event.stop()
