@@ -11,7 +11,8 @@ COLUMNS = ("NAME", "READY", "STATUS", "RESTARTS", "CPU R/L", "MEM R/L", "QOS", "
 
 # Eviction order reversed: pods evicted last render first.
 _QOS_RANK = {"Guaranteed": 0, "Burstable": 1, "BestEffort": 2}
-_QOS_STYLE = {"Guaranteed": "green", "Burstable": "yellow", "BestEffort": "red"}
+# Red is too aggressive for a steady-state view: green → chartreuse → yellow.
+_QOS_STYLE = {"Guaranteed": "green", "Burstable": "chartreuse2", "BestEffort": "yellow"}
 
 
 def _sort_key(pod: PodSummary) -> tuple[int, str]:

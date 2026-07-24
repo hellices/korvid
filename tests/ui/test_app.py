@@ -253,5 +253,5 @@ async def test_qos_cells_are_color_coded() -> None:
             assert isinstance(qos_cell, Text)
             styles[str(qos_cell)] = qos_cell.style
         assert styles["Guaranteed"] == "green"
-        assert styles["Burstable"] == "yellow"
-        assert styles["BestEffort"] == "red"
+        assert styles["Burstable"] == "chartreuse2"
+        assert styles["BestEffort"] == "yellow"
