@@ -484,3 +484,276 @@ async def test_ns_command_keeps_current_kind() -> None:
         await pilot.pause(0.2)
         assert app.current_kind == "deployments"
         assert app.current_scope == "kube-system"
+
+
+# ---------------------------------------------------------------------------
+# Task 11: Reconnect indicator + overflow banner
+# ---------------------------------------------------------------------------
+
+
+def _pod_with_container(name: str, ns: str = "default") -> PodSummary:
+    """PodSummary with a single named container so action_logs can pick the container."""
+    return PodSummary(
+        name=name,
+        namespace=ns,
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node=None,
+        qos="-",
+        containers=("main",),
+    )
+
+
+def _make_log_app(stream_logs: object) -> KorvidApp:
+    """App with one pod and an injected stream_logs callable."""
+    pod = _pod_with_container("my-pod")
+    store = ResourceStore()
+
+    async def _source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        yield ("ADDED", pod)
+        while True:
+            await asyncio.sleep(0.01)
+
+    return KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, _source),
+        stream_logs=stream_logs,  # type: ignore[arg-type]
+    )
+
+
+async def test_log_reconnect_flaky_stream() -> None:
+    """Call 1 yields 2 lines then raises; call 2 yields 2 more and stays alive.
+
+    The reconnect indicator ('reconnecting') must be visible during the sleep, then
+    flip back to 'streaming' on the first line from the second call.
+    """
+    from korvid.k8s.logs import LogLine
+    from korvid.ui.widgets.log_pane import LogPane
+
+    call_count = 0
+
+    async def _flaky(
+        ns: str,
+        pod: str,
+        ctr: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncIterator[LogLine]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield LogLine(pod=pod, container=ctr, text="line1")
+            yield LogLine(pod=pod, container=ctr, text="line2")
+            raise RuntimeError("transient network error")
+        else:
+            yield LogLine(pod=pod, container=ctr, text="line3")
+            yield LogLine(pod=pod, container=ctr, text="line4")
+            await asyncio.sleep(1000)  # stay alive until cancelled
+
+    app = _make_log_app(_flaky)
+    app._reconnect_sleep = 0.15  # long enough to inspect mid-reconnect state
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.05)
+        log_pane = app.query_one(LogPane)
+
+        await pilot.press("l")
+        # After 0.05 s the first stream has failed; sleep(0.15) is in progress.
+        await pilot.pause(0.05)
+        assert log_pane._state == "\u27f3 reconnecting"
+
+        # After another 0.4 s the reconnect sleep has finished, call 2 ran.
+        await pilot.pause(0.4)
+        assert call_count == 2
+        assert app._log_buffer is not None
+        assert len(app._log_buffer.lines()) == 4
+        assert log_pane._state == "\u25cf streaming"
+
+
+async def test_log_reconnect_exhausted_shows_error() -> None:
+    """Stream always raises → after 5 reconnect attempts state is error + notification."""
+    from korvid.k8s.logs import LogLine
+    from korvid.ui.widgets.log_pane import LogPane
+
+    call_count = 0
+
+    async def _always_fail(
+        ns: str,
+        pod: str,
+        ctr: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncIterator[LogLine]:
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError("permanent failure")
+        yield  # make it an async generator
+
+    app = _make_log_app(_always_fail)
+    app._reconnect_sleep = 0.0
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.05)
+        await pilot.press("l")
+        await pilot.pause(0.5)
+
+        log_pane = app.query_one(LogPane)
+        assert log_pane._state == "\u25ae error"
+        assert call_count == 6  # 1 initial + 5 reconnects
+
+    notifications = [n.message for n in app._notifications]
+    assert any("5 reconnect attempts" in m for m in notifications)
+
+
+async def test_log_reconnect_api_error_no_retry() -> None:
+    """ApiStatusError surfaces immediately; no reconnect attempt is made."""
+    from korvid.k8s.errors import ApiStatusError
+    from korvid.k8s.logs import LogLine
+    from korvid.ui.widgets.log_pane import LogPane
+
+    call_count = 0
+
+    async def _api_error(
+        ns: str,
+        pod: str,
+        ctr: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncIterator[LogLine]:
+        nonlocal call_count
+        call_count += 1
+        raise ApiStatusError(403, "Forbidden")
+        yield  # make it an async generator
+
+    app = _make_log_app(_api_error)
+    app._reconnect_sleep = 0.0
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.05)
+        await pilot.press("l")
+        await pilot.pause(0.2)
+
+        log_pane = app.query_one(LogPane)
+        assert call_count == 1
+        assert log_pane._state == "\u25ae error"
+
+    notifications = [n.message for n in app._notifications]
+    assert not any("reconnect" in m.lower() for m in notifications)
+
+
+async def test_log_previous_no_reconnect() -> None:
+    """Previous-logs stream ends cleanly → state ended, previous stream called once."""
+    from korvid.k8s.logs import LogLine
+    from korvid.ui.widgets.log_pane import LogPane
+
+    prev_call_count = 0
+
+    async def _stream(
+        ns: str,
+        pod: str,
+        ctr: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncIterator[LogLine]:
+        nonlocal prev_call_count
+        if follow:
+            # Live stream: stay alive until cancelled.
+            await asyncio.sleep(1000)
+            return
+        prev_call_count += 1
+        yield LogLine(pod=pod, container=ctr, text="prev-line1")
+        yield LogLine(pod=pod, container=ctr, text="prev-line2")
+
+    app = _make_log_app(_stream)
+    app._reconnect_sleep = 0.0
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.05)
+        # Open live stream then switch to previous logs.
+        await pilot.press("l")
+        await pilot.pause(0.05)
+        await pilot.press("p")
+        await pilot.pause(0.2)
+
+        log_pane = app.query_one(LogPane)
+        assert prev_call_count == 1
+        assert log_pane._state == "\u25ae ended"
+
+
+async def test_log_overflow_banner_shown_once() -> None:
+    """Buffer overflow triggers banner exactly once; guard prevents further calls."""
+    from korvid.k8s.logs import LogLine
+
+    async def _five_lines(
+        ns: str,
+        pod: str,
+        ctr: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncIterator[LogLine]:
+        for i in range(5):
+            yield LogLine(pod=pod, container=ctr, text=f"line{i}")
+        await asyncio.sleep(1000)  # stay alive until cancelled
+
+    app = _make_log_app(_five_lines)
+    app._reconnect_sleep = 0.0
+    app._log_buffer_max_lines = 3  # small cap so overflow fires on line 4
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.05)
+        await pilot.press("l")
+        await pilot.pause(0.3)
+
+        # Buffer should be overflowed and capped at max_lines.
+        assert app._log_buffer is not None
+        assert app._log_buffer.overflowed
+        assert len(app._log_buffer.lines()) == 3
+
+
+async def test_log_cancel_during_reconnect_sleep_no_error() -> None:
+    """Closing the pane while a reconnect sleep is in progress is clean; no error notif."""
+    from korvid.k8s.logs import LogLine
+    from korvid.ui.widgets.log_pane import LogPane
+
+    async def _always_fail(
+        ns: str,
+        pod: str,
+        ctr: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncIterator[LogLine]:
+        raise RuntimeError("transient")
+        yield  # make it an async generator
+
+    app = _make_log_app(_always_fail)
+    app._reconnect_sleep = 100.0  # long sleep so task is sleeping when we close
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.05)
+        await pilot.press("l")
+        await pilot.pause(0.05)  # stream fails → task now sleeping 100 s
+
+        # Close the pane (cancels the sleeping task)
+        await pilot.press("l")
+        await pilot.pause(0.1)
+
+        log_pane = app.query_one(LogPane)
+        assert log_pane.display is False
+
+    # No "5 reconnect attempts" notification should have been raised
+    notifications = [n.message for n in app._notifications]
+    assert not any("reconnect attempts" in m for m in notifications)

@@ -100,8 +100,9 @@ class FakeStream:
                 raise self.error
             for i in range(self.lines_per_call):
                 yield LogLine(pod=pod, container=container, text=f"line{i}")
-            # Block until cancelled
-            await asyncio.Event().wait()
+            # Block live streams until cancelled; return immediately for previous logs.
+            if follow:
+                await asyncio.Event().wait()
         finally:
             self.closed[key] = True
 
@@ -115,7 +116,7 @@ class FakeStream:
         follow: bool = True,
         tail_lines: int = 200,
     ) -> AsyncGenerator[LogLine, None]:
-        """Variant that returns immediately (stream ended naturally)."""
+        """Variant that always returns immediately (used for previous-logs tests)."""
         key = f"{pod}/{container}"
         self.closed[key] = False
         try:
@@ -351,12 +352,15 @@ async def test_switching_kind_closes_pane() -> None:
 
 
 async def test_stream_ended_sets_ended_state() -> None:
-    """When a stream ends naturally, the pane state becomes 'ended'."""
+    """When a previous-logs stream ends naturally, the pane state becomes 'ended'."""
     fake = FakeStream(lines_per_call=1)
-    app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake.returning)
+    # FakeStream blocks for follow=True (live) but returns for follow=False (previous).
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await pilot.press("l")
+        await pilot.press("l")  # live stream opens and stays alive
+        await pilot.pause(0.1)
+        await pilot.press("p")  # previous logs: yields 1 line, returns → "ended"
         await pilot.pause(0.3)
         log_pane = app.query_one(LogPane)
         assert log_pane.display is True
@@ -409,6 +413,7 @@ async def test_error_task_discarded_state_stays_error() -> None:
         [_pod("myapp", containers=("main", "sidecar"))],
         stream_logs=mixed,
     )
+    app._reconnect_sleep = 0.0  # speed up reconnect cycle in test
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("l")
@@ -522,7 +527,7 @@ class RecordingFakeStream:
 
 
 class SearchFakeStream:
-    """Yields 5 lines (3 containing 'findme') and returns immediately."""
+    """Yields 5 lines (3 containing 'findme') then blocks until cancelled."""
 
     async def __call__(
         self,
@@ -537,6 +542,8 @@ class SearchFakeStream:
         texts = ["findme-0", "normal-1", "findme-2", "normal-3", "findme-4"]
         for t in texts:
             yield LogLine(pod=pod, container=container, text=t)
+        if follow:
+            await asyncio.Event().wait()
 
 
 def _header_text(app: KorvidApp) -> str:

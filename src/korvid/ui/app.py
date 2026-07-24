@@ -49,6 +49,7 @@ _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
 }
 
 _MAX_MULTI_STREAM_PODS = 8
+_MAX_RECONNECT_ATTEMPTS = 5
 
 
 class KorvidApp(App[None]):
@@ -103,6 +104,8 @@ class KorvidApp(App[None]):
         self._log_error: bool = False
         self._current_log_triples: list[tuple[str, str, str]] = []
         self._current_log_force_prefix: bool = False
+        self._reconnect_sleep: float = 1.0
+        self._log_buffer_max_lines: int = 5000
 
     @property
     def current_namespace(self) -> str:
@@ -446,7 +449,7 @@ class KorvidApp(App[None]):
         self._current_log_force_prefix = force_prefix
 
         log_pane = self.query_one(LogPane)
-        self._log_buffer = LogBuffer()
+        self._log_buffer = LogBuffer(self._log_buffer_max_lines)
         log_pane.open(sources, force_prefix=force_prefix, log_buffer=self._log_buffer)
 
         if previous:
@@ -466,33 +469,109 @@ class KorvidApp(App[None]):
     async def _spawn_log_stream(
         self, namespace: str, pod: str, container: str, *, previous: bool = False
     ) -> None:
-        """Consume one log stream, feeding lines to the pane and buffer."""
-        if self._stream_logs is None:
+        """Delegate to the appropriate streaming coroutine based on follow flag."""
+        stream_logs = self._stream_logs
+        if stream_logs is None:
             return
+        if previous:
+            await self._previous_log_stream(namespace, pod, container, stream_logs)
+        else:
+            await self._live_log_stream(namespace, pod, container, stream_logs)
+
+    async def _live_log_stream(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        stream_logs: Callable[..., AsyncIterator[LogLine]],
+    ) -> None:
+        """Retry loop for live (follow=True) streams.
+
+        Retries up to ``_MAX_RECONNECT_ATTEMPTS`` times on transient errors or
+        unexpected EOF.  ApiStatusError and CancelledError are never retried.
+        """
+        log_pane = self.query_one(LogPane)
+        current = asyncio.current_task()
+        consecutive_failures = 0
+
+        while True:
+            try:
+                async for line in stream_logs(
+                    namespace, pod, container, previous=False, follow=True
+                ):
+                    if consecutive_failures > 0 and not self._log_error:
+                        log_pane.set_state("streaming")
+                    consecutive_failures = 0
+                    log_pane.feed(line)
+                    self._buffer_line(log_pane, line)
+            except ApiStatusError as exc:
+                self._handle_stream_api_error(log_pane, current, namespace, exc)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass  # transient; fall through to reconnect logic
+
+            consecutive_failures += 1
+            if consecutive_failures > _MAX_RECONNECT_ATTEMPTS or self._log_error:
+                if not self._log_error:
+                    self.notify(
+                        f"log stream lost after {_MAX_RECONNECT_ATTEMPTS} reconnect attempts",
+                        title="Log stream error",
+                        severity="error",
+                    )
+                    self._log_error = True
+                    log_pane.set_state("error")
+                self._discard_task(current)
+                return
+            log_pane.set_state("reconnecting")
+            await asyncio.sleep(self._reconnect_sleep)
+
+    async def _previous_log_stream(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        stream_logs: Callable[..., AsyncIterator[LogLine]],
+    ) -> None:
+        """One-shot previous-container-log stream (follow=False, no reconnect)."""
         log_pane = self.query_one(LogPane)
         current = asyncio.current_task()
         try:
-            async for line in self._stream_logs(
-                namespace, pod, container, previous=previous, follow=not previous
-            ):
+            async for line in stream_logs(namespace, pod, container, previous=True, follow=False):
                 log_pane.feed(line)
                 self._buffer_line(log_pane, line)
         except ApiStatusError as exc:
-            msg = explain_api_error(exc.status, exc.reason, "pods", namespace)
-            self.notify(msg, title="Log stream error", severity="error")
-            self._log_error = True
-            if log_pane.display:
-                log_pane.set_state("error")
-            if current is not None:
-                self._log_tasks.discard(current)
+            self._handle_stream_api_error(log_pane, current, namespace, exc)
+            return
         except asyncio.CancelledError:
             raise
-        else:
-            # Stream ended naturally; remove self and check if all tasks done.
-            if current is not None:
-                self._log_tasks.discard(current)
-            if not self._log_tasks and log_pane.display and not self._log_error:
-                log_pane.set_state("ended")
+        self._discard_task(current)
+        if self._all_streams_ended():
+            log_pane.set_state("ended")
+
+    def _handle_stream_api_error(
+        self,
+        log_pane: LogPane,
+        current: asyncio.Task[None] | None,
+        namespace: str,
+        exc: ApiStatusError,
+    ) -> None:
+        """Notify the user of an API error and put the stream into error state."""
+        msg = explain_api_error(exc.status, exc.reason, "pods", namespace)
+        self.notify(msg, title="Log stream error", severity="error")
+        self._log_error = True
+        log_pane.set_state("error")
+        self._discard_task(current)
+
+    def _all_streams_ended(self) -> bool:
+        """True when every spawned stream task has finished without an error."""
+        return not self._log_tasks and not self._log_error
+
+    def _discard_task(self, current: asyncio.Task[None] | None) -> None:
+        """Remove *current* from the live task set (no-op if None or absent)."""
+        if current is not None:
+            self._log_tasks.discard(current)
 
     def _buffer_line(self, log_pane: LogPane, line: LogLine) -> None:
         """Append *line* to the shared buffer; show overflow banner on first overflow."""

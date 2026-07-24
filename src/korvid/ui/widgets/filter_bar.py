@@ -11,7 +11,7 @@ class FilterBar(Input):
 
     def on_mount(self) -> None:
         self.display = False
-        self.placeholder = "/ filter pods (Enter keep, Esc clear)"
+        self.placeholder = "filter by name (Enter keep, Esc clear)"
 
     def open(self) -> None:
         self.value = ""
