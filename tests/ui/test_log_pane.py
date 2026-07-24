@@ -649,6 +649,59 @@ async def test_search_shows_counter_and_n_advances() -> None:
         assert "3/3" in header3
 
 
+async def test_search_N_navigates_backwards_with_wraparound() -> None:
+    """N goes to the previous hit; from the first hit it wraps to the last."""
+    stream = SearchFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.2)
+
+        await pilot.press("slash")
+        await pilot.pause(0.05)
+        for ch in "findme":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+        assert "1/3" in _header_text(app)
+
+        # N from the first hit wraps to the last
+        await pilot.press("shift+n")
+        await pilot.pause(0.05)
+        assert "3/3" in _header_text(app)
+
+        # N again steps back to the second hit
+        await pilot.press("shift+n")
+        await pilot.pause(0.05)
+        assert "2/3" in _header_text(app)
+
+
+async def test_search_escape_clears_stale_counter() -> None:
+    """Escaping the search input clears the hit counter from the header."""
+    stream = SearchFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.2)
+
+        await pilot.press("slash")
+        await pilot.pause(0.05)
+        for ch in "findme":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+        assert "1/3" in _header_text(app)
+
+        # Re-open search and dismiss without submitting: counter must clear
+        await pilot.press("slash")
+        await pilot.pause(0.05)
+        await pilot.press("escape")
+        await pilot.pause(0.05)
+        assert "1/3" not in _header_text(app)
+
+
 async def test_f_closed_no_crash() -> None:
     """f when pane closed produces no error and no state change."""
     app = make_app([_pod("myapp")])

@@ -254,4 +254,8 @@ class LogPane(Widget):
         search_input = self.query_one("#log-search", Input)
         if event.key == "escape" and search_input.display:
             search_input.display = False
+            self._search_hits = []
+            self._search_idx = 0
+            self._search_counter = ""
+            self._update_header()
             event.stop()
