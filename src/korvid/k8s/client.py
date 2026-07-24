@@ -12,6 +12,7 @@ from kubernetes_asyncio import watch as k8s_watch
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
 
 
@@ -172,6 +173,46 @@ class KubeClient:
         else:
             path = f"{meta.api_base}/{meta.plural}/{name}"
         return await self._request_json(path)
+
+    async def stream_logs(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncIterator[LogLine]:
+        """Stream log lines from a pod container; yields LogLine one per line.
+
+        previous=True forces follow=False (terminated containers can't be followed).
+        ApiException is wrapped as ApiStatusError both at call time and mid-stream.
+        """
+        if self._core_v1 is None:
+            raise RuntimeError("connect() first")
+        if previous:
+            follow = False
+        try:
+            resp: Any = await self._core_v1.read_namespaced_pod_log(
+                name=pod,
+                namespace=namespace,
+                container=container,
+                follow=follow,
+                previous=previous,
+                tail_lines=tail_lines,
+                _preload_content=False,
+            )
+        except k8s_client.exceptions.ApiException as exc:
+            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+        try:
+            async for raw in resp.content:
+                if not raw:
+                    continue
+                text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                yield LogLine(pod=pod, container=container, text=text)
+        except k8s_client.exceptions.ApiException as exc:
+            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 
     async def list_events_for(self, namespace: str, name: str) -> list[dict[str, Any]]:
         """Return core v1 Events where involvedObject.name == name."""
