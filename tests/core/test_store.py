@@ -57,3 +57,27 @@ def test_namespaces_isolated() -> None:
     store.apply_event("pods", "ADDED", _pod("a", ns="prod"))
     assert store.get("pods", "default") == []
     assert [p.name for p in store.get("pods", "prod")] == ["a"]
+
+
+def test_clear_empties_bucket() -> None:
+    store = ResourceStore()
+    store.apply_event("pods", "ADDED", _pod("a"))
+    store.apply_event("pods", "ADDED", _pod("b"))
+    store.clear("pods", "default")
+    assert store.get("pods", "default") == []
+
+
+def test_clear_notifies_subscribers() -> None:
+    store = ResourceStore()
+    store.apply_event("pods", "ADDED", _pod("a"))
+    seen: list[str] = []
+    store.subscribe(seen.append)
+    store.clear("pods", "default")
+    assert seen == ["pods"]
+
+
+def test_clear_other_namespace_unaffected() -> None:
+    store = ResourceStore()
+    store.apply_event("pods", "ADDED", _pod("a", ns="prod"))
+    store.clear("pods", "default")  # clear a bucket that doesn't exist
+    assert [p.name for p in store.get("pods", "prod")] == ["a"]

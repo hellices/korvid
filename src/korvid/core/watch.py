@@ -43,6 +43,7 @@ class WatchManager:
         key = (kind, namespace)
         if key in self._tasks:
             return
+        self._store.clear(kind, namespace)
         self._tasks[key] = asyncio.create_task(self._run(kind, namespace))
 
     async def stop(self, kind: str, namespace: str) -> None:

@@ -124,3 +124,21 @@ async def test_normal_stream_end_resets_failure_streak() -> None:
         # Fix is working: stream still retrying, not dead
         assert mgr.active == {("pods", "default")}
     await mgr.stop_all()
+
+
+async def test_start_clears_stale_store_data() -> None:
+    """Re-starting a watch for a (kind, ns) must purge stale data from the previous session."""
+    store = ResourceStore()
+    # Simulate stale data left from a previous watch session
+    store.apply_event("pods", "ADDED", _pod("stale"))
+    assert [p.name for p in store.get("pods", "default")] == ["stale"]
+
+    mgr = WatchManager(store, make_source([("ADDED", _pod("fresh"))]))
+    await mgr.start("pods", "default")
+    # clear() is synchronous and runs before the asyncio task; stale data gone immediately
+    assert store.get("pods", "default") == []
+    await asyncio.sleep(0.05)
+    names = [p.name for p in store.get("pods", "default")]
+    assert "stale" not in names
+    assert "fresh" in names
+    await mgr.stop_all()

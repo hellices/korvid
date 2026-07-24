@@ -36,5 +36,14 @@ class ResourceStore:
         bucket = self._data.get((kind, namespace), {})
         return sorted(bucket.values(), key=lambda o: o.name)
 
+    def clear(self, kind: str, namespace: str) -> None:
+        """Remove all objects for (kind, namespace) and notify subscribers."""
+        self._data.pop((kind, namespace), None)
+        for callback in self._subscribers:
+            try:
+                callback(kind)
+            except Exception:
+                logger.exception("resource store subscriber failed")
+
     def subscribe(self, callback: Callable[[str], None]) -> None:
         self._subscribers.append(callback)
