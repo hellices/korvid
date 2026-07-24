@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -128,6 +129,7 @@ async def test_stream_logs_previous_true_forces_follow_false() -> None:
         follow=False,
         previous=True,
         tail_lines=50,
+        timestamps=True,
         _preload_content=False,
     )
 
@@ -147,6 +149,7 @@ async def test_stream_logs_default_kwargs_forwarded() -> None:
         follow=True,
         previous=False,
         tail_lines=200,
+        timestamps=True,
         _preload_content=False,
     )
 
@@ -242,5 +245,48 @@ async def test_stream_logs_empty_container_omits_kwarg() -> None:
         follow=True,
         previous=False,
         tail_lines=200,
+        timestamps=True,
         _preload_content=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# Timestamp prefix parsing (timestamps=true responses)
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_logs_parses_and_strips_timestamp_prefix() -> None:
+    client = KubeClient()
+    fake_v1 = AsyncMock()
+    fake_v1.read_namespaced_pod_log.return_value = _FakeResp(
+        [b"2024-01-02T03:04:05.123456789Z hello world\n"]
+    )
+    with patch.object(client, "_core_v1", fake_v1):
+        lines = [line async for line in client.stream_logs("ns", "pod", "c")]
+
+    assert lines[0].text == "hello world"
+    assert lines[0].timestamp == datetime(2024, 1, 2, 3, 4, 5, 123456, tzinfo=UTC)
+
+
+async def test_stream_logs_unparsable_prefix_keeps_full_text() -> None:
+    """Lines without a valid RFC3339 prefix are yielded untouched (timestamp=None)."""
+    client = KubeClient()
+    fake_v1 = AsyncMock()
+    fake_v1.read_namespaced_pod_log.return_value = _FakeResp([b"plain text line\n"])
+    with patch.object(client, "_core_v1", fake_v1):
+        lines = [line async for line in client.stream_logs("ns", "pod", "c")]
+
+    assert lines[0].text == "plain text line"
+    assert lines[0].timestamp is None
+
+
+async def test_stream_logs_timestamped_blank_line() -> None:
+    """A blank log line still carries its timestamp; text becomes empty."""
+    client = KubeClient()
+    fake_v1 = AsyncMock()
+    fake_v1.read_namespaced_pod_log.return_value = _FakeResp([b"2024-01-02T03:04:05Z \n"])
+    with patch.object(client, "_core_v1", fake_v1):
+        lines = [line async for line in client.stream_logs("ns", "pod", "c")]
+
+    assert lines[0].text == ""
+    assert lines[0].timestamp is not None

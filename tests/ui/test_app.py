@@ -885,3 +885,33 @@ async def test_splash_replaced_by_table_on_first_data() -> None:
         await pilot.pause(0.2)  # first store notification lands
         assert app.query_one(SplashLogo).display is False
         assert app.query_one(ResourceTable).display is True
+
+
+# ---------------------------------------------------------------------------
+# Copilot review: LIST seeding must not rebuild the table once per object
+# ---------------------------------------------------------------------------
+
+
+async def test_list_seed_coalesces_table_renders() -> None:
+    """N apply_events in one loop slice trigger far fewer than N table rebuilds."""
+    pods = [_pod(f"pod-{i:03d}") for i in range(50)]
+    app = make_app([])
+    renders: list[str] = []
+    original = app._render_table
+
+    def counting_render(kind: str) -> None:
+        renders.append(kind)
+        original(kind)
+
+    app._render_table = counting_render  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        renders.clear()
+        # Simulate a LIST seed: all events applied back-to-back without yielding.
+        for p in pods:
+            app.store.apply_event("pods", "default", "ADDED", p)
+        await pilot.pause(0.2)
+        table = app.query_one(ResourceTable)
+        assert table.row_count == 50
+        # One coalesced render (a stray timer tick may add one more) — not 50.
+        assert len(renders) <= 2

@@ -1,9 +1,9 @@
 """k9s-style pod drill-down — Enter on a pod opens its container list.
 
 Shows NAME / IMAGE / READY / STATE / RESTARTS per container (init containers
-included, marked with "(init)"). Enter or ``l`` streams that container's logs,
-``s`` shells into it, Escape closes. Dismisses with ``(action, container)`` or
-``None``.
+included, marked with "(init)"). ``l`` streams that container's logs, ``s``
+shells into it, Escape closes; Enter is intentionally a no-op. Dismisses with
+``(action, container)`` or ``None``.
 """
 
 from __future__ import annotations

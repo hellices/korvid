@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -29,6 +30,21 @@ def _path_segment(value: str) -> str:
 
 
 _DNS1123_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+
+
+def _parse_log_line(pod: str, container: str, text: str) -> LogLine:
+    """Split the kubelet ``timestamps=true`` RFC3339 prefix off a log line.
+
+    ``datetime.fromisoformat`` (3.11+) accepts the RFC3339Nano form kubelet
+    emits, truncating nanoseconds to microseconds. Unparsable prefixes leave
+    the line untouched with ``timestamp=None``.
+    """
+    ts_str, _, rest = text.partition(" ")
+    try:
+        ts = datetime.fromisoformat(ts_str)
+    except ValueError:
+        return LogLine(pod=pod, container=container, text=text)
+    return LogLine(pod=pod, container=container, text=rest, timestamp=ts)
 
 
 def resolve_context_name(context: str | None = None, config_file: str | None = None) -> str | None:
@@ -226,6 +242,9 @@ class KubeClient:
 
         previous=True forces follow=False (terminated containers can't be followed).
         An empty ``container`` omits the parameter (single-container pods).
+        Lines are requested with ``timestamps=true``; the RFC3339 prefix is
+        parsed into ``LogLine.timestamp`` and stripped from ``LogLine.text``
+        so callers can deduplicate the ~tail_lines replay on reconnect.
         ApiException is wrapped as ApiStatusError both at call time and mid-stream.
         """
         if self._core_v1 is None:
@@ -238,6 +257,7 @@ class KubeClient:
             "follow": follow,
             "previous": previous,
             "tail_lines": tail_lines,
+            "timestamps": True,
             "_preload_content": False,
         }
         # An empty container name would 400 on multi-container pods; omitting
@@ -253,7 +273,7 @@ class KubeClient:
                 if not raw:
                     continue
                 text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                yield LogLine(pod=pod, container=container, text=text)
+                yield _parse_log_line(pod, container, text)
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
         finally:

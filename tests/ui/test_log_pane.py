@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 from collections.abc import AsyncGenerator, AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 from korvid.core.config import KorvidConfig
@@ -969,3 +970,80 @@ async def test_straggler_line_from_removed_source_is_dropped() -> None:
         pane.feed(LogLine(pod="ghost", container="old", text="stray-line"))
         await pilot.pause(0.05)
         assert "stray-line" not in _richlog_text(app)
+
+
+# ---------------------------------------------------------------------------
+# Copilot review: reconnect must not duplicate the replayed tail lines
+# ---------------------------------------------------------------------------
+
+
+class ReconnectingFakeStream:
+    """First call yields 2 timestamped lines then errors; second call replays
+    both lines (the API tail) plus one new line, then blocks."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncGenerator[LogLine, None]:
+        def ts(second: int) -> datetime:
+            return datetime(2024, 1, 1, 0, 0, second, tzinfo=UTC)
+
+        self.calls += 1
+        if self.calls == 1:
+            yield LogLine(pod=pod, container=container, text="one", timestamp=ts(1))
+            yield LogLine(pod=pod, container=container, text="two", timestamp=ts(2))
+            raise RuntimeError("connection reset")
+        # Reconnect: API replays the tail before following.
+        yield LogLine(pod=pod, container=container, text="one", timestamp=ts(1))
+        yield LogLine(pod=pod, container=container, text="two", timestamp=ts(2))
+        yield LogLine(pod=pod, container=container, text="three", timestamp=ts(3))
+        await asyncio.Event().wait()
+
+
+async def test_reconnect_drops_replayed_tail_lines() -> None:
+    """Lines at or before the last displayed timestamp are dropped on reconnect."""
+    fake = ReconnectingFakeStream()
+    app = make_app([_pod("app-a", containers=("main",))], stream_logs=fake)
+    app._reconnect_sleep = 0.0
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.4)
+        text = _richlog_text(app)
+        assert fake.calls == 2
+        assert text.count("one") == 1
+        assert text.count("two") == 1
+        assert "three" in text
+
+
+# ---------------------------------------------------------------------------
+# Copilot review: never spawn more streams than the pane has panels
+# ---------------------------------------------------------------------------
+
+
+async def test_open_log_pane_caps_spawned_streams_at_max_panels() -> None:
+    """A pod with more containers than MAX_PANELS spawns exactly MAX_PANELS tasks."""
+    from korvid.ui.widgets.log_pane import MAX_PANELS
+
+    fake = FakeStream(lines_per_call=1)
+    containers = tuple(f"c{i}" for i in range(MAX_PANELS + 3))
+    app = make_app([_pod("bigpod", containers=containers)], stream_logs=fake)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.2)
+        assert len(app._log_tasks) == MAX_PANELS
+        assert len(app._current_log_triples) == MAX_PANELS
+        panels = _panel_texts(app)
+        assert len(panels) == MAX_PANELS
+        msgs = [n.message for n in app._notifications]
+        assert any(str(MAX_PANELS) in m for m in msgs)

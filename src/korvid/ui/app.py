@@ -8,6 +8,7 @@ import logging
 import shutil
 import subprocess
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import datetime
 from time import monotonic
 from typing import Any, ClassVar
 
@@ -60,6 +61,15 @@ _MAX_MULTI_STREAM_PODS = 8
 # small to read — comparing >4 replicas is what ``L`` (multi-stream) is for.
 _MAX_LOG_PODS = 4
 _MAX_RECONNECT_ATTEMPTS = 5
+
+
+def _is_replayed_line(line: LogLine, resume_ts: datetime | None) -> bool:
+    """True when a reconnected stream replays a line already displayed.
+
+    Every (re)connection returns the last ~tail_lines existing lines before
+    following; lines stamped at or before the resume point are duplicates.
+    """
+    return resume_ts is not None and line.timestamp is not None and line.timestamp <= resume_ts
 
 
 class KorvidApp(App[None]):
@@ -130,6 +140,9 @@ class KorvidApp(App[None]):
         self._ns_prefetch_task: asyncio.Task[None] | None = None
         self._splash_shown_at: float = monotonic()
         self._log_buffer_max_lines: int = config.log_buffer_lines
+        # Kinds with a table render already queued — coalesces the per-object
+        # notifications of a LIST seed into a single rebuild (see _on_store_update).
+        self._render_pending: set[str] = set()
 
     @property
     def current_namespace(self) -> str:
@@ -168,6 +181,14 @@ class KorvidApp(App[None]):
         # loop-safe. Watch tasks are cancelled in on_unmount before shutdown to
         # avoid posting to a closing app.
         def _on_store_update(kind: str) -> None:
+            # The initial LIST seeds objects one apply_event at a time in a
+            # single event-loop slice; posting one message per object would
+            # rebuild the whole table N times. Post at most one render request
+            # per kind until it is consumed — _render_table reads the current
+            # store state, so a single deferred rebuild covers every event.
+            if kind in self._render_pending:
+                return
+            self._render_pending.add(kind)
             self.post_message(ResourcesUpdated(kind))
 
         def _on_watch_error(detail: str) -> None:
@@ -207,6 +228,7 @@ class KorvidApp(App[None]):
         command_bar.command_words = sorted({*self.aliases, "ns", "namespaces", "q", "quit"})
 
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
+        self._render_pending.discard(message.kind)
         self._render_table(message.kind)
 
     def _prefetch_namespaces(self) -> None:
@@ -716,6 +738,16 @@ class KorvidApp(App[None]):
         if triples is None:
             triples = [(namespace, pod, ctr) for pod, ctr in sources]
 
+        # LogPane silently ignores sources beyond MAX_PANELS; enforce the same
+        # cap here so no stream task is ever spawned without a panel to feed.
+        if len(triples) > MAX_PANELS:
+            self.notify(
+                f"Showing first {MAX_PANELS} of {len(triples)} containers",
+                severity="warning",
+            )
+            triples = triples[:MAX_PANELS]
+            sources = sources[:MAX_PANELS]
+
         self._current_log_triples = list(triples)
         self._current_log_force_prefix = force_prefix
 
@@ -764,18 +796,26 @@ class KorvidApp(App[None]):
 
         Retries up to ``_MAX_RECONNECT_ATTEMPTS`` times on transient errors or
         unexpected EOF.  ApiStatusError and CancelledError are never retried.
+        Each (re)connection replays the last ~tail_lines existing lines; lines
+        whose timestamp is at or before the last line already displayed are
+        dropped so reconnects don't duplicate output.
         """
         log_pane = self.query_one(LogPane)
         current = asyncio.current_task()
         consecutive_failures = 0
+        last_ts: datetime | None = None
 
         while True:
+            resume_ts = last_ts
             try:
                 async for line in stream_logs(
                     namespace, pod, container, previous=False, follow=True
                 ):
-                    if consecutive_failures > 0 and not self._log_error:
-                        log_pane.set_state("streaming")
+                    if _is_replayed_line(line, resume_ts):
+                        continue  # replayed tail line already shown pre-reconnect
+                    if line.timestamp is not None:
+                        last_ts = line.timestamp
+                    self._mark_stream_healthy(log_pane, consecutive_failures)
                     consecutive_failures = 0
                     log_pane.feed(line)
                     self._buffer_line(log_pane, line)
@@ -796,19 +836,35 @@ class KorvidApp(App[None]):
                 self._discard_task(current)
                 return
             consecutive_failures += 1
-            if consecutive_failures > _MAX_RECONNECT_ATTEMPTS or self._log_error:
-                if not self._log_error:
-                    self.notify(
-                        f"log stream lost after {_MAX_RECONNECT_ATTEMPTS} reconnect attempts",
-                        title="Log stream error",
-                        severity="error",
-                    )
-                    self._log_error = True
-                    log_pane.set_state("error")
-                self._discard_task(current)
+            if not await self._pause_before_reconnect(log_pane, current, consecutive_failures):
                 return
-            log_pane.set_state("reconnecting")
-            await asyncio.sleep(self._reconnect_sleep)
+
+    def _mark_stream_healthy(self, log_pane: LogPane, consecutive_failures: int) -> None:
+        """Restore the streaming indicator after a successful reconnect."""
+        if consecutive_failures > 0 and not self._log_error:
+            log_pane.set_state("streaming")
+
+    async def _pause_before_reconnect(
+        self,
+        log_pane: LogPane,
+        current: asyncio.Task[None] | None,
+        consecutive_failures: int,
+    ) -> bool:
+        """Sleep before the next attempt; False when retries are exhausted."""
+        if consecutive_failures > _MAX_RECONNECT_ATTEMPTS or self._log_error:
+            if not self._log_error:
+                self.notify(
+                    f"log stream lost after {_MAX_RECONNECT_ATTEMPTS} reconnect attempts",
+                    title="Log stream error",
+                    severity="error",
+                )
+                self._log_error = True
+                log_pane.set_state("error")
+            self._discard_task(current)
+            return False
+        log_pane.set_state("reconnecting")
+        await asyncio.sleep(self._reconnect_sleep)
+        return True
 
     async def _previous_log_stream(
         self,
