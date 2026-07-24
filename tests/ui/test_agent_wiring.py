@@ -144,3 +144,24 @@ async def test_second_submit_ignored_while_turn_running() -> None:
         await pilot.pause()
         await pilot.pause()
         assert [c[0] for c in runtime.calls] == ["first"]
+
+
+async def test_status_bar_reflects_runtime_not_config_flag() -> None:
+    """create_provider can return None while agent_enabled stays true —
+    the status label must track the actual runtime."""
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    app = make_app(runtime=None)
+    app.config = KorvidConfig(namespace="default", agent_enabled=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        assert "AI off" in str(app.query_one(StatusBar).render())
+
+
+async def test_status_bar_on_when_runtime_present() -> None:
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    app = make_app(StubRuntime([]))
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        assert "AI on" in str(app.query_one(StatusBar).render())

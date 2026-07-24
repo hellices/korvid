@@ -1,3 +1,5 @@
+from typing import cast
+
 import pytest
 
 from korvid.providers.openai_compat import OpenAICompatProvider
@@ -53,6 +55,20 @@ def test_none_when_provider_unknown() -> None:
         create_provider(
             enabled=True,
             provider="mystery",
+            base_url="http://x/v1",
+            model="m",
+            api_key_env=None,
+        )
+        is None
+    )
+
+
+def test_none_when_provider_not_a_string() -> None:
+    """YAML `provider: true` must disable the agent, not crash on .lower()."""
+    assert (
+        create_provider(
+            enabled=True,
+            provider=cast("str", True),
             base_url="http://x/v1",
             model="m",
             api_key_env=None,

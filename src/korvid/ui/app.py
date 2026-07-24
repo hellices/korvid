@@ -1005,7 +1005,10 @@ class KorvidApp(App[None]):
             self.query_one(LogPane).close()
 
     def _refresh_status(self) -> None:
-        label = "AI on" if self.config.agent_enabled else "AI off"
+        # Availability comes from the actual runtime, not the config flag —
+        # create_provider may return None (unknown provider, missing base_url/
+        # model) while agent_enabled is still true in config.
+        label = "AI on" if self._agent_runtime is not None else "AI off"
         self.query_one(StatusBar).update_status(self.config.kube_context, self.current_scope, label)
 
     # ------------------------------------------------------------------

@@ -40,7 +40,9 @@ def create_provider(
     """Build an LLM provider from neutral values, or None when unconfigured/misconfigured."""
     if not enabled:
         return None
-    name = (provider or "").lower()
+    # YAML can hand us non-string scalars (e.g. `provider: true`); only
+    # strings are meaningful — anything else falls to the unknown branch.
+    name = provider.lower() if isinstance(provider, str) else ""
     if name not in _OPENAI_COMPAT_ALIASES:
         logger.warning("unknown agent provider %r — agent disabled", provider)
         return None
