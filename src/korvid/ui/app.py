@@ -512,6 +512,10 @@ class KorvidApp(App[None]):
             except Exception:
                 pass  # transient; fall through to reconnect logic
 
+            if not log_pane.display:
+                # Pane was closed while the stream was suspended; exit quietly.
+                self._discard_task(current)
+                return
             consecutive_failures += 1
             if consecutive_failures > _MAX_RECONNECT_ATTEMPTS or self._log_error:
                 if not self._log_error:
@@ -558,6 +562,9 @@ class KorvidApp(App[None]):
         exc: ApiStatusError,
     ) -> None:
         """Notify the user of an API error and put the stream into error state."""
+        if not log_pane.display:
+            self._discard_task(current)
+            return
         msg = explain_api_error(exc.status, exc.reason, "pods", namespace)
         self.notify(msg, title="Log stream error", severity="error")
         self._log_error = True

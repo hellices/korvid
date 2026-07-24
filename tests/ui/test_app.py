@@ -713,6 +713,19 @@ async def test_log_overflow_banner_shown_once() -> None:
 
     async with app.run_test() as pilot:
         await pilot.pause(0.05)
+        from korvid.ui.widgets.log_pane import LogPane
+
+        log_pane = app.query_one(LogPane)
+        banner_calls = 0
+        original_banner = log_pane.show_overflow_banner
+
+        def _counting_banner() -> None:
+            nonlocal banner_calls
+            banner_calls += 1
+            original_banner()
+
+        log_pane.show_overflow_banner = _counting_banner  # type: ignore[method-assign]
+
         await pilot.press("l")
         await pilot.pause(0.3)
 
@@ -720,6 +733,8 @@ async def test_log_overflow_banner_shown_once() -> None:
         assert app._log_buffer is not None
         assert app._log_buffer.overflowed
         assert len(app._log_buffer.lines()) == 3
+        # Banner fires exactly once per session even though 2 lines overflowed.
+        assert banner_calls == 1
 
 
 async def test_log_cancel_during_reconnect_sleep_no_error() -> None:
