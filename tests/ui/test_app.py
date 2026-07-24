@@ -269,3 +269,29 @@ async def test_bare_ns_with_empty_list_warns_instead_of_empty_picker() -> None:
         await pilot.press("enter")
         await pilot.pause(0.2)
         assert app.query_one(NamespacePicker).display is False
+
+
+async def test_namespace_picker_api_error_shows_actionable_message() -> None:
+    """A 403 from list_namespaces surfaces the RBAC guidance, not a raw client dump."""
+    from korvid.k8s.errors import ApiStatusError
+
+    store = ResourceStore()
+
+    async def failing_list() -> list[str]:
+        raise ApiStatusError(403, "Forbidden")
+
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, fake_source([])),
+        list_namespaces=failing_list,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.05)
+        from korvid.ui.messages import ShowNamespacePicker
+
+        app.post_message(ShowNamespacePicker())
+        await pilot.pause(0.1)
+        notifications = [n.message for n in app._notifications]
+        assert any("RBAC" in m for m in notifications)
+        assert not any("API 403" in m for m in notifications)

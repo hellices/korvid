@@ -29,15 +29,21 @@ class KubeClient:
     async def list_namespaces(self) -> list[str]:
         if self._core_v1 is None:
             raise RuntimeError("connect() first")
-        resp = await self._core_v1.list_namespace(_preload_content=False)
-        data = await _to_dict(resp)
+        try:
+            resp = await self._core_v1.list_namespace(_preload_content=False)
+            data = await _to_dict(resp)
+        except k8s_client.exceptions.ApiException as exc:
+            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
         return [item["metadata"]["name"] for item in data.get("items", [])]
 
     async def list_pods(self, namespace: str) -> list[PodSummary]:
         if self._core_v1 is None:
             raise RuntimeError("connect() first")
-        resp = await self._core_v1.list_namespaced_pod(namespace, _preload_content=False)
-        data = await _to_dict(resp)
+        try:
+            resp = await self._core_v1.list_namespaced_pod(namespace, _preload_content=False)
+            data = await _to_dict(resp)
+        except k8s_client.exceptions.ApiException as exc:
+            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
         return [PodSummary.from_manifest(item) for item in data.get("items", [])]
 
     async def watch_pods(self, namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:

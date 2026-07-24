@@ -122,3 +122,32 @@ def test_sidecar_init_containers_add_to_sum() -> None:
     assert pod.cpu_request == "300m"
     # sum = 128Mi + 32Mi = 160Mi > classic init 64Mi
     assert pod.mem_request == "160Mi"
+
+
+def test_parse_full_quantity_grammar() -> None:
+    from korvid.k8s.models import parse_cpu, parse_memory
+
+    # DecimalSI suffixes beyond the common ones
+    assert parse_memory("400m") == 0  # millibytes: 0.4 bytes truncates to 0
+    assert parse_memory("1Pi") == 2**50
+    assert parse_memory("1Ei") == 2**60
+    assert parse_memory("5P") == 5 * 10**15
+    assert parse_memory("5E") == 5 * 10**18
+    # Decimal exponent form
+    assert parse_memory("1e3") == 1000
+    assert parse_memory("12E2") == 1200
+    assert parse_cpu("1e-3") == 0.001
+    # Plain and fractional
+    assert parse_cpu("2") == 2.0
+    assert parse_cpu("0.5") == 0.5
+    assert parse_cpu("250m") == 0.25
+    assert parse_memory("128Mi") == 128 * 2**20
+
+
+def test_parse_invalid_quantity_raises_value_error() -> None:
+    import pytest
+
+    from korvid.k8s.models import parse_memory
+
+    with pytest.raises(ValueError, match="invalid Kubernetes quantity"):
+        parse_memory("12abc")

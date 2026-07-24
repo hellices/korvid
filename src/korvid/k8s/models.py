@@ -2,38 +2,58 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
-# Kubernetes quantity suffixes → multiplier relative to the base unit.
-_CPU_SUFFIXES = {"n": 1e-9, "u": 1e-6, "m": 1e-3, "": 1.0, "k": 1e3}
-_MEM_SUFFIXES = {
-    "": 1,
-    "k": 10**3,
-    "M": 10**6,
-    "G": 10**9,
-    "T": 10**12,
-    "Ki": 2**10,
-    "Mi": 2**20,
-    "Gi": 2**30,
-    "Ti": 2**40,
+# Full Kubernetes Quantity grammar: signed decimal number followed by an
+# optional binarySI / decimalSI suffix or a decimal exponent (e.g. '12e3').
+_QUANTITY_RE = re.compile(
+    r"^(?P<number>[+-]?\d+(?:\.\d+)?)(?P<suffix>[eE][+-]?\d+|Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE])?$"
+)
+_SUFFIX_MULTIPLIERS: dict[str, Decimal] = {
+    "n": Decimal("1e-9"),
+    "u": Decimal("1e-6"),
+    "m": Decimal("1e-3"),
+    "k": Decimal(10) ** 3,
+    "M": Decimal(10) ** 6,
+    "G": Decimal(10) ** 9,
+    "T": Decimal(10) ** 12,
+    "P": Decimal(10) ** 15,
+    "E": Decimal(10) ** 18,
+    "Ki": Decimal(2) ** 10,
+    "Mi": Decimal(2) ** 20,
+    "Gi": Decimal(2) ** 30,
+    "Ti": Decimal(2) ** 40,
+    "Pi": Decimal(2) ** 50,
+    "Ei": Decimal(2) ** 60,
 }
+
+
+def parse_quantity(quantity: str) -> Decimal:
+    """Parse any Kubernetes Quantity (DecimalSI, BinarySI, or decimal exponent)."""
+    text = str(quantity).strip()
+    match = _QUANTITY_RE.match(text)
+    if match is None:
+        raise ValueError(f"invalid Kubernetes quantity: {quantity!r}")
+    suffix = match["suffix"]
+    if suffix is None:
+        return Decimal(match["number"])
+    multiplier = _SUFFIX_MULTIPLIERS.get(suffix)
+    if multiplier is not None:
+        return Decimal(match["number"]) * multiplier
+    return Decimal(text)  # decimal exponent form ('12e3'); Decimal parses it natively
 
 
 def parse_cpu(quantity: str) -> float:
     """Parse a Kubernetes CPU quantity into cores (e.g. '100m' -> 0.1)."""
-    for suffix, mult in sorted(_CPU_SUFFIXES.items(), key=lambda kv: -len(kv[0])):
-        if suffix and quantity.endswith(suffix):
-            return float(quantity[: -len(suffix)]) * mult
-    return float(quantity)
+    return float(parse_quantity(quantity))
 
 
 def parse_memory(quantity: str) -> int:
     """Parse a Kubernetes memory quantity into bytes (e.g. '128Mi' -> 134217728)."""
-    for suffix, mult in sorted(_MEM_SUFFIXES.items(), key=lambda kv: -len(kv[0])):
-        if suffix and quantity.endswith(suffix):
-            return int(float(quantity[: -len(suffix)]) * mult)
-    return int(float(quantity))
+    return int(parse_quantity(quantity))
 
 
 def format_cpu(cores: float) -> str:

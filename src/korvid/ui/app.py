@@ -10,8 +10,10 @@ from textual.binding import Binding
 from textual.widgets import Footer, Header, Static
 
 from korvid.core.config import KorvidConfig
+from korvid.core.errors import explain_api_error
 from korvid.core.store import ResourceStore
 from korvid.core.watch import WatchManager
+from korvid.k8s.errors import ApiStatusError
 from korvid.ui.messages import (
     ClearFilter,
     FilterCommand,
@@ -122,7 +124,11 @@ class KorvidApp(App[None]):
             return
         try:
             namespaces = await self._list_namespaces()
-        except Exception as exc:  # surface any listing failure to the user
+        except ApiStatusError as exc:  # API failures get the actionable mapping (§5-5)
+            msg = explain_api_error(exc.status, exc.reason, "namespaces", None)
+            self.notify(msg, title="Failed to list namespaces", severity="error")
+            return
+        except Exception as exc:  # surface any other listing failure to the user
             self.notify(str(exc), title="Failed to list namespaces", severity="error")
             return
         if not namespaces:

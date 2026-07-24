@@ -113,7 +113,42 @@ async def test_watch_pods_list_api_error_raises_api_status_error() -> None:
 
     import pytest
 
-    with patch.object(client, "_core_v1", fake_v1), pytest.raises(ApiStatusError) as exc_info:
+    with (
+        patch.object(client, "_core_v1", fake_v1),
+        pytest.raises(ApiStatusError, match="API 403: Forbidden") as exc_info,
+    ):
         async for _ in client.watch_pods("default"):
             pass
     assert exc_info.value.status == 403
+
+
+async def test_list_namespaces_api_error_raises_api_status_error() -> None:
+    """ApiException must not cross the k8s boundary from list_namespaces."""
+    import pytest
+    from kubernetes_asyncio.client.exceptions import ApiException
+
+    client = KubeClient()
+    fake_v1 = AsyncMock()
+    fake_v1.list_namespace.side_effect = ApiException(status=403, reason="Forbidden")
+
+    with (
+        patch.object(client, "_core_v1", fake_v1),
+        pytest.raises(ApiStatusError, match="API 403: Forbidden"),
+    ):
+        await client.list_namespaces()
+
+
+async def test_list_pods_api_error_raises_api_status_error() -> None:
+    """ApiException must not cross the k8s boundary from list_pods."""
+    import pytest
+    from kubernetes_asyncio.client.exceptions import ApiException
+
+    client = KubeClient()
+    fake_v1 = AsyncMock()
+    fake_v1.list_namespaced_pod.side_effect = ApiException(status=401, reason="Unauthorized")
+
+    with (
+        patch.object(client, "_core_v1", fake_v1),
+        pytest.raises(ApiStatusError, match="API 401: Unauthorized"),
+    ):
+        await client.list_pods("default")
