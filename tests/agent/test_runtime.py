@@ -74,7 +74,13 @@ async def test_iteration_cap() -> None:
 
 async def test_provider_error_surfaces() -> None:
     class BadProvider(ScriptedProvider):
-        async def complete(self, messages, tools, *, stream=True):  # type: ignore[no-untyped-def]
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
             raise RuntimeError("api down")
             yield  # pragma: no cover
 

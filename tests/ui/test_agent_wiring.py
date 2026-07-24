@@ -52,7 +52,7 @@ class StubRuntime:
 def make_app(runtime: Any = None, model: str | None = "test-model") -> KorvidApp:
     store = ResourceStore()
 
-    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, object]]:
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
         yield ("ADDED", _pod("web-1"))
         while True:
             await asyncio.sleep(0.01)
@@ -60,7 +60,7 @@ def make_app(runtime: Any = None, model: str | None = "test-model") -> KorvidApp
     return KorvidApp(
         config=KorvidConfig(namespace="default"),
         store=store,
-        watch_manager=WatchManager(store, source),  # type: ignore[arg-type]
+        watch_manager=WatchManager(store, source),
         agent_runtime=runtime,
         agent_model_name=model,
     )

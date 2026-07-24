@@ -235,6 +235,12 @@ def _mask_manifest(manifest: dict[str, Any]) -> None:
     if isinstance(meta, dict):
         meta.pop("managedFields", None)
     if manifest.get("kind") == "Secret":
+        # kubectl's client-side apply stores the full original manifest —
+        # including unmasked data/stringData — in this annotation.
+        if isinstance(meta, dict):
+            annotations = meta.get("annotations")
+            if isinstance(annotations, dict):
+                annotations.pop("kubectl.kubernetes.io/last-applied-configuration", None)
         for field in ("data", "stringData"):
             section = manifest.get(field)
             if isinstance(section, dict):

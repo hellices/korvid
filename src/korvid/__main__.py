@@ -32,13 +32,18 @@ logger = logging.getLogger(__name__)
 async def _shutdown(
     discovery_task: asyncio.Task[None], provider: LLMProvider | None, kube: KubeClient
 ) -> None:
-    """Tear down background work and owned clients in one place."""
-    discovery_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await discovery_task
-    if provider is not None:
-        await provider.aclose()
-    await kube.close()
+    """Tear down background work and owned clients; each step is attempted
+    even if an earlier one raises."""
+    try:
+        discovery_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await discovery_task
+    finally:
+        try:
+            if provider is not None:
+                await provider.aclose()
+        finally:
+            await kube.close()
 
 
 async def _discover_in_background(

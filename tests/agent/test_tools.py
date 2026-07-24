@@ -64,6 +64,30 @@ async def test_get_resource_masks_secret_string_data() -> None:
     assert "***MASKED***" in out
 
 
+async def test_get_resource_strips_last_applied_annotation_on_secret() -> None:
+    """Client-side apply stores the unmasked manifest in this annotation."""
+    kube = FakeKube()
+    kube.manifest = {
+        "kind": "Secret",
+        "metadata": {
+            "name": "s",
+            "annotations": {
+                "kubectl.kubernetes.io/last-applied-configuration": (
+                    '{"kind":"Secret","data":{"password":"aGVsbG8="}}'
+                ),
+                "other": "kept",
+            },
+        },
+        "data": {"password": "aGVsbG8="},
+    }
+    out = await make_executor(kube).execute(
+        "get_resource", {"kind": "pods", "name": "s", "namespace": "d"}
+    )
+    assert "aGVsbG8=" not in out
+    assert "last-applied-configuration" not in out
+    assert "kept" in out
+
+
 async def test_get_resource_strips_managed_fields_for_non_secret() -> None:
     kube = FakeKube()
     kube.manifest = {

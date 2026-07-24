@@ -98,13 +98,14 @@ async def test_non_2xx_raises_provider_error() -> None:
         _ = [e async for e in _provider("nope", status=401).complete([], [])]
 
 
-async def test_usage_with_partial_keys_defaults_to_zero() -> None:
+async def test_usage_with_partial_keys_is_not_emitted() -> None:
+    """Incomplete usage (e.g. only total_tokens) must not masquerade as exact."""
     body = _sse(
         {"choices": [{"delta": {"content": "x"}}]},
         {"choices": [], "usage": {"total_tokens": 9}},
     )
     events = [e async for e in _provider(body).complete([], [])]
-    assert {"type": "usage", "input_tokens": 0, "output_tokens": 0} in events
+    assert not [e for e in events if e["type"] == "usage"]
 
 
 async def test_aclose_closes_owned_client_only() -> None:

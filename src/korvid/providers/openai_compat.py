@@ -126,11 +126,14 @@ class OpenAICompatProvider(LLMProvider):
                 "arguments": acc["arguments"],
             }
 
-        if last_usage:
+        # Emit usage only when both component counts are present — defaulting
+        # a missing count to 0 would make an incomplete report look exact
+        # (the runtime treats any usage event as authoritative).
+        if last_usage and "prompt_tokens" in last_usage and "completion_tokens" in last_usage:
             yield {
                 "type": "usage",
-                "input_tokens": int(last_usage.get("prompt_tokens", 0)),
-                "output_tokens": int(last_usage.get("completion_tokens", 0)),
+                "input_tokens": int(last_usage["prompt_tokens"]),
+                "output_tokens": int(last_usage["completion_tokens"]),
             }
 
         yield {"type": "done"}
