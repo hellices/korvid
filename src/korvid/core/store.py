@@ -26,11 +26,7 @@ class ResourceStore:
             bucket.pop(obj.name, None)
         else:  # ADDED / MODIFIED
             bucket[obj.name] = obj
-        for callback in self._subscribers:
-            try:
-                callback(kind)
-            except Exception:  # subscriber bugs must not kill the watch loop
-                logger.exception("resource store subscriber failed")
+        self._notify(kind)
 
     def get(self, kind: str, namespace: str) -> list[PodSummary]:
         bucket = self._data.get((kind, namespace), {})
@@ -39,11 +35,14 @@ class ResourceStore:
     def clear(self, kind: str, namespace: str) -> None:
         """Remove all objects for (kind, namespace) and notify subscribers."""
         self._data.pop((kind, namespace), None)
-        for callback in self._subscribers:
-            try:
-                callback(kind)
-            except Exception:
-                logger.exception("resource store subscriber failed")
+        self._notify(kind)
 
     def subscribe(self, callback: Callable[[str], None]) -> None:
         self._subscribers.append(callback)
+
+    def _notify(self, kind: str) -> None:
+        for callback in self._subscribers:
+            try:
+                callback(kind)
+            except Exception:  # subscriber bugs must not kill the watch loop
+                logger.exception("resource store subscriber failed")
