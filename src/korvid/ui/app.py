@@ -79,9 +79,13 @@ class KorvidApp(App[None]):
         self._refresh_status()
 
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
+        self._render_table(message.kind)
+
+    def _render_table(self, kind: str) -> None:
+        """Single choke point: table rows and empty-state always update together."""
         table = self.query_one(ResourceTable)
-        table.update_rows(self.store.get(message.kind, self.current_namespace), self.filter_pattern)
-        self._refresh_empty_state(message.kind, table.row_count)
+        table.update_rows(self.store.get(kind, self.current_namespace), self.filter_pattern)
+        self._refresh_empty_state(kind, table.row_count)
 
     def on_show_error(self, message: ShowError) -> None:
         self.notify(message.detail, title=message.title, severity="error")

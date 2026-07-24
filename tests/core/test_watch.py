@@ -203,3 +203,35 @@ async def test_start_clears_stale_store_data() -> None:
     assert "stale" not in names
     assert "fresh" in names
     await mgr.stop_all()
+
+
+async def test_reconnect_relist_drops_stale_pods() -> None:
+    """A pod deleted while the watch is down must vanish after the re-LIST.
+
+    connection 1: LIST yields a+b, then the stream breaks (mid-stream failure).
+    connection 2: re-LIST yields only a (b was deleted during the outage) and
+                  stays open. Without reconcile-on-reconnect, b remains in the
+                  store forever — it never gets a DELETED event.
+    """
+    store = ResourceStore()
+    calls = 0
+    reconnected = asyncio.Event()
+
+    async def source(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield ("ADDED", _pod("a"))
+            yield ("ADDED", _pod("b"))
+            raise ApiStatusError(500, "connection reset")
+        yield ("ADDED", _pod("a"))
+        reconnected.set()
+        while True:
+            await asyncio.sleep(0.01)
+
+    mgr = WatchManager(store, source, retry_delay=0)
+    await mgr.start("pods", "default")
+    await asyncio.wait_for(reconnected.wait(), timeout=2.0)
+    await asyncio.sleep(0.02)
+    assert [p.name for p in store.get("pods", "default")] == ["a"]  # b must be gone
+    await mgr.stop_all()

@@ -64,7 +64,14 @@ class WatchManager:
 
     async def _run(self, kind: str, namespace: str) -> None:
         failures = 0
+        first_connection = True
         while True:
+            if not first_connection:
+                # Reconnect = fresh re-LIST by the source. Purge the store first:
+                # pods deleted during the outage never get a DELETED event and
+                # would otherwise linger forever. The re-LIST re-seeds immediately.
+                self._store.clear(kind, namespace)
+            first_connection = False
             try:
                 async for event_type, obj in self._source(namespace):
                     # A connection that delivers events is healthy — reset the
