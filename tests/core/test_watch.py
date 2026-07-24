@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator, Callable
 
 from korvid.core.store import ResourceStore
 from korvid.core.watch import WatchManager
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
 
 
@@ -87,43 +88,103 @@ async def test_failing_watch_reports_and_removes_task() -> None:
 
 
 async def test_normal_stream_end_resets_failure_streak() -> None:
-    """Empty stream end (no events yielded) is a successful connection and must reset the streak."""
+    """Empty-stream normal end resets the failure counter (focus: no-event connection counts).
+
+    Sequence with max_retries=3:
+      calls 1-2: fail  → failures=2
+      call  3:   normal empty end (0 events) → failures resets to 0
+      calls 4-5: fail  → failures=2
+      call  6:   blocks forever (signals `done`)
+    With fix:    failures never reach 3, on_error never fires.
+    Without fix: call 4 would be the 3rd consecutive failure → on_error fires, task dies.
+    """
     store = ResourceStore()
     errors: list[str] = []
     calls = 0
+    done = asyncio.Event()
 
-    async def flaky_with_empty_stream(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+    async def source(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
         nonlocal calls
         calls += 1
-        if calls <= 2:  # first (max_retries - 1) calls fail
+        if calls <= 2:
             raise RuntimeError(f"failure {calls}")
-        elif calls == 3:  # then one normal end with zero events (resets streak)
-            return
-            yield  # pragma: no cover - typing aid
-        elif calls <= 5:  # subsequent (max_retries - 1) calls fail again
+            yield ("", _pod(""))  # pragma: no cover - typing aid
+        elif calls == 3:
+            return  # normal empty end — must reset streak
+            yield ("", _pod(""))  # pragma: no cover - typing aid
+        elif calls <= 5:
             raise RuntimeError(f"failure {calls}")
-        else:  # final call: if we get here, streak wasn't reset; trigger error
-            raise RuntimeError(f"failure {calls}")
+            yield ("", _pod(""))  # pragma: no cover - typing aid
+        else:
+            done.set()
+            await asyncio.Event().wait()  # block; keeps task alive for assertion
+            yield ("", _pod(""))  # pragma: no cover - typing aid
 
-    # max_retries=3: fail 2x, then success (empty stream resets), then fail 2x more.
-    # Without the fix: failures not reset, so call 4 (3rd consecutive) triggers on_error.
-    # With the fix: failures IS reset, so we need 3 consecutive after reset (calls 4,5,6).
-    # Test stops before call 6 is processed, so on_error should not be called.
-    mgr = WatchManager(
-        store,
-        flaky_with_empty_stream,
-        on_error=errors.append,
-        retry_delay=0,
-        max_retries=3,
-    )
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=3)
     await mgr.start("pods", "default")
-    await asyncio.sleep(0.08)  # Allow ~5 calls but not 6
-    # With fix: streak is reset, we get calls 1,2 (fail), 3 (reset), 4,5 (fail) = no on_error yet
-    # Without fix: streak not reset, call 4 triggers on_error immediately
-    if len(errors) == 0:
-        # Fix is working: stream still retrying, not dead
-        assert mgr.active == {("pods", "default")}
+    await asyncio.wait_for(done.wait(), timeout=2.0)
+    assert errors == []
+    assert mgr.active == {("pods", "default")}
     await mgr.stop_all()
+
+
+async def test_event_resets_failure_streak() -> None:
+    """Receiving an event resets failures so a later exception starts a fresh streak.
+
+    Sequence with max_retries=3:
+      call 1: raises  → failures=1
+      call 2: yields 1 event → failures resets to 0; then raises → failures=1
+      call 3: raises  → failures=2
+      call 4: blocks (signals `done`)
+    With fix:    failures=2 < 3, on_error never fires.
+    Without fix: failures=3 at call 3 → on_error fires, `done` never set (timeout).
+    """
+    store = ResourceStore()
+    errors: list[str] = []
+    calls = 0
+    done = asyncio.Event()
+
+    async def source(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("first failure")
+            yield  # pragma: no cover
+        elif calls == 2:
+            yield ("ADDED", _pod("p"))  # event received — must reset failures
+            raise RuntimeError("source closed after event")
+        elif calls == 3:
+            raise RuntimeError("second failure")
+            yield ("", _pod(""))  # pragma: no cover
+        else:
+            done.set()
+            await asyncio.Event().wait()
+            yield ("", _pod(""))  # pragma: no cover
+
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=3)
+    await mgr.start("pods", "default")
+    await asyncio.wait_for(done.wait(), timeout=2.0)
+    assert errors == []
+    assert mgr.active == {("pods", "default")}
+    await mgr.stop_all()
+
+
+async def test_api_status_error_uses_explain_message() -> None:
+    """ApiStatusError(403) → on_error message is the human-readable explain_api_error text."""
+    store = ResourceStore()
+    errors: list[str] = []
+
+    async def source(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+        raise ApiStatusError(403, "Forbidden")
+        yield  # pragma: no cover
+
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=1)
+    await mgr.start("pods", "default")
+    await asyncio.sleep(0.05)
+    assert len(errors) == 1
+    # explain_api_error(403, ...) → "No permission to access ... Check your RBAC role bindings."
+    assert "permission" in errors[0].lower()
+    assert "rbac" in errors[0].lower()
 
 
 async def test_start_clears_stale_store_data() -> None:

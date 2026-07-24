@@ -10,10 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator, Callable
 
+from korvid.core.errors import explain_api_error
 from korvid.core.store import ResourceStore
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
+
+logger = logging.getLogger(__name__)
 
 WatchSource = Callable[[str], AsyncIterator[tuple[str, PodSummary]]]
 
@@ -62,6 +67,9 @@ class WatchManager:
         while True:
             try:
                 async for event_type, obj in self._source(namespace):
+                    # A connection that delivers events is healthy — reset the
+                    # failure streak so hours-long streams don't inherit old failures.
+                    failures = 0
                     self._store.apply_event(kind, event_type, obj)
                 # Stream ended normally (server-side watch timeout) -> reconnect.
                 failures = 0
@@ -69,9 +77,20 @@ class WatchManager:
                 raise
             except Exception as exc:  # report + retry, never die silently
                 failures += 1
+                logger.exception(
+                    "watch %s/%s attempt %d/%d failed",
+                    kind,
+                    namespace,
+                    failures,
+                    self._max_retries,
+                )
                 if failures >= self._max_retries:
                     if self.on_error is not None:
-                        self.on_error(f"watch {kind}/{namespace} failed: {exc}")
+                        if isinstance(exc, ApiStatusError):
+                            msg = explain_api_error(exc.status, exc.reason, kind, namespace)
+                        else:
+                            msg = f"watch {kind}/{namespace} failed: {exc}"
+                        self.on_error(msg)
                     break
             await asyncio.sleep(self._retry_delay)
         self._tasks.pop((kind, namespace), None)
