@@ -128,18 +128,18 @@ class KorvidApp(App[None]):
 
     def on_filter_command(self, message: FilterCommand) -> None:
         self.filter_pattern = message.pattern
-        self.post_message(ResourcesUpdated("pods"))
+        self.post_message(ResourcesUpdated(self.current_kind))
 
     def on_clear_filter(self, message: ClearFilter) -> None:
         self.filter_pattern = ""
-        self.post_message(ResourcesUpdated("pods"))
+        self.post_message(ResourcesUpdated(self.current_kind))
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
         if message.namespace and message.namespace != self.current_scope:
             await self.watch_manager.stop(self.current_kind, self.current_scope)
             self.current_scope = message.namespace
             await self.watch_manager.start(self.current_kind, self.current_scope)
-        self.post_message(ResourcesUpdated("pods"))
+        self.post_message(ResourcesUpdated(self.current_kind))
         self._refresh_status()
 
     async def on_show_namespace_picker(self, message: ShowNamespacePicker) -> None:
