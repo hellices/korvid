@@ -55,12 +55,16 @@ class KorvidApp(App[None]):
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         ("q", "quit", "Quit"),
         ("colon", "open_command", "Command"),
-        ("slash", "open_filter", "Filter"),
+        ("slash", "open_filter", "Filter/Search"),
         ("0", "toggle_all_namespaces", "All NS"),
         ("d", "describe", "Describe"),
         ("s", "shell", "Shell"),
         ("l", "logs", "Logs"),
         ("shift+l", "logs_multi", "Multi-log"),
+        ("f", "log_format", "JSON/raw"),
+        ("p", "log_previous", "Prev logs"),
+        ("n", "log_search_next", "Next hit"),
+        ("shift+n", "log_search_prev", "Prev hit"),
     ]
 
     DEFAULT_CSS = """
@@ -97,6 +101,8 @@ class KorvidApp(App[None]):
         self._log_tasks: set[asyncio.Task[None]] = set()
         self._log_buffer: LogBuffer | None = None
         self._log_error: bool = False
+        self._current_log_triples: list[tuple[str, str, str]] = []
+        self._current_log_force_prefix: bool = False
 
     @property
     def current_namespace(self) -> str:
@@ -160,6 +166,11 @@ class KorvidApp(App[None]):
         self.query_one(CommandBar).open()
 
     def action_open_filter(self) -> None:
+        # When the log pane is open, / opens the pane's inline search instead.
+        log_pane = self.query_one(LogPane)
+        if log_pane.display:
+            log_pane.open_search()
+            return
         # Dismiss the command bar first to enforce mutual exclusion.
         self.query_one(CommandBar).dismiss_bar()
         self.query_one(FilterBar).open()
@@ -424,34 +435,46 @@ class KorvidApp(App[None]):
         sources: list[tuple[str, str]],
         triples: list[tuple[str, str, str]] | None = None,
         force_prefix: bool = False,
+        previous: bool = False,
     ) -> None:
         """Show log pane and spawn one streaming task per (pod, container)."""
-        log_pane = self.query_one(LogPane)
-        log_pane.open(sources, force_prefix=force_prefix)
-        log_pane.set_state("streaming")
-
-        self._log_buffer = LogBuffer()
-        self._log_tasks = set()
-        self._log_error = False
-
-        # triples carries per-entry namespaces; fall back to the single namespace
+        # Resolve triples before saving so _current_log_triples is always complete.
         if triples is None:
             triples = [(namespace, pod, ctr) for pod, ctr in sources]
 
+        self._current_log_triples = list(triples)
+        self._current_log_force_prefix = force_prefix
+
+        log_pane = self.query_one(LogPane)
+        self._log_buffer = LogBuffer()
+        log_pane.open(sources, force_prefix=force_prefix, log_buffer=self._log_buffer)
+
+        if previous:
+            log_pane.write_banner("\u2500\u2500 previous container logs \u2500\u2500")
+
+        log_pane.set_state("streaming")
+
+        self._log_tasks = set()
+        self._log_error = False
+
         for ns, pod, container in triples:
             task: asyncio.Task[None] = asyncio.create_task(
-                self._spawn_log_stream(ns, pod, container)
+                self._spawn_log_stream(ns, pod, container, previous=previous)
             )
             self._log_tasks.add(task)
 
-    async def _spawn_log_stream(self, namespace: str, pod: str, container: str) -> None:
+    async def _spawn_log_stream(
+        self, namespace: str, pod: str, container: str, *, previous: bool = False
+    ) -> None:
         """Consume one log stream, feeding lines to the pane and buffer."""
         if self._stream_logs is None:
             return
         log_pane = self.query_one(LogPane)
         current = asyncio.current_task()
         try:
-            async for line in self._stream_logs(namespace, pod, container, follow=True):
+            async for line in self._stream_logs(
+                namespace, pod, container, previous=previous, follow=not previous
+            ):
                 log_pane.feed(line)
                 self._buffer_line(log_pane, line)
         except ApiStatusError as exc:
@@ -490,12 +513,64 @@ class KorvidApp(App[None]):
         self._log_tasks.clear()
         self._log_buffer = None
         self._log_error = False
+        self._current_log_triples = []
+        self._current_log_force_prefix = False
         with contextlib.suppress(Exception):
             self.query_one(LogPane).close()
 
     def _refresh_status(self) -> None:
         label = "AI on" if self.config.agent_enabled else "AI off"
         self.query_one(StatusBar).update_status(self.config.kube_context, self.current_scope, label)
+
+    # ------------------------------------------------------------------
+    # Task-10 actions: JSON toggle, previous logs, search navigation
+    # ------------------------------------------------------------------
+
+    async def action_log_format(self) -> None:
+        """Toggle JSON/raw formatting and re-render the buffer (``f`` key)."""
+        log_pane = self.query_one(LogPane)
+        if not log_pane.display:
+            return
+        log_pane.toggle_format()
+        if self._log_buffer is not None:
+            log_pane.replay(self._log_buffer.lines())
+
+    async def action_log_previous(self) -> None:
+        """Re-open the same streams in previous-container-log mode (``p`` key)."""
+        log_pane = self.query_one(LogPane)
+        if not log_pane.display:
+            return
+        if not self._current_log_triples:
+            return
+        triples = list(self._current_log_triples)
+        force_prefix = self._current_log_force_prefix
+        sources = [(pod, ctr) for _, pod, ctr in triples]
+        # Cancel live tasks without hiding the pane.
+        tasks = list(self._log_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._log_tasks.clear()
+        self._log_buffer = None
+        self._log_error = False
+        # Re-open with previous=True (clears RichLog, writes banner, spawns tasks).
+        ns0 = triples[0][0]
+        await self._open_log_pane(
+            ns0, sources, triples=triples, force_prefix=force_prefix, previous=True
+        )
+
+    def action_log_search_next(self) -> None:
+        """Advance to the next search hit (``n`` key)."""
+        log_pane = self.query_one(LogPane)
+        if log_pane.display:
+            log_pane.search_next()
+
+    def action_log_search_prev(self) -> None:
+        """Go back to the previous search hit (``N`` / shift+n key)."""
+        log_pane = self.query_one(LogPane)
+        if log_pane.display:
+            log_pane.search_prev()
 
     def _refresh_empty_state(self, kind: str, visible_rows: int) -> None:
         """Show guidance instead of a silent blank table (empty ns or no filter match)."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json as _json
 from collections.abc import AsyncGenerator, AsyncIterator
 
 from korvid.core.config import KorvidConfig
@@ -470,3 +471,212 @@ async def test_L_reopen_cancels_old_tasks_new_stream_opens() -> None:
             assert t.done()
         # New tasks are running
         assert len(app._log_tasks) > 0
+
+
+# ---------------------------------------------------------------------------
+# Task 10: JSON toggle (f), previous logs (p), search n/N
+# ---------------------------------------------------------------------------
+
+
+class JsonFakeStream:
+    """Stream that yields one JSON log line and then blocks (for f/format tests)."""
+
+    def __init__(self) -> None:
+        self.line = _json.dumps({"level": "info", "msg": "greeting"})
+
+    async def __call__(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncGenerator[LogLine, None]:
+        yield LogLine(pod=pod, container=container, text=self.line)
+        if follow:
+            await asyncio.Event().wait()
+
+
+class RecordingFakeStream:
+    """Records every call's kwargs; yields one line and blocks unless follow=False."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncGenerator[LogLine, None]:
+        self.calls.append({"previous": previous, "follow": follow})
+        yield LogLine(pod=pod, container=container, text="initial-line")
+        if follow:
+            await asyncio.Event().wait()
+
+
+class SearchFakeStream:
+    """Yields 5 lines (3 containing 'findme') and returns immediately."""
+
+    async def __call__(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncGenerator[LogLine, None]:
+        texts = ["findme-0", "normal-1", "findme-2", "normal-3", "findme-4"]
+        for t in texts:
+            yield LogLine(pod=pod, container=container, text=t)
+
+
+def _header_text(app: KorvidApp) -> str:
+    return str(app.query_one(LogPane).query_one("#log-header").render())
+
+
+async def test_f_toggles_format_and_rerenders() -> None:
+    """f flips header [json]<->[raw] and re-renders the buffer lines."""
+    stream = JsonFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+
+        # Initially formatted: header shows [json], rendered shows values not keys
+        header = _header_text(app)
+        assert "[json]" in header
+        text_before = _richlog_text(app)
+        assert "greeting" in text_before
+        assert '"level"' not in text_before  # key not visible, only value
+
+        # Toggle to raw
+        await pilot.press("f")
+        await pilot.pause(0.05)
+
+        header2 = _header_text(app)
+        assert "[raw]" in header2
+        text_after = _richlog_text(app)
+        assert '"level"' in text_after  # raw JSON shows the key
+
+        # Toggle back to json
+        await pilot.press("f")
+        await pilot.pause(0.05)
+        header3 = _header_text(app)
+        assert "[json]" in header3
+
+
+async def test_p_reopens_with_previous_true() -> None:
+    """p cancels live streams and re-opens with previous=True; banner appears."""
+    recording = RecordingFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=recording)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+        assert app.query_one(LogPane).display is True
+
+        # First call should be live (previous=False)
+        assert recording.calls[0]["previous"] is False
+
+        await pilot.press("p")
+        await pilot.pause(0.2)
+
+        # At least one call must have previous=True
+        assert any(c["previous"] is True for c in recording.calls)
+        # Banner must appear in the log output
+        text = _richlog_text(app)
+        assert "previous" in text
+
+
+async def test_p_follow_false_for_previous_stream() -> None:
+    """When p is pressed, the new stream is called with follow=False."""
+    recording = RecordingFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=recording)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+        await pilot.press("p")
+        await pilot.pause(0.2)
+        previous_calls = [c for c in recording.calls if c["previous"] is True]
+        assert previous_calls, "expected at least one call with previous=True"
+        assert all(c["follow"] is False for c in previous_calls)
+
+
+async def test_search_shows_counter_and_n_advances() -> None:
+    """/ + pattern + Enter shows counter; n advances the hit index."""
+    stream = SearchFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.2)
+
+        # Open inline search via slash
+        await pilot.press("slash")
+        await pilot.pause(0.05)
+
+        # Type pattern and submit
+        for ch in "findme":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+
+        # Counter should appear: 1/3 (3 lines contain "findme")
+        header = _header_text(app)
+        assert "1/3" in header
+
+        # n advances to second hit
+        await pilot.press("n")
+        await pilot.pause(0.05)
+        header2 = _header_text(app)
+        assert "2/3" in header2
+
+        # n again to third hit
+        await pilot.press("n")
+        await pilot.pause(0.05)
+        header3 = _header_text(app)
+        assert "3/3" in header3
+
+
+async def test_f_closed_no_crash() -> None:
+    """f when pane closed produces no error and no state change."""
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        assert app.query_one(LogPane).display is False
+        await pilot.press("f")
+        await pilot.pause(0.05)
+        assert app.query_one(LogPane).display is False
+
+
+async def test_p_closed_no_crash() -> None:
+    """p when pane closed produces no error and no state change."""
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        assert app.query_one(LogPane).display is False
+        await pilot.press("p")
+        await pilot.pause(0.05)
+        assert app.query_one(LogPane).display is False
+
+
+async def test_n_closed_no_crash() -> None:
+    """n when pane closed produces no error."""
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        assert app.query_one(LogPane).display is False
+        await pilot.press("n")
+        await pilot.pause(0.05)
+        assert app.query_one(LogPane).display is False
