@@ -26,12 +26,17 @@ def fake_source(pods: list[PodSummary]) -> WatchSource:
     return source
 
 
-def make_app(pods: list[PodSummary]) -> KorvidApp:
+def make_app(pods: list[PodSummary], namespaces: list[str] | None = None) -> KorvidApp:
     store = ResourceStore()
+
+    async def list_namespaces() -> list[str]:
+        return namespaces or ["default"]
+
     return KorvidApp(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, fake_source(pods)),
+        list_namespaces=list_namespaces,
     )
 
 
@@ -140,3 +145,72 @@ async def test_status_bar_shows_ns_and_agent_state() -> None:
         text = str(bar.render())
         assert "default" in text
         assert "AI off" in text
+
+
+async def test_filter_enter_closes_bar_keeps_filter() -> None:
+    app = make_app([_pod("api-1"), _pod("checkout-2")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("slash")
+        for ch in "check":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        from korvid.ui.widgets.filter_bar import FilterBar
+
+        assert app.query_one(FilterBar).display is False
+        table = app.query_one(ResourceTable)
+        assert table.row_count == 1  # filter still active after Enter
+        # focus must be back on the table so app bindings (q, :, /) work again
+        assert app.focused is app.query_one(ResourceTable)
+
+
+async def test_bars_show_mode_placeholder() -> None:
+    from korvid.ui.widgets.command_bar import CommandBar
+    from korvid.ui.widgets.filter_bar import FilterBar
+
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        assert app.query_one(CommandBar).placeholder != ""
+        assert app.query_one(FilterBar).placeholder != ""
+        assert app.query_one(CommandBar).placeholder != app.query_one(FilterBar).placeholder
+
+
+async def test_bare_ns_opens_picker_and_selection_switches() -> None:
+    from korvid.ui.widgets.namespace_picker import NamespacePicker
+
+    app = make_app([_pod("api-1")], namespaces=["default", "kube-system", "prod"])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("colon")
+        for ch in "ns":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        picker = app.query_one(NamespacePicker)
+        assert picker.display is True
+        assert picker.option_count == 3
+        # navigate down to kube-system and select it
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        assert picker.display is False
+        assert app.current_namespace == "kube-system"
+
+
+async def test_picker_escape_dismisses_without_switch() -> None:
+    from korvid.ui.widgets.namespace_picker import NamespacePicker
+
+    app = make_app([_pod("api-1")], namespaces=["default", "prod"])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("colon")
+        for ch in "ns":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert app.query_one(NamespacePicker).display is False
+        assert app.current_namespace == "default"

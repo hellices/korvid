@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import ClassVar
 
 from textual.app import App, ComposeResult
@@ -18,10 +19,12 @@ from korvid.ui.messages import (
     QuitCommand,
     ResourcesUpdated,
     ShowError,
+    ShowNamespacePicker,
     UnknownCommand,
 )
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.filter_bar import FilterBar
+from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
 
@@ -38,11 +41,13 @@ class KorvidApp(App[None]):
         config: KorvidConfig,
         store: ResourceStore,
         watch_manager: WatchManager,
+        list_namespaces: Callable[[], Awaitable[list[str]]] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.store = store
         self.watch_manager = watch_manager
+        self._list_namespaces = list_namespaces
         self.current_namespace = config.namespace or "default"
         self.filter_pattern = ""
 
@@ -54,6 +59,7 @@ class KorvidApp(App[None]):
         yield empty_state
         yield CommandBar()
         yield FilterBar()
+        yield NamespacePicker()
         yield StatusBar()
         yield Footer()
 
@@ -105,6 +111,18 @@ class KorvidApp(App[None]):
             await self.watch_manager.start("pods", self.current_namespace)
         self.post_message(ResourcesUpdated("pods"))
         self._refresh_status()
+
+    async def on_show_namespace_picker(self, message: ShowNamespacePicker) -> None:
+        picker = self.query_one(NamespacePicker)
+        if self._list_namespaces is None:
+            self.notify("Namespace listing unavailable", severity="warning")
+            return
+        try:
+            namespaces = await self._list_namespaces()
+        except Exception as exc:  # surface any listing failure to the user
+            self.notify(str(exc), title="Failed to list namespaces", severity="error")
+            return
+        picker.open(namespaces)
 
     def on_quit_command(self, message: QuitCommand) -> None:
         self.exit()

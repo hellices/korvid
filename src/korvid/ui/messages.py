@@ -65,6 +65,12 @@ class QuitCommand(Message):
     pass
 
 
+class ShowNamespacePicker(Message):
+    """Command to open the namespace picker (bare `:ns`)."""
+
+    pass
+
+
 class UnknownCommand(Message):
     """Command that was not recognised — future agent fallthrough hook."""
 

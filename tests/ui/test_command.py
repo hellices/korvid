@@ -23,3 +23,9 @@ def test_unknown_preserved() -> None:
     msg = parse_command("frobnicate all")
     assert isinstance(msg, UnknownCommand)
     assert msg.text == "frobnicate all"
+
+
+def test_bare_ns_requests_picker() -> None:
+    from korvid.ui.messages import ShowNamespacePicker
+
+    assert isinstance(parse_command("ns"), ShowNamespacePicker)

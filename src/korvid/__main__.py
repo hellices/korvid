@@ -23,7 +23,12 @@ async def _run() -> None:
     await kube.connect(config.kube_context)
     store = ResourceStore()
     watch_manager = WatchManager(store, kube.watch_pods)
-    app = KorvidApp(config=config, store=store, watch_manager=watch_manager)
+    app = KorvidApp(
+        config=config,
+        store=store,
+        watch_manager=watch_manager,
+        list_namespaces=kube.list_namespaces,
+    )
     try:
         await app.run_async()
     finally:
