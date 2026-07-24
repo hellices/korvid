@@ -60,12 +60,14 @@ class _FakeResp:
 async def test_stream_logs_yields_correct_log_lines() -> None:
     client = KubeClient()
     fake_v1 = AsyncMock()
-    fake_v1.read_namespaced_pod_log.return_value = _FakeResp([b"line one\n", b"calf\xc3\xa9\n"])
+    fake_v1.read_namespaced_pod_log.return_value = _FakeResp(
+        [b"line one\n", b"r\xc3\xa9sum\xc3\xa9\n"]
+    )
     with patch.object(client, "_core_v1", fake_v1):
         lines = [line async for line in client.stream_logs("ns", "mypod", "myctx")]
 
     assert lines[0] == LogLine(pod="mypod", container="myctx", text="line one")
-    assert lines[1] == LogLine(pod="mypod", container="myctx", text="café")
+    assert lines[1] == LogLine(pod="mypod", container="myctx", text="résumé")
 
 
 async def test_stream_logs_strips_crlf() -> None:
