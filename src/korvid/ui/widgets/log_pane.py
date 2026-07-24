@@ -269,17 +269,24 @@ class LogPane(Widget):
         return _SOURCE_COLORS[index % len(_SOURCE_COLORS)]
 
     def _panel_index(self, key: str) -> int:
-        """Panel index for a source key; unknown sources land in panel 0."""
+        """Panel index for a source key; -1 for unknown sources.
+
+        Unknown keys are dropped rather than routed to panel 0: after a
+        ``_toggle_log_pod`` reopen, a straggler line from a just-cancelled
+        stream must not be misattributed to another source's panel.
+        """
         try:
             return self._panel_keys.index(key)
         except ValueError:
-            return 0
+            return -1
 
     def _write_line(self, line: LogLine) -> None:
         """Route a single line to its panel, applying JSON formatting."""
         if not self._panel_keys:
             return
         index = self._panel_index(f"{line.pod}/{line.container}")
+        if index < 0:
+            return
         rich_log = self._panel(index).query_one(RichLog)
         rich_log.write(format_log_line(line.text, formatted=self.formatted))
 
@@ -310,6 +317,8 @@ class LogPane(Widget):
         hit = lines[hit_idx]
         key = f"{hit.pod}/{hit.container}"
         index = self._panel_index(key)
+        if index < 0:
+            return  # hit belongs to a source no longer shown
         rich_log = self._panel(index).query_one(RichLog)
         # Per-panel line index: count earlier buffer lines routed to the same
         # panel, then correct for banner lines / ring-buffer drops the RichLog

@@ -43,6 +43,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
 
 def _parse_buffer_lines(value: Any) -> int:
     """Coerce log_buffer_lines to a sane positive int; fall back to 5000."""
+    if isinstance(value, bool):  # YAML `true` would silently become a 1-line buffer
+        return 5000
     try:
         lines = int(value)
     except (TypeError, ValueError):

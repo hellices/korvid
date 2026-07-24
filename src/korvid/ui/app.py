@@ -486,17 +486,28 @@ class KorvidApp(App[None]):
         # kubectl exec propagates the remote command's exit code, so a non-zero
         # status can just mean the user's last command failed or they hit Ctrl+C.
         # Probe non-interactively: if sh runs fine, the shell session was real.
-        try:
-            probe = subprocess.run(
-                build_probe_argv(namespace, name, container, context=self.config.kube_context),
-                capture_output=True,
-                timeout=10,
-            )
-            shell_exists = probe.returncode == 0
-        except (subprocess.TimeoutExpired, OSError):
-            shell_exists = False  # inconclusive — keep offering the fallback
-        if shell_exists:
-            return
+        # Run in a thread worker so a slow API server can't freeze the UI.
+        def _probe_and_maybe_offer() -> None:
+            try:
+                probe = subprocess.run(
+                    build_probe_argv(namespace, name, container, context=self.config.kube_context),
+                    capture_output=True,
+                    timeout=5,
+                )
+                shell_exists = probe.returncode == 0
+            except (subprocess.TimeoutExpired, OSError):
+                shell_exists = False  # inconclusive — keep offering the fallback
+            if shell_exists:
+                return
+            self.call_from_thread(self._offer_debug_fallback, namespace, name, container, exit_code)
+
+        self.run_worker(_probe_and_maybe_offer, thread=True)
+
+    def _offer_debug_fallback(
+        self, namespace: str, name: str, container: str | None, exit_code: int
+    ) -> None:
+        """Ask whether to attach a kubectl debug container after a failed shell."""
+        target = f"{name}/{container}" if container else name
 
         def _on_choice(choice: str | None) -> None:
             if choice == self._DEBUG_YES:

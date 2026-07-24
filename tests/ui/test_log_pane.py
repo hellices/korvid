@@ -955,3 +955,17 @@ async def test_l_in_multi_stream_mode_closes_pane() -> None:
         await pilot.press("l")
         await pilot.pause(0.2)
         assert app.query_one(LogPane).display is False
+
+
+async def test_straggler_line_from_removed_source_is_dropped() -> None:
+    """A line from a source not in the pane must not land in another panel."""
+    fake = FakeStream(lines_per_call=1)
+    app = make_app([_pod("app-a", containers=("main",))], stream_logs=fake)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+        pane = app.query_one(LogPane)
+        pane.feed(LogLine(pod="ghost", container="old", text="stray-line"))
+        await pilot.pause(0.05)
+        assert "stray-line" not in _richlog_text(app)
