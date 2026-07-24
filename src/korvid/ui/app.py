@@ -13,7 +13,7 @@ from typing import Any, ClassVar
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.events import Key
-from textual.widgets import Footer, Static
+from textual.widgets import DataTable, Footer, Static
 
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
@@ -36,6 +36,7 @@ from korvid.ui.messages import (
 )
 from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv
 from korvid.ui.widgets.command_bar import CommandBar
+from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.log_pane import LogPane
@@ -266,6 +267,51 @@ class KorvidApp(App[None]):
     def on_quit_command(self, message: QuitCommand) -> None:
         self.exit()
 
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Enter on a pod row drills into its container list (k9s convention)."""
+        if not isinstance(event.data_table, ResourceTable) or self.current_kind != "pods":
+            return
+        event.stop()
+        row_key = str(event.row_key.value)
+        parts = row_key.split("/", 1)
+        if len(parts) != 2:
+            return
+        namespace, name = parts[0], parts[1]
+
+        rows = await self._build_container_rows(namespace, name)
+        if not rows:
+            self.notify("No containers found for this pod", severity="warning")
+            return
+
+        def _on_pick(result: tuple[str, str] | None) -> None:
+            if result is None:
+                return
+            action, container = result
+            if action == "shell":
+                self._run_shell(namespace, name, container)
+            else:
+                if self._stream_logs is None:
+                    self.notify("Log streaming unavailable", severity="warning")
+                    return
+                self.run_worker(self._open_log_pane(namespace, [(name, container)]))
+
+        await self.push_screen(ContainersScreen(name, rows), _on_pick)
+
+    async def _build_container_rows(
+        self, namespace: str, name: str
+    ) -> list[tuple[str, str, str, str, str]]:
+        """Container rows from the live manifest; store names as fallback."""
+        if self._get_manifest is not None:
+            try:
+                manifest = await self._get_manifest("pods", namespace, name)
+            except (ApiStatusError, ValueError) as exc:
+                logger.debug("manifest fetch for container list failed: %s", exc)
+            else:
+                rows = build_container_rows(manifest)
+                if rows:
+                    return rows
+        return [(ctr, "-", "-", "-", "-") for ctr in self._get_pod_containers(namespace, name)]
+
     async def action_describe(self) -> None:
         """Fetch and display the manifest + events for the currently highlighted row."""
         if self._get_manifest is None:
@@ -317,7 +363,11 @@ class KorvidApp(App[None]):
         await self.push_screen(DescribeScreen(title, manifest, events))
 
     def on_unknown_command(self, message: UnknownCommand) -> None:
-        self.notify(f"Unknown command: {message.text}", severity="warning")
+        self.notify(
+            f"Unknown resource or command: {message.text}"
+            " — not found in this cluster's API (CRD not installed?)",
+            severity="warning",
+        )
 
     def action_shell(self) -> None:
         """Drop into a shell inside the selected pod via kubectl exec.
