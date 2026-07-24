@@ -98,6 +98,9 @@ class AgentPanel(Vertical):
 
     def show_setup_hint(self) -> None:
         log = self.query_one("#agent-log", RichLog)
+        # Setup-only log: clear first so repeated Ctrl-A toggles don't
+        # append duplicate hints.
+        log.clear()
         log.write(_SETUP_HINT)
         self.query_one("#agent-input", Input).disabled = True
 

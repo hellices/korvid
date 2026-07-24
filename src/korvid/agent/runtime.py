@@ -26,6 +26,10 @@ SYSTEM_PROMPT = (
 # History is trimmed to the most recent turns to bound token cost; a turn
 # begins at a "user" message, so trimming never splits assistant/tool pairs.
 MAX_HISTORY_TURNS = 8
+# Character budget for retained history (~30k tokens at 4 chars/token).
+# Turn count alone does not bound request size: one turn can hold up to
+# max_iterations tool results of MAX_RESULT_CHARS each.
+MAX_HISTORY_CHARS = 120_000
 
 
 class _Provider(Protocol):
@@ -40,6 +44,14 @@ class _Provider(Protocol):
 
 class _Executor(Protocol):
     async def execute(self, name: str, arguments: dict[str, Any]) -> str: ...
+
+
+def _message_chars(message: dict[str, Any]) -> int:
+    """Approximate a message's context cost: content plus tool-call arguments."""
+    n = len(str(message.get("content") or ""))
+    for tc in message.get("tool_calls") or []:
+        n += len(str((tc.get("function") or {}).get("arguments") or ""))
+    return n
 
 
 @dataclass
@@ -60,10 +72,12 @@ class AgentRuntime:
         executor: _Executor,
         *,
         max_iterations: int = 15,
+        max_history_chars: int = MAX_HISTORY_CHARS,
     ) -> None:
         self._provider = provider
         self._executor = executor
         self._max_iterations = max_iterations
+        self._max_history_chars = max_history_chars
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         self._total_in = 0
         self._total_out = 0
@@ -80,12 +94,20 @@ class AgentRuntime:
         return self._estimated
 
     def _trim_history(self) -> None:
-        """Keep the system prompt plus at most MAX_HISTORY_TURNS-1 recent turns."""
+        """Keep the system prompt plus at most MAX_HISTORY_TURNS-1 recent turns,
+        then drop oldest complete turns until within the character budget."""
         user_indices = [i for i, m in enumerate(self._messages) if m.get("role") == "user"]
-        if len(user_indices) < MAX_HISTORY_TURNS:
-            return
-        cut = user_indices[-(MAX_HISTORY_TURNS - 1)]
-        self._messages = [self._messages[0], *self._messages[cut:]]
+        if len(user_indices) >= MAX_HISTORY_TURNS:
+            cut = user_indices[-(MAX_HISTORY_TURNS - 1)]
+            self._messages = [self._messages[0], *self._messages[cut:]]
+        # Turn count alone does not bound request size (tool results are
+        # capped per-result, not per-turn) — enforce a character budget,
+        # always retaining at least the most recent complete turn.
+        while sum(_message_chars(m) for m in self._messages) > self._max_history_chars:
+            user_indices = [i for i, m in enumerate(self._messages) if m.get("role") == "user"]
+            if len(user_indices) <= 1:
+                break
+            self._messages = [self._messages[0], *self._messages[user_indices[1] :]]
 
     async def _consume_stream(
         self,

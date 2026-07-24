@@ -165,3 +165,13 @@ async def test_status_bar_on_when_runtime_present() -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         assert "AI on" in str(app.query_one(StatusBar).render())
+
+
+async def test_setup_hint_not_duplicated_on_retoggle() -> None:
+    app = make_app(runtime=None, model=None)
+    async with app.run_test() as pilot:
+        for _ in range(3):
+            await pilot.press("ctrl+a")  # open
+            await pilot.press("ctrl+a")  # close
+        await pilot.press("ctrl+a")
+        assert _panel_text(app).count("provider: openai-compat") == 1

@@ -245,3 +245,20 @@ async def test_usage_missing_in_any_iteration_marks_estimated() -> None:
     tc = next(e for e in events if isinstance(e, TurnComplete))
     assert tc.estimated is True
     assert rt.usage_estimated is True
+
+
+async def test_history_trimmed_by_char_budget() -> None:
+    """A few huge turns must not blow the request size even under the turn cap."""
+    big = "x" * 4000
+    p = ScriptedProvider(
+        [[{"type": "text_delta", "text": big}, {"type": "done"}] for _ in range(4)]
+    )
+    rt = AgentRuntime(p, EchoExecutor(), max_history_chars=10_000)
+    for i in range(4):
+        await collect(rt, f"question-{i} {big}")
+    # The last provider call must fit the budget…
+    last_call_chars = sum(len(str(m.get("content") or "")) for m in p.calls[-1])
+    assert last_call_chars <= 10_000 + len(big) + 100  # budget + newest user msg
+    # …and the newest turn is always retained.
+    assert any("question-3" in str(m.get("content") or "") for m in p.calls[-1])
+    assert not any("question-0" in str(m.get("content") or "") for m in p.calls[-1])
