@@ -2,18 +2,51 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from korvid.core.config import KorvidConfig
-from korvid.core.store import ResourceStore, Summary
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager, WatchSource
-from korvid.k8s.models import PodSummary
+from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
 
+# ---------------------------------------------------------------------------
+# Shared resource meta
+# ---------------------------------------------------------------------------
 
-def _pod(name: str, phase: str = "Running", qos: str = "-") -> PodSummary:
+_PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
+_DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
+
+_DEFAULT_TEST_ALIASES: dict[str, ResourceMeta] = {
+    "pods": _PODS_META,
+    "po": _PODS_META,
+    "pod": _PODS_META,
+    "deployments": _DEPLOY_META,
+    "deploy": _DEPLOY_META,
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _pod(
+    name: str, phase: str = "Running", qos: str = "-", namespace: str = "default"
+) -> PodSummary:
     return PodSummary(
-        name=name, namespace="default", phase=phase, ready="1/1", restarts=0, node=None, qos=qos
+        name=name,
+        namespace=namespace,
+        phase=phase,
+        ready="1/1",
+        restarts=0,
+        node=None,
+        qos=qos,
     )
+
+
+def _deploy(name: str, namespace: str = "default") -> GenericSummary:
+    return GenericSummary(name=name, namespace=namespace, kind="Deployment", created="")
 
 
 def fake_source(pods: list[PodSummary]) -> WatchSource:
@@ -26,8 +59,23 @@ def fake_source(pods: list[PodSummary]) -> WatchSource:
     return source
 
 
-def make_app(pods: list[PodSummary], namespaces: list[str] | None = None) -> KorvidApp:
+def make_app(
+    pods: list[PodSummary],
+    namespaces: list[str] | None = None,
+    *,
+    extra_data: dict[str, list[Summary]] | None = None,
+    aliases: dict[str, ResourceMeta] | None = None,
+) -> KorvidApp:
     store = ResourceStore()
+    all_data: dict[str, list[Summary]] = {"pods": list(pods)}
+    if extra_data:
+        all_data.update(extra_data)
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        for obj in all_data.get(kind, []):
+            yield ("ADDED", obj)
+        while True:
+            await asyncio.sleep(0.01)
 
     async def list_namespaces() -> list[str]:
         return ["default"] if namespaces is None else namespaces
@@ -35,8 +83,9 @@ def make_app(pods: list[PodSummary], namespaces: list[str] | None = None) -> Kor
     return KorvidApp(
         config=KorvidConfig(namespace="default"),
         store=store,
-        watch_manager=WatchManager(store, fake_source(pods)),
+        watch_manager=WatchManager(store, source),
         list_namespaces=list_namespaces,
+        aliases=aliases if aliases is not None else dict(_DEFAULT_TEST_ALIASES),
     )
 
 
@@ -295,3 +344,143 @@ async def test_namespace_picker_api_error_shows_actionable_message() -> None:
         notifications = [n.message for n in app._notifications]
         assert any("RBAC" in m for m in notifications)
         assert not any("API 403" in m for m in notifications)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Universal views — grammar v2, dynamic columns, `0` key
+# ---------------------------------------------------------------------------
+
+
+async def test_deployments_view_renders_generic_columns() -> None:
+    """`:deployments` switches kind and renders NAME/AGE columns (not pod columns)."""
+    app = make_app(
+        [_pod("api-1")],
+        extra_data={"deployments": [_deploy("frontend"), _deploy("backend")]},
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("colon")
+        for ch in "deployments":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        table = app.query_one(ResourceTable)
+        assert app.current_kind == "deployments"
+        assert table.row_count == 2
+        # Generic view: 2 columns (NAME, AGE) in single-ns scope
+        assert len(table.columns) == 2
+
+
+async def test_pods_all_adds_namespace_column() -> None:
+    """`pods all` switches to ALL_NAMESPACES scope and adds NAMESPACE as first column."""
+    pods = [
+        _pod("api-1", namespace="default"),
+        _pod("svc-1", namespace="kube-system"),
+    ]
+    app = make_app(pods)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("colon")
+        for ch in "pods":
+            await pilot.press(ch)
+        await pilot.press("space")
+        for ch in "all":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        table = app.query_one(ResourceTable)
+        assert app.current_scope == ALL_NAMESPACES
+        assert table.row_count == 2
+        # Pod view all-ns: 9 columns (NAMESPACE + 8 pod columns)
+        assert len(table.columns) == 9
+
+
+async def test_zero_key_toggles_all_namespaces() -> None:
+    """`0` toggles current_scope between default and ALL_NAMESPACES."""
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        assert app.current_scope == "default"
+        await pilot.press("0")
+        await pilot.pause(0.15)
+        assert app.current_scope == ALL_NAMESPACES
+        await pilot.press("0")
+        await pilot.pause(0.15)
+        assert app.current_scope == "default"
+
+
+async def test_status_bar_shows_star_in_all_namespaces() -> None:
+    """StatusBar must show `ns: *` (or `ns:*`) when scope is ALL_NAMESPACES."""
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("0")
+        await pilot.pause(0.15)
+        bar = app.query_one(StatusBar)
+        text = str(bar.render())
+        assert "*" in text
+
+
+async def test_row_keys_are_namespace_slash_name() -> None:
+    """Row keys must be `namespace/name` in ALL cases (for describe/logs/shell)."""
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        # RowKey wraps our string key; .value holds the string we passed
+        keys = [str(k.value) for k in table.rows]
+        assert "default/api-1" in keys
+
+
+async def test_filter_works_in_generic_view() -> None:
+    """Filter by name still works when displaying generic (non-pod) resources."""
+    app = make_app(
+        [],
+        extra_data={
+            "deployments": [_deploy("frontend"), _deploy("backend-api")],
+        },
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        # Navigate to deployments
+        await pilot.press("colon")
+        for ch in "deployments":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        table = app.query_one(ResourceTable)
+        assert table.row_count == 2
+        # Apply filter
+        await pilot.press("slash")
+        for ch in "front":
+            await pilot.press(ch)
+        await pilot.pause(0.1)
+        assert table.row_count == 1
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert table.row_count == 2
+
+
+async def test_ns_command_keeps_current_kind() -> None:
+    """`:ns kube-system` changes namespace but keeps the current kind."""
+    app = make_app(
+        [_pod("api-1")],
+        extra_data={"deployments": [_deploy("frontend")]},
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        # Switch to deployments first
+        await pilot.press("colon")
+        for ch in "deployments":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        assert app.current_kind == "deployments"
+        # Now switch namespace only
+        await pilot.press("colon")
+        for ch in "ns kube-system":
+            await pilot.press(ch if ch != " " else "space")
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        assert app.current_kind == "deployments"
+        assert app.current_scope == "kube-system"

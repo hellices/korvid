@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import ClassVar, cast
+from typing import ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -11,11 +11,10 @@ from textual.widgets import Footer, Header, Static
 
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
-from korvid.core.store import ResourceStore
+from korvid.core.store import ALL_NAMESPACES, ResourceStore
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
-from korvid.k8s.models import PodSummary
 from korvid.ui.messages import (
     ClearFilter,
     FilterCommand,
@@ -44,6 +43,7 @@ class KorvidApp(App[None]):
         ("q", "quit", "Quit"),
         ("colon", "open_command", "Command"),
         ("slash", "open_filter", "Filter"),
+        ("0", "toggle_all_namespaces", "All NS"),
     ]
 
     def __init__(
@@ -88,6 +88,11 @@ class KorvidApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
+        # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
+        self.query_one(CommandBar).known = lambda a: (
+            self.aliases[a].plural if a in self.aliases else None
+        )
+
         # Both callbacks fire from watch tasks on the same loop; post_message is
         # loop-safe. Watch tasks are cancelled in on_unmount before shutdown to
         # avoid posting to a closing app.
@@ -108,9 +113,9 @@ class KorvidApp(App[None]):
     def _render_table(self, kind: str) -> None:
         """Single choke point: table rows and empty-state always update together."""
         table = self.query_one(ResourceTable)
-        # Task 4 will generalise the table for arbitrary kinds; for now pods only.
-        pods = cast(list[PodSummary], self.store.get(kind, self.current_scope))
-        table.update_rows(pods, self.filter_pattern)
+        rows = self.store.get(kind, self.current_scope)
+        all_namespaces = self.current_scope == ALL_NAMESPACES
+        table.show(kind, rows, all_namespaces=all_namespaces, pattern=self.filter_pattern)
         self._refresh_empty_state(kind, table.row_count)
 
     def on_show_error(self, message: ShowError) -> None:
@@ -135,11 +140,26 @@ class KorvidApp(App[None]):
         self.post_message(ResourcesUpdated(self.current_kind))
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
-        if message.namespace and message.namespace != self.current_scope:
+        new_kind = message.view if message.view is not None else self.current_kind
+        new_scope = message.namespace if message.namespace is not None else self.current_scope
+        if new_kind != self.current_kind or new_scope != self.current_scope:
             await self.watch_manager.stop(self.current_kind, self.current_scope)
-            self.current_scope = message.namespace
+            self.current_kind = new_kind
+            self.current_scope = new_scope
             await self.watch_manager.start(self.current_kind, self.current_scope)
         self.post_message(ResourcesUpdated(self.current_kind))
+        self._refresh_status()
+
+    async def action_toggle_all_namespaces(self) -> None:
+        """Toggle scope between ALL_NAMESPACES and the config-default namespace."""
+        if self.current_scope == ALL_NAMESPACES:
+            new_scope = self.config.namespace or "default"
+        else:
+            new_scope = ALL_NAMESPACES
+        await self.watch_manager.stop(self.current_kind, self.current_scope)
+        self.current_scope = new_scope
+        await self.watch_manager.start(self.current_kind, self.current_scope)
+        self._render_table(self.current_kind)
         self._refresh_status()
 
     async def on_show_namespace_picker(self, message: ShowNamespacePicker) -> None:

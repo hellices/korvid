@@ -40,10 +40,13 @@ async def _run() -> None:
         if kind == "pods":
             async for ev, pod in kube.watch_pods(ns):
                 yield (ev, pod)
-        else:
+        elif kind in aliases:
             meta = aliases[kind]
             async for ev, obj in kube.watch_objects(meta, ns):
                 yield (ev, obj)
+        else:
+            logger.warning("Unknown resource kind %r requested for watch; stopping", kind)
+            raise ValueError(f"Unknown resource kind: {kind!r}")
 
     watch_manager = WatchManager(store, source)
     app = KorvidApp(

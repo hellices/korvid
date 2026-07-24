@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from textual.events import Key
 from textual.widgets import Input
 
@@ -11,7 +13,8 @@ class CommandBar(Input):
 
     def on_mount(self) -> None:
         self.display = False
-        self.placeholder = "command: pods | ns [name] | quit  (no ':' needed)"
+        self.placeholder = "pods | deploy all | ns <name> | q"
+        self.known: Callable[[str], str | None] = lambda _: None
 
     def open(self) -> None:
         self.value = ""
@@ -24,7 +27,7 @@ class CommandBar(Input):
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        self.post_message(parse_command(event.value))
+        self.post_message(parse_command(event.value, self.known))
         self.dismiss_bar()
 
     async def on_key(self, event: Key) -> None:
