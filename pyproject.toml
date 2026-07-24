@@ -79,6 +79,9 @@ show_missing = true
 [tool.typos.files]
 extend-exclude = ["*.lock", "*.snap"]
 
+[tool.typos.default.extend-words]
+aks = "aks"  # Azure Kubernetes Service — not a typo of "ask"
+
 [tool.deptry]
 known_first_party = ["korvid"]
 

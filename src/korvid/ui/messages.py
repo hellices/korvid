@@ -8,14 +8,14 @@ from textual.message import Message
 class NavigateCommand(Message):
     """Command to navigate to a view, optionally in a specific namespace."""
 
-    view: str
+    view: str | None
     # `namespace` is a ClassVar on Message used only in __init_subclass__ to derive
     # handler_name ("on_navigate_command") at class-definition time. Dispatch reads
     # message.handler_name (class var), never message.namespace at runtime, so this
     # instance-attribute shadow is safe. Mypy cannot model this; suppression required.
     namespace: str | None  # type: ignore[misc,assignment]
 
-    def __init__(self, view: str, namespace: str | None = None) -> None:
+    def __init__(self, view: str | None, namespace: str | None = None) -> None:
         super().__init__()
         self.view = view
         self.namespace = namespace

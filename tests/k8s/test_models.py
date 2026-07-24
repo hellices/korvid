@@ -1,6 +1,7 @@
+from datetime import UTC, datetime
 from typing import Any
 
-from korvid.k8s.models import PodSummary
+from korvid.k8s.models import GenericSummary, PodSummary
 
 POD: dict[str, Any] = {
     "metadata": {"name": "checkout-7d9f", "namespace": "prod"},
@@ -151,3 +152,82 @@ def test_parse_invalid_quantity_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="invalid Kubernetes quantity"):
         parse_memory("12abc")
+
+
+# ---------------------------------------------------------------------------
+# GenericSummary
+# ---------------------------------------------------------------------------
+
+
+def test_generic_summary_from_manifest() -> None:
+    manifest: dict[str, Any] = {
+        "metadata": {
+            "name": "my-dep",
+            "namespace": "prod",
+            "creationTimestamp": "2024-06-01T10:00:00Z",
+        }
+    }
+    gs = GenericSummary.from_manifest("Deployment", manifest)
+    assert gs.name == "my-dep"
+    assert gs.namespace == "prod"
+    assert gs.kind == "Deployment"
+    assert gs.created == "2024-06-01T10:00:00Z"
+
+
+def test_generic_summary_missing_creation_timestamp() -> None:
+    manifest: dict[str, Any] = {"metadata": {"name": "x", "namespace": "ns"}}
+    gs = GenericSummary.from_manifest("Pod", manifest)
+    assert gs.created == ""
+
+
+def test_age_5m() -> None:
+    gs = GenericSummary(name="x", namespace="ns", kind="Pod", created="2024-01-01T12:00:00Z")
+    now = datetime(2024, 1, 1, 12, 5, 0, tzinfo=UTC)
+    assert gs.age(now) == "5m"
+
+
+def test_age_3h() -> None:
+    gs = GenericSummary(name="x", namespace="ns", kind="Pod", created="2024-01-01T12:00:00Z")
+    now = datetime(2024, 1, 1, 15, 0, 0, tzinfo=UTC)
+    assert gs.age(now) == "3h"
+
+
+def test_age_2d() -> None:
+    gs = GenericSummary(name="x", namespace="ns", kind="Pod", created="2024-01-01T12:00:00Z")
+    now = datetime(2024, 1, 3, 12, 0, 0, tzinfo=UTC)
+    assert gs.age(now) == "2d"
+
+
+def test_age_empty_created() -> None:
+    gs = GenericSummary(name="x", namespace="ns", kind="Pod", created="")
+    assert gs.age() == "-"
+
+
+# ---------------------------------------------------------------------------
+# PodSummary — containers field
+# ---------------------------------------------------------------------------
+
+
+def test_pod_summary_containers_from_manifest() -> None:
+    manifest: dict[str, Any] = {
+        "metadata": {"name": "p", "namespace": "d"},
+        "spec": {
+            "containers": [
+                {"name": "app", "image": "nginx"},
+                {"name": "sidecar", "image": "envoy"},
+            ]
+        },
+        "status": {"phase": "Running"},
+    }
+    pod = PodSummary.from_manifest(manifest)
+    assert pod.containers == ("app", "sidecar")
+
+
+def test_pod_summary_containers_defaults_to_empty_tuple() -> None:
+    manifest: dict[str, Any] = {
+        "metadata": {"name": "p", "namespace": "d"},
+        "spec": {},
+        "status": {"phase": "Pending"},
+    }
+    pod = PodSummary.from_manifest(manifest)
+    assert pod.containers == ()

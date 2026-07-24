@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -105,6 +106,52 @@ def _effective_resource(spec: dict[str, Any], bucket: str, key: str) -> str:
 
 
 @dataclass(frozen=True)
+class GenericSummary:
+    """Minimal summary for any Kubernetes object kind."""
+
+    name: str
+    namespace: str
+    kind: str
+    created: str  # ISO-8601 timestamp or "" when absent
+
+    @classmethod
+    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> GenericSummary:
+        meta = manifest.get("metadata") or {}
+        return cls(
+            name=str(meta.get("name", "")),
+            namespace=str(meta.get("namespace", "")),
+            kind=kind,
+            created=str(meta.get("creationTimestamp") or ""),
+        )
+
+    def age(self, now: datetime | None = None) -> str:
+        """Return k9s-style age string ("5m", "3h", "2d"); "-" when created is empty."""
+        if not self.created:
+            return "-"
+        if now is None:
+            now = datetime.now(UTC)
+        try:
+            ts = self.created
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
+            created_dt = datetime.fromisoformat(ts)
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=UTC)
+        except ValueError:
+            return "-"
+        total_seconds = int((now - created_dt).total_seconds())
+        if total_seconds < 0:
+            return "-"
+        days = total_seconds // 86400
+        if days >= 1:
+            return f"{days}d"
+        hours = total_seconds // 3600
+        if hours >= 1:
+            return f"{hours}h"
+        return f"{total_seconds // 60}m"
+
+
+@dataclass(frozen=True)
 class PodSummary:
     name: str
     namespace: str
@@ -117,6 +164,7 @@ class PodSummary:
     mem_request: str = "-"
     cpu_limit: str = "-"
     mem_limit: str = "-"
+    containers: tuple[str, ...] = ()
 
     @classmethod
     def from_manifest(cls, obj: dict[str, Any]) -> PodSummary:
@@ -138,4 +186,7 @@ class PodSummary:
             mem_request=_effective_resource(spec, "requests", "memory"),
             cpu_limit=_effective_resource(spec, "limits", "cpu"),
             mem_limit=_effective_resource(spec, "limits", "memory"),
+            containers=tuple(
+                str(c["name"]) for c in (spec.get("containers") or []) if c.get("name")
+            ),
         )

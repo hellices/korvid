@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
+from korvid.core.store import ALL_NAMESPACES
 from korvid.ui.messages import (
     FilterCommand,
     NavigateCommand,
@@ -10,11 +13,12 @@ from korvid.ui.messages import (
     UnknownCommand,
 )
 
-_VIEWS = {"pods"}
+_NS_KEYWORDS = {"ns", "namespaces"}
 
 
 def parse_command(
     text: str,
+    known: Callable[[str], str | None],
 ) -> NavigateCommand | FilterCommand | QuitCommand | ShowNamespacePicker | UnknownCommand:
     parts = text.strip().split()
     if not parts:
@@ -22,10 +26,16 @@ def parse_command(
     head, *rest = parts
     if head in {"q", "quit"}:
         return QuitCommand()
-    if head in _VIEWS and not rest:
-        return NavigateCommand(head)
-    if head == "ns" and not rest:
+    if head in _NS_KEYWORDS and not rest:
         return ShowNamespacePicker()
-    if head == "ns" and len(rest) == 1:
-        return NavigateCommand("pods", namespace=rest[0])
+    if head in _NS_KEYWORDS and len(rest) == 1:
+        return NavigateCommand(view=None, namespace=rest[0])
+    plural = known(head)
+    if plural is None:
+        return UnknownCommand(text)
+    if not rest:
+        return NavigateCommand(view=plural, namespace=None)
+    if len(rest) == 1:
+        ns = rest[0]
+        return NavigateCommand(view=plural, namespace=ALL_NAMESPACES if ns == "all" else ns)
     return UnknownCommand(text)

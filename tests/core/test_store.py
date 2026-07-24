@@ -1,4 +1,4 @@
-from korvid.core.store import ResourceStore
+from korvid.core.store import ALL_NAMESPACES, ResourceStore
 from korvid.k8s.models import PodSummary
 
 
@@ -8,26 +8,29 @@ def _pod(name: str, ns: str = "default") -> PodSummary:
 
 def test_apply_added_and_get_sorted() -> None:
     store = ResourceStore()
-    store.apply_event("pods", "ADDED", _pod("b"))
-    store.apply_event("pods", "ADDED", _pod("a"))
+    store.apply_event("pods", "default", "ADDED", _pod("b"))
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
     assert [p.name for p in store.get("pods", "default")] == ["a", "b"]
 
 
 def test_modified_replaces() -> None:
     store = ResourceStore()
-    store.apply_event("pods", "ADDED", _pod("a"))
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
     updated = PodSummary(
         name="a", namespace="default", phase="Failed", ready="0/1", restarts=3, node=None
     )
-    store.apply_event("pods", "MODIFIED", updated)
-    (pod,) = store.get("pods", "default")
+    store.apply_event("pods", "default", "MODIFIED", updated)
+    summaries = store.get("pods", "default")
+    assert len(summaries) == 1
+    assert isinstance(summaries[0], PodSummary)
+    pod = summaries[0]
     assert pod.phase == "Failed"
 
 
 def test_deleted_removes() -> None:
     store = ResourceStore()
-    store.apply_event("pods", "ADDED", _pod("a"))
-    store.apply_event("pods", "DELETED", _pod("a"))
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
+    store.apply_event("pods", "default", "DELETED", _pod("a"))
     assert store.get("pods", "default") == []
 
 
@@ -35,7 +38,7 @@ def test_subscriber_notified_with_kind() -> None:
     store = ResourceStore()
     seen: list[str] = []
     store.subscribe(seen.append)
-    store.apply_event("pods", "ADDED", _pod("a"))
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
     assert seen == ["pods"]
 
 
@@ -48,28 +51,28 @@ def test_broken_subscriber_does_not_block_others() -> None:
 
     store.subscribe(broken)
     store.subscribe(seen.append)
-    store.apply_event("pods", "ADDED", _pod("a"))  # must not raise
+    store.apply_event("pods", "default", "ADDED", _pod("a"))  # must not raise
     assert seen == ["pods"]
 
 
 def test_namespaces_isolated() -> None:
     store = ResourceStore()
-    store.apply_event("pods", "ADDED", _pod("a", ns="prod"))
+    store.apply_event("pods", "prod", "ADDED", _pod("a", ns="prod"))
     assert store.get("pods", "default") == []
     assert [p.name for p in store.get("pods", "prod")] == ["a"]
 
 
 def test_clear_empties_bucket() -> None:
     store = ResourceStore()
-    store.apply_event("pods", "ADDED", _pod("a"))
-    store.apply_event("pods", "ADDED", _pod("b"))
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
+    store.apply_event("pods", "default", "ADDED", _pod("b"))
     store.clear("pods", "default")
     assert store.get("pods", "default") == []
 
 
 def test_clear_notifies_subscribers() -> None:
     store = ResourceStore()
-    store.apply_event("pods", "ADDED", _pod("a"))
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
     seen: list[str] = []
     store.subscribe(seen.append)
     store.clear("pods", "default")
@@ -78,6 +81,51 @@ def test_clear_notifies_subscribers() -> None:
 
 def test_clear_other_namespace_unaffected() -> None:
     store = ResourceStore()
-    store.apply_event("pods", "ADDED", _pod("a", ns="prod"))
+    store.apply_event("pods", "prod", "ADDED", _pod("a", ns="prod"))
     store.clear("pods", "default")  # clear a bucket that doesn't exist
     assert [p.name for p in store.get("pods", "prod")] == ["a"]
+
+
+# ---------------------------------------------------------------------------
+# ALL_NAMESPACES scope
+# ---------------------------------------------------------------------------
+
+
+def test_all_namespaces_holds_pods_from_multiple_namespaces() -> None:
+    """ALL_NAMESPACES scope stores objects from different namespaces under one bucket."""
+    store = ResourceStore()
+    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("a", ns="default"))
+    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("a", ns="prod"))
+    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("b", ns="default"))
+    result = store.get("pods", ALL_NAMESPACES)
+    assert [(p.namespace, p.name) for p in result] == [
+        ("default", "a"),
+        ("default", "b"),
+        ("prod", "a"),
+    ]
+
+
+def test_all_namespaces_deleted_removes_exact_match_only() -> None:
+    """DELETED in ALL_NAMESPACES removes the (namespace, name) pair, not same-name in other ns."""
+    store = ResourceStore()
+    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("a", ns="default"))
+    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("a", ns="prod"))
+    store.apply_event("pods", ALL_NAMESPACES, "DELETED", _pod("a", ns="prod"))
+    result = store.get("pods", ALL_NAMESPACES)
+    assert len(result) == 1
+    assert result[0].namespace == "default"
+    assert result[0].name == "a"
+
+
+def test_all_namespaces_get_sorted_by_namespace_then_name() -> None:
+    """get returns items sorted by (namespace, name) for ALL_NAMESPACES scope."""
+    store = ResourceStore()
+    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("z", ns="alpha"))
+    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("a", ns="beta"))
+    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("a", ns="alpha"))
+    result = store.get("pods", ALL_NAMESPACES)
+    assert [(p.namespace, p.name) for p in result] == [
+        ("alpha", "a"),
+        ("alpha", "z"),
+        ("beta", "a"),
+    ]
