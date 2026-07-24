@@ -17,6 +17,8 @@ from textual.binding import Binding
 from textual.events import Key
 from textual.widgets import DataTable, Footer, Static
 
+from korvid.agent.events import AgentError
+from korvid.agent.runtime import AgentRuntime
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
@@ -27,6 +29,7 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import PodSummary
 from korvid.ui.messages import (
+    AgentPromptSubmitted,
     ClearFilter,
     FilterCommand,
     NavigateCommand,
@@ -37,6 +40,7 @@ from korvid.ui.messages import (
     UnknownCommand,
 )
 from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv, build_probe_argv
+from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribeScreen
@@ -126,6 +130,7 @@ class KorvidApp(App[None]):
         ("n", "log_search_next", "Next hit"),
         Binding("shift+n", "log_search_prev", "Prev hit"),
         Binding("N", "log_search_prev", "Prev hit", show=False),
+        Binding("ctrl+a", "toggle_agent", "AI", priority=True),
     ]
 
     DEFAULT_CSS = """
@@ -151,6 +156,8 @@ class KorvidApp(App[None]):
         get_manifest: (Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None) = None,
         get_events: (Callable[[str, str], Awaitable[list[dict[str, Any]]]] | None) = None,
         stream_logs: Callable[..., AsyncIterator[LogLine]] | None = None,
+        agent_runtime: AgentRuntime | None = None,
+        agent_model_name: str | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -160,6 +167,9 @@ class KorvidApp(App[None]):
         self._get_manifest = get_manifest
         self._get_events = get_events
         self._stream_logs = stream_logs
+        self._agent_runtime = agent_runtime
+        self._agent_model_name = agent_model_name
+        self._agent_task: asyncio.Task[None] | None = None
         self.aliases: dict[str, ResourceMeta] = (
             aliases if aliases is not None else dict(_DEFAULT_ALIASES)
         )
@@ -201,6 +211,9 @@ class KorvidApp(App[None]):
         empty_state.display = False  # hidden until the first store notification
         yield empty_state
         yield LogPane()
+        agent_panel = AgentPanel()
+        agent_panel.display = False
+        yield agent_panel
         yield CommandBar()
         yield FilterBar()
         yield NamespacePicker()
@@ -992,7 +1005,10 @@ class KorvidApp(App[None]):
             self.query_one(LogPane).close()
 
     def _refresh_status(self) -> None:
-        label = "AI on" if self.config.agent_enabled else "AI off"
+        # Availability comes from the actual runtime, not the config flag —
+        # create_provider may return None (unknown provider, missing base_url/
+        # model) while agent_enabled is still true in config.
+        label = "AI on" if self._agent_runtime is not None else "AI off"
         self.query_one(StatusBar).update_status(self.config.kube_context, self.current_scope, label)
 
     # ------------------------------------------------------------------
@@ -1039,6 +1055,64 @@ class KorvidApp(App[None]):
         if log_pane.display:
             log_pane.search_prev()
 
+    # ------------------------------------------------------------------
+    # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,
+    # loop logic in AgentRuntime.
+    # ------------------------------------------------------------------
+
+    def action_toggle_agent(self) -> None:
+        """Toggle the agent chat panel; show setup hint when unconfigured."""
+        panel = self.query_one(AgentPanel)
+        if panel.display:
+            panel.display = False
+            self.query_one(ResourceTable).focus()
+            return
+        panel.display = True
+        if self._agent_runtime is None:
+            panel.show_setup_hint()
+            return
+        if self._agent_model_name:
+            runtime = self._agent_runtime
+            in_tok, out_tok = runtime.total_tokens
+            panel.set_header(
+                self._agent_model_name, in_tok, out_tok, estimated=runtime.usage_estimated
+            )
+        panel.query_one("#agent-input").focus()
+
+    def on_agent_prompt_submitted(self, message: AgentPromptSubmitted) -> None:
+        if self._agent_runtime is None:
+            return
+        if self._agent_task is not None and not self._agent_task.done():
+            return
+        panel = self.query_one(AgentPanel)
+        panel.begin_turn(message.text)
+        self._agent_task = asyncio.create_task(self._run_agent_turn(message.text))
+
+    def _selected_row_name(self) -> str | None:
+        table = self.query_one(ResourceTable)
+        if table.row_count == 0:
+            return None
+        ordered = table.ordered_rows
+        if table.cursor_row >= len(ordered):
+            return None
+        return str(ordered[table.cursor_row].key.value)
+
+    async def _run_agent_turn(self, user_text: str) -> None:
+        runtime = self._agent_runtime
+        if runtime is None:
+            return
+        panel = self.query_one(AgentPanel)
+        screen_context = (
+            f"view={self.current_kind} scope={self.current_scope} "
+            f"selected={self._selected_row_name() or '-'} "
+            f"filter={self.filter_pattern or '-'}"
+        )
+        try:
+            async for event in runtime.run_turn(user_text, screen_context):
+                panel.apply_event(event)
+        except Exception as exc:
+            panel.apply_event(AgentError(message=str(exc)))
+
     def _refresh_empty_state(self, kind: str, visible_rows: int) -> None:
         """Show guidance instead of a silent blank table (empty ns or no filter match)."""
         empty = self.query_one("#empty-state", Static)
@@ -1056,6 +1130,10 @@ class KorvidApp(App[None]):
         # Cancel any active log stream tasks before the event loop shuts down.
         if self._ns_prefetch_task is not None:
             self._ns_prefetch_task.cancel()
+        if self._agent_task is not None:
+            self._agent_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._agent_task
         tasks = list(self._log_tasks)
         for task in tasks:
             task.cancel()

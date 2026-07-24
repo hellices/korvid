@@ -525,3 +525,60 @@ def test_resolve_context_name_unresolvable_returns_none(tmp_path: Path) -> None:
     from korvid.k8s.client import resolve_context_name
 
     assert resolve_context_name(None, config_file=str(tmp_path / "missing")) is None
+
+
+# ---------------------------------------------------------------------------
+# list_objects
+# ---------------------------------------------------------------------------
+
+
+async def test_list_objects_returns_generic_summaries() -> None:
+    """list_objects builds the namespaced LIST path and returns GenericSummary items."""
+    client = KubeClient()
+    meta = _deploy_meta()
+    list_resp = {
+        "items": [_generic("dep-a"), _generic("dep-b")],
+    }
+    request_json_mock = AsyncMock(return_value=list_resp)
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+    ):
+        summaries = await client.list_objects(meta, "default")
+
+    assert [s.name for s in summaries] == ["dep-a", "dep-b"]
+    called_path: str = request_json_mock.call_args[0][0]
+    assert "/namespaces/default/deployments" in called_path
+
+
+async def test_list_objects_all_namespaces_uses_cluster_path() -> None:
+    """namespace=None produces a cluster-scoped path without /namespaces/."""
+    client = KubeClient()
+    meta = _deploy_meta()
+    request_json_mock = AsyncMock(return_value={"items": []})
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+    ):
+        summaries = await client.list_objects(meta, None)
+
+    assert summaries == []
+    called_path: str = request_json_mock.call_args[0][0]
+    assert "/namespaces/" not in called_path
+    assert called_path.endswith("/deployments")
+
+
+async def test_list_objects_raises_api_status_error() -> None:
+    """ApiException from the underlying GET is wrapped as ApiStatusError."""
+    client = KubeClient()
+    meta = _deploy_meta()
+    mock_api = MagicMock()
+    mock_api.call_api = AsyncMock(side_effect=ApiException(status=403, reason="Forbidden"))
+
+    with (
+        patch.object(client, "_api", mock_api),
+        pytest.raises(ApiStatusError, match="API 403: Forbidden"),
+    ):
+        await client.list_objects(meta, "default")

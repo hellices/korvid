@@ -30,6 +30,7 @@ def _path_segment(value: str) -> str:
 
 
 _DNS1123_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+_UID_RE = re.compile(r"^[a-fA-F0-9-]+$")
 
 
 def _parse_log_line(pod: str, container: str, text: str) -> LogLine:
@@ -215,6 +216,21 @@ class KubeClient:
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 
+    async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
+        """LIST any resource kind and return GenericSummary items.
+
+        Reuses the path logic of watch_objects' LIST phase.
+        ApiException is wrapped as ApiStatusError.
+        """
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        if namespace is not None and meta.namespaced:
+            list_path = f"{meta.api_base}/namespaces/{_path_segment(namespace)}/{meta.plural}"
+        else:
+            list_path = f"{meta.api_base}/{meta.plural}"
+        data = await self._request_json(list_path)
+        return [GenericSummary.from_manifest(meta.kind, item) for item in data.get("items", [])]
+
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
     ) -> dict[str, Any]:
@@ -281,18 +297,35 @@ class KubeClient:
             # infinite follow stream. Guards against leaks on cancel/error.
             resp.close()
 
-    async def list_events_for(self, namespace: str, name: str) -> list[dict[str, Any]]:
-        """Return core v1 Events where involvedObject.name == name."""
+    async def list_events_for(
+        self,
+        namespace: str,
+        name: str,
+        *,
+        kind: str | None = None,
+        uid: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return core v1 Events for the involved object.
+
+        ``kind``/``uid`` narrow the field selector so same-named objects of a
+        different kind (or an earlier incarnation of a recreated object) are
+        excluded.
+        """
         if self._core_v1 is None:
             raise RuntimeError("connect() first")
         # fieldSelector has no escaping mechanism; a name with "," would
         # inject extra selectors. Valid k8s names can't fail this check.
         if not _DNS1123_NAME.match(name):
             return []
+        selector = f"involvedObject.name={name}"
+        if kind and kind.isalnum():
+            selector += f",involvedObject.kind={kind}"
+        if uid and _UID_RE.match(uid):
+            selector += f",involvedObject.uid={uid}"
         try:
             resp = await self._core_v1.list_namespaced_event(
                 namespace,
-                field_selector=f"involvedObject.name={name}",
+                field_selector=selector,
                 _preload_content=False,
             )
             data = await _to_dict(resp)
