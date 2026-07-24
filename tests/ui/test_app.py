@@ -1,6 +1,8 @@
 import asyncio
 from collections.abc import AsyncIterator
 
+from textual.binding import Binding
+
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager, WatchSource
@@ -777,3 +779,90 @@ async def test_log_cancel_during_reconnect_sleep_no_error() -> None:
     # No "5 reconnect attempts" notification should have been raised
     notifications = [n.message for n in app._notifications]
     assert not any("reconnect attempts" in m for m in notifications)
+
+
+# ---------------------------------------------------------------------------
+# Command bar autocompletion
+# ---------------------------------------------------------------------------
+
+
+async def test_command_bar_completes_kind_with_tab() -> None:
+    """Typing a kind prefix and Tab completes to the full alias."""
+    from korvid.ui.widgets.command_bar import CommandBar
+
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("colon")
+        for ch in "dep":
+            await pilot.press(ch)
+        await pilot.press("tab")
+        bar = app.query_one(CommandBar)
+        assert bar.value == "deploy"
+
+
+async def test_command_bar_completes_namespace_argument() -> None:
+    """`ns ku` + Tab completes the namespace from the prefetched list."""
+    from korvid.ui.widgets.command_bar import CommandBar
+
+    app = make_app([_pod("api-1")], namespaces=["default", "kube-system"])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.2)  # allow namespace prefetch to land
+        await pilot.press("colon")
+        for ch in "ns ku":
+            await pilot.press(ch if ch != " " else "space")
+        await pilot.press("tab")
+        bar = app.query_one(CommandBar)
+        assert bar.value == "ns kube-system"
+
+
+def test_command_bar_complete_no_match_returns_none() -> None:
+    from korvid.ui.widgets.command_bar import CommandBar
+
+    bar = CommandBar()
+    bar.command_words = ["deploy", "pods"]
+    bar.namespace_words = ["default"]
+    assert bar.complete("zzz") is None
+    assert bar.complete("") is None
+    assert bar.complete("ns zzz") is None
+    assert bar.complete("pods extra") is None  # non-ns second token: no completion
+
+
+# ---------------------------------------------------------------------------
+# Uppercase (real-terminal Shift) key bindings
+# ---------------------------------------------------------------------------
+
+
+def test_uppercase_bindings_registered() -> None:
+    """Real terminals send 'L'/'N' for Shift+l / Shift+n; both spellings must bind."""
+    keys = set()
+    for binding in KorvidApp.BINDINGS:
+        keys.add(binding.key if isinstance(binding, Binding) else binding[0])
+    assert "L" in keys
+    assert "N" in keys
+    assert "shift+l" in keys
+    assert "shift+n" in keys
+
+
+# ---------------------------------------------------------------------------
+# Shell exit status surfaced
+# ---------------------------------------------------------------------------
+
+
+async def test_shell_nonzero_exit_notifies() -> None:
+    """A failed kubectl exec (e.g. container without sh) surfaces a notification."""
+    from contextlib import nullcontext
+    from unittest.mock import patch
+
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        with (
+            patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+            patch("korvid.ui.app.subprocess.call", return_value=1),
+            patch.object(app, "suspend", nullcontext),
+        ):
+            await pilot.press("s")
+            await pilot.pause(0.1)
+        messages = [n.message for n in app._notifications]
+        assert any("exited with status 1" in m for m in messages)

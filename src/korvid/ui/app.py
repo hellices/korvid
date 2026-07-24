@@ -13,7 +13,7 @@ from typing import Any, ClassVar
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.events import Key
-from textual.widgets import Footer, Header, Static
+from textual.widgets import Footer, Static
 
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
@@ -64,16 +64,27 @@ class KorvidApp(App[None]):
         ("d", "describe", "Describe"),
         ("s", "shell", "Shell"),
         ("l", "logs", "Logs"),
-        ("shift+l", "logs_multi", "Multi-log"),
+        Binding("shift+l", "logs_multi", "Multi-log"),
+        # Real terminals deliver Shift+<letter> as the uppercase character,
+        # not "shift+x"; bind both so the shortcut works outside Pilot tests.
+        Binding("L", "logs_multi", "Multi-log", show=False),
         ("f", "log_format", "JSON/raw"),
         ("p", "log_previous", "Prev logs"),
         ("n", "log_search_next", "Next hit"),
-        ("shift+n", "log_search_prev", "Prev hit"),
+        Binding("shift+n", "log_search_prev", "Prev hit"),
+        Binding("N", "log_search_prev", "Prev hit", show=False),
     ]
 
     DEFAULT_CSS = """
     ResourceTable {
         height: 1fr;
+    }
+    """
+
+    # CSS (not DEFAULT_CSS) so it outranks Footer's own `dock: bottom` default.
+    CSS = """
+    Footer {
+        dock: top;
     }
     """
 
@@ -108,6 +119,7 @@ class KorvidApp(App[None]):
         self._current_log_triples: list[tuple[str, str, str]] = []
         self._current_log_force_prefix: bool = False
         self._reconnect_sleep: float = 1.0
+        self._ns_prefetch_task: asyncio.Task[None] | None = None
         self._log_buffer_max_lines: int = 5000
 
     @property
@@ -120,7 +132,9 @@ class KorvidApp(App[None]):
         self.current_scope = value
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        # Footer is docked top (see CSS): the key legend replaces the stock
+        # Header so shortcuts are visible where users look first.
+        yield Footer()
         yield ResourceTable()
         empty_state = Static(id="empty-state")
         empty_state.display = False  # hidden until the first store notification
@@ -130,13 +144,13 @@ class KorvidApp(App[None]):
         yield FilterBar()
         yield NamespacePicker()
         yield StatusBar()
-        yield Footer()
 
     async def on_mount(self) -> None:
         # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
-        self.query_one(CommandBar).known = lambda a: (
-            self.aliases[a].plural if a in self.aliases else None
-        )
+        command_bar = self.query_one(CommandBar)
+        command_bar.known = lambda a: self.aliases[a].plural if a in self.aliases else None
+        command_bar.command_words = sorted({*self.aliases, "ns", "namespaces", "q", "quit"})
+        self._prefetch_namespaces()
 
         # Both callbacks fire from watch tasks on the same loop; post_message is
         # loop-safe. Watch tasks are cancelled in on_unmount before shutdown to
@@ -154,6 +168,21 @@ class KorvidApp(App[None]):
 
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
         self._render_table(message.kind)
+
+    def _prefetch_namespaces(self) -> None:
+        """Warm the command-bar namespace completions in the background."""
+        if self._list_namespaces is None:
+            return
+
+        async def _fetch() -> None:
+            try:
+                namespaces = await self._list_namespaces()  # type: ignore[misc]
+            except Exception:
+                logger.debug("namespace prefetch for completion failed", exc_info=True)
+                return
+            self.query_one(CommandBar).namespace_words = namespaces
+
+        self._ns_prefetch_task = asyncio.create_task(_fetch())
 
     def _render_table(self, kind: str) -> None:
         """Single choke point: table rows and empty-state always update together."""
@@ -230,6 +259,7 @@ class KorvidApp(App[None]):
         if not namespaces:
             self.notify("No namespaces visible (check RBAC)", severity="warning")
             return
+        self.query_one(CommandBar).namespace_words = namespaces
         self.query_one(NamespacePicker).open(namespaces)
 
     def on_quit_command(self, message: QuitCommand) -> None:
@@ -321,8 +351,14 @@ class KorvidApp(App[None]):
 
         argv = build_exec_argv(namespace, name)
         with self.suspend():
-            subprocess.call(argv)
+            exit_code = subprocess.call(argv)
         self.refresh()
+        if exit_code != 0:
+            self.notify(
+                f"Shell exited with status {exit_code}"
+                " — the container may not have a shell (sh/bash)",
+                severity="warning",
+            )
 
     async def on_key(self, event: Key) -> None:
         """Close log pane on Escape when pane is open and no bar/picker is open."""
@@ -701,6 +737,8 @@ class KorvidApp(App[None]):
 
     async def on_unmount(self) -> None:
         # Cancel any active log stream tasks before the event loop shuts down.
+        if self._ns_prefetch_task is not None:
+            self._ns_prefetch_task.cancel()
         tasks = list(self._log_tasks)
         for task in tasks:
             task.cancel()
