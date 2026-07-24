@@ -57,12 +57,18 @@ def _quantities(containers: list[dict[str, Any]], bucket: str, key: str) -> list
 
 
 def _effective_resource(spec: dict[str, Any], bucket: str, key: str) -> str:
-    """Effective pod resource per the scheduler: max(max(initContainers), sum(containers)).
+    """Effective pod resource per the scheduler.
 
+    max(max(classic initContainers), sum(containers) + sum(sidecars)) where
+    sidecars are initContainers with restartPolicy: Always (K8s 1.28+): they
+    run for the pod's lifetime so they add to the sum, not the init max.
     Returns '-' when nothing is declared.
     """
-    main = _quantities(spec.get("containers") or [], bucket, key)
-    init = _quantities(spec.get("initContainers") or [], bucket, key)
+    init_containers = spec.get("initContainers") or []
+    sidecars = [c for c in init_containers if c.get("restartPolicy") == "Always"]
+    classic_init = [c for c in init_containers if c.get("restartPolicy") != "Always"]
+    main = _quantities((spec.get("containers") or []) + sidecars, bucket, key)
+    init = _quantities(classic_init, bucket, key)
     if not main and not init:
         return "-"
     if key == "cpu":

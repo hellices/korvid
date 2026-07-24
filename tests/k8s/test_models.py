@@ -92,3 +92,33 @@ def test_small_memory_renders_in_ki() -> None:
         }
     )
     assert pod.mem_request == "512Ki"  # not rounded down to a misleading 0Mi
+
+
+def test_sidecar_init_containers_add_to_sum() -> None:
+    # K8s 1.28+ sidecars (initContainers with restartPolicy: Always) run for the
+    # pod's lifetime: the scheduler adds them to the main-container sum instead
+    # of folding them into the classic init-container max.
+    pod = PodSummary.from_manifest(
+        {
+            "metadata": {"name": "p", "namespace": "d"},
+            "spec": {
+                "initContainers": [
+                    {  # classic init: compared via max
+                        "resources": {"requests": {"cpu": "300m", "memory": "64Mi"}},
+                    },
+                    {  # sidecar: added to the sum
+                        "restartPolicy": "Always",
+                        "resources": {"requests": {"cpu": "100m", "memory": "32Mi"}},
+                    },
+                ],
+                "containers": [
+                    {"resources": {"requests": {"cpu": "200m", "memory": "128Mi"}}},
+                ],
+            },
+            "status": {"phase": "Running"},
+        }
+    )
+    # sum = 200m(main) + 100m(sidecar) = 300m; classic init max = 300m -> 300m
+    assert pod.cpu_request == "300m"
+    # sum = 128Mi + 32Mi = 160Mi > classic init 64Mi
+    assert pod.mem_request == "160Mi"
