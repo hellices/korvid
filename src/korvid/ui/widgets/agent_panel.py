@@ -132,6 +132,8 @@ class AgentPanel(Vertical):
         elif isinstance(event, AgentError):
             self._flush(log)
             log.write(Text(f"[error] {event.message}", style="red"))
+            # AgentError may be terminal (provider failure) — let the user retry.
+            self.query_one("#agent-input", Input).disabled = False
         elif isinstance(event, TurnComplete):
             self._flush(log)
             self.query_one("#agent-input", Input).disabled = False

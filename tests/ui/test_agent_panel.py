@@ -154,3 +154,14 @@ async def test_turn_complete_updates_header_cumulatively() -> None:
         await pilot.pause()
         header = app.query_one("#agent-header", Static)
         assert "⚡ llama3 · ↑120 ↓55 tok" in str(header.render())
+
+
+async def test_agent_error_reenables_input() -> None:
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        inp = app.query_one("#agent-input", Input)
+        panel.begin_turn("q")
+        panel.apply_event(AgentError(message="provider down"))
+        await pilot.pause()
+        assert inp.disabled is False

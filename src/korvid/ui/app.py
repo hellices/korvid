@@ -1106,7 +1106,6 @@ class KorvidApp(App[None]):
                 panel.apply_event(event)
         except Exception as exc:
             panel.apply_event(AgentError(message=str(exc)))
-            panel.query_one("#agent-input").disabled = False
 
     def _refresh_empty_state(self, kind: str, visible_rows: int) -> None:
         """Show guidance instead of a silent blank table (empty ns or no filter match)."""
@@ -1127,6 +1126,8 @@ class KorvidApp(App[None]):
             self._ns_prefetch_task.cancel()
         if self._agent_task is not None:
             self._agent_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._agent_task
         tasks = list(self._log_tasks)
         for task in tasks:
             task.cancel()
