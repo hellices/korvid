@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: korvid-runners
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -30,7 +30,7 @@ jobs:
       - run: uv run pytest --cov --cov-fail-under=80
 
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: korvid-runners
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
@@ -42,7 +42,7 @@ jobs:
       - run: uv run pre-commit run --all-files --show-diff-on-failure
 
   security:
-    runs-on: ubuntu-latest
+    runs-on: korvid-runners
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
@@ -58,7 +58,7 @@ jobs:
 
   dependency-review:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: korvid-runners
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
@@ -68,7 +68,7 @@ jobs:
           fail-on-severity: high
 
   ty-experimental:
-    runs-on: ubuntu-latest
+    runs-on: korvid-runners
     continue-on-error: true
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1

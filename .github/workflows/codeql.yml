@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   analyze:
-    runs-on: ubuntu-latest
+    runs-on: korvid-runners
     permissions:
       contents: read
       security-events: write
