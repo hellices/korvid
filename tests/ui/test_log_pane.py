@@ -777,3 +777,51 @@ async def test_n_closed_no_crash() -> None:
         await pilot.press("n")
         await pilot.pause(0.05)
         assert app.query_one(LogPane).display is False
+
+
+async def test_p_unexpected_error_sets_error_state() -> None:
+    """A non-API failure in the previous-logs stream surfaces as an error, not 'streaming'."""
+
+    class BoomPreviousStream:
+        async def __call__(
+            self,
+            namespace: str,
+            pod: str,
+            container: str,
+            *,
+            previous: bool = False,
+            follow: bool = True,
+            tail_lines: int = 200,
+        ) -> AsyncGenerator[LogLine, None]:
+            if previous:
+                raise RuntimeError("transport exploded")
+            yield LogLine(pod=pod, container=container, text="live-line")
+            if follow:
+                await asyncio.Event().wait()
+
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=BoomPreviousStream())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+        await pilot.press("p")
+        await pilot.pause(0.2)
+
+        log_pane = app.query_one(LogPane)
+        assert "error" in log_pane._state
+        assert not app._log_tasks  # failed task must be discarded
+        assert any("Log stream error" in (n.title or "") for n in app._notifications)
+
+
+async def test_open_bounds_richlog_to_buffer_capacity() -> None:
+    """RichLog must be bounded when a buffer is attached (memory safety)."""
+    from textual.widgets import RichLog
+
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=FakeStream())
+    app._log_buffer_max_lines = 10
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+        rich_log = app.query_one(LogPane).query_one(RichLog)
+        assert rich_log.max_lines == 18  # buffer cap + banner headroom

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -41,7 +42,7 @@ class _FakeContent:
 
 
 class _FakeResp:
-    """Fake aiohttp response with async-iterable `.content`."""
+    """Fake aiohttp response with async-iterable `.content` and close tracking."""
 
     def __init__(
         self,
@@ -50,6 +51,10 @@ class _FakeResp:
         raise_exc: Exception | None = None,
     ) -> None:
         self.content = _FakeContent(chunks, raise_at, raise_exc)
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 # ---------------------------------------------------------------------------
@@ -176,3 +181,47 @@ async def test_stream_logs_api_exception_mid_stream_raises_api_status_error() ->
     ):
         async for _ in client.stream_logs("ns", "mypod", "myctx"):
             pass
+
+
+# ---------------------------------------------------------------------------
+# Resource cleanup: HTTP response is closed in every exit path
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_logs_closes_response_on_completion() -> None:
+    client = KubeClient()
+    fake_v1 = AsyncMock()
+    resp = _FakeResp([b"one\n"])
+    fake_v1.read_namespaced_pod_log.return_value = resp
+    with patch.object(client, "_core_v1", fake_v1):
+        async for _ in client.stream_logs("ns", "pod", "c"):
+            pass
+    assert resp.closed
+
+
+async def test_stream_logs_closes_response_on_early_generator_close() -> None:
+    """Cancelling consumption (pane closed) must still release the connection."""
+    client = KubeClient()
+    fake_v1 = AsyncMock()
+    resp = _FakeResp([b"one\n", b"two\n"])
+    fake_v1.read_namespaced_pod_log.return_value = resp
+    with patch.object(client, "_core_v1", fake_v1):
+        gen = aiter(client.stream_logs("ns", "pod", "c"))
+        await anext(gen)
+        assert isinstance(gen, AsyncGenerator)
+        await gen.aclose()
+    assert resp.closed
+
+
+async def test_stream_logs_closes_response_on_mid_stream_error() -> None:
+    client = KubeClient()
+    fake_v1 = AsyncMock()
+    resp = _FakeResp([b"one\n"], raise_at=1, raise_exc=ApiException(status=500, reason="ISE"))
+    fake_v1.read_namespaced_pod_log.return_value = resp
+    with (
+        patch.object(client, "_core_v1", fake_v1),
+        pytest.raises(ApiStatusError, match="API 500"),
+    ):
+        async for _ in client.stream_logs("ns", "pod", "c"):
+            pass
+    assert resp.closed

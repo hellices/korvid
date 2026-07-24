@@ -16,8 +16,14 @@ class LogBuffer:
         Args:
             max_lines: Maximum number of lines to retain. Defaults to 5000.
         """
+        self._max_lines = max_lines
         self._buffer: deque[LogLine] = deque(maxlen=max_lines)
         self._overflowed: bool = False
+
+    @property
+    def max_lines(self) -> int:
+        """Maximum number of lines this buffer retains."""
+        return self._max_lines
 
     def append(self, line: LogLine) -> None:
         """Append a log line to the buffer.

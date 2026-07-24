@@ -83,7 +83,9 @@ class DescribeScreen(ModalScreen[None]):
             yaml_text = yaml.safe_dump(cleaned, sort_keys=False, allow_unicode=True)
             events_text = _render_events(self._events)
             body = f"{yaml_text}\n\nEVENTS\n{'─' * 60}\n{events_text}"
-            yield Static(body, id="describe-body")
+            # markup=False: manifest/event text is cluster-controlled and may
+            # contain bracketed sequences Rich would misinterpret as styles.
+            yield Static(body, id="describe-body", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:

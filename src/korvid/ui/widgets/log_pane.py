@@ -111,7 +111,11 @@ class LogPane(Widget):
         self._log_buffer = log_buffer
         # Hide the search input in case it was open from a previous session.
         self.query_one("#log-search", Input).display = False
-        self.query_one(RichLog).clear()
+        rich_log = self.query_one(RichLog)
+        rich_log.clear()
+        # Bound RichLog to the buffer capacity (+ headroom for banner lines) so
+        # a long-running stream can't grow display memory unboundedly.
+        rich_log.max_lines = log_buffer.max_lines + 8 if log_buffer is not None else None
         self._update_header()
         self.display = True
 

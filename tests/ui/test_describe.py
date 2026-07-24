@@ -272,3 +272,51 @@ async def test_describe_unavailable_when_no_get_manifest() -> None:
         await pilot.press("d")
         await pilot.pause(0.2)
         assert not isinstance(app.screen, DescribeScreen)
+
+
+async def test_describe_non_pod_kind_skips_events() -> None:
+    """Events filter only by name, so non-pod kinds must not fetch events."""
+    from korvid.ui.widgets.describe_screen import DescribeScreen
+
+    events_calls: list[str] = []
+
+    async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        return {"kind": "Deployment", "metadata": {"name": name, "namespace": namespace}}
+
+    async def get_events(namespace: str, name: str) -> list[dict[str, Any]]:
+        events_calls.append(name)
+        return list(_EVENTS_LIST)
+
+    app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.2)
+        app.current_kind = "deployments"
+        await pilot.press("d")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, DescribeScreen)
+        assert events_calls == []
+        content = str(app.screen.query_one("#describe-body").render())
+        assert "<no events>" in content
+
+
+async def test_describe_body_renders_bracketed_text_literally() -> None:
+    """Cluster-controlled text with Rich-markup-like brackets must render as-is."""
+    from korvid.ui.widgets.describe_screen import DescribeScreen
+
+    async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        return {
+            "kind": "Pod",
+            "metadata": {"name": name, "annotations": {"note": "[red]not-a-style[/red]"}},
+        }
+
+    async def get_events(namespace: str, name: str) -> list[dict[str, Any]]:
+        return []
+
+    app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.2)
+        await pilot.press("d")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, DescribeScreen)
+        content = str(app.screen.query_one("#describe-body").render())
+        assert "[red]not-a-style[/red]" in content

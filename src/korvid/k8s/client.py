@@ -214,6 +214,10 @@ class KubeClient:
                 yield LogLine(pod=pod, container=container, text=text)
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+        finally:
+            # Hard-close the connection: release() would try to drain an
+            # infinite follow stream. Guards against leaks on cancel/error.
+            resp.close()
 
     async def list_events_for(self, namespace: str, name: str) -> list[dict[str, Any]]:
         """Return core v1 Events where involvedObject.name == name."""
@@ -290,14 +294,15 @@ class KubeClient:
         metas += _parse_resource_list(core, group="", version="v1")
         groups = await self._request_json("/apis")
         for g in groups.get("groups", []):
+            name = g.get("name")
             version = (g.get("preferredVersion") or {}).get("version")
-            if not version:
-                continue
+            if not isinstance(name, str) or not isinstance(version, str) or not name or not version:
+                continue  # malformed group must not kill discovery
             try:
-                rl = await self._request_json(f"/apis/{g['name']}/{version}")
+                rl = await self._request_json(f"/apis/{name}/{version}")
             except ApiStatusError:
                 continue  # a broken aggregated API must not kill discovery
-            metas += _parse_resource_list(rl, group=g["name"], version=version)
+            metas += _parse_resource_list(rl, group=name, version=version)
         return metas
 
     async def close(self) -> None:

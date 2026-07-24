@@ -266,7 +266,9 @@ class KorvidApp(App[None]):
             return
 
         events: list[dict[str, Any]] = []
-        if self._get_events is not None and ns is not None:
+        # Events are filtered by involvedObject.name only, so restrict to pods
+        # to avoid showing events for unrelated objects with the same name.
+        if self._get_events is not None and ns is not None and self.current_kind == "pods":
             try:
                 events = await self._get_events(namespace, name)
             except ApiStatusError as exc:
@@ -550,6 +552,18 @@ class KorvidApp(App[None]):
             return
         except asyncio.CancelledError:
             raise
+        except Exception:
+            # Unlike live streams there is no reconnect: surface the failure.
+            self._discard_task(current)
+            if log_pane.display and not self._log_error:
+                self._log_error = True
+                self.notify(
+                    "previous logs stream failed",
+                    title="Log stream error",
+                    severity="error",
+                )
+                log_pane.set_state("error")
+            return
         self._discard_task(current)
         if self._all_streams_ended():
             log_pane.set_state("ended")

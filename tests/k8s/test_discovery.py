@@ -116,6 +116,27 @@ async def test_discover_resources_skips_malformed_entries() -> None:
     assert [m.plural for m in metas] == ["pods"]
 
 
+async def test_discover_resources_skips_group_without_name() -> None:
+    """A group with a preferredVersion but no valid name is skipped, not fatal."""
+    client = KubeClient()
+
+    async def fake_request(path: str) -> dict[str, Any]:
+        if path == "/api/v1":
+            return _CORE
+        if path == "/apis":
+            return {
+                "groups": [
+                    {"preferredVersion": {"version": "v1"}},  # no name
+                    {"name": 42, "preferredVersion": {"version": "v1"}},  # non-str name
+                ]
+            }
+        raise AssertionError(f"unexpected request: {path}")
+
+    with patch.object(client, "_request_json", side_effect=fake_request):
+        metas = await client.discover_resources()
+    assert any(m.plural == "pods" for m in metas)
+
+
 async def test_request_json_wraps_api_exception_as_api_status_error() -> None:
     """_request_json must wrap ApiException as ApiStatusError."""
     from kubernetes_asyncio.client.exceptions import ApiException
