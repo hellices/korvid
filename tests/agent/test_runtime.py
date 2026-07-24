@@ -262,3 +262,27 @@ async def test_history_trimmed_by_char_budget() -> None:
     # …and the newest turn is always retained.
     assert any("question-3" in str(m.get("content") or "") for m in p.calls[-1])
     assert not any("question-0" in str(m.get("content") or "") for m in p.calls[-1])
+
+
+async def test_executor_exception_result_is_capped() -> None:
+    """A defensive fallback with a huge message must respect the ingest cap."""
+    from korvid.agent.tools import MAX_RESULT_CHARS
+
+    class LoudExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            raise RuntimeError("x" * (MAX_RESULT_CHARS * 2))
+
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "t", "arguments": "{}"},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+        ]
+    )
+    rt = AgentRuntime(p, LoudExecutor())
+    await collect(rt, "q")
+    tool_msg = next(m for m in p.calls[-1] if m.get("role") == "tool")
+    assert len(tool_msg["content"]) <= MAX_RESULT_CHARS + 50
+    assert tool_msg["content"].startswith("ERROR:")

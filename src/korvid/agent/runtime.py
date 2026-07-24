@@ -15,7 +15,7 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from korvid.agent.tools import READ_TOOLS
+from korvid.agent.tools import READ_TOOLS, cap_result
 
 SYSTEM_PROMPT = (
     "You are korvid's Kubernetes diagnostic agent. "
@@ -152,7 +152,9 @@ class AgentRuntime:
                 try:
                     result = await self._executor.execute(name, parsed)
                 except Exception as exc:  # defensive: executor contract is never-raise
-                    result = f"ERROR: {exc}"
+                    # Same ingest cap as ToolExecutor — a huge exception
+                    # message must not bypass the limit into history.
+                    result = cap_result(f"ERROR: {exc}")
             yield ToolCallFinished(
                 call_id=call_id,
                 name=name,

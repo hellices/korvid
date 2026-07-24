@@ -15,6 +15,15 @@ MAX_RESULT_CHARS = 8000
 
 _TRUNCATION_SUFFIX = "\n… [truncated — narrow the query]"
 
+
+def cap_result(result: str) -> str:
+    """Enforce the tool-result ingest cap; shared by every path that feeds
+    a result into conversation history."""
+    if len(result) > MAX_RESULT_CHARS:
+        return result[:MAX_RESULT_CHARS] + _TRUNCATION_SUFFIX
+    return result
+
+
 READ_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -136,9 +145,7 @@ class ToolExecutor:
             # Errors flow through the same cap below: a client error with a
             # long reason must not bypass the ingest limit.
             result = f"ERROR: {exc}"
-        if len(result) > MAX_RESULT_CHARS:
-            return result[:MAX_RESULT_CHARS] + _TRUNCATION_SUFFIX
-        return result
+        return cap_result(result)
 
     async def _dispatch(self, name: str, arguments: dict[str, Any]) -> str:
         if name == "list_resources":
