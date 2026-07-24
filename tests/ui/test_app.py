@@ -533,6 +533,7 @@ async def test_log_reconnect_flaky_stream() -> None:
     from korvid.ui.widgets.log_pane import LogPane
 
     call_count = 0
+    resume = asyncio.Event()
 
     async def _flaky(
         ns: str,
@@ -550,24 +551,28 @@ async def test_log_reconnect_flaky_stream() -> None:
             yield LogLine(pod=pod, container=ctr, text="line2")
             raise RuntimeError("transient network error")
         else:
+            # Hold the reconnect attempt until the test has observed the
+            # "reconnecting" state — no wall-clock race.
+            await resume.wait()
             yield LogLine(pod=pod, container=ctr, text="line3")
             yield LogLine(pod=pod, container=ctr, text="line4")
             await asyncio.sleep(1000)  # stay alive until cancelled
 
     app = _make_log_app(_flaky)
-    app._reconnect_sleep = 0.15  # long enough to inspect mid-reconnect state
+    app._reconnect_sleep = 0.0
 
     async with app.run_test() as pilot:
         await pilot.pause(0.05)
         log_pane = app.query_one(LogPane)
 
         await pilot.press("l")
-        # After 0.05 s the first stream has failed; sleep(0.15) is in progress.
-        await pilot.pause(0.05)
+        # Call 1 has failed; call 2 is blocked on `resume`, so the state
+        # deterministically stays "reconnecting" until we release it.
+        await pilot.pause(0.1)
         assert log_pane._state == "\u27f3 reconnecting"
 
-        # After another 0.4 s the reconnect sleep has finished, call 2 ran.
-        await pilot.pause(0.4)
+        resume.set()
+        await pilot.pause(0.2)
         assert call_count == 2
         assert app._log_buffer is not None
         assert len(app._log_buffer.lines()) == 4
