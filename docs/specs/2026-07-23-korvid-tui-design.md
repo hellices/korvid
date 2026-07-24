@@ -102,7 +102,7 @@ We verified, with measured data (issue numbers, 👍 counts), the needs that the
 
 | # | Unmet need (demand evidence) | korvid design response | Phase |
 |---|---|---|---|
-| 1 | Advanced log workflows — merged multi-pod view (#827, 62👍), JSON log parsing (#364, 147👍), reliable streaming (#1228 83👍, #1399) | **Logs as a first-class citizen**: merged multi-pod stream (pod prefixes), auto JSON detection + field extraction, explicit buffer-overflow banner, reconnect status indicator, search hit count + n/N navigation | MVP |
+| 1 | Advanced log workflows — merged multi-pod view (#827, 62👍), JSON log parsing (#364, 147👍), reliable streaming (#1228 83👍, #1399) | **Logs as a first-class citizen**: merged multi-pod stream (pod prefixes), auto JSON detection + field extraction **with a formatted↔raw toggle (`f` in the log view — auto-detect never forces a rendering)**, previous-container logs (`p`, `--previous`), explicit buffer-overflow banner, reconnect status indicator, search hit count + n/N navigation | MVP |
 | 2 | Simultaneous multiple views (#351, #1430 40👍) — hard to build on a single-view stack architecture | **Split-pane architecture from Day 1**: WorkspaceScreen manages N panes (watch the pod list while reading logs). Built on Textual Containers | MVP (2-pane) |
 | 3 | Freely remappable keybindings (#625) | Every action is a named command on the command bus → fully remappable via the `keybindings:` config section | MVP |
 | 4 | Stronger guardrails for dangerous operations (#1016, #319) | **Layered confirmation**: normal delete = dialog; cluster-scoped delete = type-the-resource-name confirmation; protected contexts = extra confirmation + red header; `--readonly` mode | MVP |
@@ -118,7 +118,9 @@ We verified, with measured data (issue numbers, 👍 counts), the needs that the
 | 14 | Broad terminal compatibility (#3598) | Use Textual's theme/color system (safer than managing colors in-house) | Free win |
 | 15 | Deeper Helm workflows (#1841, 28👍) | Non-goal (MVP) — via plugins in Phase 3+ | Phase 3+ |
 
-**Proven k9s UX conventions to inherit**: the `:` command bar + vim-style navigation, instant ctx/ns switching, fast startup, `/` filtering (regex/fuzzy/label), one-key shell-in, port-forward management, read-only mode. We follow these conventions as-is to minimize switching cost for users.
+**Proven k9s UX conventions to inherit**: the `:` command bar + vim-style navigation, instant ctx/ns switching, fast startup, `/` filtering (regex/fuzzy/label), one-key shell-in (`s`, `kubectl exec -it` via PTY suspend), describe view (`d`, `kubectl describe`-equivalent rendered from the object + events), previous logs (`p`), port-forward management, read-only mode. We follow these conventions as-is to minimize switching cost for users — **`d` stays describe as in k9s; the debug dialog uses `D` (all bindings remappable, §5 #3)**.
+
+**Universal resource browsing (Day-1)**: any Kubernetes object kind — built-ins and CRDs — is reachable from the `:` command bar via API discovery (`:pods`, `:deploy`, `:crd`, `:<any-kind-or-shortname>`), the k9s model. Views are generic over a resource descriptor (columns + kind metadata), so new kinds cost data-mapping only, not new UI. **Namespace scope is first-class**: a view can target one namespace or all namespaces (`:pods all`, k9s `0` convention), and `/` filtering works identically in both scopes; all-namespace views add a NAMESPACE column.
 
 ---
 
@@ -182,9 +184,9 @@ Non-disruptive debugging of running pods is a first-class feature. All three kub
 
 | Mode | Purpose | UX | Phase |
 |---|---|---|---|
-| **Ephemeral container** | Non-disruptive debugging of running pods. Essential for distroless/minimal images with no shell | `d` in the pod view → debug dialog → attach | **MVP** |
+| **Ephemeral container** | Non-disruptive debugging of running pods. Essential for distroless/minimal images with no shell | `D` in the pod view → debug dialog → attach (`d` stays describe, matching k9s) | **MVP** |
 | Copy-of-pod (`--copy-to`) | Experiments without touching the original (swap command/image) | Mode selection in the dialog. On session end, confirm cleanup of the copied pod | Phase 2 |
-| Node debug | Node-level diagnosis (host namespaces) | `d` in the node view | Phase 2 |
+| Node debug | Node-level diagnosis (host namespaces) | `D` in the node view | Phase 2 |
 
 **Debug dialog** — solves kubectl debug's complex flag combinations with a form UI:
 - Debug image: presets (busybox, nicolaka/netshoot, ubuntu) + custom (register internal-registry images in the config's `debug.images`)
@@ -262,8 +264,8 @@ Five diagnostic features deliverable at the level of the **vanilla Kubernetes AP
 
 | Phase | Scope | Definition of done |
 |---|---|---|
-| **Phase 1 — MVP** | pods/deploy/svc/events/ns/ctx views, `:` palette, `/` filter, 2-pane split, first-class log viewer (multi-pod/JSON/reconnect), layered guardrails, RBAC error mapping, selective watch, single config, keybinding overrides, **agent panel (read tools + UI control + approval-based kubectl writes)**, **live debugging (ephemeral containers + agent debug tools, §6.4)**, **event intelligence + ownership tree (forward, §6.5)**, audit log | Daily diagnostic workflows fully served by korvid alone |
-| **Phase 2** | All resources + CRD auto-discovery, shell-in, port-forward, copy-of-pod/node debug, Secret decode editing, metrics (top) sorting, **RBAC analysis + usage vs req/limits + PDB/drain simulation (§6.5)**, reverse ownership-tree indexing, command palette discoverability, session state restore, anonymize | Covers everyday cluster operations end to end, standalone |
+| **Phase 1 — MVP** | **universal resource views (any kind incl. CRDs via API discovery) with per-ns and all-namespaces scope**, events/ns/ctx views, `:` palette, `/` filter, 2-pane split, first-class log viewer (multi-pod/JSON formatted↔raw toggle/previous logs/reconnect), **describe view (`d`)**, **shell-in (`s`, exec -it)**, layered guardrails, RBAC error mapping, selective watch, single config, keybinding overrides, **agent panel (read tools + UI control + approval-based kubectl writes)**, **live debugging (ephemeral containers + agent debug tools, §6.4)**, **event intelligence + ownership tree (forward, §6.5)**, audit log | Daily diagnostic workflows fully served by korvid alone |
+| **Phase 2** | port-forward, copy-of-pod/node debug, Secret decode editing, metrics (top) sorting, **RBAC analysis + usage vs req/limits + PDB/drain simulation (§6.5)**, reverse ownership-tree indexing, command palette discoverability, session state restore, anonymize | Covers everyday cluster operations end to end, standalone |
 | **Phase 3** | Python plugin API (register panels/columns/agent tools), external MCP server connections (agent tool extension), simultaneous multi-cluster views, embedded debug terminal panel, diagnostic playbooks, (evaluation) Cilium/Hubble flow view | Ecosystem expansion begins |
 | **Non-goals** | Web UI, in-cluster resident agents (kagent's domain), Helm management (initially), optimization for 1000+ node mega-clusters | — |
 
