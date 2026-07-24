@@ -8,7 +8,7 @@ AI-native Kubernetes TUI — a k9s-style keyboard-first cockpit with an embedded
 
 ## Status
 
-Work in progress — core TUI and log viewer functional; agent runtime coming next.
+Work in progress — core TUI, log viewer, and read-only agent runtime functional.
 
 ## Keybindings
 
@@ -26,6 +26,7 @@ Work in progress — core TUI and log viewer functional; agent runtime coming ne
 | `p` | log pane | Reload pane with previous (terminated) container logs |
 | `n` | log pane | Jump to next search hit |
 | `N` | log pane | Jump to previous search hit |
+| `Ctrl-A` | global | Toggle AI agent panel |
 | `q` | global | Quit |
 | `Esc` | log pane | Close pane (or dismiss search / filter bar) |
 
@@ -42,3 +43,29 @@ five consecutive reconnect attempts without a successful line the header shows a
 error state and a notification is raised.  The in-memory ring buffer retains the
 last 5000 lines; when it overflows a one-time banner is written to the pane so you
 know older lines were dropped.
+
+## AI agent
+
+Press `Ctrl-A` to open the agent panel — a chat sidebar that answers questions
+about the cluster you are looking at.  The agent sees your current screen
+context (view, namespace, selected resource, active filter) and inspects the
+cluster through read-only tools: fetching manifests, logs, events, and resource
+listings.  It cannot mutate anything in this slice — no create, patch, delete,
+or exec.
+
+Tool results are capped at 8,000 characters and `Secret` data is masked before
+it ever reaches the model.  The header shows the model name and cumulative
+token usage (`~` marks estimated counts when the provider omits usage data).
+
+Configure any OpenAI-compatible endpoint (Ollama, vLLM, Azure OpenAI, OpenAI)
+in `~/.config/korvid/config.yaml`:
+
+```yaml
+agent:
+  provider: openai-compat
+  base_url: http://localhost:11434/v1
+  model: llama3
+  api_key_env: KORVID_API_KEY   # optional — name of the env var holding the key
+```
+
+Without configuration, `Ctrl-A` shows this setup hint instead of a prompt.
