@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
 from korvid.core.config import load_config
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -48,6 +49,13 @@ async def _run() -> None:
             logger.warning("Unknown resource kind %r requested for watch; stopping", kind)
             raise ValueError(f"Unknown resource kind: {kind!r}")
 
+    async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        meta = aliases.get(kind, PODS_META)
+        return await kube.get_object(meta, namespace, name)
+
+    async def get_events(namespace: str, name: str) -> list[dict[str, Any]]:
+        return await kube.list_events_for(namespace, name)
+
     watch_manager = WatchManager(store, source)
     app = KorvidApp(
         config=config,
@@ -55,6 +63,8 @@ async def _run() -> None:
         watch_manager=watch_manager,
         list_namespaces=kube.list_namespaces,
         aliases=aliases,
+        get_manifest=get_manifest,
+        get_events=get_events,
     )
     try:
         await app.run_async()

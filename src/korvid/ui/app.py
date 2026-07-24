@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -26,6 +26,7 @@ from korvid.ui.messages import (
     UnknownCommand,
 )
 from korvid.ui.widgets.command_bar import CommandBar
+from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.resource_table import ResourceTable
@@ -44,6 +45,7 @@ class KorvidApp(App[None]):
         ("colon", "open_command", "Command"),
         ("slash", "open_filter", "Filter"),
         ("0", "toggle_all_namespaces", "All NS"),
+        ("d", "describe", "Describe"),
     ]
 
     def __init__(
@@ -53,12 +55,16 @@ class KorvidApp(App[None]):
         watch_manager: WatchManager,
         list_namespaces: Callable[[], Awaitable[list[str]]] | None = None,
         aliases: dict[str, ResourceMeta] | None = None,
+        get_manifest: (Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None) = None,
+        get_events: (Callable[[str, str], Awaitable[list[dict[str, Any]]]] | None) = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.store = store
         self.watch_manager = watch_manager
         self._list_namespaces = list_namespaces
+        self._get_manifest = get_manifest
+        self._get_events = get_events
         self.aliases: dict[str, ResourceMeta] = (
             aliases if aliases is not None else dict(_DEFAULT_ALIASES)
         )
@@ -182,6 +188,51 @@ class KorvidApp(App[None]):
 
     def on_quit_command(self, message: QuitCommand) -> None:
         self.exit()
+
+    async def action_describe(self) -> None:
+        """Fetch and display the manifest + events for the currently highlighted row."""
+        if self._get_manifest is None:
+            self.notify("Describe unavailable", severity="warning")
+            return
+
+        table = self.query_one(ResourceTable)
+        if table.row_count == 0:
+            self.notify("No resource selected", severity="warning")
+            return
+
+        # cursor_row is the index; ordered_rows gives us Row objects with .key
+        row_index = table.cursor_row
+        ordered = table.ordered_rows
+        if row_index >= len(ordered):
+            self.notify("No resource selected", severity="warning")
+            return
+
+        row_key = str(ordered[row_index].key.value)  # "namespace/name"
+        parts = row_key.split("/", 1)
+        if len(parts) != 2:
+            self.notify("Cannot determine resource from selection", severity="warning")
+            return
+        namespace, name = parts[0], parts[1]
+        ns: str | None = namespace if namespace else None
+
+        try:
+            manifest = await self._get_manifest(self.current_kind, ns, name)
+        except ApiStatusError as exc:
+            msg = explain_api_error(exc.status, exc.reason, self.current_kind, namespace or None)
+            self.notify(msg, severity="error")
+            return
+
+        events: list[dict[str, Any]] = []
+        if self._get_events is not None and ns is not None:
+            try:
+                events = await self._get_events(namespace, name)
+            except ApiStatusError as exc:
+                # Events are best-effort; surface but still show the manifest.
+                msg = explain_api_error(exc.status, exc.reason, "events", namespace)
+                self.notify(msg, severity="warning")
+
+        title = f"{self.current_kind}/{namespace}/{name}"
+        await self.push_screen(DescribeScreen(title, manifest, events))
 
     def on_unknown_command(self, message: UnknownCommand) -> None:
         self.notify(f"Unknown command: {message.text}", severity="warning")
