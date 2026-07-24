@@ -60,3 +60,35 @@ def test_from_manifest_no_statuses() -> None:
     assert pod.mem_request == "-"
     assert pod.cpu_limit == "-"
     assert pod.mem_limit == "-"
+
+
+def test_effective_request_includes_init_containers() -> None:
+    # Effective request = max(max(initContainers), sum(containers)) per k8s scheduler.
+    pod = PodSummary.from_manifest(
+        {
+            "metadata": {"name": "p", "namespace": "d"},
+            "spec": {
+                "initContainers": [
+                    {"resources": {"requests": {"cpu": "2", "memory": "4Gi"}}},
+                ],
+                "containers": [
+                    {"resources": {"requests": {"cpu": "100m", "memory": "128Mi"}}},
+                    {"resources": {"requests": {"cpu": "200m", "memory": "128Mi"}}},
+                ],
+            },
+            "status": {"phase": "Running"},
+        }
+    )
+    assert pod.cpu_request == "2000m"  # init container dominates
+    assert pod.mem_request == "4096Mi"
+
+
+def test_small_memory_renders_in_ki() -> None:
+    pod = PodSummary.from_manifest(
+        {
+            "metadata": {"name": "p", "namespace": "d"},
+            "spec": {"containers": [{"resources": {"requests": {"memory": "512Ki"}}}]},
+            "status": {"phase": "Running"},
+        }
+    )
+    assert pod.mem_request == "512Ki"  # not rounded down to a misleading 0Mi

@@ -42,22 +42,40 @@ def format_cpu(cores: float) -> str:
 
 
 def format_memory(size: int) -> str:
-    """Render bytes as whole Mi (k9s convention): 134217728 -> '128Mi'."""
+    """Render bytes as whole Mi (k9s convention); fall back to Ki below 1Mi."""
+    if 0 < size < 2**20:
+        return f"{round(size / 2**10)}Ki"
     return f"{round(size / 2**20)}Mi"
 
 
-def _sum_resources(containers: list[dict[str, Any]], bucket: str, key: str) -> str:
-    """Sum a resource quantity across containers; '-' when nothing is declared."""
-    values = [
-        q
+def _quantities(containers: list[dict[str, Any]], bucket: str, key: str) -> list[str]:
+    return [
+        str(q)
         for c in containers
         if (q := ((c.get("resources") or {}).get(bucket) or {}).get(key)) is not None
     ]
-    if not values:
+
+
+def _effective_resource(spec: dict[str, Any], bucket: str, key: str) -> str:
+    """Effective pod resource per the scheduler: max(max(initContainers), sum(containers)).
+
+    Returns '-' when nothing is declared.
+    """
+    main = _quantities(spec.get("containers") or [], bucket, key)
+    init = _quantities(spec.get("initContainers") or [], bucket, key)
+    if not main and not init:
         return "-"
     if key == "cpu":
-        return format_cpu(sum(parse_cpu(str(v)) for v in values))
-    return format_memory(sum(parse_memory(str(v)) for v in values))
+        total = max(
+            sum(parse_cpu(v) for v in main),
+            max((parse_cpu(v) for v in init), default=0.0),
+        )
+        return format_cpu(total)
+    total_mem = max(
+        sum(parse_memory(v) for v in main),
+        max((parse_memory(v) for v in init), default=0),
+    )
+    return format_memory(total_mem)
 
 
 @dataclass(frozen=True)
@@ -80,7 +98,6 @@ class PodSummary:
         spec = obj.get("spec") or {}
         status = obj.get("status") or {}
         statuses: list[dict[str, Any]] = status.get("containerStatuses") or []
-        containers: list[dict[str, Any]] = spec.get("containers") or []
         ready_count = sum(1 for s in statuses if s.get("ready"))
         restarts = sum(int(s.get("restartCount", 0)) for s in statuses)
         return cls(
@@ -91,8 +108,8 @@ class PodSummary:
             restarts=restarts,
             node=spec.get("nodeName"),
             qos=str(status.get("qosClass") or "-"),
-            cpu_request=_sum_resources(containers, "requests", "cpu"),
-            mem_request=_sum_resources(containers, "requests", "memory"),
-            cpu_limit=_sum_resources(containers, "limits", "cpu"),
-            mem_limit=_sum_resources(containers, "limits", "memory"),
+            cpu_request=_effective_resource(spec, "requests", "cpu"),
+            mem_request=_effective_resource(spec, "requests", "memory"),
+            cpu_limit=_effective_resource(spec, "limits", "cpu"),
+            mem_limit=_effective_resource(spec, "limits", "memory"),
         )

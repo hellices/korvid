@@ -113,7 +113,6 @@ class KorvidApp(App[None]):
         self._refresh_status()
 
     async def on_show_namespace_picker(self, message: ShowNamespacePicker) -> None:
-        picker = self.query_one(NamespacePicker)
         if self._list_namespaces is None:
             self.notify("Namespace listing unavailable", severity="warning")
             return
@@ -122,7 +121,10 @@ class KorvidApp(App[None]):
         except Exception as exc:  # surface any listing failure to the user
             self.notify(str(exc), title="Failed to list namespaces", severity="error")
             return
-        picker.open(namespaces)
+        if not namespaces:
+            self.notify("No namespaces visible (check RBAC)", severity="warning")
+            return
+        self.query_one(NamespacePicker).open(namespaces)
 
     def on_quit_command(self, message: QuitCommand) -> None:
         self.exit()

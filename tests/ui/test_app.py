@@ -30,7 +30,7 @@ def make_app(pods: list[PodSummary], namespaces: list[str] | None = None) -> Kor
     store = ResourceStore()
 
     async def list_namespaces() -> list[str]:
-        return namespaces or ["default"]
+        return ["default"] if namespaces is None else namespaces
 
     return KorvidApp(
         config=KorvidConfig(namespace="default"),
@@ -255,3 +255,17 @@ async def test_qos_cells_are_color_coded() -> None:
         assert styles["Guaranteed"] == "green"
         assert styles["Burstable"] == "chartreuse2"
         assert styles["BestEffort"] == "yellow"
+
+
+async def test_bare_ns_with_empty_list_warns_instead_of_empty_picker() -> None:
+    from korvid.ui.widgets.namespace_picker import NamespacePicker
+
+    app = make_app([_pod("api-1")], namespaces=[])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("colon")
+        for ch in "ns":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        assert app.query_one(NamespacePicker).display is False
