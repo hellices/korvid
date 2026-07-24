@@ -12,7 +12,7 @@ from kubernetes_asyncio import watch as k8s_watch
 
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
-from korvid.k8s.models import PodSummary
+from korvid.k8s.models import GenericSummary, PodSummary
 
 
 class KubeClient:
@@ -82,6 +82,84 @@ class KubeClient:
                     )
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+
+    async def watch_objects(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> AsyncIterator[tuple[str, GenericSummary]]:
+        """LIST then watch any resource kind; None namespace = all namespaces.
+
+        Contract mirrors watch_pods: pre-existing items are yielded as ADDED
+        first, then live watch events from the snapshot resourceVersion.
+        ApiException is wrapped as ApiStatusError at both the LIST and watch phases.
+        """
+        if self._api is None:
+            raise RuntimeError("connect() first")
+
+        # LIST phase --------------------------------------------------------
+        if namespace is not None:
+            list_path = f"{meta.api_base}/namespaces/{namespace}/{meta.plural}"
+        else:
+            list_path = f"{meta.api_base}/{meta.plural}"
+
+        try:
+            data = await self._request_json(list_path)
+        except ApiStatusError:
+            raise
+
+        resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
+        for item in data.get("items", []):
+            yield ("ADDED", GenericSummary.from_manifest(meta.kind, item))
+
+        # Watch phase -------------------------------------------------------
+        watch_kwargs: dict[str, Any] = {}
+        if resource_version is not None:
+            watch_kwargs["resource_version"] = resource_version
+
+        custom_api = k8s_client.CustomObjectsApi(self._api)
+        watch_func: Any
+        if namespace is not None:
+            watch_func = custom_api.list_namespaced_custom_object
+            watch_args: tuple[Any, ...] = (meta.group, meta.version, namespace, meta.plural)
+        else:
+            watch_func = custom_api.list_cluster_custom_object
+            watch_args = (meta.group, meta.version, meta.plural)
+
+        w = k8s_watch.Watch()
+        try:
+            async with w.stream(watch_func, *watch_args, **watch_kwargs) as stream:
+                async for event in stream:
+                    yield (
+                        str(event["type"]),
+                        GenericSummary.from_manifest(meta.kind, event["raw_object"]),
+                    )
+        except k8s_client.exceptions.ApiException as exc:
+            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+
+    async def get_object(
+        self, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> dict[str, Any]:
+        """Fetch the raw manifest for a single object. ApiException → ApiStatusError."""
+        if meta.namespaced and namespace is not None:
+            path = f"{meta.api_base}/namespaces/{namespace}/{meta.plural}/{name}"
+        else:
+            path = f"{meta.api_base}/{meta.plural}/{name}"
+        return await self._request_json(path)
+
+    async def list_events_for(self, namespace: str, name: str) -> list[dict[str, Any]]:
+        """Return core v1 Events where involvedObject.name == name."""
+        if self._core_v1 is None:
+            raise RuntimeError("connect() first")
+        try:
+            resp = await self._core_v1.list_namespaced_event(
+                namespace,
+                field_selector=f"involvedObject.name={name}",
+                _preload_content=False,
+            )
+            data = await _to_dict(resp)
+        except k8s_client.exceptions.ApiException as exc:
+            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+        result: list[dict[str, Any]] = list(data.get("items", []))
+        return result
 
     async def _request_json(self, path: str) -> dict[str, Any]:
         """Raw GET through the ApiClient; wraps ApiException as ApiStatusError."""
