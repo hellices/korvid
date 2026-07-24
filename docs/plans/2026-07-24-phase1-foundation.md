@@ -1776,10 +1776,10 @@ git commit -m "feat: status bar with agent state and LLMProvider boundary ABC"
 
 ## Out of Scope (subsequent plans)
 
-- **Plan 2 — Log viewer**: multi-pod merged streams, JSON detection, reconnect indicator, search n/N, 2-pane split
-- **Plan 3 — Agent runtime**: agentic loop, ToolRegistry, provider adapters, approval gate, audit log, token budget/gauge, agent panel
-- **Plan 4 — Diagnostics**: kubectl debug, event intelligence, ownership tree
-- deploy/svc/events views (mechanical extension of the `ResourceTable`/store pattern once pods works)
+- **Plan 2 — Log viewer**: multi-pod merged streams, JSON detection + formatted↔raw toggle (`f`), previous-container logs (`p`), reconnect indicator, search n/N, 2-pane split
+- **Plan 3 — Universal resources & pod actions**: generic resource views for any kind incl. CRDs (API discovery), all-namespaces scope, describe view (`d`), shell-in (`s`, exec -it)
+- **Plan 4 — Agent runtime**: agentic loop, ToolRegistry, provider adapters, approval gate, audit log, token budget/gauge, agent panel
+- **Plan 5 — Diagnostics**: kubectl debug (`D`), event intelligence, ownership tree
 
 ## Verification at the End
 
