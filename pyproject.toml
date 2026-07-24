@@ -80,3 +80,7 @@ extend-exclude = ["*.lock", "*.snap"]
 
 [tool.deptry]
 known_first_party = ["korvid"]
+
+[tool.deptry.package_module_name_map]
+pyyaml = "yaml"
+kubernetes_asyncio = "kubernetes_asyncio"
