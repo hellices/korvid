@@ -38,6 +38,7 @@ class StubRuntime:
         self._block = block
         self.calls: list[tuple[str, str]] = []
         self.total_tokens = (0, 0)
+        self.usage_estimated = False
 
     async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
         self.calls.append((user_text, screen_context))

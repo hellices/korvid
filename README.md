@@ -57,15 +57,80 @@ Tool results are capped at 8,000 characters and `Secret` data is masked before
 it ever reaches the model.  The header shows the model name and cumulative
 token usage (`~` marks estimated counts when the provider omits usage data).
 
-Configure any OpenAI-compatible endpoint (Ollama, vLLM, Azure OpenAI, OpenAI)
-in `~/.config/korvid/config.yaml`:
+Configure any OpenAI-compatible endpoint in `~/.config/korvid/config.yaml`.
+Provider examples:
 
 ```yaml
+# Ollama (local, no API key)
 agent:
-  provider: openai-compat
+  provider: ollama
   base_url: http://localhost:11434/v1
-  model: llama3
-  api_key_env: KORVID_API_KEY   # optional — name of the env var holding the key
+  model: llama3.1
+
+# OpenAI
+agent:
+  provider: openai
+  base_url: https://api.openai.com/v1
+  model: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY
+
+# GitHub Models (any GitHub account; uses a PAT with `models: read` scope)
+agent:
+  provider: github
+  base_url: https://models.github.ai/inference
+  model: openai/gpt-4o-mini
+  api_key_env: GITHUB_TOKEN
+
+# Anthropic Claude (OpenAI SDK compatibility endpoint)
+agent:
+  provider: anthropic
+  base_url: https://api.anthropic.com/v1
+  model: claude-sonnet-4-5
+  api_key_env: ANTHROPIC_API_KEY
+
+# Azure OpenAI (v1 API surface)
+agent:
+  provider: azure
+  base_url: https://<resource>.openai.azure.com/openai/v1
+  model: <deployment-name>
+  api_key_env: AZURE_OPENAI_API_KEY
+
+# vLLM / any self-hosted OpenAI-compatible server
+agent:
+  provider: vllm
+  base_url: http://localhost:8000/v1
+  model: meta-llama/Llama-3.1-8B-Instruct
 ```
 
-Without configuration, `Ctrl-A` shows this setup hint instead of a prompt.
+`api_key_env` names the environment variable holding the key — the key itself
+never lives in the config file.  The GitHub Copilot subscription API
+(`api.githubcopilot.com`) requires an OAuth token exchange and is not supported
+yet; GitHub Models is the supported GitHub-hosted path.  Claude Code is a CLI
+product, not an API — use the Anthropic API entry above for Claude models.
+
+Without configuration, `Ctrl-A` shows a setup hint instead of a prompt.
+
+## Installation
+
+Not yet on PyPI. Install straight from the repository:
+
+```sh
+uv tool install git+https://github.com/hellices/korvid   # or: pipx install ...
+korvid
+```
+
+Or run it ad hoc without installing:
+
+```sh
+uvx --from git+https://github.com/hellices/korvid korvid
+```
+
+### Development
+
+```sh
+git clone https://github.com/hellices/korvid && cd korvid
+uv sync --dev          # create .venv with locked deps
+uv run korvid          # run against your current kubeconfig context
+make check             # lint + mypy --strict + tach + tests
+```
+

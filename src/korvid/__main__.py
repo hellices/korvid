@@ -15,6 +15,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
+from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.tools import ToolExecutor
 from korvid.core.config import load_config
@@ -26,6 +27,18 @@ from korvid.providers.registry import create_provider
 from korvid.ui.app import KorvidApp
 
 logger = logging.getLogger(__name__)
+
+
+async def _shutdown(
+    discovery_task: asyncio.Task[None], provider: LLMProvider | None, kube: KubeClient
+) -> None:
+    """Tear down background work and owned clients in one place."""
+    discovery_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await discovery_task
+    if provider is not None:
+        await provider.aclose()
+    await kube.close()
 
 
 async def _discover_in_background(
@@ -100,10 +113,7 @@ async def _run() -> None:
     try:
         await app.run_async()
     finally:
-        discovery_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await discovery_task
-        await kube.close()
+        await _shutdown(discovery_task, provider, kube)
 
 
 def main() -> None:

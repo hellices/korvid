@@ -11,7 +11,18 @@ from korvid.providers.openai_compat import OpenAICompatProvider
 
 logger = logging.getLogger(__name__)
 
-_OPENAI_COMPAT_ALIASES = frozenset({"openai-compat", "openai", "ollama", "azure", "vllm"})
+_OPENAI_COMPAT_ALIASES = frozenset(
+    {
+        "openai-compat",
+        "openai",
+        "ollama",
+        "azure",
+        "vllm",
+        "github",  # GitHub Models (models.github.ai) — OpenAI-compatible
+        "anthropic",  # Anthropic's OpenAI SDK compatibility endpoint
+        "claude",
+    }
+)
 
 
 def create_provider(config: KorvidConfig) -> LLMProvider | None:

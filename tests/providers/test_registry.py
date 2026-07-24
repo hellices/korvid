@@ -23,7 +23,7 @@ def test_openai_compat_created(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_aliases_accepted() -> None:
-    for alias in ("openai", "ollama", "azure", "vllm"):
+    for alias in ("openai", "ollama", "azure", "vllm", "github", "anthropic", "claude"):
         cfg = KorvidConfig(
             agent_enabled=True,
             agent_provider=alias,

@@ -94,8 +94,32 @@ async def test_sends_auth_header_and_tools() -> None:
 
 
 async def test_non_2xx_raises_provider_error() -> None:
-    with pytest.raises(ProviderError):
+    with pytest.raises(ProviderError, match="HTTP 401"):
         _ = [e async for e in _provider("nope", status=401).complete([], [])]
+
+
+async def test_usage_with_partial_keys_defaults_to_zero() -> None:
+    body = _sse(
+        {"choices": [{"delta": {"content": "x"}}]},
+        {"choices": [], "usage": {"total_tokens": 9}},
+    )
+    events = [e async for e in _provider(body).complete([], [])]
+    assert {"type": "usage", "input_tokens": 0, "output_tokens": 0} in events
+
+
+async def test_aclose_closes_owned_client_only() -> None:
+    owned = OpenAICompatProvider(base_url="http://x/v1", model="m1")
+    inner = owned._get_client()
+    await owned.aclose()
+    assert inner.is_closed
+
+    injected_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200))
+    )
+    injected = OpenAICompatProvider(base_url="http://x/v1", model="m1", client=injected_client)
+    await injected.aclose()
+    assert not injected_client.is_closed
+    await injected_client.aclose()
 
 
 async def test_no_auth_header_without_api_key() -> None:

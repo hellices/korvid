@@ -6,6 +6,7 @@ from typing import Any
 
 from korvid.agent.tools import MAX_RESULT_CHARS, READ_TOOLS, ToolExecutor
 from korvid.k8s.discovery import PODS_META
+from korvid.k8s.logs import LogLine
 
 
 class FakeKube:
@@ -95,3 +96,76 @@ async def test_executor_never_raises() -> None:
 
     out = await make_executor(Boom()).execute("get_resource", {"kind": "pods", "name": "a"})
     assert out.startswith("ERROR:")
+
+
+class FakeLogKube(FakeKube):
+    """FakeKube with a scripted stream_logs recording its call arguments."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.manifest = {
+            "kind": "Pod",
+            "metadata": {"name": "web"},
+            "spec": {"containers": [{"name": "app"}, {"name": "sidecar"}]},
+        }
+        self.log_calls: list[dict[str, Any]] = []
+
+    async def stream_logs(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> Any:
+        self.log_calls.append(
+            {
+                "namespace": namespace,
+                "pod": pod,
+                "container": container,
+                "follow": follow,
+                "tail_lines": tail_lines,
+            }
+        )
+        for text in ("line-1", "line-2"):
+            yield LogLine(pod=pod, container=container, text=text)
+
+
+async def test_get_logs_defaults_to_first_container() -> None:
+    kube = FakeLogKube()
+    out = await make_executor(kube).execute("get_logs", {"pod": "web", "namespace": "d"})
+    assert out == "line-1\nline-2"
+    assert kube.log_calls[0]["container"] == "app"
+    assert kube.log_calls[0]["follow"] is False
+
+
+async def test_get_logs_uses_explicit_container() -> None:
+    kube = FakeLogKube()
+    _ = await make_executor(kube).execute(
+        "get_logs", {"pod": "web", "namespace": "d", "container": "sidecar"}
+    )
+    assert kube.log_calls[0]["container"] == "sidecar"
+
+
+async def test_get_logs_clamps_tail_lines() -> None:
+    kube = FakeLogKube()
+    _ = await make_executor(kube).execute(
+        "get_logs", {"pod": "web", "namespace": "d", "tail_lines": 99999}
+    )
+    assert kube.log_calls[0]["tail_lines"] == 500
+    _ = await make_executor(kube).execute(
+        "get_logs", {"pod": "web", "namespace": "d", "tail_lines": 0}
+    )
+    assert kube.log_calls[1]["tail_lines"] == 1
+
+
+async def test_get_logs_stream_error_returns_error_text() -> None:
+    class BoomLogs(FakeLogKube):
+        async def stream_logs(self, *a: Any, **k: Any) -> Any:
+            raise RuntimeError("no such pod")
+            yield  # pragma: no cover - makes this an async generator
+
+    out = await make_executor(BoomLogs()).execute("get_logs", {"pod": "web", "namespace": "d"})
+    assert out.startswith("ERROR:")
+    assert "no such pod" in out

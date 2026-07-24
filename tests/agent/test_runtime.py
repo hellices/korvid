@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, TurnComplete
-from korvid.agent.runtime import AgentRuntime
+from korvid.agent.runtime import MAX_HISTORY_TURNS, AgentRuntime
 
 
 class ScriptedProvider:
@@ -158,3 +158,60 @@ async def test_executor_exception_becomes_error_result() -> None:
     assert fin.ok is False
     assert "boom" in fin.summary
     assert not any(isinstance(e, AgentError) for e in events)
+
+
+async def test_history_trimmed_to_recent_turns() -> None:
+    text_turn = [{"type": "text_delta", "text": "ok"}, {"type": "done"}]
+    p = ScriptedProvider([list(text_turn) for _ in range(12)])
+    runtime = AgentRuntime(p, EchoExecutor())
+    for i in range(12):
+        _ = await collect(runtime, f"question {i}")
+    last_call = p.calls[-1]
+    user_msgs = [m for m in last_call if m["role"] == "user"]
+    assert len(user_msgs) <= MAX_HISTORY_TURNS
+    assert last_call[0]["role"] == "system"
+    # oldest turns dropped, newest kept
+    assert "question 0" not in str(last_call)
+    assert "question 11" in str(last_call)
+
+
+async def test_provider_error_still_accounts_usage() -> None:
+    tool_turn: list[dict[str, Any]] = [
+        {"type": "usage", "input_tokens": 40, "output_tokens": 7},
+        {"type": "tool_call", "id": "c", "name": "t", "arguments": "{}"},
+        {"type": "done"},
+    ]
+
+    class FailsSecondCall(ScriptedProvider):
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            self.calls.append([dict(m) for m in messages])
+            if len(self.calls) > 1:
+                raise RuntimeError("api down")
+            for ev in tool_turn:
+                yield ev
+
+    runtime = AgentRuntime(FailsSecondCall([]), EchoExecutor())
+    events = await collect(runtime, "q")
+    assert any(isinstance(e, AgentError) for e in events)
+    assert runtime.total_tokens == (40, 7)
+
+
+async def test_usage_estimated_is_sticky() -> None:
+    no_usage: list[dict[str, Any]] = [{"type": "text_delta", "text": "hi"}, {"type": "done"}]
+    with_usage: list[dict[str, Any]] = [
+        {"type": "text_delta", "text": "hi"},
+        {"type": "usage", "input_tokens": 5, "output_tokens": 2},
+        {"type": "done"},
+    ]
+    runtime = AgentRuntime(ScriptedProvider([no_usage, with_usage]), EchoExecutor())
+    assert runtime.usage_estimated is False
+    _ = await collect(runtime, "first")
+    assert runtime.usage_estimated is True
+    _ = await collect(runtime, "second")
+    assert runtime.usage_estimated is True  # sticky: earlier totals remain estimates

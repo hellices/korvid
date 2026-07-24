@@ -23,6 +23,10 @@ SYSTEM_PROMPT = (
     "and never guess resource state."
 )
 
+# History is trimmed to the most recent turns to bound token cost; a turn
+# begins at a "user" message, so trimming never splits assistant/tool pairs.
+MAX_HISTORY_TURNS = 8
+
 
 class _Provider(Protocol):
     def complete(
@@ -63,11 +67,25 @@ class AgentRuntime:
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         self._total_in = 0
         self._total_out = 0
+        self._estimated = False
 
     @property
     def total_tokens(self) -> tuple[int, int]:
         """Cumulative (input, output) token counts across all completed turns."""
         return (self._total_in, self._total_out)
+
+    @property
+    def usage_estimated(self) -> bool:
+        """True if any counted turn lacked provider usage (totals are estimates)."""
+        return self._estimated
+
+    def _trim_history(self) -> None:
+        """Keep the system prompt plus at most MAX_HISTORY_TURNS-1 recent turns."""
+        user_indices = [i for i, m in enumerate(self._messages) if m.get("role") == "user"]
+        if len(user_indices) < MAX_HISTORY_TURNS:
+            return
+        cut = user_indices[-(MAX_HISTORY_TURNS - 1)]
+        self._messages = [self._messages[0], *self._messages[cut:]]
 
     async def _consume_stream(
         self,
@@ -127,6 +145,7 @@ class AgentRuntime:
         screen_context: str,
     ) -> AsyncIterator[AgentEvent]:
         """Async generator: run one conversation turn, yielding events until done."""
+        self._trim_history()
         self._messages.append(
             {"role": "user", "content": f"[screen] {screen_context}\n\n{user_text}"}
         )
@@ -141,6 +160,12 @@ class AgentRuntime:
                 async for event in self._consume_stream(stream, state):
                     yield event
             except Exception as exc:
+                # Tokens spent in earlier iterations (and the partial stream)
+                # are real cost — account for them before bailing out.
+                self._total_in += turn_in + state.in_tok
+                self._total_out += turn_out + state.out_tok
+                if not (saw_usage or state.has_usage):
+                    self._estimated = True
                 yield AgentError(message=str(exc))
                 return
 
@@ -165,6 +190,7 @@ class AgentRuntime:
             if not state.tool_calls:
                 self._total_in += turn_in
                 self._total_out += turn_out
+                self._estimated = self._estimated or not saw_usage
                 yield TurnComplete(
                     input_tokens=turn_in,
                     output_tokens=turn_out,
@@ -177,6 +203,7 @@ class AgentRuntime:
 
         self._total_in += turn_in
         self._total_out += turn_out
+        self._estimated = self._estimated or not saw_usage
         yield AgentError(
             message=(f"iteration limit reached ({self._max_iterations}) — refine the question")
         )

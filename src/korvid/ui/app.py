@@ -1070,7 +1070,9 @@ class KorvidApp(App[None]):
         if self._agent_model_name:
             runtime = self._agent_runtime
             in_tok, out_tok = runtime.total_tokens
-            panel.set_header(self._agent_model_name, in_tok, out_tok, estimated=False)
+            panel.set_header(
+                self._agent_model_name, in_tok, out_tok, estimated=runtime.usage_estimated
+            )
         panel.query_one("#agent-input").focus()
 
     def on_agent_panel_prompt_submitted(self, message: AgentPanel.PromptSubmitted) -> None:

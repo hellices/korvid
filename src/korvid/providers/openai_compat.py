@@ -33,6 +33,7 @@ class OpenAICompatProvider(LLMProvider):
         self._model = model
         self._api_key = api_key
         self._client = client  # injected or lazily created on first call
+        self._owns_client = client is None
 
     @property
     def name(self) -> str:
@@ -44,6 +45,12 @@ class OpenAICompatProvider(LLMProvider):
                 timeout=httpx.Timeout(60.0, connect=10.0),
             )
         return self._client
+
+    async def aclose(self) -> None:
+        """Close the lazily created HTTP client (injected clients stay open)."""
+        if self._owns_client and self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     def _headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -114,8 +121,8 @@ class OpenAICompatProvider(LLMProvider):
         if last_usage:
             yield {
                 "type": "usage",
-                "input_tokens": last_usage["prompt_tokens"],
-                "output_tokens": last_usage["completion_tokens"],
+                "input_tokens": int(last_usage.get("prompt_tokens", 0)),
+                "output_tokens": int(last_usage.get("completion_tokens", 0)),
             }
 
         yield {"type": "done"}
