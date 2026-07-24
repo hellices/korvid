@@ -9,6 +9,7 @@ dependencies = [
     "textual>=8.0",
     "kubernetes_asyncio>=32.0",
     "pyyaml>=6.0",
+    "rich>=13.0",
 ]
 
 [project.scripts]

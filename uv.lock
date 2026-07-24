@@ -544,6 +544,7 @@ source = { editable = "." }
 dependencies = [
     { name = "kubernetes-asyncio" },
     { name = "pyyaml" },
+    { name = "rich" },
     { name = "textual" },
 ]
 
@@ -566,6 +567,7 @@ dev = [
 requires-dist = [
     { name = "kubernetes-asyncio", specifier = ">=32.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rich", specifier = ">=13.0" },
     { name = "textual", specifier = ">=8.0" },
 ]
 
