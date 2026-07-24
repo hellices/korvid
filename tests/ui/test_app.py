@@ -852,6 +852,7 @@ def test_uppercase_bindings_registered() -> None:
 async def test_shell_nonzero_exit_offers_debug_fallback() -> None:
     """A failed kubectl exec (e.g. container without sh) offers the debug fallback."""
     from contextlib import nullcontext
+    from types import SimpleNamespace
     from unittest.mock import patch
 
     from korvid.ui.widgets.pick_screen import PickScreen
@@ -862,6 +863,7 @@ async def test_shell_nonzero_exit_offers_debug_fallback() -> None:
         with (
             patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
             patch("korvid.ui.app.subprocess.call", return_value=1),
+            patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
             patch.object(app, "suspend", nullcontext),
         ):
             await pilot.press("s")

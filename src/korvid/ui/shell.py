@@ -26,6 +26,31 @@ def build_exec_argv(
     ]
 
 
+def build_probe_argv(
+    namespace: str,
+    pod: str,
+    container: str | None = None,
+) -> list[str]:
+    """Return argv for a non-interactive probe that checks whether sh exists.
+
+    Used after an interactive shell exits non-zero to tell "no shell in image"
+    (probe fails -> offer kubectl debug) apart from "user's last command failed
+    or Ctrl+C" (probe succeeds -> nothing to do).
+    """
+    return [
+        "kubectl",
+        "exec",
+        "-n",
+        namespace,
+        pod,
+        *(["-c", container] if container else []),
+        "--",
+        "sh",
+        "-c",
+        "exit 0",
+    ]
+
+
 def build_debug_argv(
     namespace: str,
     pod: str,

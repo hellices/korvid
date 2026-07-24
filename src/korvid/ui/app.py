@@ -34,7 +34,7 @@ from korvid.ui.messages import (
     ShowNamespacePicker,
     UnknownCommand,
 )
-from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv
+from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv, build_probe_argv
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribeScreen
@@ -423,12 +423,27 @@ class KorvidApp(App[None]):
     _DEBUG_YES = f"Yes — attach a {DEBUG_IMAGE} debug container (kubectl debug)"
 
     def _run_shell(self, namespace: str, name: str, container: str | None) -> None:
-        """Run kubectl exec; on failure offer the kubectl debug fallback."""
+        """Run kubectl exec; offer the kubectl debug fallback only if sh is missing."""
         argv = build_exec_argv(namespace, name, container)
         with self.suspend():
             exit_code = subprocess.call(argv)
         self.refresh()
         if exit_code == 0:
+            return
+
+        # kubectl exec propagates the remote command's exit code, so a non-zero
+        # status can just mean the user's last command failed or they hit Ctrl+C.
+        # Probe non-interactively: if sh runs fine, the shell session was real.
+        try:
+            probe = subprocess.run(
+                build_probe_argv(namespace, name, container),
+                capture_output=True,
+                timeout=10,
+            )
+            shell_exists = probe.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            shell_exists = False  # inconclusive — keep offering the fallback
+        if shell_exists:
             return
 
         def _on_choice(choice: str | None) -> None:

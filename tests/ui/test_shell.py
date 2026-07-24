@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -14,7 +15,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
-from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv
+from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv, build_probe_argv
 from korvid.ui.widgets.pick_screen import PickScreen
 
 # ---------------------------------------------------------------------------
@@ -291,6 +292,7 @@ async def test_shell_exec_failure_offers_debug_fallback() -> None:
     with (
         patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
         patch("korvid.ui.app.subprocess.call", side_effect=_fake_call),
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
     ):
         async with app.run_test() as pilot:
@@ -304,12 +306,29 @@ async def test_shell_exec_failure_offers_debug_fallback() -> None:
             assert calls[1] == build_debug_argv("default", "api-1")
 
 
+async def test_shell_nonzero_exit_with_working_shell_no_fallback() -> None:
+    """Non-zero exec exit but probe succeeds (user's command failed) → no picker."""
+    app = make_app([_pod("api-1")])
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1),
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=0)),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, PickScreen)
+
+
 async def test_shell_exec_failure_no_declines_debug() -> None:
     """Choosing No in the fallback picker runs nothing further."""
     app = make_app([_pod("api-1")])
     with (
         patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
         patch("korvid.ui.app.subprocess.call", return_value=1) as mock_call,
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
         patch.object(type(app), "suspend", return_value=_noop_cm()),
     ):
         async with app.run_test() as pilot:
@@ -321,3 +340,21 @@ async def test_shell_exec_failure_no_declines_debug() -> None:
             await pilot.press("enter")
             await pilot.pause(0.2)
             mock_call.assert_called_once()  # only the failed exec; no debug
+
+
+def test_build_probe_argv() -> None:
+    result = build_probe_argv("kube-system", "coredns-abc", "coredns")
+    assert result == [
+        "kubectl",
+        "exec",
+        "-n",
+        "kube-system",
+        "coredns-abc",
+        "-c",
+        "coredns",
+        "--",
+        "sh",
+        "-c",
+        "exit 0",
+    ]
+    assert "-it" not in result  # probe must be non-interactive
