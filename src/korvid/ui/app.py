@@ -8,6 +8,7 @@ import logging
 import shutil
 import subprocess
 from collections.abc import AsyncIterator, Awaitable, Callable
+from time import monotonic
 from typing import Any, ClassVar
 
 from textual.app import App, ComposeResult
@@ -40,6 +41,7 @@ from korvid.ui.widgets.containers_screen import ContainersScreen, build_containe
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.log_pane import LogPane
+from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resource_table import ResourceTable
@@ -122,6 +124,7 @@ class KorvidApp(App[None]):
         self._current_log_force_prefix: bool = False
         self._reconnect_sleep: float = 1.0
         self._ns_prefetch_task: asyncio.Task[None] | None = None
+        self._splash_shown_at: float = monotonic()
         self._log_buffer_max_lines: int = 5000
 
     @property
@@ -137,7 +140,10 @@ class KorvidApp(App[None]):
         # Footer is docked top (see CSS): the key legend replaces the stock
         # Header so shortcuts are visible where users look first.
         yield Footer()
-        yield ResourceTable()
+        yield SplashLogo()
+        table = ResourceTable()
+        table.display = False  # hidden behind the splash until first data
+        yield table
         empty_state = Static(id="empty-state")
         empty_state.display = False  # hidden until the first store notification
         yield empty_state
@@ -165,8 +171,28 @@ class KorvidApp(App[None]):
 
         self.store.subscribe(_on_store_update)
         self.watch_manager.on_error = _on_watch_error
+        self._splash_shown_at = monotonic()
         await self.watch_manager.start(self.current_kind, self.current_scope)
         self._refresh_status()
+        # Safety net: never leave the splash up if the watch produces nothing
+        # (e.g. connection failure) — swap to the table after a short grace.
+        self.set_timer(5.0, self._dismiss_splash)
+
+    #: Minimum time the startup splash stays visible in a real terminal.
+    #: Skipped in headless (test) mode so Pilot tests see the table at once.
+    SPLASH_MIN_SECONDS = 1.2
+
+    def _dismiss_splash(self) -> None:
+        splash = self.query_one(SplashLogo)
+        if not splash.display:
+            return
+        if not self.is_headless:
+            remaining = self._splash_shown_at + self.SPLASH_MIN_SECONDS - monotonic()
+            if remaining > 0:
+                self.set_timer(remaining, self._dismiss_splash)
+                return
+        splash.display = False
+        self.query_one(ResourceTable).display = True
 
     def on_aliases_updated(self) -> None:
         """Refresh command autocompletion after background resource discovery."""
@@ -196,6 +222,8 @@ class KorvidApp(App[None]):
 
     def _render_table(self, kind: str) -> None:
         """Single choke point: table rows and empty-state always update together."""
+        # First store notification: replace the startup splash with real content.
+        self._dismiss_splash()
         table = self.query_one(ResourceTable)
         rows = self.store.get(kind, self.current_scope)
         all_namespaces = self.current_scope == ALL_NAMESPACES

@@ -869,3 +869,19 @@ async def test_shell_nonzero_exit_offers_debug_fallback() -> None:
             await pilot.press("s")
             await pilot.pause(0.2)
         assert isinstance(app.screen, PickScreen)
+
+
+# ---------------------------------------------------------------------------
+# Startup splash logo
+# ---------------------------------------------------------------------------
+
+
+async def test_splash_replaced_by_table_on_first_data() -> None:
+    """SplashLogo shows at launch and is swapped for the table on first render."""
+    from korvid.ui.widgets.logo import SplashLogo
+
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.2)  # first store notification lands
+        assert app.query_one(SplashLogo).display is False
+        assert app.query_one(ResourceTable).display is True
