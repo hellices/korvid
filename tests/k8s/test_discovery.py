@@ -94,6 +94,28 @@ async def test_discover_resources_skips_broken_group() -> None:
     assert any(m.plural == "pods" for m in metas)
 
 
+async def test_discover_resources_skips_malformed_entries() -> None:
+    """Entries missing name/kind/namespaced are skipped instead of raising KeyError."""
+    client = KubeClient()
+    core: dict[str, Any] = {
+        "resources": [
+            {"kind": "Broken", "namespaced": True, "verbs": ["list", "watch"]},  # no name
+            {"name": "broken2", "namespaced": True, "verbs": ["list", "watch"]},  # no kind
+            {"name": "broken3", "kind": "Broken3", "verbs": ["list", "watch"]},  # no namespaced
+            {"name": "pods", "kind": "Pod", "namespaced": True, "verbs": ["list", "watch"]},
+        ]
+    }
+
+    async def fake_request(path: str) -> dict[str, Any]:
+        if path == "/api/v1":
+            return core
+        return {"groups": []}
+
+    with patch.object(client, "_request_json", side_effect=fake_request):
+        metas = await client.discover_resources()
+    assert [m.plural for m in metas] == ["pods"]
+
+
 async def test_request_json_wraps_api_exception_as_api_status_error() -> None:
     """_request_json must wrap ApiException as ApiStatusError."""
     from kubernetes_asyncio.client.exceptions import ApiException

@@ -273,6 +273,26 @@ async def test_watch_objects_all_namespaces_uses_cluster_path() -> None:
     assert "/namespaces/" not in str(fake_watch.captured_args)
 
 
+async def test_watch_objects_cluster_scoped_kind_ignores_namespace() -> None:
+    """A cluster-scoped kind (namespaced=False) never uses a /namespaces/ path."""
+    client = KubeClient()
+    meta = ResourceMeta("Node", "nodes", "", "v1", False)
+    list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "42"}, "items": []}
+    request_json_mock = AsyncMock(return_value=list_resp)
+    fake_watch = _FakeWatch([])
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        async for _ in client.watch_objects(meta, "default"):
+            pass
+
+    called_path: str = request_json_mock.call_args[0][0]
+    assert called_path == "/api/v1/nodes"
+
+
 # ---------------------------------------------------------------------------
 # get_object
 # ---------------------------------------------------------------------------

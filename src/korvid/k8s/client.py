@@ -135,7 +135,8 @@ class KubeClient:
             raise RuntimeError("connect() first")
 
         # LIST phase --------------------------------------------------------
-        if namespace is not None:
+        # Cluster-scoped kinds have no namespaced path regardless of scope.
+        if namespace is not None and meta.namespaced:
             list_path = f"{meta.api_base}/namespaces/{namespace}/{meta.plural}"
         else:
             list_path = f"{meta.api_base}/{meta.plural}"
@@ -316,16 +317,21 @@ async def _to_dict(resp: Any) -> dict[str, Any]:
 def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> list[ResourceMeta]:
     out = []
     for r in data.get("resources", []):
+        name = r.get("name")
+        kind = r.get("kind")
+        namespaced = r.get("namespaced")
         verbs: list[str] = r.get("verbs", [])
-        if "/" in r["name"] or "list" not in verbs or "watch" not in verbs:
+        if not isinstance(name, str) or not isinstance(kind, str) or namespaced is None:
+            continue  # malformed entry must not kill discovery
+        if "/" in name or "list" not in verbs or "watch" not in verbs:
             continue
         out.append(
             ResourceMeta(
-                r["kind"],
-                r["name"],
+                kind,
+                name,
                 group,
                 version,
-                r["namespaced"],
+                bool(namespaced),
                 tuple(r.get("shortNames") or ()),
             )
         )

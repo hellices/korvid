@@ -230,8 +230,15 @@ class LogPane(Widget):
     def _scroll_to_hit(self) -> None:
         if not self._search_hits:
             return
+        rich_log = self.query_one(RichLog)
         line_idx = self._search_hits[self._search_idx]
-        self.query_one(RichLog).scroll_to(y=line_idx, animate=False)
+        # Hits index into the LogBuffer, but RichLog also contains banner
+        # lines and keeps lines the ring buffer has dropped; correct by the
+        # difference so the scroll lands on the actual hit.
+        if self._log_buffer is not None:
+            offset = len(rich_log.lines) - len(self._log_buffer.lines())
+            line_idx += max(offset, 0)
+        rich_log.scroll_to(y=line_idx, animate=False)
 
     # ------------------------------------------------------------------
     # Event handlers

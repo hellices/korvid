@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 from collections.abc import AsyncGenerator, AsyncIterator
+from typing import Any
 
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore
@@ -707,6 +708,42 @@ async def test_search_escape_clears_stale_counter() -> None:
         await pilot.press("escape")
         await pilot.pause(0.05)
         assert "1/3" not in _header_text(app)
+
+
+async def test_search_scroll_offsets_for_banner_lines() -> None:
+    """Search scroll targets account for banner lines RichLog has but the buffer lacks."""
+    from textual.widgets import RichLog
+
+    stream = SearchFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.2)
+        # p re-opens as a previous stream, which prepends a banner line to RichLog
+        # only (not the buffer), shifting all hit lines down by one.
+        await pilot.press("p")
+        await pilot.pause(0.2)
+
+        rich_log = app.query_one(LogPane).query_one(RichLog)
+        scrolled: list[float] = []
+        original_scroll = rich_log.scroll_to
+
+        def _capture(*args: Any, **kwargs: Any) -> None:
+            scrolled.append(float(kwargs["y"]))
+            original_scroll(*args, **kwargs)
+
+        rich_log.scroll_to = _capture  # type: ignore[method-assign]
+
+        await pilot.press("slash")
+        await pilot.pause(0.05)
+        for ch in "findme":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+
+        # Buffer hit index 0 ("findme-0") sits at RichLog line 1 (after banner).
+        assert scrolled == [1]
 
 
 async def test_f_closed_no_crash() -> None:
