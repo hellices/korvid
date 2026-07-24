@@ -133,7 +133,9 @@ class ToolExecutor:
         try:
             result = await self._dispatch(name, arguments)
         except Exception as exc:
-            return f"ERROR: {exc}"
+            # Errors flow through the same cap below: a client error with a
+            # long reason must not bypass the ingest limit.
+            result = f"ERROR: {exc}"
         if len(result) > MAX_RESULT_CHARS:
             return result[:MAX_RESULT_CHARS] + _TRUNCATION_SUFFIX
         return result
@@ -167,6 +169,10 @@ class ToolExecutor:
         if kind not in self._aliases:
             raise ValueError(f"unknown kind {kind!r}")
         meta = self._aliases[kind]
+        # A namespaced kind without a namespace would hit an invalid
+        # cluster-scoped path — give the model an actionable error instead.
+        if meta.namespaced and not namespace:
+            raise ValueError(f"kind {kind!r} is namespaced — provide the 'namespace' argument")
         manifest = await self._kube.get_object(meta, namespace, name)
         _mask_manifest(manifest)
         return yaml.safe_dump(manifest, default_flow_style=False, allow_unicode=True)

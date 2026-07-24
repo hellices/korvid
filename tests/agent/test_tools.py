@@ -109,7 +109,9 @@ async def test_unknown_tool_and_kind_return_error_text() -> None:
 async def test_result_is_capped() -> None:
     kube = FakeKube()
     kube.manifest = {"kind": "Pod", "metadata": {"name": "a"}, "blob": "x" * 20000}
-    out = await make_executor(kube).execute("get_resource", {"kind": "pods", "name": "a"})
+    out = await make_executor(kube).execute(
+        "get_resource", {"kind": "pods", "name": "a", "namespace": "d"}
+    )
     assert len(out) <= MAX_RESULT_CHARS + 50
     assert "[truncated" in out
 
@@ -119,7 +121,9 @@ async def test_executor_never_raises() -> None:
         async def get_object(self, *a: Any, **k: Any) -> dict[str, Any]:
             raise RuntimeError("kaput")
 
-    out = await make_executor(Boom()).execute("get_resource", {"kind": "pods", "name": "a"})
+    out = await make_executor(Boom()).execute(
+        "get_resource", {"kind": "pods", "name": "a", "namespace": "d"}
+    )
     assert out.startswith("ERROR:")
 
 
@@ -259,3 +263,23 @@ async def test_get_events_non_404_lookup_failure_is_error() -> None:
     )
     assert out.startswith("ERROR:")
     assert kube.event_calls == []
+
+
+async def test_error_results_are_capped() -> None:
+    """A long exception reason must pass through the same ingest cap."""
+
+    class LoudKube(FakeKube):
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            raise RuntimeError("x" * (MAX_RESULT_CHARS * 2))
+
+    out = await make_executor(LoudKube()).execute(
+        "get_resource", {"kind": "pods", "name": "a", "namespace": "d"}
+    )
+    assert out.startswith("ERROR:")
+    assert len(out) <= MAX_RESULT_CHARS + 50  # cap + truncation suffix
+
+
+async def test_get_resource_requires_namespace_for_namespaced_kind() -> None:
+    out = await make_executor(FakeKube()).execute("get_resource", {"kind": "pods", "name": "a"})
+    assert out.startswith("ERROR:")
+    assert "namespace" in out
