@@ -6,7 +6,7 @@ from typing import ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, Header
+from textual.widgets import Footer, Header, Static
 
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore
@@ -49,6 +49,9 @@ class KorvidApp(App[None]):
     def compose(self) -> ComposeResult:
         yield Header()
         yield ResourceTable()
+        empty_state = Static(id="empty-state")
+        empty_state.display = False  # hidden until the first store notification
+        yield empty_state
         yield CommandBar()
         yield FilterBar()
         yield StatusBar()
@@ -72,6 +75,7 @@ class KorvidApp(App[None]):
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
         table = self.query_one(ResourceTable)
         table.update_rows(self.store.get(message.kind, self.current_namespace), self.filter_pattern)
+        self._refresh_empty_state(message.kind, table.row_count)
 
     def on_show_error(self, message: ShowError) -> None:
         self.notify(message.detail, title=message.title, severity="error")
@@ -113,6 +117,19 @@ class KorvidApp(App[None]):
         self.query_one(StatusBar).update_status(
             self.config.kube_context, self.current_namespace, label
         )
+
+    def _refresh_empty_state(self, kind: str, visible_rows: int) -> None:
+        """Show guidance instead of a silent blank table (empty ns or no filter match)."""
+        empty = self.query_one("#empty-state", Static)
+        if visible_rows > 0:
+            empty.display = False
+            return
+        if self.filter_pattern:
+            message = f"No {kind} matching '{self.filter_pattern}' — Esc to clear the filter"
+        else:
+            message = f"No {kind} in namespace '{self.current_namespace}' — :ns <name> to switch"
+        empty.update(message)
+        empty.display = True
 
     async def on_unmount(self) -> None:
         await self.watch_manager.stop_all()

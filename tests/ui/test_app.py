@@ -98,6 +98,40 @@ async def test_watch_update_preserves_filter() -> None:
         assert table.row_count == 2
 
 
+async def test_empty_namespace_shows_guidance() -> None:
+    app = make_app([])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        empty = app.query_one("#empty-state")
+        assert empty.display is True
+        text = str(empty.render())
+        assert "default" in text  # names the namespace so users know where they are
+        assert ":ns" in text  # tells users how to switch
+
+
+async def test_empty_state_hidden_when_pods_exist() -> None:
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        assert app.query_one("#empty-state").display is False
+
+
+async def test_empty_state_appears_when_filter_matches_nothing() -> None:
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("slash")
+        for ch in "zzz":
+            await pilot.press(ch)
+        await pilot.pause(0.1)
+        empty = app.query_one("#empty-state")
+        assert empty.display is True
+        assert "zzz" in str(empty.render())
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert empty.display is False
+
+
 async def test_status_bar_shows_ns_and_agent_state() -> None:
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
