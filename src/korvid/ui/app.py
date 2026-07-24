@@ -96,6 +96,7 @@ class KorvidApp(App[None]):
         self.filter_pattern = ""
         self._log_tasks: set[asyncio.Task[None]] = set()
         self._log_buffer: LogBuffer | None = None
+        self._log_error: bool = False
 
     @property
     def current_namespace(self) -> str:
@@ -363,7 +364,9 @@ class KorvidApp(App[None]):
             await self._close_log_pane()
 
         ns0 = triples[0][0]
-        await self._open_log_pane(ns0, [(pod, ctr) for _, pod, ctr in triples], triples=triples)
+        await self._open_log_pane(
+            ns0, [(pod, ctr) for _, pod, ctr in triples], triples=triples, force_prefix=True
+        )
 
     def _build_multi_stream_triples(self, table: ResourceTable) -> list[tuple[str, str, str]]:
         """Collect (namespace, pod, container) triples for all visible pods; cap at 8."""
@@ -420,14 +423,16 @@ class KorvidApp(App[None]):
         namespace: str,
         sources: list[tuple[str, str]],
         triples: list[tuple[str, str, str]] | None = None,
+        force_prefix: bool = False,
     ) -> None:
         """Show log pane and spawn one streaming task per (pod, container)."""
         log_pane = self.query_one(LogPane)
-        log_pane.open(sources)
+        log_pane.open(sources, force_prefix=force_prefix)
         log_pane.set_state("streaming")
 
         self._log_buffer = LogBuffer()
         self._log_tasks = set()
+        self._log_error = False
 
         # triples carries per-entry namespaces; fall back to the single namespace
         if triples is None:
@@ -444,6 +449,7 @@ class KorvidApp(App[None]):
         if self._stream_logs is None:
             return
         log_pane = self.query_one(LogPane)
+        current = asyncio.current_task()
         try:
             async for line in self._stream_logs(namespace, pod, container, follow=True):
                 log_pane.feed(line)
@@ -451,16 +457,18 @@ class KorvidApp(App[None]):
         except ApiStatusError as exc:
             msg = explain_api_error(exc.status, exc.reason, "pods", namespace)
             self.notify(msg, title="Log stream error", severity="error")
+            self._log_error = True
             if log_pane.display:
                 log_pane.set_state("error")
+            if current is not None:
+                self._log_tasks.discard(current)
         except asyncio.CancelledError:
             raise
         else:
             # Stream ended naturally; remove self and check if all tasks done.
-            current = asyncio.current_task()
             if current is not None:
                 self._log_tasks.discard(current)
-            if not self._log_tasks and log_pane.display:
+            if not self._log_tasks and log_pane.display and not self._log_error:
                 log_pane.set_state("ended")
 
     def _buffer_line(self, log_pane: LogPane, line: LogLine) -> None:
@@ -481,6 +489,7 @@ class KorvidApp(App[None]):
             await asyncio.gather(*tasks, return_exceptions=True)
         self._log_tasks.clear()
         self._log_buffer = None
+        self._log_error = False
         with contextlib.suppress(Exception):
             self.query_one(LogPane).close()
 

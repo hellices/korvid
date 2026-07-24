@@ -42,12 +42,13 @@ class LogPane(Widget):
         yield Static("", id="log-header")
         yield RichLog(wrap=False, highlight=False, markup=False)
 
-    def open(self, sources: list[tuple[str, str]]) -> None:
+    def open(self, sources: list[tuple[str, str]], *, force_prefix: bool = False) -> None:
         """Open the pane with the given ``(pod, container)`` sources.
 
-        Renders the header with all source names and shows the pane.
+        ``force_prefix=True`` ensures ``[pod/container]`` prefixes are shown even
+        when only one source is present (used by the multi-pod ``L`` path).
         """
-        self._multi_source = len(sources) > 1
+        self._multi_source = force_prefix or len(sources) > 1
         self._sources_text = ", ".join(f"{pod}/{ctr}" if ctr else pod for pod, ctr in sources)
         self.query_one("#log-header", Static).update(self._sources_text)
         self.query_one(RichLog).clear()

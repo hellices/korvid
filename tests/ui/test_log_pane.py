@@ -40,6 +40,35 @@ def _pod(
     )
 
 
+class MixedFakeStream:
+    """Stream factory where specific containers raise an error; others end naturally."""
+
+    def __init__(self, error_containers: set[str], error: ApiStatusError) -> None:
+        self.error_containers = error_containers
+        self.error = error
+        self.closed: dict[str, bool] = {}
+
+    async def __call__(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncGenerator[LogLine, None]:
+        key = f"{pod}/{container}"
+        self.closed[key] = False
+        try:
+            if container in self.error_containers:
+                raise self.error
+            yield LogLine(pod=pod, container=container, text="line0")
+            # end naturally
+        finally:
+            self.closed[key] = True
+
+
 class FakeStream:
     """Controllable async generator factory for testing log streaming."""
 
@@ -333,3 +362,111 @@ async def test_stream_ended_sets_ended_state() -> None:
         # Header should mention "ended"
         header_text = str(log_pane.query_one("#log-header").render())
         assert "ended" in header_text
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: Important 1 — L with single pod must always show prefix
+# ---------------------------------------------------------------------------
+
+
+async def test_L_single_pod_always_shows_prefix() -> None:
+    """L with a filter matching exactly 1 single-container pod still shows prefix."""
+    fake = FakeStream(lines_per_call=1)
+    app = make_app(
+        [
+            _pod("app-only", containers=("main",)),
+            _pod("other", containers=("main",)),
+        ],
+        stream_logs=fake,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        # Filter to exactly 1 pod
+        await pilot.press("slash")
+        for ch in "app-only":
+            await pilot.press(ch)
+        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        assert table.row_count == 1
+        await pilot.press("shift+l")
+        await pilot.pause(0.2)
+        text = _richlog_text(app)
+        # Prefix must be present even with only 1 visible pod
+        assert "[app-only/main]" in text
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: Important 2 — errored task discarded; error state not overwritten
+# ---------------------------------------------------------------------------
+
+
+async def test_error_task_discarded_state_stays_error() -> None:
+    """One container errors, other ends naturally: state=error, _log_tasks empty."""
+    error = ApiStatusError(403, "Forbidden")
+    mixed = MixedFakeStream(error_containers={"sidecar"}, error=error)
+    app = make_app(
+        [_pod("myapp", containers=("main", "sidecar"))],
+        stream_logs=mixed,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.4)
+        log_pane = app.query_one(LogPane)
+        # State must remain "error" — not downgraded to "ended"
+        header_text = str(log_pane.query_one("#log-header").render())
+        assert "error" in header_text
+        assert "ended" not in header_text
+        # No task leak: all tasks must have been discarded
+        assert len(app._log_tasks) == 0
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: Minor — L on non-pods kind warns and spawns no tasks
+# ---------------------------------------------------------------------------
+
+
+async def test_L_on_non_pods_kind_warns_no_tasks() -> None:
+    """Shift+L when kind != pods shows warning and spawns no stream tasks."""
+    fake = FakeStream(lines_per_call=1)
+    app = make_app([_pod("myapp")], stream_logs=fake)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        app.current_kind = "deployments"
+        await pilot.press("shift+l")
+        await pilot.pause(0.05)
+        msgs = [n.message for n in app._notifications]
+        assert any("pod" in m.lower() for m in msgs)
+        assert len(app._log_tasks) == 0
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: Minor — L again while multi-stream open cancels old tasks
+# ---------------------------------------------------------------------------
+
+
+async def test_L_reopen_cancels_old_tasks_new_stream_opens() -> None:
+    """Shift+L while streams are open cancels old tasks and opens a fresh stream."""
+    fake = FakeStream(lines_per_call=1)
+    app = make_app(
+        [
+            _pod("app-alpha", containers=("main",)),
+            _pod("app-beta", containers=("main",)),
+        ],
+        stream_logs=fake,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("shift+l")
+        await pilot.pause(0.1)
+        assert app.query_one(LogPane).display is True
+        first_tasks = set(app._log_tasks)
+        # Press Shift+L again to re-open
+        await pilot.press("shift+l")
+        await pilot.pause(0.2)
+        assert app.query_one(LogPane).display is True
+        # All old tasks should be done (cancelled)
+        for t in first_tasks:
+            assert t.done()
+        # New tasks are running
+        assert len(app._log_tasks) > 0
