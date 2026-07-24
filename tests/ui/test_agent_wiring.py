@@ -1,0 +1,144 @@
+"""Tests for Task 9: Ctrl-A agent panel wiring."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from typing import Any
+
+from textual.widgets import Input, RichLog
+
+from korvid.agent.events import AgentEvent, TextDelta, TurnComplete
+from korvid.core.config import KorvidConfig
+from korvid.core.store import ResourceStore
+from korvid.core.watch import WatchManager
+from korvid.k8s.models import PodSummary
+from korvid.ui.app import KorvidApp
+from korvid.ui.widgets.agent_panel import AgentPanel
+
+
+def _pod(name: str) -> PodSummary:
+    return PodSummary(
+        name=name,
+        namespace="default",
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node=None,
+        qos="-",
+        containers=("main",),
+    )
+
+
+class StubRuntime:
+    """Scripted stand-in for AgentRuntime."""
+
+    def __init__(self, events: list[AgentEvent], block: bool = False) -> None:
+        self._events = events
+        self._block = block
+        self.calls: list[tuple[str, str]] = []
+        self.total_tokens = (0, 0)
+
+    async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
+        self.calls.append((user_text, screen_context))
+        for ev in self._events:
+            yield ev
+        if self._block:
+            await asyncio.Event().wait()
+
+
+def make_app(runtime: Any = None, model: str | None = "test-model") -> KorvidApp:
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, object]]:
+        yield ("ADDED", _pod("web-1"))
+        while True:
+            await asyncio.sleep(0.01)
+
+    return KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, source),  # type: ignore[arg-type]
+        agent_runtime=runtime,
+        agent_model_name=model,
+    )
+
+
+def _panel_text(app: KorvidApp) -> str:
+    log = app.query_one(AgentPanel).query_one("#agent-log", RichLog)
+    return "\n".join(strip.text for strip in log.lines)
+
+
+async def test_ctrl_a_toggles_panel_display() -> None:
+    app = make_app(StubRuntime([]))
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        assert panel.display is False
+        await pilot.press("ctrl+a")
+        assert panel.display is True
+        await pilot.press("ctrl+a")
+        assert panel.display is False
+
+
+async def test_no_runtime_shows_setup_hint() -> None:
+    app = make_app(runtime=None, model=None)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")
+        assert "provider: openai-compat" in _panel_text(app)
+        assert app.query_one(AgentPanel).query_one("#agent-input", Input).disabled is True
+
+
+async def test_prompt_drives_runtime_and_renders_reply() -> None:
+    runtime = StubRuntime(
+        [
+            TextDelta(text="All pods healthy.\n"),
+            TurnComplete(input_tokens=10, output_tokens=4, estimated=False),
+        ]
+    )
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")
+        inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
+        inp.value = "how are my pods?"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert runtime.calls
+        assert runtime.calls[0][0] == "how are my pods?"
+        text = _panel_text(app)
+        assert "> how are my pods?" in text
+        assert "All pods healthy." in text
+        assert inp.disabled is False
+
+
+async def test_screen_context_includes_current_view() -> None:
+    runtime = StubRuntime([TurnComplete(input_tokens=0, output_tokens=0, estimated=True)])
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")
+        inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
+        inp.value = "q"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert runtime.calls
+        ctx = runtime.calls[0][1]
+        assert "view=pods" in ctx
+        assert "scope=default" in ctx
+
+
+async def test_second_submit_ignored_while_turn_running() -> None:
+    runtime = StubRuntime([TextDelta(text="thinking")], block=True)
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")
+        panel = app.query_one(AgentPanel)
+        inp = panel.query_one("#agent-input", Input)
+        inp.value = "first"
+        await pilot.press("enter")
+        await pilot.pause()
+        # Input is disabled during a turn, but simulate a direct message anyway.
+        panel.post_message(AgentPanel.PromptSubmitted("second"))
+        await pilot.pause()
+        await pilot.pause()
+        assert [c[0] for c in runtime.calls] == ["first"]
