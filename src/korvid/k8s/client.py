@@ -47,7 +47,17 @@ class KubeClient:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
         return [PodSummary.from_manifest(item) for item in data.get("items", [])]
 
-    async def watch_pods(self, namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+    async def watch_pods(self, namespace: str | None) -> AsyncIterator[tuple[str, PodSummary]]:
+        """LIST then watch pods; namespace=None watches cluster-wide."""
+        if namespace is not None:
+            async for item in self._watch_pods_namespaced(namespace):
+                yield item
+        else:
+            async for item in self._watch_pods_cluster():
+                yield item
+
+    async def _watch_pods_namespaced(self, namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+        """Per-namespace pod watch via CoreV1Api (LIST then stream)."""
         if self._core_v1 is None:
             raise RuntimeError("connect() first")
 
@@ -75,6 +85,34 @@ class KubeClient:
             async with w.stream(
                 self._core_v1.list_namespaced_pod, namespace, **watch_kwargs
             ) as stream:
+                async for event in stream:
+                    yield (
+                        str(event["type"]),
+                        PodSummary.from_manifest(event["raw_object"]),
+                    )
+        except k8s_client.exceptions.ApiException as exc:
+            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+
+    async def _watch_pods_cluster(self) -> AsyncIterator[tuple[str, PodSummary]]:
+        """Cluster-wide pod watch via raw /api/v1/pods path (LIST then stream)."""
+        if self._api is None:
+            raise RuntimeError("connect() first")
+
+        path = "/api/v1/pods"
+        data = await self._request_json(path)
+
+        resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
+        for item in data.get("items", []):
+            yield ("ADDED", PodSummary.from_manifest(item))
+
+        watch_kwargs: dict[str, Any] = {}
+        if resource_version is not None:
+            watch_kwargs["resource_version"] = resource_version
+
+        watch_func = self._make_raw_watch_callable(path)
+        w = k8s_watch.Watch()
+        try:
+            async with w.stream(watch_func, **watch_kwargs) as stream:
                 async for event in stream:
                     yield (
                         str(event["type"]),

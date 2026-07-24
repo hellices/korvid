@@ -148,6 +148,26 @@ async def test_watch_pods_list_api_error_raises_api_status_error() -> None:
     assert exc_info.value.status == 403
 
 
+async def test_watch_pods_all_namespaces_uses_cluster_path() -> None:
+    """watch_pods(None) LISTs /api/v1/pods without a /namespaces/ segment."""
+    client = KubeClient()
+    list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "100"}, "items": []}
+    request_json_mock = AsyncMock(return_value=list_resp)
+    fake_watch = _FakeWatch([])
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        async for _ in client.watch_pods(None):
+            pass
+
+    called_path: str = request_json_mock.call_args[0][0]
+    assert "/namespaces/" not in called_path
+    assert called_path == "/api/v1/pods"
+
+
 async def test_list_namespaces_api_error_raises_api_status_error() -> None:
     """ApiException must not cross the k8s boundary from list_namespaces."""
     client = KubeClient()

@@ -2,7 +2,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from korvid.core.config import KorvidConfig
-from korvid.core.store import ResourceStore
+from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager, WatchSource
 from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
@@ -17,7 +17,7 @@ def _pod(name: str, phase: str = "Running", qos: str = "-") -> PodSummary:
 
 
 def fake_source(pods: list[PodSummary]) -> WatchSource:
-    async def source(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         for p in pods:
             yield ("ADDED", p)
         while True:
@@ -53,7 +53,7 @@ async def test_watch_update_refreshes_table() -> None:
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        app.store.apply_event("pods", "ADDED", _pod("zzz-new"))
+        app.store.apply_event("pods", "default", "ADDED", _pod("zzz-new"))
         await pilot.pause(0.1)
         table = app.query_one(ResourceTable)
         assert table.row_count == 2
@@ -97,7 +97,7 @@ async def test_watch_update_preserves_filter() -> None:
         table = app.query_one(ResourceTable)
         assert table.row_count == 1  # only checkout-2
         # A new pod arrives while the filter is active.
-        app.store.apply_event("pods", "ADDED", _pod("checkout-3"))
+        app.store.apply_event("pods", "default", "ADDED", _pod("checkout-3"))
         await pilot.pause(0.1)
         # Filter must still apply: checkout-2 + checkout-3 visible; api-1 filtered out.
         assert table.row_count == 2

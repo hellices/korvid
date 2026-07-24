@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import ClassVar
+from typing import ClassVar, cast
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -13,7 +13,9 @@ from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.store import ResourceStore
 from korvid.core.watch import WatchManager
+from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.models import PodSummary
 from korvid.ui.messages import (
     ClearFilter,
     FilterCommand,
@@ -30,6 +32,12 @@ from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
 
+_DEFAULT_ALIASES: dict[str, ResourceMeta] = {
+    "pods": PODS_META,
+    "po": PODS_META,
+    "pod": PODS_META,
+}
+
 
 class KorvidApp(App[None]):
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
@@ -44,14 +52,28 @@ class KorvidApp(App[None]):
         store: ResourceStore,
         watch_manager: WatchManager,
         list_namespaces: Callable[[], Awaitable[list[str]]] | None = None,
+        aliases: dict[str, ResourceMeta] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.store = store
         self.watch_manager = watch_manager
         self._list_namespaces = list_namespaces
-        self.current_namespace = config.namespace or "default"
+        self.aliases: dict[str, ResourceMeta] = (
+            aliases if aliases is not None else dict(_DEFAULT_ALIASES)
+        )
+        self.current_kind: str = "pods"
+        self.current_scope: str = config.namespace or "default"
         self.filter_pattern = ""
+
+    @property
+    def current_namespace(self) -> str:
+        """Alias for current_scope; kept for backward-compatible test access."""
+        return self.current_scope
+
+    @current_namespace.setter
+    def current_namespace(self, value: str) -> None:
+        self.current_scope = value
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -77,7 +99,7 @@ class KorvidApp(App[None]):
 
         self.store.subscribe(_on_store_update)
         self.watch_manager.on_error = _on_watch_error
-        await self.watch_manager.start("pods", self.current_namespace)
+        await self.watch_manager.start(self.current_kind, self.current_scope)
         self._refresh_status()
 
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
@@ -86,7 +108,9 @@ class KorvidApp(App[None]):
     def _render_table(self, kind: str) -> None:
         """Single choke point: table rows and empty-state always update together."""
         table = self.query_one(ResourceTable)
-        table.update_rows(self.store.get(kind, self.current_namespace), self.filter_pattern)
+        # Task 4 will generalise the table for arbitrary kinds; for now pods only.
+        pods = cast(list[PodSummary], self.store.get(kind, self.current_scope))
+        table.update_rows(pods, self.filter_pattern)
         self._refresh_empty_state(kind, table.row_count)
 
     def on_show_error(self, message: ShowError) -> None:
@@ -111,10 +135,10 @@ class KorvidApp(App[None]):
         self.post_message(ResourcesUpdated("pods"))
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
-        if message.namespace and message.namespace != self.current_namespace:
-            await self.watch_manager.stop("pods", self.current_namespace)
-            self.current_namespace = message.namespace
-            await self.watch_manager.start("pods", self.current_namespace)
+        if message.namespace and message.namespace != self.current_scope:
+            await self.watch_manager.stop(self.current_kind, self.current_scope)
+            self.current_scope = message.namespace
+            await self.watch_manager.start(self.current_kind, self.current_scope)
         self.post_message(ResourcesUpdated("pods"))
         self._refresh_status()
 
@@ -144,9 +168,7 @@ class KorvidApp(App[None]):
 
     def _refresh_status(self) -> None:
         label = "AI on" if self.config.agent_enabled else "AI off"
-        self.query_one(StatusBar).update_status(
-            self.config.kube_context, self.current_namespace, label
-        )
+        self.query_one(StatusBar).update_status(self.config.kube_context, self.current_scope, label)
 
     def _refresh_empty_state(self, kind: str, visible_rows: int) -> None:
         """Show guidance instead of a silent blank table (empty ns or no filter match)."""
@@ -157,7 +179,7 @@ class KorvidApp(App[None]):
         if self.filter_pattern:
             message = f"No {kind} matching '{self.filter_pattern}' — Esc to clear the filter"
         else:
-            message = f"No {kind} in namespace '{self.current_namespace}' — :ns <name> to switch"
+            message = f"No {kind} in namespace '{self.current_scope}' — :ns <name> to switch"
         empty.update(message)
         empty.display = True
 
