@@ -34,12 +34,13 @@ from korvid.ui.messages import (
     ShowNamespacePicker,
     UnknownCommand,
 )
-from korvid.ui.shell import build_exec_argv
+from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.log_pane import LogPane
 from korvid.ui.widgets.namespace_picker import NamespacePicker
+from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
 
@@ -319,7 +320,12 @@ class KorvidApp(App[None]):
         self.notify(f"Unknown command: {message.text}", severity="warning")
 
     def action_shell(self) -> None:
-        """Drop into a shell inside the selected pod via kubectl exec."""
+        """Drop into a shell inside the selected pod via kubectl exec.
+
+        Multi-container pods show a container picker first; if exec fails
+        (typically a distroless image without sh/bash) a `kubectl debug`
+        ephemeral-container fallback is offered.
+        """
         if self.current_kind != "pods":
             self.notify("Shell is only available for pods", severity="warning")
             return
@@ -349,14 +355,57 @@ class KorvidApp(App[None]):
             )
             return
 
-        argv = build_exec_argv(namespace, name)
+        containers = self._get_pod_containers(namespace, name)
+        if len(containers) > 1:
+
+            def _on_pick(container: str | None) -> None:
+                if container is not None:
+                    self._run_shell(namespace, name, container)
+
+            self.push_screen(
+                PickScreen(f"Container in {name}:", list(containers)),
+                _on_pick,
+            )
+            return
+
+        self._run_shell(namespace, name, containers[0] if containers else None)
+
+    _DEBUG_YES = f"Yes — attach a {DEBUG_IMAGE} debug container (kubectl debug)"
+
+    def _run_shell(self, namespace: str, name: str, container: str | None) -> None:
+        """Run kubectl exec; on failure offer the kubectl debug fallback."""
+        argv = build_exec_argv(namespace, name, container)
+        with self.suspend():
+            exit_code = subprocess.call(argv)
+        self.refresh()
+        if exit_code == 0:
+            return
+
+        def _on_choice(choice: str | None) -> None:
+            if choice == self._DEBUG_YES:
+                self._run_debug(namespace, name, container)
+
+        target = f"{name}/{container}" if container else name
+        self.push_screen(
+            PickScreen(
+                f"Shell failed in {target} (exit {exit_code}) — the image likely has"
+                " no sh/bash (distroless). Attach a debug container instead?\n"
+                "Note: the ephemeral container stays in the pod spec until restart.",
+                [self._DEBUG_YES, "No"],
+            ),
+            _on_choice,
+        )
+
+    def _run_debug(self, namespace: str, name: str, container: str | None) -> None:
+        """Attach an ephemeral busybox container via kubectl debug."""
+        argv = build_debug_argv(namespace, name, container)
         with self.suspend():
             exit_code = subprocess.call(argv)
         self.refresh()
         if exit_code != 0:
             self.notify(
-                f"Shell exited with status {exit_code}"
-                " — the container may not have a shell (sh/bash)",
+                f"kubectl debug exited with status {exit_code}"
+                " — check RBAC (pods/ephemeralcontainers) and cluster version",
                 severity="warning",
             )
 

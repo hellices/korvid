@@ -849,10 +849,12 @@ def test_uppercase_bindings_registered() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_shell_nonzero_exit_notifies() -> None:
-    """A failed kubectl exec (e.g. container without sh) surfaces a notification."""
+async def test_shell_nonzero_exit_offers_debug_fallback() -> None:
+    """A failed kubectl exec (e.g. container without sh) offers the debug fallback."""
     from contextlib import nullcontext
     from unittest.mock import patch
+
+    from korvid.ui.widgets.pick_screen import PickScreen
 
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
@@ -863,6 +865,5 @@ async def test_shell_nonzero_exit_notifies() -> None:
             patch.object(app, "suspend", nullcontext),
         ):
             await pilot.press("s")
-            await pilot.pause(0.1)
-        messages = [n.message for n in app._notifications]
-        assert any("exited with status 1" in m for m in messages)
+            await pilot.pause(0.2)
+        assert isinstance(app.screen, PickScreen)

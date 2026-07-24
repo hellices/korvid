@@ -14,7 +14,8 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
-from korvid.ui.shell import build_exec_argv
+from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv
+from korvid.ui.widgets.pick_screen import PickScreen
 
 # ---------------------------------------------------------------------------
 # Pure unit tests: argv builder
@@ -188,7 +189,7 @@ async def test_shell_selected_pod_invokes_kubectl() -> None:
     app = make_app([_pod("api-1")])
     with (
         patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
-        patch("korvid.ui.app.subprocess.call") as mock_call,
+        patch("korvid.ui.app.subprocess.call", return_value=0) as mock_call,
         patch.object(type(app), "suspend", return_value=_noop_cm()),
     ):
         async with app.run_test() as pilot:
@@ -197,3 +198,126 @@ async def test_shell_selected_pod_invokes_kubectl() -> None:
             await pilot.pause(0.1)
             expected_argv = build_exec_argv("default", "api-1")
             mock_call.assert_called_once_with(expected_argv)
+
+
+# ---------------------------------------------------------------------------
+# Container picker + kubectl debug fallback
+# ---------------------------------------------------------------------------
+
+
+def _multi_container_pod(name: str, namespace: str = "default") -> PodSummary:
+    return PodSummary(
+        name=name,
+        namespace=namespace,
+        phase="Running",
+        ready="2/2",
+        restarts=0,
+        node=None,
+        qos="-",
+        containers=("app", "sidecar"),
+    )
+
+
+def test_build_debug_argv_with_target() -> None:
+    result = build_debug_argv("kube-system", "cilium-abc", "cilium-agent")
+    assert result == [
+        "kubectl",
+        "debug",
+        "-it",
+        "-n",
+        "kube-system",
+        "cilium-abc",
+        f"--image={DEBUG_IMAGE}",
+        "--target=cilium-agent",
+        "--",
+        "sh",
+    ]
+
+
+def test_build_debug_argv_without_target() -> None:
+    result = build_debug_argv("ns", "pod", None)
+    assert "--target" not in " ".join(result)
+    assert f"--image={DEBUG_IMAGE}" in result
+
+
+async def test_shell_multi_container_shows_picker() -> None:
+    """s on a multi-container pod → PickScreen listing containers; pick runs exec -c."""
+    app = make_app([_multi_container_pod("web-1")])
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=0) as mock_call,
+        patch.object(type(app), "suspend", return_value=_noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, PickScreen)
+            mock_call.assert_not_called()  # nothing runs until a container is chosen
+            await pilot.press("down")  # highlight "sidecar"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            mock_call.assert_called_once_with(build_exec_argv("default", "web-1", "sidecar"))
+
+
+async def test_shell_multi_container_picker_escape_cancels() -> None:
+    """Escaping the container picker runs nothing."""
+    app = make_app([_multi_container_pod("web-1")])
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call") as mock_call,
+        patch.object(type(app), "suspend", return_value=_noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, PickScreen)
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, PickScreen)
+            mock_call.assert_not_called()
+
+
+async def test_shell_exec_failure_offers_debug_fallback() -> None:
+    """Failed exec (distroless) → PickScreen offering kubectl debug; Yes runs it."""
+    app = make_app([_pod("api-1")])
+    calls: list[list[str]] = []
+
+    def _fake_call(argv: list[str]) -> int:
+        calls.append(argv)
+        return 1 if argv[1] == "exec" else 0
+
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", side_effect=_fake_call),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, PickScreen)
+            await pilot.press("enter")  # first option = Yes
+            await pilot.pause(0.2)
+            assert calls[0] == build_exec_argv("default", "api-1")
+            assert calls[1] == build_debug_argv("default", "api-1")
+
+
+async def test_shell_exec_failure_no_declines_debug() -> None:
+    """Choosing No in the fallback picker runs nothing further."""
+    app = make_app([_pod("api-1")])
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1) as mock_call,
+        patch.object(type(app), "suspend", return_value=_noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, PickScreen)
+            await pilot.press("down")  # highlight "No"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            mock_call.assert_called_once()  # only the failed exec; no debug
