@@ -149,11 +149,38 @@ def make_app(
 
 
 def _richlog_text(app: KorvidApp) -> str:
-    """Concatenate all rendered RichLog lines for assertion."""
+    """Concatenate rendered lines of every visible panel for assertion."""
     from textual.widgets import RichLog
 
-    rich_log = app.query_one(LogPane).query_one(RichLog)
-    return "\n".join(strip.text for strip in rich_log.lines)
+    pane = app.query_one(LogPane)
+    parts = []
+    for i in range(len(pane._panel_keys)):
+        rich_log = pane.query_one(f"#log-panel-{i}").query_one(RichLog)
+        parts.append("\n".join(strip.text for strip in rich_log.lines))
+    return "\n".join(parts)
+
+
+def _panel_texts(app: KorvidApp) -> dict[str, str]:
+    """Map each visible panel's source key to its RichLog text."""
+    from textual.widgets import RichLog
+
+    pane = app.query_one(LogPane)
+    result: dict[str, str] = {}
+    for i, key in enumerate(pane._panel_keys):
+        rich_log = pane.query_one(f"#log-panel-{i}").query_one(RichLog)
+        result[key] = "\n".join(strip.text for strip in rich_log.lines)
+    return result
+
+
+def _titles_visible(app: KorvidApp) -> bool:
+    """Whether panel title bars are shown (source attribution)."""
+    from textual.widgets import Static
+
+    pane = app.query_one(LogPane)
+    if not pane._panel_keys:
+        return False
+    title = pane.query_one("#log-panel-0").query_one(".panel-title", Static)
+    return bool(title.display)
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +235,8 @@ async def test_l_opens_pane_for_selected_pod() -> None:
         assert app.query_one(LogPane).display is True
 
 
-async def test_l_multi_container_prefix_in_output() -> None:
-    """Multi-container pod: lines are prefixed with [pod/container]."""
+async def test_l_multi_container_split_panels() -> None:
+    """Multi-container pod: one panel per container, each with its own lines."""
     fake = FakeStream(lines_per_call=1)
     app = make_app(
         [_pod("myapp", containers=("main", "sidecar"))],
@@ -219,13 +246,15 @@ async def test_l_multi_container_prefix_in_output() -> None:
         await pilot.pause(0.1)
         await pilot.press("l")
         await pilot.pause(0.2)  # let both stream tasks yield their lines
-        text = _richlog_text(app)
-        assert "[myapp/main]" in text
-        assert "[myapp/sidecar]" in text
+        panels = _panel_texts(app)
+        assert set(panels) == {"myapp/main", "myapp/sidecar"}
+        assert "line0" in panels["myapp/main"]
+        assert "line0" in panels["myapp/sidecar"]
+        assert _titles_visible(app) is True
 
 
-async def test_l_single_container_no_prefix() -> None:
-    """Single-container pod: no [pod/container] prefix in output."""
+async def test_l_single_container_no_title() -> None:
+    """Single-container pod: one panel, no title bar needed."""
     fake = FakeStream(lines_per_call=1)
     app = make_app(
         [_pod("myapp", containers=("main",))],
@@ -236,9 +265,8 @@ async def test_l_single_container_no_prefix() -> None:
         await pilot.press("l")
         await pilot.pause(0.2)
         text = _richlog_text(app)
-        # Content present but no pod/container bracket prefix
         assert "line0" in text
-        assert "[myapp/main]" not in text
+        assert _titles_visible(app) is False
 
 
 async def test_l_again_closes_pane_and_cancels() -> None:
@@ -297,9 +325,11 @@ async def test_L_streams_multiple_pods_with_prefix() -> None:
         await pilot.press("shift+l")
         await pilot.pause(0.2)
         assert app.query_one(LogPane).display is True
-        text = _richlog_text(app)
-        assert "[app-alpha/main]" in text
-        assert "[app-beta/main]" in text
+        panels = _panel_texts(app)
+        assert set(panels) == {"app-alpha/main", "app-beta/main"}
+        assert "line0" in panels["app-alpha/main"]
+        assert "line0" in panels["app-beta/main"]
+        assert _titles_visible(app) is True
 
 
 async def test_L_caps_at_8_pods_and_notifies() -> None:
@@ -396,9 +426,11 @@ async def test_L_single_pod_always_shows_prefix() -> None:
         assert table.row_count == 1
         await pilot.press("shift+l")
         await pilot.pause(0.2)
-        text = _richlog_text(app)
-        # Prefix must be present even with only 1 visible pod
-        assert "[app-only/main]" in text
+        # Title must be shown even with only 1 visible pod (L path)
+        panels = _panel_texts(app)
+        assert set(panels) == {"app-only/main"}
+        assert "line0" in panels["app-only/main"]
+        assert _titles_visible(app) is True
 
 
 # ---------------------------------------------------------------------------

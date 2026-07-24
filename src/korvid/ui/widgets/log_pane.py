@@ -1,32 +1,32 @@
-"""Log pane widget — two-pane split with RichLog and source/state header.
+"""Log pane widget — split panels per (pod, container) source.
 
-New in Task 10
---------------
-- ``formatted`` toggle (``f``): renders JSON lines with colour; plain otherwise.
-- ``p`` key: re-open with ``previous=True`` (handled by the App, which calls
-  ``open()`` with fresh triples and ``previous=True``).
-- Inline search (``/``): ``open_search()`` shows a one-line Input; on submit
-  hits come from ``LogBuffer.search()``.  ``search_next()`` / ``search_prev()``
-  scroll the RichLog to the next/previous hit.
+Multi-source streams (multi-container ``l`` or multi-pod ``L``) render one
+panel per source in a 2-column grid, each with a coloured ``pod/container``
+title. This answers the real k9s pain point (#1430 split views): comparing
+several containers side-by-side instead of untangling one merged stream.
 
 Design notes
 ~~~~~~~~~~~~
+**Fixed panel pool**: ``MAX_PANELS`` panels are composed up-front and shown /
+hidden per ``open()`` call. This avoids async mount timing issues and keeps
+``feed()`` a plain synchronous routing call.
+
 **f-rerender approach**: The App owns the LogBuffer and calls
 ``log_pane.replay(buffer.lines())`` after toggling ``log_pane.formatted``.
-``replay()`` clears the RichLog and re-feeds every line through
-``_write_line()``, which in turn calls ``format_log_line``.  This keeps the
-formatting logic in one place and the App in charge of the source of truth.
+``replay()`` clears every visible panel and re-feeds each line through the
+same routing as ``feed()``.
 
 **/-routing**: ``App.action_open_filter`` checks ``log_pane.display`` first.
 When the pane is open it calls ``log_pane.open_search()`` instead of opening
-the table FilterBar.  The ``n``/``N`` (shift+n) keys are App-level bindings
-guarded by ``log_pane.display``, so they are inert when the pane is closed.
+the table FilterBar. Search hits index into the shared LogBuffer; the pane
+maps each hit to its source panel and scrolls that panel.
 """
 
 from __future__ import annotations
 
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.containers import Container, Vertical
 from textual.events import Key
 from textual.widget import Widget
 from textual.widgets import Input, RichLog, Static
@@ -35,8 +35,11 @@ from korvid.core.logbuffer import LogBuffer
 from korvid.k8s.logs import LogLine
 from korvid.ui.logformat import format_log_line
 
-# Distinct colours cycled across multi-stream sources so interleaved lines are
-# visually attributable at a glance (same idea as stern/k9s prefix colouring).
+#: Maximum simultaneous log sources (matches the App's multi-stream cap).
+MAX_PANELS = 8
+
+# Distinct colours cycled across sources so each panel title is attributable
+# at a glance (same idea as stern/k9s prefix colouring).
 _SOURCE_COLORS = (
     "bright_cyan",
     "bright_magenta",
@@ -70,6 +73,19 @@ class LogPane(Widget):
         height: 1;
         display: none;
     }
+    LogPane #log-panels {
+        layout: grid;
+        grid-size: 2;
+        height: 1fr;
+    }
+    LogPane .log-panel {
+        height: 1fr;
+    }
+    LogPane .panel-title {
+        height: 1;
+        background: $surface;
+        padding: 0 1;
+    }
     LogPane RichLog {
         height: 1fr;
         background: $surface;
@@ -78,9 +94,9 @@ class LogPane(Widget):
 
     def __init__(self) -> None:
         super().__init__()
-        self._multi_source: bool = False
+        self._panel_keys: list[str] = []
+        self._show_titles: bool = False
         self._sources_text: str = ""
-        self._source_colors: dict[str, str] = {}
         self._state: str = ""
         self._search_counter: str = ""
         self._search_hits: list[int] = []
@@ -92,13 +108,19 @@ class LogPane(Widget):
     def compose(self) -> ComposeResult:
         yield Static("", id="log-header")
         yield Input(placeholder="search logs…", id="log-search")
-        yield RichLog(wrap=False, highlight=False, markup=False)
+        with Container(id="log-panels"):
+            for i in range(MAX_PANELS):
+                with Vertical(classes="log-panel", id=f"log-panel-{i}"):
+                    yield Static("", classes="panel-title", markup=False)
+                    yield RichLog(wrap=False, highlight=False, markup=False)
 
     def on_mount(self) -> None:
         self.query_one("#log-search", Input).display = False
+        for i in range(MAX_PANELS):
+            self._panel(i).display = False
 
     # ------------------------------------------------------------------
-    # Public API (existing + extended)
+    # Public API
     # ------------------------------------------------------------------
 
     def open(
@@ -108,20 +130,18 @@ class LogPane(Widget):
         force_prefix: bool = False,
         log_buffer: LogBuffer | None = None,
     ) -> None:
-        """Open the pane with the given ``(pod, container)`` sources.
+        """Open the pane with one panel per ``(pod, container)`` source.
 
-        ``force_prefix=True`` ensures ``[pod/container]`` prefixes are shown
-        even when only one source is present (used by the multi-pod ``L`` path).
+        ``force_prefix=True`` shows the panel title even for a single source
+        (used by the multi-pod ``L`` path so the pod is always identified).
 
-        ``log_buffer`` is stored for later inline search; pass the App's current
-        ``LogBuffer`` instance.
+        ``log_buffer`` is stored for later inline search; pass the App's
+        current ``LogBuffer`` instance.
         """
-        self._multi_source = force_prefix or len(sources) > 1
+        sources = sources[:MAX_PANELS]
+        self._panel_keys = [f"{pod}/{ctr}" for pod, ctr in sources]
+        self._show_titles = force_prefix or len(sources) > 1
         self._sources_text = ", ".join(f"{pod}/{ctr}" if ctr else pod for pod, ctr in sources)
-        self._source_colors = {
-            f"{pod}/{ctr}": _SOURCE_COLORS[i % len(_SOURCE_COLORS)]
-            for i, (pod, ctr) in enumerate(sources)
-        }
         self._state = ""
         self._search_counter = ""
         self._search_hits = []
@@ -129,26 +149,33 @@ class LogPane(Widget):
         self._log_buffer = log_buffer
         # Hide the search input in case it was open from a previous session.
         self.query_one("#log-search", Input).display = False
-        rich_log = self.query_one(RichLog)
-        rich_log.clear()
-        # Bound RichLog to the buffer capacity (+ headroom for banner lines) so
-        # a long-running stream can't grow display memory unboundedly.
-        rich_log.max_lines = log_buffer.max_lines + 8 if log_buffer is not None else None
-        if self._multi_source:
-            # Legend: one coloured entry per source so the merged stream is
-            # obviously multi-pod even before lines arrive.
-            legend = Text(f"merged logs — {len(sources)} sources: ", style="dim")
-            for i, (pod, ctr) in enumerate(sources):
-                if i:
-                    legend.append(", ", style="dim")
-                key = f"{pod}/{ctr}"
-                legend.append(key if ctr else pod, style=self._source_colors.get(key, ""))
-            rich_log.write(legend)
+
+        panels_container = self.query_one("#log-panels", Container)
+        panels_container.styles.grid_size_columns = 1 if len(sources) == 1 else 2
+
+        max_lines = log_buffer.max_lines + 8 if log_buffer is not None else None
+        for i in range(MAX_PANELS):
+            panel = self._panel(i)
+            if i < len(sources):
+                pod, ctr = sources[i]
+                title = panel.query_one(".panel-title", Static)
+                key = self._panel_keys[i]
+                title.update(Text(key if ctr else pod, style=self._color(i)))
+                title.display = self._show_titles
+                rich_log = panel.query_one(RichLog)
+                rich_log.clear()
+                # Bound RichLog to the buffer capacity (+ headroom for banner
+                # lines) so a long stream can't grow display memory unboundedly.
+                rich_log.max_lines = max_lines
+                panel.display = True
+            else:
+                panel.display = False
+
         self._update_header()
         self.display = True
 
     def feed(self, line: LogLine) -> None:
-        """Write *line* to the RichLog; prefix omitted for single-source streams."""
+        """Route *line* to its source panel's RichLog."""
         self._write_line(line)
 
     def replay(self, lines: list[LogLine]) -> None:
@@ -156,10 +183,10 @@ class LogPane(Widget):
 
         Called by the App after toggling ``formatted`` so the whole visible
         buffer is re-displayed without re-buffering.  The App provides the
-        lines from its ``LogBuffer``; this method only touches the RichLog.
+        lines from its ``LogBuffer``; this method only touches the RichLogs.
         """
-        rich_log = self.query_one(RichLog)
-        rich_log.clear()
+        for i in range(len(self._panel_keys)):
+            self._panel(i).query_one(RichLog).clear()
         for line in lines:
             self._write_line(line)
 
@@ -175,14 +202,13 @@ class LogPane(Widget):
         self._update_header()
 
     def show_overflow_banner(self) -> None:
-        """Write a one-time overflow warning line to the log."""
-        self.query_one(RichLog).write(
-            "\u2500\u2500 buffer overflowed; oldest lines dropped \u2500\u2500"
-        )
+        """Write a one-time overflow warning line to every visible panel."""
+        self.write_banner("\u2500\u2500 buffer overflowed; oldest lines dropped \u2500\u2500")
 
     def write_banner(self, text: str) -> None:
-        """Write a plain informational banner line to the log."""
-        self.query_one(RichLog).write(text)
+        """Write a plain informational banner line to every visible panel."""
+        for i in range(len(self._panel_keys)):
+            self._panel(i).query_one(RichLog).write(text)
 
     def close(self) -> None:
         """Hide the pane and clear its contents."""
@@ -192,7 +218,11 @@ class LogPane(Widget):
         self._search_idx = 0
         self._log_buffer = None
         self.query_one("#log-search", Input).display = False
-        self.query_one(RichLog).clear()
+        for i in range(MAX_PANELS):
+            panel = self._panel(i)
+            panel.query_one(RichLog).clear()
+            panel.display = False
+        self._panel_keys = []
         self.display = False
 
     def toggle_format(self) -> None:
@@ -231,17 +261,27 @@ class LogPane(Widget):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _panel(self, index: int) -> Vertical:
+        return self.query_one(f"#log-panel-{index}", Vertical)
+
+    @staticmethod
+    def _color(index: int) -> str:
+        return _SOURCE_COLORS[index % len(_SOURCE_COLORS)]
+
+    def _panel_index(self, key: str) -> int:
+        """Panel index for a source key; unknown sources land in panel 0."""
+        try:
+            return self._panel_keys.index(key)
+        except ValueError:
+            return 0
+
     def _write_line(self, line: LogLine) -> None:
-        """Write a single line to RichLog, applying prefix and formatting."""
-        rich_log = self.query_one(RichLog)
-        formatted_text = format_log_line(line.text, formatted=self.formatted)
-        if self._multi_source:
-            key = f"{line.pod}/{line.container}"
-            prefix = Text(f"[{key}] ", style=self._source_colors.get(key, "bright_white"))
-            output: Text = prefix + formatted_text
-            rich_log.write(output)
-        else:
-            rich_log.write(formatted_text)
+        """Route a single line to its panel, applying JSON formatting."""
+        if not self._panel_keys:
+            return
+        index = self._panel_index(f"{line.pod}/{line.container}")
+        rich_log = self._panel(index).query_one(RichLog)
+        rich_log.write(format_log_line(line.text, formatted=self.formatted))
 
     def _update_header(self) -> None:
         fmt_tag = "[json]" if self.formatted else "[raw]"
@@ -261,17 +301,29 @@ class LogPane(Widget):
         self._update_header()
 
     def _scroll_to_hit(self) -> None:
-        if not self._search_hits:
+        if not self._search_hits or self._log_buffer is None:
             return
-        rich_log = self.query_one(RichLog)
-        line_idx = self._search_hits[self._search_idx]
-        # Hits index into the LogBuffer, but RichLog also contains banner
-        # lines and keeps lines the ring buffer has dropped; correct by the
-        # difference so the scroll lands on the actual hit.
-        if self._log_buffer is not None:
-            offset = len(rich_log.lines) - len(self._log_buffer.lines())
-            line_idx += max(offset, 0)
-        rich_log.scroll_to(y=line_idx, animate=False)
+        lines = self._log_buffer.lines()
+        hit_idx = self._search_hits[self._search_idx]
+        if hit_idx >= len(lines):
+            return
+        hit = lines[hit_idx]
+        key = f"{hit.pod}/{hit.container}"
+        index = self._panel_index(key)
+        rich_log = self._panel(index).query_one(RichLog)
+        # Per-panel line index: count earlier buffer lines routed to the same
+        # panel, then correct for banner lines / ring-buffer drops the RichLog
+        # still displays.
+        panel_line_idx = sum(
+            1
+            for line in lines[:hit_idx]
+            if self._panel_index(f"{line.pod}/{line.container}") == index
+        )
+        panel_total = sum(
+            1 for line in lines if self._panel_index(f"{line.pod}/{line.container}") == index
+        )
+        offset = len(rich_log.lines) - panel_total
+        rich_log.scroll_to(y=panel_line_idx + max(offset, 0), animate=False)
 
     # ------------------------------------------------------------------
     # Event handlers
