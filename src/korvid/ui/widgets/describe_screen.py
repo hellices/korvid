@@ -88,6 +88,3 @@ class DescribeScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self.title = self._title
-
-    def action_dismiss(self) -> None:  # type: ignore[override]
-        self.dismiss(None)
