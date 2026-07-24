@@ -9,6 +9,7 @@ created on, so separate asyncio.run() calls would break with
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -17,10 +18,23 @@ from korvid.core.config import load_config
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.client import KubeClient
-from korvid.k8s.discovery import PODS_META, build_alias_map
+from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.ui.app import KorvidApp
 
 logger = logging.getLogger(__name__)
+
+
+async def _discover_in_background(
+    kube: KubeClient, aliases: dict[str, ResourceMeta], app: KorvidApp
+) -> None:
+    """Merge full API discovery into *aliases* once available (shared dict)."""
+    try:
+        discovered = build_alias_map(await kube.discover_resources())
+    except Exception:
+        logger.warning("Resource discovery failed; staying pods-only", exc_info=True)
+        return
+    aliases.update(discovered)
+    app.on_aliases_updated()
 
 
 async def _run() -> None:
@@ -29,12 +43,9 @@ async def _run() -> None:
     await kube.connect(config.kube_context)
     store = ResourceStore()
 
-    # Discover available resources; fall back to pods-only on any failure.
-    try:
-        aliases = build_alias_map(await kube.discover_resources())
-    except Exception:
-        logger.warning("Resource discovery failed; falling back to pods only", exc_info=True)
-        aliases = build_alias_map([PODS_META])
+    # Start with pods only so the UI appears immediately; full discovery runs
+    # in the background and merges into this dict (closures + app share it).
+    aliases = build_alias_map([PODS_META])
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         ns = None if scope == ALL_NAMESPACES else scope
@@ -69,9 +80,14 @@ async def _run() -> None:
         get_events=get_events,
         stream_logs=kube.stream_logs,
     )
+
+    discovery_task = asyncio.create_task(_discover_in_background(kube, aliases, app))
     try:
         await app.run_async()
     finally:
+        discovery_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await discovery_task
         await kube.close()
 
 

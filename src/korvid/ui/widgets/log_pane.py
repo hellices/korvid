@@ -35,6 +35,19 @@ from korvid.core.logbuffer import LogBuffer
 from korvid.k8s.logs import LogLine
 from korvid.ui.logformat import format_log_line
 
+# Distinct colours cycled across multi-stream sources so interleaved lines are
+# visually attributable at a glance (same idea as stern/k9s prefix colouring).
+_SOURCE_COLORS = (
+    "bright_cyan",
+    "bright_magenta",
+    "bright_yellow",
+    "bright_green",
+    "bright_blue",
+    "orange1",
+    "turquoise2",
+    "violet",
+)
+
 
 class LogPane(Widget):
     """Collapsible log pane displayed below the resource table.
@@ -67,6 +80,7 @@ class LogPane(Widget):
         super().__init__()
         self._multi_source: bool = False
         self._sources_text: str = ""
+        self._source_colors: dict[str, str] = {}
         self._state: str = ""
         self._search_counter: str = ""
         self._search_hits: list[int] = []
@@ -104,6 +118,10 @@ class LogPane(Widget):
         """
         self._multi_source = force_prefix or len(sources) > 1
         self._sources_text = ", ".join(f"{pod}/{ctr}" if ctr else pod for pod, ctr in sources)
+        self._source_colors = {
+            f"{pod}/{ctr}": _SOURCE_COLORS[i % len(_SOURCE_COLORS)]
+            for i, (pod, ctr) in enumerate(sources)
+        }
         self._state = ""
         self._search_counter = ""
         self._search_hits = []
@@ -116,6 +134,16 @@ class LogPane(Widget):
         # Bound RichLog to the buffer capacity (+ headroom for banner lines) so
         # a long-running stream can't grow display memory unboundedly.
         rich_log.max_lines = log_buffer.max_lines + 8 if log_buffer is not None else None
+        if self._multi_source:
+            # Legend: one coloured entry per source so the merged stream is
+            # obviously multi-pod even before lines arrive.
+            legend = Text(f"merged logs — {len(sources)} sources: ", style="dim")
+            for i, (pod, ctr) in enumerate(sources):
+                if i:
+                    legend.append(", ", style="dim")
+                key = f"{pod}/{ctr}"
+                legend.append(key if ctr else pod, style=self._source_colors.get(key, ""))
+            rich_log.write(legend)
         self._update_header()
         self.display = True
 
@@ -208,7 +236,8 @@ class LogPane(Widget):
         rich_log = self.query_one(RichLog)
         formatted_text = format_log_line(line.text, formatted=self.formatted)
         if self._multi_source:
-            prefix = Text(f"[{line.pod}/{line.container}] ")
+            key = f"{line.pod}/{line.container}"
+            prefix = Text(f"[{key}] ", style=self._source_colors.get(key, "bright_white"))
             output: Text = prefix + formatted_text
             rich_log.write(output)
         else:

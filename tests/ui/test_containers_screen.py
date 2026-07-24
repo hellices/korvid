@@ -136,7 +136,20 @@ async def test_containers_screen_escape_closes() -> None:
         assert not isinstance(app.screen, ContainersScreen)
 
 
-async def test_containers_screen_enter_opens_logs() -> None:
+async def test_containers_screen_enter_is_noop() -> None:
+    """Enter must not trigger logs — only l/s act (user request)."""
+    app = make_app([_pod("web-1")], get_manifest=_get_manifest)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert isinstance(app.screen, ContainersScreen)
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, ContainersScreen)  # still open, nothing ran
+
+
+async def test_containers_screen_l_opens_logs() -> None:
     lines_streamed: list[tuple[str, str, str]] = []
 
     async def stream_logs(
@@ -152,7 +165,7 @@ async def test_containers_screen_enter_opens_logs() -> None:
         await pilot.press("enter")
         await pilot.pause(0.1)
         assert isinstance(app.screen, ContainersScreen)
-        await pilot.press("enter")  # first row = "app" → logs
+        await pilot.press("l")  # first row = "app" → logs
         await pilot.pause(0.2)
         assert not isinstance(app.screen, ContainersScreen)
         assert ("default", "web-1", "app") in lines_streamed

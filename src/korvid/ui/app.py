@@ -168,6 +168,14 @@ class KorvidApp(App[None]):
         await self.watch_manager.start(self.current_kind, self.current_scope)
         self._refresh_status()
 
+    def on_aliases_updated(self) -> None:
+        """Refresh command autocompletion after background resource discovery."""
+        try:
+            command_bar = self.query_one(CommandBar)
+        except Exception:
+            return  # app is shutting down or not composed yet
+        command_bar.command_words = sorted({*self.aliases, "ns", "namespaces", "q", "quit"})
+
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
         self._render_table(message.kind)
 
@@ -422,11 +430,23 @@ class KorvidApp(App[None]):
 
     _DEBUG_YES = f"Yes — attach a {DEBUG_IMAGE} debug container (kubectl debug)"
 
+    @staticmethod
+    def _run_interactive(argv: list[str], banner: str) -> int:
+        """Run an interactive subprocess on a cleared screen for a direct feel.
+
+        Suspending Textual drops back to the primary screen, exposing old
+        scrollback (including the command that launched korvid). Clearing
+        first makes it look like we connected straight into the pod.
+        """
+        print(f"\x1b[2J\x1b[H\x1b[2m{banner}\x1b[0m", flush=True)
+        return subprocess.call(argv)
+
     def _run_shell(self, namespace: str, name: str, container: str | None) -> None:
         """Run kubectl exec; offer the kubectl debug fallback only if sh is missing."""
         argv = build_exec_argv(namespace, name, container)
+        target = f"{name}/{container}" if container else name
         with self.suspend():
-            exit_code = subprocess.call(argv)
+            exit_code = self._run_interactive(argv, f"korvid shell → {target} (exit to return)")
         self.refresh()
         if exit_code == 0:
             return
@@ -450,7 +470,6 @@ class KorvidApp(App[None]):
             if choice == self._DEBUG_YES:
                 self._run_debug(namespace, name, container)
 
-        target = f"{name}/{container}" if container else name
         self.push_screen(
             PickScreen(
                 f"Shell failed in {target} (exit {exit_code}) — the image likely has"
@@ -464,8 +483,9 @@ class KorvidApp(App[None]):
     def _run_debug(self, namespace: str, name: str, container: str | None) -> None:
         """Attach an ephemeral busybox container via kubectl debug."""
         argv = build_debug_argv(namespace, name, container)
+        target = f"{name}/{container}" if container else name
         with self.suspend():
-            exit_code = subprocess.call(argv)
+            exit_code = self._run_interactive(argv, f"korvid debug → {target} (exit to return)")
         self.refresh()
         if exit_code != 0:
             self.notify(

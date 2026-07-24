@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
@@ -314,21 +315,32 @@ class KubeClient:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 
     async def discover_resources(self) -> list[ResourceMeta]:
-        """Return every list+watch-able resource from /api/v1 and /apis."""
+        """Return every list+watch-able resource from /api/v1 and /apis.
+
+        Group version lists are fetched concurrently — sequential fetching adds
+        one RTT per API group and dominates startup on clusters with many CRDs.
+        """
         metas: list[ResourceMeta] = []
         core = await self._request_json("/api/v1")
         metas += _parse_resource_list(core, group="", version="v1")
         groups = await self._request_json("/apis")
+
+        async def _fetch(name: str, version: str) -> list[ResourceMeta]:
+            try:
+                rl = await self._request_json(f"/apis/{name}/{version}")
+            except ApiStatusError:
+                return []  # a broken aggregated API must not kill discovery
+            return _parse_resource_list(rl, group=name, version=version)
+
+        tasks = []
         for g in groups.get("groups", []):
             name = g.get("name")
             version = (g.get("preferredVersion") or {}).get("version")
             if not isinstance(name, str) or not isinstance(version, str) or not name or not version:
                 continue  # malformed group must not kill discovery
-            try:
-                rl = await self._request_json(f"/apis/{name}/{version}")
-            except ApiStatusError:
-                continue  # a broken aggregated API must not kill discovery
-            metas += _parse_resource_list(rl, group=name, version=version)
+            tasks.append(_fetch(name, version))
+        for group_metas in await asyncio.gather(*tasks):
+            metas += group_metas
         return metas
 
     async def close(self) -> None:

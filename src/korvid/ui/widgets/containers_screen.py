@@ -114,10 +114,8 @@ class ContainersScreen(ModalScreen[tuple[str, str] | None]):
         return str(ordered[row_index].key.value)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Enter on a container row defaults to logs (k9s convention)."""
+        """Enter is intentionally a no-op here — use ``l`` (logs) or ``s`` (shell)."""
         event.stop()
-        if event.row_key.value is not None:
-            self.dismiss(("logs", str(event.row_key.value)))
 
     def action_pick_logs(self) -> None:
         container = self._selected_container()
