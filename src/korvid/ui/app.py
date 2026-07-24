@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from collections.abc import Awaitable, Callable
 from typing import Any, ClassVar
 
@@ -25,6 +27,7 @@ from korvid.ui.messages import (
     ShowNamespacePicker,
     UnknownCommand,
 )
+from korvid.ui.shell import build_exec_argv
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
@@ -46,6 +49,7 @@ class KorvidApp(App[None]):
         ("slash", "open_filter", "Filter"),
         ("0", "toggle_all_namespaces", "All NS"),
         ("d", "describe", "Describe"),
+        ("s", "shell", "Shell"),
     ]
 
     def __init__(
@@ -236,6 +240,42 @@ class KorvidApp(App[None]):
 
     def on_unknown_command(self, message: UnknownCommand) -> None:
         self.notify(f"Unknown command: {message.text}", severity="warning")
+
+    def action_shell(self) -> None:
+        """Drop into a shell inside the selected pod via kubectl exec."""
+        if self.current_kind != "pods":
+            self.notify("Shell is only available for pods", severity="warning")
+            return
+
+        table = self.query_one(ResourceTable)
+        if table.row_count == 0:
+            self.notify("No resource selected", severity="warning")
+            return
+
+        row_index = table.cursor_row
+        ordered = table.ordered_rows
+        if row_index >= len(ordered):
+            self.notify("No resource selected", severity="warning")
+            return
+
+        row_key = str(ordered[row_index].key.value)  # "namespace/name"
+        parts = row_key.split("/", 1)
+        if len(parts) != 2:
+            self.notify("Cannot determine resource from selection", severity="warning")
+            return
+        namespace, name = parts[0], parts[1]
+
+        if shutil.which("kubectl") is None:
+            self.notify(
+                "kubectl not found on PATH — shell-in requires kubectl",
+                severity="error",
+            )
+            return
+
+        argv = build_exec_argv(namespace, name)
+        with self.suspend():
+            subprocess.call(argv)
+        self.refresh()
 
     def _refresh_status(self) -> None:
         label = "AI on" if self.config.agent_enabled else "AI off"
