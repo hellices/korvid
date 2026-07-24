@@ -15,14 +15,35 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
+from korvid.agent.provider import LLMProvider
+from korvid.agent.runtime import AgentRuntime
+from korvid.agent.tools import ToolExecutor
 from korvid.core.config import load_config
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.client import KubeClient, resolve_context_name
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+from korvid.providers.registry import create_provider
 from korvid.ui.app import KorvidApp
 
 logger = logging.getLogger(__name__)
+
+
+async def _shutdown(
+    discovery_task: asyncio.Task[None], provider: LLMProvider | None, kube: KubeClient
+) -> None:
+    """Tear down background work and owned clients; each step is attempted
+    even if an earlier one raises."""
+    try:
+        discovery_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await discovery_task
+    finally:
+        try:
+            if provider is not None:
+                await provider.aclose()
+        finally:
+            await kube.close()
 
 
 async def _discover_in_background(
@@ -76,6 +97,16 @@ async def _run() -> None:
         return await kube.list_events_for(namespace, name)
 
     watch_manager = WatchManager(store, source)
+
+    provider = create_provider(
+        enabled=config.agent_enabled,
+        provider=config.agent_provider,
+        base_url=config.agent_base_url,
+        model=config.agent_model,
+        api_key_env=config.agent_api_key_env,
+    )
+    agent_runtime = AgentRuntime(provider, ToolExecutor(kube, aliases)) if provider else None
+
     app = KorvidApp(
         config=config,
         store=store,
@@ -85,16 +116,15 @@ async def _run() -> None:
         get_manifest=get_manifest,
         get_events=get_events,
         stream_logs=kube.stream_logs,
+        agent_runtime=agent_runtime,
+        agent_model_name=config.agent_model,
     )
 
     discovery_task = asyncio.create_task(_discover_in_background(kube, aliases, app))
     try:
         await app.run_async()
     finally:
-        discovery_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await discovery_task
-        await kube.close()
+        await _shutdown(discovery_task, provider, kube)
 
 
 def main() -> None:

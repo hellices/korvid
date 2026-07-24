@@ -17,6 +17,9 @@ class KorvidConfig:
     namespace: str | None = None
     agent_enabled: bool = False
     agent_provider: str | None = None
+    agent_base_url: str | None = None
+    agent_model: str | None = None
+    agent_api_key_env: str | None = None
     keybindings: dict[str, str] = field(default_factory=dict)
     log_buffer_lines: int = 5000
 
@@ -36,6 +39,9 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         namespace=raw.get("namespace"),
         agent_enabled=enabled,
         agent_provider=provider,
+        agent_base_url=_opt_str(agent_raw.get("base_url")),
+        agent_model=_opt_str(agent_raw.get("model")),
+        agent_api_key_env=_opt_str(agent_raw.get("api_key_env")),
         keybindings=dict(raw.get("keybindings") or {}),
         log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
     )
@@ -50,3 +56,8 @@ def _parse_buffer_lines(value: Any) -> int:
     except (TypeError, ValueError):
         return 5000
     return lines if lines > 0 else 5000
+
+
+def _opt_str(value: Any) -> str | None:
+    """Coerce value to string or None if empty."""
+    return value if isinstance(value, str) and value else None

@@ -58,3 +58,25 @@ def test_log_buffer_lines_bool_falls_back(tmp_path: Path) -> None:
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text("log_buffer_lines: true\n")
     assert load_config(cfg_file).log_buffer_lines == 5000
+
+
+def test_agent_provider_settings_parsed(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "agent:\n  provider: openai-compat\n  base_url: http://localhost:11434/v1\n"
+        "  model: llama3\n  api_key_env: MY_KEY\n"
+    )
+    cfg = load_config(p)
+    assert cfg.agent_provider == "openai-compat"
+    assert cfg.agent_base_url == "http://localhost:11434/v1"
+    assert cfg.agent_model == "llama3"
+    assert cfg.agent_api_key_env == "MY_KEY"
+
+
+def test_agent_settings_default_none(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("namespace: default\n")
+    cfg = load_config(p)
+    assert cfg.agent_base_url is None
+    assert cfg.agent_model is None
+    assert cfg.agent_api_key_env is None

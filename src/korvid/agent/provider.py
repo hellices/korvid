@@ -1,7 +1,9 @@
 """LLMProvider ABC — the pluggable boundary (design doc §6.3, standards §3).
 
-Concrete adapters live in korvid/providers/ and register via the
-entry_points group "korvid.provider". No default provider is bundled.
+Concrete adapters live in korvid/providers/ and are selected by the
+config-driven factory in korvid.providers.registry. Entry-point based
+discovery ("korvid.provider" group) is planned for third-party adapters
+but not implemented yet.
 """
 
 from __future__ import annotations
@@ -32,3 +34,6 @@ class LLMProvider(ABC):
         Do NOT write a plain async function returning an iterator—that
         produces a coroutine and fails the override check.
         """
+
+    async def aclose(self) -> None:  # noqa: B027 - optional hook, no-op by default
+        """Release provider-owned resources (HTTP clients etc). Default: no-op."""
