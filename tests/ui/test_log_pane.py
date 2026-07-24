@@ -857,3 +857,101 @@ async def test_open_bounds_richlog_to_buffer_capacity() -> None:
         await pilot.pause(0.15)
         rich_log = app.query_one(LogPane).query_one(RichLog)
         assert rich_log.max_lines == 18  # buffer cap + banner headroom
+
+
+# ---------------------------------------------------------------------------
+# Accumulating pod logs with repeated ``l`` (max 4 pods)
+# ---------------------------------------------------------------------------
+
+
+async def test_l_on_second_pod_adds_side_by_side() -> None:
+    """l on pod A, then l on pod B shows both pods' panels."""
+    fake = FakeStream(lines_per_call=1)
+    app = make_app(
+        [_pod("app-a", containers=("main",)), _pod("app-b", containers=("main",))],
+        stream_logs=fake,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+        await pilot.press("down")
+        await pilot.press("l")
+        await pilot.pause(0.2)
+        panels = _panel_texts(app)
+        assert set(panels) == {"app-a/main", "app-b/main"}
+        assert "line0" in panels["app-a/main"]
+        assert "line0" in panels["app-b/main"]
+        assert _titles_visible(app) is True
+
+
+async def test_l_on_shown_pod_removes_it() -> None:
+    """l on a pod already in the pane removes only that pod's panels."""
+    fake = FakeStream(lines_per_call=1)
+    app = make_app(
+        [_pod("app-a", containers=("main",)), _pod("app-b", containers=("main",))],
+        stream_logs=fake,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+        await pilot.press("down")
+        await pilot.press("l")
+        await pilot.pause(0.2)
+        # Cursor still on app-b: pressing l again removes app-b only.
+        await pilot.press("l")
+        await pilot.pause(0.2)
+        panels = _panel_texts(app)
+        assert set(panels) == {"app-a/main"}
+        assert app.query_one(LogPane).display is True
+
+
+async def test_l_removing_last_pod_closes_pane() -> None:
+    """l on the only shown pod closes the pane (toggle parity)."""
+    fake = FakeStream(lines_per_call=1)
+    app = make_app([_pod("app-a", containers=("main",))], stream_logs=fake)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+        await pilot.press("l")
+        await pilot.pause(0.2)
+        assert app.query_one(LogPane).display is False
+        assert not app._log_tasks
+
+
+async def test_l_caps_accumulation_at_4_pods() -> None:
+    """A fifth pod is rejected with a warning; the four stay open."""
+    fake = FakeStream(lines_per_call=1)
+    pods = [_pod(f"app-{i}", containers=("main",)) for i in range(5)]
+    app = make_app(pods, stream_logs=fake)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.1)
+        for _ in range(4):
+            await pilot.press("down")
+            await pilot.press("l")
+            await pilot.pause(0.15)
+        panels = _panel_texts(app)
+        assert len(panels) == 4
+        msgs = [n.message for n in app._notifications]
+        assert any("4" in m for m in msgs)
+
+
+async def test_l_in_multi_stream_mode_closes_pane() -> None:
+    """After L (multi-stream), l does not accumulate — it closes the pane."""
+    fake = FakeStream(lines_per_call=1)
+    app = make_app(
+        [_pod("app-a", containers=("main",)), _pod("app-b", containers=("main",))],
+        stream_logs=fake,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("shift+l")
+        await pilot.pause(0.2)
+        assert app.query_one(LogPane).display is True
+        await pilot.press("l")
+        await pilot.pause(0.2)
+        assert app.query_one(LogPane).display is False

@@ -31,6 +31,25 @@ def _path_segment(value: str) -> str:
 _DNS1123_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
 
 
+def resolve_context_name(context: str | None = None, config_file: str | None = None) -> str | None:
+    """Return the effective kubeconfig context name, or None if unresolvable.
+
+    Used to pin kubectl subprocesses (shell/debug) with ``--context`` so a
+    ``kubectl config use-context`` in another terminal cannot retarget them
+    at a different cluster mid-session (k9s parity).
+    """
+    if context:
+        return context
+    try:
+        _, active = k8s_config.list_kube_config_contexts(config_file=config_file)
+    except Exception:
+        return None
+    if not active:
+        return None
+    name = active.get("name")
+    return str(name) if name else None
+
+
 class KubeClient:
     """Thin wrapper over kubernetes_asyncio; returns typed summaries."""
 

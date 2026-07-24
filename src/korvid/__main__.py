@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -17,7 +18,7 @@ from typing import Any
 from korvid.core.config import load_config
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
-from korvid.k8s.client import KubeClient
+from korvid.k8s.client import KubeClient, resolve_context_name
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.ui.app import KorvidApp
 
@@ -39,6 +40,11 @@ async def _discover_in_background(
 
 async def _run() -> None:
     config = load_config()
+    # Pin the actual context name so kubectl subprocesses (shell/debug) and the
+    # status bar reference this cluster even if current-context changes later.
+    resolved_ctx = resolve_context_name(config.kube_context)
+    if resolved_ctx != config.kube_context:
+        config = dataclasses.replace(config, kube_context=resolved_ctx)
     kube = KubeClient()
     await kube.connect(config.kube_context)
     store = ResourceStore()

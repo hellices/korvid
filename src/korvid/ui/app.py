@@ -40,7 +40,7 @@ from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
-from korvid.ui.widgets.log_pane import LogPane
+from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.pick_screen import PickScreen
@@ -56,6 +56,9 @@ _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
 logger = logging.getLogger(__name__)
 
 _MAX_MULTI_STREAM_PODS = 8
+# ``l`` accumulates side-by-side pod logs; beyond 4 pods each panel gets too
+# small to read — comparing >4 replicas is what ``L`` (multi-stream) is for.
+_MAX_LOG_PODS = 4
 _MAX_RECONNECT_ATTEMPTS = 5
 
 
@@ -122,10 +125,11 @@ class KorvidApp(App[None]):
         self._log_error: bool = False
         self._current_log_triples: list[tuple[str, str, str]] = []
         self._current_log_force_prefix: bool = False
+        self._log_pane_mode: str = ""
         self._reconnect_sleep: float = 1.0
         self._ns_prefetch_task: asyncio.Task[None] | None = None
         self._splash_shown_at: float = monotonic()
-        self._log_buffer_max_lines: int = 5000
+        self._log_buffer_max_lines: int = config.log_buffer_lines
 
     @property
     def current_namespace(self) -> str:
@@ -471,7 +475,7 @@ class KorvidApp(App[None]):
 
     def _run_shell(self, namespace: str, name: str, container: str | None) -> None:
         """Run kubectl exec; offer the kubectl debug fallback only if sh is missing."""
-        argv = build_exec_argv(namespace, name, container)
+        argv = build_exec_argv(namespace, name, container, context=self.config.kube_context)
         target = f"{name}/{container}" if container else name
         with self.suspend():
             exit_code = self._run_interactive(argv, f"korvid shell → {target} (exit to return)")
@@ -484,7 +488,7 @@ class KorvidApp(App[None]):
         # Probe non-interactively: if sh runs fine, the shell session was real.
         try:
             probe = subprocess.run(
-                build_probe_argv(namespace, name, container),
+                build_probe_argv(namespace, name, container, context=self.config.kube_context),
                 capture_output=True,
                 timeout=10,
             )
@@ -510,7 +514,7 @@ class KorvidApp(App[None]):
 
     def _run_debug(self, namespace: str, name: str, container: str | None) -> None:
         """Attach an ephemeral busybox container via kubectl debug."""
-        argv = build_debug_argv(namespace, name, container)
+        argv = build_debug_argv(namespace, name, container, context=self.config.kube_context)
         target = f"{name}/{container}" if container else name
         with self.suspend():
             exit_code = self._run_interactive(argv, f"korvid debug → {target} (exit to return)")
@@ -536,13 +540,21 @@ class KorvidApp(App[None]):
                 event.stop()
 
     async def action_logs(self) -> None:
-        """Open or close the log pane for the selected pod (``l`` binding)."""
+        """Open logs for the selected pod, or toggle it in/out of the pane (``l``).
+
+        With the pane already open in live mode, ``l`` on another pod adds its
+        containers side-by-side (max ``_MAX_LOG_PODS`` pods); ``l`` on a pod
+        already shown removes it (closing the pane when it was the last one).
+        Adding/removing reopens the streams, so panels restart at the last
+        ~200 tailed lines.
+        """
         if self.current_kind != "pods":
             self.notify("Logs are only available for pods", severity="warning")
             return
 
         log_pane = self.query_one(LogPane)
-        if log_pane.display:
+        if log_pane.display and self._log_pane_mode != "l":
+            # L (multi-stream) and p (previous) modes don't accumulate.
             await self._close_log_pane()
             return
 
@@ -554,11 +566,52 @@ class KorvidApp(App[None]):
         if ns is None or name is None:
             return
 
-        containers = self._get_pod_containers(ns, name)
-        sources: list[tuple[str, str]] = (
-            [(name, ctr) for ctr in containers] if containers else [(name, "")]
-        )
-        await self._open_log_pane(ns, sources)
+        if log_pane.display:
+            await self._toggle_log_pod(ns, name)
+            return
+
+        self._log_pane_mode = "l"
+        triples = self._pod_triples(ns, name)
+        await self._open_log_pane(ns, [(pod, ctr) for _, pod, ctr in triples], triples=triples)
+
+    def _pod_triples(self, namespace: str, name: str) -> list[tuple[str, str, str]]:
+        """Return (ns, pod, container) triples for one pod (one per container)."""
+        containers = self._get_pod_containers(namespace, name)
+        if containers:
+            return [(namespace, name, ctr) for ctr in containers]
+        return [(namespace, name, "")]
+
+    async def _toggle_log_pod(self, namespace: str, name: str) -> None:
+        """Add or remove *namespace/name* from the accumulated live-log panels."""
+        existing = list(self._current_log_triples)
+        pods: list[tuple[str, str]] = []
+        for t_ns, t_pod, _ in existing:
+            if (t_ns, t_pod) not in pods:
+                pods.append((t_ns, t_pod))
+
+        if (namespace, name) in pods:
+            triples = [t for t in existing if (t[0], t[1]) != (namespace, name)]
+            if not triples:
+                await self._close_log_pane()
+                return
+        else:
+            if len(pods) >= _MAX_LOG_PODS:
+                self.notify(
+                    f"Log pane caps at {_MAX_LOG_PODS} pods — Esc closes all",
+                    severity="warning",
+                )
+                return
+            triples = existing + self._pod_triples(namespace, name)
+            if len(triples) > MAX_PANELS:
+                self.notify(
+                    f"Panel cap is {MAX_PANELS} containers — cannot add {name}",
+                    severity="warning",
+                )
+                return
+
+        await self._cancel_log_tasks()
+        sources = [(pod, ctr) for _, pod, ctr in triples]
+        await self._open_log_pane(triples[0][0], sources, triples=triples)
 
     async def action_logs_multi(self) -> None:
         """Stream all filtered pods' containers (``L`` binding); cap at 8."""
@@ -583,6 +636,7 @@ class KorvidApp(App[None]):
         if self.query_one(LogPane).display:
             await self._close_log_pane()
 
+        self._log_pane_mode = "L"
         ns0 = triples[0][0]
         await self._open_log_pane(
             ns0, [(pod, ctr) for _, pod, ctr in triples], triples=triples, force_prefix=True
@@ -815,8 +869,8 @@ class KorvidApp(App[None]):
         if not was_full and self._log_buffer.overflowed:
             log_pane.show_overflow_banner()
 
-    async def _close_log_pane(self) -> None:
-        """Cancel all stream tasks and hide the log pane."""
+    async def _cancel_log_tasks(self) -> None:
+        """Cancel and await stream tasks without hiding the pane (reopen path)."""
         tasks = list(self._log_tasks)
         for task in tasks:
             task.cancel()
@@ -825,8 +879,13 @@ class KorvidApp(App[None]):
         self._log_tasks.clear()
         self._log_buffer = None
         self._log_error = False
+
+    async def _close_log_pane(self) -> None:
+        """Cancel all stream tasks and hide the log pane."""
+        await self._cancel_log_tasks()
         self._current_log_triples = []
         self._current_log_force_prefix = False
+        self._log_pane_mode = ""
         with contextlib.suppress(Exception):
             self.query_one(LogPane).close()
 
@@ -858,14 +917,8 @@ class KorvidApp(App[None]):
         force_prefix = self._current_log_force_prefix
         sources = [(pod, ctr) for _, pod, ctr in triples]
         # Cancel live tasks without hiding the pane.
-        tasks = list(self._log_tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._log_tasks.clear()
-        self._log_buffer = None
-        self._log_error = False
+        await self._cancel_log_tasks()
+        self._log_pane_mode = "p"
         # Re-open with previous=True (clears RichLog, writes banner, spawns tasks).
         ns0 = triples[0][0]
         await self._open_log_pane(

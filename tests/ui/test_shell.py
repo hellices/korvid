@@ -66,6 +66,37 @@ def test_build_exec_argv_container_none_omits_flag() -> None:
     assert result[double_dash_idx - 1] == "pod"
 
 
+def test_argv_builders_pin_context_when_given() -> None:
+    for builder in (build_exec_argv, build_probe_argv, build_debug_argv):
+        argv = builder("ns", "pod", "ctr", context="my-cluster")
+        idx = argv.index("--context")
+        assert argv[idx + 1] == "my-cluster"
+        # --context must precede `--` so kubectl parses it as its own flag.
+        assert idx < argv.index("--")
+
+
+def test_argv_builders_omit_context_when_none() -> None:
+    for builder in (build_exec_argv, build_probe_argv, build_debug_argv):
+        assert "--context" not in builder("ns", "pod", "ctr", context=None)
+
+
+async def test_shell_uses_config_context() -> None:
+    """s must invoke kubectl exec pinned to the app's kubeconfig context."""
+    app = make_app([_pod("api-1")], kube_context="pinned-ctx")
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=0) as mock_call,
+        patch.object(type(app), "suspend", return_value=_noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.1)
+            argv = mock_call.call_args[0][0]
+            idx = argv.index("--context")
+            assert argv[idx + 1] == "pinned-ctx"
+
+
 # ---------------------------------------------------------------------------
 # Pilot tests: action_shell integration
 # ---------------------------------------------------------------------------
@@ -102,6 +133,7 @@ def make_app(
     pods: list[PodSummary],
     *,
     extra_data: dict[str, list[Summary]] | None = None,
+    kube_context: str | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -115,7 +147,7 @@ def make_app(
             await asyncio.sleep(0.01)
 
     return KorvidApp(
-        config=KorvidConfig(namespace="default"),
+        config=KorvidConfig(namespace="default", kube_context=kube_context),
         store=store,
         watch_manager=WatchManager(store, source),
         aliases=dict(_TEST_ALIASES),

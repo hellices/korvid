@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -484,3 +485,43 @@ async def test_list_events_for_rejects_invalid_name() -> None:
 
     assert events == []
     fake_v1.list_namespaced_event.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# resolve_context_name — pins kubectl subprocesses to the session's context
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_context_name_prefers_explicit() -> None:
+    from korvid.k8s.client import resolve_context_name
+
+    assert resolve_context_name("explicit-ctx") == "explicit-ctx"
+
+
+def test_resolve_context_name_reads_current_context(tmp_path: Path) -> None:
+    from korvid.k8s.client import resolve_context_name
+
+    kubeconfig = tmp_path / "config"
+    kubeconfig.write_text(
+        """
+apiVersion: v1
+kind: Config
+current-context: ctx-a
+clusters:
+- name: cluster-a
+  cluster: {server: "https://a.example"}
+contexts:
+- name: ctx-a
+  context: {cluster: cluster-a, user: user-a}
+users:
+- name: user-a
+  user: {}
+"""
+    )
+    assert resolve_context_name(None, config_file=str(kubeconfig)) == "ctx-a"
+
+
+def test_resolve_context_name_unresolvable_returns_none(tmp_path: Path) -> None:
+    from korvid.k8s.client import resolve_context_name
+
+    assert resolve_context_name(None, config_file=str(tmp_path / "missing")) is None

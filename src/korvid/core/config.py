@@ -18,6 +18,7 @@ class KorvidConfig:
     agent_enabled: bool = False
     agent_provider: str | None = None
     keybindings: dict[str, str] = field(default_factory=dict)
+    log_buffer_lines: int = 5000
 
 
 def load_config(path: Path | None = None) -> KorvidConfig:
@@ -36,4 +37,14 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_enabled=enabled,
         agent_provider=provider,
         keybindings=dict(raw.get("keybindings") or {}),
+        log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
     )
+
+
+def _parse_buffer_lines(value: Any) -> int:
+    """Coerce log_buffer_lines to a sane positive int; fall back to 5000."""
+    try:
+        lines = int(value)
+    except (TypeError, ValueError):
+        return 5000
+    return lines if lines > 0 else 5000
