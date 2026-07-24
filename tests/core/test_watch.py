@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Callable
 
-from korvid.core.store import ResourceStore
+from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
@@ -15,8 +15,8 @@ def _pod(name: str) -> PodSummary:
 
 def make_source(
     events: list[tuple[str, PodSummary]], forever: bool = True
-) -> Callable[[str], AsyncIterator[tuple[str, PodSummary]]]:
-    async def source(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+) -> Callable[[str, str], AsyncIterator[tuple[str, Summary]]]:
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         for ev in events:
             yield ev
         while forever:  # simulate an open stream
@@ -58,7 +58,7 @@ async def test_stream_end_reconnects() -> None:
     store = ResourceStore()
     calls = 0
 
-    async def flaky(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+    async def flaky(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         nonlocal calls
         calls += 1
         yield ("ADDED", _pod(f"p{calls}"))
@@ -75,7 +75,7 @@ async def test_failing_watch_reports_and_removes_task() -> None:
     store = ResourceStore()
     errors: list[str] = []
 
-    async def broken(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+    async def broken(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         raise RuntimeError("boom")
         yield ("", _pod(""))  # pragma: no cover - makes this an async generator
 
@@ -103,7 +103,7 @@ async def test_normal_stream_end_resets_failure_streak() -> None:
     calls = 0
     done = asyncio.Event()
 
-    async def source(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         nonlocal calls
         calls += 1
         if calls <= 2:
@@ -144,7 +144,7 @@ async def test_event_resets_failure_streak() -> None:
     calls = 0
     done = asyncio.Event()
 
-    async def source(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -174,7 +174,7 @@ async def test_api_status_error_uses_explain_message() -> None:
     store = ResourceStore()
     errors: list[str] = []
 
-    async def source(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         raise ApiStatusError(403, "Forbidden")
         yield  # pragma: no cover
 
@@ -188,10 +188,10 @@ async def test_api_status_error_uses_explain_message() -> None:
 
 
 async def test_start_clears_stale_store_data() -> None:
-    """Re-starting a watch for a (kind, ns) must purge stale data from the previous session."""
+    """Re-starting a watch for a (kind, scope) must purge stale data from the previous session."""
     store = ResourceStore()
     # Simulate stale data left from a previous watch session
-    store.apply_event("pods", "ADDED", _pod("stale"))
+    store.apply_event("pods", "default", "ADDED", _pod("stale"))
     assert [p.name for p in store.get("pods", "default")] == ["stale"]
 
     mgr = WatchManager(store, make_source([("ADDED", _pod("fresh"))]))
@@ -217,7 +217,7 @@ async def test_reconnect_relist_drops_stale_pods() -> None:
     calls = 0
     reconnected = asyncio.Event()
 
-    async def source(namespace: str) -> AsyncIterator[tuple[str, PodSummary]]:
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -234,4 +234,37 @@ async def test_reconnect_relist_drops_stale_pods() -> None:
     await asyncio.wait_for(reconnected.wait(), timeout=2.0)
     await asyncio.sleep(0.02)
     assert [p.name for p in store.get("pods", "default")] == ["a"]  # b must be gone
+    await mgr.stop_all()
+
+
+# ---------------------------------------------------------------------------
+# New: source invoked with (kind, scope); independent watches per (kind, scope)
+# ---------------------------------------------------------------------------
+
+
+async def test_source_invoked_with_kind_and_scope() -> None:
+    """WatchManager passes (kind, scope) to the source, not just scope."""
+    store = ResourceStore()
+    received: list[tuple[str, str]] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        received.append((kind, scope))
+        yield ("ADDED", _pod("a"))
+
+    mgr = WatchManager(store, source, retry_delay=0.01)
+    await mgr.start("pods", "default")
+    await asyncio.sleep(0.05)
+    assert received[0] == ("pods", "default")
+    await mgr.stop_all()
+
+
+async def test_same_kind_different_scope_independent_watches() -> None:
+    """(pods, default) and (pods, *) are independent watches, both tracked in active."""
+    store = ResourceStore()
+    mgr = WatchManager(store, make_source([]))
+    await mgr.start("pods", "default")
+    await mgr.start("pods", "*")
+    assert len(mgr.active) == 2
+    assert ("pods", "default") in mgr.active
+    assert ("pods", "*") in mgr.active
     await mgr.stop_all()

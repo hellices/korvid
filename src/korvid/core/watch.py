@@ -1,4 +1,4 @@
-"""Selective watch: one task per (kind, namespace) actually on screen (§5-6).
+"""Selective watch: one task per (kind, scope) actually on screen (§5-6).
 
 Streams that end normally (k8s API servers close watches periodically)
 reconnect forever. Streams that raise retry up to max_retries consecutive
@@ -14,13 +14,12 @@ import logging
 from collections.abc import AsyncIterator, Callable
 
 from korvid.core.errors import explain_api_error
-from korvid.core.store import ResourceStore
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.k8s.errors import ApiStatusError
-from korvid.k8s.models import PodSummary
 
 logger = logging.getLogger(__name__)
 
-WatchSource = Callable[[str], AsyncIterator[tuple[str, PodSummary]]]
+WatchSource = Callable[[str, str], AsyncIterator[tuple[str, Summary]]]
 
 
 class WatchManager:
@@ -44,25 +43,25 @@ class WatchManager:
     def active(self) -> set[tuple[str, str]]:
         return set(self._tasks)
 
-    async def start(self, kind: str, namespace: str) -> None:
-        key = (kind, namespace)
+    async def start(self, kind: str, scope: str) -> None:
+        key = (kind, scope)
         if key in self._tasks:
             return
-        self._store.clear(kind, namespace)
-        self._tasks[key] = asyncio.create_task(self._run(kind, namespace))
+        self._store.clear(kind, scope)
+        self._tasks[key] = asyncio.create_task(self._run(kind, scope))
 
-    async def stop(self, kind: str, namespace: str) -> None:
-        task = self._tasks.pop((kind, namespace), None)
+    async def stop(self, kind: str, scope: str) -> None:
+        task = self._tasks.pop((kind, scope), None)
         if task is not None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
     async def stop_all(self) -> None:
-        for kind, namespace in list(self._tasks):
-            await self.stop(kind, namespace)
+        for kind, scope in list(self._tasks):
+            await self.stop(kind, scope)
 
-    async def _run(self, kind: str, namespace: str) -> None:
+    async def _run(self, kind: str, scope: str) -> None:
         failures = 0
         first_connection = True
         while True:
@@ -70,14 +69,14 @@ class WatchManager:
                 # Reconnect = fresh re-LIST by the source. Purge the store first:
                 # pods deleted during the outage never get a DELETED event and
                 # would otherwise linger forever. The re-LIST re-seeds immediately.
-                self._store.clear(kind, namespace)
+                self._store.clear(kind, scope)
             first_connection = False
             try:
-                async for event_type, obj in self._source(namespace):
+                async for event_type, obj in self._source(kind, scope):
                     # A connection that delivers events is healthy — reset the
                     # failure streak so hours-long streams don't inherit old failures.
                     failures = 0
-                    self._store.apply_event(kind, event_type, obj)
+                    self._store.apply_event(kind, scope, event_type, obj)
                 # Stream ended normally (server-side watch timeout) -> reconnect.
                 failures = 0
             except asyncio.CancelledError:
@@ -87,17 +86,18 @@ class WatchManager:
                 logger.exception(
                     "watch %s/%s attempt %d/%d failed",
                     kind,
-                    namespace,
+                    scope,
                     failures,
                     self._max_retries,
                 )
                 if failures >= self._max_retries:
                     if self.on_error is not None:
+                        ns_for_explain = None if scope == ALL_NAMESPACES else scope
                         if isinstance(exc, ApiStatusError):
-                            msg = explain_api_error(exc.status, exc.reason, kind, namespace)
+                            msg = explain_api_error(exc.status, exc.reason, kind, ns_for_explain)
                         else:
-                            msg = f"watch {kind}/{namespace} failed: {exc}"
+                            msg = f"watch {kind}/{scope} failed: {exc}"
                         self.on_error(msg)
                     break
             await asyncio.sleep(self._retry_delay)
-        self._tasks.pop((kind, namespace), None)
+        self._tasks.pop((kind, scope), None)

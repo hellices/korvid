@@ -30,3 +30,31 @@ def test_explicit_agent_off_wins(tmp_path: Path) -> None:
     f.write_text("agent:\n  provider: anthropic\n  enabled: false\n")
     cfg = load_config(f)
     assert cfg.agent_enabled is False  # explicit off switch (design doc §6.3-4)
+
+
+# ---------------------------------------------------------------------------
+# log_buffer_lines
+# ---------------------------------------------------------------------------
+
+
+def test_log_buffer_lines_default_is_5000() -> None:
+    assert KorvidConfig().log_buffer_lines == 5000
+
+
+def test_log_buffer_lines_from_yaml(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("log_buffer_lines: 20000\n")
+    assert load_config(cfg_file).log_buffer_lines == 20000
+
+
+def test_log_buffer_lines_invalid_falls_back(tmp_path: Path) -> None:
+    for bad in ("log_buffer_lines: banana\n", "log_buffer_lines: -3\n", "log_buffer_lines: 0\n"):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(bad)
+        assert load_config(cfg_file).log_buffer_lines == 5000
+
+
+def test_log_buffer_lines_bool_falls_back(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("log_buffer_lines: true\n")
+    assert load_config(cfg_file).log_buffer_lines == 5000
