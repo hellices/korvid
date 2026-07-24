@@ -12,6 +12,7 @@ import os
 
 from korvid.agent.provider import LLMProvider
 from korvid.providers.openai_compat import OpenAICompatProvider
+from korvid.providers.static_creds import StaticHeaderSource
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +51,16 @@ def create_provider(
         logger.warning("agent provider %r missing base_url/model — agent disabled", name)
         return None
     api_key = os.environ.get(api_key_env) if api_key_env else None
+    credentials = None
+    if api_key:
+        # Azure OpenAI authenticates with a raw key in the "api-key" header
+        # instead of a Bearer Authorization header.
+        if name == "azure":
+            credentials = StaticHeaderSource(api_key, header="api-key", prefix="")
+        else:
+            credentials = StaticHeaderSource(api_key)
     return OpenAICompatProvider(
         base_url=base_url,
         model=model,
-        api_key=api_key,
-        # Azure OpenAI authenticates with a raw key in the "api-key" header
-        # instead of a Bearer Authorization header.
-        auth_header="api-key" if name == "azure" else "Authorization",
+        credentials=credentials,
     )
