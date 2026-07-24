@@ -65,6 +65,7 @@ async def _run() -> None:
         aliases=aliases,
         get_manifest=get_manifest,
         get_events=get_events,
+        stream_logs=kube.stream_logs,
     )
     try:
         await app.run_async()
