@@ -50,7 +50,9 @@ async def _run() -> None:
             raise ValueError(f"Unknown resource kind: {kind!r}")
 
     async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
-        meta = aliases.get(kind, PODS_META)
+        meta = aliases.get(kind)
+        if meta is None:
+            raise ValueError(f"Unknown resource kind: {kind!r}")
         return await kube.get_object(meta, namespace, name)
 
     async def get_events(namespace: str, name: str) -> list[dict[str, Any]]:

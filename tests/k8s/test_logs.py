@@ -225,3 +225,22 @@ async def test_stream_logs_closes_response_on_mid_stream_error() -> None:
         async for _ in client.stream_logs("ns", "pod", "c"):
             pass
     assert resp.closed
+
+
+async def test_stream_logs_empty_container_omits_kwarg() -> None:
+    """An empty container name is omitted so single-container pods use the API default."""
+    client = KubeClient()
+    fake_v1 = AsyncMock()
+    fake_v1.read_namespaced_pod_log.return_value = _FakeResp([])
+    with patch.object(client, "_core_v1", fake_v1):
+        async for _ in client.stream_logs("ns", "mypod", ""):
+            pass
+
+    fake_v1.read_namespaced_pod_log.assert_awaited_once_with(
+        name="mypod",
+        namespace="ns",
+        follow=True,
+        previous=False,
+        tail_lines=200,
+        _preload_content=False,
+    )

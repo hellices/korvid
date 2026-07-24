@@ -428,3 +428,59 @@ async def test_watch_objects_mid_stream_api_exception_raises_api_status_error() 
     ):
         async for _ in client.watch_objects(meta, "default"):
             pass
+
+
+# ---------------------------------------------------------------------------
+# Path encoding & fieldSelector validation (review hardening)
+# ---------------------------------------------------------------------------
+
+
+async def test_watch_objects_encodes_namespace_in_list_path() -> None:
+    """A namespace with path metacharacters must be percent-encoded, not interpolated raw."""
+    client = KubeClient()
+    meta = _deploy_meta()
+    list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "1"}, "items": []}
+    request_json_mock = AsyncMock(return_value=list_resp)
+    fake_watch = _FakeWatch([])
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        async for _ in client.watch_objects(meta, "bad/ns?watch=true"):
+            pass
+
+    called_path: str = request_json_mock.call_args[0][0]
+    assert "bad/ns" not in called_path
+    assert "bad%2Fns%3Fwatch%3Dtrue" in called_path
+
+
+async def test_get_object_encodes_namespace_and_name() -> None:
+    """Namespace and name segments are percent-encoded in the GET path."""
+    client = KubeClient()
+    meta = _deploy_meta()
+    request_json_mock = AsyncMock(return_value={"kind": "Deployment"})
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+    ):
+        await client.get_object(meta, "team/a", "dep#1")
+
+    called_path: str = request_json_mock.call_args[0][0]
+    assert "team%2Fa" in called_path
+    assert "dep%231" in called_path
+    assert "team/a" not in called_path
+
+
+async def test_list_events_for_rejects_invalid_name() -> None:
+    """A name failing DNS-1123 validation short-circuits to [] (no fieldSelector injection)."""
+    client = KubeClient()
+    fake_v1 = AsyncMock()
+
+    with patch.object(client, "_core_v1", fake_v1):
+        events = await client.list_events_for("default", "pod,involvedObject.kind=Secret")
+
+    assert events == []
+    fake_v1.list_namespaced_event.assert_not_awaited()

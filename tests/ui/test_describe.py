@@ -320,3 +320,23 @@ async def test_describe_body_renders_bracketed_text_literally() -> None:
         assert isinstance(app.screen, DescribeScreen)
         content = str(app.screen.query_one("#describe-body").render())
         assert "[red]not-a-style[/red]" in content
+
+
+async def test_describe_unknown_kind_notifies_error() -> None:
+    """get_manifest raising ValueError (unknown kind) surfaces a notification, no crash."""
+    from korvid.ui.widgets.describe_screen import DescribeScreen
+
+    async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        raise ValueError(f"Unknown resource kind: {kind!r}")
+
+    async def get_events(namespace: str, name: str) -> list[dict[str, Any]]:
+        return []
+
+    app = make_describe_app([_pod("my-pod")], get_manifest=get_manifest, get_events=get_events)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.2)
+        await pilot.press("d")
+        await pilot.pause(0.2)
+        assert not isinstance(app.screen, DescribeScreen)
+        notifications = [n.message for n in app._notifications]
+        assert any("Unknown resource kind" in m for m in notifications)

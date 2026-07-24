@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from typing import Any
+from urllib.parse import quote
 
 from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio import config as k8s_config
@@ -14,6 +16,18 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
+
+
+def _path_segment(value: str) -> str:
+    """Percent-encode *value* for safe use as a single URL path segment.
+
+    Namespaces arrive from user input (command bar); encoding prevents
+    ``/`` or ``..`` from altering the request path.
+    """
+    return quote(value, safe="")
+
+
+_DNS1123_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
 
 
 class KubeClient:
@@ -137,7 +151,7 @@ class KubeClient:
         # LIST phase --------------------------------------------------------
         # Cluster-scoped kinds have no namespaced path regardless of scope.
         if namespace is not None and meta.namespaced:
-            list_path = f"{meta.api_base}/namespaces/{namespace}/{meta.plural}"
+            list_path = f"{meta.api_base}/namespaces/{_path_segment(namespace)}/{meta.plural}"
         else:
             list_path = f"{meta.api_base}/{meta.plural}"
 
@@ -170,9 +184,12 @@ class KubeClient:
     ) -> dict[str, Any]:
         """Fetch the raw manifest for a single object. ApiException → ApiStatusError."""
         if meta.namespaced and namespace is not None:
-            path = f"{meta.api_base}/namespaces/{namespace}/{meta.plural}/{name}"
+            path = (
+                f"{meta.api_base}/namespaces/{_path_segment(namespace)}"
+                f"/{meta.plural}/{_path_segment(name)}"
+            )
         else:
-            path = f"{meta.api_base}/{meta.plural}/{name}"
+            path = f"{meta.api_base}/{meta.plural}/{_path_segment(name)}"
         return await self._request_json(path)
 
     async def stream_logs(
@@ -188,22 +205,27 @@ class KubeClient:
         """Stream log lines from a pod container; yields LogLine one per line.
 
         previous=True forces follow=False (terminated containers can't be followed).
+        An empty ``container`` omits the parameter (single-container pods).
         ApiException is wrapped as ApiStatusError both at call time and mid-stream.
         """
         if self._core_v1 is None:
             raise RuntimeError("connect() first")
         if previous:
             follow = False
+        kwargs: dict[str, Any] = {
+            "name": pod,
+            "namespace": namespace,
+            "follow": follow,
+            "previous": previous,
+            "tail_lines": tail_lines,
+            "_preload_content": False,
+        }
+        # An empty container name would 400 on multi-container pods; omitting
+        # it lets the API server pick the default for single-container pods.
+        if container:
+            kwargs["container"] = container
         try:
-            resp: Any = await self._core_v1.read_namespaced_pod_log(
-                name=pod,
-                namespace=namespace,
-                container=container,
-                follow=follow,
-                previous=previous,
-                tail_lines=tail_lines,
-                _preload_content=False,
-            )
+            resp: Any = await self._core_v1.read_namespaced_pod_log(**kwargs)
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
         try:
@@ -223,6 +245,10 @@ class KubeClient:
         """Return core v1 Events where involvedObject.name == name."""
         if self._core_v1 is None:
             raise RuntimeError("connect() first")
+        # fieldSelector has no escaping mechanism; a name with "," would
+        # inject extra selectors. Valid k8s names can't fail this check.
+        if not _DNS1123_NAME.match(name):
+            return []
         try:
             resp = await self._core_v1.list_namespaced_event(
                 namespace,

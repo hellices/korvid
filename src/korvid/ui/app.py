@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import shutil
 import subprocess
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -47,6 +48,8 @@ _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
     "po": PODS_META,
     "pod": PODS_META,
 }
+
+logger = logging.getLogger(__name__)
 
 _MAX_MULTI_STREAM_PODS = 8
 _MAX_RECONNECT_ATTEMPTS = 5
@@ -264,6 +267,9 @@ class KorvidApp(App[None]):
             msg = explain_api_error(exc.status, exc.reason, self.current_kind, namespace or None)
             self.notify(msg, severity="error")
             return
+        except ValueError as exc:
+            self.notify(str(exc), severity="error")
+            return
 
         events: list[dict[str, Any]] = []
         # Events are filtered by involvedObject.name only, so restrict to pods
@@ -459,6 +465,10 @@ class KorvidApp(App[None]):
 
         log_pane.set_state("streaming")
 
+        # Defensive: callers cancel+gather before re-opening, but never let a
+        # stale task survive the set replacement below.
+        for stale in self._log_tasks:
+            stale.cancel()
         self._log_tasks = set()
         self._log_error = False
 
@@ -512,7 +522,11 @@ class KorvidApp(App[None]):
             except asyncio.CancelledError:
                 raise
             except Exception:
-                pass  # transient; fall through to reconnect logic
+                # Transient (network hiccup, rotation EOF); logged so
+                # programming bugs aren't silently disguised as reconnects.
+                logger.debug(
+                    "log stream for %s/%s failed; will reconnect", pod, container, exc_info=True
+                )
 
             if not log_pane.display:
                 # Pane was closed while the stream was suspended; exit quietly.
