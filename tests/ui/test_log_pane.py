@@ -1025,6 +1025,52 @@ async def test_reconnect_drops_replayed_tail_lines() -> None:
         assert "three" in text
 
 
+class SameTimestampReconnectStream:
+    """All lines share one (microsecond-truncated) timestamp.  First call
+    yields 2 lines then errors; the reconnect replays both and follows with a
+    *new* line stamped identically — it must not be dropped."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncGenerator[LogLine, None]:
+        ts = datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC)
+        self.calls += 1
+        if self.calls == 1:
+            yield LogLine(pod=pod, container=container, text="one", timestamp=ts)
+            yield LogLine(pod=pod, container=container, text="two", timestamp=ts)
+            raise RuntimeError("connection reset")
+        yield LogLine(pod=pod, container=container, text="one", timestamp=ts)
+        yield LogLine(pod=pod, container=container, text="two", timestamp=ts)
+        yield LogLine(pod=pod, container=container, text="three", timestamp=ts)
+        await asyncio.Event().wait()
+
+
+async def test_reconnect_keeps_new_line_with_equal_timestamp() -> None:
+    """A new line sharing the last displayed timestamp survives a reconnect."""
+    fake = SameTimestampReconnectStream()
+    app = make_app([_pod("app-a", containers=("main",))], stream_logs=fake)
+    app._reconnect_sleep = 0.0
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.4)
+        text = _richlog_text(app)
+        assert fake.calls == 2
+        assert text.count("one") == 1
+        assert text.count("two") == 1
+        assert text.count("three") == 1
+
+
 # ---------------------------------------------------------------------------
 # Copilot review: never spawn more streams than the pane has panels
 # ---------------------------------------------------------------------------

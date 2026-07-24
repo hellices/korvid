@@ -63,13 +63,49 @@ _MAX_LOG_PODS = 4
 _MAX_RECONNECT_ATTEMPTS = 5
 
 
-def _is_replayed_line(line: LogLine, resume_ts: datetime | None) -> bool:
-    """True when a reconnected stream replays a line already displayed.
+class _ReplayFilter:
+    """Drops tail lines replayed by the API after a reconnect.
 
     Every (re)connection returns the last ~tail_lines existing lines before
-    following; lines stamped at or before the resume point are duplicates.
+    following.  The cursor is (last displayed timestamp, count of displayed
+    lines carrying that exact timestamp) rather than a bare ``<=`` timestamp
+    comparison, so *new* lines that happen to share the last displayed
+    timestamp (kubelet is nanosecond-precise but parsing truncates to
+    microseconds) are not lost across a reconnect.
     """
-    return resume_ts is not None and line.timestamp is not None and line.timestamp <= resume_ts
+
+    def __init__(self) -> None:
+        self._last_ts: datetime | None = None
+        self._last_ts_count = 0
+        self._resume_ts: datetime | None = None
+        self._remaining = 0
+
+    def start_connection(self) -> None:
+        """Snapshot the cursor; replayed lines up to it will be dropped."""
+        self._resume_ts = self._last_ts
+        self._remaining = self._last_ts_count
+
+    def is_replayed(self, line: LogLine) -> bool:
+        ts = line.timestamp
+        if ts is None or self._resume_ts is None:
+            return False
+        if ts < self._resume_ts:
+            return True
+        if ts == self._resume_ts and self._remaining > 0:
+            self._remaining -= 1
+            return True
+        return False
+
+    def record(self, line: LogLine) -> None:
+        """Advance the cursor past a line that was just displayed."""
+        ts = line.timestamp
+        if ts is None:
+            return
+        if ts == self._last_ts:
+            self._last_ts_count += 1
+        else:
+            self._last_ts = ts
+            self._last_ts_count = 1
 
 
 class KorvidApp(App[None]):
@@ -796,25 +832,24 @@ class KorvidApp(App[None]):
 
         Retries up to ``_MAX_RECONNECT_ATTEMPTS`` times on transient errors or
         unexpected EOF.  ApiStatusError and CancelledError are never retried.
-        Each (re)connection replays the last ~tail_lines existing lines; lines
-        whose timestamp is at or before the last line already displayed are
-        dropped so reconnects don't duplicate output.
+        Each (re)connection replays the last ~tail_lines existing lines;
+        ``_ReplayFilter`` drops the ones already displayed so reconnects
+        don't duplicate output.
         """
         log_pane = self.query_one(LogPane)
         current = asyncio.current_task()
         consecutive_failures = 0
-        last_ts: datetime | None = None
+        replay = _ReplayFilter()
 
         while True:
-            resume_ts = last_ts
+            replay.start_connection()
             try:
                 async for line in stream_logs(
                     namespace, pod, container, previous=False, follow=True
                 ):
-                    if _is_replayed_line(line, resume_ts):
+                    if replay.is_replayed(line):
                         continue  # replayed tail line already shown pre-reconnect
-                    if line.timestamp is not None:
-                        last_ts = line.timestamp
+                    replay.record(line)
                     self._mark_stream_healthy(log_pane, consecutive_failures)
                     consecutive_failures = 0
                     log_pane.feed(line)
