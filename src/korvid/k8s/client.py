@@ -215,6 +215,21 @@ class KubeClient:
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 
+    async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
+        """LIST any resource kind and return GenericSummary items.
+
+        Reuses the path logic of watch_objects' LIST phase.
+        ApiException is wrapped as ApiStatusError.
+        """
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        if namespace is not None and meta.namespaced:
+            list_path = f"{meta.api_base}/namespaces/{_path_segment(namespace)}/{meta.plural}"
+        else:
+            list_path = f"{meta.api_base}/{meta.plural}"
+        data = await self._request_json(list_path)
+        return [GenericSummary.from_manifest(meta.kind, item) for item in data.get("items", [])]
+
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
     ) -> dict[str, Any]:
