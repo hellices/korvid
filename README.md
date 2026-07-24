@@ -88,7 +88,7 @@ agent:
   model: claude-sonnet-4-5
   api_key_env: ANTHROPIC_API_KEY
 
-# Azure OpenAI (v1 API surface)
+# Azure OpenAI (v1 API surface; korvid sends the key as an "api-key" header)
 agent:
   provider: azure
   base_url: https://<resource>.openai.azure.com/openai/v1

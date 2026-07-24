@@ -5,7 +5,6 @@ from __future__ import annotations
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
-from textual.message import Message
 from textual.widgets import Input, RichLog, Static
 
 from korvid.agent.events import (
@@ -16,6 +15,7 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
+from korvid.ui.messages import AgentPromptSubmitted
 
 _SETUP_HINT = (
     "Agent not configured.\n"
@@ -59,13 +59,6 @@ class AgentPanel(Vertical):
     }
     """
 
-    class PromptSubmitted(Message):
-        """Posted when the user submits a non-empty prompt."""
-
-        def __init__(self, text: str) -> None:
-            super().__init__()
-            self.text = text
-
     def __init__(self) -> None:
         super().__init__()
         self._pending = ""
@@ -85,7 +78,7 @@ class AgentPanel(Vertical):
         if not text:
             return
         event.input.value = ""
-        self.post_message(self.PromptSubmitted(text))
+        self.post_message(AgentPromptSubmitted(text))
 
     def set_header(
         self,

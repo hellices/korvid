@@ -169,3 +169,53 @@ async def test_get_logs_stream_error_returns_error_text() -> None:
     out = await make_executor(BoomLogs()).execute("get_logs", {"pod": "web", "namespace": "d"})
     assert out.startswith("ERROR:")
     assert "no such pod" in out
+
+
+async def test_kind_is_normalized_before_lookup() -> None:
+    kube = FakeKube()
+    out = await make_executor(kube).execute(
+        "get_resource", {"kind": " Pod ", "name": "a", "namespace": "d"}
+    )
+    assert not out.startswith("ERROR:")
+    assert "kind: Pod" in out
+
+
+class FakeEventKube(FakeKube):
+    def __init__(self) -> None:
+        super().__init__()
+        self.manifest = {"kind": "Pod", "metadata": {"name": "web", "uid": "abc-123"}}
+        self.event_calls: list[dict[str, Any]] = []
+
+    async def list_events_for(
+        self,
+        namespace: str,
+        name: str,
+        *,
+        kind: str | None = None,
+        uid: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.event_calls.append({"namespace": namespace, "name": name, "kind": kind, "uid": uid})
+        return [{"type": "Warning", "reason": "BackOff", "count": 3, "message": "restarting"}]
+
+
+async def test_get_events_scopes_by_kind_and_uid() -> None:
+    kube = FakeEventKube()
+    out = await make_executor(kube).execute(
+        "get_events", {"kind": "Pod", "namespace": "d", "name": "web"}
+    )
+    assert "BackOff" in out
+    assert kube.event_calls == [{"namespace": "d", "name": "web", "kind": "Pod", "uid": "abc-123"}]
+
+
+async def test_get_events_falls_back_when_object_gone() -> None:
+    class GoneKube(FakeEventKube):
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            raise RuntimeError("not found")
+
+    kube = GoneKube()
+    out = await make_executor(kube).execute(
+        "get_events", {"kind": "pods", "namespace": "d", "name": "web"}
+    )
+    assert "BackOff" in out
+    assert kube.event_calls[0]["uid"] is None
+    assert kube.event_calls[0]["kind"] == "Pod"

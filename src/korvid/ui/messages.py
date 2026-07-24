@@ -77,3 +77,11 @@ class UnknownCommand(Message):
     def __init__(self, text: str) -> None:
         self.text = text
         super().__init__()
+
+
+class AgentPromptSubmitted(Message):
+    """Posted by AgentPanel when the user submits a non-empty prompt."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.text = text

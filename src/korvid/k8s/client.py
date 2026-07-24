@@ -30,6 +30,7 @@ def _path_segment(value: str) -> str:
 
 
 _DNS1123_NAME = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+_UID_RE = re.compile(r"^[a-fA-F0-9-]+$")
 
 
 def _parse_log_line(pod: str, container: str, text: str) -> LogLine:
@@ -296,18 +297,35 @@ class KubeClient:
             # infinite follow stream. Guards against leaks on cancel/error.
             resp.close()
 
-    async def list_events_for(self, namespace: str, name: str) -> list[dict[str, Any]]:
-        """Return core v1 Events where involvedObject.name == name."""
+    async def list_events_for(
+        self,
+        namespace: str,
+        name: str,
+        *,
+        kind: str | None = None,
+        uid: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return core v1 Events for the involved object.
+
+        ``kind``/``uid`` narrow the field selector so same-named objects of a
+        different kind (or an earlier incarnation of a recreated object) are
+        excluded.
+        """
         if self._core_v1 is None:
             raise RuntimeError("connect() first")
         # fieldSelector has no escaping mechanism; a name with "," would
         # inject extra selectors. Valid k8s names can't fail this check.
         if not _DNS1123_NAME.match(name):
             return []
+        selector = f"involvedObject.name={name}"
+        if kind and kind.isalnum():
+            selector += f",involvedObject.kind={kind}"
+        if uid and _UID_RE.match(uid):
+            selector += f",involvedObject.uid={uid}"
         try:
             resp = await self._core_v1.list_namespaced_event(
                 namespace,
-                field_selector=f"involvedObject.name={name}",
+                field_selector=selector,
                 _preload_content=False,
             )
             data = await _to_dict(resp)

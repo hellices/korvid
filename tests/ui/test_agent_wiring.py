@@ -14,6 +14,7 @@ from korvid.core.store import ResourceStore
 from korvid.core.watch import WatchManager
 from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
+from korvid.ui.messages import AgentPromptSubmitted
 from korvid.ui.widgets.agent_panel import AgentPanel
 
 
@@ -139,7 +140,7 @@ async def test_second_submit_ignored_while_turn_running() -> None:
         await pilot.press("enter")
         await pilot.pause()
         # Input is disabled during a turn, but simulate a direct message anyway.
-        panel.post_message(AgentPanel.PromptSubmitted("second"))
+        panel.post_message(AgentPromptSubmitted("second"))
         await pilot.pause()
         await pilot.pause()
         assert [c[0] for c in runtime.calls] == ["first"]

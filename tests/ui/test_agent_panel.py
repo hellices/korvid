@@ -12,6 +12,7 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
+from korvid.ui.messages import AgentPromptSubmitted
 from korvid.ui.widgets.agent_panel import AgentPanel
 
 
@@ -23,7 +24,7 @@ class PanelApp(App[None]):
     def compose(self) -> ComposeResult:
         yield AgentPanel()
 
-    def on_agent_panel_prompt_submitted(self, msg: AgentPanel.PromptSubmitted) -> None:
+    def on_agent_prompt_submitted(self, msg: AgentPromptSubmitted) -> None:
         self.prompts.append(msg.text)
 
 

@@ -41,4 +41,7 @@ def create_provider(config: KorvidConfig) -> LLMProvider | None:
         base_url=config.agent_base_url,
         model=config.agent_model,
         api_key=api_key,
+        # Azure OpenAI authenticates with a raw key in the "api-key" header
+        # instead of a Bearer Authorization header.
+        auth_header="api-key" if name == "azure" else "Authorization",
     )

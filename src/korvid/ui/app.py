@@ -29,6 +29,7 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import PodSummary
 from korvid.ui.messages import (
+    AgentPromptSubmitted,
     ClearFilter,
     FilterCommand,
     NavigateCommand,
@@ -1075,7 +1076,7 @@ class KorvidApp(App[None]):
             )
         panel.query_one("#agent-input").focus()
 
-    def on_agent_panel_prompt_submitted(self, message: AgentPanel.PromptSubmitted) -> None:
+    def on_agent_prompt_submitted(self, message: AgentPromptSubmitted) -> None:
         if self._agent_runtime is None:
             return
         if self._agent_task is not None and not self._agent_task.done():

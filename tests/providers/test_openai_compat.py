@@ -134,3 +134,24 @@ async def test_no_auth_header_without_api_key() -> None:
     provider = OpenAICompatProvider(base_url="http://x/v1", model="m1", client=client)
     _ = [e async for e in provider.complete([], [])]
     assert "authorization" not in cap["headers"]
+
+
+async def test_azure_style_api_key_header() -> None:
+    cap: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["headers"] = dict(request.headers)
+        body = _sse({"choices": [{"delta": {"content": "x"}}]})
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatProvider(
+        base_url="http://x/openai/v1",
+        model="m1",
+        api_key="azure-key",
+        client=client,
+        auth_header="api-key",
+    )
+    _ = [e async for e in provider.complete([], [])]
+    assert cap["headers"]["api-key"] == "azure-key"
+    assert "authorization" not in cap["headers"]

@@ -100,6 +100,10 @@ READ_TOOLS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "kind": {
+                        "type": "string",
+                        "description": "Resource kind, e.g. 'pods' or 'deployment'.",
+                    },
                     "namespace": {
                         "type": "string",
                         "description": "Kubernetes namespace.",
@@ -109,7 +113,7 @@ READ_TOOLS: list[dict[str, Any]] = [
                         "description": "Name of the resource whose events to fetch.",
                     },
                 },
-                "required": ["namespace", "name"],
+                "required": ["kind", "namespace", "name"],
             },
         },
     },
@@ -145,7 +149,7 @@ class ToolExecutor:
         raise ValueError(f"unknown tool: {name!r}")
 
     async def _list_resources(self, args: dict[str, Any]) -> str:
-        kind = str(args["kind"])
+        kind = str(args["kind"]).strip().lower()
         namespace: str | None = args.get("namespace")
         if kind not in self._aliases:
             raise ValueError(f"unknown kind {kind!r}")
@@ -156,7 +160,7 @@ class ToolExecutor:
         return "\n".join(f"{s.namespace}/{s.name}  -  age={s.age()}" for s in summaries)
 
     async def _get_resource(self, args: dict[str, Any]) -> str:
-        kind = str(args["kind"])
+        kind = str(args["kind"]).strip().lower()
         name = str(args["name"])
         namespace: str | None = args.get("namespace")
         if kind not in self._aliases:
@@ -191,9 +195,23 @@ class ToolExecutor:
         return "\n".join(lines)
 
     async def _get_events(self, args: dict[str, Any]) -> str:
+        kind = str(args["kind"]).strip().lower()
         namespace = str(args["namespace"])
         name = str(args["name"])
-        events = await self._kube.list_events_for(namespace, name)
+        if kind not in self._aliases:
+            raise ValueError(f"unknown kind {kind!r}")
+        meta = self._aliases[kind]
+        # Fetch the live object so events are scoped to this exact incarnation
+        # (kind + UID), not merely anything sharing the name.
+        uid: str | None = None
+        try:
+            manifest = await self._kube.get_object(meta, namespace, name)
+        except Exception:
+            manifest = None  # object may be gone; fall back to kind+name scope
+        if manifest is not None:
+            raw_uid = (manifest.get("metadata") or {}).get("uid")
+            uid = str(raw_uid) if raw_uid else None
+        events = await self._kube.list_events_for(namespace, name, kind=meta.kind, uid=uid)
         if not events:
             return "(no events)"
         parts: list[str] = []
