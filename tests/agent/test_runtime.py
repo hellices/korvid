@@ -215,3 +215,27 @@ async def test_usage_estimated_is_sticky() -> None:
     assert runtime.usage_estimated is True
     _ = await collect(runtime, "second")
     assert runtime.usage_estimated is True  # sticky: earlier totals remain estimates
+
+
+async def test_usage_missing_in_any_iteration_marks_estimated() -> None:
+    """Exactness requires usage from EVERY iteration, not just one."""
+    p = ScriptedProvider(
+        [
+            [
+                # tool-calling iteration omits usage …
+                {"type": "tool_call", "id": "c1", "name": "t", "arguments": "{}"},
+                {"type": "done"},
+            ],
+            [
+                # … final iteration reports it — turn is still an estimate.
+                {"type": "text_delta", "text": "answer"},
+                {"type": "usage", "input_tokens": 70, "output_tokens": 9},
+                {"type": "done"},
+            ],
+        ]
+    )
+    rt = AgentRuntime(p, EchoExecutor())
+    events = await collect(rt, "q")
+    tc = next(e for e in events if isinstance(e, TurnComplete))
+    assert tc.estimated is True
+    assert rt.usage_estimated is True

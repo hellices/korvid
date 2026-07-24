@@ -6,6 +6,7 @@ from typing import Any
 
 from korvid.agent.tools import MAX_RESULT_CHARS, READ_TOOLS, ToolExecutor
 from korvid.k8s.discovery import PODS_META
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 
 
@@ -210,7 +211,7 @@ async def test_get_events_scopes_by_kind_and_uid() -> None:
 async def test_get_events_falls_back_when_object_gone() -> None:
     class GoneKube(FakeEventKube):
         async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
-            raise RuntimeError("not found")
+            raise ApiStatusError(404, "NotFound")
 
     kube = GoneKube()
     out = await make_executor(kube).execute(
@@ -219,3 +220,18 @@ async def test_get_events_falls_back_when_object_gone() -> None:
     assert "BackOff" in out
     assert kube.event_calls[0]["uid"] is None
     assert kube.event_calls[0]["kind"] == "Pod"
+
+
+async def test_get_events_non_404_lookup_failure_is_error() -> None:
+    """Only 404 proves absence; other failures must surface, not weaken scoping."""
+
+    class ForbiddenKube(FakeEventKube):
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            raise ApiStatusError(403, "Forbidden")
+
+    kube = ForbiddenKube()
+    out = await make_executor(kube).execute(
+        "get_events", {"kind": "pods", "namespace": "d", "name": "web"}
+    )
+    assert out.startswith("ERROR:")
+    assert kube.event_calls == []

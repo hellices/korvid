@@ -97,9 +97,11 @@ class OpenAICompatProvider(LLMProvider):
             last_usage: dict[str, int] | None = None
 
             async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
+                # SSE permits both "data:<value>" and "data: <value>" — strip
+                # at most one optional leading space from the field value.
+                if not line.startswith("data:"):
                     continue
-                payload_str = line[len("data: ") :]
+                payload_str = line[len("data:") :].removeprefix(" ")
                 if payload_str == "[DONE]":
                     break
 

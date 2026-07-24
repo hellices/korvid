@@ -18,4 +18,4 @@ depends_on = []
 
 [[modules]]
 path = "korvid.providers"
-depends_on = ["korvid.agent", "korvid.core"]
+depends_on = ["korvid.agent"]

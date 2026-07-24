@@ -152,7 +152,9 @@ class AgentRuntime:
 
         turn_in = 0
         turn_out = 0
-        saw_usage = False
+        # Token counts are exact only when EVERY iteration reported usage;
+        # one missing iteration makes the whole turn an estimate.
+        usage_missing = False
         for _ in range(self._max_iterations):
             state = _StreamState()
             try:
@@ -164,7 +166,7 @@ class AgentRuntime:
                 # are real cost — account for them before bailing out.
                 self._total_in += turn_in + state.in_tok
                 self._total_out += turn_out + state.out_tok
-                if not (saw_usage or state.has_usage):
+                if usage_missing or not state.has_usage:
                     self._estimated = True
                 yield AgentError(message=str(exc))
                 return
@@ -173,7 +175,7 @@ class AgentRuntime:
                 state.out_tok = len(state.text) // 4
             turn_in += state.in_tok
             turn_out += state.out_tok
-            saw_usage = saw_usage or state.has_usage
+            usage_missing = usage_missing or not state.has_usage
 
             assistant_msg: dict[str, Any] = {"role": "assistant", "content": state.text}
             if state.tool_calls:
@@ -190,11 +192,11 @@ class AgentRuntime:
             if not state.tool_calls:
                 self._total_in += turn_in
                 self._total_out += turn_out
-                self._estimated = self._estimated or not saw_usage
+                self._estimated = self._estimated or usage_missing
                 yield TurnComplete(
                     input_tokens=turn_in,
                     output_tokens=turn_out,
-                    estimated=not saw_usage,
+                    estimated=usage_missing,
                 )
                 return
 
@@ -203,8 +205,8 @@ class AgentRuntime:
 
         self._total_in += turn_in
         self._total_out += turn_out
-        self._estimated = self._estimated or not saw_usage
+        self._estimated = self._estimated or usage_missing
         yield AgentError(
             message=(f"iteration limit reached ({self._max_iterations}) — refine the question")
         )
-        yield TurnComplete(input_tokens=turn_in, output_tokens=turn_out, estimated=not saw_usage)
+        yield TurnComplete(input_tokens=turn_in, output_tokens=turn_out, estimated=usage_missing)

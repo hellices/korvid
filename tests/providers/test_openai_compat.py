@@ -155,3 +155,12 @@ async def test_azure_style_api_key_header() -> None:
     _ = [e async for e in provider.complete([], [])]
     assert cap["headers"]["api-key"] == "azure-key"
     assert "authorization" not in cap["headers"]
+
+
+async def test_sse_without_space_after_data_colon() -> None:
+    """SSE permits "data:<value>" with no space — chunks must not be skipped."""
+    chunk = {"choices": [{"delta": {"content": "hi"}}]}
+    body = f"data:{json.dumps(chunk)}\n\ndata:[DONE]\n\n"
+    events = [e async for e in _provider(body).complete([{"role": "user", "content": "q"}], [])]
+    assert {"type": "text_delta", "text": "hi"} in events
+    assert events[-1] == {"type": "done"}

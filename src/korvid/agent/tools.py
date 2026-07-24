@@ -9,6 +9,7 @@ import yaml
 
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import ApiStatusError
 
 MAX_RESULT_CHARS = 8000
 
@@ -206,8 +207,12 @@ class ToolExecutor:
         uid: str | None = None
         try:
             manifest = await self._kube.get_object(meta, namespace, name)
-        except Exception:
-            manifest = None  # object may be gone; fall back to kind+name scope
+        except ApiStatusError as exc:
+            # Only 404 proves the object is gone (fall back to kind+name
+            # scope); any other failure propagates as an ERROR: tool result.
+            if exc.status != 404:
+                raise
+            manifest = None
         if manifest is not None:
             raw_uid = (manifest.get("metadata") or {}).get("uid")
             uid = str(raw_uid) if raw_uid else None

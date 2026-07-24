@@ -93,7 +93,13 @@ async def _run() -> None:
 
     watch_manager = WatchManager(store, source)
 
-    provider = create_provider(config)
+    provider = create_provider(
+        enabled=config.agent_enabled,
+        provider=config.agent_provider,
+        base_url=config.agent_base_url,
+        model=config.agent_model,
+        api_key_env=config.agent_api_key_env,
+    )
     agent_runtime = AgentRuntime(provider, ToolExecutor(kube, aliases)) if provider else None
 
     app = KorvidApp(
