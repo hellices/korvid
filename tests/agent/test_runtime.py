@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator
 from typing import Any
 
-from korvid.agent.events import AgentError, TextDelta, TurnComplete
+from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, TurnComplete
 from korvid.agent.runtime import AgentRuntime
 
 
@@ -135,3 +135,26 @@ async def test_usage_accumulates_across_tool_iterations() -> None:
     tc = next(e for e in events if isinstance(e, TurnComplete))
     assert (tc.input_tokens, tc.output_tokens, tc.estimated) == (120, 14, False)
     assert rt.total_tokens == (120, 14)
+
+
+class RaisingExecutor:
+    async def execute(self, name: str, arguments: dict[str, object]) -> str:
+        raise RuntimeError("boom")
+
+
+async def test_executor_exception_becomes_error_result() -> None:
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "get_manifest", "arguments": "{}"},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+        ]
+    )
+    rt = AgentRuntime(p, RaisingExecutor())
+    events = await collect(rt, "q")
+    fin = next(e for e in events if isinstance(e, ToolCallFinished))
+    assert fin.ok is False
+    assert "boom" in fin.summary
+    assert not any(isinstance(e, AgentError) for e in events)

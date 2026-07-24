@@ -104,12 +104,15 @@ class AgentRuntime:
             name = str(tc["name"])
             arguments = str(tc["arguments"])
             yield ToolCallStarted(call_id=call_id, name=name, arguments=arguments)
-            result = "ERROR: bad arguments"
             try:
                 parsed = json.loads(arguments or "{}")
-                result = await self._executor.execute(name, parsed)
             except json.JSONDecodeError:
-                pass
+                result = "ERROR: bad arguments"
+            else:
+                try:
+                    result = await self._executor.execute(name, parsed)
+                except Exception as exc:  # defensive: executor contract is never-raise
+                    result = f"ERROR: {exc}"
             yield ToolCallFinished(
                 call_id=call_id,
                 name=name,
