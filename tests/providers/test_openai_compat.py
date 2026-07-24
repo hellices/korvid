@@ -90,8 +90,23 @@ async def test_sends_auth_header_and_tools() -> None:
     assert cap["headers"]["authorization"] == "Bearer sk-test"
     assert cap["json"]["tools"] == tools
     assert cap["json"]["stream"] is True
+    assert cap["json"]["stream_options"] == {"include_usage": True}
 
 
 async def test_non_2xx_raises_provider_error() -> None:
     with pytest.raises(ProviderError):
         _ = [e async for e in _provider("nope", status=401).complete([], [])]
+
+
+async def test_no_auth_header_without_api_key() -> None:
+    cap: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["headers"] = dict(request.headers)
+        body = _sse({"choices": [{"delta": {"content": "x"}}]})
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatProvider(base_url="http://x/v1", model="m1", client=client)
+    _ = [e async for e in provider.complete([], [])]
+    assert "authorization" not in cap["headers"]
