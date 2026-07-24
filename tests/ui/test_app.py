@@ -10,9 +10,9 @@ from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
 
 
-def _pod(name: str, phase: str = "Running") -> PodSummary:
+def _pod(name: str, phase: str = "Running", qos: str = "-") -> PodSummary:
     return PodSummary(
-        name=name, namespace="default", phase=phase, ready="1/1", restarts=0, node=None
+        name=name, namespace="default", phase=phase, ready="1/1", restarts=0, node=None, qos=qos
     )
 
 
@@ -214,3 +214,44 @@ async def test_picker_escape_dismisses_without_switch() -> None:
         await pilot.pause(0.1)
         assert app.query_one(NamespacePicker).display is False
         assert app.current_namespace == "default"
+
+
+async def test_rows_sorted_by_eviction_order_reversed() -> None:
+    # Last-to-be-evicted first: Guaranteed > Burstable > BestEffort; name tiebreak.
+    app = make_app(
+        [
+            _pod("b-besteffort", qos="BestEffort"),
+            _pod("z-guaranteed", qos="Guaranteed"),
+            _pod("m-burstable", qos="Burstable"),
+            _pod("a-guaranteed", qos="Guaranteed"),
+        ]
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        names = [table.get_row_at(i)[0] for i in range(table.row_count)]
+        assert names == ["a-guaranteed", "z-guaranteed", "m-burstable", "b-besteffort"]
+
+
+async def test_qos_cells_are_color_coded() -> None:
+    from rich.text import Text
+
+    app = make_app(
+        [
+            _pod("g", qos="Guaranteed"),
+            _pod("u", qos="Burstable"),
+            _pod("e", qos="BestEffort"),
+        ]
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        table = app.query_one(ResourceTable)
+        styles = {}
+        for i in range(table.row_count):
+            row = table.get_row_at(i)
+            qos_cell = row[6]
+            assert isinstance(qos_cell, Text)
+            styles[str(qos_cell)] = qos_cell.style
+        assert styles["Guaranteed"] == "green"
+        assert styles["Burstable"] == "yellow"
+        assert styles["BestEffort"] == "red"

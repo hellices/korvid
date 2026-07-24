@@ -11,7 +11,7 @@ class CommandBar(Input):
 
     def on_mount(self) -> None:
         self.display = False
-        self.placeholder = ": command (pods | ns [name] | quit)"
+        self.placeholder = "command: pods | ns [name] | quit  (no ':' needed)"
 
     def open(self) -> None:
         self.value = ""
