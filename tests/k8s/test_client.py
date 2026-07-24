@@ -1,6 +1,9 @@
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from kubernetes_asyncio.client.exceptions import ApiException
+
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
@@ -15,12 +18,24 @@ def _pod(name: str, ns: str = "default") -> dict[str, Any]:
 
 
 class _FakeWatchStream:
-    """Async context manager + iterator that yields a fixed list of watch events."""
+    """Async context manager + iterator that yields a fixed list of watch events.
 
-    def __init__(self, events: list[dict[str, Any]], captured: dict[str, Any]) -> None:
+    If *raise_at* is set, an ApiException is raised instead of returning that
+    event — used to test mid-stream error propagation.
+    """
+
+    def __init__(
+        self,
+        events: list[dict[str, Any]],
+        captured: dict[str, Any],
+        raise_at: int | None = None,
+        raise_exc: Exception | None = None,
+    ) -> None:
         self._events = events
         self._captured = captured
         self._idx = 0
+        self._raise_at = raise_at
+        self._raise_exc = raise_exc
 
     async def __aenter__(self) -> "_FakeWatchStream":
         return self
@@ -32,6 +47,9 @@ class _FakeWatchStream:
         return self
 
     async def __anext__(self) -> dict[str, Any]:
+        if self._raise_at is not None and self._idx == self._raise_at:
+            assert self._raise_exc is not None
+            raise self._raise_exc
         if self._idx >= len(self._events):
             raise StopAsyncIteration
         ev = self._events[self._idx]
@@ -42,8 +60,15 @@ class _FakeWatchStream:
 class _FakeWatch:
     """Drop-in for k8s_watch.Watch in unit tests."""
 
-    def __init__(self, events: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        events: list[dict[str, Any]],
+        raise_at: int | None = None,
+        raise_exc: Exception | None = None,
+    ) -> None:
         self._events = events
+        self._raise_at = raise_at
+        self._raise_exc = raise_exc
         self.captured_func: Any = None
         self.captured_args: tuple[Any, ...] = ()
         self.captured_kwargs: dict[str, Any] = {}
@@ -52,7 +77,7 @@ class _FakeWatch:
         self.captured_func = func
         self.captured_args = args
         self.captured_kwargs = kwargs
-        return _FakeWatchStream(self._events, self.captured_kwargs)
+        return _FakeWatchStream(self._events, self.captured_kwargs, self._raise_at, self._raise_exc)
 
 
 async def test_list_pods_parses_summaries() -> None:
@@ -110,13 +135,9 @@ async def test_watch_pods_passes_resource_version_to_watch() -> None:
 
 async def test_watch_pods_list_api_error_raises_api_status_error() -> None:
     """ApiException from the initial LIST is wrapped as ApiStatusError."""
-    from kubernetes_asyncio.client.exceptions import ApiException
-
     client = KubeClient()
     fake_v1 = AsyncMock()
     fake_v1.list_namespaced_pod.side_effect = ApiException(status=403, reason="Forbidden")
-
-    import pytest
 
     with (
         patch.object(client, "_core_v1", fake_v1),
@@ -129,9 +150,6 @@ async def test_watch_pods_list_api_error_raises_api_status_error() -> None:
 
 async def test_list_namespaces_api_error_raises_api_status_error() -> None:
     """ApiException must not cross the k8s boundary from list_namespaces."""
-    import pytest
-    from kubernetes_asyncio.client.exceptions import ApiException
-
     client = KubeClient()
     fake_v1 = AsyncMock()
     fake_v1.list_namespace.side_effect = ApiException(status=403, reason="Forbidden")
@@ -145,9 +163,6 @@ async def test_list_namespaces_api_error_raises_api_status_error() -> None:
 
 async def test_list_pods_api_error_raises_api_status_error() -> None:
     """ApiException must not cross the k8s boundary from list_pods."""
-    import pytest
-    from kubernetes_asyncio.client.exceptions import ApiException
-
     client = KubeClient()
     fake_v1 = AsyncMock()
     fake_v1.list_namespaced_pod.side_effect = ApiException(status=401, reason="Unauthorized")
@@ -216,7 +231,7 @@ async def test_watch_objects_passes_resource_version_to_watch() -> None:
 
 
 async def test_watch_objects_all_namespaces_uses_cluster_path() -> None:
-    """namespace=None uses a cluster-scoped LIST path and cluster watch function."""
+    """namespace=None uses a cluster-scoped LIST path (no /namespaces/ segment)."""
     client = KubeClient()
     meta = _deploy_meta()
     list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "300"}, "items": []}
@@ -233,7 +248,9 @@ async def test_watch_objects_all_namespaces_uses_cluster_path() -> None:
 
     called_path: str = request_json_mock.call_args[0][0]
     assert "/namespaces/" not in called_path
-    assert "cluster" in fake_watch.captured_func.__name__
+    # The watch callable must also target the cluster-scoped (no /namespaces/) path.
+    # With the raw-callable approach, captured_args is empty (path is closed over).
+    assert "/namespaces/" not in str(fake_watch.captured_args)
 
 
 # ---------------------------------------------------------------------------
@@ -243,9 +260,6 @@ async def test_watch_objects_all_namespaces_uses_cluster_path() -> None:
 
 async def test_get_object_raises_api_status_error() -> None:
     """ApiException from the raw GET is wrapped as ApiStatusError."""
-    import pytest
-    from kubernetes_asyncio.client.exceptions import ApiException
-
     client = KubeClient()
     meta = _deploy_meta()
     mock_api = MagicMock()
@@ -265,9 +279,6 @@ async def test_get_object_raises_api_status_error() -> None:
 
 async def test_list_events_for_raises_api_status_error() -> None:
     """ApiException from CoreV1 is wrapped as ApiStatusError."""
-    import pytest
-    from kubernetes_asyncio.client.exceptions import ApiException
-
     client = KubeClient()
     fake_v1 = AsyncMock()
     fake_v1.list_namespaced_event.side_effect = ApiException(status=403, reason="Forbidden")
@@ -277,3 +288,103 @@ async def test_list_events_for_raises_api_status_error() -> None:
         pytest.raises(ApiStatusError, match="API 403: Forbidden"),
     ):
         await client.list_events_for("default", "my-pod")
+
+
+# ---------------------------------------------------------------------------
+# watch_objects — core-group regression (group == "")
+# ---------------------------------------------------------------------------
+
+
+def _service_meta() -> ResourceMeta:
+    return ResourceMeta("Service", "services", "", "v1", True)
+
+
+async def test_watch_objects_core_group_does_not_use_empty_group_in_watch() -> None:
+    """Regression: watch for core resources (group=="") must NOT call CustomObjectsApi.
+
+    CustomObjectsApi.list_*_custom_object with group="" produces the URL
+    /apis//v1/... which returns 404.  The watch callable must be built from
+    the raw api_base path ("/api/v1/...") rather than via CustomObjectsApi.
+    """
+    client = KubeClient()
+    meta = _service_meta()
+    list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "42"}, "items": []}
+    fake_watch = _FakeWatch([])
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        async for _ in client.watch_objects(meta, "default"):
+            pass
+
+    # With the broken CustomObjectsApi approach, the first positional arg passed
+    # to Watch.stream is the empty group string ""; asserting it is absent proves
+    # we no longer route core resources through /apis//v1/...
+    assert "" not in fake_watch.captured_args, (
+        "Watch received empty group as positional arg — would produce /apis//v1/... (404)"
+    )
+
+
+async def test_watch_objects_core_group_watch_list_path_is_api_v1() -> None:
+    """The watch callable for a core-group resource must close over the /api/v1 path.
+
+    This verifies that meta.api_base ("/api/v1") is used, not "/apis//v1".
+    """
+    client = KubeClient()
+    meta = _service_meta()  # api_base == "/api/v1"
+    list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "1"}, "items": []}
+    fake_watch = _FakeWatch([])
+    mock_api = MagicMock()
+    watch_call_paths: list[str] = []
+
+    async def _fake_watch_call(*args: Any, **kwargs: Any) -> Any:
+        watch_call_paths.append(args[0] if args else "")
+        return MagicMock()
+
+    mock_api.call_api = _fake_watch_call
+
+    with (
+        patch.object(client, "_api", mock_api),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        async for _ in client.watch_objects(meta, "default"):
+            pass
+
+        # Invoke the captured callable while the patch is still active.
+        await fake_watch.captured_func(watch=True, _preload_content=False, resource_version="1")
+
+    assert len(watch_call_paths) == 1
+    assert "/apis//" not in watch_call_paths[0], (
+        f"watch path must not contain /apis//: got {watch_call_paths[0]!r}"
+    )
+    assert watch_call_paths[0].startswith("/api/v1"), (
+        f"core-group watch path must start with /api/v1: got {watch_call_paths[0]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# watch_objects — mid-stream error propagation
+# ---------------------------------------------------------------------------
+
+
+async def test_watch_objects_mid_stream_api_exception_raises_api_status_error() -> None:
+    """An ApiException raised inside the watch stream must surface as ApiStatusError."""
+    client = KubeClient()
+    meta = _deploy_meta()
+    list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "10"}, "items": []}
+    watch_events = [{"type": "ADDED", "raw_object": _generic("dep-x")}]
+    mid_stream_exc = ApiException(status=410, reason="Gone")
+    # Raise on index 1 (after the first valid event)
+    fake_watch = _FakeWatch(watch_events, raise_at=1, raise_exc=mid_stream_exc)
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+        pytest.raises(ApiStatusError, match="API 410: Gone"),
+    ):
+        async for _ in client.watch_objects(meta, "default"):
+            pass

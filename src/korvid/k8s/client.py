@@ -101,10 +101,7 @@ class KubeClient:
         else:
             list_path = f"{meta.api_base}/{meta.plural}"
 
-        try:
-            data = await self._request_json(list_path)
-        except ApiStatusError:
-            raise
+        data = await self._request_json(list_path)
 
         resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
         for item in data.get("items", []):
@@ -115,18 +112,11 @@ class KubeClient:
         if resource_version is not None:
             watch_kwargs["resource_version"] = resource_version
 
-        custom_api = k8s_client.CustomObjectsApi(self._api)
-        watch_func: Any
-        if namespace is not None:
-            watch_func = custom_api.list_namespaced_custom_object
-            watch_args: tuple[Any, ...] = (meta.group, meta.version, namespace, meta.plural)
-        else:
-            watch_func = custom_api.list_cluster_custom_object
-            watch_args = (meta.group, meta.version, meta.plural)
+        watch_func = self._make_raw_watch_callable(list_path)
 
         w = k8s_watch.Watch()
         try:
-            async with w.stream(watch_func, *watch_args, **watch_kwargs) as stream:
+            async with w.stream(watch_func, **watch_kwargs) as stream:
                 async for event in stream:
                     yield (
                         str(event["type"]),
@@ -160,6 +150,41 @@ class KubeClient:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
         result: list[dict[str, Any]] = list(data.get("items", []))
         return result
+
+    def _make_raw_watch_callable(self, path: str) -> Any:
+        """Return an async callable compatible with k8s_watch.Watch.stream.
+
+        Watch.stream injects ``watch=True``, ``_preload_content=False``, and
+        ``resource_version`` as keyword arguments. This adapter translates those
+        to the raw ``call_api`` contract so the correct path is used for **both**
+        core-group (group=="", api_base="/api/v1") and extension-group resources,
+        eliminating the broken ``/apis//v1/...`` URL that CustomObjectsApi would
+        produce when ``group`` is empty.
+        """
+        api = self._api
+        if api is None:
+            raise RuntimeError("connect() first")
+
+        async def _watch_call(
+            watch: bool = False,
+            _preload_content: bool = True,
+            resource_version: str | None = None,
+            **_rest: Any,
+        ) -> Any:
+            # watch/_preload_content are injected by Watch.stream; _rest absorbs
+            # any future kwargs it may add.
+            query_params: list[tuple[str, Any]] = [("watch", "true")]
+            if resource_version is not None:
+                query_params.append(("resourceVersion", resource_version))
+            return await api.call_api(
+                path,
+                "GET",
+                auth_settings=["BearerToken"],
+                query_params=query_params,
+                _preload_content=False,
+            )
+
+        return _watch_call
 
     async def _request_json(self, path: str) -> dict[str, Any]:
         """Raw GET through the ApiClient; wraps ApiException as ApiStatusError."""
