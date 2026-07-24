@@ -140,3 +140,17 @@ async def test_header_formats_tokens() -> None:
 
         panel.set_header("llama3", 100, 40, estimated=True)
         assert "~↑100" in str(header.render())
+
+
+async def test_turn_complete_updates_header_cumulatively() -> None:
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        from textual.widgets import Static
+
+        panel = app.query_one(AgentPanel)
+        panel.set_header("llama3", 100, 50, estimated=False)
+        panel.begin_turn("q")
+        panel.apply_event(TurnComplete(input_tokens=20, output_tokens=5, estimated=False))
+        await pilot.pause()
+        header = app.query_one("#agent-header", Static)
+        assert "⚡ llama3 · ↑120 ↓55 tok" in str(header.render())

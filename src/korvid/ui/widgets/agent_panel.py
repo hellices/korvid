@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message
@@ -68,6 +69,10 @@ class AgentPanel(Vertical):
     def __init__(self) -> None:
         super().__init__()
         self._pending = ""
+        self._model = "agent"
+        self._tok_in = 0
+        self._tok_out = 0
+        self._estimated = False
 
     def compose(self) -> ComposeResult:
         yield Static("⚡ agent", id="agent-header")
@@ -89,6 +94,10 @@ class AgentPanel(Vertical):
         output_tokens: int,
         estimated: bool,
     ) -> None:
+        self._model = model
+        self._tok_in = input_tokens
+        self._tok_out = output_tokens
+        self._estimated = estimated
         prefix = "~" if estimated else ""
         self.query_one("#agent-header", Static).update(
             f"⚡ {model} · {prefix}↑{_fmt_tokens(input_tokens)} ↓{_fmt_tokens(output_tokens)} tok"
@@ -122,10 +131,16 @@ class AgentPanel(Vertical):
                 log.write(f"🔧 {event.name} ✗ {event.summary}")
         elif isinstance(event, AgentError):
             self._flush(log)
-            log.write(f"[error] {event.message}")
+            log.write(Text(f"[error] {event.message}", style="red"))
         elif isinstance(event, TurnComplete):
             self._flush(log)
             self.query_one("#agent-input", Input).disabled = False
+            self.set_header(
+                self._model,
+                self._tok_in + event.input_tokens,
+                self._tok_out + event.output_tokens,
+                self._estimated or event.estimated,
+            )
 
     def _append_text(self, log: RichLog, text: str) -> None:
         """Buffer streamed deltas; emit a log line per completed newline."""
