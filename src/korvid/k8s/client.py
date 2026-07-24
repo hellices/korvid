@@ -10,6 +10,7 @@ from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio import config as k8s_config
 from kubernetes_asyncio import watch as k8s_watch
 
+from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
 
@@ -82,6 +83,40 @@ class KubeClient:
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 
+    async def _request_json(self, path: str) -> dict[str, Any]:
+        """Raw GET through the ApiClient; wraps ApiException as ApiStatusError."""
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        try:
+            resp = await self._api.call_api(
+                path,
+                "GET",
+                auth_settings=["BearerToken"],
+                _preload_content=False,
+            )
+            body = await resp.read()
+            result: dict[str, Any] = json.loads(body)
+            return result
+        except k8s_client.exceptions.ApiException as exc:
+            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+
+    async def discover_resources(self) -> list[ResourceMeta]:
+        """Return every list+watch-able resource from /api/v1 and /apis."""
+        metas: list[ResourceMeta] = []
+        core = await self._request_json("/api/v1")
+        metas += _parse_resource_list(core, group="", version="v1")
+        groups = await self._request_json("/apis")
+        for g in groups.get("groups", []):
+            version = (g.get("preferredVersion") or {}).get("version")
+            if not version:
+                continue
+            try:
+                rl = await self._request_json(f"/apis/{g['name']}/{version}")
+            except ApiStatusError:
+                continue  # a broken aggregated API must not kill discovery
+            metas += _parse_resource_list(rl, group=g["name"], version=version)
+        return metas
+
     async def close(self) -> None:
         if self._api is not None:
             await self._api.close()
@@ -94,3 +129,22 @@ async def _to_dict(resp: Any) -> dict[str, Any]:
     body = await resp.read()
     result: dict[str, Any] = json.loads(body)
     return result
+
+
+def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> list[ResourceMeta]:
+    out = []
+    for r in data.get("resources", []):
+        verbs: list[str] = r.get("verbs", [])
+        if "/" in r["name"] or "list" not in verbs or "watch" not in verbs:
+            continue
+        out.append(
+            ResourceMeta(
+                r["kind"],
+                r["name"],
+                group,
+                version,
+                r["namespaced"],
+                tuple(r.get("shortNames") or ()),
+            )
+        )
+    return out
