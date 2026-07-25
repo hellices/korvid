@@ -157,6 +157,9 @@ class UIBridge(ABC):
         self, kind: str, name: str, namespace: str | None = None
     ) -> str: ...
 
+    @abstractmethod
+    async def agent_drill_down(self, name: str) -> str: ...
+
 
 UI_TOOLS: list[dict[str, Any]] = [
     {
@@ -257,6 +260,27 @@ UI_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "drill_down",
+            "description": (
+                "Drill into a row of the visible table following the ownership "
+                "chain the user sees on screen: a deployment opens its replicaset "
+                "revision history, a replicaset opens its pods. Screen-only."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the row in the current view to drill into.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
 ]
 
 UI_TOOL_NAMES = frozenset(t["function"]["name"] for t in UI_TOOLS)
@@ -309,6 +333,8 @@ class ToolExecutor:
             return await self._ui.agent_open_logs(
                 str(args["pod"]), str(args["namespace"]), args.get("container")
             )
+        if name == "drill_down":
+            return await self._ui.agent_drill_down(str(args["name"]))
         return await self._ui.agent_open_describe(
             str(args["kind"]), str(args["name"]), args.get("namespace")
         )

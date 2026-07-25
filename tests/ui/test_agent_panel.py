@@ -269,6 +269,24 @@ async def test_cluster_and_ui_tools_have_distinct_markers() -> None:
         assert ui_line.startswith("🖥")
 
 
+async def test_drill_down_shows_ui_marker_and_readable_label() -> None:
+    """drill_down mutates the screen: it must get the 🖥 marker and a
+    human-readable label, not the raw tool name with a cluster-read marker."""
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("go")
+        panel.apply_event(
+            ToolCallStarted(call_id="d1", name="drill_down", arguments='{"name": "web"}')
+        )
+        panel.apply_event(ToolCallFinished(call_id="d1", name="drill_down", ok=True, summary=""))
+        await pilot.pause()
+        raws = [e.raw for e in app.query(ChatEntry)]
+        line = next(r for r in raws if "web" in r)
+        assert line.startswith("🖥")
+        assert "drilled into web" in line
+
+
 async def test_begin_turn_drops_stale_tool_state() -> None:
     """A ToolCallFinished left over from a previous (errored) turn must not
     touch the new turn's transcript — no in-place flip, no new row."""

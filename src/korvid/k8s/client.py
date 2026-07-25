@@ -17,7 +17,7 @@ from kubernetes_asyncio import watch as k8s_watch
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
-from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.k8s.models import GenericSummary, PodSummary, summary_for
 
 
 def _path_segment(value: str) -> str:
@@ -196,7 +196,7 @@ class KubeClient:
 
         resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
         for item in data.get("items", []):
-            yield ("ADDED", GenericSummary.from_manifest(meta.kind, item))
+            yield ("ADDED", summary_for(meta.kind, item))
 
         # Watch phase -------------------------------------------------------
         watch_kwargs: dict[str, Any] = {}
@@ -211,7 +211,7 @@ class KubeClient:
                 async for event in stream:
                     yield (
                         str(event["type"]),
-                        GenericSummary.from_manifest(meta.kind, event["raw_object"]),
+                        summary_for(meta.kind, event["raw_object"]),
                     )
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
@@ -229,7 +229,7 @@ class KubeClient:
         else:
             list_path = f"{meta.api_base}/{meta.plural}"
         data = await self._request_json(list_path)
-        return [GenericSummary.from_manifest(meta.kind, item) for item in data.get("items", [])]
+        return [summary_for(meta.kind, item) for item in data.get("items", [])]
 
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
