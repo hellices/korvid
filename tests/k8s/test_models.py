@@ -561,6 +561,15 @@ class TestDisplayPhase:
         )
         assert pod.phase == "Unknown"
 
+    def test_deleting_terminal_pod_on_lost_node_shows_unknown(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {"phase": "Failed", "reason": "NodeLost"},
+                metadata={"deletionTimestamp": "2026-01-01T00:00:00Z"},
+            )
+        )
+        assert pod.phase == "Unknown"
+
     def test_deleting_succeeded_pod_keeps_completed(self) -> None:
         pod = PodSummary.from_manifest(
             self._pod(

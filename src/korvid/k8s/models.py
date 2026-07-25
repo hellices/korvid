@@ -206,6 +206,27 @@ def _is_initialized(status: dict[str, Any]) -> bool:
     )
 
 
+def _deletion_status(meta: dict[str, Any], status: dict[str, Any], phase: str) -> str | None:
+    """kubectl's deletion overrides: NodeLost is Unknown regardless of phase;
+    the generic Terminating override applies only to non-terminal phases."""
+    if not meta.get("deletionTimestamp"):
+        return None
+    if status.get("reason") == "NodeLost":
+        return "Unknown"
+    if phase not in ("Succeeded", "Failed"):
+        return "Terminating"
+    return None
+
+
+def _is_scheduling_gated(status: dict[str, Any]) -> bool:
+    return any(
+        c.get("type") == "PodScheduled"
+        and c.get("status") == "False"
+        and c.get("reason") == "SchedulingGated"
+        for c in (status.get("conditions") or [])
+    )
+
+
 def _display_phase(
     meta: dict[str, Any],
     spec: dict[str, Any],
@@ -221,9 +242,9 @@ def _display_phase(
     deleting terminal pods, and shows Unknown for NodeLost deletions).
     """
     phase = str(status.get("phase") or "")
-    if meta.get("deletionTimestamp") and phase not in ("Succeeded", "Failed"):
-        # kubectl exception: a pod deleting from an unreachable node is Unknown.
-        return "Unknown" if status.get("reason") == "NodeLost" else "Terminating"
+    deletion = _deletion_status(meta, status, phase)
+    if deletion is not None:
+        return deletion
     # kubectl scans regular containers once the pod is initialized; a stale
     # Init:* status must not hide a current CrashLoopBackOff.
     if not _is_initialized(status):
@@ -232,12 +253,7 @@ def _display_phase(
             return init_reason
     reason = str(status.get("reason") or status.get("phase") or "Unknown")
     # kubectl promotes a gated PodScheduled condition before scanning containers.
-    if any(
-        c.get("type") == "PodScheduled"
-        and c.get("status") == "False"
-        and c.get("reason") == "SchedulingGated"
-        for c in (status.get("conditions") or [])
-    ):
+    if _is_scheduling_gated(status):
         reason = "SchedulingGated"
     has_running = False
     for cs in reversed(statuses):
