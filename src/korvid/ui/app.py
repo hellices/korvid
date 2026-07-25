@@ -532,13 +532,20 @@ class KorvidApp(App[None]):
         new_settings = dataclasses.replace(settings, model=args[0])
 
         async def _switch() -> None:
+            # Apply first: persistence must be conditional on a successful
+            # swap, or a refused change would silently take effect on restart.
+            if not self._apply_agent_settings(new_settings):
+                return  # _apply_agent_settings already notified the reason
             try:
                 await configurator.save(new_settings)
-            except Exception as exc:  # keep the old runtime on failure
-                self.notify(f"Model switch failed: {exc}", severity="error")
+            except Exception as exc:  # runtime is live but disk is stale
+                self.notify(
+                    f"Model applied, but save failed: {exc} — will revert to "
+                    f"{settings.model} on restart",
+                    severity="warning",
+                )
                 return
-            if self._apply_agent_settings(new_settings):
-                self.notify(f"Agent model set to {new_settings.model}")
+            self.notify(f"Agent model set to {new_settings.model}")
 
         self.run_worker(_switch(), exclusive=False)
 

@@ -231,3 +231,23 @@ def test_save_agent_config_interrupted_write_preserves_existing_config(
     cfg = load_config(p)  # must still parse as the pre-save configuration
     assert cfg.keybindings == {"q": "quit"}
     assert cfg.agent_provider == "ollama"
+
+
+def test_save_agent_config_preserves_restrictive_file_mode(tmp_path: Path) -> None:
+    """Atomic replacement must not widen an existing 0600 config to the
+    umask-derived default, exposing preserved values."""
+    import os
+    import stat
+
+    p = tmp_path / "c.yaml"
+    p.write_text("agent:\n  provider: ollama\n  model: llama3\n")
+    os.chmod(p, 0o600)
+    save_agent_config(
+        p,
+        provider="ollama",
+        auth_method="none",
+        base_url=None,
+        model="llama3",
+        api_key_env=None,
+    )
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600

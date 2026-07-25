@@ -292,6 +292,92 @@ async def test_model_command_without_config_does_not_crash() -> None:
         assert app._agent_model_name is None
 
 
+async def test_model_command_does_not_persist_when_apply_fails() -> None:
+    """If the runtime swap is refused (rebuild returns None), the new model
+    must NOT be written to config.yaml — otherwise the failed change silently
+    takes effect after restart."""
+    from korvid.agent.setup import AgentConfigurator, AgentSettings
+    from korvid.ui.messages import UnknownCommand
+
+    saved: list[AgentSettings] = []
+
+    class Cfg(AgentConfigurator):
+        async def begin_device_login(self) -> Any:
+            raise NotImplementedError
+
+        async def finish_device_login(self) -> None:
+            raise NotImplementedError
+
+        async def test(self, settings: Any) -> str:
+            return "ok"
+
+        async def save(self, settings: AgentSettings) -> None:
+            saved.append(settings)
+
+    runtime = cast("Any", StubRuntime([]))
+    rebuilds: list[AgentSettings] = []
+
+    def rebuild(settings: AgentSettings) -> Any:
+        rebuilds.append(settings)
+        # First call (initial apply) succeeds; the :model rebuild fails.
+        return runtime if len(rebuilds) == 1 else None
+
+    app = make_app(runtime=None, model=None, agent_configurator=Cfg(), rebuild_agent=rebuild)
+    settings = AgentSettings(
+        provider="ollama",
+        auth_method="none",
+        base_url="http://localhost:11434/v1",
+        model="llama3",
+    )
+    async with app.run_test() as pilot:
+        app._apply_agent_settings(settings)
+        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        for _ in range(4):
+            await pilot.pause()
+        assert app._agent_model_name == "llama3"  # old runtime kept
+        assert not saved  # and nothing was persisted
+
+
+async def test_model_command_save_failure_warns_about_restart_revert() -> None:
+    """If the swap succeeded but persisting failed, the user must be told the
+    model is live now but will revert on restart."""
+    from korvid.agent.setup import AgentConfigurator, AgentSettings
+    from korvid.ui.messages import UnknownCommand
+
+    class Cfg(AgentConfigurator):
+        async def begin_device_login(self) -> Any:
+            raise NotImplementedError
+
+        async def finish_device_login(self) -> None:
+            raise NotImplementedError
+
+        async def test(self, settings: Any) -> str:
+            return "ok"
+
+        async def save(self, settings: AgentSettings) -> None:
+            raise RuntimeError("disk full")
+
+    runtime = cast("Any", StubRuntime([]))
+    app = make_app(
+        runtime=None, model=None, agent_configurator=Cfg(), rebuild_agent=lambda s: runtime
+    )
+    settings = AgentSettings(
+        provider="ollama",
+        auth_method="none",
+        base_url="http://localhost:11434/v1",
+        model="llama3",
+    )
+    async with app.run_test() as pilot:
+        app._apply_agent_settings(settings)
+        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        for _ in range(4):
+            await pilot.pause()
+        assert app._agent_model_name == "gpt-4o"  # swap took effect
+        notes = " ".join(str(n.message) for n in app._notifications)
+        assert "disk full" in notes
+        assert "revert" in notes.lower()
+
+
 async def test_model_command_works_after_configured_startup() -> None:
     """A runtime built from config.yaml at startup must seed _agent_settings
     so :model works without running the :ai wizard first."""
