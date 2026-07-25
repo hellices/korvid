@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from os import replace as os_replace
 from pathlib import Path
 from typing import Any
 
@@ -93,7 +94,18 @@ def save_agent_config(
         agent.pop("api_key_env", None)
     raw["agent"] = agent
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    _atomic_write_text(path, yaml.safe_dump(raw, sort_keys=False))
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Same-directory temp file + atomic replace: an interrupted write can
+    never leave truncated YAML behind (destroying unrelated keys)."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text)
+        os_replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _parse_buffer_lines(value: Any) -> int:

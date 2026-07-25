@@ -78,6 +78,13 @@ class TokenStore:
 
     def _write_file(self, data: dict[str, str]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.touch(exist_ok=True)
-        os.chmod(self._path, 0o600)
-        self._path.write_text(json.dumps(data))
+        # Same-directory temp file + atomic replace: an interrupted write can
+        # never truncate the only stored copy of a credential.
+        tmp = self._path.with_name(self._path.name + ".tmp")
+        try:
+            tmp.touch(exist_ok=True)
+            os.chmod(tmp, 0o600)
+            tmp.write_text(json.dumps(data))
+            os.replace(tmp, self._path)
+        finally:
+            tmp.unlink(missing_ok=True)

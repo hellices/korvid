@@ -130,3 +130,25 @@ def test_failed_file_write_keeps_stale_keyring_copy(
     with pytest.raises(OSError, match="disk full"):
         store.save("k", "new")
     assert calls["korvid/k"] == "old-keyring-token"  # last copy preserved
+
+
+def test_interrupted_write_preserves_existing_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A short write (disk full / crash) must not corrupt the fallback file:
+    the previously stored credential has to survive intact."""
+    _no_keyring(monkeypatch)
+    p = tmp_path / "creds.json"
+    store = TokenStore(fallback_path=p)
+    store.save("old", "keep-me")
+    real_write_text = Path.write_text
+
+    def truncating_write(self: Path, content: str, *args: object, **kwargs: object) -> int:
+        real_write_text(self, content[: len(content) // 2])
+        raise OSError("disk full")
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "write_text", truncating_write)
+        with pytest.raises(OSError, match="disk full"):
+            store.save("new", "value")
+    assert store.load("old") == "keep-me"

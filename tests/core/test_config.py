@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from korvid.core.config import KorvidConfig, load_config, save_agent_config
 
 
@@ -200,3 +202,32 @@ def test_save_agent_config_clears_explicit_disable(tmp_path: Path) -> None:
     import yaml
 
     assert "enabled" not in yaml.safe_load(p.read_text())["agent"]
+
+
+def test_save_agent_config_interrupted_write_preserves_existing_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A short write (disk full / crash) must not truncate the user's config:
+    the previous file content has to survive intact."""
+    p = tmp_path / "c.yaml"
+    p.write_text("keybindings:\n  q: quit\nagent:\n  provider: ollama\n  model: llama3\n")
+    real_write_text = Path.write_text
+
+    def truncating_write(self: Path, content: str, *args: object, **kwargs: object) -> int:
+        real_write_text(self, content[: len(content) // 2])
+        raise OSError("disk full")
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "write_text", truncating_write)
+        with pytest.raises(OSError, match="disk full"):
+            save_agent_config(
+                p,
+                provider="openai",
+                auth_method="api-key",
+                base_url=None,
+                model="gpt-4o",
+                api_key_env="OPENAI_API_KEY",
+            )
+    cfg = load_config(p)  # must still parse as the pre-save configuration
+    assert cfg.keybindings == {"q": "quit"}
+    assert cfg.agent_provider == "ollama"
