@@ -194,6 +194,54 @@ async def test_save_failure_shows_error_and_keeps_screen_open() -> None:
         assert "disk full" in str(status.render())
 
 
+async def test_save_failure_after_apply_warns_about_restart_revert() -> None:
+    """When the runtime swap already succeeded, a save failure must tell the
+    user the settings are active now but will revert on restart."""
+
+    class SaveFailConfigurator(FakeConfigurator):
+        async def save(self, settings: AgentSettings) -> None:
+            raise RuntimeError("disk full")
+
+    cfg = SaveFailConfigurator()
+    applied: list[AgentSettings] = []
+
+    # NB: not a _Host subclass — Textual dispatches on_mount once per class in
+    # the MRO, so subclassing would push two screens.
+    class _ApplyHost(App[None]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.result: AgentSettings | None | str = "unset"
+
+        def on_mount(self) -> None:
+            def _done(res: AgentSettings | None) -> None:
+                self.result = res
+
+            def _apply(settings: AgentSettings) -> bool:
+                applied.append(settings)
+                return True
+
+            self.push_screen(
+                AgentSetupScreen(cfg, apply_settings=_apply),
+                callback=_done,
+            )
+
+    app = _ApplyHost()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "ollama")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+        assert applied  # runtime swap happened before the failing save
+        assert app.result == "unset"  # not dismissed
+        text = str(app.screen.query_one("#setup-status", Static).render())
+        assert "disk full" in text
+        assert "applied" in text.lower()
+        assert "revert" in text.lower()
+
+
 async def test_retry_uses_edited_inputs() -> None:
     """After a failed probe, `r` must test the currently visible input values,
     not the snapshot captured on the original submission."""

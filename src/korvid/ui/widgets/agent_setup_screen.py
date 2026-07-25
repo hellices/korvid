@@ -186,16 +186,27 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
         except Exception as exc:  # keep the wizard open on probe failure
             self._status(f"Test failed: {exc} — press Ctrl+R to retry, Esc to cancel")
             return
-        if self._apply_settings is not None and not self._apply_settings(settings):
-            # The app refused the swap (busy turn / rebuild failure): stay
-            # open and do NOT persist, so a restart cannot silently activate
-            # a configuration that never took effect.
-            self._status("Apply failed — press Ctrl+R to retry, Esc to cancel")
-            return
+        applied = False
+        if self._apply_settings is not None:
+            if not self._apply_settings(settings):
+                # The app refused the swap (busy turn / rebuild failure): stay
+                # open and do NOT persist, so a restart cannot silently activate
+                # a configuration that never took effect.
+                self._status("Apply failed — press Ctrl+R to retry, Esc to cancel")
+                return
+            applied = True
         try:
             await self._configurator.save(settings)
         except Exception as exc:  # keep the wizard open on save failure
-            self._status(f"Save failed: {exc} — press Ctrl+R to retry, Esc to cancel")
+            if applied:
+                # The runtime already swapped: warn that the change is live
+                # now but will revert to the previous settings on restart.
+                self._status(
+                    f"Applied, but save failed: {exc} — settings will revert on "
+                    "restart. Press Ctrl+R to retry, Esc to cancel"
+                )
+            else:
+                self._status(f"Save failed: {exc} — press Ctrl+R to retry, Esc to cancel")
             return
         self.dismiss(settings)
 
