@@ -194,6 +194,7 @@ class KorvidApp(App[None]):
         self._rollout_restart = rollout_restart
         self._audit = audit
         self._check_permission = check_permission
+        self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
         self._agent_configurator = agent_configurator
@@ -1096,7 +1097,17 @@ class KorvidApp(App[None]):
                 verb, meta.plural, subresource, namespace, meta.group, name
             )
         except Exception:
-            logger.debug("permission pre-check failed; allowing", exc_info=True)
+            # Fail-open, but visibly: warn once so a persistently failing
+            # checker (e.g. SSAR forbidden) does not disable the gate silently.
+            if self._permission_check_warned:
+                logger.debug("permission pre-check failed; allowing", exc_info=True)
+            else:
+                self._permission_check_warned = True
+                logger.warning(
+                    "permission pre-check failed; allowing (fail-open) -"
+                    " writes remain approval-gated and audited",
+                    exc_info=True,
+                )
             return True
         if not allowed:
             self.notify(f"missing permission: {verb} {meta.plural}", severity="error")

@@ -76,6 +76,7 @@ class KubeClient:
     def __init__(self) -> None:
         self._api: k8s_client.ApiClient | None = None
         self._core_v1: k8s_client.CoreV1Api | None = None
+        self._ssar_warned = False
 
     async def connect(self, context: str | None = None) -> None:
         await k8s_config.load_kube_config(context=context)
@@ -316,7 +317,17 @@ class KubeClient:
             )
             data = await _to_dict(resp)
         except Exception:
-            logger.debug("SelfSubjectAccessReview failed; allowing (fail-open)", exc_info=True)
+            # Fail-open, but make the silently disabled pre-check visible to
+            # operators: warn on the first failure, debug afterwards.
+            if self._ssar_warned:
+                logger.debug("SelfSubjectAccessReview failed; allowing (fail-open)", exc_info=True)
+            else:
+                self._ssar_warned = True
+                logger.warning(
+                    "SelfSubjectAccessReview failed; permission pre-checks are"
+                    " disabled (fail-open) - writes remain approval-gated and audited",
+                    exc_info=True,
+                )
             return True
         return bool((data.get("status") or {}).get("allowed", False))
 

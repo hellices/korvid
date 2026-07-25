@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from korvid.core.audit import AuditLog
 
 
@@ -60,3 +62,40 @@ def test_audit_mode_enforced_on_existing_file(tmp_path: Path) -> None:
     path.chmod(0o644)
     AuditLog(path).append(action="delete", kind="pods", namespace="default", name="w")
     assert (path.stat().st_mode & 0o777) == 0o600
+
+
+def test_rotates_at_size_cap(tmp_path: Path) -> None:
+    """Design contract: size-based rotation (default 50 MB; small cap here)."""
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path, max_bytes=200, backups=2)
+    for i in range(10):
+        log.append(action="delete", kind="pods", namespace="default", name=f"pod-{i}")
+    assert path.exists()
+    assert (tmp_path / "audit.jsonl.1").exists()
+    assert path.stat().st_size < 400  # rotation kept the live file bounded
+    # every line everywhere is still valid JSON
+    for f in tmp_path.iterdir():
+        for line in f.read_text().splitlines():
+            json.loads(line)
+
+
+def test_rotation_drops_oldest_backup(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path, max_bytes=1, backups=2)  # rotate on every append
+    for i in range(6):
+        log.append(action="delete", kind="pods", namespace="default", name=f"pod-{i}")
+    names = sorted(p.name for p in tmp_path.iterdir())
+    assert names == ["audit.jsonl", "audit.jsonl.1", "audit.jsonl.2"]
+    # oldest backup holds the oldest surviving entry, not pod-0 (dropped)
+    assert "pod-0" not in (tmp_path / "audit.jsonl.2").read_text()
+
+
+def test_constructor_does_not_touch_filesystem(tmp_path: Path) -> None:
+    """A bad audit path must not abort startup (e.g. --readonly sessions);
+    it only blocks writes when append() is actually called."""
+    bad = tmp_path / "not-a-dir"
+    bad.write_text("file, not a directory")
+    log = AuditLog(bad / "audit.jsonl")  # must not raise
+    # macOS raises FileExistsError, Linux NotADirectoryError for the mkdir
+    with pytest.raises((FileExistsError, NotADirectoryError)):
+        log.append(action="delete", kind="pods", namespace="default", name="w")
