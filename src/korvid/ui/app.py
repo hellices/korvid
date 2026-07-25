@@ -1311,6 +1311,19 @@ class KorvidApp(App[None]):
             return "blocked: audit log unavailable"
         try:
             await op
+        except ApiStatusError as exc:
+            with contextlib.suppress(Exception):
+                await self._audit_write(action, meta, namespace, name, detail, f"error: {exc}")
+            if exc.status == 403:
+                # The SSAR pre-check fails open and permissions can change
+                # mid-flight: keep the actionable RBAC message contract
+                # instead of a bare "API 403: Forbidden".
+                verb, target = self._write_perm_target(action, meta)
+                message = f"missing permission: {verb} {target}"
+            else:
+                message = str(exc)
+            self.notify(f"{action} {kind}/{name} failed: {message}", severity="error")
+            return f"failed: {message}"
         except Exception as exc:
             with contextlib.suppress(Exception):
                 await self._audit_write(action, meta, namespace, name, detail, f"error: {exc}")

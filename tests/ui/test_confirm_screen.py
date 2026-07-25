@@ -200,3 +200,35 @@ async def test_y_buffered_before_dialog_visible_is_discarded() -> None:
         await pilot.press("y")
         await pilot.pause()
         assert results == [True]
+
+
+async def test_require_name_discards_keys_buffered_before_dialog() -> None:
+    """The typed-name variant applies the same stale-key cutoff: a resource
+    name plus Enter buffered while the caller's pre-checks ran must never
+    type into the input or approve the delete; fresh typing still works."""
+    from textual import events
+
+    app = HostApp()
+    results: list[bool | None] = []
+    async with app.run_test() as pilot:
+        # Typed (and timestamped) before the dialog exists, delivered after.
+        stale = [events.Key(ch, ch) for ch in "worker-1"] + [events.Key("enter", None)]
+        await pilot.pause()
+
+        dialog = ConfirmScreen("Delete node", "delete nodes/worker-1", require_name="worker-1")
+        await app.push_screen(dialog, results.append)
+        await pilot.pause()
+        target = app.focused
+        assert target is not None
+        for key in stale:
+            target.post_message(key)
+        await pilot.pause()
+        assert results == []  # neither typed nor submitted
+        from textual.widgets import Input
+
+        assert dialog.query_one(Input).value == ""
+        for ch in "worker-1":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert results == [True]

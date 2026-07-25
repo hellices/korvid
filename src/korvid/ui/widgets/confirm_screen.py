@@ -39,6 +39,26 @@ ConfirmScreen .confirm-hint, ReplicasPrompt .confirm-hint {
 """
 
 
+class _FreshKeysInput(Input):
+    """Input that discards key events created before ``created_time``.
+
+    Keystrokes buffered while the caller's pre-checks ran (an RBAC round
+    trip) predate the dialog: they must never type or submit the
+    confirmation name for an operation the user has not yet seen.
+    """
+
+    def __init__(self, created_time: float, *, placeholder: str, id: str) -> None:
+        super().__init__(placeholder=placeholder, id=id)
+        self._created_time = created_time
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.time < self._created_time:
+            event.stop()
+            event.prevent_default()
+            return
+        await super()._on_key(event)
+
+
 class ConfirmScreen(ModalScreen[bool]):
     """y/n approval dialog; with ``require_name`` the exact resource name
     must be typed (cluster-scoped or otherwise high-blast-radius deletes)."""
@@ -73,7 +93,9 @@ class ConfirmScreen(ModalScreen[bool]):
                     f"Type {self._require_name!r} and press Enter to confirm (Esc cancels)",
                     classes="confirm-hint",
                 )
-                yield Input(placeholder=self._require_name, id="confirm-name")
+                yield _FreshKeysInput(
+                    self._created_time, placeholder=self._require_name, id="confirm-name"
+                )
 
     def on_mount(self) -> None:
         if self._require_name is not None:

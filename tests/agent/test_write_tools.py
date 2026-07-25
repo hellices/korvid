@@ -174,3 +174,19 @@ def test_namespaced_write_schemas_require_namespace() -> None:
     assert "namespace" in by_name["scale_resource"]
     assert "namespace" in by_name["rollout_restart"]
     assert "namespace" not in by_name["delete_resource"]
+
+
+async def test_executor_rejects_non_string_write_arguments() -> None:
+    """Coercing a schema-invalid numeric name like 123 would turn it into the
+    valid Kubernetes target "123" and reach the approval path."""
+    cases = [
+        {"kind": 5, "name": "web", "namespace": "default"},
+        {"kind": "deployments", "name": 123, "namespace": "default"},
+        {"kind": "deployments", "name": "web", "namespace": 7},
+    ]
+    for args in cases:
+        bridge = _FakeBridge()
+        executor = ToolExecutor(kube=None, aliases={}, ui=bridge)  # type: ignore[arg-type]
+        result = await executor.execute("delete_resource", args)
+        assert result.startswith("ERROR:")
+        assert bridge.writes == []  # never reached the approval path

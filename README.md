@@ -61,7 +61,8 @@ The agent can also *request* three write operations — delete, scale, and
 rollout restart — but it can never execute them itself.  Each request opens
 the same confirmation dialog as the keybindings (marked with a ⚠ in the tool
 log), and only your keystroke in that dialog approves it; an unanswered
-dialog times out as a denial.  Every executed write — yours or agent-requested
+dialog expires without executing anything.  Every executed write — yours or
+agent-requested
 — is recorded in an audit log at `~/.local/state/korvid/audit.jsonl`
 (0600 permissions, size-rotated).  If the audit entry cannot be written, the
 write is blocked.

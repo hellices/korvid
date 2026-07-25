@@ -440,3 +440,32 @@ async def test_blocked_audit_result_omits_local_path(tmp_path: Path) -> None:
         assert "blocked: audit log unavailable" in result
         assert str(tmp_path) not in result  # no filesystem details leak
         assert rec.calls == []
+
+
+async def test_write_403_reports_actionable_permission_message(tmp_path: Path) -> None:
+    """The SSAR pre-check fails open and permissions can change mid-flight:
+    a 403 from the actual mutation must keep the actionable RBAC contract
+    ('missing permission: {verb} {resource}'), not a bare 'API 403'."""
+    from korvid.k8s.errors import ApiStatusError
+
+    rec = Recorder()
+
+    async def forbidden(meta: ResourceMeta, namespace: str | None, name: str) -> None:
+        raise ApiStatusError(403, "Forbidden")
+
+    rec.delete = forbidden  # type: ignore[method-assign]  # simulate a mid-flight RBAC change
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        _expand_panel(app)
+        task = asyncio.ensure_future(
+            app.agent_request_write("delete", "deployments", "web", namespace="default")
+        )
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        result = await task
+        assert "missing permission: delete deployments" in result
+        assert "403" not in result
+        entry = json.loads(audit_path.read_text().splitlines()[-1])
+        assert entry["outcome"].startswith("error")  # the failure is still audited

@@ -453,16 +453,26 @@ class ToolExecutor:
     async def _dispatch_write(self, name: str, args: dict[str, Any]) -> str:
         if self._ui is None:
             raise ValueError("write actions require the interactive TUI session")
+        # Tool schemas are not runtime validation: reject wrong-typed values
+        # instead of coercing them (str(123) would show the user a target the
+        # model never named; int(1.9) an operation it never asked for).
+        kind = args.get("kind")
+        target = args.get("name")
+        namespace = args.get("namespace")
+        if not isinstance(kind, str):
+            raise ValueError(f"'kind' must be a string, got {kind!r}")
+        if not isinstance(target, str):
+            raise ValueError(f"'name' must be a string, got {target!r}")
+        if namespace is not None and not isinstance(namespace, str):
+            raise ValueError(f"'namespace' must be a string, got {namespace!r}")
         replicas = args.get("replicas")
         if replicas is not None and (isinstance(replicas, bool) or not isinstance(replicas, int)):
-            # Tool schemas are not runtime validation: coercing 1.9 or true to
-            # an int would show the user an operation the model never asked for.
             raise ValueError(f"'replicas' must be an integer, got {replicas!r}")
         return await self._ui.agent_request_write(
             _WRITE_ACTIONS[name],
-            str(args["kind"]),
-            str(args["name"]),
-            args.get("namespace"),
+            kind,
+            target,
+            namespace,
             replicas,
         )
 
