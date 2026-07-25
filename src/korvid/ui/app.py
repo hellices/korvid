@@ -174,9 +174,9 @@ class KorvidApp(App[None]):
         agent_model_name: str | None = None,
         agent_configurator: AgentConfigurator | None = None,
         rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None = None,
-        delete_object: Callable[[str, str | None, str], Awaitable[None]] | None = None,
-        scale_object: Callable[[str, str | None, str, int], Awaitable[None]] | None = None,
-        rollout_restart: Callable[[str, str | None, str], Awaitable[None]] | None = None,
+        delete_object: Callable[[ResourceMeta, str | None, str], Awaitable[None]] | None = None,
+        scale_object: Callable[[ResourceMeta, str | None, str, int], Awaitable[None]] | None = None,
+        rollout_restart: Callable[[ResourceMeta, str | None, str], Awaitable[None]] | None = None,
         audit: AuditLog | None = None,
         check_permission: Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
         | None = None,
@@ -853,7 +853,10 @@ class KorvidApp(App[None]):
             )
             return
         pods_meta = self.aliases.get("pods")
-        if pods_meta is not None and not await self._permitted("debug", pods_meta, namespace, name):
+        if pods_meta is None:
+            # Fail-open like the other permission paths, but never silently.
+            logger.warning("pods alias missing; skipping debug RBAC pre-check (fail-open)")
+        elif not await self._permitted("debug", pods_meta, namespace, name):
             # RBAC pre-check (spec debug safety contract): don't offer a
             # picker the API server would reject; _permitted notified with
             # "missing permission: patch pods/ephemeralcontainers".
@@ -1254,7 +1257,7 @@ class KorvidApp(App[None]):
         def _done(confirmed: bool | None) -> None:
             if confirmed:
                 self.run_worker(
-                    self._run_write("delete", meta.plural, ns, name, delete(meta.plural, ns, name))
+                    self._run_write("delete", meta.plural, ns, name, delete(meta, ns, name))
                 )
 
         await self.push_screen(
@@ -1281,7 +1284,7 @@ class KorvidApp(App[None]):
             if confirmed:
                 self.run_worker(
                     self._run_write(
-                        "rollout_restart", meta.plural, ns, name, restart(meta.plural, ns, name)
+                        "rollout_restart", meta.plural, ns, name, restart(meta, ns, name)
                     )
                 )
 
@@ -1329,7 +1332,7 @@ class KorvidApp(App[None]):
                             meta.plural,
                             ns,
                             name,
-                            scale(meta.plural, ns, name, replicas),
+                            scale(meta, ns, name, replicas),
                             detail=f"replicas -> {replicas}",
                         )
                     )
@@ -1959,6 +1962,7 @@ class KorvidApp(App[None]):
         same ConfirmScreen as the keybindings; only the user's keystroke can
         approve it, and the outcome (executed/denied/error) flows back as the
         tool result. Every executed write is audited with an agent marker."""
+        name = name.strip()  # every stage below must see the exact same target
         built = self._agent_write_op(action, kind, name, namespace, replicas)
         if isinstance(built, str):
             return built
@@ -1999,6 +2003,7 @@ class KorvidApp(App[None]):
         if not name:
             # JSON Schema 'required' does not reject empty strings; an empty
             # name would build a collection path instead of one exact object.
+            # (agent_request_write pre-strips: keep this for direct callers.)
             return "ERROR: 'name' must be a non-empty resource name"
         namespace = namespace.strip() or None if namespace is not None else None
         meta = self.aliases.get(kind.strip().lower())
@@ -2024,7 +2029,7 @@ class KorvidApp(App[None]):
         return (
             meta,
             ns,
-            lambda: delete(meta.plural, ns, name),
+            lambda: delete(meta, ns, name),
             f"DELETE {meta.plural}/{name}{self._write_locus(ns)}",
             "requested by agent",
         )
@@ -2042,7 +2047,7 @@ class KorvidApp(App[None]):
         return (
             meta,
             ns,
-            lambda: scale(meta.plural, ns, name, replicas),
+            lambda: scale(meta, ns, name, replicas),
             f"PATCH {meta.plural}/{name} scale -> {replicas} replicas{self._write_locus(ns)}",
             f"replicas -> {replicas}; requested by agent",
         )
@@ -2058,7 +2063,7 @@ class KorvidApp(App[None]):
         return (
             meta,
             ns,
-            lambda: restart(meta.plural, ns, name),
+            lambda: restart(meta, ns, name),
             f"PATCH {meta.plural}/{name} pod template (restartedAt annotation)"
             f"{self._write_locus(ns)}",
             "requested by agent",
@@ -2079,14 +2084,17 @@ class KorvidApp(App[None]):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _APPROVAL_TIMEOUT
         if not self._can_surface_approval():
-            self.notify(
-                "Agent write approval pending - open the agent panel (Ctrl-A) to review",
-                severity="warning",
-                timeout=10,
-            )
+            pending_msg = "Agent write approval pending - open the agent panel (Ctrl-A) to review"
+            self.notify(pending_msg, severity="warning", timeout=10)
+            last_reminder = loop.time()
             while not self._can_surface_approval():
                 if loop.time() >= deadline:
                     return False
+                if loop.time() - last_reminder >= 30:
+                    # The first toast fades after 10s: keep reminding so the
+                    # request does not silently expire as a denial.
+                    self.notify(pending_msg, severity="warning", timeout=10)
+                    last_reminder = loop.time()
                 await asyncio.sleep(0.05)
         fut: asyncio.Future[bool] = loop.create_future()
 

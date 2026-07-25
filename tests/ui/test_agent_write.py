@@ -43,14 +43,16 @@ class Recorder:
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
 
-    async def delete(self, kind: str, namespace: str | None, name: str) -> None:
-        self.calls.append(("delete", kind, namespace, name))
+    async def delete(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
+        self.calls.append(("delete", meta.plural, namespace, name))
 
-    async def scale(self, kind: str, namespace: str | None, name: str, replicas: int) -> None:
-        self.calls.append(("scale", kind, namespace, name, replicas))
+    async def scale(
+        self, meta: ResourceMeta, namespace: str | None, name: str, replicas: int
+    ) -> None:
+        self.calls.append(("scale", meta.plural, namespace, name, replicas))
 
-    async def restart(self, kind: str, namespace: str | None, name: str) -> None:
-        self.calls.append(("restart", kind, namespace, name))
+    async def restart(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
+        self.calls.append(("restart", meta.plural, namespace, name))
 
 
 def make_app(
@@ -314,3 +316,50 @@ async def test_agent_write_rejects_empty_name(tmp_path: Path) -> None:
             assert "name" in result
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
+
+
+async def test_agent_write_normalizes_whitespace_name(tmp_path: Path) -> None:
+    """' web ' must delete, permission-check, and audit the same 'web': a
+    mismatch would break the exact-target safety record."""
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        _expand_panel(app)
+        task = asyncio.ensure_future(
+            app.agent_request_write("delete", "deployments", "  web  ", namespace="default")
+        )
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        result = await task
+        assert "deployments/web" in result
+        assert rec.calls == [("delete", "deployments", "default", "web")]
+        entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        assert all(e["name"] == "web" for e in entries)
+
+
+async def test_agent_write_executes_with_exact_validated_meta(tmp_path: Path) -> None:
+    """Alias maps are first-wins across API groups: the executed operation
+    must use the exact ResourceMeta that was validated and permission-checked,
+    never one re-resolved from the plural string."""
+    seen: list[ResourceMeta] = []
+
+    class MetaRecorder(Recorder):
+        async def delete(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
+            seen.append(meta)
+            await super().delete(meta, namespace, name)
+
+    rec = MetaRecorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        _expand_panel(app)
+        task = asyncio.ensure_future(
+            app.agent_request_write("delete", "deployments", "web", namespace="default")
+        )
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        await task
+        assert seen == [_DEPLOY_META]
+        assert seen[0] is _DEPLOY_META  # identity, not a lookalike from another group

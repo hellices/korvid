@@ -36,16 +36,18 @@ class Recorder:
         self.calls: list[tuple[object, ...]] = []
         self.fail = fail
 
-    async def delete(self, kind: str, namespace: str | None, name: str) -> None:
+    async def delete(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
         if self.fail:
             raise ApiStatusError(403, "Forbidden")
-        self.calls.append(("delete", kind, namespace, name))
+        self.calls.append(("delete", meta.plural, namespace, name))
 
-    async def scale(self, kind: str, namespace: str | None, name: str, replicas: int) -> None:
-        self.calls.append(("scale", kind, namespace, name, replicas))
+    async def scale(
+        self, meta: ResourceMeta, namespace: str | None, name: str, replicas: int
+    ) -> None:
+        self.calls.append(("scale", meta.plural, namespace, name, replicas))
 
-    async def restart(self, kind: str, namespace: str | None, name: str) -> None:
-        self.calls.append(("restart", kind, namespace, name))
+    async def restart(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
+        self.calls.append(("restart", meta.plural, namespace, name))
 
 
 def make_app(

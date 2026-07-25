@@ -13,7 +13,7 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from korvid.agent.provider import LLMProvider
@@ -203,34 +203,6 @@ def _build_agent_wiring(
     return agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy
 
 
-def _build_write_ops(
-    kube: KubeClient, aliases: dict[str, ResourceMeta]
-) -> tuple[
-    Callable[[str, str | None, str], Awaitable[None]],
-    Callable[[str, str | None, str, int], Awaitable[None]],
-    Callable[[str, str | None, str], Awaitable[None]],
-]:
-    """Kind-string wrappers over the KubeClient write methods: the app speaks
-    plural kind strings; the client wants ResourceMeta resolved via aliases."""
-
-    def _meta_for(kind: str) -> ResourceMeta:
-        meta = aliases.get(kind)
-        if meta is None:
-            raise ValueError(f"Unknown resource kind: {kind!r}")
-        return meta
-
-    async def delete_object(kind: str, namespace: str | None, name: str) -> None:
-        await kube.delete_object(_meta_for(kind), namespace, name)
-
-    async def scale_object(kind: str, namespace: str | None, name: str, replicas: int) -> None:
-        await kube.scale_object(_meta_for(kind), namespace, name, replicas)
-
-    async def rollout_restart(kind: str, namespace: str | None, name: str) -> None:
-        await kube.rollout_restart(_meta_for(kind), namespace, name)
-
-    return delete_object, scale_object, rollout_restart
-
-
 def _load_startup_config(readonly: bool) -> KorvidConfig:
     config = load_config()
     if readonly:
@@ -275,8 +247,6 @@ async def _run(readonly: bool = False) -> None:
     async def get_events(namespace: str, name: str) -> list[dict[str, Any]]:
         return await kube.list_events_for(namespace, name)
 
-    delete_object, scale_object, rollout_restart = _build_write_ops(kube, aliases)
-
     watch_manager = WatchManager(store, source)
 
     agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy = _build_agent_wiring(
@@ -292,9 +262,9 @@ async def _run(readonly: bool = False) -> None:
         get_manifest=get_manifest,
         get_events=get_events,
         stream_logs=kube.stream_logs,
-        delete_object=delete_object,
-        scale_object=scale_object,
-        rollout_restart=rollout_restart,
+        delete_object=kube.delete_object,
+        scale_object=kube.scale_object,
+        rollout_restart=kube.rollout_restart,
         audit=AuditLog(default_audit_path(), context=config.kube_context),
         check_permission=kube.can_i,
         agent_runtime=agent_runtime,
