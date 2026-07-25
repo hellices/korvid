@@ -40,8 +40,10 @@ WRITE_PROMPT = (
     "approval dialog in the TUI, and the operation runs only if the user "
     "approves it with a keystroke. State clearly what you are about to "
     "request and why before calling a write tool, and report the outcome "
-    "(approved, denied, or failed) afterwards. Never retry a denied request "
-    "unless the user asks."
+    "(approved, denied, expired, or failed) afterwards. Never retry a denied "
+    "or expired request unless the user explicitly asks: an expired request "
+    "means nobody answered the dialog, and reissuing it would keep reopening "
+    "approval dialogs the user is not acting on."
 )
 
 # Appended only when the runtime is armed with the UI-control tools, so the

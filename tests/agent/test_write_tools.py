@@ -190,3 +190,10 @@ async def test_executor_rejects_non_string_write_arguments() -> None:
         result = await executor.execute("delete_resource", args)
         assert result.startswith("ERROR:")
         assert bridge.writes == []  # never reached the approval path
+
+
+def test_write_prompt_forbids_retrying_expired_requests() -> None:
+    """An expired (unanswered) request must be as non-retryable as an
+    explicit denial - reissuing it would keep reopening approval dialogs
+    the user is not acting on."""
+    assert "Never retry a denied or expired request" in WRITE_PROMPT
