@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Callable
 
 import httpx
@@ -15,7 +14,7 @@ from korvid.providers.github_copilot import (
     DeviceCodePrompt,
     GitHubDeviceFlow,
 )
-from korvid.providers.registry import create_provider
+from korvid.providers.registry import build_credentials, create_provider
 from korvid.providers.token_store import TokenStore
 
 logger = logging.getLogger(__name__)
@@ -82,11 +81,13 @@ class ProviderConfigurator(AgentConfigurator):
         oauth = self._store.load("github-oauth")
         if not oauth:
             return []
-        creds = CopilotCredentialSource(oauth, client=self._http_client_factory())
+        # One client serves both round-trips (token exchange + /models GET)
+        # so the connection pool is shared; the credential source closes it.
+        client = self._http_client_factory()
+        creds = CopilotCredentialSource(oauth, client=client)
         try:
             headers = await creds.headers()
-            async with self._http_client_factory() as client:
-                resp = await client.get(f"{COPILOT_CHAT_BASE_URL}/models", headers=headers)
+            resp = await client.get(f"{COPILOT_CHAT_BASE_URL}/models", headers=headers)
         finally:
             await creds.aclose()
         if resp.status_code != 200:
@@ -102,13 +103,17 @@ class ProviderConfigurator(AgentConfigurator):
     async def _list_openai_compat_models(self, settings: AgentSettings) -> list[str]:
         if not settings.base_url:
             return []
-        headers: dict[str, str] = {}
-        if settings.auth_method == "api_key" and settings.api_key_env:
-            api_key = os.environ.get(settings.api_key_env)
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-        async with self._http_client_factory() as client:
-            resp = await client.get(f"{settings.base_url.rstrip('/')}/models", headers=headers)
+        # Reuse the registry's credential dispatch so azure gets its raw
+        # `api-key` header and entra gets a real bearer token — a plain
+        # Bearer-from-env guess would 401 on valid azure configurations.
+        creds = build_credentials(settings.provider, settings.auth_method, settings.api_key_env)
+        try:
+            headers = await creds.headers() if creds is not None else {}
+            async with self._http_client_factory() as client:
+                resp = await client.get(f"{settings.base_url.rstrip('/')}/models", headers=headers)
+        finally:
+            if creds is not None:
+                await creds.aclose()
         if resp.status_code != 200:
             return []
         data = resp.json().get("data", [])

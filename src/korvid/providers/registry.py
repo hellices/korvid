@@ -76,7 +76,7 @@ def create_provider(
         logger.warning("agent provider %r missing base_url/model — agent disabled", name)
         return None
     try:
-        credentials = _build_credentials(name, auth_method, api_key_env)
+        credentials = build_credentials(name, auth_method, api_key_env)
     except _AuthMisconfigured as exc:
         logger.warning("%s — agent disabled", exc)
         return None
@@ -91,9 +91,15 @@ class _AuthMisconfigured(Exception):
     """Auth settings are present but unusable — the agent must be disabled."""
 
 
-def _build_credentials(
+def build_credentials(
     name: str, auth_method: str | None, api_key_env: str | None
 ) -> CredentialSource | None:
+    """Credential source for a provider, or None when explicitly unauthenticated.
+
+    Raises when auth settings are present but unusable (unknown method,
+    missing API key env var) — callers decide whether that disables the
+    agent or merely skips an optional request.
+    """
     method = auth_method or ("api_key" if api_key_env else "none")
     if method == "entra":
         return EntraCredentialSource()

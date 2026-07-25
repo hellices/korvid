@@ -917,14 +917,14 @@ class ProviderConfigurator(AgentConfigurator):
 - Consumes: `AgentConfigurator`, `AgentSettings`, `DeviceLoginPrompt` from `korvid.agent.setup`.
 - Produces: `AgentSetupScreen(configurator)` — `ModalScreen[AgentSettings | None]`; app param `rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None`.
 
-**Wizard flow (single screen, staged widgets):**
+**Wizard flow (single screen, staged widgets — superseded during review; as implemented):**
 1. Provider `OptionList`: `github-copilot`, `openai-compat`, `azure`, `ollama` (id strings). Selecting sets defaults: github-copilot → auth `device-login`, base_url None, model `gpt-4o`; openai-compat → auth `api_key`, base_url `https://api.openai.com/v1`, model `gpt-4o-mini`; azure → second OptionList `api_key` / `entra`, base_url empty (required), model empty (required); ollama → auth `none`, base_url `http://localhost:11434/v1`, model `llama3`.
-2. Field stage: `Input#setup-base-url`, `Input#setup-model`, `Input#setup-api-key-env` (last shown only for `api_key`). Enter advances.
-3. github-copilot only: call `begin_device_login()`, show `Static#setup-device-code` with `Enter code {user_code} at {verification_uri}`, then `finish_device_login()` in a worker; errors shown in `Static#setup-status`.
-4. Test stage: `test(settings)` in a worker; success → `save(settings)` → `dismiss(settings)`; failure → show error in `#setup-status`, stay (Esc cancels, `r` retries test).
+2. Auth/endpoint stage: github-copilot signs in first (device login via `begin_device_login()`/`finish_device_login()` in a worker, reusing an existing login when `list_models` already answers); other providers ask for `Input#setup-base-url` then `Input#setup-api-key-env` (only for `api_key`). Enter advances; completed steps stay visible as a checklist (`Static#setup-steps`).
+3. Model stage: `list_models(settings)` in a worker; non-empty → type-to-filter `OptionList#setup-model-list`; empty → typed `Input#setup-model` fallback with provider default.
+4. Test stage: `test(settings)` in a worker; success → apply to the running app first (`apply_settings` callback), and only when the swap succeeds `save(settings)` → `dismiss(settings)`; failure at any point → show error in `#setup-status`, stay open (Esc cancels, Ctrl+R retries with the currently visible input values). Persisting before a successful apply is forbidden — a rejected change must never activate after a restart.
 - Esc anywhere → `dismiss(None)`.
 
-**App wiring:** command `:ai` (alias `:agent`) pushes the screen when `self._agent_configurator` is not None; on non-None result calls `self._apply_agent_settings(settings)`: `runtime = self._rebuild_agent(settings)`; sets `_agent_runtime`, `_agent_model_name = settings.model`, `_refresh_status()`, and if the panel is open re-enables input + header. `__main__` closure:
+**App wiring:** command `:ai` (alias `:agent`) pushes the screen when `self._agent_configurator` is not None, passing `apply_settings=self._apply_agent_settings`; the wizard calls it before saving (transactional order above). `_apply_agent_settings` calls `runtime = self._rebuild_agent(settings)`; on success sets `_agent_runtime`, `_agent_model_name = settings.model`, `_refresh_status()`, and if the panel is open re-enables input + header; on failure returns False and keeps the old runtime. `__main__` closure:
 
 ```python
 def rebuild_agent(settings: AgentSettings) -> AgentRuntime | None:
@@ -933,11 +933,10 @@ def rebuild_agent(settings: AgentSettings) -> AgentRuntime | None:
         base_url=settings.base_url, model=settings.model,
         api_key_env=settings.api_key_env, oauth_token=token_store.load("github-oauth"),
     )
-    # Old provider is closed by app-side apply? No: track and close here.
     ...
 ```
 
-Track the live provider in a mutable holder at composition root: `provider_box: list[LLMProvider | None] = [provider]`; `rebuild_agent` closes `provider_box[0]` via `asyncio.create_task(old.aclose())` before replacing; `_shutdown` closes `provider_box[0]`.
+Track the live provider in a mutable holder at composition root: `provider_box: list[LLMProvider | None] = [provider]`. Build the replacement first; only after it exists swap `provider_box[0]` and close the old provider via `asyncio.create_task(old.aclose())` — closing the old provider before the replacement is known to exist would break the transactional failure behavior (a failed rebuild must leave the current runtime untouched). `_shutdown` closes `provider_box[0]`.
 
 - [x] **Step 1: Failing UI tests** — drive with a `FakeConfigurator` recording calls: (a) ollama path: pick provider, accept defaults, test called, save called, dismissed with settings; (b) github-copilot path: begin/finish device login called, device code text visible; (c) test failure keeps screen open and shows error; (d) Esc dismisses None; (e) app-level: `:ai` applies settings → status bar shows "AI on" and panel input enabled.
 - [x] **Step 2: Verify FAIL.**
@@ -958,7 +957,7 @@ Track the live provider in a mutable holder at composition root: `provider_box: 
 
 **Behavior:**
 - `:model` (no arg) → status-bar flash/notify current model or "agent not configured".
-- `:model <name>` → requires existing `_agent_settings`; `dataclasses.replace(settings, model=name)` → `save` via configurator → `rebuild_agent` → update header/status. Errors notify, keep old runtime.
+- `:model <name>` → requires existing `_agent_settings`; `dataclasses.replace(settings, model=name)` → `rebuild_agent` + apply first → only after a successful swap, `save` via configurator (transactional: persisting first would activate a rejected change after restart). Save failure warns that the live change reverts to the last saved model on restart. Rebuild/apply errors notify, keep old runtime, and persist nothing.
 
 - [x] **Step 1: Failing tests** — (a) `:model gpt-4o` swaps `_agent_model_name` and calls rebuild+save; (b) `:model` without config notifies and does not crash.
 - [x] **Step 2: Verify FAIL.**

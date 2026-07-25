@@ -1,7 +1,8 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import pytest
 
 from korvid.agent.setup import AgentSettings
@@ -140,17 +141,13 @@ def test_provider_configurator_implements_abc() -> None:
         AgentConfigurator()  # type: ignore[abstract]  # instantiating ABC is the test
 
 
-def _models_client(handler: Any) -> Any:
-    import httpx
-
+def _models_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 async def test_list_models_copilot_filters_chat_models(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import httpx
-
     monkeypatch.setitem(__import__("sys").modules, "keyring", None)
     store = _store(tmp_path)
     store.save("github-oauth", "gho_tok")
@@ -188,8 +185,6 @@ async def test_list_models_copilot_without_login_returns_empty(tmp_path: Path) -
 
 
 async def test_list_models_openai_compat_lists_ids(tmp_path: Path) -> None:
-    import httpx
-
     def handler(req: httpx.Request) -> httpx.Response:
         assert str(req.url) == "http://localhost:11434/v1/models"
         return httpx.Response(200, json={"data": [{"id": "llama3"}, {"id": "mistral"}]})
@@ -208,8 +203,6 @@ async def test_list_models_openai_compat_lists_ids(tmp_path: Path) -> None:
 async def test_list_models_openai_compat_sends_api_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import httpx
-
     monkeypatch.setenv("MY_KEY", "sk-test")
     seen: dict[str, str] = {}
 
@@ -234,8 +227,6 @@ async def test_list_models_openai_compat_sends_api_key(
 
 
 async def test_list_models_returns_empty_on_http_error(tmp_path: Path) -> None:
-    import httpx
-
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": "boom"})
 
@@ -254,3 +245,95 @@ async def test_list_models_returns_empty_without_base_url(tmp_path: Path) -> Non
     cfg = ProviderConfigurator(_store(tmp_path), persist=lambda s: None)
     settings = AgentSettings(provider="azure", auth_method="entra", base_url=None, model="")
     assert await cfg.list_models(settings) == []
+
+
+async def test_list_models_azure_api_key_uses_api_key_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Azure OpenAI authenticates with a raw `api-key` header, not Bearer —
+    the registry dispatch must be reused so listing works for valid configs."""
+
+    monkeypatch.setenv("AZ_KEY", "azure-secret")
+    seen: dict[str, str] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.update({k.lower(): v for k, v in req.headers.items()})
+        return httpx.Response(200, json={"data": [{"id": "gpt-4o"}]})
+
+    cfg = ProviderConfigurator(
+        _store(tmp_path),
+        persist=lambda s: None,
+        http_client_factory=lambda: _models_client(handler),
+    )
+    settings = AgentSettings(
+        provider="azure",
+        auth_method="api_key",
+        base_url="https://foo.openai.azure.com/openai/v1",
+        model="",
+        api_key_env="AZ_KEY",
+    )
+    assert await cfg.list_models(settings) == ["gpt-4o"]
+    assert seen["api-key"] == "azure-secret"
+    assert "authorization" not in seen
+
+
+async def test_list_models_azure_entra_uses_entra_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeEntra:
+        async def headers(self) -> dict[str, str]:
+            return {"Authorization": "Bearer entra-token"}
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr("korvid.providers.registry.EntraCredentialSource", FakeEntra)
+    seen: dict[str, str] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.update({k.lower(): v for k, v in req.headers.items()})
+        return httpx.Response(200, json={"data": [{"id": "gpt-4o"}]})
+
+    cfg = ProviderConfigurator(
+        _store(tmp_path),
+        persist=lambda s: None,
+        http_client_factory=lambda: _models_client(handler),
+    )
+    settings = AgentSettings(
+        provider="azure",
+        auth_method="entra",
+        base_url="https://foo.openai.azure.com/openai/v1",
+        model="",
+    )
+    assert await cfg.list_models(settings) == ["gpt-4o"]
+    assert seen["authorization"] == "Bearer entra-token"
+
+
+async def test_list_models_copilot_reuses_one_http_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Token exchange and the /models GET must share one client (one pool)."""
+
+    monkeypatch.setitem(__import__("sys").modules, "keyring", None)
+    store = _store(tmp_path)
+    store.save("github-oauth", "gho_tok")
+    created = 0
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "copilot_internal" in str(req.url):
+            return httpx.Response(200, json={"token": "ct", "expires_at": 9e9})
+        return httpx.Response(
+            200, json={"data": [{"id": "gpt-4o", "capabilities": {"type": "chat"}}]}
+        )
+
+    def factory() -> httpx.AsyncClient:
+        nonlocal created
+        created += 1
+        return _models_client(handler)
+
+    cfg = ProviderConfigurator(store, persist=lambda s: None, http_client_factory=factory)
+    settings = AgentSettings(
+        provider="github-copilot", auth_method="device-login", base_url=None, model=""
+    )
+    assert await cfg.list_models(settings) == ["gpt-4o"]
+    assert created == 1

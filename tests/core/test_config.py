@@ -288,12 +288,13 @@ def test_save_agent_config_fsyncs_before_replace(
     real_replace = os.replace
 
     def spy_fsync(fd: int) -> None:
-        import fcntl
-
         # Windows' fsync (_commit) requires a writable handle: syncing an
         # O_RDONLY fd raises there, so the implementation must sync the fd
-        # it wrote through.
-        assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY
+        # it wrote through. fcntl itself is POSIX-only, so guard the check.
+        if os.name != "nt":
+            import fcntl
+
+            assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY
         calls.append("fsync")
         real_fsync(fd)
 
