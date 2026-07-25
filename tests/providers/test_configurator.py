@@ -146,9 +146,12 @@ def _models_client(handler: Any) -> Any:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-async def test_list_models_copilot_filters_chat_models(tmp_path: Path) -> None:
+async def test_list_models_copilot_filters_chat_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import httpx
 
+    monkeypatch.setitem(__import__("sys").modules, "keyring", None)
     store = _store(tmp_path)
     store.save("github-oauth", "gho_tok")
 
