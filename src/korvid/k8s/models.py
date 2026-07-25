@@ -231,6 +231,14 @@ def _display_phase(
         if init_reason is not None:
             return init_reason
     reason = str(status.get("reason") or status.get("phase") or "Unknown")
+    # kubectl promotes a gated PodScheduled condition before scanning containers.
+    if any(
+        c.get("type") == "PodScheduled"
+        and c.get("status") == "False"
+        and c.get("reason") == "SchedulingGated"
+        for c in (status.get("conditions") or [])
+    ):
+        reason = "SchedulingGated"
     has_running = False
     for cs in reversed(statuses):
         state = cs.get("state") or {}

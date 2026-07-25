@@ -594,3 +594,20 @@ class TestDisplayPhase:
             )
         )
         assert pod.phase == "OOMKilled"
+
+    def test_scheduling_gated_pod_shows_scheduling_gated(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "conditions": [
+                        {
+                            "type": "PodScheduled",
+                            "status": "False",
+                            "reason": "SchedulingGated",
+                        }
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "SchedulingGated"

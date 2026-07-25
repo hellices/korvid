@@ -83,3 +83,6 @@ class TestInitPhaseStyle:
         assert phase_style("Signal:9") == "bold red"
         assert phase_style("ExitCode:2") == "bold red"
         assert phase_style("Init:ExitCode:3") == "bold red"
+
+    def test_scheduling_gated_is_yellow(self) -> None:
+        assert phase_style("SchedulingGated") == "yellow"
