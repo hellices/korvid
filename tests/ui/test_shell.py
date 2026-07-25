@@ -19,6 +19,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv, build_probe_argv
+from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.pick_screen import PickScreen
 
 # ---------------------------------------------------------------------------
@@ -322,13 +323,13 @@ async def test_shell_multi_container_picker_escape_cancels() -> None:
             assert isinstance(app.screen, PickScreen)
             await pilot.press("escape")
             await pilot.pause(0.2)
-            assert not isinstance(app.screen, PickScreen)
+            assert not isinstance(app.screen, ConfirmScreen)
             mock_call.assert_not_called()
 
 
 async def test_shell_exec_failure_offers_debug_fallback(tmp_path: Path) -> None:
-    """Failed exec (distroless) → PickScreen offering kubectl debug; Yes runs it.
-    kubectl debug is a pod mutation, so the executed fallback is audited."""
+    """Failed exec (distroless) → ConfirmScreen offering kubectl debug; y runs
+    it. kubectl debug is a pod mutation, so the executed fallback is audited."""
     audit_path = tmp_path / "audit.jsonl"
     app = make_app([_pod("api-1")], audit=AuditLog(audit_path))
     calls: list[list[str]] = []
@@ -347,9 +348,8 @@ async def test_shell_exec_failure_offers_debug_fallback(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             await pilot.press("s")
             await pilot.pause(0.2)
-            assert isinstance(app.screen, PickScreen)
-            await pilot.press("down")  # highlight "Yes" (No is first: safe default)
-            await pilot.press("enter")
+            assert isinstance(app.screen, ConfirmScreen)
+            await pilot.press("y")
             await pilot.pause(0.2)
             assert calls[0] == build_exec_argv("default", "api-1")
             assert calls[1] == build_debug_argv("default", "api-1")
@@ -374,7 +374,7 @@ async def test_debug_fallback_not_offered_over_open_dialog(tmp_path: Path) -> No
 
 
 async def test_shell_nonzero_exit_with_working_shell_no_fallback() -> None:
-    """Non-zero exec exit but probe succeeds (user's command failed) → no picker."""
+    """Non-zero exec exit but probe succeeds (user's command failed) → no offer."""
     app = make_app([_pod("api-1")])
     with (
         patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
@@ -386,11 +386,11 @@ async def test_shell_nonzero_exit_with_working_shell_no_fallback() -> None:
             await pilot.pause(0.1)
             await pilot.press("s")
             await pilot.pause(0.2)
-            assert not isinstance(app.screen, PickScreen)
+            assert not isinstance(app.screen, ConfirmScreen)
 
 
 async def test_shell_exec_failure_no_declines_debug(tmp_path: Path) -> None:
-    """Choosing No in the fallback picker runs nothing further."""
+    """Declining the fallback dialog runs nothing further."""
     app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
     with (
         patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
@@ -402,8 +402,8 @@ async def test_shell_exec_failure_no_declines_debug(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             await pilot.press("s")
             await pilot.pause(0.2)
-            assert isinstance(app.screen, PickScreen)
-            await pilot.press("enter")  # first option = No (safe default)
+            assert isinstance(app.screen, ConfirmScreen)
+            await pilot.press("n")
             await pilot.pause(0.2)
             mock_call.assert_called_once()  # only the failed exec; no debug
 
@@ -440,7 +440,7 @@ async def test_debug_fallback_not_offered_in_readonly(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             await pilot.press("s")
             await pilot.pause(0.3)
-            assert not isinstance(app.screen, PickScreen)
+            assert not isinstance(app.screen, ConfirmScreen)
             mock_call.assert_called_once()  # only the failed exec; no debug
 
 
@@ -457,13 +457,13 @@ async def test_debug_fallback_not_offered_without_audit() -> None:
             await pilot.pause(0.1)
             await pilot.press("s")
             await pilot.pause(0.3)
-            assert not isinstance(app.screen, PickScreen)
+            assert not isinstance(app.screen, ConfirmScreen)
             mock_call.assert_called_once()
 
 
 async def test_debug_fallback_not_offered_without_permission(tmp_path: Path) -> None:
     """RBAC pre-check (spec 7 safety contract): without patch
-    pods/ephemeralcontainers the picker is never shown - the user sees
+    pods/ephemeralcontainers the offer is never shown - the user sees
     'missing permission' instead of an approval that would then fail."""
     app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"), permitted=False)
     with (
@@ -476,7 +476,7 @@ async def test_debug_fallback_not_offered_without_permission(tmp_path: Path) -> 
             await pilot.pause(0.1)
             await pilot.press("s")
             await pilot.pause(0.3)
-            assert not isinstance(app.screen, PickScreen)
+            assert not isinstance(app.screen, ConfirmScreen)
             notifications = [n.message for n in app._notifications]
             assert any(
                 "missing permission: patch pods/ephemeralcontainers" in m for m in notifications
@@ -485,7 +485,7 @@ async def test_debug_fallback_not_offered_without_permission(tmp_path: Path) -> 
 
 
 async def test_debug_fallback_offered_with_permission(tmp_path: Path) -> None:
-    """With patch pods/ephemeralcontainers allowed the picker still appears."""
+    """With patch pods/ephemeralcontainers allowed the offer still appears."""
     app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"), permitted=True)
     with (
         patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
@@ -497,4 +497,4 @@ async def test_debug_fallback_offered_with_permission(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             await pilot.press("s")
             await pilot.pause(0.3)
-            assert isinstance(app.screen, PickScreen)
+            assert isinstance(app.screen, ConfirmScreen)

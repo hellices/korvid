@@ -793,8 +793,6 @@ class KorvidApp(App[None]):
 
         self._run_shell(namespace, name, containers[0] if containers else None)
 
-    _DEBUG_YES = f"Yes — attach a {DEBUG_IMAGE} debug container (kubectl debug)"
-
     @staticmethod
     def _run_interactive(argv: list[str], banner: str) -> int:
         """Run an interactive subprocess on a cleared screen for a direct feel.
@@ -868,9 +866,7 @@ class KorvidApp(App[None]):
         target = f"{name}/{container}" if container else name
         if len(self.screen_stack) > 1:
             # The probe/RBAC pre-check ran concurrently with user input: never
-            # push the picker over a dialog that opened meanwhile, where a
-            # buffered Enter would select "Yes" (option 0) and start a pod
-            # mutation the user never saw.
+            # stack the offer over a dialog that opened meanwhile.
             self.notify(
                 f"Debug fallback for {target} not offered - another dialog is open."
                 " Close it and press 's' again to retry.",
@@ -878,19 +874,21 @@ class KorvidApp(App[None]):
             )
             return
 
-        def _on_choice(choice: str | None) -> None:
-            if choice == self._DEBUG_YES:
+        def _on_choice(confirmed: bool | None) -> None:
+            if confirmed:
                 self._run_debug(namespace, name, container)
 
+        # ConfirmScreen, not a generic picker: this offer appears
+        # asynchronously (after the probe/RBAC round trip), and its
+        # creation-time key cutoff discards any input buffered before the
+        # prompt existed - a queued Enter or Down+Enter must never start a
+        # pod mutation the user has not seen.
         self.push_screen(
-            PickScreen(
-                f"Shell failed in {target} (exit {exit_code}) — the image likely has"
-                " no sh/bash (distroless). Attach a debug container instead?\n"
-                "Note: the ephemeral container stays in the pod spec until restart.",
-                # "No" first: the picker highlights option 0, and this offer
-                # appears asynchronously - an Enter buffered on the base TUI
-                # must never approve a pod mutation the user has not seen.
-                ["No", self._DEBUG_YES],
+            ConfirmScreen(
+                f"Shell failed in {target} (exit {exit_code})",
+                f"kubectl debug: attach a {DEBUG_IMAGE} debug container - the image"
+                " likely has no sh/bash (distroless). Note: the ephemeral container"
+                " stays in the pod spec until restart.",
             ),
             _on_choice,
         )
@@ -2176,6 +2174,26 @@ class KorvidApp(App[None]):
             "requested by agent",
         )
 
+    async def _wait_until_surfaceable(self, deadline: float) -> bool:
+        """Poll until an approval dialog may surface (panel expanded, no other
+        screen on top); False when the deadline passes first."""
+        loop = asyncio.get_running_loop()
+        if self._can_surface_approval():
+            return True
+        pending_msg = "Agent write approval pending - open the agent panel (Ctrl-A) to review"
+        self.notify(pending_msg, severity="warning", timeout=10)
+        last_reminder = loop.time()
+        while not self._can_surface_approval():
+            if loop.time() >= deadline:
+                return False
+            if loop.time() - last_reminder >= 30:
+                # The first toast fades after 10s: keep reminding so the
+                # request does not silently expire.
+                self.notify(pending_msg, severity="warning", timeout=10)
+                last_reminder = loop.time()
+            await asyncio.sleep(0.05)
+        return True
+
     async def _await_user_approval(
         self, title: str, operation: str, *, require_name: str | None = None
     ) -> Literal["approved", "declined", "expired"]:
@@ -2192,19 +2210,8 @@ class KorvidApp(App[None]):
         agent turn can never hang forever."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _APPROVAL_TIMEOUT
-        if not self._can_surface_approval():
-            pending_msg = "Agent write approval pending - open the agent panel (Ctrl-A) to review"
-            self.notify(pending_msg, severity="warning", timeout=10)
-            last_reminder = loop.time()
-            while not self._can_surface_approval():
-                if loop.time() >= deadline:
-                    return "expired"
-                if loop.time() - last_reminder >= 30:
-                    # The first toast fades after 10s: keep reminding so the
-                    # request does not silently expire.
-                    self.notify(pending_msg, severity="warning", timeout=10)
-                    last_reminder = loop.time()
-                await asyncio.sleep(0.05)
+        if not await self._wait_until_surfaceable(deadline):
+            return "expired"
         fut: asyncio.Future[bool] = loop.create_future()
 
         def _done(confirmed: bool | None) -> None:
@@ -2213,8 +2220,14 @@ class KorvidApp(App[None]):
 
         screen = ConfirmScreen(title, operation, require_name=require_name)
         await self.push_screen(screen, _done)
+        # Recheck after mounting: surfacing the dialog (or push_screen itself)
+        # can consume the last of the budget, and a fixed minimum here would
+        # quietly extend the expiry contract past _APPROVAL_TIMEOUT.
+        remaining = deadline - loop.time()
         try:
-            confirmed = await asyncio.wait_for(fut, timeout=max(deadline - loop.time(), 0.05))
+            if remaining <= 0:
+                raise TimeoutError
+            confirmed = await asyncio.wait_for(fut, timeout=remaining)
             return "approved" if confirmed else "declined"
         except TimeoutError:
             # Late keystrokes are a no-op (the future is already resolved),

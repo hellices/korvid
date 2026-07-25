@@ -469,3 +469,22 @@ async def test_write_403_reports_actionable_permission_message(tmp_path: Path) -
         assert "403" not in result
         entry = json.loads(audit_path.read_text().splitlines()[-1])
         assert entry["outcome"].startswith("error")  # the failure is still audited
+
+
+async def test_agent_write_expired_budget_never_grants_extra_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The expiry contract is exact: if surfacing the dialog consumed the
+    whole budget, the request expires instead of granting a minimum
+    approval window past the deadline."""
+    monkeypatch.setattr("korvid.ui.app._APPROVAL_TIMEOUT", 0.0)
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        _expand_panel(app)
+        result = await app.agent_request_write("delete", "deployments", "web", namespace="default")
+        assert "expired" in result
+        await pilot.pause(0.1)
+        assert not isinstance(app.screen, ConfirmScreen)  # nothing lingers
+        assert rec.calls == []

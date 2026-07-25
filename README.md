@@ -62,9 +62,10 @@ rollout restart — but it can never execute them itself.  Each request opens
 the same confirmation dialog as the keybindings (marked with a ⚠ in the tool
 log), and only your keystroke in that dialog approves it; an unanswered
 dialog expires without executing anything.  Every executed write — yours or
-agent-requested
-— is recorded in an audit log at `~/.local/state/korvid/audit.jsonl`
-(0600 permissions, size-rotated).  If the audit entry cannot be written, the
+agent-requested — is recorded in an audit log at
+`$XDG_STATE_HOME/korvid/audit.jsonl` (defaulting to
+`~/.local/state/korvid/audit.jsonl` when `XDG_STATE_HOME` is unset;
+0600 permissions, size-rotated).  If the audit entry cannot be written, the
 write is blocked.
 
 ### Read-only mode
