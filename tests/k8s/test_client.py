@@ -612,3 +612,213 @@ async def test_list_objects_raises_api_status_error() -> None:
         pytest.raises(ApiStatusError, match="API 403: Forbidden"),
     ):
         await client.list_objects(meta, "default")
+
+
+# Write operations (issue #16) -------------------------------------------------
+
+
+def _write_api() -> MagicMock:
+    """ApiClient mock whose call_api returns an empty JSON body."""
+    api = MagicMock()
+    resp = MagicMock()
+    resp.read = AsyncMock(return_value=b"{}")
+    api.call_api = AsyncMock(return_value=resp)
+    return api
+
+
+async def test_delete_object_issues_delete_on_object_path() -> None:
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.delete_object(_deploy_meta(), "default", "web")
+    args = api.call_api.call_args[0]
+    assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web"
+    assert args[1] == "DELETE"
+
+
+async def test_delete_object_encodes_segments() -> None:
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.delete_object(_deploy_meta(), "team/a", "dep#1")
+    path = api.call_api.call_args[0][0]
+    assert "team%2Fa" in path
+    assert "dep%231" in path
+    assert "team/a" not in path
+
+
+async def test_scale_object_patches_scale_subresource() -> None:
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.scale_object(_deploy_meta(), "default", "web", 5)
+    args, kwargs = api.call_api.call_args
+    assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web/scale"
+    assert args[1] == "PATCH"
+    assert kwargs["body"] == {"spec": {"replicas": 5}}
+    assert kwargs["header_params"]["Content-Type"] == "application/merge-patch+json"
+
+
+async def test_rollout_restart_patches_restartedAt_annotation() -> None:
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.rollout_restart(_deploy_meta(), "default", "web")
+    args, kwargs = api.call_api.call_args
+    assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web"
+    assert args[1] == "PATCH"
+    annotations = kwargs["body"]["spec"]["template"]["metadata"]["annotations"]
+    assert "kubectl.kubernetes.io/restartedAt" in annotations
+    assert kwargs["header_params"]["Content-Type"] == "application/strategic-merge-patch+json"
+
+
+async def test_write_api_error_raises_api_status_error() -> None:
+    client = KubeClient()
+    api = MagicMock()
+    api.call_api = AsyncMock(side_effect=ApiException(status=403, reason="Forbidden"))
+    with (
+        patch.object(client, "_api", api),
+        pytest.raises(ApiStatusError, match="API 403: Forbidden"),
+    ):
+        await client.delete_object(_deploy_meta(), "default", "web")
+
+
+async def test_write_without_connect_raises() -> None:
+    client = KubeClient()
+    with pytest.raises(RuntimeError, match="connect"):
+        await client.delete_object(_deploy_meta(), "default", "web")
+
+
+async def test_write_consumes_response_body() -> None:
+    """Review round 1: with _preload_content=False the caller owns the
+    response; reading it releases the pooled connection."""
+    client = KubeClient()
+    api = _write_api()
+    resp = api.call_api.return_value
+    with patch.object(client, "_api", api):
+        await client.delete_object(_deploy_meta(), "default", "web")
+    resp.read.assert_awaited()
+
+
+def _ssar_api(allowed: bool) -> MagicMock:
+    api = MagicMock()
+    resp = MagicMock()
+    payload = b'{"status": {"allowed": true}}' if allowed else b'{"status": {"allowed": false}}'
+    resp.read = AsyncMock(return_value=payload)
+    api.call_api = AsyncMock(return_value=resp)
+    return api
+
+
+async def test_can_i_allowed() -> None:
+    client = KubeClient()
+    api = _ssar_api(allowed=True)
+    with patch.object(client, "_api", api):
+        assert await client.can_i("delete", "pods", "", "default") is True
+    args, kwargs = api.call_api.call_args
+    assert args[0] == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+    assert args[1] == "POST"
+    attrs = kwargs["body"]["spec"]["resourceAttributes"]
+    assert attrs == {"verb": "delete", "resource": "pods", "namespace": "default"}
+
+
+async def test_can_i_denied() -> None:
+    client = KubeClient()
+    with patch.object(client, "_api", _ssar_api(allowed=False)):
+        assert await client.can_i("patch", "deployments", "scale", "default") is False
+
+
+async def test_can_i_fails_open_on_error() -> None:
+    """SSAR itself may be forbidden or flaky; the write stays approval-gated
+    and audited, so infrastructure errors must not block it."""
+    client = KubeClient()
+    api = MagicMock()
+    api.call_api = AsyncMock(side_effect=ApiException(status=403, reason="Forbidden"))
+    with patch.object(client, "_api", api):
+        assert await client.can_i("delete", "pods", "", "default") is True
+
+
+async def test_can_i_includes_group_name_and_subresource() -> None:
+    """Review round 2: without the API group every apps/* check was evaluated
+    against the core group and wrongly denied."""
+    client = KubeClient()
+    api = _ssar_api(allowed=True)
+    with patch.object(client, "_api", api):
+        assert await client.can_i("patch", "deployments", "scale", "prod", "apps", "web") is True
+    attrs = api.call_api.call_args.kwargs["body"]["spec"]["resourceAttributes"]
+    assert attrs == {
+        "verb": "patch",
+        "resource": "deployments",
+        "group": "apps",
+        "name": "web",
+        "subresource": "scale",
+        "namespace": "prod",
+    }
+
+
+async def test_delete_object_sends_uid_precondition() -> None:
+    """A uid pins the delete to the approved object incarnation: the API
+    server answers 409 if the object was recreated under the same name."""
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.delete_object(_deploy_meta(), "default", "web", uid="abc-123")
+    args, kwargs = api.call_api.call_args
+    assert args[1] == "DELETE"
+    assert kwargs["body"] == {"preconditions": {"uid": "abc-123"}}
+    assert kwargs["header_params"]["Content-Type"] == "application/json"
+
+
+async def test_delete_object_without_uid_sends_no_body() -> None:
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.delete_object(_deploy_meta(), "default", "web")
+    kwargs = api.call_api.call_args[1]
+    assert kwargs["body"] is None
+    assert "Content-Type" not in kwargs["header_params"]
+
+
+async def test_scale_object_sends_uid_precondition() -> None:
+    """metadata.uid in a merge patch is an apiserver precondition (409 on mismatch)."""
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.scale_object(_deploy_meta(), "default", "web", 5, uid="abc-123")
+    kwargs = api.call_api.call_args[1]
+    assert kwargs["body"] == {"spec": {"replicas": 5}, "metadata": {"uid": "abc-123"}}
+
+
+async def test_rollout_restart_sends_uid_precondition() -> None:
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.rollout_restart(_deploy_meta(), "default", "web", uid="abc-123")
+    body = api.call_api.call_args[1]["body"]
+    assert body["metadata"] == {"uid": "abc-123"}
+    assert (
+        "kubectl.kubernetes.io/restartedAt" in body["spec"]["template"]["metadata"]["annotations"]
+    )
+
+
+def test_path_segment_rejects_traversal_segments() -> None:
+    """quote() leaves '.' intact, so empty and dot segments must be rejected
+    before they can survive as literal traversal segments in an object URL."""
+    from korvid.k8s.client import _path_segment
+
+    for bad in ("", ".", ".."):
+        with pytest.raises(ValueError, match="invalid URL path segment"):
+            _path_segment(bad)
+    assert _path_segment("web-1") == "web-1"
+    assert _path_segment("a/b") == "a%2Fb"
+
+
+async def test_delete_object_rejects_dot_name() -> None:
+    """A write addressed at name '..' must fail before any request is built."""
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        with pytest.raises(ValueError, match="invalid URL path segment"):
+            await client.delete_object(_deploy_meta(), "default", "..")
+        with pytest.raises(ValueError, match="invalid URL path segment"):
+            await client.delete_object(_deploy_meta(), "..", "web")
+    api.call_api.assert_not_called()

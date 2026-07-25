@@ -11,7 +11,7 @@ import subprocess
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from time import monotonic
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -22,6 +22,7 @@ from korvid.agent.events import AgentError
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.agent.tools import UIBridge
+from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
@@ -32,6 +33,7 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import PodSummary
 from korvid.k8s.relations import drill_child, owned_by
+from korvid.k8s.writes import WriteOps
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -48,6 +50,7 @@ from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv, buil
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 from korvid.ui.widgets.command_bar import CommandBar
+from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
@@ -71,6 +74,18 @@ _MAX_MULTI_STREAM_PODS = 8
 # small to read — comparing >4 replicas is what ``L`` (multi-stream) is for.
 _MAX_LOG_PODS = 4
 _MAX_RECONNECT_ATTEMPTS = 5
+#: Seconds an agent-requested approval dialog stays open before it counts as
+#: a denial - an unanswered dialog must never hang the agent turn forever.
+_APPROVAL_TIMEOUT = 120.0
+#: Upper bound on the SubjectAccessReview pre-check: a stalled authorization
+#: endpoint must never hang a binding handler or an agent turn. On timeout
+#: the check fails open (writes stay approval-gated and audited).
+_PERMISSION_CHECK_TIMEOUT = 10.0
+#: Upper bound on the pre-approval uid lookup: a stalled API server must
+#: never leave an agent tool call (or the debug offer) pending indefinitely.
+#: On timeout the lookup fails open (write proceeds without a precondition,
+#: still approval-gated and audited).
+_UID_LOOKUP_TIMEOUT = 10.0
 
 
 class _ReplayFilter:
@@ -137,6 +152,9 @@ class KorvidApp(App[None]):
         Binding("shift+n", "log_search_prev", "Prev hit"),
         Binding("N", "log_search_prev", "Prev hit", show=False),
         Binding("ctrl+a", "toggle_agent", "AI", priority=True),
+        Binding("ctrl+d", "delete_resource", "Delete"),
+        Binding("r", "rollout_restart", "Restart", show=False),
+        Binding("S", "scale_resource", "Scale", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -166,6 +184,10 @@ class KorvidApp(App[None]):
         agent_model_name: str | None = None,
         agent_configurator: AgentConfigurator | None = None,
         rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None = None,
+        write_ops: WriteOps | None = None,
+        audit: AuditLog | None = None,
+        check_permission: Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
+        | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -175,6 +197,10 @@ class KorvidApp(App[None]):
         self._get_manifest = get_manifest
         self._get_events = get_events
         self._stream_logs = stream_logs
+        self._write_ops = write_ops
+        self._audit = audit
+        self._check_permission = check_permission
+        self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
         self._agent_configurator = agent_configurator
@@ -769,8 +795,6 @@ class KorvidApp(App[None]):
 
         self._run_shell(namespace, name, containers[0] if containers else None)
 
-    _DEBUG_YES = f"Yes — attach a {DEBUG_IMAGE} debug container (kubectl debug)"
-
     @staticmethod
     def _run_interactive(argv: list[str], banner: str) -> int:
         """Run an interactive subprocess on a cleared screen for a direct feel.
@@ -808,43 +832,156 @@ class KorvidApp(App[None]):
                 shell_exists = False  # inconclusive — keep offering the fallback
             if shell_exists:
                 return
-            self.call_from_thread(self._offer_debug_fallback, namespace, name, container, exit_code)
+            self.call_from_thread(self._schedule_debug_offer, namespace, name, container, exit_code)
 
         self.run_worker(_probe_and_maybe_offer, thread=True)
 
-    def _offer_debug_fallback(
+    def _schedule_debug_offer(
+        self, namespace: str, name: str, container: str | None, exit_code: int
+    ) -> None:
+        """Sync shim for call_from_thread: the offer itself is async because
+        it awaits the RBAC pre-check."""
+        self.run_worker(self._offer_debug_fallback(namespace, name, container, exit_code))
+
+    async def _offer_debug_fallback(
         self, namespace: str, name: str, container: str | None, exit_code: int
     ) -> None:
         """Ask whether to attach a kubectl debug container after a failed shell."""
+        if self.config.readonly or self._audit is None:
+            # kubectl debug mutates the pod spec (ephemeral container):
+            # never offer a write we would refuse to run.
+            self.notify(
+                "Shell failed and the debug fallback is unavailable"
+                " (read-only mode or no audit log)",
+                severity="warning",
+            )
+            return
+        pods_meta = self.aliases.get("pods")
+        if pods_meta is None:
+            # Fail-open like the other permission paths, but never silently.
+            logger.warning("pods alias missing; skipping debug RBAC pre-check (fail-open)")
+        elif not await self._permitted("debug", pods_meta, namespace, name):
+            # RBAC pre-check (spec debug safety contract): don't offer a
+            # picker the API server would reject; _permitted notified with
+            # "missing permission: patch pods/ephemeralcontainers".
+            return
         target = f"{name}/{container}" if container else name
+        try:
+            # Bind the offer to this pod incarnation: kubectl debug addresses
+            # the pod by namespace/name only, so without this a same-named
+            # replacement created while the dialog is open would receive the
+            # ephemeral container. _run_debug re-checks the uid just before
+            # executing and aborts on change. 404 -> the pod is already gone.
+            approved_uid = await self._target_uid("pods", namespace, name)
+        except ApiStatusError:
+            self.notify(
+                f"Debug fallback for {target} not offered - the pod no longer exists.",
+                severity="warning",
+            )
+            return
+        if len(self.screen_stack) > 1:
+            # The probe/RBAC pre-check ran concurrently with user input: never
+            # stack the offer over a dialog that opened meanwhile.
+            self.notify(
+                f"Debug fallback for {target} not offered - another dialog is open."
+                " Close it and press 's' again to retry.",
+                severity="warning",
+            )
+            return
 
-        def _on_choice(choice: str | None) -> None:
-            if choice == self._DEBUG_YES:
-                self._run_debug(namespace, name, container)
+        def _on_choice(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(self._run_debug(namespace, name, container, approved_uid))
 
+        # ConfirmScreen, not a generic picker: this offer appears
+        # asynchronously (after the probe/RBAC round trip), and its
+        # creation-time key cutoff discards any input buffered before the
+        # prompt existed - a queued Enter or Down+Enter must never start a
+        # pod mutation the user has not seen.
         self.push_screen(
-            PickScreen(
-                f"Shell failed in {target} (exit {exit_code}) — the image likely has"
-                " no sh/bash (distroless). Attach a debug container instead?\n"
-                "Note: the ephemeral container stays in the pod spec until restart.",
-                [self._DEBUG_YES, "No"],
+            ConfirmScreen(
+                f"Shell failed in {target} (exit {exit_code})",
+                f"kubectl debug: attach a {DEBUG_IMAGE} debug container to pod"
+                f" {name}{self._write_locus(namespace)} - the image likely has no"
+                " sh/bash (distroless). Note: the ephemeral container stays in the"
+                " pod spec until restart.",
             ),
             _on_choice,
         )
 
-    def _run_debug(self, namespace: str, name: str, container: str | None) -> None:
-        """Attach an ephemeral busybox container via kubectl debug."""
+    async def _run_debug(
+        self, namespace: str, name: str, container: str | None, approved_uid: str | None
+    ) -> None:
+        """Attach an ephemeral busybox container via kubectl debug. This is a
+        pod mutation: blocked in readonly sessions and audited fail-closed
+        like every other write (user approval came from the fallback prompt).
+        kubectl cannot carry a uid precondition, so the approved pod
+        incarnation is re-verified immediately before executing and the debug
+        aborts when the pod was replaced or removed while the dialog was open
+        (narrowing the race from the unbounded dialog lifetime to the exec
+        latency). Audit appends take blocking locks and fsync, so they run off
+        the event loop (like _audit_write) - intent is still recorded before
+        the mutation starts."""
+        if self.config.readonly:
+            self.notify("Read-only mode: cluster writes are disabled", severity="warning")
+            return
+        audit = self._audit
+        if audit is None:
+            self.notify("Writes disabled: no audit log configured", severity="warning")
+            return
+        if approved_uid is not None:
+            try:
+                current_uid = await self._target_uid("pods", namespace, name)
+            except ApiStatusError:
+                self.notify(
+                    f"kubectl debug cancelled - pod {name} no longer exists.",
+                    severity="warning",
+                )
+                return
+            if current_uid is not None and current_uid != approved_uid:
+                self.notify(
+                    f"kubectl debug cancelled - pod {name} was replaced since"
+                    " the prompt was shown.",
+                    severity="warning",
+                )
+                return
+        detail = "ephemeral debug container (kubectl debug)"
+        try:
+            await asyncio.to_thread(self._audit_debug, audit, namespace, name, detail, "intent")
+        except Exception:
+            logger.exception("audit append failed; blocking kubectl debug")
+            self.notify("Write blocked: audit log unavailable", severity="error")
+            return
         argv = build_debug_argv(namespace, name, container, context=self.config.kube_context)
         target = f"{name}/{container}" if container else name
         with self.suspend():
             exit_code = self._run_interactive(argv, f"korvid debug → {target} (exit to return)")
         self.refresh()
+        outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
+        try:
+            await asyncio.to_thread(self._audit_debug, audit, namespace, name, detail, outcome)
+        except Exception:
+            logger.exception("audit append failed after kubectl debug")
+            self.notify("Audit write failed for the executed debug", severity="warning")
         if exit_code != 0:
             self.notify(
                 f"kubectl debug exited with status {exit_code}"
                 " — check RBAC (pods/ephemeralcontainers) and cluster version",
                 severity="warning",
             )
+
+    @staticmethod
+    def _audit_debug(audit: AuditLog, namespace: str, name: str, detail: str, outcome: str) -> None:
+        audit.append(
+            action="debug",
+            kind="pods",
+            group="",  # pods are core/v1; kubectl debug always targets a pod
+            version="v1",
+            namespace=namespace,
+            name=name,
+            detail=detail,
+            outcome=outcome,
+        )
 
     async def on_key(self, event: Key) -> None:
         """Escape closes describe/log panes, then pops one drill-down level."""
@@ -1021,6 +1158,372 @@ class KorvidApp(App[None]):
             if obj.namespace == namespace and obj.name == name and isinstance(obj, PodSummary):
                 return obj.containers
         return ()
+
+    # -- Write operations (issue #16): every path goes through a ConfirmScreen
+    # -- confirmed only by a user keystroke; executed writes are audited.
+
+    #: Workload eligibility is keyed on (group, plural): a custom-group CRD
+    #: whose plural collides with a built-in (e.g. 'deployments') must never
+    #: be treated as an apps/* workload.
+    _RESTARTABLE: ClassVar[frozenset[tuple[str, str]]] = frozenset(
+        {("apps", "deployments"), ("apps", "statefulsets"), ("apps", "daemonsets")}
+    )
+    _SCALABLE: ClassVar[frozenset[tuple[str, str]]] = frozenset(
+        {("apps", "deployments"), ("apps", "replicasets"), ("apps", "statefulsets")}
+    )
+    #: action -> (verb, subresource) for the SubjectAccessReview pre-check.
+    _WRITE_VERBS: ClassVar[dict[str, tuple[str, str]]] = {
+        "delete": ("delete", ""),
+        "scale": ("patch", "scale"),
+        "rollout_restart": ("patch", ""),
+        "debug": ("patch", "ephemeralcontainers"),
+    }
+
+    @staticmethod
+    def _gvr_label(meta: ResourceMeta) -> str:
+        """Group-qualified plural ('deployments.example.io') so rejection
+        messages disambiguate same-plural resources across API groups."""
+        return f"{meta.plural}.{meta.group}" if meta.group else meta.plural
+
+    @classmethod
+    def _write_perm_target(cls, action: str, meta: ResourceMeta) -> tuple[str, str]:
+        """(verb, resource[/subresource]) as shown in permission messages."""
+        verb, subresource = cls._WRITE_VERBS[action]
+        target = f"{meta.plural}/{subresource}" if subresource else meta.plural
+        return verb, target
+
+    @staticmethod
+    def _write_locus(ns: str | None) -> str:
+        """Namespace qualifier shown in every approval dialog so identically
+        named workloads in different namespaces are distinguishable."""
+        return f" in namespace {ns}" if ns else " (cluster-scoped)"
+
+    def _selected_uid(self, ns: str | None, name: str) -> str | None:
+        """Uid of the selected row's object from the store, binding an
+        approval to the exact incarnation on screen; None when the summary
+        type carries no uid (the write then runs without a precondition)."""
+        for obj in self.store.get(self.current_kind, self.current_scope):
+            if obj.namespace == (ns or "") and obj.name == name:
+                uid = str(getattr(obj, "uid", "") or "")
+                return uid or None
+        return None
+
+    def _write_target(self) -> tuple[ResourceMeta, str | None, str, str | None] | None:
+        """Resolve (meta, namespace, name, uid) of the selected row for a
+        write, or None (with a notification) when writes are disabled or
+        nothing usable is selected. Cluster-scoped kinds get namespace=None.
+        The uid pins the object incarnation the user saw: if it is deleted
+        and recreated under the same name while the dialog is open, the API
+        server rejects the write with a 409 instead of hitting the
+        replacement."""
+        if self.config.readonly:
+            self.notify("Read-only mode: cluster writes are disabled", severity="warning")
+            return None
+        if self._audit is None:
+            # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
+            self.notify("Writes disabled: no audit log configured", severity="warning")
+            return None
+        kind = self._canonical_kind(self.current_kind)
+        meta = self.aliases.get(kind)
+        if meta is None:
+            self.notify(f"Unknown resource kind {kind!r}", severity="warning")
+            return None
+        ns, name = self._selected_ns_name()
+        if name is None:
+            return None
+        namespace = ns if meta.namespaced and ns else None
+        return meta, namespace, name, self._selected_uid(namespace, name)
+
+    def _write_context_intact(
+        self, action: str, meta: ResourceMeta, ns: str | None, name: str
+    ) -> bool:
+        """Re-validate after an awaited pre-check, before pushing a dialog:
+        the permission check is an API round-trip, so the user may have opened
+        another screen or moved the selection meanwhile - and keystrokes typed
+        during the await must never land on a confirmation they did not see.
+        Abort (with a notification) unless the base screen is still on top and
+        the same row is still selected."""
+        if len(self.screen_stack) > 1:
+            self.notify(
+                f"{action} {self._gvr_label(meta)}/{name} cancelled -"
+                " another dialog opened during the permission check",
+                severity="warning",
+            )
+            return False
+        kind = self._canonical_kind(self.current_kind)
+        current_ns, current_name = self._selected_ns_name()
+        if (
+            self.aliases.get(kind) is not meta
+            or current_name != name
+            or (meta.namespaced and (current_ns or None) != ns)
+        ):
+            self.notify(
+                f"{action} {self._gvr_label(meta)}/{name} cancelled -"
+                " the selection changed during the permission check",
+                severity="warning",
+            )
+            return False
+        return True
+
+    async def _precheck_keybinding_write(
+        self, action: str, meta: ResourceMeta, ns: str | None, name: str
+    ) -> bool:
+        """RBAC pre-check plus post-await re-validation for binding handlers:
+        the check is an API round trip, so confirm the screen and selection
+        are unchanged before any dialog is pushed."""
+        if not await self._permitted(action, meta, ns, name):
+            return False
+        return self._write_context_intact(action, meta, ns, name)
+
+    async def _permitted(
+        self, action: str, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> bool:
+        """SubjectAccessReview pre-check at the approval stage (spec §5 #5):
+        surface 'missing permission' before the dialog instead of after a
+        failed mutation. No checker injected -> allowed (still gated+audited)."""
+        if self._check_permission is None:
+            return True
+        verb, subresource = self._WRITE_VERBS[action]
+        try:
+            allowed = await asyncio.wait_for(
+                self._check_permission(verb, meta.plural, subresource, namespace, meta.group, name),
+                timeout=_PERMISSION_CHECK_TIMEOUT,
+            )
+        except Exception:
+            # Fail-open, but visibly: warn once so a persistently failing
+            # checker (e.g. SSAR forbidden) does not disable the gate silently.
+            if self._permission_check_warned:
+                logger.debug("permission pre-check failed; allowing", exc_info=True)
+            else:
+                self._permission_check_warned = True
+                logger.warning(
+                    "permission pre-check failed; allowing (fail-open) -"
+                    " writes remain approval-gated and audited",
+                    exc_info=True,
+                )
+            return True
+        if not allowed:
+            _, target = self._write_perm_target(action, meta)
+            self.notify(f"missing permission: {verb} {target}", severity="error")
+        return allowed
+
+    async def _audit_write(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        detail: str,
+        outcome: str,
+    ) -> None:
+        """Append one audit record; raises if it cannot be persisted (the
+        caller decides whether that blocks the write - see _run_write)."""
+        if self._audit is None:
+            raise RuntimeError("audit log not configured")
+        audit = self._audit
+        await asyncio.to_thread(
+            lambda: audit.append(
+                action=action,
+                kind=meta.plural,
+                group=meta.group,
+                version=meta.version,
+                namespace=namespace,
+                name=name,
+                detail=detail,
+                outcome=outcome,
+            )
+        )
+
+    async def _run_write(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        op: Awaitable[None],
+        detail: str = "",
+    ) -> str:
+        """Execute an approved write with fail-closed auditing (AGENTS.md):
+        the intent record must persist *before* the mutation - if it cannot,
+        the write is blocked. Returns a short outcome string ('done' /
+        'blocked: ...' / 'failed: ...') for callers that report back."""
+        kind = meta.plural
+        try:
+            await self._audit_write(action, meta, namespace, name, detail, "intent")
+        except Exception as exc:
+            close = getattr(op, "close", None)
+            if callable(close):
+                close()  # avoid "coroutine was never awaited" for the blocked op
+            # The exception can embed the local audit path (home directory):
+            # log it here, but keep the notification and the tool result -
+            # which is sent to the LLM provider - free of filesystem details.
+            logger.exception("audit intent record failed; write blocked: %s", exc)
+            self.notify(
+                f"{action} {kind}/{name} blocked: audit log unavailable",
+                severity="error",
+            )
+            return "blocked: audit log unavailable"
+        try:
+            await op
+        except ApiStatusError as exc:
+            with contextlib.suppress(Exception):
+                await self._audit_write(action, meta, namespace, name, detail, f"error: {exc}")
+            if exc.status == 403:
+                # The SSAR pre-check fails open and permissions can change
+                # mid-flight: keep the actionable RBAC message contract
+                # instead of a bare "API 403: Forbidden".
+                verb, target = self._write_perm_target(action, meta)
+                message = f"missing permission: {verb} {target}"
+            elif exc.status == 409:
+                # The uid precondition tripped: the object was deleted and
+                # recreated (or otherwise changed) after the approval was
+                # given - nothing was modified.
+                message = "conflict: the target changed since it was approved - refresh and retry"
+            else:
+                message = str(exc)
+            self.notify(f"{action} {kind}/{name} failed: {message}", severity="error")
+            return f"failed: {message}"
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                await self._audit_write(action, meta, namespace, name, detail, f"error: {exc}")
+            self.notify(f"{action} {kind}/{name} failed: {exc}", severity="error")
+            return f"failed: {exc}"
+        try:
+            await self._audit_write(action, meta, namespace, name, detail, "success")
+        except Exception:
+            logger.exception("audit outcome record failed after successful write")
+            self.notify("Audit log write failed (operation already executed)", severity="warning")
+        self.notify(f"{action} {kind}/{name}: done", severity="information")
+        return "done"
+
+    async def action_delete_resource(self) -> None:
+        """Ctrl-D: delete the selected resource behind a layered confirmation
+        (cluster-scoped kinds require typing the resource name)."""
+        ops = self._write_ops
+        if ops is None:
+            self.notify("Delete unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name, uid = target
+        if not await self._precheck_keybinding_write("delete", meta, ns, name):
+            return
+        operation = f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}"
+        require = None if meta.namespaced else name
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_write(
+                        "delete", meta, ns, name, ops.delete_object(meta, ns, name, uid=uid)
+                    )
+                )
+
+        await self.push_screen(
+            ConfirmScreen(
+                f"Delete {self._gvr_label(meta)}/{name}?", operation, require_name=require
+            ),
+            _done,
+        )
+
+    async def action_rollout_restart(self) -> None:
+        """r: rolling restart of the selected deployment/statefulset/daemonset."""
+        ops = self._write_ops
+        if ops is None:
+            self.notify("Rollout restart unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name, uid = target
+        if (meta.group, meta.plural) not in self._RESTARTABLE:
+            self.notify(
+                f"rollout restart does not apply to {self._gvr_label(meta)}", severity="warning"
+            )
+            return
+        if not await self._precheck_keybinding_write("rollout_restart", meta, ns, name):
+            return
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_write(
+                        "rollout_restart",
+                        meta,
+                        ns,
+                        name,
+                        ops.rollout_restart(meta, ns, name, uid=uid),
+                    )
+                )
+
+        await self.push_screen(
+            ConfirmScreen(
+                f"Rollout restart {self._gvr_label(meta)}/{name}?",
+                f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
+                f"{self._write_locus(ns)}",
+            ),
+            _done,
+        )
+
+    def _current_replicas(self, ns: str | None, name: str) -> int | None:
+        """Desired replicas of the selected row, or None when the summary type
+        does not carry it (0 would be indistinguishable from scaled-to-zero)."""
+        for obj in self.store.get(self.current_kind, self.current_scope):
+            if obj.namespace == (ns or "") and obj.name == name:
+                desired = getattr(obj, "desired", None)
+                return None if desired is None else int(desired)
+        return None
+
+    async def action_scale_resource(self) -> None:
+        """S: scale the selected deployment/replicaset/statefulset (prompt, then confirm)."""
+        ops = self._write_ops
+        if ops is None:
+            self.notify("Scale unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name, uid = target
+        if (meta.group, meta.plural) not in self._SCALABLE:
+            self.notify(f"scale does not apply to {self._gvr_label(meta)}", severity="warning")
+            return
+        if not await self._precheck_keybinding_write("scale", meta, ns, name):
+            return
+        current = self._current_replicas(ns, name)
+
+        def _confirmed(replicas: int) -> Callable[[bool | None], None]:
+            def _done(confirmed: bool | None) -> None:
+                if confirmed:
+                    self.run_worker(
+                        self._run_write(
+                            "scale",
+                            meta,
+                            ns,
+                            name,
+                            ops.scale_object(meta, ns, name, replicas, uid=uid),
+                            detail=f"replicas -> {replicas}",
+                        )
+                    )
+
+            return _done
+
+        def _on_replicas(replicas: int | None) -> None:
+            if replicas is None:
+                return
+            shown = "?" if current is None else current
+            self.push_screen(
+                ConfirmScreen(
+                    f"Scale {self._gvr_label(meta)}/{name}?",
+                    f"PATCH {self._gvr_label(meta)}/{name}/scale: replicas {shown} -> {replicas}"
+                    f"{self._write_locus(ns)}",
+                ),
+                _confirmed(replicas),
+            )
+
+        await self.push_screen(
+            ReplicasPrompt(f"{self._gvr_label(meta)}/{name}", current=current), _on_replicas
+        )
 
     async def _open_log_pane(
         self,
@@ -1315,6 +1818,17 @@ class KorvidApp(App[None]):
     # loop logic in AgentRuntime.
     # ------------------------------------------------------------------
 
+    def _agent_panel_expanded(self) -> bool:
+        """True when the agent chat panel is mounted and visible on screen."""
+        panels = self.query(AgentPanel)
+        return bool(panels) and panels.first(AgentPanel).display
+
+    def _can_surface_approval(self) -> bool:
+        """An approval dialog may only appear when the panel is expanded AND
+        no other screen is stacked on top: pushing it over an active dialog
+        would let the user's next y/Enter approve an unexpected write."""
+        return self._agent_panel_expanded() and len(self.screen_stack) == 1
+
     def action_toggle_agent(self) -> None:
         """Toggle the agent chat panel; show setup hint when unconfigured."""
         panel = self.query_one(AgentPanel)
@@ -1597,13 +2111,251 @@ class KorvidApp(App[None]):
         # instead of pushing a modal: a modal becomes the active screen and
         # would keep the chat input from taking focus. Resolved outside the
         # try below so a missing widget isn't masked as a generic push error.
-        share = bool(self.query(AgentPanel)) and self.query_one(AgentPanel).display
+        share = self._agent_panel_expanded()
         try:
             await self._show_describe(share, title, manifest, events)
         except Exception as exc:
             return f"ERROR: {exc}"
         self._mark_agent_action(f"describe → {title}")
         return f"describe screen opened for {title} — manifest and events are on screen"
+
+    async def agent_request_write(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+    ) -> str:
+        """Approval-gated write requested by the agent (spec §6.2): opens the
+        same ConfirmScreen as the keybindings; only the user's keystroke can
+        approve it, and the outcome (executed/denied/error) flows back as the
+        tool result. Every executed write is audited with an agent marker."""
+        name = name.strip()  # every stage below must see the exact same target
+        built = self._agent_write_op(action, kind, name, namespace, replicas)
+        if isinstance(built, str):
+            return built
+        meta, ns, op, operation, detail = built
+        if not await self._permitted(action, meta, ns, name):
+            verb, target = self._write_perm_target(action, meta)
+            return f"ERROR: missing permission: {verb} {target}"
+        try:
+            # Capture the target's uid *before* asking for approval: the
+            # executed write carries it as a precondition, so the approval is
+            # bound to this exact object incarnation - a same-named
+            # replacement created while the dialog is open gets a 409, not
+            # the mutation. The lookup uses the caller's validated alias, not
+            # meta.plural: alias resolution is first-wins, so a plural that
+            # collides across groups could otherwise resolve to a different
+            # resource than the one validated above.
+            uid = await self._target_uid(kind.strip().lower(), ns, name)
+        except ApiStatusError:
+            return f"ERROR: {self._gvr_label(meta)}/{name} not found{self._write_locus(ns)}"
+        require = name if action == "delete" and not meta.namespaced else None
+        decision = await self._await_user_approval(
+            f"Agent requests: {action} {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
+            operation,
+            require_name=require,
+        )
+        if decision == "expired":
+            return (
+                f"not approved: the request expired before the user responded"
+                f" ({action} {self._gvr_label(meta)}/{name})"
+            )
+        if decision != "approved":
+            return (
+                f"denied: the user declined the {action} request for {self._gvr_label(meta)}/{name}"
+            )
+        outcome = await self._run_write(action, meta, ns, name, op(uid), detail=detail)
+        if outcome != "done":
+            return f"ERROR: {action} {self._gvr_label(meta)}/{name} {outcome}"
+        self._mark_agent_action(f"{action} → {self._gvr_label(meta)}/{name}")
+        return f"approved and executed: {action} {self._gvr_label(meta)}/{name}"
+
+    async def _target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
+        """Uid of a write target at request time, looked up by the same alias
+        the write was validated with (both resolve through the one aliases
+        mapping wired in __main__, so the manifest and the mutation address
+        the same resource even when plurals collide across groups).
+        Raises ApiStatusError(404) when the target does not exist (the caller
+        turns that into an actionable error before bothering the user with a
+        dialog). Fails open (None -> no precondition, matching the previous
+        behaviour) when no manifest source is wired or the lookup fails for
+        infrastructure reasons - including a lookup slower than
+        _UID_LOOKUP_TIMEOUT, so a stalled API server cannot leave the caller
+        pending forever - the write stays approval-gated and audited."""
+        if self._get_manifest is None:
+            return None
+        try:
+            manifest = await asyncio.wait_for(
+                self._get_manifest(kind_alias, ns, name), _UID_LOOKUP_TIMEOUT
+            )
+        except ApiStatusError as exc:
+            if exc.status == 404:
+                raise
+            logger.warning("uid lookup for %s/%s failed; writing without precondition", ns, name)
+            return None
+        except TimeoutError:
+            logger.warning("uid lookup for %s/%s timed out; writing without precondition", ns, name)
+            return None
+        except Exception:
+            logger.exception("uid lookup for %s/%s failed; writing without precondition", ns, name)
+            return None
+        raw = (manifest.get("metadata") or {}).get("uid")
+        return str(raw) if raw else None
+
+    def _agent_write_op(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None,
+        replicas: int | None,
+    ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
+        """Validate an agent write request; return (meta, ns, op, operation
+        description, audit detail) or an 'ERROR: ...' string."""
+        if self.config.readonly:
+            return "ERROR: read-only mode - cluster writes are disabled"
+        if self._audit is None:
+            # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
+            return "ERROR: writes disabled - no audit log configured"
+        name = name.strip()
+        if not name:
+            # JSON Schema 'required' does not reject empty strings; an empty
+            # name would build a collection path instead of one exact object.
+            # (agent_request_write pre-strips: keep this for direct callers.)
+            return "ERROR: 'name' must be a non-empty resource name"
+        namespace = namespace.strip() or None if namespace is not None else None
+        meta = self.aliases.get(kind.strip().lower())
+        if meta is None:
+            return f"ERROR: unknown kind {kind!r} - not a resource kind in this cluster"
+        if meta.namespaced and not namespace:
+            return f"ERROR: kind {kind!r} is namespaced - provide the 'namespace' argument"
+        ns = namespace if meta.namespaced else None
+        if action == "delete":
+            return self._agent_delete_op(meta, ns, name)
+        if action == "scale":
+            return self._agent_scale_op(meta, ns, name, replicas)
+        if action == "rollout_restart":
+            return self._agent_restart_op(meta, ns, name)
+        return f"ERROR: unknown write action {action!r}"
+
+    def _agent_delete_op(
+        self, meta: ResourceMeta, ns: str | None, name: str
+    ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
+        ops = self._write_ops
+        if ops is None:
+            return "ERROR: delete unavailable in this session"
+        return (
+            meta,
+            ns,
+            lambda uid: ops.delete_object(meta, ns, name, uid=uid),
+            f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
+            "requested by agent",
+        )
+
+    def _agent_scale_op(
+        self, meta: ResourceMeta, ns: str | None, name: str, replicas: int | None
+    ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
+        ops = self._write_ops
+        if ops is None:
+            return "ERROR: scale unavailable in this session"
+        if (meta.group, meta.plural) not in self._SCALABLE:
+            return f"ERROR: scale does not apply to {self._gvr_label(meta)}"
+        if replicas is None or replicas < 0:
+            return "ERROR: scale requires a 'replicas' argument >= 0"
+        return (
+            meta,
+            ns,
+            lambda uid: ops.scale_object(meta, ns, name, replicas, uid=uid),
+            f"PATCH {self._gvr_label(meta)}/{name} scale -> {replicas} replicas{self._write_locus(ns)}",
+            f"replicas -> {replicas}; requested by agent",
+        )
+
+    def _agent_restart_op(
+        self, meta: ResourceMeta, ns: str | None, name: str
+    ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
+        ops = self._write_ops
+        if ops is None:
+            return "ERROR: rollout restart unavailable in this session"
+        if (meta.group, meta.plural) not in self._RESTARTABLE:
+            return f"ERROR: rollout restart does not apply to {self._gvr_label(meta)}"
+        return (
+            meta,
+            ns,
+            lambda uid: ops.rollout_restart(meta, ns, name, uid=uid),
+            f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
+            f"{self._write_locus(ns)}",
+            "requested by agent",
+        )
+
+    async def _wait_until_surfaceable(self, deadline: float) -> bool:
+        """Poll until an approval dialog may surface (panel expanded, no other
+        screen on top); False when the deadline passes first."""
+        loop = asyncio.get_running_loop()
+        if self._can_surface_approval():
+            return True
+        pending_msg = "Agent write approval pending - open the agent panel (Ctrl-A) to review"
+        self.notify(pending_msg, severity="warning", timeout=10)
+        last_reminder = loop.time()
+        while not self._can_surface_approval():
+            if loop.time() >= deadline:
+                return False
+            if loop.time() - last_reminder >= 30:
+                # The first toast fades after 10s: keep reminding so the
+                # request does not silently expire.
+                self.notify(pending_msg, severity="warning", timeout=10)
+                last_reminder = loop.time()
+            await asyncio.sleep(0.05)
+        return True
+
+    async def _await_user_approval(
+        self, title: str, operation: str, *, require_name: str | None = None
+    ) -> Literal["approved", "declined", "expired"]:
+        """Show a ConfirmScreen and wait for the user's decision. Only real key
+        input can resolve it. While the agent panel is collapsed, or another
+        screen (a user dialog, describe, picker) is on top, the request stays
+        pending instead of pushing a modal (spec 6.1: approval dialogs are
+        never auto-opened from the collapsed state, and never stacked over an
+        active dialog where a stray keystroke could approve it); it surfaces
+        when the panel is expanded with a clear screen. Pending and on-screen
+        time share one deadline, so an unanswered or never-surfaced request
+        resolves as "expired" (distinct from an explicit "declined", so the
+        agent is never told the user declined when nobody answered) and an
+        agent turn can never hang forever."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _APPROVAL_TIMEOUT
+        if not await self._wait_until_surfaceable(deadline):
+            return "expired"
+        fut: asyncio.Future[bool] = loop.create_future()
+
+        def _done(confirmed: bool | None) -> None:
+            if not fut.done():
+                fut.set_result(bool(confirmed))
+
+        screen = ConfirmScreen(title, operation, require_name=require_name)
+        await self.push_screen(screen, _done)
+        # Recheck after mounting: surfacing the dialog (or push_screen itself)
+        # can consume the last of the budget, and a fixed minimum here would
+        # quietly extend the expiry contract past _APPROVAL_TIMEOUT.
+        remaining = deadline - loop.time()
+        try:
+            if remaining <= 0:
+                raise TimeoutError
+            confirmed = await asyncio.wait_for(fut, timeout=remaining)
+            return "approved" if confirmed else "declined"
+        except TimeoutError:
+            # Late keystrokes are a no-op (the future is already resolved),
+            # but clear the dialog when possible so it doesn't linger.
+            if self.screen is screen:
+                with contextlib.suppress(Exception):
+                    self.pop_screen()
+            elif screen in self.screen_stack:
+                self.notify(
+                    "Agent write request expired - dismiss the pending dialog with Esc",
+                    severity="warning",
+                )
+            return "expired"
 
     async def _show_describe(
         self,
@@ -1676,3 +2428,13 @@ class AppUIBridge(UIBridge):
 
     async def agent_drill_down(self, name: str) -> str:
         return await self._app.agent_drill_down(name)
+
+    async def agent_request_write(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+    ) -> str:
+        return await self._app.agent_request_write(action, kind, name, namespace, replicas)

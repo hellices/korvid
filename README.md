@@ -8,7 +8,9 @@ AI-native Kubernetes TUI — a k9s-style keyboard-first cockpit with an embedded
 
 ## Status
 
-Work in progress — core TUI, log viewer, and read-only agent runtime functional.
+Work in progress — core TUI, log viewer, and agent runtime functional.
+Read-heavy by design: cluster writes (delete / scale / rollout restart) exist
+but every one is approval-gated and audited; `--readonly` disables them all.
 
 ## Keybindings
 
@@ -26,6 +28,9 @@ Work in progress — core TUI, log viewer, and read-only agent runtime functiona
 | `p` | log pane | Reload pane with previous (terminated) container logs |
 | `n` | log pane | Jump to next search hit |
 | `N` | log pane | Jump to previous search hit |
+| `Ctrl-D` | table | Delete selected resource (confirm dialog; cluster-scoped kinds require typing the name) |
+| `r` | table | Rolling restart of selected deployment / statefulset / daemonset (confirm dialog) |
+| `S` | table | Scale selected deployment / replicaset / statefulset (replica prompt + confirm dialog) |
 | `Ctrl-A` | global | Toggle AI agent panel |
 | `q` | global | Quit |
 | `Esc` | log pane | Close pane (or dismiss search / filter bar) |
@@ -50,8 +55,25 @@ Press `Ctrl-A` to open the agent panel — a chat sidebar that answers questions
 about the cluster you are looking at.  The agent sees your current screen
 context (view, namespace, selected resource, active filter) and inspects the
 cluster through read-only tools: fetching manifests, logs, events, and resource
-listings.  It cannot mutate anything in this slice — no create, patch, delete,
-or exec.
+listings.
+
+The agent can also *request* three write operations — delete, scale, and
+rollout restart — but it can never execute them itself.  Each request opens
+the same confirmation dialog as the keybindings (marked with a ⚠ in the tool
+log), and only your keystroke in that dialog approves it; an unanswered
+dialog expires without executing anything.  Every executed write — yours or
+agent-requested — is recorded in an audit log at
+`$XDG_STATE_HOME/korvid/audit.jsonl` (defaulting to
+`~/.local/state/korvid/audit.jsonl` when `XDG_STATE_HOME` is unset;
+0600 permissions, size-rotated).  If the audit entry cannot be written, the
+write is blocked.
+
+### Read-only mode
+
+Start with `korvid --readonly` (or set `readonly: true` in
+`~/.config/korvid/config.yaml`) to disable all cluster writes: the
+keybindings above are rejected and the write tools are never offered to the
+model.
 
 Tool results are capped at 8,000 characters and `Secret` data is masked before
 it ever reaches the model.  The header shows the model name and cumulative

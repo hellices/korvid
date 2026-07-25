@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -18,14 +19,22 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary, summary_for
+from korvid.k8s.writes import WriteOps
+
+logger = logging.getLogger(__name__)
 
 
 def _path_segment(value: str) -> str:
     """Percent-encode *value* for safe use as a single URL path segment.
 
-    Namespaces arrive from user input (command bar); encoding prevents
-    ``/`` or ``..`` from altering the request path.
+    Namespaces and names arrive from user and agent input; encoding prevents
+    ``/`` from altering the request path. Empty and dot segments are rejected
+    outright: quote() leaves ``.`` intact, so ``.`` or ``..`` would survive as
+    a literal traversal segment that an HTTP stack can normalize away from
+    the intended (and, for writes, approved) object path.
     """
+    if value in ("", ".", ".."):
+        raise ValueError(f"invalid URL path segment: {value!r}")
     return quote(value, safe="")
 
 
@@ -67,12 +76,13 @@ def resolve_context_name(context: str | None = None, config_file: str | None = N
     return str(name) if name else None
 
 
-class KubeClient:
+class KubeClient(WriteOps):
     """Thin wrapper over kubernetes_asyncio; returns typed summaries."""
 
     def __init__(self) -> None:
         self._api: k8s_client.ApiClient | None = None
         self._core_v1: k8s_client.CoreV1Api | None = None
+        self._ssar_warned = False
 
     async def connect(self, context: str | None = None) -> None:
         await k8s_config.load_kube_config(context=context)
@@ -235,14 +245,159 @@ class KubeClient:
         self, meta: ResourceMeta, namespace: str | None, name: str
     ) -> dict[str, Any]:
         """Fetch the raw manifest for a single object. ApiException → ApiStatusError."""
+        return await self._request_json(self._object_path(meta, namespace, name))
+
+    @staticmethod
+    def _object_path(meta: ResourceMeta, namespace: str | None, name: str) -> str:
         if meta.namespaced and namespace is not None:
-            path = (
+            return (
                 f"{meta.api_base}/namespaces/{_path_segment(namespace)}"
                 f"/{meta.plural}/{_path_segment(name)}"
             )
-        else:
-            path = f"{meta.api_base}/{meta.plural}/{_path_segment(name)}"
-        return await self._request_json(path)
+        return f"{meta.api_base}/{meta.plural}/{_path_segment(name)}"
+
+    async def _request_write(
+        self,
+        path: str,
+        method: str,
+        body: dict[str, Any] | None = None,
+        content_type: str | None = None,
+    ) -> None:
+        """Mutating request through the ApiClient; wraps ApiException as ApiStatusError."""
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        header_params: dict[str, str] = {}
+        if content_type is not None:
+            header_params["Content-Type"] = content_type
+        try:
+            resp = await self._api.call_api(
+                path,
+                method,
+                auth_settings=["BearerToken"],
+                header_params=header_params,
+                body=body,
+                _preload_content=False,
+            )
+            # Drain the body so the pooled HTTP connection is released; with
+            # _preload_content=False the caller owns the response. Writes may
+            # return empty or non-JSON bodies, so no decode is attempted.
+            await resp.read()
+        except k8s_client.exceptions.ApiException as exc:
+            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+
+    async def can_i(
+        self,
+        verb: str,
+        resource: str,
+        subresource: str,
+        namespace: str | None,
+        group: str = "",
+        name: str = "",
+    ) -> bool:
+        """SelfSubjectAccessReview permission pre-check (spec: RBAC check at
+        the approval gate). Fails open on infrastructure errors: the write is
+        still approval-gated and audited, and SSAR itself may be forbidden."""
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        attrs: dict[str, Any] = {"verb": verb, "resource": resource}
+        if group:
+            attrs["group"] = group
+        if name:
+            attrs["name"] = name
+        if subresource:
+            attrs["subresource"] = subresource
+        if namespace:
+            attrs["namespace"] = namespace
+        body = {
+            "apiVersion": "authorization.k8s.io/v1",
+            "kind": "SelfSubjectAccessReview",
+            "spec": {"resourceAttributes": attrs},
+        }
+        try:
+            resp = await self._api.call_api(
+                "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews",
+                "POST",
+                auth_settings=["BearerToken"],
+                header_params={"Content-Type": "application/json"},
+                body=body,
+                _preload_content=False,
+            )
+            data = await _to_dict(resp)
+        except Exception:
+            # Fail-open, but make the silently disabled pre-check visible to
+            # operators: warn on the first failure, debug afterwards.
+            if self._ssar_warned:
+                logger.debug("SelfSubjectAccessReview failed; allowing (fail-open)", exc_info=True)
+            else:
+                self._ssar_warned = True
+                logger.warning(
+                    "SelfSubjectAccessReview failed; permission pre-checks are"
+                    " disabled (fail-open) - writes remain approval-gated and audited",
+                    exc_info=True,
+                )
+            return True
+        return bool((data.get("status") or {}).get("allowed", False))
+
+    async def delete_object(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        """DELETE a single object. A ``uid`` precondition pins the exact object
+        incarnation that was approved: if the object was deleted and recreated
+        under the same name meanwhile, the API server refuses with 409 instead
+        of deleting the replacement. ApiException → ApiStatusError."""
+        body = {"preconditions": {"uid": uid}} if uid else None
+        await self._request_write(
+            self._object_path(meta, namespace, name),
+            "DELETE",
+            body=body,
+            content_type="application/json" if body else None,
+        )
+
+    async def scale_object(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        replicas: int,
+        *,
+        uid: str | None = None,
+    ) -> None:
+        """Set spec.replicas via the /scale subresource (merge patch). A
+        ``uid`` in the patched metadata is an apiserver precondition: the
+        patch is rejected with 409 when the object was recreated."""
+        body: dict[str, Any] = {"spec": {"replicas": replicas}}
+        if uid:
+            body["metadata"] = {"uid": uid}
+        await self._request_write(
+            f"{self._object_path(meta, namespace, name)}/scale",
+            "PATCH",
+            body=body,
+            content_type="application/merge-patch+json",
+        )
+
+    async def rollout_restart(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        """Trigger a rolling restart the way kubectl does: patch the pod
+        template with a kubectl.kubernetes.io/restartedAt annotation. A
+        ``uid`` in the patched metadata is an apiserver precondition (409 on
+        mismatch), so the restart never lands on a recreated object."""
+        stamp = datetime.now().astimezone().isoformat()
+        body: dict[str, Any] = {
+            "spec": {
+                "template": {
+                    "metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": stamp}}
+                }
+            }
+        }
+        if uid:
+            body["metadata"] = {"uid": uid}
+        await self._request_write(
+            self._object_path(meta, namespace, name),
+            "PATCH",
+            body=body,
+            content_type="application/strategic-merge-patch+json",
+        )
 
     async def stream_logs(
         self,
