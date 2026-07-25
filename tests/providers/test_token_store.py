@@ -136,20 +136,20 @@ def test_failed_file_write_keeps_stale_keyring_copy(
 def test_interrupted_write_preserves_existing_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A short write (disk full / crash) must not corrupt the fallback file:
-    the previously stored credential has to survive intact."""
+    """A failure mid-write (disk full / crash) must not corrupt the fallback
+    file: the previously stored credential has to survive intact."""
+    import korvid.providers.token_store as ts_mod
+
     _no_keyring(monkeypatch)
     p = tmp_path / "creds.json"
     store = TokenStore(fallback_path=p)
     store.save("old", "keep-me")
-    real_write_text = Path.write_text
 
-    def truncating_write(self: Path, content: str, *args: object, **kwargs: object) -> int:
-        real_write_text(self, content[: len(content) // 2])
+    def failing_fsync(fd: int) -> None:
         raise OSError("disk full")
 
     with monkeypatch.context() as m:
-        m.setattr(Path, "write_text", truncating_write)
+        m.setattr(ts_mod, "os_fsync", failing_fsync)
         with pytest.raises(OSError, match="disk full"):
             store.save("new", "value")
     assert store.load("old") == "keep-me"
@@ -166,6 +166,12 @@ def test_write_fsyncs_before_replace(tmp_path: Path, monkeypatch: pytest.MonkeyP
     real_replace = os.replace
 
     def spy_fsync(fd: int) -> None:
+        import fcntl
+
+        # Windows' fsync (_commit) requires a writable handle: syncing an
+        # O_RDONLY fd raises there, so the implementation must sync the fd
+        # it wrote through.
+        assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY
         calls.append("fsync")
         real_fsync(fd)
 

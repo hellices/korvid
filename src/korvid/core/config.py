@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from os import O_RDONLY
 from os import chmod as os_chmod
-from os import close as os_close
+from os import fdopen as os_fdopen
 from os import fsync as os_fsync
-from os import open as os_open
 from os import replace as os_replace
 from pathlib import Path
 from stat import S_IMODE
@@ -120,16 +118,15 @@ def _atomic_write_text(path: Path, text: str) -> None:
     except OSError:
         mode = 0o600
     fd, tmp_name = mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
-    os_close(fd)
     tmp = Path(tmp_name)
     try:
+        # Write through the mkstemp fd and fsync it while still writable:
+        # Windows' fsync (_commit) rejects read-only handles.
+        with os_fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os_fsync(fh.fileno())
         os_chmod(tmp, mode)
-        tmp.write_text(text)
-        fsync_fd = os_open(tmp, O_RDONLY)
-        try:
-            os_fsync(fsync_fd)
-        finally:
-            os_close(fsync_fd)
         os_replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)

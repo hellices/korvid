@@ -86,15 +86,14 @@ class TokenStore:
         # copy, a power loss cannot leave an empty file, and concurrent
         # writers cannot race on a shared temp name. mkstemp creates 0600.
         fd, tmp_name = mkstemp(dir=self._path.parent, prefix=self._path.name + ".", suffix=".tmp")
-        os.close(fd)
         tmp = Path(tmp_name)
         try:
-            tmp.write_text(json.dumps(data))
-            fsync_fd = os.open(tmp, os.O_RDONLY)
-            try:
-                os_fsync(fsync_fd)
-            finally:
-                os.close(fsync_fd)
+            # Write through the mkstemp fd and fsync it while still writable:
+            # Windows' fsync (_commit) rejects read-only handles.
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(data))
+                fh.flush()
+                os_fsync(fh.fileno())
             os_replace(tmp, self._path)
         finally:
             tmp.unlink(missing_ok=True)

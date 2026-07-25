@@ -208,18 +208,18 @@ def test_save_agent_config_clears_explicit_disable(tmp_path: Path) -> None:
 def test_save_agent_config_interrupted_write_preserves_existing_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A short write (disk full / crash) must not truncate the user's config:
-    the previous file content has to survive intact."""
+    """A failure mid-write (disk full / crash) must not truncate the user's
+    config: the previous file content has to survive intact."""
+    import korvid.core.config as cfg_mod
+
     p = tmp_path / "c.yaml"
     p.write_text("keybindings:\n  q: quit\nagent:\n  provider: ollama\n  model: llama3\n")
-    real_write_text = Path.write_text
 
-    def truncating_write(self: Path, content: str, *args: object, **kwargs: object) -> int:
-        real_write_text(self, content[: len(content) // 2])
+    def failing_fsync(fd: int) -> None:
         raise OSError("disk full")
 
     with monkeypatch.context() as m:
-        m.setattr(Path, "write_text", truncating_write)
+        m.setattr(cfg_mod, "os_fsync", failing_fsync)
         with pytest.raises(OSError, match="disk full"):
             save_agent_config(
                 p,
@@ -288,6 +288,12 @@ def test_save_agent_config_fsyncs_before_replace(
     real_replace = os.replace
 
     def spy_fsync(fd: int) -> None:
+        import fcntl
+
+        # Windows' fsync (_commit) requires a writable handle: syncing an
+        # O_RDONLY fd raises there, so the implementation must sync the fd
+        # it wrote through.
+        assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY
         calls.append("fsync")
         real_fsync(fd)
 
