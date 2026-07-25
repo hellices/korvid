@@ -1399,7 +1399,10 @@ class KorvidApp(App[None]):
                 "(user action takes priority) — retry if still needed"
             )
         try:
-            await self.push_screen(DescribeScreen(title, manifest, events))
+            # When the chat panel is visible, take only the left side so the
+            # conversation stays on screen while the user reads the manifest.
+            share = self.query_one(AgentPanel).display
+            await self.push_screen(DescribeScreen(title, manifest, events, share_with_agent=share))
         except Exception as exc:
             return f"ERROR: {exc}"
         self._mark_agent_action(f"describe → {title}")

@@ -69,7 +69,8 @@ async def test_text_deltas_accumulate_in_log() -> None:
         panel.apply_event(TurnComplete(input_tokens=1, output_tokens=2, estimated=True))
         await pilot.pause()
         text = _log_text(app)
-        assert "> hi" in text
+        assert "▸ you" in text
+        assert "hi" in text
         assert "Hello world." in text
         assert "Second line." in text
 
@@ -188,3 +189,44 @@ async def test_ui_tool_calls_use_screen_marker() -> None:
         assert '🖥 navigate({"view":"pods"}) …' in text
         assert "🖥 navigate ✓" in text
         assert "🖥 set_filter ✗ ERROR: x" in text
+
+
+async def test_user_line_is_visually_marked() -> None:
+    """The user's message must be distinguishable from agent output at a
+    glance: rendered with a '▸ you' marker line."""
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("why is my pod crashing?")
+        await pilot.pause()
+        text = _log_text(app)
+        assert "▸ you" in text
+        assert "why is my pod crashing?" in text
+
+
+async def test_agent_reply_gets_label_before_first_output() -> None:
+    """Agent output starts with its own label line so consecutive turns
+    read as a dialogue, not one undifferentiated stream."""
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("hello")
+        panel.apply_event(TextDelta("hi there\n"))
+        panel.apply_event(TurnComplete(input_tokens=1, output_tokens=1, estimated=False))
+        await pilot.pause()
+        text = _log_text(app)
+        assert "⚡ agent" in text
+        assert text.index("▸ you") < text.index("⚡ agent") < text.index("hi there")
+
+
+async def test_agent_label_precedes_tool_calls_too() -> None:
+    """A turn that begins with a tool call (no text yet) still gets the
+    agent label first."""
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("check pods")
+        panel.apply_event(ToolCallStarted(call_id="c1", name="list_resources", arguments="{}"))
+        await pilot.pause()
+        text = _log_text(app)
+        assert text.index("▸ you") < text.index("⚡ agent") < text.index("list_resources")

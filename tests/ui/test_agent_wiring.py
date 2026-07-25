@@ -109,7 +109,8 @@ async def test_prompt_drives_runtime_and_renders_reply() -> None:
         assert runtime.calls
         assert runtime.calls[0][0] == "how are my pods?"
         text = _panel_text(app)
-        assert "> how are my pods?" in text
+        assert "▸ you" in text
+        assert "how are my pods?" in text
         assert "All pods healthy." in text
         assert inp.disabled is False
 

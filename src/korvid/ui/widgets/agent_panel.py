@@ -67,6 +67,7 @@ class AgentPanel(Vertical):
         self._tok_in = 0
         self._tok_out = 0
         self._estimated = False
+        self._agent_labeled = True
 
     def compose(self) -> ComposeResult:
         yield Static("⚡ agent", id="agent-header")
@@ -107,15 +108,26 @@ class AgentPanel(Vertical):
 
     def begin_turn(self, user_text: str) -> None:
         log = self.query_one("#agent-log", RichLog)
-        log.write(f"> {user_text}")
+        log.write(Text("▸ you", style="bold cyan"))
+        log.write(Text(f"  {user_text}", style="cyan"))
         self.query_one("#agent-input", Input).disabled = True
         self._pending = ""
+        self._agent_labeled = False
+
+    def _ensure_agent_label(self, log: RichLog) -> None:
+        """Label the agent's side of the dialogue once per turn, before its
+        first output (text or tool call), so turns read as a conversation."""
+        if not self._agent_labeled:
+            self._agent_labeled = True
+            log.write(Text("⚡ agent", style="bold magenta"))
 
     def apply_event(self, event: AgentEvent) -> None:
         log = self.query_one("#agent-log", RichLog)
         if isinstance(event, TextDelta):
+            self._ensure_agent_label(log)
             self._append_text(log, event.text)
         elif isinstance(event, ToolCallStarted):
+            self._ensure_agent_label(log)
             self._flush(log)
             args = event.arguments
             if len(args) > 40:

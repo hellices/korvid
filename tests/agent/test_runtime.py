@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, TurnComplete
-from korvid.agent.runtime import MAX_HISTORY_TURNS, AgentRuntime
+from korvid.agent.runtime import MAX_HISTORY_TURNS, SYSTEM_PROMPT, AgentRuntime
 
 
 class ScriptedProvider:
@@ -350,3 +350,10 @@ async def test_system_prompt_advertises_ui_driving_with_ui_tools() -> None:
     system = p.calls[0][0]["content"]
     for tool in ("navigate", "set_filter", "open_logs", "open_describe"):
         assert tool in system
+
+
+def test_system_prompt_redirects_write_requests_to_kubectl() -> None:
+    """The agent has no write tools yet; instead of a bare refusal it must
+    offer the exact kubectl command the user can run."""
+    assert "kubectl" in SYSTEM_PROMPT
+    assert "write" in SYSTEM_PROMPT.lower() or "modify" in SYSTEM_PROMPT.lower()

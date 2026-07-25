@@ -490,3 +490,33 @@ async def test_agent_open_logs_rechecks_pane_gen_after_cancel() -> None:
         await pilot.pause()
         assert out.startswith("ERROR:")
         assert ("default", "web-2", "main") in app._current_log_triples
+
+
+async def test_agent_open_describe_shares_screen_when_panel_visible() -> None:
+    """When the chat panel is open, an agent-opened describe must not cover
+    it — the modal takes the left side and the conversation stays visible."""
+    from korvid.ui.widgets.agent_panel import AgentPanel
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one(AgentPanel).display = True
+        out = await app.agent_open_describe("pods", "web-1", "default")
+        await pilot.pause()
+        assert not out.startswith("ERROR:")
+        assert isinstance(app.screen, DescribeScreen)
+        assert app.screen.has_class("share")
+
+
+async def test_agent_open_describe_fullscreen_when_panel_hidden() -> None:
+    from korvid.ui.widgets.agent_panel import AgentPanel
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one(AgentPanel).display = False
+        out = await app.agent_open_describe("pods", "web-1", "default")
+        await pilot.pause()
+        assert not out.startswith("ERROR:")
+        assert isinstance(app.screen, DescribeScreen)
+        assert not app.screen.has_class("share")

@@ -63,6 +63,17 @@ class DescribeScreen(ModalScreen[None]):
     DescribeScreen #describe-body {
         width: 100%;
     }
+    DescribeScreen.share {
+        background: $background 0%;
+    }
+    DescribeScreen.share Header,
+    DescribeScreen.share VerticalScroll,
+    DescribeScreen.share Footer {
+        width: 60%;
+    }
+    DescribeScreen.share VerticalScroll {
+        border-right: solid $accent;
+    }
     """
 
     def __init__(
@@ -70,11 +81,16 @@ class DescribeScreen(ModalScreen[None]):
         title: str,
         manifest: dict[str, Any],
         events: list[dict[str, Any]],
+        share_with_agent: bool = False,
     ) -> None:
         super().__init__()
         self._title = title
         self._manifest = manifest
         self._events = events
+        if share_with_agent:
+            # Agent-opened describe: take the left side only, so the chat
+            # panel (and the conversation in progress) stays visible.
+            self.add_class("share")
 
     def compose(self) -> ComposeResult:
         yield Header()
