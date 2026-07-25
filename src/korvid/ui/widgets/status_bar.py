@@ -4,6 +4,9 @@ from textual.widgets import Static
 
 
 class StatusBar(Static):
-    def update_status(self, context: str | None, namespace: str, agent_label: str) -> None:
+    def update_status(
+        self, context: str | None, namespace: str, agent_label: str, breadcrumb: str = ""
+    ) -> None:
         ctx = context or "(current)"
-        self.update(f"ctx:{ctx}  ns:{namespace}  ⚡{agent_label}")
+        trail = f"  {breadcrumb}" if breadcrumb else ""
+        self.update(f"ctx:{ctx}  ns:{namespace}  ⚡{agent_label}{trail}")

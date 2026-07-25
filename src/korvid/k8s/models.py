@@ -105,6 +105,10 @@ def _effective_resource(spec: dict[str, Any], bucket: str, key: str) -> str:
     return format_memory(total_mem)
 
 
+def _owner_uids(meta: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(str(ref["uid"]) for ref in (meta.get("ownerReferences") or []) if ref.get("uid"))
+
+
 @dataclass(frozen=True)
 class GenericSummary:
     """Minimal summary for any Kubernetes object kind."""
@@ -113,6 +117,8 @@ class GenericSummary:
     namespace: str
     kind: str
     created: str  # ISO-8601 timestamp or "" when absent
+    uid: str = ""
+    owner_uids: tuple[str, ...] = ()
 
     @classmethod
     def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> GenericSummary:
@@ -122,6 +128,8 @@ class GenericSummary:
             namespace=str(meta.get("namespace", "")),
             kind=kind,
             created=str(meta.get("creationTimestamp") or ""),
+            uid=str(meta.get("uid") or ""),
+            owner_uids=_owner_uids(meta),
         )
 
     def age(self, now: datetime | None = None) -> str:
@@ -149,6 +157,44 @@ class GenericSummary:
         if hours >= 1:
             return f"{hours}h"
         return f"{total_seconds // 60}m"
+
+
+@dataclass(frozen=True)
+class ReplicaSetSummary(GenericSummary):
+    """ReplicaSet summary with rollout-history fields for drill-down views."""
+
+    revision: str = "-"  # deployment.kubernetes.io/revision annotation
+    desired: int = 0
+    current: int = 0
+    ready: str = "0/0"
+
+    @classmethod
+    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> ReplicaSetSummary:
+        meta = manifest.get("metadata") or {}
+        spec = manifest.get("spec") or {}
+        status = manifest.get("status") or {}
+        desired = int(spec.get("replicas") or 0)
+        return cls(
+            name=str(meta.get("name", "")),
+            namespace=str(meta.get("namespace", "")),
+            kind=kind,
+            created=str(meta.get("creationTimestamp") or ""),
+            uid=str(meta.get("uid") or ""),
+            owner_uids=_owner_uids(meta),
+            revision=str(
+                (meta.get("annotations") or {}).get("deployment.kubernetes.io/revision") or "-"
+            ),
+            desired=desired,
+            current=int(status.get("replicas") or 0),
+            ready=f"{int(status.get('readyReplicas') or 0)}/{desired}",
+        )
+
+
+def summary_for(kind: str, manifest: dict[str, Any]) -> GenericSummary:
+    """Build the richest summary available for *kind* (ReplicaSet gets history fields)."""
+    if kind == "ReplicaSet":
+        return ReplicaSetSummary.from_manifest(kind, manifest)
+    return GenericSummary.from_manifest(kind, manifest)
 
 
 def _terminated_reason(terminated: dict[str, Any]) -> str | None:
@@ -294,6 +340,7 @@ class PodSummary:
     cpu_limit: str = "-"
     mem_limit: str = "-"
     containers: tuple[str, ...] = ()
+    owner_uids: tuple[str, ...] = ()
 
     @classmethod
     def from_manifest(cls, obj: dict[str, Any]) -> PodSummary:
@@ -318,4 +365,5 @@ class PodSummary:
             containers=tuple(
                 str(c["name"]) for c in (spec.get("containers") or []) if c.get("name")
             ),
+            owner_uids=_owner_uids(meta),
         )

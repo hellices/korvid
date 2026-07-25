@@ -312,6 +312,10 @@ class FakeBridge(UIBridge):
         self.calls.append(("open_describe", {"kind": kind, "name": name, "namespace": namespace}))
         return f"describe opened for {kind}/{name}"
 
+    async def agent_drill_down(self, name: str) -> str:
+        self.calls.append(("drill_down", {"name": name}))
+        return f"drilled into {name}"
+
 
 def make_ui_executor(bridge: Any) -> ToolExecutor:
     kube: Any = FakeKube()
@@ -320,7 +324,7 @@ def make_ui_executor(bridge: Any) -> ToolExecutor:
 
 def test_ui_tools_schema_names() -> None:
     names = [t["function"]["name"] for t in UI_TOOLS]
-    assert names == ["navigate", "set_filter", "open_logs", "open_describe"]
+    assert names == ["navigate", "set_filter", "open_logs", "open_describe", "drill_down"]
 
 
 def test_ui_tools_all_have_type_function() -> None:
@@ -357,6 +361,13 @@ async def test_open_describe_dispatches_to_bridge() -> None:
         "open_describe", {"kind": "pods", "name": "web-1", "namespace": "d"}
     )
     assert out == "describe opened for pods/web-1"
+
+
+async def test_drill_down_dispatches_to_bridge() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute("drill_down", {"name": "web"})
+    assert out == "drilled into web"
+    assert bridge.calls == [("drill_down", {"name": "web"})]
 
 
 async def test_ui_tool_without_bridge_is_error() -> None:

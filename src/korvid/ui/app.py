@@ -31,6 +31,7 @@ from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import PodSummary
+from korvid.k8s.relations import drill_child, owned_by
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -42,6 +43,7 @@ from korvid.ui.messages import (
     ShowNamespacePicker,
     UnknownCommand,
 )
+from korvid.ui.navigation import DrillLevel, NavigationStack
 from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv, build_probe_argv
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
@@ -199,6 +201,9 @@ class KorvidApp(App[None]):
         self.current_kind: str = "pods"
         self.current_scope: str = config.namespace or "default"
         self.filter_pattern = ""
+        # Drill-down levels (deploy -> rs -> pods); single source for the
+        # breadcrumb line and the owner-uid filter on the current table.
+        self._drill = NavigationStack()
         self._log_tasks: set[asyncio.Task[None]] = set()
         self._log_buffer: LogBuffer | None = None
         self._log_error: bool = False
@@ -326,6 +331,9 @@ class KorvidApp(App[None]):
         self._dismiss_splash()
         table = self.query_one(ResourceTable)
         rows = self.store.get(kind, self.current_scope)
+        drill_uid = self._drill.parent_uid
+        if drill_uid is not None and kind == self._drill.child_kind:
+            rows = [r for r in rows if owned_by(r, drill_uid)]
         all_namespaces = self.current_scope == ALL_NAMESPACES
         table.show(kind, rows, all_namespaces=all_namespaces, pattern=self.filter_pattern)
         self._refresh_empty_state(kind, table.row_count)
@@ -357,6 +365,12 @@ class KorvidApp(App[None]):
         self.post_message(ResourcesUpdated(self.current_kind))
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
+        # An explicit :view / agent navigate abandons any drill-down context;
+        # drill navigation goes through _navigate directly to keep its stack.
+        self._drill.clear()
+        await self._navigate(message.view, message.namespace)
+
+    async def _navigate(self, view: str | None, namespace: str | None) -> None:
         # The lock serializes the agent path (direct call from the agent
         # task) with the keyboard path (message pump): both mutate
         # current_kind/current_scope across awaits. The final state is the
@@ -367,8 +381,8 @@ class KorvidApp(App[None]):
             # over the new view — dismiss it on any navigation, even when the
             # requested kind/scope already matches.
             self.query_one(DescribePane).hide()
-            new_kind = message.view if message.view is not None else self.current_kind
-            new_scope = message.namespace if message.namespace is not None else self.current_scope
+            new_kind = view if view is not None else self.current_kind
+            new_scope = namespace if namespace is not None else self.current_scope
             if new_kind != self.current_kind or new_scope != self.current_scope:
                 await self._close_log_pane()
                 await self.watch_manager.stop(self.current_kind, self.current_scope)
@@ -413,8 +427,13 @@ class KorvidApp(App[None]):
         self.exit()
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Enter on a pod row drills into its container list (k9s convention)."""
-        if not isinstance(event.data_table, ResourceTable) or self.current_kind != "pods":
+        """Enter drills down: pods -> containers (k9s convention); kinds with a
+        registered ownership child (deploy -> rs -> pods) push a drill level."""
+        if not isinstance(event.data_table, ResourceTable):
+            return
+        if self.current_kind != "pods":
+            event.stop()
+            await self._drill_down_selected(str(event.row_key.value))
             return
         event.stop()
         row_key = str(event.row_key.value)
@@ -441,6 +460,55 @@ class KorvidApp(App[None]):
                 self.run_worker(self._open_log_pane(namespace, [(name, container)]))
 
         await self.push_screen(ContainersScreen(name, rows), _on_pick)
+
+    def _canonical_kind(self, kind: str) -> str:
+        meta = self.aliases.get(kind)
+        return meta.plural if meta is not None else kind
+
+    async def _drill_down_selected(self, row_key: str) -> None:
+        """Keyboard Enter: push a drill level for the selected row."""
+        if drill_child(self._canonical_kind(self.current_kind)) is None:
+            return  # kind has no drill-down chain; Enter is a no-op
+        parts = row_key.split("/", 1)
+        if len(parts) != 2:
+            return
+        error = await self._drill_into(parts[0], parts[1])
+        if error is not None:
+            self.notify(error, severity="warning")
+
+    async def _drill_into(self, namespace: str, name: str) -> str | None:
+        """Push a drill level for (namespace, name) in the current view and
+        navigate to the child kind. Returns an error message, or None on success."""
+        canonical = self._canonical_kind(self.current_kind)
+        child = drill_child(canonical)
+        if child is None:
+            return f"{canonical} has no drill-down chain"
+        if child not in self.aliases:
+            return f"{child} not discovered yet, try again shortly"
+        obj = next(
+            (
+                o
+                for o in self.store.get(self.current_kind, self.current_scope)
+                if o.namespace == namespace and o.name == name
+            ),
+            None,
+        )
+        if obj is None:
+            return f"no {canonical} named {name!r} in the current view"
+        uid = str(getattr(obj, "uid", "") or "")
+        if not uid:
+            return f"cannot drill into {name}: no uid available"
+        self._drill.push(
+            DrillLevel(
+                parent_kind=canonical,
+                parent_name=name,
+                parent_namespace=namespace,
+                parent_uid=uid,
+                child_kind=child,
+            )
+        )
+        await self._navigate(child, None)
+        return None
 
     async def _build_container_rows(
         self, namespace: str, name: str
@@ -736,21 +804,27 @@ class KorvidApp(App[None]):
             )
 
     async def on_key(self, event: Key) -> None:
-        """Close describe pane / log pane on Escape when no bar/picker is open."""
-        if event.key == "escape":
-            describe_pane = self.query_one(DescribePane)
-            log_pane = self.query_one(LogPane)
-            if not describe_pane.display and not log_pane.display:
-                return
-            filter_bar = self.query_one(FilterBar)
-            command_bar = self.query_one(CommandBar)
-            namespace_picker = self.query_one(NamespacePicker)
-            if filter_bar.display or command_bar.display or namespace_picker.display:
-                return
-            if describe_pane.display:
-                describe_pane.hide()
-            else:
-                await self._close_log_pane()
+        """Escape closes describe/log panes, then pops one drill-down level."""
+        if event.key != "escape":
+            return
+        filter_bar = self.query_one(FilterBar)
+        command_bar = self.query_one(CommandBar)
+        namespace_picker = self.query_one(NamespacePicker)
+        if filter_bar.display or command_bar.display or namespace_picker.display:
+            return  # bars and pickers own Escape while open
+        describe_pane = self.query_one(DescribePane)
+        if describe_pane.display:
+            describe_pane.hide()
+            event.stop()
+            return
+        log_pane = self.query_one(LogPane)
+        if log_pane.display:
+            await self._close_log_pane()
+            event.stop()
+            return
+        popped = self._drill.pop()
+        if popped is not None:
+            await self._navigate(popped.parent_kind, None)
             event.stop()
 
     async def action_logs(self) -> None:
@@ -1143,7 +1217,12 @@ class KorvidApp(App[None]):
         # create_provider may return None (unknown provider, missing base_url/
         # model) while agent_enabled is still true in config.
         label = "AI on" if self._agent_runtime is not None else "AI off"
-        self.query_one(StatusBar).update_status(self.config.kube_context, self.current_scope, label)
+        self.query_one(StatusBar).update_status(
+            self.config.kube_context,
+            self.current_scope,
+            label,
+            breadcrumb=self._drill.breadcrumb(),
+        )
 
     # ------------------------------------------------------------------
     # Task-10 actions: JSON toggle, previous logs, search navigation
@@ -1397,6 +1476,35 @@ class KorvidApp(App[None]):
             return [(namespace, pod, "")]
         return []
 
+    async def agent_drill_down(self, name: str) -> str:
+        canonical = self._canonical_kind(self.current_kind)
+        child = drill_child(canonical)
+        if child is None:
+            return (
+                f"ERROR: {canonical} has no drill-down chain - "
+                "drill_down works on deployments and replicasets"
+            )
+        rows = self.store.get(self.current_kind, self.current_scope)
+        drill_uid = self._drill.parent_uid
+        if drill_uid is not None and self.current_kind == self._drill.child_kind:
+            rows = [r for r in rows if owned_by(r, drill_uid)]
+        matches = [r for r in rows if r.name == name]
+        if not matches:
+            return f"ERROR: no {canonical} named {name!r} in the current view"
+        if len(matches) > 1:
+            return (
+                f"ERROR: multiple {canonical} named {name!r} across namespaces - "
+                "navigate to one namespace first"
+            )
+        error = await self._drill_into(matches[0].namespace, name)
+        if error is not None:
+            return f"ERROR: {error}"
+        self._mark_agent_action(f"drill → {self._drill.breadcrumb()}")
+        return (
+            f"drilled into {canonical}/{name} — now showing the {child} it owns "
+            f"({self._drill.breadcrumb()})"
+        )
+
     async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
         if self._get_manifest is None:
             return "ERROR: describe unavailable in this session"
@@ -1510,3 +1618,6 @@ class AppUIBridge(UIBridge):
 
     async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
         return await self._app.agent_open_describe(kind, name, namespace)
+
+    async def agent_drill_down(self, name: str) -> str:
+        return await self._app.agent_drill_down(name)

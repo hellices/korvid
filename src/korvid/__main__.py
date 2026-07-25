@@ -111,6 +111,11 @@ class _UIBridgeProxy(UIBridge):
             return self._NOT_READY
         return await self.target.agent_open_describe(kind, name, namespace)
 
+    async def agent_drill_down(self, name: str) -> str:
+        if self.target is None:
+            return self._NOT_READY
+        return await self.target.agent_drill_down(name)
+
 
 def _build_agent_wiring(
     config: KorvidConfig, kube: KubeClient, aliases: dict[str, ResourceMeta]
