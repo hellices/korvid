@@ -520,3 +520,34 @@ class TestDisplayPhase:
             }
         )
         assert pod.phase == "Init:0/2"
+
+    def test_initialized_condition_true_skips_init_status(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Running",
+                    "conditions": [{"type": "Initialized", "status": "True"}],
+                    "initContainerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "PodInitializing"}}}
+                    ],
+                    "containerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "CrashLoopBackOff"}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "CrashLoopBackOff"
+
+    def test_initialized_condition_false_keeps_init_status(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "conditions": [{"type": "Initialized", "status": "False"}],
+                    "initContainerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "PodInitializing"}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Init:0/1"

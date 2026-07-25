@@ -198,6 +198,14 @@ def _init_phase(spec: dict[str, Any], status: dict[str, Any]) -> str | None:
     return None
 
 
+def _is_initialized(status: dict[str, Any]) -> bool:
+    """True when the pod's Initialized condition is True."""
+    return any(
+        c.get("type") == "Initialized" and c.get("status") == "True"
+        for c in (status.get("conditions") or [])
+    )
+
+
 def _display_phase(
     meta: dict[str, Any],
     spec: dict[str, Any],
@@ -212,9 +220,12 @@ def _display_phase(
     """
     if meta.get("deletionTimestamp"):
         return "Terminating"
-    init_reason = _init_phase(spec, status)
-    if init_reason is not None:
-        return init_reason
+    # kubectl scans regular containers once the pod is initialized; a stale
+    # Init:* status must not hide a current CrashLoopBackOff.
+    if not _is_initialized(status):
+        init_reason = _init_phase(spec, status)
+        if init_reason is not None:
+            return init_reason
     reason = str(status.get("reason") or status.get("phase") or "Unknown")
     has_running = False
     for cs in reversed(statuses):
