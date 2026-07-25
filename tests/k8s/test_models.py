@@ -501,3 +501,22 @@ class TestDisplayPhase:
             )
         )
         assert pod.phase == "Init:ExitCode:3"
+
+    def test_init_progress_denominator_uses_spec_count(self) -> None:
+        pod = PodSummary.from_manifest(
+            {
+                "metadata": {"name": "p", "namespace": "d"},
+                "spec": {"initContainers": [{"name": "a"}, {"name": "b"}]},
+                "status": {
+                    "phase": "Pending",
+                    "initContainerStatuses": [
+                        {
+                            "name": "a",
+                            "ready": False,
+                            "state": {"waiting": {"reason": "PodInitializing"}},
+                        }
+                    ],
+                },
+            }
+        )
+        assert pod.phase == "Init:0/2"

@@ -213,3 +213,13 @@ def test_plain_level_inside_word_not_matched() -> None:
 def test_formatted_false_skips_plain_level_detection() -> None:
     result = format_log_line("ERROR failed", formatted=False)
     assert not result.spans
+
+
+def test_json_scalar_with_level_word_stays_unstyled() -> None:
+    result = format_log_line('"ERROR"', formatted=True)
+    assert not result.spans
+
+
+def test_json_array_with_level_word_stays_unstyled() -> None:
+    result = format_log_line('["ERROR", "boom"]', formatted=True)
+    assert not result.spans

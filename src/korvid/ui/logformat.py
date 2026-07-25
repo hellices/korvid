@@ -104,8 +104,9 @@ def format_log_line(text: str, *, formatted: bool) -> Text:
     - order: level, ts, msg, then the rest in original dict order
 
     Non-JSON input with ``formatted=True`` gets lightweight plain-text
-    styling: standalone level words colored, ISO timestamps dim.
-    ``formatted=False`` always returns an unstyled ``Text(text)``.
+    styling: standalone level words colored, ISO timestamps dim. Valid
+    JSON that is not an object (arrays, scalars) and ``formatted=False``
+    always return an unstyled ``Text(text)``.
     """
     if not formatted:
         return Text(text)
@@ -114,5 +115,5 @@ def format_log_line(text: str, *, formatted: bool) -> Text:
     except (json.JSONDecodeError, ValueError):
         return _build_plain_text(text)
     if not isinstance(data, dict):
-        return _build_plain_text(text)
+        return Text(text)
     return _build_structured_text(data)

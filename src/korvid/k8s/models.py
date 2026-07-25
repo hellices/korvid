@@ -178,11 +178,10 @@ def _init_phase(spec: dict[str, Any], status: dict[str, Any]) -> str | None:
     kubectl; a zero exit code means the init container finished successfully.
     """
     init_statuses: list[dict[str, Any]] = status.get("initContainerStatuses") or []
-    sidecar_names = {
-        str(c.get("name"))
-        for c in (spec.get("initContainers") or [])
-        if c.get("restartPolicy") == "Always"
-    }
+    declared = spec.get("initContainers") or []
+    # Status can lag the spec during initialization; kubectl uses the spec count.
+    total = max(len(declared), len(init_statuses))
+    sidecar_names = {str(c.get("name")) for c in declared if c.get("restartPolicy") == "Always"}
     for i, cs in enumerate(init_statuses):
         state = cs.get("state") or {}
         terminated = state.get("terminated") or {}
@@ -195,7 +194,7 @@ def _init_phase(spec: dict[str, Any], status: dict[str, Any]) -> str | None:
         waiting_reason = (state.get("waiting") or {}).get("reason")
         if waiting_reason and waiting_reason != "PodInitializing":
             return f"Init:{waiting_reason}"
-        return f"Init:{i}/{len(init_statuses)}"
+        return f"Init:{i}/{total}"
     return None
 
 
