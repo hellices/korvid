@@ -151,6 +151,135 @@ class GenericSummary:
         return f"{total_seconds // 60}m"
 
 
+def _terminated_reason(terminated: dict[str, Any]) -> str | None:
+    """kubectl-style reason for a terminated state; None when nothing to show.
+
+    Falls back to ``Signal:<n>`` / ``ExitCode:<n>`` when ``reason`` is empty;
+    a clean zero exit without a reason yields None.
+    """
+    if not terminated:
+        return None
+    reason = terminated.get("reason")
+    if reason:
+        return str(reason)
+    signal = terminated.get("signal")
+    if signal:
+        return f"Signal:{signal}"
+    exit_code = terminated.get("exitCode")
+    if exit_code:
+        return f"ExitCode:{exit_code}"
+    return None
+
+
+def _init_phase(spec: dict[str, Any], status: dict[str, Any]) -> str | None:
+    """Init-container display status ('Init:<reason>' / 'Init:i/n'), or None when done.
+
+    Restartable (sidecar) init containers that have started are skipped, like
+    kubectl; a zero exit code means the init container finished successfully.
+    """
+    init_statuses: list[dict[str, Any]] = status.get("initContainerStatuses") or []
+    declared = spec.get("initContainers") or []
+    # Status can lag the spec during initialization; kubectl uses the spec count.
+    total = max(len(declared), len(init_statuses))
+    sidecar_names = {str(c.get("name")) for c in declared if c.get("restartPolicy") == "Always"}
+    for i, cs in enumerate(init_statuses):
+        state = cs.get("state") or {}
+        terminated = state.get("terminated") or {}
+        if terminated and terminated.get("exitCode") == 0:
+            continue
+        if str(cs.get("name")) in sidecar_names and cs.get("started"):
+            continue
+        if terminated:
+            return f"Init:{_terminated_reason(terminated) or 'Error'}"
+        waiting_reason = (state.get("waiting") or {}).get("reason")
+        if waiting_reason and waiting_reason != "PodInitializing":
+            return f"Init:{waiting_reason}"
+        return f"Init:{i}/{total}"
+    return None
+
+
+def _is_initialized(status: dict[str, Any]) -> bool:
+    """True when the pod's Initialized condition is True."""
+    return any(
+        c.get("type") == "Initialized" and c.get("status") == "True"
+        for c in (status.get("conditions") or [])
+    )
+
+
+def _deletion_status(meta: dict[str, Any], status: dict[str, Any], phase: str) -> str | None:
+    """kubectl's deletion overrides: NodeLost is Unknown regardless of phase;
+    the generic Terminating override applies only to non-terminal phases."""
+    if not meta.get("deletionTimestamp"):
+        return None
+    if status.get("reason") == "NodeLost":
+        return "Unknown"
+    if phase not in ("Succeeded", "Failed"):
+        return "Terminating"
+    return None
+
+
+def _is_scheduling_gated(status: dict[str, Any]) -> bool:
+    return any(
+        c.get("type") == "PodScheduled"
+        and c.get("status") == "False"
+        and c.get("reason") == "SchedulingGated"
+        for c in (status.get("conditions") or [])
+    )
+
+
+def _is_pod_ready(status: dict[str, Any]) -> bool:
+    return any(
+        c.get("type") == "Ready" and c.get("status") == "True"
+        for c in (status.get("conditions") or [])
+    )
+
+
+def _display_phase(
+    meta: dict[str, Any],
+    spec: dict[str, Any],
+    status: dict[str, Any],
+    statuses: list[dict[str, Any]],
+) -> str:
+    """Displayed pod status mirroring kubectl's printer.
+
+    Init-container failures render as ``Init:<reason>``; container
+    waiting/terminated reasons (CrashLoopBackOff, OOMKilled, ...) override
+    ``status.phase``. A deletionTimestamp renders Terminating only while the
+    phase is non-terminal (kubectl keeps Completed/Failed reasons for
+    deleting terminal pods, and shows Unknown for NodeLost deletions).
+    """
+    phase = str(status.get("phase") or "")
+    deletion = _deletion_status(meta, status, phase)
+    if deletion is not None:
+        return deletion
+    # kubectl scans regular containers once the pod is initialized; a stale
+    # Init:* status must not hide a current CrashLoopBackOff.
+    if not _is_initialized(status):
+        init_reason = _init_phase(spec, status)
+        if init_reason is not None:
+            return init_reason
+    reason = str(status.get("reason") or status.get("phase") or "Unknown")
+    # kubectl promotes a gated PodScheduled condition before scanning containers.
+    if _is_scheduling_gated(status):
+        reason = "SchedulingGated"
+    has_running = False
+    for cs in reversed(statuses):
+        state = cs.get("state") or {}
+        waiting_reason = (state.get("waiting") or {}).get("reason")
+        terminated_reason = _terminated_reason(state.get("terminated") or {})
+        if waiting_reason:
+            reason = str(waiting_reason)
+        elif terminated_reason:
+            reason = terminated_reason
+        elif state.get("running") and cs.get("ready"):
+            has_running = True
+    # A completed sidecar next to a running main container is a running pod
+    # only once the pod reports Ready; otherwise kubectl shows NotReady.
+    if reason == "Completed" and has_running:
+        return "Running" if _is_pod_ready(status) else "NotReady"
+    return reason
+
+
 @dataclass(frozen=True)
 class PodSummary:
     name: str
@@ -177,7 +306,7 @@ class PodSummary:
         return cls(
             name=str(meta.get("name", "")),
             namespace=str(meta.get("namespace", "")),
-            phase=str(status.get("phase", "Unknown")),
+            phase=_display_phase(meta, spec, status, statuses),
             ready=f"{ready_count}/{len(statuses)}",
             restarts=restarts,
             node=spec.get("nodeName"),
