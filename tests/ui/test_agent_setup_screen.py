@@ -208,10 +208,11 @@ async def test_retry_uses_edited_inputs() -> None:
         for _ in range(6):
             await pilot.pause()
         cfg.test_error = None
-        app.screen.query_one("#setup-model", Input).value = "edited-model"
-        screen = app.screen
-        assert isinstance(screen, AgentSetupScreen)
-        screen.action_retry()
+        model_input = app.screen.query_one("#setup-model", Input)
+        model_input.value = "edited-model"
+        model_input.focus()
+        # The real shortcut must work even while an Input is focused.
+        await pilot.press("ctrl+r")
         for _ in range(6):
             await pilot.pause()
         tested = [c[1] for c in cfg.calls if isinstance(c, tuple) and c[0] == "test"]

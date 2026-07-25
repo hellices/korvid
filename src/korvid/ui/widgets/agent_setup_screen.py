@@ -31,7 +31,7 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("escape", "cancel", "Cancel", show=True),
-        Binding("r", "retry", "Retry test", show=False),
+        Binding("ctrl+r", "retry", "Retry test", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -184,18 +184,18 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
         try:
             await self._configurator.test(settings)
         except Exception as exc:  # keep the wizard open on probe failure
-            self._status(f"Test failed: {exc} — press r to retry, Esc to cancel")
+            self._status(f"Test failed: {exc} — press Ctrl+R to retry, Esc to cancel")
             return
         if self._apply_settings is not None and not self._apply_settings(settings):
             # The app refused the swap (busy turn / rebuild failure): stay
             # open and do NOT persist, so a restart cannot silently activate
             # a configuration that never took effect.
-            self._status("Apply failed — press r to retry, Esc to cancel")
+            self._status("Apply failed — press Ctrl+R to retry, Esc to cancel")
             return
         try:
             await self._configurator.save(settings)
         except Exception as exc:  # keep the wizard open on save failure
-            self._status(f"Save failed: {exc} — press r to retry, Esc to cancel")
+            self._status(f"Save failed: {exc} — press Ctrl+R to retry, Esc to cancel")
             return
         self.dismiss(settings)
 

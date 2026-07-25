@@ -65,7 +65,12 @@ class GitHubDeviceFlow:
         """Poll until the user approves; return the OAuth access token."""
         deadline = time.monotonic() + prompt.expires_in
         interval = float(prompt.interval)
-        while time.monotonic() < deadline:
+        while True:
+            # RFC 8628 §3.5: wait `interval` before EVERY token request,
+            # including the first one.
+            await asyncio.sleep(interval)
+            if time.monotonic() >= deadline:
+                break
             resp = await self._client.post(
                 ACCESS_TOKEN_URL,
                 data={
@@ -84,7 +89,6 @@ class GitHubDeviceFlow:
                 if error == "slow_down":
                     # RFC 8628 §3.5: increase the interval for ALL subsequent polls.
                     interval += 5
-                await asyncio.sleep(interval)
                 continue
             raise DeviceLoginError(f"device login failed: {error}")
         raise DeviceLoginError("device login timed out")

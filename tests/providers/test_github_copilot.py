@@ -53,7 +53,8 @@ async def test_poll_pending_then_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("korvid.providers.github_copilot.asyncio.sleep", fake_sleep)
     prompt = DeviceCodePrompt("u", "https://x", "d", 1, 900)
     assert await flow.poll(prompt) == "gho_tok"
-    assert sleeps == [1]
+    # RFC 8628 §3.5: wait `interval` before EVERY token request, incl. the first.
+    assert sleeps == [1, 1]
 
 
 async def test_poll_denied_raises() -> None:
@@ -130,8 +131,9 @@ async def test_poll_slow_down_increases_interval_persistently(
     monkeypatch.setattr("korvid.providers.github_copilot.asyncio.sleep", fake_sleep)
     prompt = DeviceCodePrompt("u", "https://x", "d", 5, 900)
     assert await flow.poll(prompt) == "gho_tok"
-    # slow_down bumps the interval for ALL subsequent polls (RFC 8628 §3.5).
-    assert sleeps == [10, 10]
+    # First wait uses the base interval; slow_down bumps it for ALL
+    # subsequent polls (RFC 8628 §3.5).
+    assert sleeps == [5, 10, 10]
 
 
 async def test_missing_expires_at_defaults_to_short_ttl() -> None:
