@@ -448,6 +448,10 @@ class KorvidApp(App[None]):
         if not isinstance(event.data_table, ResourceTable):
             return
         if self.current_kind != "pods":
+            if drill_child(self._canonical_kind(self.current_kind)) is None:
+                # No drill chain for this kind: leave Enter unconsumed so
+                # future handlers (e.g. a default describe) can claim it.
+                return
             event.stop()
             await self._drill_down_selected(str(event.row_key.value))
             return
@@ -1533,6 +1537,12 @@ class KorvidApp(App[None]):
         drill_uid = self._drill.parent_uid
         if drill_uid is not None and self.current_kind == self._drill.child_kind:
             rows = [r for r in rows if owned_by(r, drill_uid)]
+        if self.filter_pattern:
+            # drill_down acts on the visible table: apply the same
+            # case-insensitive name filter as ResourceTable.show so the agent
+            # cannot drill into a row the filter is hiding.
+            pat = self.filter_pattern.lower()
+            rows = [r for r in rows if pat in r.name.lower()]
         matches = [r for r in rows if r.name == name]
         if not matches:
             return f"ERROR: no {canonical} named {name!r} in the current view"

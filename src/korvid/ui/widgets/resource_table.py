@@ -116,6 +116,18 @@ class ResourceTable(DataTable[str | Text]):
             if all_namespaces:
                 cells.insert(0, rs.namespace)
             self.add_row(*cells, key=f"{rs.namespace}/{rs.name}")
+        # Rows that reached this view without ReplicaSet parsing (e.g. a
+        # future path that skips summary_for) still render NAME/AGE rather
+        # than silently disappearing.
+        fallbacks = [r for r in rows if not isinstance(r, ReplicaSetSummary)]
+        for obj in sorted(fallbacks, key=lambda o: (o.namespace, o.name)):
+            if pattern and pattern.lower() not in obj.name.lower():
+                continue
+            age = obj.age() if isinstance(obj, GenericSummary) else ""
+            fallback_cells: list[str | Text] = [obj.name, "", "", "", "", age]
+            if all_namespaces:
+                fallback_cells.insert(0, obj.namespace)
+            self.add_row(*fallback_cells, key=f"{obj.namespace}/{obj.name}")
 
     def _add_generic_rows(self, rows: list[Summary], *, all_namespaces: bool, pattern: str) -> None:
         generics = cast(list[GenericSummary], rows)

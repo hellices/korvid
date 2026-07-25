@@ -240,6 +240,67 @@ async def test_agent_drill_down_without_child_kind_is_error() -> None:
         assert out.startswith("ERROR:")
 
 
+async def test_agent_drill_down_respects_visible_filter() -> None:
+    """drill_down acts on the visible table: a name hidden by the active
+    filter pattern must not be drillable."""
+    app = make_app(_default_data())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        app.filter_pattern = "api"
+        out = await app.agent_drill_down("web")
+        assert out.startswith("ERROR:")
+        assert app.current_kind == "deployments"
+
+
+async def test_enter_without_drill_chain_leaves_event_unconsumed() -> None:
+    """Kinds with no drill chain must not consume Enter, so future handlers
+    (e.g. a default describe) can claim it."""
+    from types import SimpleNamespace
+
+    services_meta = ResourceMeta("Service", "services", "", "v1", True, ("svc",))
+    data = _default_data()
+    data["services"] = [
+        GenericSummary(name="web-svc", namespace="default", kind="Service", created="")
+    ]
+    app = make_app(data)
+    app.aliases["services"] = services_meta
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "services")
+        table = app.query_one(ResourceTable)
+        stopped = False
+
+        def _stop() -> None:
+            nonlocal stopped
+            stopped = True
+
+        event = SimpleNamespace(
+            data_table=table, row_key=SimpleNamespace(value="default/web-svc"), stop=_stop
+        )
+        await app.on_data_table_row_selected(event)  # type: ignore[arg-type]  # duck-typed stand-in for DataTable.RowSelected
+        assert not stopped
+        assert app.current_kind == "services"
+
+
+async def test_replicaset_view_renders_generic_fallback_rows() -> None:
+    """A replicaset row that arrives as a plain GenericSummary still shows
+    NAME/AGE instead of silently disappearing."""
+    data = _default_data()
+    data["replicasets"].append(
+        GenericSummary(name="odd-rs", namespace="default", kind="ReplicaSet", created="")
+    )
+    app = make_app(data)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "replicasets")
+        table = app.query_one(ResourceTable)
+        names = [str(table.get_row_at(i)[0]) for i in range(table.row_count)]
+        assert "odd-rs" in names
+        idx = names.index("odd-rs")
+        assert str(table.get_row_at(idx)[1]) == ""  # no revision info
+
+
 async def test_agent_drill_down_rejected_while_describe_screen_open() -> None:
     """Same user-priority guard as agent_navigate: never change the table
     hidden under a describe modal the user is reading."""
