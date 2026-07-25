@@ -520,3 +520,18 @@ async def test_agent_open_describe_fullscreen_when_panel_hidden() -> None:
         assert not out.startswith("ERROR:")
         assert isinstance(app.screen, DescribeScreen)
         assert not app.screen.has_class("share")
+
+
+async def test_agent_open_logs_reports_panel_truncation() -> None:
+    """The pane caps panels at MAX_PANELS; the tool result must say so, or
+    the model will assume every container's logs are on screen."""
+    from korvid.ui.widgets.log_pane import MAX_PANELS
+
+    total = MAX_PANELS + 2
+    app = make_app(manifest_containers=[f"c{i}" for i in range(total)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        out = await app.agent_open_logs("web-1", "default")
+        await pilot.pause()
+        assert not out.startswith("ERROR:")
+        assert f"first {MAX_PANELS} of {total}" in out

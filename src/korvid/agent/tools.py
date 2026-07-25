@@ -217,7 +217,9 @@ UI_TOOLS: list[dict[str, Any]] = [
             "name": "open_logs",
             "description": (
                 "Open the live log pane for a pod so the user can watch the logs "
-                "on screen alongside your analysis."
+                "on screen alongside your analysis. At most 8 container panels "
+                "fit on screen; the result reports which containers are shown "
+                "if the pod has more."
             ),
             "parameters": {
                 "type": "object",

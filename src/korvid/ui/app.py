@@ -1329,7 +1329,15 @@ class KorvidApp(App[None]):
             return f"ERROR: {exc}"
         target = f"{namespace}/{pod}" + (f" [{container}]" if container else "")
         self._mark_agent_action(f"logs → {target}")
-        return f"log pane opened for {target} — the user can now see the live logs"
+        # _open_log_pane caps at MAX_PANELS; tell the model which subset is
+        # actually visible so it never assumes every container is on screen.
+        truncated = ""
+        if len(triples) > MAX_PANELS:
+            truncated = (
+                f" (showing first {MAX_PANELS} of {len(triples)} containers; "
+                f"pass 'container' to view a specific one)"
+            )
+        return f"log pane opened for {target} — the user can now see the live logs{truncated}"
 
     async def _agent_pod_triples(self, namespace: str, pod: str) -> list[tuple[str, str, str]]:
         """All (ns, pod, container) triples for a pod the agent targets.
