@@ -332,35 +332,64 @@ class KubeClient:
             return True
         return bool((data.get("status") or {}).get("allowed", False))
 
-    async def delete_object(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
-        """DELETE a single object. ApiException → ApiStatusError."""
-        await self._request_write(self._object_path(meta, namespace, name), "DELETE")
+    async def delete_object(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        """DELETE a single object. A ``uid`` precondition pins the exact object
+        incarnation that was approved: if the object was deleted and recreated
+        under the same name meanwhile, the API server refuses with 409 instead
+        of deleting the replacement. ApiException → ApiStatusError."""
+        body = {"preconditions": {"uid": uid}} if uid else None
+        await self._request_write(
+            self._object_path(meta, namespace, name),
+            "DELETE",
+            body=body,
+            content_type="application/json" if body else None,
+        )
 
     async def scale_object(
-        self, meta: ResourceMeta, namespace: str | None, name: str, replicas: int
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        replicas: int,
+        *,
+        uid: str | None = None,
     ) -> None:
-        """Set spec.replicas via the /scale subresource (merge patch)."""
+        """Set spec.replicas via the /scale subresource (merge patch). A
+        ``uid`` in the patched metadata is an apiserver precondition: the
+        patch is rejected with 409 when the object was recreated."""
+        body: dict[str, Any] = {"spec": {"replicas": replicas}}
+        if uid:
+            body["metadata"] = {"uid": uid}
         await self._request_write(
             f"{self._object_path(meta, namespace, name)}/scale",
             "PATCH",
-            body={"spec": {"replicas": replicas}},
+            body=body,
             content_type="application/merge-patch+json",
         )
 
-    async def rollout_restart(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
+    async def rollout_restart(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
         """Trigger a rolling restart the way kubectl does: patch the pod
-        template with a kubectl.kubernetes.io/restartedAt annotation."""
+        template with a kubectl.kubernetes.io/restartedAt annotation. A
+        ``uid`` in the patched metadata is an apiserver precondition (409 on
+        mismatch), so the restart never lands on a recreated object."""
         stamp = datetime.now().astimezone().isoformat()
+        body: dict[str, Any] = {
+            "spec": {
+                "template": {
+                    "metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": stamp}}
+                }
+            }
+        }
+        if uid:
+            body["metadata"] = {"uid": uid}
         await self._request_write(
             self._object_path(meta, namespace, name),
             "PATCH",
-            body={
-                "spec": {
-                    "template": {
-                        "metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": stamp}}
-                    }
-                }
-            },
+            body=body,
             content_type="application/strategic-merge-patch+json",
         )
 

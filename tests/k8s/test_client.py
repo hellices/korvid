@@ -753,3 +753,48 @@ async def test_can_i_includes_group_name_and_subresource() -> None:
         "subresource": "scale",
         "namespace": "prod",
     }
+
+
+async def test_delete_object_sends_uid_precondition() -> None:
+    """A uid pins the delete to the approved object incarnation: the API
+    server answers 409 if the object was recreated under the same name."""
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.delete_object(_deploy_meta(), "default", "web", uid="abc-123")
+    args, kwargs = api.call_api.call_args
+    assert args[1] == "DELETE"
+    assert kwargs["body"] == {"preconditions": {"uid": "abc-123"}}
+    assert kwargs["header_params"]["Content-Type"] == "application/json"
+
+
+async def test_delete_object_without_uid_sends_no_body() -> None:
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.delete_object(_deploy_meta(), "default", "web")
+    kwargs = api.call_api.call_args[1]
+    assert kwargs["body"] is None
+    assert "Content-Type" not in kwargs["header_params"]
+
+
+async def test_scale_object_sends_uid_precondition() -> None:
+    """metadata.uid in a merge patch is an apiserver precondition (409 on mismatch)."""
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.scale_object(_deploy_meta(), "default", "web", 5, uid="abc-123")
+    kwargs = api.call_api.call_args[1]
+    assert kwargs["body"] == {"spec": {"replicas": 5}, "metadata": {"uid": "abc-123"}}
+
+
+async def test_rollout_restart_sends_uid_precondition() -> None:
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.rollout_restart(_deploy_meta(), "default", "web", uid="abc-123")
+    body = api.call_api.call_args[1]["body"]
+    assert body["metadata"] == {"uid": "abc-123"}
+    assert (
+        "kubectl.kubernetes.io/restartedAt" in body["spec"]["template"]["metadata"]["annotations"]
+    )

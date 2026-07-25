@@ -34,21 +34,35 @@ _ALIASES = {
 
 
 class Recorder:
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, fail_status: int | None = None) -> None:
         self.calls: list[tuple[object, ...]] = []
-        self.fail = fail
+        self.uids: list[str | None] = []
+        self.fail_status = fail_status
 
-    async def delete(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
-        if self.fail:
-            raise ApiStatusError(403, "Forbidden")
+    async def delete(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        if self.fail_status is not None:
+            raise ApiStatusError(self.fail_status, "boom")
+        self.uids.append(uid)
         self.calls.append(("delete", meta.plural, namespace, name))
 
     async def scale(
-        self, meta: ResourceMeta, namespace: str | None, name: str, replicas: int
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        replicas: int,
+        *,
+        uid: str | None = None,
     ) -> None:
+        self.uids.append(uid)
         self.calls.append(("scale", meta.plural, namespace, name, replicas))
 
-    async def restart(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
+    async def restart(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        self.uids.append(uid)
         self.calls.append(("restart", meta.plural, namespace, name))
 
 
@@ -69,11 +83,17 @@ def make_app(
                 ready="1/1",
                 restarts=0,
                 node=None,
+                uid="pod-uid-1",
             )
         ],
         "deployments": [
             GenericSummary(
-                name="web", namespace="default", kind="Deployment", created="", desired=3
+                name="web",
+                namespace="default",
+                kind="Deployment",
+                created="",
+                desired=3,
+                uid="deploy-uid-1",
             )
         ],
         "nodes": [GenericSummary(name="worker-1", namespace="", kind="Node", created="")],
@@ -225,7 +245,7 @@ async def test_scale_flow_prompts_then_confirms(tmp_path: Path) -> None:
 
 
 async def test_failed_write_audits_error(tmp_path: Path) -> None:
-    rec = Recorder(fail=True)
+    rec = Recorder(fail_status=403)
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
@@ -355,3 +375,50 @@ async def test_y_queued_during_stalled_check_cannot_approve(
         await pilot.press("y")  # a fresh keystroke still confirms
         await pilot.pause(0.2)
         assert rec.calls == [("delete", "pods", "default", "web-1")]
+
+
+async def test_delete_binds_selected_row_uid(tmp_path: Path) -> None:
+    """The uid of the row the user selected rides along as a delete
+    precondition, so the approval cannot land on a same-named replacement
+    created while the dialog was open."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("ctrl+d")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        await _until(pilot, lambda: rec.calls)
+        assert rec.uids == ["pod-uid-1"]
+
+
+async def test_scale_binds_selected_row_uid(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _to_view(pilot, "deployments")
+        await pilot.press("S")
+        await _until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
+        await pilot.press("5")
+        await pilot.press("enter")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        await _until(pilot, lambda: rec.calls)
+        assert rec.uids == ["deploy-uid-1"]
+
+
+async def test_conflict_reports_target_changed_since_approval(tmp_path: Path) -> None:
+    """A 409 (uid precondition tripped: the object was deleted and recreated
+    after approval) surfaces as an actionable message, not a bare API error."""
+    rec = Recorder(fail_status=409)
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("ctrl+d")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        await _until(
+            pilot,
+            lambda: any("changed since it was approved" in n.message for n in app._notifications),
+        )

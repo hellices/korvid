@@ -5,8 +5,9 @@ approve with a real keystroke (issue #16, spec §6.2): the agent can only
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -15,6 +16,7 @@ from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.agent_panel import AgentPanel
@@ -42,16 +44,30 @@ def _expand_panel(app: KorvidApp) -> None:
 class Recorder:
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
+        self.uids: list[str | None] = []
 
-    async def delete(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
+    async def delete(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        self.uids.append(uid)
         self.calls.append(("delete", meta.plural, namespace, name))
 
     async def scale(
-        self, meta: ResourceMeta, namespace: str | None, name: str, replicas: int
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        replicas: int,
+        *,
+        uid: str | None = None,
     ) -> None:
+        self.uids.append(uid)
         self.calls.append(("scale", meta.plural, namespace, name, replicas))
 
-    async def restart(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
+    async def restart(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        self.uids.append(uid)
         self.calls.append(("restart", meta.plural, namespace, name))
 
 
@@ -61,6 +77,7 @@ def make_app(
     *,
     readonly: bool = False,
     permitted: bool | None = None,
+    get_manifest: Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     deploys = [GenericSummary(name="web", namespace="default", kind="Deployment", created="")]
@@ -82,6 +99,7 @@ def make_app(
         store=store,
         watch_manager=WatchManager(store, source),
         aliases=dict(_ALIASES),
+        get_manifest=get_manifest,
         delete_object=recorder.delete,
         scale_object=recorder.scale,
         rollout_restart=recorder.restart,
@@ -401,9 +419,11 @@ async def test_agent_write_executes_with_exact_validated_meta(tmp_path: Path) ->
     seen: list[ResourceMeta] = []
 
     class MetaRecorder(Recorder):
-        async def delete(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
+        async def delete(
+            self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+        ) -> None:
             seen.append(meta)
-            await super().delete(meta, namespace, name)
+            await super().delete(meta, namespace, name, uid=uid)
 
     rec = MetaRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
@@ -450,7 +470,9 @@ async def test_write_403_reports_actionable_permission_message(tmp_path: Path) -
 
     rec = Recorder()
 
-    async def forbidden(meta: ResourceMeta, namespace: str | None, name: str) -> None:
+    async def forbidden(
+        meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
         raise ApiStatusError(403, "Forbidden")
 
     rec.delete = forbidden  # type: ignore[method-assign]  # simulate a mid-flight RBAC change
@@ -487,4 +509,50 @@ async def test_agent_write_expired_budget_never_grants_extra_window(
         assert "expired" in result
         await pilot.pause(0.1)
         assert not isinstance(app.screen, ConfirmScreen)  # nothing lingers
+        assert rec.calls == []
+
+
+async def test_agent_write_binds_target_uid_as_precondition(tmp_path: Path) -> None:
+    """The uid fetched at request time rides along to the executed write, so
+    the approval is bound to the exact object incarnation - a same-named
+    replacement created while the dialog is open gets a 409 from the API
+    server instead of the mutation."""
+    rec = Recorder()
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return {"metadata": {"uid": "deploy-uid-7"}}
+
+    app = make_app(rec, tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        _expand_panel(app)
+        task = asyncio.ensure_future(
+            app.agent_request_write("delete", "deployments", "web", namespace="default")
+        )
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        result = await task
+        assert "executed" in result
+        assert rec.uids == ["deploy-uid-7"]
+
+
+async def test_agent_write_missing_target_errors_before_dialog(tmp_path: Path) -> None:
+    """A 404 on the uid lookup means the target does not exist: the agent
+    gets an actionable error and the user is never shown a dialog for it."""
+    rec = Recorder()
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        raise ApiStatusError(404, "Not Found")
+
+    app = make_app(rec, tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        _expand_panel(app)
+        result = await app.agent_request_write(
+            "delete", "deployments", "ghost", namespace="default"
+        )
+        assert result.startswith("ERROR:")
+        assert "not found" in result
+        await pilot.pause(0.1)
+        assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []

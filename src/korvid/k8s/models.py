@@ -350,6 +350,7 @@ class PodSummary:
     cpu_limit: str = "-"
     mem_limit: str = "-"
     containers: tuple[str, ...] = ()
+    uid: str = ""
     owner_uids: tuple[str, ...] = ()
 
     @classmethod
@@ -375,5 +376,6 @@ class PodSummary:
             containers=tuple(
                 str(c["name"]) for c in (spec.get("containers") or []) if c.get("name")
             ),
+            uid=str(meta.get("uid") or ""),
             owner_uids=_owner_uids(meta),
         )
