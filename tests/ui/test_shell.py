@@ -358,6 +358,20 @@ async def test_shell_exec_failure_offers_debug_fallback(tmp_path: Path) -> None:
             assert entries[-1]["outcome"] == "success"
 
 
+async def test_debug_fallback_not_offered_over_open_dialog(tmp_path: Path) -> None:
+    """If another dialog opened while the probe/RBAC pre-check ran, the offer
+    aborts instead of stacking the picker where a buffered Enter would select
+    "Yes" and start a pod mutation the user never saw."""
+    app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        blocker = PickScreen("unrelated dialog", ["a", "b"])
+        await app.push_screen(blocker)
+        await app._offer_debug_fallback("default", "api-1", None, 127)
+        await pilot.pause(0.1)
+        assert app.screen is blocker  # nothing stacked on top
+
+
 async def test_shell_nonzero_exit_with_working_shell_no_fallback() -> None:
     """Non-zero exec exit but probe succeeds (user's command failed) → no picker."""
     app = make_app([_pod("api-1")])

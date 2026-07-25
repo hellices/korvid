@@ -21,6 +21,24 @@ def test_append_writes_jsonl_entry(tmp_path: Path) -> None:
     assert entry["name"] == "web-1"
     assert entry["outcome"] == "success"
     assert entry["timestamp"]  # ISO timestamp present
+    assert entry["group"] == ""  # GVR fields always present (core group = "")
+    assert entry["apiVersion"] == ""
+
+
+def test_append_records_target_gvr(tmp_path: Path) -> None:
+    """kind alone is ambiguous across API groups: entries carry the full GVR."""
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(
+        action="scale",
+        kind="deployments",
+        group="apps",
+        api_version="v1",
+        namespace="default",
+        name="web",
+    )
+    entry = json.loads((tmp_path / "audit.jsonl").read_text())
+    assert entry["group"] == "apps"
+    assert entry["apiVersion"] == "v1"
 
 
 def test_append_accumulates_lines(tmp_path: Path) -> None:

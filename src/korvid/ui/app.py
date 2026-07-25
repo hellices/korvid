@@ -862,6 +862,17 @@ class KorvidApp(App[None]):
             # "missing permission: patch pods/ephemeralcontainers".
             return
         target = f"{name}/{container}" if container else name
+        if len(self.screen_stack) > 1:
+            # The probe/RBAC pre-check ran concurrently with user input: never
+            # push the picker over a dialog that opened meanwhile, where a
+            # buffered Enter would select "Yes" (option 0) and start a pod
+            # mutation the user never saw.
+            self.notify(
+                f"Debug fallback for {target} not offered - another dialog is open."
+                " Close it and press 's' again to retry.",
+                severity="warning",
+            )
+            return
 
         def _on_choice(choice: str | None) -> None:
             if choice == self._DEBUG_YES:
@@ -918,6 +929,8 @@ class KorvidApp(App[None]):
         audit.append(
             action="debug",
             kind="pods",
+            group="",  # pods are core/v1; kubectl debug always targets a pod
+            api_version="v1",
             namespace=namespace,
             name=name,
             detail=detail,
@@ -1103,10 +1116,15 @@ class KorvidApp(App[None]):
     # -- Write operations (issue #16): every path goes through a ConfirmScreen
     # -- confirmed only by a user keystroke; executed writes are audited.
 
-    _RESTARTABLE: ClassVar[frozenset[str]] = frozenset(
-        {"deployments", "statefulsets", "daemonsets"}
+    #: Workload eligibility is keyed on (group, plural): a custom-group CRD
+    #: whose plural collides with a built-in (e.g. 'deployments') must never
+    #: be treated as an apps/* workload.
+    _RESTARTABLE: ClassVar[frozenset[tuple[str, str]]] = frozenset(
+        {("apps", "deployments"), ("apps", "statefulsets"), ("apps", "daemonsets")}
     )
-    _SCALABLE: ClassVar[frozenset[str]] = frozenset({"deployments", "replicasets", "statefulsets"})
+    _SCALABLE: ClassVar[frozenset[tuple[str, str]]] = frozenset(
+        {("apps", "deployments"), ("apps", "replicasets"), ("apps", "statefulsets")}
+    )
     #: action -> (verb, subresource) for the SubjectAccessReview pre-check.
     _WRITE_VERBS: ClassVar[dict[str, tuple[str, str]]] = {
         "delete": ("delete", ""),
@@ -1114,6 +1132,12 @@ class KorvidApp(App[None]):
         "rollout_restart": ("patch", ""),
         "debug": ("patch", "ephemeralcontainers"),
     }
+
+    @staticmethod
+    def _gvr_label(meta: ResourceMeta) -> str:
+        """Group-qualified plural ('deployments.example.io') so rejection
+        messages disambiguate same-plural resources across API groups."""
+        return f"{meta.plural}.{meta.group}" if meta.group else meta.plural
 
     @classmethod
     def _write_perm_target(cls, action: str, meta: ResourceMeta) -> tuple[str, str]:
@@ -1181,7 +1205,13 @@ class KorvidApp(App[None]):
         return allowed
 
     async def _audit_write(
-        self, action: str, kind: str, namespace: str | None, name: str, detail: str, outcome: str
+        self,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        detail: str,
+        outcome: str,
     ) -> None:
         """Append one audit record; raises if it cannot be persisted (the
         caller decides whether that blocks the write - see _run_write)."""
@@ -1191,7 +1221,9 @@ class KorvidApp(App[None]):
         await asyncio.to_thread(
             lambda: audit.append(
                 action=action,
-                kind=kind,
+                kind=meta.plural,
+                group=meta.group,
+                api_version=meta.version,
                 namespace=namespace,
                 name=name,
                 detail=detail,
@@ -1202,7 +1234,7 @@ class KorvidApp(App[None]):
     async def _run_write(
         self,
         action: str,
-        kind: str,
+        meta: ResourceMeta,
         namespace: str | None,
         name: str,
         op: Awaitable[None],
@@ -1212,8 +1244,9 @@ class KorvidApp(App[None]):
         the intent record must persist *before* the mutation - if it cannot,
         the write is blocked. Returns a short outcome string ('done' /
         'blocked: ...' / 'failed: ...') for callers that report back."""
+        kind = meta.plural
         try:
-            await self._audit_write(action, kind, namespace, name, detail, "intent")
+            await self._audit_write(action, meta, namespace, name, detail, "intent")
         except Exception as exc:
             close = getattr(op, "close", None)
             if callable(close):
@@ -1227,11 +1260,11 @@ class KorvidApp(App[None]):
             await op
         except Exception as exc:
             with contextlib.suppress(Exception):
-                await self._audit_write(action, kind, namespace, name, detail, f"error: {exc}")
+                await self._audit_write(action, meta, namespace, name, detail, f"error: {exc}")
             self.notify(f"{action} {kind}/{name} failed: {exc}", severity="error")
             return f"failed: {exc}"
         try:
-            await self._audit_write(action, kind, namespace, name, detail, "success")
+            await self._audit_write(action, meta, namespace, name, detail, "success")
         except Exception:
             logger.exception("audit outcome record failed after successful write")
             self.notify("Audit log write failed (operation already executed)", severity="warning")
@@ -1256,9 +1289,7 @@ class KorvidApp(App[None]):
 
         def _done(confirmed: bool | None) -> None:
             if confirmed:
-                self.run_worker(
-                    self._run_write("delete", meta.plural, ns, name, delete(meta, ns, name))
-                )
+                self.run_worker(self._run_write("delete", meta, ns, name, delete(meta, ns, name)))
 
         await self.push_screen(
             ConfirmScreen(f"Delete {meta.plural}/{name}?", operation, require_name=require), _done
@@ -1274,8 +1305,10 @@ class KorvidApp(App[None]):
         if target is None:
             return
         meta, ns, name = target
-        if meta.plural not in self._RESTARTABLE:
-            self.notify(f"rollout restart does not apply to {meta.plural}", severity="warning")
+        if (meta.group, meta.plural) not in self._RESTARTABLE:
+            self.notify(
+                f"rollout restart does not apply to {self._gvr_label(meta)}", severity="warning"
+            )
             return
         if not await self._permitted("rollout_restart", meta, ns, name):
             return
@@ -1283,9 +1316,7 @@ class KorvidApp(App[None]):
         def _done(confirmed: bool | None) -> None:
             if confirmed:
                 self.run_worker(
-                    self._run_write(
-                        "rollout_restart", meta.plural, ns, name, restart(meta, ns, name)
-                    )
+                    self._run_write("rollout_restart", meta, ns, name, restart(meta, ns, name))
                 )
 
         await self.push_screen(
@@ -1316,8 +1347,8 @@ class KorvidApp(App[None]):
         if target is None:
             return
         meta, ns, name = target
-        if meta.plural not in self._SCALABLE:
-            self.notify(f"scale does not apply to {meta.plural}", severity="warning")
+        if (meta.group, meta.plural) not in self._SCALABLE:
+            self.notify(f"scale does not apply to {self._gvr_label(meta)}", severity="warning")
             return
         if not await self._permitted("scale", meta, ns, name):
             return
@@ -1329,7 +1360,7 @@ class KorvidApp(App[None]):
                     self.run_worker(
                         self._run_write(
                             "scale",
-                            meta.plural,
+                            meta,
                             ns,
                             name,
                             scale(meta, ns, name, replicas),
@@ -1983,7 +2014,7 @@ class KorvidApp(App[None]):
             )
         if decision != "approved":
             return f"denied: the user declined the {action} request for {meta.plural}/{name}"
-        outcome = await self._run_write(action, meta.plural, ns, name, op(), detail=detail)
+        outcome = await self._run_write(action, meta, ns, name, op(), detail=detail)
         if outcome != "done":
             return f"ERROR: {action} {meta.plural}/{name} {outcome}"
         self._mark_agent_action(f"{action} → {meta.plural}/{name}")
@@ -2045,8 +2076,8 @@ class KorvidApp(App[None]):
         scale = self._scale_object
         if scale is None:
             return "ERROR: scale unavailable in this session"
-        if meta.plural not in self._SCALABLE:
-            return f"ERROR: scale does not apply to {meta.plural}"
+        if (meta.group, meta.plural) not in self._SCALABLE:
+            return f"ERROR: scale does not apply to {self._gvr_label(meta)}"
         if replicas is None or replicas < 0:
             return "ERROR: scale requires a 'replicas' argument >= 0"
         return (
@@ -2063,8 +2094,8 @@ class KorvidApp(App[None]):
         restart = self._rollout_restart
         if restart is None:
             return "ERROR: rollout restart unavailable in this session"
-        if meta.plural not in self._RESTARTABLE:
-            return f"ERROR: rollout restart does not apply to {meta.plural}"
+        if (meta.group, meta.plural) not in self._RESTARTABLE:
+            return f"ERROR: rollout restart does not apply to {self._gvr_label(meta)}"
         return (
             meta,
             ns,

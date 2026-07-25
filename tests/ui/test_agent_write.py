@@ -111,6 +111,8 @@ async def test_agent_delete_approved_by_user_key(tmp_path: Path) -> None:
         entry = lines[-1]
         assert entry["outcome"] == "success"
         assert "agent" in entry["detail"]
+        # the audit record carries the full GVR of the mutated resource
+        assert (entry["group"], entry["apiVersion"], entry["kind"]) == ("apps", "v1", "deployments")
 
 
 async def test_agent_delete_denied_by_user_key(tmp_path: Path) -> None:
@@ -126,6 +128,27 @@ async def test_agent_delete_denied_by_user_key(tmp_path: Path) -> None:
         await pilot.press("n")
         result = await task
         assert "denied" in result.lower() or "declined" in result.lower()
+        assert rec.calls == []
+
+
+async def test_agent_write_rejects_same_plural_custom_group(tmp_path: Path) -> None:
+    """A custom-group CRD whose plural collides with apps/deployments must not
+    be treated as an apps/* workload: eligibility keys on (group, plural)."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    app.aliases["xdeploy"] = ResourceMeta(
+        "Deployment", "deployments", "example.io", "v1", True, ("xdeploy",)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        scaled = await app.agent_request_write(
+            "scale", "xdeploy", "web", namespace="default", replicas=2
+        )
+        assert scaled == "ERROR: scale does not apply to deployments.example.io"
+        restarted = await app.agent_request_write(
+            "rollout_restart", "xdeploy", "web", namespace="default"
+        )
+        assert restarted == "ERROR: rollout restart does not apply to deployments.example.io"
         assert rec.calls == []
 
 

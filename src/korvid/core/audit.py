@@ -1,8 +1,11 @@
 """Append-only audit log for cluster write operations (spec §6.2).
 
-Every executed write — user keybinding or agent tool, success or failure —
-is appended as one JSON line so operators can reconstruct exactly what
-korvid changed in a cluster and when.
+Every write — user keybinding or agent tool, success or failure — is
+recorded as JSON lines so operators can reconstruct exactly what korvid
+changed in a cluster and when. A write typically produces two events: an
+``intent`` record persisted *before* the mutation (fail-closed: if it cannot
+be written, the write is blocked) and an outcome record
+(``success``/``error: ...``) after.
 """
 
 from __future__ import annotations
@@ -55,11 +58,14 @@ def default_audit_path() -> Path:
 
 
 class AuditLog:
-    """JSONL appender; one line per write operation.
+    """JSONL appender; one line per audit event (writes usually emit two:
+    intent before the mutation, outcome after - see the module docstring).
 
     The file is created (and kept) with 0600 permissions and rotated by size
-    per the design contract (default 50 MB, configurable backup retention;
-    at least one backup is always kept so rotation never discards history).
+    per the design contract (default 50 MB). Retention is size-bounded, not
+    an infinite archive: rotation keeps ``backups`` numbered backups (at
+    least one, so the most recent history always survives a rotation) and
+    drops the oldest file beyond that count.
     Rotation and append are serialized with an in-process lock plus an
     interprocess lock (``flock`` on POSIX, ``msvcrt.locking`` on Windows) on
     a sidecar lock file, since several korvid sessions may share the default
@@ -116,6 +122,8 @@ class AuditLog:
         kind: str,
         namespace: str | None,
         name: str,
+        group: str = "",
+        api_version: str = "",
         detail: str = "",
         outcome: str = "success",
     ) -> None:
@@ -124,6 +132,10 @@ class AuditLog:
             "context": self._context,
             "action": action,
             "kind": kind,
+            # kind alone is ambiguous: a custom-group resource can share its
+            # plural with a built-in, so record the full GVR of the target.
+            "group": group,
+            "apiVersion": api_version,
             "namespace": namespace,
             "name": name,
             "detail": detail,
