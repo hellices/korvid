@@ -876,7 +876,7 @@ class KorvidApp(App[None]):
 
         def _on_choice(confirmed: bool | None) -> None:
             if confirmed:
-                self._run_debug(namespace, name, container)
+                self.run_worker(self._run_debug(namespace, name, container))
 
         # ConfirmScreen, not a generic picker: this offer appears
         # asynchronously (after the probe/RBAC round trip), and its
@@ -893,10 +893,13 @@ class KorvidApp(App[None]):
             _on_choice,
         )
 
-    def _run_debug(self, namespace: str, name: str, container: str | None) -> None:
+    async def _run_debug(self, namespace: str, name: str, container: str | None) -> None:
         """Attach an ephemeral busybox container via kubectl debug. This is a
         pod mutation: blocked in readonly sessions and audited fail-closed
-        like every other write (user approval came from the fallback prompt)."""
+        like every other write (user approval came from the fallback prompt).
+        Audit appends take blocking locks and fsync, so they run off the event
+        loop (like _audit_write) - intent is still recorded before the
+        mutation starts."""
         if self.config.readonly:
             self.notify("Read-only mode: cluster writes are disabled", severity="warning")
             return
@@ -906,7 +909,7 @@ class KorvidApp(App[None]):
             return
         detail = "ephemeral debug container (kubectl debug)"
         try:
-            self._audit_debug(audit, namespace, name, detail, "intent")
+            await asyncio.to_thread(self._audit_debug, audit, namespace, name, detail, "intent")
         except Exception:
             logger.exception("audit append failed; blocking kubectl debug")
             self.notify("Write blocked: audit log unavailable", severity="error")
@@ -918,7 +921,7 @@ class KorvidApp(App[None]):
         self.refresh()
         outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
         try:
-            self._audit_debug(audit, namespace, name, detail, outcome)
+            await asyncio.to_thread(self._audit_debug, audit, namespace, name, detail, outcome)
         except Exception:
             logger.exception("audit append failed after kubectl debug")
             self.notify("Audit write failed for the executed debug", severity="warning")

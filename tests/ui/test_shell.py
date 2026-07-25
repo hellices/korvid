@@ -323,7 +323,7 @@ async def test_shell_multi_container_picker_escape_cancels() -> None:
             assert isinstance(app.screen, PickScreen)
             await pilot.press("escape")
             await pilot.pause(0.2)
-            assert not isinstance(app.screen, ConfirmScreen)
+            assert not isinstance(app.screen, PickScreen)
             mock_call.assert_not_called()
 
 
