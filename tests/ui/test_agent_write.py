@@ -112,7 +112,7 @@ async def test_agent_delete_approved_by_user_key(tmp_path: Path) -> None:
         assert entry["outcome"] == "success"
         assert "agent" in entry["detail"]
         # the audit record carries the full GVR of the mutated resource
-        assert (entry["group"], entry["apiVersion"], entry["kind"]) == ("apps", "v1", "deployments")
+        assert (entry["group"], entry["version"], entry["kind"]) == ("apps", "v1", "deployments")
 
 
 async def test_agent_delete_denied_by_user_key(tmp_path: Path) -> None:

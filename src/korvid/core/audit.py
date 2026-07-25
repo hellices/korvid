@@ -123,7 +123,7 @@ class AuditLog:
         namespace: str | None,
         name: str,
         group: str = "",
-        api_version: str = "",
+        version: str = "",
         detail: str = "",
         outcome: str = "success",
     ) -> None:
@@ -135,7 +135,7 @@ class AuditLog:
             # kind alone is ambiguous: a custom-group resource can share its
             # plural with a built-in, so record the full GVR of the target.
             "group": group,
-            "apiVersion": api_version,
+            "version": version,
             "namespace": namespace,
             "name": name,
             "detail": detail,

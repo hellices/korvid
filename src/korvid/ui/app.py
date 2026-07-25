@@ -934,7 +934,7 @@ class KorvidApp(App[None]):
             action="debug",
             kind="pods",
             group="",  # pods are core/v1; kubectl debug always targets a pod
-            api_version="v1",
+            version="v1",
             namespace=namespace,
             name=name,
             detail=detail,
@@ -1269,7 +1269,7 @@ class KorvidApp(App[None]):
                 action=action,
                 kind=meta.plural,
                 group=meta.group,
-                api_version=meta.version,
+                version=meta.version,
                 namespace=namespace,
                 name=name,
                 detail=detail,
