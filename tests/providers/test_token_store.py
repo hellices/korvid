@@ -103,3 +103,30 @@ def test_failed_keyring_save_removes_stale_keyring_entry(
     store.save("k", "new")
     # keyring recovered later must not resurrect the old token via load().
     assert store.load("k") == "new"
+
+
+def test_failed_file_write_keeps_stale_keyring_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If both keyring save and the file write fail, the old keyring copy is
+    the only surviving token and must not be deleted."""
+    calls: dict[str, str] = {"korvid/k": "old-keyring-token"}
+
+    def boom_set(*a: object) -> None:
+        raise RuntimeError("set failed")
+
+    fake = types.SimpleNamespace(
+        set_password=boom_set,
+        get_password=lambda svc, k: calls.get(f"{svc}/{k}"),
+        delete_password=lambda svc, k: calls.pop(f"{svc}/{k}", None),
+    )
+    monkeypatch.setitem(sys.modules, "keyring", fake)
+    store = TokenStore(fallback_path=tmp_path / "creds.json")
+
+    def boom_write(data: dict[str, str]) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_write_file", boom_write)
+    with pytest.raises(OSError, match="disk full"):
+        store.save("k", "new")
+    assert calls["korvid/k"] == "old-keyring-token"  # last copy preserved

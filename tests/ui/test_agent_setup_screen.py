@@ -192,3 +192,60 @@ async def test_save_failure_shows_error_and_keeps_screen_open() -> None:
         assert app.result == "unset"  # not dismissed
         status = app.screen.query_one("#setup-status", Static)
         assert "disk full" in str(status.render())
+
+
+async def test_retry_uses_edited_inputs() -> None:
+    """After a failed probe, `r` must test the currently visible input values,
+    not the snapshot captured on the original submission."""
+    cfg = FakeConfigurator(test_error="boom")
+    app = _Host(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "ollama")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+        cfg.test_error = None
+        app.screen.query_one("#setup-model", Input).value = "edited-model"
+        screen = app.screen
+        assert isinstance(screen, AgentSetupScreen)
+        screen.action_retry()
+        for _ in range(6):
+            await pilot.pause()
+        tested = [c[1] for c in cfg.calls if isinstance(c, tuple) and c[0] == "test"]
+        assert tested[-1].model == "edited-model"
+
+
+async def test_apply_failure_keeps_wizard_open_and_skips_save() -> None:
+    """If the app cannot swap the runtime (busy turn / rebuild failure), the
+    wizard must stay open and must not persist the new configuration."""
+    cfg = FakeConfigurator()
+
+    class ApplyHost(App[None]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.result: AgentSettings | None | str = "unset"
+
+        def on_mount(self) -> None:
+            def _done(res: AgentSettings | None) -> None:
+                self.result = res
+
+            self.push_screen(AgentSetupScreen(cfg, apply_settings=lambda s: False), callback=_done)
+
+    app = ApplyHost()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "ollama")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+        assert app.result == "unset"  # not dismissed
+        assert not any(
+            isinstance(c, tuple) and c[0] == "save" for c in cfg.calls
+        )  # config untouched
+        status = app.screen.query_one("#setup-status", Static)
+        assert "Apply failed" in str(status.render())

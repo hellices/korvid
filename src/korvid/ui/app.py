@@ -510,12 +510,11 @@ class KorvidApp(App[None]):
         if self._agent_configurator is None:
             self.notify("Agent setup unavailable in this build", severity="warning")
             return
-
-        def _done(result: AgentSettings | None) -> None:
-            if result is not None:
-                self._apply_agent_settings(result)
-
-        self.push_screen(AgentSetupScreen(self._agent_configurator), callback=_done)
+        # The wizard applies the settings itself (via apply_settings) before
+        # persisting, so a refused swap keeps the wizard open and unsaved.
+        self.push_screen(
+            AgentSetupScreen(self._agent_configurator, apply_settings=self._apply_agent_settings)
+        )
 
     def _handle_model_command(self, args: list[str]) -> None:
         """`:model` shows the current model; `:model <name>` switches and persists it."""
@@ -571,11 +570,13 @@ class KorvidApp(App[None]):
         self._agent_settings = settings
         self._refresh_status()
         panel = self.query_one(AgentPanel)
+        agent_input = panel.query_one("#agent-input")
+        # Always re-enable: the hint may have disabled it while the panel was
+        # open earlier; only focus/header rendering depends on visibility.
+        agent_input.disabled = False
         if panel.display:
             in_tok, out_tok = runtime.total_tokens
             panel.set_header(settings.model, in_tok, out_tok, estimated=runtime.usage_estimated)
-            agent_input = panel.query_one("#agent-input")
-            agent_input.disabled = False
             agent_input.focus()
         return True
 

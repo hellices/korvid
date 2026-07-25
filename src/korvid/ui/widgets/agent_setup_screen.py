@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Callable
 from typing import ClassVar
 
 from textual.app import ComposeResult
@@ -53,9 +55,14 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
     }
     """
 
-    def __init__(self, configurator: AgentConfigurator) -> None:
+    def __init__(
+        self,
+        configurator: AgentConfigurator,
+        apply_settings: Callable[[AgentSettings], bool] | None = None,
+    ) -> None:
         super().__init__()
         self._configurator = configurator
+        self._apply_settings = apply_settings
         self._provider = ""
         self._auth_method = ""
         self._settings: AgentSettings | None = None
@@ -179,6 +186,12 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
         except Exception as exc:  # keep the wizard open on probe failure
             self._status(f"Test failed: {exc} — press r to retry, Esc to cancel")
             return
+        if self._apply_settings is not None and not self._apply_settings(settings):
+            # The app refused the swap (busy turn / rebuild failure): stay
+            # open and do NOT persist, so a restart cannot silently activate
+            # a configuration that never took effect.
+            self._status("Apply failed — press r to retry, Esc to cancel")
+            return
         try:
             await self._configurator.save(settings)
         except Exception as exc:  # keep the wizard open on save failure
@@ -194,8 +207,20 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
         self.query_one("#setup-status", Static).update(text)
 
     def action_retry(self) -> None:
-        if self._settings is not None:
-            self.run_worker(self._probe(), exclusive=True)
+        if self._settings is None:
+            return
+        # Re-read the still-visible inputs so an edit after a failed probe is
+        # actually tested (device login is not repeated for Copilot).
+        base_url = self.query_one("#setup-base-url", Input).value.strip() or None
+        model = self.query_one("#setup-model", Input).value.strip()
+        api_key_env = self.query_one("#setup-api-key-env", Input).value.strip() or None
+        if not model:
+            self._status("Model is required")
+            return
+        self._settings = dataclasses.replace(
+            self._settings, base_url=base_url, model=model, api_key_env=api_key_env
+        )
+        self.run_worker(self._probe(), exclusive=True)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

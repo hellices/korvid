@@ -13,4 +13,6 @@ async def test_static_custom_header_no_prefix() -> None:
 
 async def test_aclose_is_no_op() -> None:
     src = StaticHeaderSource("sk-1")
-    await src.aclose()  # should not raise
+    await src.aclose()
+    # close is a documented no-op: the source stays usable afterwards.
+    assert "Authorization" in await src.headers()

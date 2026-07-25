@@ -446,3 +446,20 @@ async def test_model_switch_blocked_while_turn_running() -> None:
             assert any("busy" in m.lower() for m in msgs)
         finally:
             app._agent_task.cancel()
+
+
+async def test_input_reenabled_even_when_panel_closed() -> None:
+    from korvid.agent.setup import AgentSettings
+
+    new_runtime = cast("Any", StubRuntime([]))
+    app = make_app(runtime=None, model=None, rebuild_agent=lambda s: new_runtime)
+    settings = AgentSettings(
+        provider="ollama", auth_method="none", base_url="http://x/v1", model="m"
+    )
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")  # open unconfigured: hint disables input
+        await pilot.press("ctrl+a")  # close panel
+        app._apply_agent_settings(settings)
+        await pilot.pause()
+        await pilot.press("ctrl+a")  # reopen: input must be usable again
+        assert app.query_one(AgentPanel).query_one("#agent-input", Input).disabled is False
