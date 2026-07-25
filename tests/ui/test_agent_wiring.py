@@ -235,3 +235,58 @@ async def test_apply_agent_settings_enables_agent() -> None:
         assert app._agent_model_name == "llama3"
         assert "AI on" in str(app.query_one(StatusBar).render())
         assert app.query_one(AgentPanel).query_one("#agent-input", Input).disabled is False
+
+
+async def test_model_command_swaps_model_and_saves() -> None:
+    from korvid.agent.setup import AgentSettings
+    from korvid.ui.messages import UnknownCommand
+
+    saved: list[AgentSettings] = []
+
+    class Cfg:
+        async def begin_device_login(self) -> Any:
+            raise NotImplementedError
+
+        async def finish_device_login(self) -> None:
+            raise NotImplementedError
+
+        async def test(self, settings: Any) -> str:
+            return "ok"
+
+        async def save(self, settings: AgentSettings) -> None:
+            saved.append(settings)
+
+    rebuilt: list[AgentSettings] = []
+    runtime = cast("Any", StubRuntime([]))
+
+    def rebuild(settings: AgentSettings) -> Any:
+        rebuilt.append(settings)
+        return runtime
+
+    app = make_app(runtime=None, model=None, agent_configurator=Cfg(), rebuild_agent=rebuild)
+    settings = AgentSettings(
+        provider="ollama",
+        auth_method="none",
+        base_url="http://localhost:11434/v1",
+        model="llama3",
+    )
+    async with app.run_test() as pilot:
+        app._apply_agent_settings(settings)
+        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        for _ in range(4):
+            await pilot.pause()
+        assert app._agent_model_name == "gpt-4o"
+        assert saved
+        assert saved[-1].model == "gpt-4o"
+        assert rebuilt[-1].model == "gpt-4o"
+
+
+async def test_model_command_without_config_does_not_crash() -> None:
+    from korvid.ui.messages import UnknownCommand
+
+    app = make_app(runtime=None, model=None)
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        app.on_unknown_command(UnknownCommand("model"))
+        await pilot.pause()
+        assert app._agent_model_name is None

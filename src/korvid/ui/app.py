@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import shutil
 import subprocess
@@ -175,6 +176,7 @@ class KorvidApp(App[None]):
         self._agent_model_name = agent_model_name
         self._agent_configurator = agent_configurator
         self._rebuild_agent = rebuild_agent
+        self._agent_settings: AgentSettings | None = None
         self._agent_task: asyncio.Task[None] | None = None
         self.aliases: dict[str, ResourceMeta] = (
             aliases if aliases is not None else dict(_DEFAULT_ALIASES)
@@ -480,9 +482,13 @@ class KorvidApp(App[None]):
         await self.push_screen(DescribeScreen(title, manifest, events))
 
     def on_unknown_command(self, message: UnknownCommand) -> None:
-        head = message.text.strip().split()[0] if message.text.strip() else ""
+        parts = message.text.strip().split()
+        head = parts[0] if parts else ""
         if head in {"ai", "agent"}:
             self._open_agent_setup()
+            return
+        if head == "model":
+            self._handle_model_command(parts[1:])
             return
         self.notify(
             f"Unknown resource or command: {message.text}"
@@ -501,6 +507,32 @@ class KorvidApp(App[None]):
 
         self.push_screen(AgentSetupScreen(self._agent_configurator), callback=_done)
 
+    def _handle_model_command(self, args: list[str]) -> None:
+        """`:model` shows the current model; `:model <name>` switches and persists it."""
+        if not args:
+            if self._agent_model_name:
+                self.notify(f"Agent model: {self._agent_model_name}")
+            else:
+                self.notify("Agent not configured — run :ai first", severity="warning")
+            return
+        settings = self._agent_settings
+        configurator = self._agent_configurator
+        if settings is None or configurator is None:
+            self.notify("Agent not configured — run :ai first", severity="warning")
+            return
+        new_settings = dataclasses.replace(settings, model=args[0])
+
+        async def _switch() -> None:
+            try:
+                await configurator.save(new_settings)
+            except Exception as exc:  # keep the old runtime on failure
+                self.notify(f"Model switch failed: {exc}", severity="error")
+                return
+            self._apply_agent_settings(new_settings)
+            self.notify(f"Agent model set to {new_settings.model}")
+
+        self.run_worker(_switch(), exclusive=False)
+
     def _apply_agent_settings(self, settings: AgentSettings) -> None:
         """Swap in a fresh runtime built from the wizard's settings."""
         if self._rebuild_agent is None:
@@ -509,6 +541,7 @@ class KorvidApp(App[None]):
         runtime = self._rebuild_agent(settings)
         self._agent_runtime = runtime
         self._agent_model_name = settings.model
+        self._agent_settings = settings
         self._refresh_status()
         panel = self.query_one(AgentPanel)
         if panel.display and runtime is not None:
