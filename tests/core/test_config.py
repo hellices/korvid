@@ -251,3 +251,25 @@ def test_save_agent_config_preserves_restrictive_file_mode(tmp_path: Path) -> No
         api_key_env=None,
     )
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
+
+
+def test_save_agent_config_preserves_auth_extension_keys(tmp_path: Path) -> None:
+    """The read-modify-write contract applies to nested `agent.auth` too:
+    only `method` is managed, unrelated auth keys must survive."""
+    import yaml
+
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "agent:\n  provider: ollama\n  model: llama3\n  auth:\n    method: none\n    tenant_id: contoso\n"
+    )
+    save_agent_config(
+        p,
+        provider="ollama",
+        auth_method="api-key",
+        base_url=None,
+        model="llama3",
+        api_key_env="MY_KEY",
+    )
+    auth = yaml.safe_load(p.read_text())["agent"]["auth"]
+    assert auth["method"] == "api-key"
+    assert auth["tenant_id"] == "contoso"

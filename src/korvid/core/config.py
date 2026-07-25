@@ -82,7 +82,12 @@ def save_agent_config(
     agent: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
     agent["provider"] = provider
     agent["model"] = model
-    agent["auth"] = {"method": auth_method}
+    # Merge into any existing auth mapping: only `method` is managed here,
+    # unrelated nested keys must survive the read-modify-write.
+    existing_auth = agent.get("auth")
+    auth: dict[str, Any] = dict(existing_auth) if isinstance(existing_auth, dict) else {}
+    auth["method"] = auth_method
+    agent["auth"] = auth
     # A completed wizard/model save is a user-confirmed enable: clear any
     # stale explicit-disable switch so it cannot silently win after restart.
     agent.pop("enabled", None)
