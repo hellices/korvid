@@ -7,8 +7,10 @@ korvid changed in a cluster and when.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -24,16 +26,35 @@ class AuditLog:
     """JSONL appender; one line per write operation.
 
     The file is created (and kept) with 0600 permissions and rotated by size
-    per the design contract (default 50 MB, configurable backup retention).
-    ``append`` is synchronous file I/O — call it via ``asyncio.to_thread``
-    from async contexts. All filesystem work happens inside ``append`` so a
-    bad audit path never aborts startup; it only blocks writes (fail-closed).
+    per the design contract (default 50 MB, configurable backup retention;
+    at least one backup is always kept so rotation never discards history).
+    Rotation and append are serialized with an in-process lock plus an
+    interprocess ``flock`` on a sidecar lock file, since several korvid
+    sessions may share the default path. ``append`` is synchronous file I/O —
+    call it via ``asyncio.to_thread`` from async contexts. All filesystem
+    work happens inside ``append`` so a bad audit path never aborts startup;
+    it only blocks writes (fail-closed).
+
+    ``context`` identifies the kubeconfig context (cluster) the entries
+    belong to; without it, writes to identically named objects in different
+    clusters would be indistinguishable.
     """
 
-    def __init__(self, path: Path, *, max_bytes: int = 50 * 1024 * 1024, backups: int = 3) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        context: str | None = None,
+        max_bytes: int = 50 * 1024 * 1024,
+        backups: int = 3,
+    ) -> None:
+        if backups < 1:
+            raise ValueError("backups must be >= 1: rotation must never discard audit history")
         self._path = path
+        self._context = context
         self._max_bytes = max_bytes
         self._backups = backups
+        self._lock = threading.Lock()
 
     def _rotate_if_needed(self) -> None:
         """Rename audit.jsonl -> .1 -> .2 ... when the size cap is hit,
@@ -49,10 +70,7 @@ class AuditLog:
             src = self._path.with_name(f"{self._path.name}.{i}")
             if src.exists():
                 src.rename(self._path.with_name(f"{self._path.name}.{i + 1}"))
-        if self._backups > 0:
-            self._path.rename(self._path.with_name(f"{self._path.name}.1"))
-        else:
-            self._path.unlink(missing_ok=True)
+        self._path.rename(self._path.with_name(f"{self._path.name}.1"))
 
     def append(
         self,
@@ -66,6 +84,7 @@ class AuditLog:
     ) -> None:
         entry = {
             "timestamp": datetime.now().astimezone().isoformat(),
+            "context": self._context,
             "action": action,
             "kind": kind,
             "namespace": namespace,
@@ -74,6 +93,21 @@ class AuditLog:
             "outcome": outcome,
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            # flock on a sidecar file (the log itself gets renamed by
+            # rotation) serializes rotate+append across processes too.
+            lock_fd = os.open(
+                self._path.with_name(f"{self._path.name}.lock"),
+                os.O_WRONLY | os.O_CREAT,
+                0o600,
+            )
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                self._locked_append(entry)
+            finally:
+                os.close(lock_fd)  # releases the flock
+
+    def _locked_append(self, entry: dict[str, str | None]) -> None:
         self._rotate_if_needed()
         # O_CREAT with 0600 is umask-filtered, so enforce the mode on the
         # open descriptor - it must hold for pre-existing files too.

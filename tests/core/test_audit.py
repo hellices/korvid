@@ -84,7 +84,7 @@ def test_rotation_drops_oldest_backup(tmp_path: Path) -> None:
     log = AuditLog(path, max_bytes=1, backups=2)  # rotate on every append
     for i in range(6):
         log.append(action="delete", kind="pods", namespace="default", name=f"pod-{i}")
-    names = sorted(p.name for p in tmp_path.iterdir())
+    names = sorted(p.name for p in tmp_path.iterdir() if not p.name.endswith(".lock"))
     assert names == ["audit.jsonl", "audit.jsonl.1", "audit.jsonl.2"]
     # oldest backup holds the oldest surviving entry, not pod-0 (dropped)
     assert "pod-0" not in (tmp_path / "audit.jsonl.2").read_text()
@@ -99,3 +99,44 @@ def test_constructor_does_not_touch_filesystem(tmp_path: Path) -> None:
     # macOS raises FileExistsError, Linux NotADirectoryError for the mkdir
     with pytest.raises((FileExistsError, NotADirectoryError)):
         log.append(action="delete", kind="pods", namespace="default", name="w")
+
+
+def test_entry_records_kube_context(tmp_path: Path) -> None:
+    """Entries from different clusters must be distinguishable: the shared
+    default audit file records the kubeconfig context of every write."""
+    path = tmp_path / "audit.jsonl"
+    AuditLog(path, context="prod-cluster").append(
+        action="delete", kind="pods", namespace="default", name="w"
+    )
+    assert json.loads(path.read_text())["context"] == "prod-cluster"
+
+
+def test_entry_context_defaults_to_none(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    AuditLog(path).append(action="delete", kind="pods", namespace="default", name="w")
+    assert json.loads(path.read_text())["context"] is None
+
+
+def test_zero_backups_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="backups"):
+        AuditLog(tmp_path / "audit.jsonl", backups=0)
+
+
+def test_concurrent_appends_do_not_race_rotation(tmp_path: Path) -> None:
+    """append() runs in worker threads (asyncio.to_thread); concurrent calls
+    at the size threshold must not race through unlink/rename."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path, max_bytes=300, backups=2)
+
+    def _write(i: int) -> None:
+        log.append(action="delete", kind="pods", namespace="default", name=f"pod-{i}")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(_write, range(80)))  # raises if any rename/unlink races
+    files = [p for p in tmp_path.iterdir() if not p.name.endswith(".lock")]
+    assert path in files
+    for f in files:
+        for line in f.read_text().splitlines():
+            json.loads(line)
