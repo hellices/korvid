@@ -24,6 +24,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.client import KubeClient, resolve_context_name
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.providers.registry import create_provider
+from korvid.providers.token_store import TokenStore
 from korvid.ui.app import KorvidApp
 
 logger = logging.getLogger(__name__)
@@ -98,12 +99,16 @@ async def _run() -> None:
 
     watch_manager = WatchManager(store, source)
 
+    token_store = TokenStore()
+    oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
     provider = create_provider(
         enabled=config.agent_enabled,
         provider=config.agent_provider,
+        auth_method=config.agent_auth_method,
         base_url=config.agent_base_url,
         model=config.agent_model,
         api_key_env=config.agent_api_key_env,
+        oauth_token=oauth,
     )
     agent_runtime = AgentRuntime(provider, ToolExecutor(kube, aliases)) if provider else None
 

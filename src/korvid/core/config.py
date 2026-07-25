@@ -20,6 +20,7 @@ class KorvidConfig:
     agent_base_url: str | None = None
     agent_model: str | None = None
     agent_api_key_env: str | None = None
+    agent_auth_method: str | None = None
     keybindings: dict[str, str] = field(default_factory=dict)
     log_buffer_lines: int = 5000
 
@@ -34,6 +35,12 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     provider: str | None = agent_raw.get("provider")
     # Auto-activation: provider present -> on, unless explicitly disabled (§6.3).
     enabled = bool(provider) and agent_raw.get("enabled", True) is not False
+    api_key_env = _opt_str(agent_raw.get("api_key_env"))
+    auth_raw: dict[str, Any] = agent_raw.get("auth") or {}
+    auth_method = _opt_str(auth_raw.get("method"))
+    if auth_method is None and provider:
+        # Back-compat: configs written before agent.auth existed.
+        auth_method = "api_key" if api_key_env else "none"
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
@@ -41,10 +48,38 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_provider=provider,
         agent_base_url=_opt_str(agent_raw.get("base_url")),
         agent_model=_opt_str(agent_raw.get("model")),
-        agent_api_key_env=_opt_str(agent_raw.get("api_key_env")),
+        agent_api_key_env=api_key_env,
+        agent_auth_method=auth_method,
         keybindings=dict(raw.get("keybindings") or {}),
         log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
     )
+
+
+def save_agent_config(
+    path: Path,
+    *,
+    provider: str,
+    auth_method: str,
+    base_url: str | None,
+    model: str,
+    api_key_env: str | None,
+) -> None:
+    """Persist the agent section, preserving unrelated top-level keys."""
+    raw: dict[str, Any] = {}
+    if path.is_file():
+        raw = yaml.safe_load(path.read_text()) or {}
+    agent: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "auth": {"method": auth_method},
+    }
+    if base_url:
+        agent["base_url"] = base_url
+    if api_key_env:
+        agent["api_key_env"] = api_key_env
+    raw["agent"] = agent
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
 
 def _parse_buffer_lines(value: Any) -> int:

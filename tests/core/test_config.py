@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from korvid.core.config import KorvidConfig, load_config
+from korvid.core.config import KorvidConfig, load_config, save_agent_config
 
 
 def test_defaults_when_no_file(tmp_path: Path) -> None:
@@ -80,3 +80,53 @@ def test_agent_settings_default_none(tmp_path: Path) -> None:
     assert cfg.agent_base_url is None
     assert cfg.agent_model is None
     assert cfg.agent_api_key_env is None
+
+
+def test_auth_method_parsed(tmp_path: Path) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text("agent:\n  provider: github-copilot\n  auth:\n    method: device-login\n")
+    cfg = load_config(p)
+    assert cfg.agent_auth_method == "device-login"
+
+
+def test_auth_method_backcompat_api_key(tmp_path: Path) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text("agent:\n  provider: openai-compat\n  api_key_env: K\n")
+    assert load_config(p).agent_auth_method == "api_key"
+
+
+def test_auth_method_backcompat_none(tmp_path: Path) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text("agent:\n  provider: ollama\n")
+    assert load_config(p).agent_auth_method == "none"
+
+
+def test_save_agent_config_preserves_other_keys(tmp_path: Path) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text("namespace: prod\nlog_buffer_lines: 9000\n")
+    save_agent_config(
+        p,
+        provider="github-copilot",
+        auth_method="device-login",
+        base_url="https://api.githubcopilot.com",
+        model="gpt-4o",
+        api_key_env=None,
+    )
+    cfg = load_config(p)
+    assert cfg.namespace == "prod"
+    assert cfg.log_buffer_lines == 9000
+    assert cfg.agent_provider == "github-copilot"
+    assert cfg.agent_auth_method == "device-login"
+
+
+def test_save_agent_config_creates_file(tmp_path: Path) -> None:
+    p = tmp_path / "sub" / "c.yaml"
+    save_agent_config(
+        p,
+        provider="ollama",
+        auth_method="none",
+        base_url="http://localhost:11434/v1",
+        model="llama3",
+        api_key_env=None,
+    )
+    assert load_config(p).agent_provider == "ollama"

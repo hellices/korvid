@@ -10,7 +10,10 @@ from __future__ import annotations
 import logging
 import os
 
+from korvid.agent.credentials import CredentialSource
 from korvid.agent.provider import LLMProvider
+from korvid.providers.entra import EntraCredentialSource
+from korvid.providers.github_copilot import COPILOT_CHAT_BASE_URL, CopilotCredentialSource
 from korvid.providers.openai_compat import OpenAICompatProvider
 from korvid.providers.static_creds import StaticHeaderSource
 
@@ -34,9 +37,11 @@ def create_provider(
     *,
     enabled: bool,
     provider: str | None,
+    auth_method: str | None,
     base_url: str | None,
     model: str | None,
     api_key_env: str | None,
+    oauth_token: str | None = None,
 ) -> LLMProvider | None:
     """Build an LLM provider from neutral values, or None when unconfigured/misconfigured."""
     if not enabled:
@@ -44,23 +49,45 @@ def create_provider(
     # YAML can hand us non-string scalars (e.g. `provider: true`); only
     # strings are meaningful — anything else falls to the unknown branch.
     name = provider.lower() if isinstance(provider, str) else ""
+    if name == "github-copilot":
+        if not model:
+            logger.warning("github-copilot missing model — agent disabled")
+            return None
+        if not oauth_token:
+            logger.warning("github-copilot: not logged in — run :ai in the TUI")
+            return None
+        return OpenAICompatProvider(
+            base_url=base_url or COPILOT_CHAT_BASE_URL,
+            model=model,
+            credentials=CopilotCredentialSource(oauth_token),
+        )
     if name not in _OPENAI_COMPAT_ALIASES:
         logger.warning("unknown agent provider %r — agent disabled", provider)
         return None
     if not base_url or not model:
         logger.warning("agent provider %r missing base_url/model — agent disabled", name)
         return None
-    api_key = os.environ.get(api_key_env) if api_key_env else None
-    credentials = None
-    if api_key:
-        # Azure OpenAI authenticates with a raw key in the "api-key" header
-        # instead of a Bearer Authorization header.
-        if name == "azure":
-            credentials = StaticHeaderSource(api_key, header="api-key", prefix="")
-        else:
-            credentials = StaticHeaderSource(api_key)
+    credentials = _build_credentials(name, auth_method, api_key_env)
     return OpenAICompatProvider(
         base_url=base_url,
         model=model,
         credentials=credentials,
     )
+
+
+def _build_credentials(
+    name: str, auth_method: str | None, api_key_env: str | None
+) -> CredentialSource | None:
+    method = auth_method or ("api_key" if api_key_env else "none")
+    if method == "entra":
+        return EntraCredentialSource()
+    if method == "api_key":
+        api_key = os.environ.get(api_key_env) if api_key_env else None
+        if not api_key:
+            return None
+        # Azure OpenAI authenticates with a raw key in the "api-key" header
+        # instead of a bearer Authorization header.
+        if name == "azure":
+            return StaticHeaderSource(api_key, header="api-key", prefix="")
+        return StaticHeaderSource(api_key)
+    return None  # "none" and unknown methods -> unauthenticated
