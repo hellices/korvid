@@ -11,6 +11,7 @@ be written, the write is blocked) and an outcome record
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from datetime import datetime
@@ -25,6 +26,8 @@ try:  # Windows interprocess lock
     import msvcrt
 except ImportError:
     msvcrt = None  # type: ignore[assignment]  # absent on POSIX, where flock is used
+
+logger = logging.getLogger(__name__)
 
 
 def _lock_file(fd: int) -> None:
@@ -202,6 +205,11 @@ class AuditLog:
 
     def _locked_append(self, entry: dict[str, str | None]) -> None:
         self._rotate_if_needed()
+        # A crash or ENOSPC mid-append can leave a torn final record; the new
+        # record must never be concatenated onto it, or the supposedly
+        # persisted intent would not be a valid JSONL entry. Repair failures
+        # propagate: the write stays blocked (fail-closed).
+        self._repair_torn_tail()
         # O_CREAT with 0600 is umask-filtered, so enforce the mode on the
         # open descriptor - it must hold for pre-existing files too.
         fd = os.open(self._path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
@@ -224,3 +232,33 @@ class AuditLog:
         # sync the parent too - otherwise the freshly synced data can belong
         # to a file that does not survive the crash.
         _sync_dir(self._path.parent)
+
+    def _repair_torn_tail(self) -> None:
+        """Terminate a torn final record with a newline (caller holds the lock).
+
+        A previous append that crashed between ``write`` and a completed
+        ``fsync`` (or hit ENOSPC mid-write) can leave the live log without a
+        trailing newline. Writing the terminator makes the torn tail an
+        explicit, self-contained invalid line that readers can flag, and
+        guarantees the next record starts a valid JSONL entry. Failures
+        propagate so the pending write stays blocked.
+        """
+        try:
+            fd = os.open(self._path, os.O_RDWR)
+        except FileNotFoundError:
+            return  # nothing to repair; the append below creates the file
+        try:
+            size = os.lseek(fd, 0, os.SEEK_END)
+            if size == 0:
+                return
+            os.lseek(fd, size - 1, os.SEEK_SET)
+            if os.read(fd, 1) == b"\n":
+                return
+            logger.warning(
+                "audit log %s ended mid-record (crash or full disk); terminating the torn tail",
+                self._path,
+            )
+            os.write(fd, b"\n")
+            os.fsync(fd)
+        finally:
+            os.close(fd)

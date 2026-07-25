@@ -27,9 +27,14 @@ logger = logging.getLogger(__name__)
 def _path_segment(value: str) -> str:
     """Percent-encode *value* for safe use as a single URL path segment.
 
-    Namespaces arrive from user input (command bar); encoding prevents
-    ``/`` or ``..`` from altering the request path.
+    Namespaces and names arrive from user and agent input; encoding prevents
+    ``/`` from altering the request path. Empty and dot segments are rejected
+    outright: quote() leaves ``.`` intact, so ``.`` or ``..`` would survive as
+    a literal traversal segment that an HTTP stack can normalize away from
+    the intended (and, for writes, approved) object path.
     """
+    if value in ("", ".", ".."):
+        raise ValueError(f"invalid URL path segment: {value!r}")
     return quote(value, safe="")
 
 

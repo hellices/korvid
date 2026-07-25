@@ -285,3 +285,35 @@ def test_append_syncs_parents_of_created_directories(
     assert tmp_path in synced
     assert tmp_path / "state" in synced
     assert tmp_path / "state" / "korvid" in synced
+
+
+def test_append_repairs_torn_tail_before_writing(tmp_path: Path) -> None:
+    """A torn final record (crash/ENOSPC mid-append) is terminated with a
+    newline before the next intent, so the new record is a valid JSONL line
+    instead of being concatenated onto the torn tail."""
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path)
+    log.append(action="delete", kind="pods", namespace="default", name="web-1")
+    with path.open("a", encoding="utf-8") as f:
+        f.write('{"action": "scale", "kind"')  # torn record: no newline
+    log.append(action="restart", kind="deployments", namespace="default", name="web")
+    lines = path.read_text().splitlines()
+    assert len(lines) == 3
+    assert json.loads(lines[0])["action"] == "delete"
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(lines[1])  # the torn tail stays visible as an invalid line
+    entry = json.loads(lines[2])  # the new record is intact and parseable
+    assert entry["action"] == "restart"
+    assert entry["name"] == "web"
+
+
+def test_append_after_clean_tail_adds_no_blank_line(tmp_path: Path) -> None:
+    """The repair only fires on a missing terminator: appends onto a cleanly
+    terminated log never insert blank lines."""
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path)
+    log.append(action="delete", kind="pods", namespace="default", name="a")
+    log.append(action="delete", kind="pods", namespace="default", name="b")
+    lines = path.read_text().splitlines()
+    assert len(lines) == 2
+    assert all(json.loads(ln)["action"] == "delete" for ln in lines)

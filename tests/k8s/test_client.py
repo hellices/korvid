@@ -798,3 +798,27 @@ async def test_rollout_restart_sends_uid_precondition() -> None:
     assert (
         "kubectl.kubernetes.io/restartedAt" in body["spec"]["template"]["metadata"]["annotations"]
     )
+
+
+def test_path_segment_rejects_traversal_segments() -> None:
+    """quote() leaves '.' intact, so empty and dot segments must be rejected
+    before they can survive as literal traversal segments in an object URL."""
+    from korvid.k8s.client import _path_segment
+
+    for bad in ("", ".", ".."):
+        with pytest.raises(ValueError, match="invalid URL path segment"):
+            _path_segment(bad)
+    assert _path_segment("web-1") == "web-1"
+    assert _path_segment("a/b") == "a%2Fb"
+
+
+async def test_delete_object_rejects_dot_name() -> None:
+    """A write addressed at name '..' must fail before any request is built."""
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        with pytest.raises(ValueError, match="invalid URL path segment"):
+            await client.delete_object(_deploy_meta(), "default", "..")
+        with pytest.raises(ValueError, match="invalid URL path segment"):
+            await client.delete_object(_deploy_meta(), "..", "web")
+    api.call_api.assert_not_called()
