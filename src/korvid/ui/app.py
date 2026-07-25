@@ -363,6 +363,10 @@ class KorvidApp(App[None]):
         # latest command's — a user keystroke arriving after an agent
         # navigate always lands last.
         async with self._nav_lock:
+            # A describe pane covering the table would show a stale manifest
+            # over the new view — dismiss it on any navigation, even when the
+            # requested kind/scope already matches.
+            self.query_one(DescribePane).hide()
             new_kind = message.view if message.view is not None else self.current_kind
             new_scope = message.namespace if message.namespace is not None else self.current_scope
             if new_kind != self.current_kind or new_scope != self.current_scope:
@@ -1255,6 +1259,14 @@ class KorvidApp(App[None]):
         self.notify(summary, title="agent", severity="information", timeout=3)
 
     async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        if isinstance(self.screen, DescribeScreen):
+            # The user opened a describe modal and is reading it; switching
+            # the table underneath while reporting 'switched' would lie about
+            # what's on screen. User action takes priority.
+            return (
+                "ERROR: a describe screen is open — the user is reading it; "
+                "ask them to close it (Esc) before changing the view"
+            )
         key = view.strip().lower()
         meta = self.aliases.get(key)
         if meta is None:
@@ -1364,7 +1376,13 @@ class KorvidApp(App[None]):
                 logger.debug("agent logs: manifest container lookup failed", exc_info=True)
             else:
                 spec = manifest.get("spec") or {}
-                names = [c.get("name") for c in spec.get("containers") or []]
+                # Init and ephemeral containers are valid log targets too
+                # (the human container picker exposes init containers).
+                names = [
+                    c.get("name")
+                    for section in ("containers", "initContainers", "ephemeralContainers")
+                    for c in spec.get(section) or []
+                ]
                 triples = [(namespace, pod, str(n)) for n in names if n]
                 if triples:
                     return triples

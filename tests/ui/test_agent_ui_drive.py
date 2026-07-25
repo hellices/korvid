@@ -50,6 +50,8 @@ def make_app(
     with_manifest: bool = True,
     with_logs: bool = True,
     manifest_containers: list[str] | None = None,
+    manifest_init_containers: list[str] | None = None,
+    manifest_ephemeral_containers: list[str] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -65,10 +67,15 @@ def make_app(
 
     async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
         containers = manifest_containers or ["main"]
+        spec: dict[str, Any] = {"containers": [{"name": c} for c in containers]}
+        if manifest_init_containers:
+            spec["initContainers"] = [{"name": c} for c in manifest_init_containers]
+        if manifest_ephemeral_containers:
+            spec["ephemeralContainers"] = [{"name": c} for c in manifest_ephemeral_containers]
         return {
             "kind": "Pod",
             "metadata": {"name": name, "namespace": namespace},
-            "spec": {"containers": [{"name": c} for c in containers]},
+            "spec": spec,
         }
 
     async def stream_logs(
@@ -546,6 +553,84 @@ async def test_agent_open_describe_fullscreen_when_panel_hidden() -> None:
         await pilot.pause()
         assert not out.startswith("ERROR:")
         assert isinstance(app.screen, DescribeScreen)
+
+
+async def test_agent_open_logs_accepts_init_container() -> None:
+    """Init containers are valid log targets (the human picker exposes them),
+    so the agent path must accept them too."""
+    app = make_app(manifest_containers=["main"], manifest_init_containers=["setup"])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        out = await app.agent_open_logs("web-1", "default", "setup")
+        await pilot.pause()
+        assert not out.startswith("ERROR:")
+        assert ("default", "web-1", "setup") in app._current_log_triples
+
+
+async def test_agent_open_logs_all_includes_init_and_ephemeral() -> None:
+    """'All containers' must mean all: regular + init + ephemeral."""
+    app = make_app(
+        manifest_containers=["main"],
+        manifest_init_containers=["setup"],
+        manifest_ephemeral_containers=["debugger"],
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        out = await app.agent_open_logs("web-1", "default")
+        await pilot.pause()
+        assert not out.startswith("ERROR:")
+        assert ("default", "web-1", "main") in app._current_log_triples
+        assert ("default", "web-1", "setup") in app._current_log_triples
+        assert ("default", "web-1", "debugger") in app._current_log_triples
+
+
+async def test_navigation_closes_shared_describe_pane() -> None:
+    """Navigating changes the table behind the pane — leaving a stale
+    manifest covering the new view would mislead the user."""
+    from korvid.ui.widgets.agent_panel import AgentPanel
+    from korvid.ui.widgets.describe_screen import DescribePane
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one(AgentPanel).display = True
+        await app.agent_open_describe("pods", "web-1", "default")
+        await pilot.pause()
+        assert app.query_one(DescribePane).display is True
+        out = await app.agent_navigate("deployments")
+        await pilot.pause()
+        assert not out.startswith("ERROR:")
+        assert app.query_one(DescribePane).display is False
+
+
+async def test_navigation_closes_pane_even_when_view_already_matches() -> None:
+    from korvid.ui.widgets.agent_panel import AgentPanel
+    from korvid.ui.widgets.describe_screen import DescribePane
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one(AgentPanel).display = True
+        await app.agent_open_describe("pods", "web-1", "default")
+        await pilot.pause()
+        out = await app.agent_navigate("pods")  # same kind/scope
+        await pilot.pause()
+        assert not out.startswith("ERROR:")
+        assert app.query_one(DescribePane).display is False
+
+
+async def test_agent_navigate_rejected_while_user_describe_modal_open() -> None:
+    """A user-opened describe modal means the user is reading — the agent
+    must not report 'switched' while the modal still covers the screen."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.push_screen(DescribeScreen("pods/default/web-1", {"kind": "Pod"}, []))
+        await pilot.pause()
+        out = await app.agent_navigate("deployments")
+        assert out.startswith("ERROR:")
+        assert isinstance(app.screen, DescribeScreen)
+        assert app.current_kind == "pods"
 
 
 async def test_agent_open_logs_reports_panel_truncation() -> None:
