@@ -348,7 +348,8 @@ async def test_shell_exec_failure_offers_debug_fallback(tmp_path: Path) -> None:
             await pilot.press("s")
             await pilot.pause(0.2)
             assert isinstance(app.screen, PickScreen)
-            await pilot.press("enter")  # first option = Yes
+            await pilot.press("down")  # highlight "Yes" (No is first: safe default)
+            await pilot.press("enter")
             await pilot.pause(0.2)
             assert calls[0] == build_exec_argv("default", "api-1")
             assert calls[1] == build_debug_argv("default", "api-1")
@@ -402,8 +403,7 @@ async def test_shell_exec_failure_no_declines_debug(tmp_path: Path) -> None:
             await pilot.press("s")
             await pilot.pause(0.2)
             assert isinstance(app.screen, PickScreen)
-            await pilot.press("down")  # highlight "No"
-            await pilot.press("enter")
+            await pilot.press("enter")  # first option = No (safe default)
             await pilot.pause(0.2)
             mock_call.assert_called_once()  # only the failed exec; no debug
 

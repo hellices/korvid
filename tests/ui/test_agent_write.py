@@ -418,3 +418,25 @@ async def test_agent_write_executes_with_exact_validated_meta(tmp_path: Path) ->
         await task
         assert seen == [_DEPLOY_META]
         assert seen[0] is _DEPLOY_META  # identity, not a lookalike from another group
+
+
+async def test_blocked_audit_result_omits_local_path(tmp_path: Path) -> None:
+    """An audit failure message can embed the local log path (and therefore
+    the user's home directory): the tool result goes to the LLM provider,
+    so it must stay generic."""
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    audit_path.mkdir()  # a directory at the log path makes appends fail
+    app = make_app(rec, audit_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        _expand_panel(app)
+        task = asyncio.ensure_future(
+            app.agent_request_write("delete", "deployments", "web", namespace="default")
+        )
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        result = await task
+        assert "blocked: audit log unavailable" in result
+        assert str(tmp_path) not in result  # no filesystem details leak
+        assert rec.calls == []

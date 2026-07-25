@@ -175,3 +175,28 @@ async def test_replicas_prompt_unknown_current() -> None:
         assert app.screen.query_one(Input).value == ""
         labels = " ".join(str(s.render()) for s in app.screen.query(Static))
         assert "unknown" in labels
+
+
+async def test_y_buffered_before_dialog_visible_is_discarded() -> None:
+    """A 'y' typed while the caller's pre-checks ran (RBAC round trip) is
+    created before the dialog exists and must never approve the operation;
+    a fresh 'y' afterwards still confirms."""
+    from textual import events
+
+    app = HostApp()
+    results: list[bool | None] = []
+    async with app.run_test() as pilot:
+        # Created before the dialog exists: same situation as a keystroke
+        # buffered in the input queue during a stalled permission check.
+        stale = events.Key("y", "y")
+        await pilot.pause()
+
+        dialog = ConfirmScreen("Delete pod default/web-1", "delete pods/web-1")
+        await app.push_screen(dialog, results.append)
+        await pilot.pause()
+        dialog.post_message(stale)
+        await pilot.pause()
+        assert results == []  # stale keystroke discarded
+        await pilot.press("y")
+        await pilot.pause()
+        assert results == [True]

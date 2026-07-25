@@ -15,6 +15,7 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
@@ -53,6 +54,13 @@ class ConfirmScreen(ModalScreen[bool]):
         self._title = title
         self._operation = operation
         self._require_name = require_name
+        # Same clock as event timestamps (Message.time): key events created
+        # before this moment were buffered while the caller's pre-checks ran
+        # and must never confirm an operation the user had not yet seen.
+        # Captured at construction (always after those pre-checks) rather
+        # than on_mount, which can be processed after a legitimate keystroke
+        # on the already-visible dialog was created.
+        self._created_time = Message().time
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -75,6 +83,8 @@ class ConfirmScreen(ModalScreen[bool]):
         if self._require_name is None:
             if event.key == "y":
                 event.stop()
+                if event.time < self._created_time:
+                    return  # buffered before the dialog existed: discard
                 self.dismiss(True)
             elif event.key == "n":
                 event.stop()

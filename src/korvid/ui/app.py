@@ -887,7 +887,10 @@ class KorvidApp(App[None]):
                 f"Shell failed in {target} (exit {exit_code}) — the image likely has"
                 " no sh/bash (distroless). Attach a debug container instead?\n"
                 "Note: the ephemeral container stays in the pod spec until restart.",
-                [self._DEBUG_YES, "No"],
+                # "No" first: the picker highlights option 0, and this offer
+                # appears asynchronously - an Enter buffered on the base TUI
+                # must never approve a pod mutation the user has not seen.
+                ["No", self._DEBUG_YES],
             ),
             _on_choice,
         )
@@ -1297,11 +1300,15 @@ class KorvidApp(App[None]):
             close = getattr(op, "close", None)
             if callable(close):
                 close()  # avoid "coroutine was never awaited" for the blocked op
+            # The exception can embed the local audit path (home directory):
+            # log it here, but keep the notification and the tool result -
+            # which is sent to the LLM provider - free of filesystem details.
+            logger.exception("audit intent record failed; write blocked: %s", exc)
             self.notify(
-                f"{action} {kind}/{name} blocked: audit log unavailable ({exc})",
+                f"{action} {kind}/{name} blocked: audit log unavailable",
                 severity="error",
             )
-            return f"blocked: audit log unavailable ({exc})"
+            return "blocked: audit log unavailable"
         try:
             await op
         except Exception as exc:

@@ -10,6 +10,8 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import pytest
+
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
@@ -318,3 +320,38 @@ async def test_dialog_opened_during_permission_check_aborts_write(tmp_path: Path
         await pilot.pause(0.3)
         assert app.screen is blocker  # no ConfirmScreen stacked on top
         assert rec.calls == []
+
+
+async def test_y_queued_during_stalled_check_cannot_approve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 'y' typed while the RBAC pre-check stalled predates the dialog: even
+    if it reaches the ConfirmScreen after mounting, it must be discarded -
+    the user never saw the operation it would approve."""
+    from textual import events
+
+    monkeypatch.setattr("korvid.ui.app._PERMISSION_CHECK_TIMEOUT", 0.1)
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", permitted=True)
+
+    async def stall(
+        verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
+    ) -> bool:
+        await asyncio.Event().wait()  # never resolves
+        return True
+
+    app._check_permission = stall
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        # The input driver timestamps keys on arrival: one typed during the
+        # stalled check predates the dialog, which only exists afterwards.
+        stale = events.Key("y", "y")
+        await pilot.press("ctrl+d")  # stalls, then fails open into the dialog
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        app.screen.post_message(stale)
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, ConfirmScreen)  # discarded: still open
+        assert rec.calls == []
+        await pilot.press("y")  # a fresh keystroke still confirms
+        await pilot.pause(0.2)
+        assert rec.calls == [("delete", "pods", "default", "web-1")]
