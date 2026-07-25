@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
-from textual.widgets import Input, RichLog
+from textual.widgets import Input
 
 from korvid.agent.events import AgentEvent, TextDelta, TurnComplete
 from korvid.core.config import KorvidConfig
@@ -68,8 +68,9 @@ def make_app(runtime: Any = None, model: str | None = "test-model", **kwargs: An
 
 
 def _panel_text(app: KorvidApp) -> str:
-    log = app.query_one(AgentPanel).query_one("#agent-log", RichLog)
-    return "\n".join(strip.text for strip in log.lines)
+    from korvid.ui.widgets.agent_panel import ChatEntry
+
+    return "\n".join(entry.raw for entry in app.query_one(AgentPanel).query(ChatEntry))
 
 
 async def test_ctrl_a_toggles_panel_display() -> None:
@@ -109,7 +110,7 @@ async def test_prompt_drives_runtime_and_renders_reply() -> None:
         assert runtime.calls
         assert runtime.calls[0][0] == "how are my pods?"
         text = _panel_text(app)
-        assert "> how are my pods?" in text
+        assert "how are my pods?" in text
         assert "All pods healthy." in text
         assert inp.disabled is False
 

@@ -1,7 +1,8 @@
-"""Read-only tool definitions and executor for the agent runtime (spec §5)."""
+"""Read-only and UI-control tool definitions and executor (spec §5, §6)."""
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
@@ -130,12 +131,149 @@ READ_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-class ToolExecutor:
-    """Dispatches OpenAI tool calls to the Kubernetes client."""
+class UIBridge(ABC):
+    """Screen-control surface the agent may drive (spec §4.1 UI Bus).
 
-    def __init__(self, kube: KubeClient, aliases: Mapping[str, ResourceMeta]) -> None:
+    Layer-boundary interface (AGENTS.md: `abc.ABC`); the concrete adapter
+    lives in the ui layer and is injected at the composition root, so the
+    agent layer never imports ui. Every method returns a short human/model-
+    readable confirmation, or an "ERROR: …" string — implementations must
+    not raise.
+    """
+
+    @abstractmethod
+    async def agent_navigate(self, view: str, namespace: str | None = None) -> str: ...
+
+    @abstractmethod
+    async def agent_set_filter(self, pattern: str) -> str: ...
+
+    @abstractmethod
+    async def agent_open_logs(
+        self, pod: str, namespace: str, container: str | None = None
+    ) -> str: ...
+
+    @abstractmethod
+    async def agent_open_describe(
+        self, kind: str, name: str, namespace: str | None = None
+    ) -> str: ...
+
+
+UI_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "navigate",
+            "description": (
+                "Switch the korvid main table to a resource view the user can see, "
+                "optionally scoping to a namespace. Screen-only; changes nothing "
+                "in the cluster."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "view": {
+                        "type": "string",
+                        "description": "Resource kind or alias to display (e.g. 'pods', 'deploy').",
+                    },
+                    "namespace": {
+                        "type": "string",
+                        "description": (
+                            "Namespace scope. Pass 'all' for the all-namespaces "
+                            "scope. Omit to keep the current scope."
+                        ),
+                    },
+                },
+                "required": ["view"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_filter",
+            "description": (
+                "Apply a case-insensitive substring filter to the visible resource "
+                "table so the user sees only rows whose name contains the pattern. "
+                "Not a regex. Pass an empty pattern to clear."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": (
+                            "Case-insensitive substring to match against resource "
+                            "names; '' clears the filter."
+                        ),
+                    },
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_logs",
+            "description": (
+                "Open the live log pane for a pod so the user can watch the logs "
+                "on screen alongside your analysis. At most 8 container panels "
+                "fit on screen; the result reports which containers are shown "
+                "if the pod has more."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pod": {"type": "string", "description": "Pod name."},
+                    "namespace": {"type": "string", "description": "Pod namespace."},
+                    "container": {
+                        "type": "string",
+                        "description": "Container name. Omit to show all containers.",
+                    },
+                },
+                "required": ["pod", "namespace"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_describe",
+            "description": (
+                "Open the describe screen (manifest + events) for a resource so the "
+                "user sees the evidence you are citing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "description": "Resource kind or alias."},
+                    "name": {"type": "string", "description": "Resource name."},
+                    "namespace": {
+                        "type": "string",
+                        "description": "Namespace (required for namespaced resources).",
+                    },
+                },
+                "required": ["kind", "name"],
+            },
+        },
+    },
+]
+
+UI_TOOL_NAMES = frozenset(t["function"]["name"] for t in UI_TOOLS)
+
+
+class ToolExecutor:
+    """Dispatches OpenAI tool calls to the Kubernetes client or the UI bridge."""
+
+    def __init__(
+        self,
+        kube: KubeClient,
+        aliases: Mapping[str, ResourceMeta],
+        ui: UIBridge | None = None,
+    ) -> None:
         self._kube = kube
         self._aliases = aliases
+        self._ui = ui
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         """Dispatch a tool call; never raises — exceptions are returned as 'ERROR: ...'."""
@@ -148,6 +286,8 @@ class ToolExecutor:
         return cap_result(result)
 
     async def _dispatch(self, name: str, arguments: dict[str, Any]) -> str:
+        if name in UI_TOOL_NAMES:
+            return await self._dispatch_ui(name, arguments)
         if name == "list_resources":
             return await self._list_resources(arguments)
         if name == "get_resource":
@@ -157,6 +297,21 @@ class ToolExecutor:
         if name == "get_events":
             return await self._get_events(arguments)
         raise ValueError(f"unknown tool: {name!r}")
+
+    async def _dispatch_ui(self, name: str, args: dict[str, Any]) -> str:
+        if self._ui is None:
+            raise ValueError("UI control unavailable in this session")
+        if name == "navigate":
+            return await self._ui.agent_navigate(str(args["view"]), args.get("namespace"))
+        if name == "set_filter":
+            return await self._ui.agent_set_filter(str(args["pattern"]))
+        if name == "open_logs":
+            return await self._ui.agent_open_logs(
+                str(args["pod"]), str(args["namespace"]), args.get("container")
+            )
+        return await self._ui.agent_open_describe(
+            str(args["kind"]), str(args["name"]), args.get("namespace")
+        )
 
     async def _list_resources(self, args: dict[str, Any]) -> str:
         kind = str(args["kind"]).strip().lower()

@@ -21,6 +21,7 @@ from textual.widgets import DataTable, Footer, Static
 from korvid.agent.events import AgentError
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
+from korvid.agent.tools import UIBridge
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
@@ -46,7 +47,7 @@ from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
-from korvid.ui.widgets.describe_screen import DescribeScreen
+from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
@@ -188,6 +189,10 @@ class KorvidApp(App[None]):
                 api_key_env=config.agent_api_key_env,
             )
         self._agent_task: asyncio.Task[None] | None = None
+        # Serializes view/scope switches: keyboard NavigateCommands and the
+        # agent's navigate tool share this handler, which yields while
+        # stopping/starting watches — interleaving would corrupt state.
+        self._nav_lock = asyncio.Lock()
         self.aliases: dict[str, ResourceMeta] = (
             aliases if aliases is not None else dict(_DEFAULT_ALIASES)
         )
@@ -198,6 +203,7 @@ class KorvidApp(App[None]):
         self._log_buffer: LogBuffer | None = None
         self._log_error: bool = False
         self._current_log_triples: list[tuple[str, str, str]] = []
+        self._log_pane_gen: int = 0
         self._current_log_force_prefix: bool = False
         self._log_pane_mode: str = ""
         self._reconnect_sleep: float = 1.0
@@ -229,6 +235,7 @@ class KorvidApp(App[None]):
         empty_state.display = False  # hidden until the first store notification
         yield empty_state
         yield LogPane()
+        yield DescribePane()
         agent_panel = AgentPanel()
         agent_panel.display = False
         yield agent_panel
@@ -350,29 +357,38 @@ class KorvidApp(App[None]):
         self.post_message(ResourcesUpdated(self.current_kind))
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
-        new_kind = message.view if message.view is not None else self.current_kind
-        new_scope = message.namespace if message.namespace is not None else self.current_scope
-        if new_kind != self.current_kind or new_scope != self.current_scope:
-            await self._close_log_pane()
-            await self.watch_manager.stop(self.current_kind, self.current_scope)
-            self.current_kind = new_kind
-            self.current_scope = new_scope
-            await self.watch_manager.start(self.current_kind, self.current_scope)
+        # The lock serializes the agent path (direct call from the agent
+        # task) with the keyboard path (message pump): both mutate
+        # current_kind/current_scope across awaits. The final state is the
+        # latest command's — a user keystroke arriving after an agent
+        # navigate always lands last.
+        async with self._nav_lock:
+            # A describe pane covering the table would show a stale manifest
+            # over the new view — dismiss it on any navigation, even when the
+            # requested kind/scope already matches.
+            self.query_one(DescribePane).hide()
+            new_kind = message.view if message.view is not None else self.current_kind
+            new_scope = message.namespace if message.namespace is not None else self.current_scope
+            if new_kind != self.current_kind or new_scope != self.current_scope:
+                await self._close_log_pane()
+                await self.watch_manager.stop(self.current_kind, self.current_scope)
+                self.current_kind = new_kind
+                self.current_scope = new_scope
+                await self.watch_manager.start(self.current_kind, self.current_scope)
         self.post_message(ResourcesUpdated(self.current_kind))
         self._refresh_status()
 
     async def action_toggle_all_namespaces(self) -> None:
-        """Toggle scope between ALL_NAMESPACES and the config-default namespace."""
-        await self._close_log_pane()
+        """Toggle scope between ALL_NAMESPACES and the config-default namespace.
+
+        Routed through the locked navigate handler so it serializes with
+        agent-driven navigation (both stop/start watches across awaits).
+        """
         if self.current_scope == ALL_NAMESPACES:
             new_scope = self.config.namespace or "default"
         else:
             new_scope = ALL_NAMESPACES
-        await self.watch_manager.stop(self.current_kind, self.current_scope)
-        self.current_scope = new_scope
-        await self.watch_manager.start(self.current_kind, self.current_scope)
-        self._render_table(self.current_kind)
-        self._refresh_status()
+        await self.on_navigate_command(NavigateCommand(None, new_scope))
 
     async def on_show_namespace_picker(self, message: ShowNamespacePicker) -> None:
         if self._list_namespaces is None:
@@ -720,17 +736,22 @@ class KorvidApp(App[None]):
             )
 
     async def on_key(self, event: Key) -> None:
-        """Close log pane on Escape when pane is open and no bar/picker is open."""
+        """Close describe pane / log pane on Escape when no bar/picker is open."""
         if event.key == "escape":
+            describe_pane = self.query_one(DescribePane)
             log_pane = self.query_one(LogPane)
-            if not log_pane.display:
+            if not describe_pane.display and not log_pane.display:
                 return
             filter_bar = self.query_one(FilterBar)
             command_bar = self.query_one(CommandBar)
             namespace_picker = self.query_one(NamespacePicker)
-            if not filter_bar.display and not command_bar.display and not namespace_picker.display:
+            if filter_bar.display or command_bar.display or namespace_picker.display:
+                return
+            if describe_pane.display:
+                describe_pane.hide()
+            else:
                 await self._close_log_pane()
-                event.stop()
+            event.stop()
 
     async def action_logs(self) -> None:
         """Open logs for the selected pod, or toggle it in/out of the pane (``l``).
@@ -894,6 +915,7 @@ class KorvidApp(App[None]):
         previous: bool = False,
     ) -> None:
         """Show log pane and spawn one streaming task per (pod, container)."""
+        self._log_pane_gen += 1
         # Resolve triples before saving so _current_log_triples is always complete.
         if triples is None:
             triples = [(namespace, pod, ctr) for pod, ctr in sources]
@@ -1108,6 +1130,7 @@ class KorvidApp(App[None]):
 
     async def _close_log_pane(self) -> None:
         """Cancel all stream tasks and hide the log pane."""
+        self._log_pane_gen += 1
         await self._cancel_log_tasks()
         self._current_log_triples = []
         self._current_log_force_prefix = False
@@ -1224,6 +1247,215 @@ class KorvidApp(App[None]):
         except Exception as exc:
             panel.apply_event(AgentError(message=str(exc)))
 
+    # ------------------------------------------------------------------
+    # UIBridge implementation (spec §4.1 UI Bus): the agent drives the
+    # exact same handlers as user keystrokes. Every method returns a
+    # confirmation or an "ERROR: …" string and never raises (executor
+    # contract), and every screen change is announced via notify so the
+    # user always sees what the agent did.
+    # ------------------------------------------------------------------
+
+    def _mark_agent_action(self, summary: str) -> None:
+        self.notify(summary, title="agent", severity="information", timeout=3)
+
+    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        if isinstance(self.screen, DescribeScreen):
+            # The user opened a describe modal and is reading it; switching
+            # the table underneath while reporting 'switched' would lie about
+            # what's on screen. User action takes priority.
+            return (
+                "ERROR: a describe screen is open — the user is reading it; "
+                "ask them to close it (Esc) before changing the view"
+            )
+        key = view.strip().lower()
+        meta = self.aliases.get(key)
+        if meta is None:
+            return f"ERROR: unknown view {view!r} — not a resource kind in this cluster"
+        if namespace and namespace.strip().lower() in ("all", ALL_NAMESPACES):
+            # Same mapping as the human ':view all' command path.
+            namespace = ALL_NAMESPACES
+        try:
+            await self.on_navigate_command(NavigateCommand(meta.plural, namespace))
+        except Exception as exc:
+            return f"ERROR: {exc}"
+        rows = self.store.get(self.current_kind, self.current_scope)
+        # Report what the user actually sees: apply the same case-insensitive
+        # name filter as ResourceTable.show before counting.
+        if self.filter_pattern:
+            pat = self.filter_pattern.lower()
+            rows = [r for r in rows if pat in r.name.lower()]
+        self._mark_agent_action(f"view → {self.current_kind} ({self.current_scope})")
+        suffix = " (list may still be loading)" if not rows else ""
+        filter_note = f" (filter {self.filter_pattern!r} applied)" if self.filter_pattern else ""
+        return (
+            f"switched to {self.current_kind} in {self.current_scope} — "
+            f"{len(rows)} resources{filter_note}{suffix}"
+        )
+
+    async def agent_set_filter(self, pattern: str) -> str:
+        try:
+            if pattern:
+                self.on_filter_command(FilterCommand(pattern))
+            else:
+                self.on_clear_filter(ClearFilter())
+        except Exception as exc:
+            return f"ERROR: {exc}"
+        if pattern:
+            self._mark_agent_action(f"filter → {pattern!r}")
+            return f"filter set to {pattern!r} on the {self.current_kind} view"
+        self._mark_agent_action("filter cleared")
+        return "filter cleared"
+
+    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
+        if self._stream_logs is None:
+            return "ERROR: log streaming unavailable in this session"
+        pane_gen = self._log_pane_gen
+        try:
+            known = await self._agent_pod_triples(namespace, pod)
+            if not known:
+                # Validate before _cancel_log_tasks: a hallucinated pod name
+                # must not tear down the streams the user is watching.
+                return f"ERROR: pod {namespace}/{pod} not found (check the name and namespace)"
+            if container:
+                names = [c for _, _, c in known if c]
+                if names and container not in names:
+                    return (
+                        f"ERROR: container {container!r} not found in pod "
+                        f"{namespace}/{pod} (containers: {', '.join(names)})"
+                    )
+                triples = [(namespace, pod, container)]
+            else:
+                triples = known
+            if pane_gen != self._log_pane_gen:
+                # The user (or another turn) changed the log pane while we were
+                # resolving containers — user keystrokes take priority.
+                return (
+                    "ERROR: the log pane changed while resolving containers "
+                    "(user action takes priority) — retry if still needed"
+                )
+            await self._cancel_log_tasks()
+            if pane_gen != self._log_pane_gen:
+                # Recheck after the cancel await: a user pane change landing
+                # in that window still wins.
+                return (
+                    "ERROR: the log pane changed while preparing the streams "
+                    "(user action takes priority) — retry if still needed"
+                )
+            self._log_pane_mode = "l"
+            await self._open_log_pane(namespace, [(p, c) for _, p, c in triples], triples=triples)
+        except Exception as exc:
+            return f"ERROR: {exc}"
+        target = f"{namespace}/{pod}" + (f" [{container}]" if container else "")
+        self._mark_agent_action(f"logs → {target}")
+        # _open_log_pane caps at MAX_PANELS; tell the model which subset is
+        # actually visible so it never assumes every container is on screen.
+        truncated = ""
+        if len(triples) > MAX_PANELS:
+            truncated = (
+                f" (showing first {MAX_PANELS} of {len(triples)} containers; "
+                f"pass 'container' to view a specific one)"
+            )
+        return f"log pane opened for {target} — the user can now see the live logs{truncated}"
+
+    async def _agent_pod_triples(self, namespace: str, pod: str) -> list[tuple[str, str, str]]:
+        """All (ns, pod, container) triples for a pod the agent targets.
+
+        The agent may open logs for a pod outside the visible view/scope, so
+        the live manifest is authoritative; the store bucket is only a
+        fallback. Returns an empty list when the pod cannot be found at all.
+        """
+        if self._get_manifest is not None:
+            try:
+                manifest = await self._get_manifest("pods", namespace, pod)
+            except ApiStatusError:
+                # The API authoritatively rejected the target (e.g. 404 for a
+                # freshly deleted pod still in the watch cache) — surface it
+                # instead of falling back to stale cache data.
+                raise
+            except Exception:
+                logger.debug("agent logs: manifest container lookup failed", exc_info=True)
+            else:
+                spec = manifest.get("spec") or {}
+                # Init and ephemeral containers are valid log targets too
+                # (the human container picker exposes init containers).
+                names = [
+                    c.get("name")
+                    for section in ("containers", "initContainers", "ephemeralContainers")
+                    for c in spec.get(section) or []
+                ]
+                triples = [(namespace, pod, str(n)) for n in names if n]
+                if triples:
+                    return triples
+        containers = self._get_pod_containers(namespace, pod)
+        if containers:
+            return [(namespace, pod, ctr) for ctr in containers]
+        if any(
+            obj.namespace == namespace and obj.name == pod and isinstance(obj, PodSummary)
+            for obj in self.store.get(self.current_kind, self.current_scope)
+        ):
+            # Known pod without container info: blank container = server default.
+            return [(namespace, pod, "")]
+        return []
+
+    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
+        if self._get_manifest is None:
+            return "ERROR: describe unavailable in this session"
+        key = kind.strip().lower()
+        meta = self.aliases.get(key)
+        if meta is None:
+            return f"ERROR: unknown kind {kind!r} — not a resource kind in this cluster"
+        if meta.namespaced and not namespace:
+            return f"ERROR: kind {kind!r} is namespaced — provide the 'namespace' argument"
+        # Snapshot the visible state: if the user pushes a screen or navigates
+        # while the fetches below are pending, abort instead of covering it.
+        top_screen = self.screen_stack[-1] if self.screen_stack else None
+        view_before = (self.current_kind, self.current_scope)
+        try:
+            manifest = await self._get_manifest(meta.plural, namespace, name)
+        except ApiStatusError as exc:
+            return f"ERROR: {explain_api_error(exc.status, exc.reason, meta.plural, namespace)}"
+        except Exception as exc:
+            return f"ERROR: {exc}"
+        events: list[dict[str, Any]] = []
+        # Events are name-scoped only, so restrict to pods (same rule as `d`).
+        if self._get_events is not None and namespace and meta.plural == "pods":
+            try:
+                events = await self._get_events(namespace, name)
+            except Exception:  # events are best-effort; the manifest still shows
+                logger.debug("agent describe: event fetch failed", exc_info=True)
+        title = f"{meta.plural}/{namespace or '-'}/{name}"
+        current_top = self.screen_stack[-1] if self.screen_stack else None
+        if current_top is not top_screen or (self.current_kind, self.current_scope) != view_before:
+            return (
+                "ERROR: the screen changed while fetching the manifest "
+                "(user action takes priority) — retry if still needed"
+            )
+        # When the chat panel is visible, show the non-modal pane on the left
+        # instead of pushing a modal: a modal becomes the active screen and
+        # would keep the chat input from taking focus. Resolved outside the
+        # try below so a missing widget isn't masked as a generic push error.
+        share = bool(self.query(AgentPanel)) and self.query_one(AgentPanel).display
+        try:
+            await self._show_describe(share, title, manifest, events)
+        except Exception as exc:
+            return f"ERROR: {exc}"
+        self._mark_agent_action(f"describe → {title}")
+        return f"describe screen opened for {title} — manifest and events are on screen"
+
+    async def _show_describe(
+        self,
+        share: bool,
+        title: str,
+        manifest: dict[str, Any],
+        events: list[dict[str, Any]],
+    ) -> None:
+        """Present a describe view: non-modal pane when sharing with the chat
+        panel (modal screens would steal focus from the chat input)."""
+        if share:
+            self.query_one(DescribePane).show(title, manifest, events)
+        else:
+            await self.push_screen(DescribeScreen(title, manifest, events))
+
     def _refresh_empty_state(self, kind: str, visible_rows: int) -> None:
         """Show guidance instead of a silent blank table (empty ns or no filter match)."""
         empty = self.query_one("#empty-state", Static)
@@ -1253,3 +1485,28 @@ class KorvidApp(App[None]):
                 await asyncio.gather(*tasks, return_exceptions=True)
         self._log_tasks.clear()
         await self.watch_manager.stop_all()
+
+
+class AppUIBridge(UIBridge):
+    """Nominal `UIBridge` adapter over `KorvidApp`.
+
+    The layer-boundary interface must be an `abc.ABC` (AGENTS.md), but
+    Textual's `App` metaclass conflicts with `ABCMeta`, so the app cannot
+    inherit `UIBridge` directly — this thin adapter conforms nominally and
+    delegates to the app's bridge methods.
+    """
+
+    def __init__(self, app: KorvidApp) -> None:
+        self._app = app
+
+    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        return await self._app.agent_navigate(view, namespace)
+
+    async def agent_set_filter(self, pattern: str) -> str:
+        return await self._app.agent_set_filter(pattern)
+
+    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
+        return await self._app.agent_open_logs(pod, namespace, container)
+
+    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
+        return await self._app.agent_open_describe(kind, name, namespace)

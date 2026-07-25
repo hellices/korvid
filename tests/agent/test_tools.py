@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from korvid.agent.tools import MAX_RESULT_CHARS, READ_TOOLS, ToolExecutor
+from korvid.agent.tools import MAX_RESULT_CHARS, READ_TOOLS, UI_TOOLS, ToolExecutor, UIBridge
 from korvid.k8s.discovery import PODS_META
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
@@ -283,3 +283,104 @@ async def test_get_resource_requires_namespace_for_namespaced_kind() -> None:
     out = await make_executor(FakeKube()).execute("get_resource", {"kind": "pods", "name": "a"})
     assert out.startswith("ERROR:")
     assert "namespace" in out
+
+
+# --- Slice 3: UI-control tools (spec §4.1 UI Bus / §6 UI control row) ---
+
+
+class FakeBridge(UIBridge):
+    """Records UI-control calls; returns canned confirmations."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        self.calls.append(("navigate", {"view": view, "namespace": namespace}))
+        return f"switched to {view}"
+
+    async def agent_set_filter(self, pattern: str) -> str:
+        self.calls.append(("set_filter", {"pattern": pattern}))
+        return f"filter set to {pattern!r}"
+
+    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
+        self.calls.append(
+            ("open_logs", {"pod": pod, "namespace": namespace, "container": container})
+        )
+        return f"log pane opened for {namespace}/{pod}"
+
+    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
+        self.calls.append(("open_describe", {"kind": kind, "name": name, "namespace": namespace}))
+        return f"describe opened for {kind}/{name}"
+
+
+def make_ui_executor(bridge: Any) -> ToolExecutor:
+    kube: Any = FakeKube()
+    return ToolExecutor(kube, {"pods": PODS_META}, ui=bridge)
+
+
+def test_ui_tools_schema_names() -> None:
+    names = [t["function"]["name"] for t in UI_TOOLS]
+    assert names == ["navigate", "set_filter", "open_logs", "open_describe"]
+
+
+def test_ui_tools_all_have_type_function() -> None:
+    for tool in UI_TOOLS:
+        assert tool["type"] == "function"
+        assert "parameters" in tool["function"]
+
+
+async def test_navigate_dispatches_to_bridge() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute(
+        "navigate", {"view": "deployments", "namespace": "prod"}
+    )
+    assert out == "switched to deployments"
+    assert bridge.calls == [("navigate", {"view": "deployments", "namespace": "prod"})]
+
+
+async def test_set_filter_dispatches_to_bridge() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute("set_filter", {"pattern": "web"})
+    assert out == "filter set to 'web'"
+
+
+async def test_open_logs_dispatches_to_bridge() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute("open_logs", {"pod": "web-1", "namespace": "d"})
+    assert out == "log pane opened for d/web-1"
+    assert bridge.calls[0][1]["container"] is None
+
+
+async def test_open_describe_dispatches_to_bridge() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute(
+        "open_describe", {"kind": "pods", "name": "web-1", "namespace": "d"}
+    )
+    assert out == "describe opened for pods/web-1"
+
+
+async def test_ui_tool_without_bridge_is_error() -> None:
+    kube: Any = FakeKube()
+    executor = ToolExecutor(kube, {"pods": PODS_META})
+    out = await executor.execute("navigate", {"view": "pods"})
+    assert out.startswith("ERROR:")
+    assert "UI control unavailable" in out
+
+
+async def test_ui_tool_bridge_result_is_capped() -> None:
+    class LoudBridge(FakeBridge):
+        async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+            return "x" * (MAX_RESULT_CHARS * 2)
+
+    out = await make_ui_executor(LoudBridge()).execute("navigate", {"view": "pods"})
+    assert len(out) <= MAX_RESULT_CHARS + 50
+
+
+async def test_ui_tool_bridge_exception_is_error_result() -> None:
+    class BoomBridge(FakeBridge):
+        async def agent_set_filter(self, pattern: str) -> str:
+            raise RuntimeError("widget gone")
+
+    out = await make_ui_executor(BoomBridge()).execute("set_filter", {"pattern": "x"})
+    assert out.startswith("ERROR:")
+    assert "widget gone" in out
