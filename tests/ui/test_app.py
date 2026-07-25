@@ -1,8 +1,10 @@
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from textual.binding import Binding
 
+from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager, WatchSource
@@ -67,6 +69,7 @@ def make_app(
     *,
     extra_data: dict[str, list[Summary]] | None = None,
     aliases: dict[str, ResourceMeta] | None = None,
+    audit: AuditLog | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -88,6 +91,7 @@ def make_app(
         watch_manager=WatchManager(store, source),
         list_namespaces=list_namespaces,
         aliases=aliases if aliases is not None else dict(_DEFAULT_TEST_ALIASES),
+        audit=audit,
     )
 
 
@@ -849,7 +853,7 @@ def test_uppercase_bindings_registered() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_shell_nonzero_exit_offers_debug_fallback() -> None:
+async def test_shell_nonzero_exit_offers_debug_fallback(tmp_path: Path) -> None:
     """A failed kubectl exec (e.g. container without sh) offers the debug fallback."""
     from contextlib import nullcontext
     from types import SimpleNamespace
@@ -857,7 +861,8 @@ async def test_shell_nonzero_exit_offers_debug_fallback() -> None:
 
     from korvid.ui.widgets.pick_screen import PickScreen
 
-    app = make_app([_pod("api-1")])
+    # The debug fallback mutates the pod spec, so it needs an audit sink.
+    app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         with (

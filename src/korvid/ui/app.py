@@ -836,6 +836,15 @@ class KorvidApp(App[None]):
         self, namespace: str, name: str, container: str | None, exit_code: int
     ) -> None:
         """Ask whether to attach a kubectl debug container after a failed shell."""
+        if self.config.readonly or self._audit is None:
+            # kubectl debug mutates the pod spec (ephemeral container):
+            # never offer a write we would refuse to run.
+            self.notify(
+                "Shell failed and the debug fallback is unavailable"
+                " (read-only mode or no audit log)",
+                severity="warning",
+            )
+            return
         target = f"{name}/{container}" if container else name
 
         def _on_choice(choice: str | None) -> None:
@@ -853,18 +862,51 @@ class KorvidApp(App[None]):
         )
 
     def _run_debug(self, namespace: str, name: str, container: str | None) -> None:
-        """Attach an ephemeral busybox container via kubectl debug."""
+        """Attach an ephemeral busybox container via kubectl debug. This is a
+        pod mutation: blocked in readonly sessions and audited fail-closed
+        like every other write (user approval came from the fallback prompt)."""
+        if self.config.readonly:
+            self.notify("Read-only mode: cluster writes are disabled", severity="warning")
+            return
+        audit = self._audit
+        if audit is None:
+            self.notify("Writes disabled: no audit log configured", severity="warning")
+            return
+        detail = "ephemeral debug container (kubectl debug)"
+        try:
+            self._audit_debug(audit, namespace, name, detail, "intent")
+        except Exception:
+            logger.exception("audit append failed; blocking kubectl debug")
+            self.notify("Write blocked: audit log unavailable", severity="error")
+            return
         argv = build_debug_argv(namespace, name, container, context=self.config.kube_context)
         target = f"{name}/{container}" if container else name
         with self.suspend():
             exit_code = self._run_interactive(argv, f"korvid debug → {target} (exit to return)")
         self.refresh()
+        outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
+        try:
+            self._audit_debug(audit, namespace, name, detail, outcome)
+        except Exception:
+            logger.exception("audit append failed after kubectl debug")
+            self.notify("Audit write failed for the executed debug", severity="warning")
         if exit_code != 0:
             self.notify(
                 f"kubectl debug exited with status {exit_code}"
                 " — check RBAC (pods/ephemeralcontainers) and cluster version",
                 severity="warning",
             )
+
+    @staticmethod
+    def _audit_debug(audit: AuditLog, namespace: str, name: str, detail: str, outcome: str) -> None:
+        audit.append(
+            action="debug",
+            kind="pods",
+            namespace=namespace,
+            name=name,
+            detail=detail,
+            outcome=outcome,
+        )
 
     async def on_key(self, event: Key) -> None:
         """Escape closes describe/log panes, then pops one drill-down level."""

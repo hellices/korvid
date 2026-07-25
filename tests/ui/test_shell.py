@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -134,6 +137,8 @@ def make_app(
     *,
     extra_data: dict[str, list[Summary]] | None = None,
     kube_context: str | None = None,
+    audit: AuditLog | None = None,
+    readonly: bool = False,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -147,10 +152,11 @@ def make_app(
             await asyncio.sleep(0.01)
 
     return KorvidApp(
-        config=KorvidConfig(namespace="default", kube_context=kube_context),
+        config=KorvidConfig(namespace="default", kube_context=kube_context, readonly=readonly),
         store=store,
         watch_manager=WatchManager(store, source),
         aliases=dict(_TEST_ALIASES),
+        audit=audit,
     )
 
 
@@ -312,9 +318,11 @@ async def test_shell_multi_container_picker_escape_cancels() -> None:
             mock_call.assert_not_called()
 
 
-async def test_shell_exec_failure_offers_debug_fallback() -> None:
-    """Failed exec (distroless) → PickScreen offering kubectl debug; Yes runs it."""
-    app = make_app([_pod("api-1")])
+async def test_shell_exec_failure_offers_debug_fallback(tmp_path: Path) -> None:
+    """Failed exec (distroless) → PickScreen offering kubectl debug; Yes runs it.
+    kubectl debug is a pod mutation, so the executed fallback is audited."""
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app([_pod("api-1")], audit=AuditLog(audit_path))
     calls: list[list[str]] = []
 
     def _fake_call(argv: list[str]) -> int:
@@ -336,6 +344,10 @@ async def test_shell_exec_failure_offers_debug_fallback() -> None:
             await pilot.pause(0.2)
             assert calls[0] == build_exec_argv("default", "api-1")
             assert calls[1] == build_debug_argv("default", "api-1")
+            entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+            assert entries[0]["action"] == "debug"
+            assert entries[0]["outcome"] == "intent"
+            assert entries[-1]["outcome"] == "success"
 
 
 async def test_shell_nonzero_exit_with_working_shell_no_fallback() -> None:
@@ -354,9 +366,9 @@ async def test_shell_nonzero_exit_with_working_shell_no_fallback() -> None:
             assert not isinstance(app.screen, PickScreen)
 
 
-async def test_shell_exec_failure_no_declines_debug() -> None:
+async def test_shell_exec_failure_no_declines_debug(tmp_path: Path) -> None:
     """Choosing No in the fallback picker runs nothing further."""
-    app = make_app([_pod("api-1")])
+    app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
     with (
         patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
         patch("korvid.ui.app.subprocess.call", return_value=1) as mock_call,
@@ -390,3 +402,38 @@ def test_build_probe_argv() -> None:
         "exit 0",
     ]
     assert "-it" not in result  # probe must be non-interactive
+
+
+async def test_debug_fallback_not_offered_in_readonly(tmp_path: Path) -> None:
+    """kubectl debug mutates the pod spec: readonly sessions never get the
+    fallback offer, matching every other gated write."""
+    app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"), readonly=True)
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1) as mock_call,
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", return_value=_noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.3)
+            assert not isinstance(app.screen, PickScreen)
+            mock_call.assert_called_once()  # only the failed exec; no debug
+
+
+async def test_debug_fallback_not_offered_without_audit() -> None:
+    """Fail-closed: no audit sink means the mutating fallback is not offered."""
+    app = make_app([_pod("api-1")])  # audit=None
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1) as mock_call,
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", return_value=_noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.3)
+            assert not isinstance(app.screen, PickScreen)
+            mock_call.assert_called_once()
