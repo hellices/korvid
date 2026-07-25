@@ -233,3 +233,21 @@ def test_append_fails_closed_when_fsync_fails(
     log = AuditLog(tmp_path / "audit.jsonl")
     with pytest.raises(OSError, match="disk gone"):
         log.append(action="delete", kind="pods", namespace="default", name="web-1")
+
+
+def test_append_fails_closed_when_dir_sync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Directory-entry durability failures propagate like file fsync ones:
+    a record in a file that may not survive a crash is not persisted."""
+
+    def failing_open(path: object, flags: int, *args: object) -> int:
+        if flags == os.O_RDONLY:  # only the directory sync opens read-only
+            raise OSError("cannot open directory")
+        return real_open(path, flags, *args)  # type: ignore[arg-type]  # passthrough to the real os.open
+
+    real_open = os.open
+    monkeypatch.setattr(os, "open", failing_open)
+    log = AuditLog(tmp_path / "audit.jsonl")
+    with pytest.raises(OSError, match="cannot open directory"):
+        log.append(action="delete", kind="pods", namespace="default", name="web-1")

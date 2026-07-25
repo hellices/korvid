@@ -53,13 +53,14 @@ def _unlock_file(fd: int) -> None:
 def _sync_dir(path: Path) -> None:
     """fsync a directory so entry changes (create/rename) are durable.
 
-    Windows cannot open directories with ``os.open``, but NTFS metadata
-    operations are journaled there, so skipping is safe.
+    On POSIX a failure propagates - losing the directory entry can lose the
+    just-synced record, so it must fail closed like the file fsync. Windows
+    cannot open directories with ``os.open``, but NTFS metadata operations
+    are journaled there, so skipping is safe.
     """
-    try:
-        dir_fd = os.open(path, os.O_RDONLY)
-    except OSError:  # pragma: no cover - Windows-only branch; CI runs on POSIX
+    if os.name == "nt":  # pragma: no cover - Windows-only branch; CI runs on POSIX
         return
+    dir_fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(dir_fd)
     finally:
