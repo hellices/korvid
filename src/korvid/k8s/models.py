@@ -216,9 +216,12 @@ def _display_phase(
 
     Init-container failures render as ``Init:<reason>``; container
     waiting/terminated reasons (CrashLoopBackOff, OOMKilled, ...) override
-    ``status.phase``; a deletionTimestamp always wins as Terminating.
+    ``status.phase``. A deletionTimestamp renders Terminating only while the
+    phase is non-terminal (kubectl keeps Completed/Failed reasons for
+    deleting terminal pods, and shows Unknown for NodeLost deletions).
     """
-    if meta.get("deletionTimestamp"):
+    phase = str(status.get("phase") or "")
+    if meta.get("deletionTimestamp") and phase not in ("Succeeded", "Failed"):
         # kubectl exception: a pod deleting from an unreachable node is Unknown.
         return "Unknown" if status.get("reason") == "NodeLost" else "Terminating"
     # kubectl scans regular containers once the pod is initialized; a stale

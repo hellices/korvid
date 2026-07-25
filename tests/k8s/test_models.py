@@ -560,3 +560,37 @@ class TestDisplayPhase:
             )
         )
         assert pod.phase == "Unknown"
+
+    def test_deleting_succeeded_pod_keeps_completed(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Succeeded",
+                    "containerStatuses": [
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "Completed", "exitCode": 0}},
+                        }
+                    ],
+                },
+                metadata={"deletionTimestamp": "2026-01-01T00:00:00Z"},
+            )
+        )
+        assert pod.phase == "Completed"
+
+    def test_deleting_failed_pod_keeps_failure_reason(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Failed",
+                    "containerStatuses": [
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "OOMKilled", "exitCode": 137}},
+                        }
+                    ],
+                },
+                metadata={"deletionTimestamp": "2026-01-01T00:00:00Z"},
+            )
+        )
+        assert pod.phase == "OOMKilled"
