@@ -286,3 +286,28 @@ async def test_agent_open_logs_resolves_containers_from_manifest() -> None:
         assert not out.startswith("ERROR:")
         containers = {c for _, _, c in app._current_log_triples}
         assert containers == {"main", "sidecar"}
+
+
+async def test_agent_open_logs_unknown_pod_errors_without_disturbing_pane() -> None:
+    """A pod the model hallucinated must not tear down existing log streams
+    or open a blank pane — the agent gets an ERROR it can act on instead."""
+    app = make_app()
+
+    async def manifest_or_404(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        if name == "ghost":
+            raise RuntimeError('pods "ghost" not found')
+        return {"kind": "Pod", "spec": {"containers": [{"name": "main"}]}}
+
+    app._get_manifest = manifest_or_404
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.agent_open_logs("web-1", "default")
+        await pilot.pause()
+        assert app.query_one(LogPane).display is True
+        before = list(app._current_log_triples)
+
+        out = await app.agent_open_logs("ghost", "default")
+        await pilot.pause()
+        assert out.startswith("ERROR:")
+        assert "ghost" in out
+        assert app._current_log_triples == before

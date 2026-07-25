@@ -1291,6 +1291,10 @@ class KorvidApp(App[None]):
                 triples = [(namespace, pod, container)]
             else:
                 triples = await self._agent_pod_triples(namespace, pod)
+            if not triples:
+                # Validate before _cancel_log_tasks: a hallucinated pod name
+                # must not tear down the streams the user is watching.
+                return f"ERROR: pod {namespace}/{pod} not found (check the name and namespace)"
             await self._cancel_log_tasks()
             self._log_pane_mode = "l"
             await self._open_log_pane(namespace, [(p, c) for _, p, c in triples], triples=triples)
@@ -1305,7 +1309,7 @@ class KorvidApp(App[None]):
 
         The agent may open logs for a pod outside the visible view/scope, so
         the live manifest is authoritative; the store bucket is only a
-        fallback (which itself degrades to a blank container = server default).
+        fallback. Returns an empty list when the pod cannot be found at all.
         """
         if self._get_manifest is not None:
             try:
@@ -1318,7 +1322,16 @@ class KorvidApp(App[None]):
                 triples = [(namespace, pod, str(n)) for n in names if n]
                 if triples:
                     return triples
-        return self._pod_triples(namespace, pod)
+        containers = self._get_pod_containers(namespace, pod)
+        if containers:
+            return [(namespace, pod, ctr) for ctr in containers]
+        if any(
+            obj.namespace == namespace and obj.name == pod
+            for obj in self.store.get(self.current_kind, self.current_scope)
+        ):
+            # Known pod without container info: blank container = server default.
+            return [(namespace, pod, "")]
+        return []
 
     async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
         if self._get_manifest is None:
