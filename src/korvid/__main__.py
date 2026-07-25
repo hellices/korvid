@@ -296,6 +296,7 @@ async def _run(readonly: bool = False) -> None:
         scale_object=scale_object,
         rollout_restart=rollout_restart,
         audit=AuditLog(default_audit_path()),
+        check_permission=kube.can_i,
         agent_runtime=agent_runtime,
         agent_model_name=config.agent_model,
         agent_configurator=configurator,

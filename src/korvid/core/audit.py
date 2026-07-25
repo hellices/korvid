@@ -21,10 +21,16 @@ def default_audit_path() -> Path:
 
 
 class AuditLog:
-    """JSONL appender; one line per write operation."""
+    """JSONL appender; one line per write operation.
+
+    The file is created (and kept) with 0600 permissions per the design
+    contract. ``append`` is synchronous file I/O — call it via
+    ``asyncio.to_thread`` from async contexts.
+    """
 
     def __init__(self, path: Path) -> None:
         self._path = path
+        self._path.parent.mkdir(parents=True, exist_ok=True)
 
     def append(
         self,
@@ -45,6 +51,14 @@ class AuditLog:
             "detail": detail,
             "outcome": outcome,
         }
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a", encoding="utf-8") as f:
+        # O_CREAT with 0600 is umask-filtered, so enforce the mode on the
+        # open descriptor - it must hold for pre-existing files too.
+        fd = os.open(self._path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            f = os.fdopen(fd, "a", encoding="utf-8")
+        except Exception:
+            os.close(fd)
+            raise
+        with f:
             f.write(json.dumps(entry) + "\n")

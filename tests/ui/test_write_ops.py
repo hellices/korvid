@@ -48,7 +48,13 @@ class Recorder:
         self.calls.append(("restart", kind, namespace, name))
 
 
-def make_app(recorder: Recorder, audit_path: Path, *, readonly: bool = False) -> KorvidApp:
+def make_app(
+    recorder: Recorder,
+    audit_path: Path,
+    *,
+    readonly: bool = False,
+    permitted: bool | None = None,
+) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
         "pods": [
@@ -73,6 +79,10 @@ def make_app(recorder: Recorder, audit_path: Path, *, readonly: bool = False) ->
         while True:
             await asyncio.sleep(0.01)
 
+    async def check_permission(verb: str, resource: str, sub: str, ns: str | None) -> bool:
+        assert permitted is not None
+        return permitted
+
     return KorvidApp(
         config=KorvidConfig(namespace="default", readonly=readonly),
         store=store,
@@ -82,6 +92,7 @@ def make_app(recorder: Recorder, audit_path: Path, *, readonly: bool = False) ->
         scale_object=recorder.scale,
         rollout_restart=recorder.restart,
         audit=AuditLog(audit_path),
+        check_permission=None if permitted is None else check_permission,
     )
 
 
@@ -105,7 +116,9 @@ async def test_ctrl_d_delete_confirmed_executes_and_audits(tmp_path: Path) -> No
         await pilot.press("y")
         await pilot.pause(0.2)
         assert rec.calls == [("delete", "pods", "default", "web-1")]
-        entry = json.loads(audit_path.read_text().splitlines()[0])
+        lines = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        assert lines[0]["outcome"] == "intent"  # recorded before the write ran
+        entry = lines[-1]
         assert entry["action"] == "delete"
         assert entry["name"] == "web-1"
         assert entry["outcome"] == "success"
@@ -209,5 +222,63 @@ async def test_failed_write_audits_error(tmp_path: Path) -> None:
         await pilot.pause()
         await pilot.press("y")
         await pilot.pause(0.2)
-        entry = json.loads(audit_path.read_text().splitlines()[0])
+        entry = json.loads(audit_path.read_text().splitlines()[-1])
         assert entry["outcome"].startswith("error")
+
+
+async def test_permission_denied_blocks_delete(tmp_path: Path) -> None:
+    """A failed SelfSubjectAccessReview pre-check stops the flow before the dialog."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", permitted=False)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("ctrl+d")
+        await pilot.pause(0.2)
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert rec.calls == []
+
+
+async def test_permission_allowed_proceeds(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", permitted=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press("y")
+        await pilot.pause(0.2)
+        assert rec.calls == [("delete", "pods", "default", "web-1")]
+
+
+async def test_unwritable_audit_blocks_write(tmp_path: Path) -> None:
+    """Fail-closed auditing: if the intent record cannot be written, the
+    cluster write must not run."""
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    audit_path.mkdir()  # a directory at the log path makes appends fail
+    app = make_app(rec, audit_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press("y")
+        await pilot.pause(0.2)
+        assert rec.calls == []
+
+
+async def test_scale_prompt_prefills_current_replicas(tmp_path: Path) -> None:
+    from textual.widgets import Input
+
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _to_view(pilot, "deployments")
+        await pilot.press("S")
+        await pilot.pause()
+        assert isinstance(app.screen, ReplicasPrompt)
+        # GenericSummary carries no desired count, so the field starts empty
+        # and the label reports it as unknown instead of a misleading 0.
+        assert app.screen.query_one(Input).value == ""

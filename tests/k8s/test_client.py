@@ -687,3 +687,51 @@ async def test_write_without_connect_raises() -> None:
     client = KubeClient()
     with pytest.raises(RuntimeError, match="connect"):
         await client.delete_object(_deploy_meta(), "default", "web")
+
+
+async def test_write_consumes_response_body() -> None:
+    """Review round 1: with _preload_content=False the caller owns the
+    response; reading it releases the pooled connection."""
+    client = KubeClient()
+    api = _write_api()
+    resp = api.call_api.return_value
+    with patch.object(client, "_api", api):
+        await client.delete_object(_deploy_meta(), "default", "web")
+    resp.read.assert_awaited()
+
+
+def _ssar_api(allowed: bool) -> MagicMock:
+    api = MagicMock()
+    resp = MagicMock()
+    payload = b'{"status": {"allowed": true}}' if allowed else b'{"status": {"allowed": false}}'
+    resp.read = AsyncMock(return_value=payload)
+    api.call_api = AsyncMock(return_value=resp)
+    return api
+
+
+async def test_can_i_allowed() -> None:
+    client = KubeClient()
+    api = _ssar_api(allowed=True)
+    with patch.object(client, "_api", api):
+        assert await client.can_i("delete", "pods", "", "default") is True
+    args, kwargs = api.call_api.call_args
+    assert args[0] == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+    assert args[1] == "POST"
+    attrs = kwargs["body"]["spec"]["resourceAttributes"]
+    assert attrs == {"verb": "delete", "resource": "pods", "namespace": "default"}
+
+
+async def test_can_i_denied() -> None:
+    client = KubeClient()
+    with patch.object(client, "_api", _ssar_api(allowed=False)):
+        assert await client.can_i("patch", "deployments", "scale", "default") is False
+
+
+async def test_can_i_fails_open_on_error() -> None:
+    """SSAR itself may be forbidden or flaky; the write stays approval-gated
+    and audited, so infrastructure errors must not block it."""
+    client = KubeClient()
+    api = MagicMock()
+    api.call_api = AsyncMock(side_effect=ApiException(status=403, reason="Forbidden"))
+    with patch.object(client, "_api", api):
+        assert await client.can_i("delete", "pods", "", "default") is True

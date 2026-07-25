@@ -35,7 +35,13 @@ class Recorder:
         self.calls.append(("restart", kind, namespace, name))
 
 
-def make_app(recorder: Recorder, audit_path: Path, *, readonly: bool = False) -> KorvidApp:
+def make_app(
+    recorder: Recorder,
+    audit_path: Path,
+    *,
+    readonly: bool = False,
+    permitted: bool | None = None,
+) -> KorvidApp:
     store = ResourceStore()
     deploys = [GenericSummary(name="web", namespace="default", kind="Deployment", created="")]
 
@@ -44,6 +50,10 @@ def make_app(recorder: Recorder, audit_path: Path, *, readonly: bool = False) ->
             yield ("ADDED", obj)
         while True:
             await asyncio.sleep(0.01)
+
+    async def check_permission(verb: str, resource: str, sub: str, ns: str | None) -> bool:
+        assert permitted is not None
+        return permitted
 
     return KorvidApp(
         config=KorvidConfig(namespace="default", readonly=readonly),
@@ -54,6 +64,7 @@ def make_app(recorder: Recorder, audit_path: Path, *, readonly: bool = False) ->
         scale_object=recorder.scale,
         rollout_restart=recorder.restart,
         audit=AuditLog(audit_path),
+        check_permission=None if permitted is None else check_permission,
     )
 
 
@@ -74,7 +85,9 @@ async def test_agent_delete_approved_by_user_key(tmp_path: Path) -> None:
         result = await task
         assert "delete" in result.lower()
         assert rec.calls == [("delete", "deployments", "default", "web")]
-        entry = json.loads(audit_path.read_text().splitlines()[0])
+        lines = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        assert lines[0]["outcome"] == "intent"
+        entry = lines[-1]
         assert entry["outcome"] == "success"
         assert "agent" in entry["detail"]
 
@@ -149,4 +162,16 @@ async def test_agent_unknown_kind_is_error(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         result = await app.agent_request_write("delete", "frobnicators", "x", namespace="default")
         assert result.startswith("ERROR:")
+        assert rec.calls == []
+
+
+async def test_agent_write_blocked_without_permission(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", permitted=False)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        result = await app.agent_request_write("delete", "deployments", "web", namespace="default")
+        assert result.startswith("ERROR:")
+        assert "permission" in result.lower()
+        assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []

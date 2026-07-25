@@ -178,6 +178,7 @@ class KorvidApp(App[None]):
         scale_object: Callable[[str, str | None, str, int], Awaitable[None]] | None = None,
         rollout_restart: Callable[[str, str | None, str], Awaitable[None]] | None = None,
         audit: AuditLog | None = None,
+        check_permission: Callable[[str, str, str, str | None], Awaitable[bool]] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -191,6 +192,7 @@ class KorvidApp(App[None]):
         self._scale_object = scale_object
         self._rollout_restart = rollout_restart
         self._audit = audit
+        self._check_permission = check_permission
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
         self._agent_configurator = agent_configurator
@@ -1045,6 +1047,12 @@ class KorvidApp(App[None]):
         {"deployments", "statefulsets", "daemonsets"}
     )
     _SCALABLE: ClassVar[frozenset[str]] = frozenset({"deployments", "replicasets", "statefulsets"})
+    #: action -> (verb, subresource) for the SubjectAccessReview pre-check.
+    _WRITE_VERBS: ClassVar[dict[str, tuple[str, str]]] = {
+        "delete": ("delete", ""),
+        "scale": ("patch", "scale"),
+        "rollout_restart": ("patch", ""),
+    }
 
     def _write_target(self) -> tuple[ResourceMeta, str | None, str] | None:
         """Resolve (meta, namespace, name) of the selected row for a write, or
@@ -1052,6 +1060,10 @@ class KorvidApp(App[None]):
         is selected. Cluster-scoped kinds get namespace=None."""
         if self.config.readonly:
             self.notify("Read-only mode: cluster writes are disabled", severity="warning")
+            return None
+        if self._audit is None:
+            # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
+            self.notify("Writes disabled: no audit log configured", severity="warning")
             return None
         kind = self._canonical_kind(self.current_kind)
         meta = self.aliases.get(kind)
@@ -1063,11 +1075,32 @@ class KorvidApp(App[None]):
             return None
         return meta, (ns if meta.namespaced and ns else None), name
 
-    def _audit_write(
+    async def _permitted(self, action: str, meta: ResourceMeta, namespace: str | None) -> bool:
+        """SubjectAccessReview pre-check at the approval stage (spec §5 #5):
+        surface 'missing permission' before the dialog instead of after a
+        failed mutation. No checker injected -> allowed (still gated+audited)."""
+        if self._check_permission is None:
+            return True
+        verb, subresource = self._WRITE_VERBS[action]
+        try:
+            allowed = await self._check_permission(verb, meta.plural, subresource, namespace)
+        except Exception:
+            logger.debug("permission pre-check failed; allowing", exc_info=True)
+            return True
+        if not allowed:
+            self.notify(f"missing permission: {verb} {meta.plural}", severity="error")
+        return allowed
+
+    async def _audit_write(
         self, action: str, kind: str, namespace: str | None, name: str, detail: str, outcome: str
     ) -> None:
-        if self._audit is not None:
-            self._audit.append(
+        """Append one audit record; raises if it cannot be persisted (the
+        caller decides whether that blocks the write - see _run_write)."""
+        if self._audit is None:
+            raise RuntimeError("audit log not configured")
+        audit = self._audit
+        await asyncio.to_thread(
+            lambda: audit.append(
                 action=action,
                 kind=kind,
                 namespace=namespace,
@@ -1075,6 +1108,7 @@ class KorvidApp(App[None]):
                 detail=detail,
                 outcome=outcome,
             )
+        )
 
     async def _run_write(
         self,
@@ -1084,16 +1118,36 @@ class KorvidApp(App[None]):
         name: str,
         op: Awaitable[None],
         detail: str = "",
-    ) -> None:
-        """Execute an approved write; audit success or failure either way."""
+    ) -> str:
+        """Execute an approved write with fail-closed auditing (AGENTS.md):
+        the intent record must persist *before* the mutation - if it cannot,
+        the write is blocked. Returns a short outcome string ('done' /
+        'blocked: ...' / 'failed: ...') for callers that report back."""
+        try:
+            await self._audit_write(action, kind, namespace, name, detail, "intent")
+        except Exception as exc:
+            close = getattr(op, "close", None)
+            if callable(close):
+                close()  # avoid "coroutine was never awaited" for the blocked op
+            self.notify(
+                f"{action} {kind}/{name} blocked: audit log unavailable ({exc})",
+                severity="error",
+            )
+            return f"blocked: audit log unavailable ({exc})"
         try:
             await op
         except Exception as exc:
-            self._audit_write(action, kind, namespace, name, detail, f"error: {exc}")
+            with contextlib.suppress(Exception):
+                await self._audit_write(action, kind, namespace, name, detail, f"error: {exc}")
             self.notify(f"{action} {kind}/{name} failed: {exc}", severity="error")
-            return
-        self._audit_write(action, kind, namespace, name, detail, "success")
+            return f"failed: {exc}"
+        try:
+            await self._audit_write(action, kind, namespace, name, detail, "success")
+        except Exception:
+            logger.exception("audit outcome record failed after successful write")
+            self.notify("Audit log write failed (operation already executed)", severity="warning")
         self.notify(f"{action} {kind}/{name}: done", severity="information")
+        return "done"
 
     async def action_delete_resource(self) -> None:
         """Ctrl-D: delete the selected resource behind a layered confirmation
@@ -1106,6 +1160,8 @@ class KorvidApp(App[None]):
         if target is None:
             return
         meta, ns, name = target
+        if not await self._permitted("delete", meta, ns):
+            return
         where = f" in namespace {ns}" if ns else " (cluster-scoped)"
         operation = f"DELETE {meta.plural}/{name}{where}"
         require = None if meta.namespaced else name
@@ -1133,6 +1189,8 @@ class KorvidApp(App[None]):
         if meta.plural not in self._RESTARTABLE:
             self.notify(f"rollout restart does not apply to {meta.plural}", severity="warning")
             return
+        if not await self._permitted("rollout_restart", meta, ns):
+            return
 
         def _done(confirmed: bool | None) -> None:
             if confirmed:
@@ -1150,11 +1208,14 @@ class KorvidApp(App[None]):
             _done,
         )
 
-    def _current_replicas(self, ns: str | None, name: str) -> int:
+    def _current_replicas(self, ns: str | None, name: str) -> int | None:
+        """Desired replicas of the selected row, or None when the summary type
+        does not carry it (0 would be indistinguishable from scaled-to-zero)."""
         for obj in self.store.get(self.current_kind, self.current_scope):
             if obj.namespace == (ns or "") and obj.name == name:
-                return int(getattr(obj, "desired", 0) or 0)
-        return 0
+                desired = getattr(obj, "desired", None)
+                return None if desired is None else int(desired)
+        return None
 
     async def action_scale_resource(self) -> None:
         """S: scale the selected deployment/replicaset/statefulset (prompt, then confirm)."""
@@ -1168,6 +1229,8 @@ class KorvidApp(App[None]):
         meta, ns, name = target
         if meta.plural not in self._SCALABLE:
             self.notify(f"scale does not apply to {meta.plural}", severity="warning")
+            return
+        if not await self._permitted("scale", meta, ns):
             return
         current = self._current_replicas(ns, name)
 
@@ -1190,10 +1253,11 @@ class KorvidApp(App[None]):
         def _on_replicas(replicas: int | None) -> None:
             if replicas is None:
                 return
+            shown = "?" if current is None else current
             self.push_screen(
                 ConfirmScreen(
                     f"Scale {meta.plural}/{name}?",
-                    f"PATCH {meta.plural}/{name}/scale: replicas {current} -> {replicas}",
+                    f"PATCH {meta.plural}/{name}/scale: replicas {shown} -> {replicas}",
                 ),
                 _confirmed(replicas),
             )
@@ -1801,20 +1865,19 @@ class KorvidApp(App[None]):
         if isinstance(built, str):
             return built
         meta, ns, op, operation, detail = built
+        if not await self._permitted(action, meta, ns):
+            verb, _ = self._WRITE_VERBS[action]
+            return f"ERROR: missing permission: {verb} {meta.plural}"
         require = name if action == "delete" and not meta.namespaced else None
         approved = await self._await_user_approval(
             f"Agent requests: {action} {meta.plural}/{name}", operation, require_name=require
         )
         if not approved:
             return f"denied: the user declined the {action} request for {meta.plural}/{name}"
-        try:
-            await op()
-        except Exception as exc:
-            self._audit_write(action, meta.plural, ns, name, detail, f"error: {exc}")
-            return f"ERROR: {action} {meta.plural}/{name} failed: {exc}"
-        self._audit_write(action, meta.plural, ns, name, detail, "success")
+        outcome = await self._run_write(action, meta.plural, ns, name, op(), detail=detail)
+        if outcome != "done":
+            return f"ERROR: {action} {meta.plural}/{name} {outcome}"
         self._mark_agent_action(f"{action} → {meta.plural}/{name}")
-        self.notify(f"{action} {meta.plural}/{name}: done", severity="information")
         return f"approved and executed: {action} {meta.plural}/{name}"
 
     def _agent_write_op(
@@ -1829,6 +1892,9 @@ class KorvidApp(App[None]):
         description, audit detail) or an 'ERROR: ...' string."""
         if self.config.readonly:
             return "ERROR: read-only mode - cluster writes are disabled"
+        if self._audit is None:
+            # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
+            return "ERROR: writes disabled - no audit log configured"
         meta = self.aliases.get(kind.strip().lower())
         if meta is None:
             return f"ERROR: unknown kind {kind!r} - not a resource kind in this cluster"
@@ -1909,8 +1975,16 @@ class KorvidApp(App[None]):
         try:
             return await asyncio.wait_for(fut, timeout=_APPROVAL_TIMEOUT)
         except TimeoutError:
+            # Late keystrokes are a no-op (the future is already resolved),
+            # but clear the dialog when possible so it doesn't linger.
             if self.screen is screen:
-                self.pop_screen()
+                with contextlib.suppress(Exception):
+                    self.pop_screen()
+            elif screen in self.screen_stack:
+                self.notify(
+                    "Agent write request expired - dismiss the pending dialog with Esc",
+                    severity="warning",
+                )
             return False
 
     async def _show_describe(

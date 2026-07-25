@@ -44,3 +44,19 @@ def test_append_creates_parent_dirs(tmp_path: Path) -> None:
     assert (tmp_path / "deep" / "nested" / "audit.jsonl").exists()
     entry = json.loads((tmp_path / "deep" / "nested" / "audit.jsonl").read_text())
     assert entry["namespace"] is None
+
+
+def test_audit_file_created_with_0600(tmp_path: Path) -> None:
+    """Design contract: the audit log is created with 0600 permissions,
+    regardless of the process umask."""
+    path = tmp_path / "audit.jsonl"
+    AuditLog(path).append(action="delete", kind="pods", namespace="default", name="w")
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
+def test_audit_mode_enforced_on_existing_file(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    path.touch()
+    path.chmod(0o644)
+    AuditLog(path).append(action="delete", kind="pods", namespace="default", name="w")
+    assert (path.stat().st_mode & 0o777) == 0o600

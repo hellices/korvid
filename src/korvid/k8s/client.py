@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -18,6 +19,8 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary, summary_for
+
+logger = logging.getLogger(__name__)
 
 
 def _path_segment(value: str) -> str:
@@ -260,7 +263,7 @@ class KubeClient:
         if content_type is not None:
             header_params["Content-Type"] = content_type
         try:
-            await self._api.call_api(
+            resp = await self._api.call_api(
                 path,
                 method,
                 auth_settings=["BearerToken"],
@@ -268,8 +271,44 @@ class KubeClient:
                 body=body,
                 _preload_content=False,
             )
+            # Consume the body so the pooled HTTP connection is released;
+            # with _preload_content=False the caller owns the response.
+            await _to_dict(resp)
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+
+    async def can_i(
+        self, verb: str, resource: str, subresource: str, namespace: str | None
+    ) -> bool:
+        """SelfSubjectAccessReview permission pre-check (spec: RBAC check at
+        the approval gate). Fails open on infrastructure errors: the write is
+        still approval-gated and audited, and SSAR itself may be forbidden."""
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        attrs: dict[str, Any] = {"verb": verb, "resource": resource}
+        if subresource:
+            attrs["subresource"] = subresource
+        if namespace:
+            attrs["namespace"] = namespace
+        body = {
+            "apiVersion": "authorization.k8s.io/v1",
+            "kind": "SelfSubjectAccessReview",
+            "spec": {"resourceAttributes": attrs},
+        }
+        try:
+            resp = await self._api.call_api(
+                "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews",
+                "POST",
+                auth_settings=["BearerToken"],
+                header_params={"Content-Type": "application/json"},
+                body=body,
+                _preload_content=False,
+            )
+            data = await _to_dict(resp)
+        except Exception:
+            logger.debug("SelfSubjectAccessReview failed; allowing (fail-open)", exc_info=True)
+            return True
+        return bool((data.get("status") or {}).get("allowed", False))
 
     async def delete_object(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
         """DELETE a single object. ApiException → ApiStatusError."""

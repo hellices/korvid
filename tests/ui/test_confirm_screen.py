@@ -148,7 +148,30 @@ async def test_replicas_prompt_rejects_non_numeric() -> None:
 
         await app.push_screen(ReplicasPrompt("deployments/web", current=2), _done)
         await pilot.pause()
-        await pilot.press("x")
-        await pilot.press("enter")
+        await pilot.press("backspace")  # clear the prefilled value
+        await pilot.press("x")  # rejected by the integer input
+        await pilot.press("enter")  # empty value -> not a number -> stays open
         await pilot.pause()
         assert app.result == "unset"  # stays open
+
+
+async def test_replicas_prompt_prefills_current_value() -> None:
+    from textual.widgets import Input
+
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(ReplicasPrompt("deployments/web", current=3))
+        await pilot.pause()
+        assert app.screen.query_one(Input).value == "3"
+
+
+async def test_replicas_prompt_unknown_current() -> None:
+    from textual.widgets import Input
+
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(ReplicasPrompt("deployments/web", current=None))
+        await pilot.pause()
+        assert app.screen.query_one(Input).value == ""
+        labels = " ".join(str(s.render()) for s in app.screen.query(Static))
+        assert "unknown" in labels

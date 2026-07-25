@@ -104,17 +104,25 @@ class ReplicasPrompt(ModalScreen[int | None]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
-    def __init__(self, target: str, *, current: int) -> None:
+    def __init__(self, target: str, *, current: int | None) -> None:
         super().__init__()
         self._target = target
         self._current = current
 
     def compose(self) -> ComposeResult:
+        shown = "unknown" if self._current is None else str(self._current)
         with Vertical():
             yield Static(f"Scale {self._target}", classes="confirm-title", markup=False)
-            yield Static(f"Current replicas: {self._current}", markup=False)
+            yield Static(f"Current replicas: {shown}", markup=False)
             yield Static("Enter the new replica count (Esc cancels)", classes="confirm-hint")
-            yield Input(placeholder=str(self._current), id="replicas-input", type="integer")
+            # Prefill the actual value (not just a placeholder) so Enter alone
+            # keeps the current count; select-on-focus lets typing replace it.
+            yield Input(
+                value="" if self._current is None else str(self._current),
+                id="replicas-input",
+                type="integer",
+                select_on_focus=True,
+            )
 
     def on_mount(self) -> None:
         self.query_one(Input).focus()
