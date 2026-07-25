@@ -374,17 +374,16 @@ class KorvidApp(App[None]):
         self._refresh_status()
 
     async def action_toggle_all_namespaces(self) -> None:
-        """Toggle scope between ALL_NAMESPACES and the config-default namespace."""
-        await self._close_log_pane()
+        """Toggle scope between ALL_NAMESPACES and the config-default namespace.
+
+        Routed through the locked navigate handler so it serializes with
+        agent-driven navigation (both stop/start watches across awaits).
+        """
         if self.current_scope == ALL_NAMESPACES:
             new_scope = self.config.namespace or "default"
         else:
             new_scope = ALL_NAMESPACES
-        await self.watch_manager.stop(self.current_kind, self.current_scope)
-        self.current_scope = new_scope
-        await self.watch_manager.start(self.current_kind, self.current_scope)
-        self._render_table(self.current_kind)
-        self._refresh_status()
+        await self.on_navigate_command(NavigateCommand(None, new_scope))
 
     async def on_show_namespace_picker(self, message: ShowNamespacePicker) -> None:
         if self._list_namespaces is None:
@@ -1317,6 +1316,13 @@ class KorvidApp(App[None]):
                     "(user action takes priority) — retry if still needed"
                 )
             await self._cancel_log_tasks()
+            if pane_gen != self._log_pane_gen:
+                # Recheck after the cancel await: a user pane change landing
+                # in that window still wins.
+                return (
+                    "ERROR: the log pane changed while preparing the streams "
+                    "(user action takes priority) — retry if still needed"
+                )
             self._log_pane_mode = "l"
             await self._open_log_pane(namespace, [(p, c) for _, p, c in triples], triples=triples)
         except Exception as exc:
@@ -1335,6 +1341,11 @@ class KorvidApp(App[None]):
         if self._get_manifest is not None:
             try:
                 manifest = await self._get_manifest("pods", namespace, pod)
+            except ApiStatusError:
+                # The API authoritatively rejected the target (e.g. 404 for a
+                # freshly deleted pod still in the watch cache) — surface it
+                # instead of falling back to stale cache data.
+                raise
             except Exception:
                 logger.debug("agent logs: manifest container lookup failed", exc_info=True)
             else:

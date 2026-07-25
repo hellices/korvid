@@ -423,3 +423,70 @@ async def test_agent_open_describe_yields_to_user_screen_change_during_fetch() -
         await pilot.pause()
         assert out.startswith("ERROR:")
         assert app.screen is user_screen
+
+
+async def test_toggle_all_namespaces_serializes_with_agent_navigate() -> None:
+    """The 'a' key path mutates scope and stops/starts watches across awaits,
+    so it must serialize through the same nav lock as agent navigation."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        active = 0
+        max_concurrent = 0
+        orig_stop = app.watch_manager.stop
+
+        async def slow_stop(kind: str, scope: str) -> None:
+            nonlocal active, max_concurrent
+            active += 1
+            max_concurrent = max(max_concurrent, active)
+            await asyncio.sleep(0.05)
+            active -= 1
+            await orig_stop(kind, scope)
+
+        app.watch_manager.stop = slow_stop  # type: ignore[method-assign]  # instrumenting stop to observe handler overlap; restored via orig_stop
+        t1 = asyncio.create_task(app.agent_navigate("deployments"))
+        t2 = asyncio.create_task(app.action_toggle_all_namespaces())
+        await asyncio.gather(t1, t2)
+        assert max_concurrent == 1
+
+
+async def test_agent_open_logs_api_rejection_beats_stale_cache() -> None:
+    """A 404 from the API is authoritative: a recently deleted pod that is
+    still in the watch cache must not open a doomed stream."""
+    from korvid.k8s.errors import ApiStatusError
+
+    app = make_app()
+
+    async def manifest_gone(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        raise ApiStatusError(404, f'pods "{name}" not found')
+
+    app._get_manifest = manifest_gone
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # web-1 is still in the store (watch cache), but the API says 404.
+        out = await app.agent_open_logs("web-1", "default")
+        await pilot.pause()
+        assert out.startswith("ERROR:")
+        assert app.query_one(LogPane).display is False
+
+
+async def test_agent_open_logs_rechecks_pane_gen_after_cancel() -> None:
+    """A user pane change landing during the agent's cancel await must
+    still win — the generation is rechecked right before opening."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        orig_cancel = app._cancel_log_tasks
+
+        async def cancel_then_user_opens() -> None:
+            await orig_cancel()
+            app._cancel_log_tasks = orig_cancel  # type: ignore[method-assign]  # restoring the original bound method after the one-shot intercept
+            await app._open_log_pane(
+                "default", [("web-2", "main")], triples=[("default", "web-2", "main")]
+            )
+
+        app._cancel_log_tasks = cancel_then_user_opens  # type: ignore[method-assign]  # simulating a user pane change inside the agent's cancel window
+        out = await app.agent_open_logs("web-1", "default")
+        await pilot.pause()
+        assert out.startswith("ERROR:")
+        assert ("default", "web-2", "main") in app._current_log_triples
