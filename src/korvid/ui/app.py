@@ -178,7 +178,8 @@ class KorvidApp(App[None]):
         scale_object: Callable[[str, str | None, str, int], Awaitable[None]] | None = None,
         rollout_restart: Callable[[str, str | None, str], Awaitable[None]] | None = None,
         audit: AuditLog | None = None,
-        check_permission: Callable[[str, str, str, str | None], Awaitable[bool]] | None = None,
+        check_permission: Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
+        | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -1054,6 +1055,12 @@ class KorvidApp(App[None]):
         "rollout_restart": ("patch", ""),
     }
 
+    @staticmethod
+    def _write_locus(ns: str | None) -> str:
+        """Namespace qualifier shown in every approval dialog so identically
+        named workloads in different namespaces are distinguishable."""
+        return f" in namespace {ns}" if ns else " (cluster-scoped)"
+
     def _write_target(self) -> tuple[ResourceMeta, str | None, str] | None:
         """Resolve (meta, namespace, name) of the selected row for a write, or
         None (with a notification) when writes are disabled or nothing usable
@@ -1075,7 +1082,9 @@ class KorvidApp(App[None]):
             return None
         return meta, (ns if meta.namespaced and ns else None), name
 
-    async def _permitted(self, action: str, meta: ResourceMeta, namespace: str | None) -> bool:
+    async def _permitted(
+        self, action: str, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> bool:
         """SubjectAccessReview pre-check at the approval stage (spec §5 #5):
         surface 'missing permission' before the dialog instead of after a
         failed mutation. No checker injected -> allowed (still gated+audited)."""
@@ -1083,7 +1092,9 @@ class KorvidApp(App[None]):
             return True
         verb, subresource = self._WRITE_VERBS[action]
         try:
-            allowed = await self._check_permission(verb, meta.plural, subresource, namespace)
+            allowed = await self._check_permission(
+                verb, meta.plural, subresource, namespace, meta.group, name
+            )
         except Exception:
             logger.debug("permission pre-check failed; allowing", exc_info=True)
             return True
@@ -1160,10 +1171,9 @@ class KorvidApp(App[None]):
         if target is None:
             return
         meta, ns, name = target
-        if not await self._permitted("delete", meta, ns):
+        if not await self._permitted("delete", meta, ns, name):
             return
-        where = f" in namespace {ns}" if ns else " (cluster-scoped)"
-        operation = f"DELETE {meta.plural}/{name}{where}"
+        operation = f"DELETE {meta.plural}/{name}{self._write_locus(ns)}"
         require = None if meta.namespaced else name
 
         def _done(confirmed: bool | None) -> None:
@@ -1189,7 +1199,7 @@ class KorvidApp(App[None]):
         if meta.plural not in self._RESTARTABLE:
             self.notify(f"rollout restart does not apply to {meta.plural}", severity="warning")
             return
-        if not await self._permitted("rollout_restart", meta, ns):
+        if not await self._permitted("rollout_restart", meta, ns, name):
             return
 
         def _done(confirmed: bool | None) -> None:
@@ -1203,7 +1213,8 @@ class KorvidApp(App[None]):
         await self.push_screen(
             ConfirmScreen(
                 f"Rollout restart {meta.plural}/{name}?",
-                f"PATCH {meta.plural}/{name} pod template (restartedAt annotation)",
+                f"PATCH {meta.plural}/{name} pod template (restartedAt annotation)"
+                f"{self._write_locus(ns)}",
             ),
             _done,
         )
@@ -1230,7 +1241,7 @@ class KorvidApp(App[None]):
         if meta.plural not in self._SCALABLE:
             self.notify(f"scale does not apply to {meta.plural}", severity="warning")
             return
-        if not await self._permitted("scale", meta, ns):
+        if not await self._permitted("scale", meta, ns, name):
             return
         current = self._current_replicas(ns, name)
 
@@ -1257,7 +1268,8 @@ class KorvidApp(App[None]):
             self.push_screen(
                 ConfirmScreen(
                     f"Scale {meta.plural}/{name}?",
-                    f"PATCH {meta.plural}/{name}/scale: replicas {shown} -> {replicas}",
+                    f"PATCH {meta.plural}/{name}/scale: replicas {shown} -> {replicas}"
+                    f"{self._write_locus(ns)}",
                 ),
                 _confirmed(replicas),
             )
@@ -1865,12 +1877,14 @@ class KorvidApp(App[None]):
         if isinstance(built, str):
             return built
         meta, ns, op, operation, detail = built
-        if not await self._permitted(action, meta, ns):
+        if not await self._permitted(action, meta, ns, name):
             verb, _ = self._WRITE_VERBS[action]
             return f"ERROR: missing permission: {verb} {meta.plural}"
         require = name if action == "delete" and not meta.namespaced else None
         approved = await self._await_user_approval(
-            f"Agent requests: {action} {meta.plural}/{name}", operation, require_name=require
+            f"Agent requests: {action} {meta.plural}/{name}{self._write_locus(ns)}",
+            operation,
+            require_name=require,
         )
         if not approved:
             return f"denied: the user declined the {action} request for {meta.plural}/{name}"
@@ -1915,12 +1929,11 @@ class KorvidApp(App[None]):
         delete = self._delete_object
         if delete is None:
             return "ERROR: delete unavailable in this session"
-        where = f" in namespace {ns}" if ns else " (cluster-scoped)"
         return (
             meta,
             ns,
             lambda: delete(meta.plural, ns, name),
-            f"DELETE {meta.plural}/{name}{where}",
+            f"DELETE {meta.plural}/{name}{self._write_locus(ns)}",
             "requested by agent",
         )
 
@@ -1938,7 +1951,7 @@ class KorvidApp(App[None]):
             meta,
             ns,
             lambda: scale(meta.plural, ns, name, replicas),
-            f"PATCH {meta.plural}/{name} scale -> {replicas} replicas",
+            f"PATCH {meta.plural}/{name} scale -> {replicas} replicas{self._write_locus(ns)}",
             f"replicas -> {replicas}; requested by agent",
         )
 
@@ -1954,7 +1967,8 @@ class KorvidApp(App[None]):
             meta,
             ns,
             lambda: restart(meta.plural, ns, name),
-            f"PATCH {meta.plural}/{name} pod template (restartedAt annotation)",
+            f"PATCH {meta.plural}/{name} pod template (restartedAt annotation)"
+            f"{self._write_locus(ns)}",
             "requested by agent",
         )
 

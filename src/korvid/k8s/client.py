@@ -278,7 +278,13 @@ class KubeClient:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 
     async def can_i(
-        self, verb: str, resource: str, subresource: str, namespace: str | None
+        self,
+        verb: str,
+        resource: str,
+        subresource: str,
+        namespace: str | None,
+        group: str = "",
+        name: str = "",
     ) -> bool:
         """SelfSubjectAccessReview permission pre-check (spec: RBAC check at
         the approval gate). Fails open on infrastructure errors: the write is
@@ -286,6 +292,10 @@ class KubeClient:
         if self._api is None:
             raise RuntimeError("connect() first")
         attrs: dict[str, Any] = {"verb": verb, "resource": resource}
+        if group:
+            attrs["group"] = group
+        if name:
+            attrs["name"] = name
         if subresource:
             attrs["subresource"] = subresource
         if namespace:

@@ -735,3 +735,21 @@ async def test_can_i_fails_open_on_error() -> None:
     api.call_api = AsyncMock(side_effect=ApiException(status=403, reason="Forbidden"))
     with patch.object(client, "_api", api):
         assert await client.can_i("delete", "pods", "", "default") is True
+
+
+async def test_can_i_includes_group_name_and_subresource() -> None:
+    """Review round 2: without the API group every apps/* check was evaluated
+    against the core group and wrongly denied."""
+    client = KubeClient()
+    api = _ssar_api(allowed=True)
+    with patch.object(client, "_api", api):
+        assert await client.can_i("patch", "deployments", "scale", "prod", "apps", "web") is True
+    attrs = api.call_api.call_args.kwargs["body"]["spec"]["resourceAttributes"]
+    assert attrs == {
+        "verb": "patch",
+        "resource": "deployments",
+        "group": "apps",
+        "name": "web",
+        "subresource": "scale",
+        "namespace": "prod",
+    }

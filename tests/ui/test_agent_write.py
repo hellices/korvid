@@ -8,6 +8,8 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import pytest
+
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
@@ -51,7 +53,9 @@ def make_app(
         while True:
             await asyncio.sleep(0.01)
 
-    async def check_permission(verb: str, resource: str, sub: str, ns: str | None) -> bool:
+    async def check_permission(
+        verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
+    ) -> bool:
         assert permitted is not None
         return permitted
 
@@ -174,4 +178,49 @@ async def test_agent_write_blocked_without_permission(tmp_path: Path) -> None:
         assert result.startswith("ERROR:")
         assert "permission" in result.lower()
         assert not isinstance(app.screen, ConfirmScreen)
+        assert rec.calls == []
+
+
+async def test_agent_write_times_out_as_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unanswered approval dialog resolves as a denial (never hangs the
+    agent turn), executes nothing, audits nothing, and clears the dialog."""
+    monkeypatch.setattr("korvid.ui.app._APPROVAL_TIMEOUT", 0.2)
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        task = asyncio.ensure_future(
+            app.agent_request_write("delete", "deployments", "web", namespace="default")
+        )
+        await pilot.pause(0.1)
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.pause(0.5)  # no keystroke; let the timeout fire
+        result = await task
+        assert "denied" in result.lower()
+        assert rec.calls == []
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert not audit_path.exists()
+
+
+async def test_agent_dialog_shows_namespace(tmp_path: Path) -> None:
+    """The approval dialog must identify the namespace: the agent may target
+    any namespace, and default/web vs prod/web must be distinguishable."""
+    from textual.widgets import Static
+
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        task = asyncio.ensure_future(
+            app.agent_request_write("scale", "deployments", "web", namespace="prod", replicas=2)
+        )
+        await pilot.pause(0.2)
+        assert isinstance(app.screen, ConfirmScreen)
+        texts = " ".join(str(s.render()) for s in app.screen.query(Static))
+        assert "in namespace prod" in texts
+        await pilot.press("n")
+        await task
         assert rec.calls == []

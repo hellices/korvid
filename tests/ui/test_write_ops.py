@@ -79,7 +79,9 @@ def make_app(
         while True:
             await asyncio.sleep(0.01)
 
-    async def check_permission(verb: str, resource: str, sub: str, ns: str | None) -> bool:
+    async def check_permission(
+        verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
+    ) -> bool:
         assert permitted is not None
         return permitted
 
