@@ -1,5 +1,7 @@
 # Plan 4 Slice 2 — Multi-Auth Credentials + TUI Setup Wizard
 
+**Status: COMPLETE** — all 9 tasks implemented on branch `agent-auth-slice2`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let users connect korvid's agent to any provider × auth-method combination (GitHub Copilot device-login, Entra/AI Foundry, static API key, none) and configure it entirely inside the TUI via a `:ai` setup wizard.
@@ -35,7 +37,7 @@
 - Produces: `CredentialSource` ABC — `async def headers(self) -> dict[str, str]`, `async def aclose(self) -> None` (no-op default). `StaticHeaderSource(value, *, header="Authorization", prefix="Bearer ")`.
 - Produces: `OpenAICompatProvider(base_url, model, credentials: CredentialSource | None = None, client=None)`; `_headers` becomes `async`; `aclose()` also closes credentials.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```python
 # tests/agent/test_credentials.py
@@ -54,9 +56,9 @@ async def test_static_custom_header_no_prefix() -> None:
 
 In `tests/providers/test_openai_compat.py`, replace `api_key=...` usages: the `_provider` helper builds `OpenAICompatProvider(base_url=..., model=..., credentials=StaticHeaderSource("k"), client=...)`, and the header assertion test checks the sent request carries `Authorization: Bearer k`. Add one test that `credentials=None` sends no Authorization header.
 
-- [ ] **Step 2: Run tests, verify FAIL** — `uv run pytest tests/agent/test_credentials.py -p no:tach -x` fails with ImportError.
+- [x] **Step 2: Run tests, verify FAIL** — `uv run pytest tests/agent/test_credentials.py -p no:tach -x` fails with ImportError.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # src/korvid/agent/credentials.py
@@ -101,8 +103,8 @@ class StaticHeaderSource(CredentialSource):
 
 In `openai_compat.py`: `__init__(self, base_url, model, credentials: CredentialSource | None = None, client=None)`; delete `_api_key`/`_auth_header`; `_headers` becomes `async def _headers(self) -> dict[str, str]: return await self._credentials.headers() if self._credentials else {}`; the request call site becomes `headers=await self._headers()`; `aclose()` additionally `await self._credentials.aclose()` when set (nested finally so both run). In `registry.py`, build `api_key and StaticHeaderSource(api_key, header="api-key", prefix="") if name == "azure" else StaticHeaderSource(api_key)` and pass `credentials=`.
 
-- [ ] **Step 4: `make check` green** (fix any fallout in existing tests).
-- [ ] **Step 5: Commit** — `feat: CredentialSource ABC; providers take credential sources`
+- [x] **Step 4: `make check` green** (fix any fallout in existing tests).
+- [x] **Step 5: Commit** — `feat: CredentialSource ABC; providers take credential sources`
 
 ---
 
@@ -116,7 +118,7 @@ In `openai_compat.py`: `__init__(self, base_url, model, credentials: CredentialS
 **Interfaces:**
 - Produces: `TokenStore(fallback_path: Path | None = None)` with sync `save(key, value)`, `load(key) -> str | None`, `delete(key)`. Keyring service name `"korvid"`. Fallback JSON file defaults to `~/.config/korvid/credentials.json`.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```python
 # tests/providers/test_token_store.py
@@ -175,8 +177,8 @@ def test_keyring_error_falls_back_to_file(tmp_path: Path, monkeypatch) -> None:
     assert store.load("k") == "v"
 ```
 
-- [ ] **Step 2: Verify FAIL.**
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Verify FAIL.**
+- [x] **Step 3: Implement**
 
 ```python
 # src/korvid/providers/token_store.py
@@ -250,8 +252,8 @@ class TokenStore:
 
 Note: `monkeypatch.setitem(sys.modules, "keyring", None)` makes `import keyring` raise ImportError — caught by the blanket `except Exception`.
 
-- [ ] **Step 4: `make check` green** (keyring dep added via `uv add keyring`).
-- [ ] **Step 5: Commit** — `feat: TokenStore with keyring and 0600 file fallback`
+- [x] **Step 4: `make check` green** (keyring dep added via `uv add keyring`).
+- [x] **Step 5: Commit** — `feat: TokenStore with keyring and 0600 file fallback`
 
 ---
 
@@ -264,7 +266,7 @@ Note: `monkeypatch.setitem(sys.modules, "keyring", None)` makes `import keyring`
 **Interfaces:**
 - Produces: `DeviceCodePrompt` frozen dataclass `(user_code, verification_uri, device_code, interval, expires_in)`; `DeviceLoginError(Exception)`; `GitHubDeviceFlow(client=None)` with `async start() -> DeviceCodePrompt` and `async poll(prompt) -> str` (OAuth token); `CopilotCredentialSource(oauth_token, client=None, clock=time.time)` implementing `CredentialSource`; constants `COPILOT_CHAT_BASE_URL = "https://api.githubcopilot.com"`, `GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"`.
 
-- [ ] **Step 1: Failing tests** (httpx.MockTransport; see full behaviors below)
+- [x] **Step 1: Failing tests** (httpx.MockTransport; see full behaviors below)
 
 ```python
 # tests/providers/test_github_copilot.py — key cases
@@ -367,8 +369,8 @@ async def test_copilot_exchange_failure_raises() -> None:
         await src.headers()
 ```
 
-- [ ] **Step 2: Verify FAIL.**
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Verify FAIL.**
+- [x] **Step 3: Implement**
 
 ```python
 # src/korvid/providers/github_copilot.py
@@ -504,8 +506,8 @@ class CopilotCredentialSource(CredentialSource):
         await self._client.aclose()
 ```
 
-- [ ] **Step 4: `make check` green.**
-- [ ] **Step 5: Commit** — `feat: GitHub Copilot device flow and credential source`
+- [x] **Step 4: `make check` green.**
+- [x] **Step 5: Commit** — `feat: GitHub Copilot device flow and credential source`
 
 ---
 
@@ -519,7 +521,7 @@ class CopilotCredentialSource(CredentialSource):
 **Interfaces:**
 - Produces: `EntraCredentialSource(credential: Any | None = None, clock=time.time)`; `ENTRA_SCOPE = "https://cognitiveservices.azure.com/.default"`. When `credential is None`, lazily imports `azure.identity.aio.DefaultAzureCredential`; ImportError → raise `RuntimeError("Entra auth requires: pip install korvid[entra]")`.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```python
 # tests/providers/test_entra.py
@@ -561,8 +563,8 @@ async def test_token_cached_until_expiry_window() -> None:
     assert len(cred.calls) == 2
 ```
 
-- [ ] **Step 2: Verify FAIL.**
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Verify FAIL.**
+- [x] **Step 3: Implement**
 
 ```python
 # src/korvid/providers/entra.py
@@ -616,8 +618,8 @@ class EntraCredentialSource(CredentialSource):
                 await close()
 ```
 
-- [ ] **Step 4: `make check` green** (`uv add --optional entra azure-identity`, `uv add --group dev azure-identity`).
-- [ ] **Step 5: Commit** — `feat: Entra credential source as optional extra`
+- [x] **Step 4: `make check` green** (`uv add --optional entra azure-identity`, `uv add --group dev azure-identity`).
+- [x] **Step 5: Commit** — `feat: Entra credential source as optional extra`
 
 ---
 
@@ -634,7 +636,7 @@ class EntraCredentialSource(CredentialSource):
 - Produces: `save_agent_config(path, *, provider, auth_method, base_url, model, api_key_env) -> None` — read-modify-write YAML preserving unrelated top-level keys.
 - Produces: `create_provider(*, enabled, provider, auth_method, base_url, model, api_key_env, oauth_token=None)`; `"github-copilot"` provider alias defaults `base_url=COPILOT_CHAT_BASE_URL`, requires `oauth_token` (else warn + None). `auth_method` dispatch: `api_key`→StaticHeaderSource(env), `device-login`→CopilotCredentialSource(oauth_token), `entra`→EntraCredentialSource(), `none`→None credentials.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```python
 # tests/core/test_config.py additions
@@ -706,8 +708,8 @@ def test_entra_auth_builds_provider() -> None:
 
 Update all existing `create_provider` call sites/tests to pass `auth_method` (existing behavior = `"api_key"` when `api_key_env` given, else `"none"`).
 
-- [ ] **Step 2: Verify FAIL.**
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Verify FAIL.**
+- [x] **Step 3: Implement**
 
 `config.py`: parse `auth_raw = agent_raw.get("auth") or {}`; `method = _opt_str(auth_raw.get("method"))`; default `"api_key" if api_key_env else "none"` when method is None and provider present.
 
@@ -791,8 +793,8 @@ def _build_credentials(
 
 `__main__.py`: `token_store = TokenStore()`; `oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None`; pass `auth_method=config.agent_auth_method, oauth_token=oauth` to `create_provider`.
 
-- [ ] **Step 4: `make check` green.**
-- [ ] **Step 5: Commit** — `feat: auth method config, save_agent_config, provider auth dispatch`
+- [x] **Step 4: `make check` green.**
+- [x] **Step 5: Commit** — `feat: auth method config, save_agent_config, provider auth dispatch`
 
 ---
 
@@ -831,10 +833,10 @@ class AgentConfigurator(Protocol):
 
 - Produces: `ProviderConfigurator(token_store, persist: Callable[[AgentSettings], None], client: httpx.AsyncClient | None = None)` implementing the protocol. `finish_device_login` polls and stores OAuth token under key `"github-oauth"`. `test()` builds a provider via `create_provider` (oauth from store), sends `[{"role": "user", "content": "Reply with the single word: ok"}]` with `tools=[]`, returns concatenated text (must be non-empty, else raise `RuntimeError("provider returned no text")`); always `aclose()`s the provider (try/finally). `save()` calls `persist(settings)`.
 
-- [ ] **Step 1: Failing tests** — fake `GitHubDeviceFlow` injected via constructor param `flow_factory: Callable[[], GitHubDeviceFlow]`; fake provider path exercised by monkeypatching `korvid.providers.configurator.create_provider` to return a `ScriptedProvider`-style stub whose `complete` yields `{"type": "text_delta", "text": "ok"}` then `{"type": "done"}`. Cases: (a) device login stores token, (b) `test` returns "ok", (c) `test` raises on providerless settings (create_provider returns None → `RuntimeError`), (d) `save` invokes persist with settings.
+- [x] **Step 1: Failing tests** — fake `GitHubDeviceFlow` injected via constructor param `flow_factory: Callable[[], GitHubDeviceFlow]`; fake provider path exercised by monkeypatching `korvid.providers.configurator.create_provider` to return a `ScriptedProvider`-style stub whose `complete` yields `{"type": "text_delta", "text": "ok"}` then `{"type": "done"}`. Cases: (a) device login stores token, (b) `test` returns "ok", (c) `test` raises on providerless settings (create_provider returns None → `RuntimeError`), (d) `save` invokes persist with settings.
 
-- [ ] **Step 2: Verify FAIL.**
-- [ ] **Step 3: Implement** `ProviderConfigurator`:
+- [x] **Step 2: Verify FAIL.**
+- [x] **Step 3: Implement** `ProviderConfigurator`:
 
 ```python
 # src/korvid/providers/configurator.py (core logic)
@@ -893,8 +895,8 @@ class ProviderConfigurator:
         self._persist(settings)
 ```
 
-- [ ] **Step 4: `make check` green.**
-- [ ] **Step 5: Commit** — `feat: AgentConfigurator protocol and provider implementation`
+- [x] **Step 4: `make check` green.**
+- [x] **Step 5: Commit** — `feat: AgentConfigurator protocol and provider implementation`
 
 ---
 
@@ -933,11 +935,11 @@ def rebuild_agent(settings: AgentSettings) -> AgentRuntime | None:
 
 Track the live provider in a mutable holder at composition root: `provider_box: list[LLMProvider | None] = [provider]`; `rebuild_agent` closes `provider_box[0]` via `asyncio.create_task(old.aclose())` before replacing; `_shutdown` closes `provider_box[0]`.
 
-- [ ] **Step 1: Failing UI tests** — drive with a `FakeConfigurator` recording calls: (a) ollama path: pick provider, accept defaults, test called, save called, dismissed with settings; (b) github-copilot path: begin/finish device login called, device code text visible; (c) test failure keeps screen open and shows error; (d) Esc dismisses None; (e) app-level: `:ai` applies settings → status bar shows "AI on" and panel input enabled.
-- [ ] **Step 2: Verify FAIL.**
-- [ ] **Step 3: Implement screen + app wiring + `__main__` closure.**
-- [ ] **Step 4: `make check` green.**
-- [ ] **Step 5: Commit** — `feat: in-TUI agent setup wizard (:ai) with device login`
+- [x] **Step 1: Failing UI tests** — drive with a `FakeConfigurator` recording calls: (a) ollama path: pick provider, accept defaults, test called, save called, dismissed with settings; (b) github-copilot path: begin/finish device login called, device code text visible; (c) test failure keeps screen open and shows error; (d) Esc dismisses None; (e) app-level: `:ai` applies settings → status bar shows "AI on" and panel input enabled.
+- [x] **Step 2: Verify FAIL.**
+- [x] **Step 3: Implement screen + app wiring + `__main__` closure.**
+- [x] **Step 4: `make check` green.**
+- [x] **Step 5: Commit** — `feat: in-TUI agent setup wizard (:ai) with device login`
 
 ---
 
@@ -954,11 +956,11 @@ Track the live provider in a mutable holder at composition root: `provider_box: 
 - `:model` (no arg) → status-bar flash/notify current model or "agent not configured".
 - `:model <name>` → requires existing `_agent_settings`; `dataclasses.replace(settings, model=name)` → `save` via configurator → `rebuild_agent` → update header/status. Errors notify, keep old runtime.
 
-- [ ] **Step 1: Failing tests** — (a) `:model gpt-4o` swaps `_agent_model_name` and calls rebuild+save; (b) `:model` without config notifies and does not crash.
-- [ ] **Step 2: Verify FAIL.**
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: `make check` green.**
-- [ ] **Step 5: Commit** — `feat: :model command to switch agent model`
+- [x] **Step 1: Failing tests** — (a) `:model gpt-4o` swaps `_agent_model_name` and calls rebuild+save; (b) `:model` without config notifies and does not crash.
+- [x] **Step 2: Verify FAIL.**
+- [x] **Step 3: Implement.**
+- [x] **Step 4: `make check` green.**
+- [x] **Step 5: Commit** — `feat: :model command to switch agent model`
 
 ---
 
@@ -1002,6 +1004,6 @@ agent:
 
 Plus the verbatim warning from Global Constraints and a note that Entra needs `pip install korvid[entra]`.
 
-- [ ] **Step 1: Write docs.**
-- [ ] **Step 2: `make check` green (docs don't break lint).**
-- [ ] **Step 3: Commit, push branch `agent-auth-slice2`, open PR, request Copilot review.**
+- [x] **Step 1: Write docs.**
+- [x] **Step 2: `make check` green (docs don't break lint).**
+- [x] **Step 3: Commit, push branch `agent-auth-slice2`, open PR, request Copilot review.**
