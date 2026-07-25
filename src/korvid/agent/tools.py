@@ -343,13 +343,18 @@ WRITE_TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "kind": {"type": "string", "description": "Resource kind or alias."},
                     "name": {"type": "string", "description": "Resource name."},
-                    "namespace": {"type": "string", "description": "Namespace."},
+                    "namespace": {
+                        "type": "string",
+                        "description": "Namespace of the workload.",
+                    },
                     "replicas": {
                         "type": "integer",
                         "description": "Desired replica count (>= 0).",
                     },
                 },
-                "required": ["kind", "name", "replicas"],
+                # scalable kinds are all namespaced apps/* workloads, so a
+                # call without a namespace can never succeed
+                "required": ["kind", "name", "namespace", "replicas"],
             },
         },
     },
@@ -367,9 +372,14 @@ WRITE_TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "kind": {"type": "string", "description": "Resource kind or alias."},
                     "name": {"type": "string", "description": "Resource name."},
-                    "namespace": {"type": "string", "description": "Namespace."},
+                    "namespace": {
+                        "type": "string",
+                        "description": "Namespace of the workload.",
+                    },
                 },
-                "required": ["kind", "name"],
+                # restartable kinds are all namespaced apps/* workloads, so a
+                # call without a namespace can never succeed
+                "required": ["kind", "name", "namespace"],
             },
         },
     },

@@ -1188,7 +1188,7 @@ class KorvidApp(App[None]):
         the same row is still selected."""
         if len(self.screen_stack) > 1:
             self.notify(
-                f"{action} {meta.plural}/{name} cancelled -"
+                f"{action} {self._gvr_label(meta)}/{name} cancelled -"
                 " another dialog opened during the permission check",
                 severity="warning",
             )
@@ -1201,7 +1201,7 @@ class KorvidApp(App[None]):
             or (meta.namespaced and (current_ns or None) != ns)
         ):
             self.notify(
-                f"{action} {meta.plural}/{name} cancelled -"
+                f"{action} {self._gvr_label(meta)}/{name} cancelled -"
                 " the selection changed during the permission check",
                 severity="warning",
             )
@@ -1330,7 +1330,7 @@ class KorvidApp(App[None]):
         meta, ns, name = target
         if not await self._precheck_keybinding_write("delete", meta, ns, name):
             return
-        operation = f"DELETE {meta.plural}/{name}{self._write_locus(ns)}"
+        operation = f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}"
         require = None if meta.namespaced else name
 
         def _done(confirmed: bool | None) -> None:
@@ -1338,7 +1338,10 @@ class KorvidApp(App[None]):
                 self.run_worker(self._run_write("delete", meta, ns, name, delete(meta, ns, name)))
 
         await self.push_screen(
-            ConfirmScreen(f"Delete {meta.plural}/{name}?", operation, require_name=require), _done
+            ConfirmScreen(
+                f"Delete {self._gvr_label(meta)}/{name}?", operation, require_name=require
+            ),
+            _done,
         )
 
     async def action_rollout_restart(self) -> None:
@@ -1367,8 +1370,8 @@ class KorvidApp(App[None]):
 
         await self.push_screen(
             ConfirmScreen(
-                f"Rollout restart {meta.plural}/{name}?",
-                f"PATCH {meta.plural}/{name} pod template (restartedAt annotation)"
+                f"Rollout restart {self._gvr_label(meta)}/{name}?",
+                f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
                 f"{self._write_locus(ns)}",
             ),
             _done,
@@ -1422,15 +1425,15 @@ class KorvidApp(App[None]):
             shown = "?" if current is None else current
             self.push_screen(
                 ConfirmScreen(
-                    f"Scale {meta.plural}/{name}?",
-                    f"PATCH {meta.plural}/{name}/scale: replicas {shown} -> {replicas}"
+                    f"Scale {self._gvr_label(meta)}/{name}?",
+                    f"PATCH {self._gvr_label(meta)}/{name}/scale: replicas {shown} -> {replicas}"
                     f"{self._write_locus(ns)}",
                 ),
                 _confirmed(replicas),
             )
 
         await self.push_screen(
-            ReplicasPrompt(f"{meta.plural}/{name}", current=current), _on_replicas
+            ReplicasPrompt(f"{self._gvr_label(meta)}/{name}", current=current), _on_replicas
         )
 
     async def _open_log_pane(
@@ -2049,22 +2052,24 @@ class KorvidApp(App[None]):
             return f"ERROR: missing permission: {verb} {target}"
         require = name if action == "delete" and not meta.namespaced else None
         decision = await self._await_user_approval(
-            f"Agent requests: {action} {meta.plural}/{name}{self._write_locus(ns)}",
+            f"Agent requests: {action} {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
             operation,
             require_name=require,
         )
         if decision == "expired":
             return (
                 f"not approved: the request expired before the user responded"
-                f" ({action} {meta.plural}/{name})"
+                f" ({action} {self._gvr_label(meta)}/{name})"
             )
         if decision != "approved":
-            return f"denied: the user declined the {action} request for {meta.plural}/{name}"
+            return (
+                f"denied: the user declined the {action} request for {self._gvr_label(meta)}/{name}"
+            )
         outcome = await self._run_write(action, meta, ns, name, op(), detail=detail)
         if outcome != "done":
-            return f"ERROR: {action} {meta.plural}/{name} {outcome}"
-        self._mark_agent_action(f"{action} → {meta.plural}/{name}")
-        return f"approved and executed: {action} {meta.plural}/{name}"
+            return f"ERROR: {action} {self._gvr_label(meta)}/{name} {outcome}"
+        self._mark_agent_action(f"{action} → {self._gvr_label(meta)}/{name}")
+        return f"approved and executed: {action} {self._gvr_label(meta)}/{name}"
 
     def _agent_write_op(
         self,
@@ -2112,7 +2117,7 @@ class KorvidApp(App[None]):
             meta,
             ns,
             lambda: delete(meta, ns, name),
-            f"DELETE {meta.plural}/{name}{self._write_locus(ns)}",
+            f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
             "requested by agent",
         )
 
@@ -2130,7 +2135,7 @@ class KorvidApp(App[None]):
             meta,
             ns,
             lambda: scale(meta, ns, name, replicas),
-            f"PATCH {meta.plural}/{name} scale -> {replicas} replicas{self._write_locus(ns)}",
+            f"PATCH {self._gvr_label(meta)}/{name} scale -> {replicas} replicas{self._write_locus(ns)}",
             f"replicas -> {replicas}; requested by agent",
         )
 
@@ -2146,7 +2151,7 @@ class KorvidApp(App[None]):
             meta,
             ns,
             lambda: restart(meta, ns, name),
-            f"PATCH {meta.plural}/{name} pod template (restartedAt annotation)"
+            f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
             f"{self._write_locus(ns)}",
             "requested by agent",
         )

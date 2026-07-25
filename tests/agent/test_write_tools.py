@@ -164,3 +164,13 @@ def test_base_system_prompt_has_no_write_claims() -> None:
     """The base prompt must not hard-code 'no write tools' — that claim is
     now conditional on whether WRITE_TOOLS were armed."""
     assert "no write tools" not in SYSTEM_PROMPT.lower()
+
+
+def test_namespaced_write_schemas_require_namespace() -> None:
+    """scale/rollout targets are all namespaced apps/* workloads: the schema
+    must not advertise calls that are guaranteed to fail validation. Delete
+    keeps namespace optional (cluster-scoped kinds are deletable)."""
+    by_name = {t["function"]["name"]: t["function"]["parameters"]["required"] for t in WRITE_TOOLS}
+    assert "namespace" in by_name["scale_resource"]
+    assert "namespace" in by_name["rollout_restart"]
+    assert "namespace" not in by_name["delete_resource"]

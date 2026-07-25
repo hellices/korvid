@@ -388,7 +388,7 @@ async def test_agent_write_normalizes_whitespace_name(tmp_path: Path) -> None:
         await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         result = await task
-        assert "deployments/web" in result
+        assert "deployments.apps/web" in result
         assert rec.calls == [("delete", "deployments", "default", "web")]
         entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert all(e["name"] == "web" for e in entries)
