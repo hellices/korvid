@@ -245,6 +245,73 @@ async def test_text_after_tool_call_starts_new_message() -> None:
         assert len(app.query(".agent-msg")) == 2
 
 
+async def test_cluster_and_ui_tools_have_distinct_markers() -> None:
+    """Screen mutations (🖥) must be scannable apart from cluster reads (🔧)."""
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("go")
+        panel.apply_event(
+            ToolCallStarted(call_id="r1", name="list_resources", arguments='{"kind": "pods"}')
+        )
+        panel.apply_event(
+            ToolCallStarted(call_id="u1", name="navigate", arguments='{"view": "pods"}')
+        )
+        panel.apply_event(
+            ToolCallFinished(call_id="r1", name="list_resources", ok=True, summary="")
+        )
+        panel.apply_event(ToolCallFinished(call_id="u1", name="navigate", ok=True, summary=""))
+        await pilot.pause()
+        raws = [e.raw for e in app.query(ChatEntry)]
+        read_line = next(r for r in raws if "pods" in r and "screen" not in r)
+        ui_line = next(r for r in raws if "screen" in r)
+        assert read_line.startswith("🔧")
+        assert ui_line.startswith("🖥")
+
+
+async def test_begin_turn_drops_stale_tool_state() -> None:
+    """A ToolCallFinished left over from a previous (errored) turn must not
+    touch the new turn's transcript — no in-place flip, no new row."""
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("t1")
+        panel.apply_event(
+            ToolCallStarted(call_id="c1", name="list_resources", arguments='{"kind": "pods"}')
+        )
+        panel.apply_event(AgentError(message="provider died"))
+        await pilot.pause()
+        panel.begin_turn("t2")
+        before = len(app.query(ChatEntry))
+        panel.apply_event(
+            ToolCallFinished(call_id="c1", name="list_resources", ok=True, summary="")
+        )
+        await pilot.pause()
+        assert len(app.query(ChatEntry)) == before  # no new row for a stale call
+        # the interrupted tool line still reads as unfinished
+        assert any(e.raw.endswith("…") for e in app.query(ChatEntry))
+
+
+async def test_stream_renders_markdown_only_when_message_ends() -> None:
+    """Re-parsing the whole accumulated response as Markdown on every token
+    is O(n^2); stream cheap, render Markdown once when the message ends."""
+    from rich.markdown import Markdown
+
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("hi")
+        panel.apply_event(TextDelta(text="**bold"))
+        panel.apply_event(TextDelta(text="** rest"))
+        await pilot.pause()
+        entry = next(e for e in app.query(ChatEntry) if e.has_class("agent-msg"))
+        assert not isinstance(entry.content, Markdown)
+        panel.apply_event(TurnComplete(input_tokens=1, output_tokens=1, estimated=False))
+        await pilot.pause()
+        assert isinstance(entry.content, Markdown)
+        assert entry.raw == "**bold** rest"
+
+
 # --- errors / input state ---
 
 

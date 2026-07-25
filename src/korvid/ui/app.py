@@ -47,7 +47,7 @@ from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
-from korvid.ui.widgets.describe_screen import DescribeScreen
+from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
@@ -235,6 +235,7 @@ class KorvidApp(App[None]):
         empty_state.display = False  # hidden until the first store notification
         yield empty_state
         yield LogPane()
+        yield DescribePane()
         agent_panel = AgentPanel()
         agent_panel.display = False
         yield agent_panel
@@ -731,17 +732,22 @@ class KorvidApp(App[None]):
             )
 
     async def on_key(self, event: Key) -> None:
-        """Close log pane on Escape when pane is open and no bar/picker is open."""
+        """Close describe pane / log pane on Escape when no bar/picker is open."""
         if event.key == "escape":
+            describe_pane = self.query_one(DescribePane)
             log_pane = self.query_one(LogPane)
-            if not log_pane.display:
+            if not describe_pane.display and not log_pane.display:
                 return
             filter_bar = self.query_one(FilterBar)
             command_bar = self.query_one(CommandBar)
             namespace_picker = self.query_one(NamespacePicker)
-            if not filter_bar.display and not command_bar.display and not namespace_picker.display:
+            if filter_bar.display or command_bar.display or namespace_picker.display:
+                return
+            if describe_pane.display:
+                describe_pane.hide()
+            else:
                 await self._close_log_pane()
-                event.stop()
+            event.stop()
 
     async def action_logs(self) -> None:
         """Open logs for the selected pod, or toggle it in/out of the pane (``l``).
@@ -1406,15 +1412,31 @@ class KorvidApp(App[None]):
                 "ERROR: the screen changed while fetching the manifest "
                 "(user action takes priority) — retry if still needed"
             )
+        # When the chat panel is visible, show the non-modal pane on the left
+        # instead of pushing a modal: a modal becomes the active screen and
+        # would keep the chat input from taking focus. Resolved outside the
+        # try below so a missing widget isn't masked as a generic push error.
+        share = bool(self.query(AgentPanel)) and self.query_one(AgentPanel).display
         try:
-            # When the chat panel is visible, take only the left side so the
-            # conversation stays on screen while the user reads the manifest.
-            share = self.query_one(AgentPanel).display
-            await self.push_screen(DescribeScreen(title, manifest, events, share_with_agent=share))
+            await self._show_describe(share, title, manifest, events)
         except Exception as exc:
             return f"ERROR: {exc}"
         self._mark_agent_action(f"describe → {title}")
         return f"describe screen opened for {title} — manifest and events are on screen"
+
+    async def _show_describe(
+        self,
+        share: bool,
+        title: str,
+        manifest: dict[str, Any],
+        events: list[dict[str, Any]],
+    ) -> None:
+        """Present a describe view: non-modal pane when sharing with the chat
+        panel (modal screens would steal focus from the chat input)."""
+        if share:
+            self.query_one(DescribePane).show(title, manifest, events)
+        else:
+            await self.push_screen(DescribeScreen(title, manifest, events))
 
     def _refresh_empty_state(self, kind: str, visible_rows: int) -> None:
         """Show guidance instead of a silent blank table (empty ns or no filter match)."""

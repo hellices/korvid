@@ -34,6 +34,9 @@ _SETUP_HINT = (
 
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
+#: Tools that mutate what's on screen (vs. read-only cluster queries).
+_UI_TOOLS = frozenset({"navigate", "set_filter", "open_logs", "open_describe"})
+
 # (running, done) label templates per tool. Placeholders are filled from the
 # call's JSON arguments; missing keys fall back to the bare tool name.
 _TOOL_LABELS: dict[str, tuple[str, str]] = {
@@ -53,6 +56,11 @@ def _fmt_tokens(n: int) -> str:
     if n >= 1000:
         return f"{n / 1000:.1f}k"
     return str(n)
+
+
+def _tool_marker(name: str) -> str:
+    """Screen mutations (🖥) read differently from cluster reads (🔧)."""
+    return "🖥" if name in _UI_TOOLS else "🔧"
 
 
 def _tool_label(name: str, arguments: str, *, done: bool) -> str:
@@ -149,6 +157,8 @@ class AgentPanel(Vertical):
         self._estimated = False
         self._stream_widget: ChatEntry | None = None
         self._stream_text = ""
+        self._stream_dirty = False
+        self._flush_timer: Timer | None = None
         self._tool_widgets: dict[str, ChatEntry] = {}
         self._tool_args: dict[str, str] = {}
         self.status_text = ""
@@ -202,6 +212,14 @@ class AgentPanel(Vertical):
         self.query_one("#agent-input", Input).disabled = True
         self._stream_widget = None
         self._stream_text = ""
+        self._stream_dirty = False
+        # Drop tool state from any previous turn: a late ToolCallFinished from
+        # an errored turn must not touch this turn's transcript.
+        self._tool_widgets.clear()
+        self._tool_args.clear()
+        if self._flush_timer is not None:
+            self._flush_timer.stop()
+        self._flush_timer = self.set_interval(0.1, self._flush_stream)
         self._set_status("thinking")
 
     def apply_event(self, event: AgentEvent) -> None:
@@ -209,10 +227,11 @@ class AgentPanel(Vertical):
             self._append_text(event.text)
         elif isinstance(event, ToolCallStarted):
             self._end_stream()
+            marker = _tool_marker(event.name)
             label = _tool_label(event.name, event.arguments, done=False)
             entry = ChatEntry(
-                Text.assemble(("● ", "yellow"), (f"{label}…", "dim")),
-                raw=f"● {label}…",
+                Text.assemble((f"{marker} ", "yellow"), (f"{label}…", "dim")),
+                raw=f"{marker} {label}…",
                 classes="tool-line",
             )
             self._tool_widgets[event.call_id] = entry
@@ -224,6 +243,7 @@ class AgentPanel(Vertical):
             self._set_status("thinking")
         elif isinstance(event, AgentError):
             self._end_stream()
+            self._stop_flush_timer()
             self._mount_entry(
                 ChatEntry(
                     Text(f"✗ {event.message}"),
@@ -236,6 +256,7 @@ class AgentPanel(Vertical):
             self.query_one("#agent-input", Input).disabled = False
         elif isinstance(event, TurnComplete):
             self._end_stream()
+            self._stop_flush_timer()
             self._clear_status()
             self.query_one("#agent-input", Input).disabled = False
             self.set_header(
@@ -253,39 +274,59 @@ class AgentPanel(Vertical):
         chat.call_after_refresh(chat.scroll_end, animate=False)
 
     def _append_text(self, text: str) -> None:
-        """Stream deltas token-by-token into the current agent message."""
+        """Accumulate stream deltas; visual rendering is flushed on a timer.
+
+        Re-rendering per token would reparse the whole accumulated text on
+        every delta (O(n^2) on long answers), so the widget is repainted at
+        ~10fps and the final Markdown render happens once in ``_end_stream``.
+        """
         self._stream_text += text
         if self._stream_widget is None:
             self._stream_widget = ChatEntry("", raw="", classes="agent-msg")
             self._mount_entry(self._stream_widget)
-        self._stream_widget.set_content(
-            Markdown(self._stream_text),
-            self._stream_text,
-        )
+        self._stream_widget.raw = self._stream_text
+        self._stream_dirty = True
+
+    def _flush_stream(self) -> None:
+        if not self._stream_dirty or self._stream_widget is None:
+            return
+        self._stream_dirty = False
+        self._stream_widget.set_content(Text(self._stream_text), self._stream_text)
         chat = self.query_one("#agent-chat", VerticalScroll)
         chat.call_after_refresh(chat.scroll_end, animate=False)
 
     def _end_stream(self) -> None:
+        if self._stream_widget is not None and self._stream_text:
+            # The message is complete: render it as Markdown exactly once.
+            self._stream_widget.set_content(Markdown(self._stream_text), self._stream_text)
         self._stream_widget = None
         self._stream_text = ""
+        self._stream_dirty = False
+
+    def _stop_flush_timer(self) -> None:
+        if self._flush_timer is not None:
+            self._flush_timer.stop()
+            self._flush_timer = None
 
     def _finish_tool(self, event: ToolCallFinished) -> None:
         entry = self._tool_widgets.pop(event.call_id, None)
-        arguments = self._tool_args.pop(event.call_id, "")
-        label = _tool_label(event.name, arguments, done=event.ok)
         if entry is None:
-            entry = ChatEntry("", raw="", classes="tool-line")
-            self._mount_entry(entry)
+            # Stale finish from a previous turn (state was cleared) — ignore.
+            return
+        arguments = self._tool_args.pop(event.call_id, "")
+        marker = _tool_marker(event.name)
+        label = _tool_label(event.name, arguments, done=event.ok)
         if event.ok:
             entry.set_content(
-                Text.assemble(("● ", "green"), (label, "dim")),
-                f"● {label}",
+                Text.assemble((f"{marker} ", "green"), (label, "dim")),
+                f"{marker} {label}",
             )
         else:
-            raw = f"● {label} — {event.summary}"
             entry.set_content(
-                Text.assemble(("● ", "red"), (label, "dim"), (f" — {event.summary}", "red")),
-                raw,
+                Text.assemble(
+                    (f"{marker} ", "red"), (label, "dim"), (f" — {event.summary}", "red")
+                ),
+                f"{marker} {label} — {event.summary}",
             )
 
     # --- status / spinner ---------------------------------------------------

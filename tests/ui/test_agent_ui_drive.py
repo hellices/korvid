@@ -493,9 +493,13 @@ async def test_agent_open_logs_rechecks_pane_gen_after_cancel() -> None:
 
 
 async def test_agent_open_describe_shares_screen_when_panel_visible() -> None:
-    """When the chat panel is open, an agent-opened describe must not cover
-    it — the modal takes the left side and the conversation stays visible."""
+    """When the chat panel is open, describe must not become the active
+    (modal) screen — the chat input has to stay reachable while the manifest
+    is on screen (agent actions must not steal focus)."""
+    from textual.widgets import Input
+
     from korvid.ui.widgets.agent_panel import AgentPanel
+    from korvid.ui.widgets.describe_screen import DescribePane
 
     app = make_app()
     async with app.run_test() as pilot:
@@ -504,8 +508,31 @@ async def test_agent_open_describe_shares_screen_when_panel_visible() -> None:
         out = await app.agent_open_describe("pods", "web-1", "default")
         await pilot.pause()
         assert not out.startswith("ERROR:")
-        assert isinstance(app.screen, DescribeScreen)
-        assert app.screen.has_class("share")
+        assert not isinstance(app.screen, DescribeScreen)
+        pane = app.query_one(DescribePane)
+        assert pane.display is True
+        assert "web-1" in pane.body_text
+        # the chat input remains focusable — describe didn't take the screen
+        agent_input = app.query_one("#agent-input", Input)
+        agent_input.focus()
+        await pilot.pause()
+        assert app.focused is agent_input
+
+
+async def test_escape_closes_shared_describe_pane() -> None:
+    from korvid.ui.widgets.agent_panel import AgentPanel
+    from korvid.ui.widgets.describe_screen import DescribePane
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one(AgentPanel).display = True
+        await app.agent_open_describe("pods", "web-1", "default")
+        await pilot.pause()
+        assert app.query_one(DescribePane).display is True
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.query_one(DescribePane).display is False
 
 
 async def test_agent_open_describe_fullscreen_when_panel_hidden() -> None:
@@ -519,7 +546,6 @@ async def test_agent_open_describe_fullscreen_when_panel_hidden() -> None:
         await pilot.pause()
         assert not out.startswith("ERROR:")
         assert isinstance(app.screen, DescribeScreen)
-        assert not app.screen.has_class("share")
 
 
 async def test_agent_open_logs_reports_panel_truncation() -> None:
