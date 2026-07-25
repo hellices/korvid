@@ -30,6 +30,8 @@ def phase_style(phase: str) -> str:
         return style
     if any(marker in phase for marker in _ERROR_MARKERS):
         return "bold red"
+    if phase.startswith("Init:"):
+        return "yellow"
     return "dim"
 
 

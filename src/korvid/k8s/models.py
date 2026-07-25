@@ -151,17 +151,53 @@ class GenericSummary:
         return f"{total_seconds // 60}m"
 
 
+def _init_phase(spec: dict[str, Any], status: dict[str, Any]) -> str | None:
+    """Init-container display status ('Init:<reason>' / 'Init:i/n'), or None when done.
+
+    Restartable (sidecar) init containers that have started are skipped, like
+    kubectl; a zero exit code means the init container finished successfully.
+    """
+    init_statuses: list[dict[str, Any]] = status.get("initContainerStatuses") or []
+    sidecar_names = {
+        str(c.get("name"))
+        for c in (spec.get("initContainers") or [])
+        if c.get("restartPolicy") == "Always"
+    }
+    for i, cs in enumerate(init_statuses):
+        state = cs.get("state") or {}
+        terminated = state.get("terminated") or {}
+        if terminated and terminated.get("exitCode") == 0:
+            continue
+        if str(cs.get("name")) in sidecar_names and cs.get("started"):
+            continue
+        if terminated:
+            return f"Init:{terminated.get('reason') or 'Error'}"
+        waiting_reason = (state.get("waiting") or {}).get("reason")
+        if waiting_reason and waiting_reason != "PodInitializing":
+            return f"Init:{waiting_reason}"
+        return f"Init:{i}/{len(init_statuses)}"
+    return None
+
+
 def _display_phase(
-    meta: dict[str, Any], status: dict[str, Any], statuses: list[dict[str, Any]]
+    meta: dict[str, Any],
+    spec: dict[str, Any],
+    status: dict[str, Any],
+    statuses: list[dict[str, Any]],
 ) -> str:
     """Displayed pod status mirroring kubectl's printer.
 
-    Container waiting/terminated reasons (CrashLoopBackOff, OOMKilled, ...)
-    override ``status.phase``; a deletionTimestamp always wins as Terminating.
+    Init-container failures render as ``Init:<reason>``; container
+    waiting/terminated reasons (CrashLoopBackOff, OOMKilled, ...) override
+    ``status.phase``; a deletionTimestamp always wins as Terminating.
     """
     if meta.get("deletionTimestamp"):
         return "Terminating"
+    init_reason = _init_phase(spec, status)
+    if init_reason is not None:
+        return init_reason
     reason = str(status.get("reason") or status.get("phase") or "Unknown")
+    has_running = False
     for cs in reversed(statuses):
         state = cs.get("state") or {}
         waiting_reason = (state.get("waiting") or {}).get("reason")
@@ -170,6 +206,11 @@ def _display_phase(
             reason = str(waiting_reason)
         elif terminated_reason:
             reason = str(terminated_reason)
+        elif state.get("running") and cs.get("ready"):
+            has_running = True
+    # A completed sidecar next to a running main container is a running pod.
+    if reason == "Completed" and has_running:
+        return "Running"
     return reason
 
 
@@ -199,7 +240,7 @@ class PodSummary:
         return cls(
             name=str(meta.get("name", "")),
             namespace=str(meta.get("namespace", "")),
-            phase=_display_phase(meta, status, statuses),
+            phase=_display_phase(meta, spec, status, statuses),
             ready=f"{ready_count}/{len(statuses)}",
             restarts=restarts,
             node=spec.get("nodeName"),

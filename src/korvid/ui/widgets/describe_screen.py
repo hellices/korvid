@@ -60,20 +60,28 @@ def _describe_body(manifest: dict[str, Any], events: list[dict[str, Any]]) -> Re
 
     The YAML section is syntax-highlighted; Warning events render red.
     """
+    return _body_renderable(_manifest_yaml(manifest), _render_events(events))
+
+
+def _body_renderable(yaml_text: str, events_text: Text) -> RenderableType:
     syntax = Syntax(
-        _manifest_yaml(manifest),
+        yaml_text,
         "yaml",
         theme="ansi_dark",
         background_color="default",
         word_wrap=True,
     )
     header = Text(f"\nEVENTS\n{'─' * 60}", style="bold")
-    return Group(syntax, header, _render_events(events))
+    return Group(syntax, header, events_text)
+
+
+def _body_plain(yaml_text: str, events_text: Text) -> str:
+    return f"{yaml_text}\n\nEVENTS\n{'─' * 60}\n{events_text.plain}"
 
 
 def describe_body_text(manifest: dict[str, Any], events: list[dict[str, Any]]) -> str:
     """Plain-text body (no styling) — consumed by the agent UI bridge."""
-    return f"{_manifest_yaml(manifest)}\n\nEVENTS\n{'─' * 60}\n{_render_events(events).plain}"
+    return _body_plain(_manifest_yaml(manifest), _render_events(events))
 
 
 class DescribeScreen(ModalScreen[None]):
@@ -163,9 +171,13 @@ class DescribePane(Vertical):
             yield Static("", id="describe-pane-body", markup=False)
 
     def show(self, title: str, manifest: dict[str, Any], events: list[dict[str, Any]]) -> None:
-        self.body_text = describe_body_text(manifest, events)
+        yaml_text = _manifest_yaml(manifest)
+        events_text = _render_events(events)
+        self.body_text = _body_plain(yaml_text, events_text)
         self.query_one("#describe-pane-title", Static).update(f"{title}  (Esc to close)")
-        self.query_one("#describe-pane-body", Static).update(_describe_body(manifest, events))
+        self.query_one("#describe-pane-body", Static).update(
+            _body_renderable(yaml_text, events_text)
+        )
         self.query_one(VerticalScroll).scroll_home(animate=False)
         self.display = True
 

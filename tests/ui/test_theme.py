@@ -69,3 +69,12 @@ class TestRestartsStyle:
     def test_high_count_is_bold_red(self) -> None:
         assert restarts_style(6) == "bold red"
         assert restarts_style(42) == "bold red"
+
+
+class TestInitPhaseStyle:
+    def test_init_error_states_are_bold_red(self) -> None:
+        assert phase_style("Init:CrashLoopBackOff") == "bold red"
+        assert phase_style("Init:Error") == "bold red"
+
+    def test_init_progress_is_yellow(self) -> None:
+        assert phase_style("Init:0/2") == "yellow"

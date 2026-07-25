@@ -345,3 +345,107 @@ class TestDisplayPhase:
     def test_status_reason_used_when_no_container_reason(self) -> None:
         pod = PodSummary.from_manifest(self._pod({"phase": "Failed", "reason": "Evicted"}))
         assert pod.phase == "Evicted"
+
+    def test_init_container_crashloop_shows_init_prefix(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "initContainerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "CrashLoopBackOff"}}}
+                    ],
+                    "containerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "PodInitializing"}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Init:CrashLoopBackOff"
+
+    def test_init_container_terminated_error_shows_init_prefix(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "initContainerStatuses": [
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "Error", "exitCode": 1}},
+                        }
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Init:Error"
+
+    def test_init_container_succeeded_falls_through_to_containers(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Running",
+                    "initContainerStatuses": [
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "Completed", "exitCode": 0}},
+                        }
+                    ],
+                    "containerStatuses": [
+                        {"ready": True, "state": {"running": {"startedAt": "2026-01-01"}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Running"
+
+    def test_init_container_in_progress_shows_counter(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "initContainerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "PodInitializing"}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Init:0/1"
+
+    def test_started_sidecar_init_container_skipped(self) -> None:
+        pod = PodSummary.from_manifest(
+            {
+                "metadata": {"name": "p", "namespace": "d"},
+                "spec": {"initContainers": [{"name": "sc", "restartPolicy": "Always"}]},
+                "status": {
+                    "phase": "Running",
+                    "initContainerStatuses": [
+                        {
+                            "name": "sc",
+                            "ready": True,
+                            "started": True,
+                            "state": {"running": {"startedAt": "2026-01-01"}},
+                        }
+                    ],
+                    "containerStatuses": [
+                        {"ready": True, "state": {"running": {"startedAt": "2026-01-01"}}}
+                    ],
+                },
+            }
+        )
+        assert pod.phase == "Running"
+
+    def test_completed_sidecar_with_running_main_shows_running(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Running",
+                    "containerStatuses": [
+                        {"ready": True, "state": {"running": {"startedAt": "2026-01-01"}}},
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "Completed", "exitCode": 0}},
+                        },
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Running"
