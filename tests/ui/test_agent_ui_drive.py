@@ -257,7 +257,7 @@ async def test_concurrent_navigations_serialize() -> None:
             active -= 1
             await orig_stop(kind, scope)
 
-        app.watch_manager.stop = slow_stop  # type: ignore[method-assign]
+        app.watch_manager.stop = slow_stop  # type: ignore[method-assign]  # instrumenting stop to observe handler overlap; restored via orig_stop
         t1 = asyncio.create_task(app.agent_navigate("deployments"))
         t2 = asyncio.create_task(app.on_navigate_command(NavigateCommand("pods", "prod")))
         await asyncio.gather(t1, t2)
@@ -311,3 +311,44 @@ async def test_agent_open_logs_unknown_pod_errors_without_disturbing_pane() -> N
         assert out.startswith("ERROR:")
         assert "ghost" in out
         assert app._current_log_triples == before
+
+
+async def test_agent_open_logs_yields_to_user_log_action_during_lookup() -> None:
+    """If the user opens/changes the log pane while the agent is still
+    resolving containers, the user's choice wins — the agent must not
+    clobber it when its coroutine resumes."""
+    app = make_app()
+    release = asyncio.Event()
+
+    async def slow_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        await release.wait()
+        return {"kind": "Pod", "spec": {"containers": [{"name": "main"}]}}
+
+    app._get_manifest = slow_manifest
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        task = asyncio.create_task(app.agent_open_logs("web-1", "default"))
+        await asyncio.sleep(0.02)
+        # User opens logs for web-2 while the agent's manifest lookup is pending.
+        await app._open_log_pane(
+            "default", [("web-2", "main")], triples=[("default", "web-2", "main")]
+        )
+        release.set()
+        out = await task
+        await pilot.pause()
+        assert out.startswith("ERROR:")
+        assert ("default", "web-2", "main") in app._current_log_triples
+
+
+async def test_agent_navigate_all_namespace_maps_to_all_scope() -> None:
+    """namespace='all' must select the first-class all-namespaces scope,
+    matching the human command path (':pods all')."""
+    from korvid.core.store import ALL_NAMESPACES
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        out = await app.agent_navigate("pods", "all")
+        await pilot.pause()
+        assert app.current_scope == ALL_NAMESPACES
+        assert not out.startswith("ERROR:")

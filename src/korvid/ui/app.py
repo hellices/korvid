@@ -203,6 +203,7 @@ class KorvidApp(App[None]):
         self._log_buffer: LogBuffer | None = None
         self._log_error: bool = False
         self._current_log_triples: list[tuple[str, str, str]] = []
+        self._log_pane_gen: int = 0
         self._current_log_force_prefix: bool = False
         self._log_pane_mode: str = ""
         self._reconnect_sleep: float = 1.0
@@ -905,6 +906,7 @@ class KorvidApp(App[None]):
         previous: bool = False,
     ) -> None:
         """Show log pane and spawn one streaming task per (pod, container)."""
+        self._log_pane_gen += 1
         # Resolve triples before saving so _current_log_triples is always complete.
         if triples is None:
             triples = [(namespace, pod, ctr) for pod, ctr in sources]
@@ -1119,6 +1121,7 @@ class KorvidApp(App[None]):
 
     async def _close_log_pane(self) -> None:
         """Cancel all stream tasks and hide the log pane."""
+        self._log_pane_gen += 1
         await self._cancel_log_tasks()
         self._current_log_triples = []
         self._current_log_force_prefix = False
@@ -1251,6 +1254,9 @@ class KorvidApp(App[None]):
         meta = self.aliases.get(key)
         if meta is None:
             return f"ERROR: unknown view {view!r} — not a resource kind in this cluster"
+        if namespace and namespace.strip().lower() in ("all", ALL_NAMESPACES):
+            # Same mapping as the human ':view all' command path.
+            namespace = ALL_NAMESPACES
         try:
             await self.on_navigate_command(NavigateCommand(meta.plural, namespace))
         except Exception as exc:
@@ -1286,6 +1292,7 @@ class KorvidApp(App[None]):
     async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
         if self._stream_logs is None:
             return "ERROR: log streaming unavailable in this session"
+        pane_gen = self._log_pane_gen
         try:
             if container:
                 triples = [(namespace, pod, container)]
@@ -1295,6 +1302,13 @@ class KorvidApp(App[None]):
                 # Validate before _cancel_log_tasks: a hallucinated pod name
                 # must not tear down the streams the user is watching.
                 return f"ERROR: pod {namespace}/{pod} not found (check the name and namespace)"
+            if pane_gen != self._log_pane_gen:
+                # The user (or another turn) changed the log pane while we were
+                # resolving containers — user keystrokes take priority.
+                return (
+                    "ERROR: the log pane changed while resolving containers "
+                    "(user action takes priority) — retry if still needed"
+                )
             await self._cancel_log_tasks()
             self._log_pane_mode = "l"
             await self._open_log_pane(namespace, [(p, c) for _, p, c in triples], triples=triples)

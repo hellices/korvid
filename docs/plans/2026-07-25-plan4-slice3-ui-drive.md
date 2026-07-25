@@ -9,7 +9,7 @@
 **Why:** Today the agent is a read-only Q&A proxy (an "MCP in a panel"). The design spec's core differentiator is an agent whose actions land in the same TUI the user works in, using the same command bus as keystrokes.
 
 **Architecture:** tach layers forbid `agent → ui`. So:
-- `korvid.agent` defines a `UIBridge` **Protocol** (structural, no ui import) plus `UI_TOOLS` OpenAI tool schemas. `ToolExecutor` gains an optional bridge and dispatches the four UI tools to it.
+- `korvid.agent` defines a `UIBridge` **abc.ABC** (repository boundary-interface rule; no ui import) plus `UI_TOOLS` OpenAI tool schemas. `ToolExecutor` gains an optional bridge and dispatches the four UI tools to it.
 - `korvid.ui.app.KorvidApp` implements the bridge methods by reusing the *exact same* handlers user keystrokes hit (`on_navigate_command`, `on_filter_command`, `_open_log_pane`, `DescribeScreen`) and returning a short confirmation string the model can read ("switched to pods in prod — 12 rows visible").
 - `korvid.__main__` (composition root) late-binds: the executor is created before the app exists, so it holds a small mutable proxy whose target is set to the app right after construction.
 
@@ -17,7 +17,7 @@
 
 ## Global Constraints
 
-- tach layers: `korvid.agent` depends only on `core`, `k8s`. `UIBridge` must be a `typing.Protocol` in `agent`, satisfied structurally by `KorvidApp`.
+- tach layers: `korvid.agent` depends only on `core`, `k8s`. `UIBridge` is an `abc.ABC` in `agent`; Textual's `App` metaclass conflicts with `ABCMeta`, so `KorvidApp` cannot inherit it — a thin `AppUIBridge(UIBridge)` adapter in `ui` delegates to the app's bridge methods.
 - ruff S101 (no assert in src/), mypy --strict, `make check` before every commit.
 - pytest needs `-p no:tach`.
 - Commit trailer: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
@@ -30,7 +30,7 @@
 
 **Files:** modify `src/korvid/agent/tools.py`; test `tests/agent/test_tools.py`.
 
-- `UIBridge(Protocol)`: four async methods, each returns `str` (confirmation or "ERROR: …").
+- `UIBridge(ABC)`: four async abstract methods, each returns `str` (confirmation or "ERROR: …"). Nominal conformance via `AppUIBridge` adapter and `_UIBridgeProxy`.
 - `UI_TOOLS: list[dict]` — OpenAI function schemas for the four tools.
 - `ToolExecutor(kube, aliases, ui=None)`; `_dispatch` routes the four names to `self._ui`; when `ui is None` returns `ERROR: UI control unavailable`.
 - All results (including bridge errors) flow through `cap_result`.

@@ -177,7 +177,10 @@ UI_TOOLS: list[dict[str, Any]] = [
                     },
                     "namespace": {
                         "type": "string",
-                        "description": "Namespace scope. Omit to keep the current scope.",
+                        "description": (
+                            "Namespace scope. Pass 'all' for the all-namespaces "
+                            "scope. Omit to keep the current scope."
+                        ),
                     },
                 },
                 "required": ["view"],
