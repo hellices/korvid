@@ -1224,6 +1224,95 @@ class KorvidApp(App[None]):
         except Exception as exc:
             panel.apply_event(AgentError(message=str(exc)))
 
+    # ------------------------------------------------------------------
+    # UIBridge implementation (spec §4.1 UI Bus): the agent drives the
+    # exact same handlers as user keystrokes. Every method returns a
+    # confirmation or an "ERROR: …" string and never raises (executor
+    # contract), and every screen change is announced via notify so the
+    # user always sees what the agent did.
+    # ------------------------------------------------------------------
+
+    def _mark_agent_action(self, summary: str) -> None:
+        self.notify(summary, title="agent", severity="information", timeout=3)
+
+    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        key = view.strip().lower()
+        meta = self.aliases.get(key)
+        if meta is None:
+            return f"ERROR: unknown view {view!r} — not a resource kind in this cluster"
+        try:
+            await self.on_navigate_command(NavigateCommand(meta.plural, namespace))
+        except Exception as exc:
+            return f"ERROR: {exc}"
+        rows = self.store.get(self.current_kind, self.current_scope)
+        self._mark_agent_action(f"view → {self.current_kind} ({self.current_scope})")
+        suffix = " (list may still be loading)" if not rows else ""
+        return (
+            f"switched to {self.current_kind} in {self.current_scope} — "
+            f"{len(rows)} resources{suffix}"
+        )
+
+    async def agent_set_filter(self, pattern: str) -> str:
+        try:
+            if pattern:
+                self.on_filter_command(FilterCommand(pattern))
+            else:
+                self.on_clear_filter(ClearFilter())
+        except Exception as exc:
+            return f"ERROR: {exc}"
+        if pattern:
+            self._mark_agent_action(f"filter → {pattern!r}")
+            return f"filter set to {pattern!r} on the {self.current_kind} view"
+        self._mark_agent_action("filter cleared")
+        return "filter cleared"
+
+    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
+        if self._stream_logs is None:
+            return "ERROR: log streaming unavailable in this session"
+        try:
+            if container:
+                triples = [(namespace, pod, container)]
+            else:
+                triples = self._pod_triples(namespace, pod)
+            await self._cancel_log_tasks()
+            self._log_pane_mode = "l"
+            await self._open_log_pane(namespace, [(p, c) for _, p, c in triples], triples=triples)
+        except Exception as exc:
+            return f"ERROR: {exc}"
+        target = f"{namespace}/{pod}" + (f" [{container}]" if container else "")
+        self._mark_agent_action(f"logs → {target}")
+        return f"log pane opened for {target} — the user can now see the live logs"
+
+    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
+        if self._get_manifest is None:
+            return "ERROR: describe unavailable in this session"
+        key = kind.strip().lower()
+        meta = self.aliases.get(key)
+        if meta is None:
+            return f"ERROR: unknown kind {kind!r} — not a resource kind in this cluster"
+        if meta.namespaced and not namespace:
+            return f"ERROR: kind {kind!r} is namespaced — provide the 'namespace' argument"
+        try:
+            manifest = await self._get_manifest(meta.plural, namespace, name)
+        except ApiStatusError as exc:
+            return f"ERROR: {explain_api_error(exc.status, exc.reason, meta.plural, namespace)}"
+        except Exception as exc:
+            return f"ERROR: {exc}"
+        events: list[dict[str, Any]] = []
+        # Events are name-scoped only, so restrict to pods (same rule as `d`).
+        if self._get_events is not None and namespace and meta.plural == "pods":
+            try:
+                events = await self._get_events(namespace, name)
+            except Exception:  # events are best-effort; the manifest still shows
+                logger.debug("agent describe: event fetch failed", exc_info=True)
+        title = f"{meta.plural}/{namespace or '-'}/{name}"
+        try:
+            await self.push_screen(DescribeScreen(title, manifest, events))
+        except Exception as exc:
+            return f"ERROR: {exc}"
+        self._mark_agent_action(f"describe → {title}")
+        return f"describe screen opened for {title} — manifest and events are on screen"
+
     def _refresh_empty_state(self, kind: str, visible_rows: int) -> None:
         """Show guidance instead of a silent blank table (empty ns or no filter match)."""
         empty = self.query_one("#empty-state", Static)

@@ -166,3 +166,25 @@ async def test_agent_error_reenables_input() -> None:
         panel.apply_event(AgentError(message="provider down"))
         await pilot.pause()
         assert inp.disabled is False
+
+
+async def test_ui_tool_calls_use_screen_marker() -> None:
+    """Slice 3: screen actions render with 🖥 so users can tell them from cluster reads."""
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("q")
+        panel.apply_event(
+            ToolCallStarted(call_id="c1", name="navigate", arguments='{"view":"pods"}')
+        )
+        panel.apply_event(
+            ToolCallFinished(call_id="c1", name="navigate", ok=True, summary="switched")
+        )
+        panel.apply_event(
+            ToolCallFinished(call_id="c2", name="set_filter", ok=False, summary="ERROR: x")
+        )
+        await pilot.pause()
+        text = _log_text(app)
+        assert '🖥 navigate({"view":"pods"}) …' in text
+        assert "🖥 navigate ✓" in text
+        assert "🖥 set_filter ✗ ERROR: x" in text

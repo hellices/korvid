@@ -286,3 +286,56 @@ async def test_executor_exception_result_is_capped() -> None:
     tool_msg = next(m for m in p.calls[-1] if m.get("role") == "tool")
     assert len(tool_msg["content"]) <= MAX_RESULT_CHARS + 50
     assert tool_msg["content"].startswith("ERROR:")
+
+
+async def test_runtime_passes_injected_tools_to_provider() -> None:
+    """Slice 3: composition root injects READ_TOOLS + UI_TOOLS."""
+
+    seen: list[list[dict[str, Any]]] = []
+
+    class ToolSpyProvider(ScriptedProvider):
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            seen.append(tools)
+            async for ev in super().complete(messages, tools, stream=stream):
+                yield ev
+
+    custom = [{"type": "function", "function": {"name": "navigate", "parameters": {}}}]
+    p = ToolSpyProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
+    await collect(AgentRuntime(p, EchoExecutor(), tools=custom), "go")
+    assert seen == [custom]
+
+
+async def test_runtime_defaults_to_read_tools() -> None:
+    from korvid.agent.tools import READ_TOOLS
+
+    seen: list[list[dict[str, Any]]] = []
+
+    class ToolSpyProvider(ScriptedProvider):
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            seen.append(tools)
+            async for ev in super().complete(messages, tools, stream=stream):
+                yield ev
+
+    p = ToolSpyProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
+    await collect(AgentRuntime(p, EchoExecutor()), "go")
+    assert seen == [READ_TOOLS]
+
+
+def test_system_prompt_explains_ui_driving() -> None:
+    """Slice 3: the model must know it can drive the TUI, not just answer."""
+    from korvid.agent.runtime import SYSTEM_PROMPT
+
+    for tool in ("navigate", "set_filter", "open_logs", "open_describe"):
+        assert tool in SYSTEM_PROMPT

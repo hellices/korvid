@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import cast
+from typing import Any, cast
 
 from korvid.__main__ import _close_provider_in_background
 
@@ -44,3 +44,85 @@ async def test_close_errors_are_consumed() -> None:
     # Exception must be retrieved by the done callback (no unhandled-task
     # warning); the set must not leak the failed task.
     assert not tasks
+
+
+# --- Slice 3: late-bound UI bridge proxy ---
+
+
+class _FakeApp:
+    """Minimal structural UIBridge."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        self.calls.append(f"navigate:{view}:{namespace}")
+        return "ok-nav"
+
+    async def agent_set_filter(self, pattern: str) -> str:
+        self.calls.append(f"filter:{pattern}")
+        return "ok-filter"
+
+    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
+        self.calls.append(f"logs:{namespace}/{pod}")
+        return "ok-logs"
+
+    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
+        self.calls.append(f"describe:{kind}/{name}")
+        return "ok-describe"
+
+
+async def test_proxy_without_target_returns_error() -> None:
+    from korvid.__main__ import _UIBridgeProxy
+
+    proxy = _UIBridgeProxy()
+    assert (await proxy.agent_navigate("pods")).startswith("ERROR:")
+    assert (await proxy.agent_set_filter("x")).startswith("ERROR:")
+    assert (await proxy.agent_open_logs("p", "ns")).startswith("ERROR:")
+    assert (await proxy.agent_open_describe("pods", "p")).startswith("ERROR:")
+
+
+async def test_proxy_forwards_to_target() -> None:
+    from korvid.__main__ import _UIBridgeProxy
+
+    proxy = _UIBridgeProxy()
+    app = _FakeApp()
+    proxy.target = app
+    assert await proxy.agent_navigate("pods", "prod") == "ok-nav"
+    assert await proxy.agent_set_filter("web") == "ok-filter"
+    assert await proxy.agent_open_logs("p", "ns") == "ok-logs"
+    assert await proxy.agent_open_describe("pods", "p", "ns") == "ok-describe"
+    assert app.calls == [
+        "navigate:pods:prod",
+        "filter:web",
+        "logs:ns/p",
+        "describe:pods/p",
+    ]
+
+
+def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
+    """The composition root arms the runtime with READ_TOOLS + UI_TOOLS."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+    )
+    runtime, _, _, _, proxy = _build_agent_wiring(config, object(), {})  # type: ignore[arg-type]
+    assert runtime is not None
+    names = [t["function"]["name"] for t in runtime._tools]
+    assert "navigate" in names
+    assert "list_resources" in names
+    executor = cast("Any", runtime._executor)
+    assert executor._ui is proxy

@@ -15,6 +15,7 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
+from korvid.agent.tools import UI_TOOL_NAMES
 from korvid.ui.messages import AgentPromptSubmitted
 
 _SETUP_HINT = (
@@ -30,6 +31,11 @@ def _fmt_tokens(n: int) -> str:
     if n >= 1000:
         return f"{n / 1000:.1f}k"
     return str(n)
+
+
+def _tool_marker(name: str) -> str:
+    """Screen actions (🖥) look different from cluster reads (🔧) at a glance."""
+    return "🖥" if name in UI_TOOL_NAMES else "🔧"
 
 
 class AgentPanel(Vertical):
@@ -114,12 +120,13 @@ class AgentPanel(Vertical):
             args = event.arguments
             if len(args) > 40:
                 args = args[:40] + "…"
-            log.write(f"🔧 {event.name}({args}) …")
+            log.write(f"{_tool_marker(event.name)} {event.name}({args}) …")
         elif isinstance(event, ToolCallFinished):
+            marker = _tool_marker(event.name)
             if event.ok:
-                log.write(f"🔧 {event.name} ✓")
+                log.write(f"{marker} {event.name} ✓")
             else:
-                log.write(f"🔧 {event.name} ✗ {event.summary}")
+                log.write(f"{marker} {event.name} ✗ {event.summary}")
         elif isinstance(event, AgentError):
             self._flush(log)
             log.write(Text(f"[error] {event.message}", style="red"))

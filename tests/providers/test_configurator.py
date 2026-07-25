@@ -176,7 +176,11 @@ async def test_list_models_copilot_filters_chat_models(
     assert await cfg.list_models(settings) == ["claude-sonnet-4", "gpt-4o"]
 
 
-async def test_list_models_copilot_without_login_returns_empty(tmp_path: Path) -> None:
+async def test_list_models_copilot_without_login_returns_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Block the real OS keyring: a developer machine may hold a live login.
+    monkeypatch.setitem(__import__("sys").modules, "keyring", None)
     cfg = ProviderConfigurator(_store(tmp_path), persist=lambda s: None)
     settings = AgentSettings(
         provider="github-copilot", auth_method="device-login", base_url=None, model=""

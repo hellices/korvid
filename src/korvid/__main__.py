@@ -18,7 +18,7 @@ from typing import Any
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentSettings
-from korvid.agent.tools import ToolExecutor
+from korvid.agent.tools import READ_TOOLS, UI_TOOLS, ToolExecutor, UIBridge
 from korvid.core.config import DEFAULT_CONFIG_PATH, KorvidConfig, load_config, save_agent_config
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -80,6 +80,38 @@ def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Task
     task.add_done_callback(_reap)
 
 
+class _UIBridgeProxy:
+    """Late-bound UI bridge: the ToolExecutor is built before the app exists,
+    so it holds this proxy and the composition root points ``target`` at the
+    app right after construction. Until then every UI tool degrades to an
+    ERROR result instead of crashing the turn."""
+
+    _NOT_READY = "ERROR: UI not ready"
+
+    def __init__(self) -> None:
+        self.target: UIBridge | None = None
+
+    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        if self.target is None:
+            return self._NOT_READY
+        return await self.target.agent_navigate(view, namespace)
+
+    async def agent_set_filter(self, pattern: str) -> str:
+        if self.target is None:
+            return self._NOT_READY
+        return await self.target.agent_set_filter(pattern)
+
+    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
+        if self.target is None:
+            return self._NOT_READY
+        return await self.target.agent_open_logs(pod, namespace, container)
+
+    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
+        if self.target is None:
+            return self._NOT_READY
+        return await self.target.agent_open_describe(kind, name, namespace)
+
+
 def _build_agent_wiring(
     config: KorvidConfig, kube: KubeClient, aliases: dict[str, ResourceMeta]
 ) -> tuple[
@@ -87,9 +119,12 @@ def _build_agent_wiring(
     ProviderConfigurator,
     Callable[[AgentSettings], AgentRuntime | None],
     list[LLMProvider | None],
+    _UIBridgeProxy,
 ]:
     """Build the initial agent runtime plus the :ai wizard's configurator/rebuild hooks."""
     token_store = TokenStore()
+    ui_proxy = _UIBridgeProxy()
+    agent_tools = READ_TOOLS + UI_TOOLS
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
     provider = create_provider(
         enabled=config.agent_enabled,
@@ -100,7 +135,11 @@ def _build_agent_wiring(
         api_key_env=config.agent_api_key_env,
         oauth_token=oauth,
     )
-    agent_runtime = AgentRuntime(provider, ToolExecutor(kube, aliases)) if provider else None
+    agent_runtime = (
+        AgentRuntime(provider, ToolExecutor(kube, aliases, ui=ui_proxy), tools=agent_tools)
+        if provider
+        else None
+    )
 
     # Mutable holder so rebuild_agent/_shutdown always see the live provider.
     provider_box: list[LLMProvider | None] = [provider]
@@ -135,9 +174,11 @@ def _build_agent_wiring(
         provider_box[0] = new_provider
         if new_provider is None:
             return None
-        return AgentRuntime(new_provider, ToolExecutor(kube, aliases))
+        return AgentRuntime(
+            new_provider, ToolExecutor(kube, aliases, ui=ui_proxy), tools=agent_tools
+        )
 
-    return agent_runtime, configurator, rebuild_agent, provider_box
+    return agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy
 
 
 async def _run() -> None:
@@ -179,7 +220,7 @@ async def _run() -> None:
 
     watch_manager = WatchManager(store, source)
 
-    agent_runtime, configurator, rebuild_agent, provider_box = _build_agent_wiring(
+    agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy = _build_agent_wiring(
         config, kube, aliases
     )
 
@@ -197,6 +238,9 @@ async def _run() -> None:
         agent_configurator=configurator,
         rebuild_agent=rebuild_agent,
     )
+    # Late-bind the UI bridge: from here on the agent's UI-control tools
+    # (navigate/set_filter/open_logs/open_describe) land in this app.
+    ui_proxy.target = app
 
     discovery_task = asyncio.create_task(_discover_in_background(kube, aliases, app))
     try:

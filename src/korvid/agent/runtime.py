@@ -18,9 +18,17 @@ from korvid.agent.events import (
 from korvid.agent.tools import READ_TOOLS, cap_result
 
 SYSTEM_PROMPT = (
-    "You are korvid's Kubernetes diagnostic agent. "
+    "You are korvid's Kubernetes diagnostic agent, embedded in a live TUI the "
+    "user is looking at right now. "
     "Use tools to inspect cluster state, cite evidence from tool results, "
-    "and never guess resource state."
+    "and never guess resource state. "
+    "You can also drive the TUI itself: navigate (switch the resource view), "
+    "set_filter (narrow the visible rows), open_logs (show a pod's live logs "
+    "on screen), and open_describe (show a resource's manifest and events). "
+    "Prefer showing evidence on screen with these tools while you narrate — "
+    "for example, when you find a failing pod, open its logs or describe view "
+    "so the user sees exactly what you see. These screen tools change nothing "
+    "in the cluster. Keep your text concise; the screen carries the detail."
 )
 
 # History is trimmed to the most recent turns to bound token cost; a turn
@@ -71,11 +79,13 @@ class AgentRuntime:
         provider: _Provider,
         executor: _Executor,
         *,
+        tools: list[dict[str, Any]] | None = None,
         max_iterations: int = 15,
         max_history_chars: int = MAX_HISTORY_CHARS,
     ) -> None:
         self._provider = provider
         self._executor = executor
+        self._tools = tools if tools is not None else READ_TOOLS
         self._max_iterations = max_iterations
         self._max_history_chars = max_history_chars
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -182,7 +192,7 @@ class AgentRuntime:
         for _ in range(self._max_iterations):
             state = _StreamState()
             try:
-                stream = self._provider.complete(self._messages, READ_TOOLS)
+                stream = self._provider.complete(self._messages, self._tools)
                 async for event in self._consume_stream(stream, state):
                     yield event
             except Exception as exc:
