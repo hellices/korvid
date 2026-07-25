@@ -7,12 +7,16 @@ korvid changed in a cluster and when.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import threading
 from datetime import datetime
 from pathlib import Path
+
+try:  # Unix only; on other platforms the in-process lock still applies
+    import fcntl
+except ImportError:  # pragma: no cover - exercised only on Windows
+    fcntl = None  # type: ignore[assignment]
 
 
 def default_audit_path() -> Path:
@@ -94,6 +98,9 @@ class AuditLog:
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
+            if fcntl is None:  # pragma: no cover - Windows fallback
+                self._locked_append(entry)
+                return
             # flock on a sidecar file (the log itself gets renamed by
             # rotation) serializes rotate+append across processes too.
             lock_fd = os.open(
@@ -113,7 +120,8 @@ class AuditLog:
         # open descriptor - it must hold for pre-existing files too.
         fd = os.open(self._path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
-            os.fchmod(fd, 0o600)
+            if hasattr(os, "fchmod"):  # not available on Windows
+                os.fchmod(fd, 0o600)
             f = os.fdopen(fd, "a", encoding="utf-8")
         except Exception:
             os.close(fd)
