@@ -26,6 +26,7 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
+from korvid.agent.tools import UI_TOOL_NAMES
 from korvid.ui.messages import AgentPromptSubmitted
 
 _SETUP_HINT = (
@@ -35,7 +36,9 @@ _SETUP_HINT = (
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 #: Tools that mutate what's on screen (vs. read-only cluster queries).
-_UI_TOOLS = frozenset({"navigate", "set_filter", "open_logs", "open_describe"})
+#: Derived from the tool registry so a new UI tool can't silently fall back
+#: to the cluster-read marker.
+_UI_TOOLS = UI_TOOL_NAMES
 
 # (running, done) label templates per tool. Placeholders are filled from the
 # call's JSON arguments; missing keys fall back to the bare tool name.
@@ -48,6 +51,7 @@ _TOOL_LABELS: dict[str, tuple[str, str]] = {
     "set_filter": ("filtering screen rows", "screen → filter applied"),
     "open_logs": ("opening logs of {pod} on screen", "screen → logs of {pod}"),
     "open_describe": ("opening describe of {name} on screen", "screen → describe of {name}"),
+    "drill_down": ("drilling into {name} on screen", "screen → drilled into {name}"),
 }
 
 
