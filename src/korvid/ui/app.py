@@ -11,7 +11,7 @@ import subprocess
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from time import monotonic
-from typing import Any, ClassVar, Literal, Protocol
+from typing import Any, ClassVar, Literal
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -33,6 +33,7 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import PodSummary
 from korvid.k8s.relations import drill_child, owned_by
+from korvid.k8s.writes import WriteOps
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -67,37 +68,6 @@ _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
 }
 
 logger = logging.getLogger(__name__)
-
-
-class DeleteObject(Protocol):
-    """Delete op with an optional uid precondition (see KubeClient.delete_object)."""
-
-    def __call__(
-        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
-    ) -> Awaitable[None]: ...
-
-
-class ScaleObject(Protocol):
-    """Scale op with an optional uid precondition (see KubeClient.scale_object)."""
-
-    def __call__(
-        self,
-        meta: ResourceMeta,
-        namespace: str | None,
-        name: str,
-        replicas: int,
-        *,
-        uid: str | None = None,
-    ) -> Awaitable[None]: ...
-
-
-class RolloutRestart(Protocol):
-    """Restart op with an optional uid precondition (see KubeClient.rollout_restart)."""
-
-    def __call__(
-        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
-    ) -> Awaitable[None]: ...
-
 
 _MAX_MULTI_STREAM_PODS = 8
 # ``l`` accumulates side-by-side pod logs; beyond 4 pods each panel gets too
@@ -209,9 +179,7 @@ class KorvidApp(App[None]):
         agent_model_name: str | None = None,
         agent_configurator: AgentConfigurator | None = None,
         rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None = None,
-        delete_object: DeleteObject | None = None,
-        scale_object: ScaleObject | None = None,
-        rollout_restart: RolloutRestart | None = None,
+        write_ops: WriteOps | None = None,
         audit: AuditLog | None = None,
         check_permission: Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
         | None = None,
@@ -224,9 +192,7 @@ class KorvidApp(App[None]):
         self._get_manifest = get_manifest
         self._get_events = get_events
         self._stream_logs = stream_logs
-        self._delete_object = delete_object
-        self._scale_object = scale_object
-        self._rollout_restart = rollout_restart
+        self._write_ops = write_ops
         self._audit = audit
         self._check_permission = check_permission
         self._permission_check_warned = False
@@ -1393,8 +1359,8 @@ class KorvidApp(App[None]):
     async def action_delete_resource(self) -> None:
         """Ctrl-D: delete the selected resource behind a layered confirmation
         (cluster-scoped kinds require typing the resource name)."""
-        delete = self._delete_object
-        if delete is None:
+        ops = self._write_ops
+        if ops is None:
             self.notify("Delete unavailable in this session", severity="warning")
             return
         target = self._write_target()
@@ -1409,7 +1375,9 @@ class KorvidApp(App[None]):
         def _done(confirmed: bool | None) -> None:
             if confirmed:
                 self.run_worker(
-                    self._run_write("delete", meta, ns, name, delete(meta, ns, name, uid=uid))
+                    self._run_write(
+                        "delete", meta, ns, name, ops.delete_object(meta, ns, name, uid=uid)
+                    )
                 )
 
         await self.push_screen(
@@ -1421,8 +1389,8 @@ class KorvidApp(App[None]):
 
     async def action_rollout_restart(self) -> None:
         """r: rolling restart of the selected deployment/statefulset/daemonset."""
-        restart = self._rollout_restart
-        if restart is None:
+        ops = self._write_ops
+        if ops is None:
             self.notify("Rollout restart unavailable in this session", severity="warning")
             return
         target = self._write_target()
@@ -1441,7 +1409,11 @@ class KorvidApp(App[None]):
             if confirmed:
                 self.run_worker(
                     self._run_write(
-                        "rollout_restart", meta, ns, name, restart(meta, ns, name, uid=uid)
+                        "rollout_restart",
+                        meta,
+                        ns,
+                        name,
+                        ops.rollout_restart(meta, ns, name, uid=uid),
                     )
                 )
 
@@ -1465,8 +1437,8 @@ class KorvidApp(App[None]):
 
     async def action_scale_resource(self) -> None:
         """S: scale the selected deployment/replicaset/statefulset (prompt, then confirm)."""
-        scale = self._scale_object
-        if scale is None:
+        ops = self._write_ops
+        if ops is None:
             self.notify("Scale unavailable in this session", severity="warning")
             return
         target = self._write_target()
@@ -1489,7 +1461,7 @@ class KorvidApp(App[None]):
                             meta,
                             ns,
                             name,
-                            scale(meta, ns, name, replicas, uid=uid),
+                            ops.scale_object(meta, ns, name, replicas, uid=uid),
                             detail=f"replicas -> {replicas}",
                         )
                     )
@@ -2132,8 +2104,11 @@ class KorvidApp(App[None]):
             # executed write carries it as a precondition, so the approval is
             # bound to this exact object incarnation - a same-named
             # replacement created while the dialog is open gets a 409, not
-            # the mutation.
-            uid = await self._agent_target_uid(meta, ns, name)
+            # the mutation. The lookup uses the caller's validated alias, not
+            # meta.plural: alias resolution is first-wins, so a plural that
+            # collides across groups could otherwise resolve to a different
+            # resource than the one validated above.
+            uid = await self._agent_target_uid(kind.strip().lower(), ns, name)
         except ApiStatusError:
             return f"ERROR: {self._gvr_label(meta)}/{name} not found{self._write_locus(ns)}"
         require = name if action == "delete" and not meta.namespaced else None
@@ -2157,17 +2132,20 @@ class KorvidApp(App[None]):
         self._mark_agent_action(f"{action} → {self._gvr_label(meta)}/{name}")
         return f"approved and executed: {action} {self._gvr_label(meta)}/{name}"
 
-    async def _agent_target_uid(self, meta: ResourceMeta, ns: str | None, name: str) -> str | None:
-        """Uid of the agent's write target at request time. Raises
-        ApiStatusError(404) when the target does not exist (the caller turns
-        that into an actionable error before bothering the user with a
+    async def _agent_target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
+        """Uid of the agent's write target at request time, looked up by the
+        same alias the write was validated with (both resolve through the one
+        aliases mapping wired in __main__, so the manifest and the mutation
+        address the same resource even when plurals collide across groups).
+        Raises ApiStatusError(404) when the target does not exist (the caller
+        turns that into an actionable error before bothering the user with a
         dialog). Fails open (None -> no precondition, matching the previous
         behaviour) when no manifest source is wired or the lookup fails for
         infrastructure reasons - the write stays approval-gated and audited."""
         if self._get_manifest is None:
             return None
         try:
-            manifest = await self._get_manifest(meta.plural, ns, name)
+            manifest = await self._get_manifest(kind_alias, ns, name)
         except ApiStatusError as exc:
             if exc.status == 404:
                 raise
@@ -2218,13 +2196,13 @@ class KorvidApp(App[None]):
     def _agent_delete_op(
         self, meta: ResourceMeta, ns: str | None, name: str
     ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
-        delete = self._delete_object
-        if delete is None:
+        ops = self._write_ops
+        if ops is None:
             return "ERROR: delete unavailable in this session"
         return (
             meta,
             ns,
-            lambda uid: delete(meta, ns, name, uid=uid),
+            lambda uid: ops.delete_object(meta, ns, name, uid=uid),
             f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
             "requested by agent",
         )
@@ -2232,8 +2210,8 @@ class KorvidApp(App[None]):
     def _agent_scale_op(
         self, meta: ResourceMeta, ns: str | None, name: str, replicas: int | None
     ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
-        scale = self._scale_object
-        if scale is None:
+        ops = self._write_ops
+        if ops is None:
             return "ERROR: scale unavailable in this session"
         if (meta.group, meta.plural) not in self._SCALABLE:
             return f"ERROR: scale does not apply to {self._gvr_label(meta)}"
@@ -2242,7 +2220,7 @@ class KorvidApp(App[None]):
         return (
             meta,
             ns,
-            lambda uid: scale(meta, ns, name, replicas, uid=uid),
+            lambda uid: ops.scale_object(meta, ns, name, replicas, uid=uid),
             f"PATCH {self._gvr_label(meta)}/{name} scale -> {replicas} replicas{self._write_locus(ns)}",
             f"replicas -> {replicas}; requested by agent",
         )
@@ -2250,15 +2228,15 @@ class KorvidApp(App[None]):
     def _agent_restart_op(
         self, meta: ResourceMeta, ns: str | None, name: str
     ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
-        restart = self._rollout_restart
-        if restart is None:
+        ops = self._write_ops
+        if ops is None:
             return "ERROR: rollout restart unavailable in this session"
         if (meta.group, meta.plural) not in self._RESTARTABLE:
             return f"ERROR: rollout restart does not apply to {self._gvr_label(meta)}"
         return (
             meta,
             ns,
-            lambda uid: restart(meta, ns, name, uid=uid),
+            lambda uid: ops.rollout_restart(meta, ns, name, uid=uid),
             f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
             f"{self._write_locus(ns)}",
             "requested by agent",

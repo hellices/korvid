@@ -19,6 +19,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.k8s.writes import WriteOps
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 
@@ -33,13 +34,13 @@ _ALIASES = {
 }
 
 
-class Recorder:
+class Recorder(WriteOps):
     def __init__(self, fail_status: int | None = None) -> None:
         self.calls: list[tuple[object, ...]] = []
         self.uids: list[str | None] = []
         self.fail_status = fail_status
 
-    async def delete(
+    async def delete_object(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> None:
         if self.fail_status is not None:
@@ -47,7 +48,7 @@ class Recorder:
         self.uids.append(uid)
         self.calls.append(("delete", meta.plural, namespace, name))
 
-    async def scale(
+    async def scale_object(
         self,
         meta: ResourceMeta,
         namespace: str | None,
@@ -59,7 +60,7 @@ class Recorder:
         self.uids.append(uid)
         self.calls.append(("scale", meta.plural, namespace, name, replicas))
 
-    async def restart(
+    async def rollout_restart(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> None:
         self.uids.append(uid)
@@ -116,9 +117,7 @@ def make_app(
         store=store,
         watch_manager=WatchManager(store, source),
         aliases=dict(_ALIASES),
-        delete_object=recorder.delete,
-        scale_object=recorder.scale,
-        rollout_restart=recorder.restart,
+        write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,
     )

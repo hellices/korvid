@@ -18,6 +18,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary
+from korvid.k8s.writes import WriteOps
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
@@ -41,18 +42,18 @@ def _expand_panel(app: KorvidApp) -> None:
     app.query_one(AgentPanel).display = True
 
 
-class Recorder:
+class Recorder(WriteOps):
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
         self.uids: list[str | None] = []
 
-    async def delete(
+    async def delete_object(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> None:
         self.uids.append(uid)
         self.calls.append(("delete", meta.plural, namespace, name))
 
-    async def scale(
+    async def scale_object(
         self,
         meta: ResourceMeta,
         namespace: str | None,
@@ -64,7 +65,7 @@ class Recorder:
         self.uids.append(uid)
         self.calls.append(("scale", meta.plural, namespace, name, replicas))
 
-    async def restart(
+    async def rollout_restart(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> None:
         self.uids.append(uid)
@@ -100,9 +101,7 @@ def make_app(
         watch_manager=WatchManager(store, source),
         aliases=dict(_ALIASES),
         get_manifest=get_manifest,
-        delete_object=recorder.delete,
-        scale_object=recorder.scale,
-        rollout_restart=recorder.restart,
+        write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,
     )
@@ -419,11 +418,11 @@ async def test_agent_write_executes_with_exact_validated_meta(tmp_path: Path) ->
     seen: list[ResourceMeta] = []
 
     class MetaRecorder(Recorder):
-        async def delete(
+        async def delete_object(
             self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
         ) -> None:
             seen.append(meta)
-            await super().delete(meta, namespace, name, uid=uid)
+            await super().delete_object(meta, namespace, name, uid=uid)
 
     rec = MetaRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
@@ -475,7 +474,7 @@ async def test_write_403_reports_actionable_permission_message(tmp_path: Path) -
     ) -> None:
         raise ApiStatusError(403, "Forbidden")
 
-    rec.delete = forbidden  # type: ignore[method-assign]  # simulate a mid-flight RBAC change
+    rec.delete_object = forbidden  # type: ignore[method-assign]  # simulate a mid-flight RBAC change
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
@@ -556,3 +555,27 @@ async def test_agent_write_missing_target_errors_before_dialog(tmp_path: Path) -
         await pilot.pause(0.1)
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
+
+
+async def test_agent_uid_lookup_uses_validated_alias(tmp_path: Path) -> None:
+    """The uid lookup resolves through the same alias the write was validated
+    with - not meta.plural, whose first-wins resolution could address a
+    different resource when plurals collide across groups."""
+    rec = Recorder()
+    kinds: list[str] = []
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        kinds.append(kind)
+        return {"metadata": {"uid": "u-1"}}
+
+    app = make_app(rec, tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        _expand_panel(app)
+        task = asyncio.ensure_future(
+            app.agent_request_write("delete", "Deploy", "web", namespace="default")
+        )
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        await task
+    assert kinds == ["deploy"]  # the caller's alias, normalized - not "deployments"

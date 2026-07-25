@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import korvid.core.audit as audit_module
 from korvid.core.audit import AuditLog
 
 
@@ -251,3 +252,36 @@ def test_append_fails_closed_when_dir_sync_fails(
     log = AuditLog(tmp_path / "audit.jsonl")
     with pytest.raises(OSError, match="cannot open directory"):
         log.append(action="delete", kind="pods", namespace="default", name="web-1")
+
+
+def test_append_syncs_parents_of_created_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mkdir -p alone leaves the new directory entries unpersisted: each
+    created directory's entry lives in its parent, so every containing parent
+    must be fsynced or a crash after the intent append can drop the whole
+    audit tree (fail-closed durability invariant)."""
+    synced: list[Path] = []
+    real_sync = audit_module._sync_dir
+
+    def recording_sync(path: Path) -> None:
+        synced.append(path)
+        real_sync(path)
+
+    monkeypatch.setattr(audit_module, "_sync_dir", recording_sync)
+    log = AuditLog(tmp_path / "state" / "korvid" / "audit.jsonl")
+    log.append(
+        action="delete",
+        kind="pods",
+        group="",
+        version="v1",
+        namespace="default",
+        name="web-1",
+        detail="",
+        outcome="intent",
+    )
+    # 'state' was created inside tmp_path and 'korvid' inside 'state': both
+    # containing parents must have been synced (plus the leaf for the file).
+    assert tmp_path in synced
+    assert tmp_path / "state" in synced
+    assert tmp_path / "state" / "korvid" in synced

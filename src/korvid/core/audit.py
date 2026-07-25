@@ -67,6 +67,30 @@ def _sync_dir(path: Path) -> None:
         os.close(dir_fd)
 
 
+def _mkdirs_durable(path: Path) -> None:
+    """``mkdir -p`` that also fsyncs the parent of every directory it creates.
+
+    A new directory's entry lives in its *parent* directory: the later
+    ``_sync_dir(self._path.parent)`` in ``_locked_append`` only persists the
+    log file's entry inside the leaf. Without syncing each containing parent
+    here, the first append (the normal default-path case) could return with
+    the whole audit directory tree still unpersisted - a crash would then
+    lose the intent record after the cluster mutation started, breaking the
+    fail-closed invariant.
+    """
+    missing: list[Path] = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        parent = current.parent
+        if parent == current:  # filesystem root; nothing above to create
+            break
+        current = parent
+    for directory in reversed(missing):
+        directory.mkdir(exist_ok=True)
+        _sync_dir(directory.parent)
+
+
 def default_audit_path() -> Path:
     """XDG state dir (falls back to ~/.local/state) / korvid/audit.jsonl."""
     state = os.environ.get("XDG_STATE_HOME")
@@ -158,7 +182,7 @@ class AuditLog:
             "detail": detail,
             "outcome": outcome,
         }
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        _mkdirs_durable(self._path.parent)
         with self._lock:
             # Interprocess lock on a sidecar file (the log itself gets renamed
             # by rotation) serializes rotate+append across korvid sessions.

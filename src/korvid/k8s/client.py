@@ -19,6 +19,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary, summary_for
+from korvid.k8s.writes import WriteOps
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ def resolve_context_name(context: str | None = None, config_file: str | None = N
     return str(name) if name else None
 
 
-class KubeClient:
+class KubeClient(WriteOps):
     """Thin wrapper over kubernetes_asyncio; returns typed summaries."""
 
     def __init__(self) -> None:
