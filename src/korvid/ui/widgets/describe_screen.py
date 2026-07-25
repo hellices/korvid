@@ -5,6 +5,9 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 import yaml
+from rich.console import Group, RenderableType
+from rich.syntax import Syntax
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -20,17 +23,21 @@ def _format_age(event: dict[str, Any]) -> str:
     return str(ts)
 
 
-def _render_events(events: list[dict[str, Any]]) -> str:
+def _render_events(events: list[dict[str, Any]]) -> Text:
+    """Render events as a Rich Text; Warning lines are red."""
     if not events:
-        return "<no events>"
-    lines: list[str] = []
-    for ev in events:
-        ev_type = ev.get("type", "")
-        reason = ev.get("reason", "")
+        return Text("<no events>", style="dim")
+    result = Text()
+    for i, ev in enumerate(events):
+        if i > 0:
+            result.append("\n")
+        ev_type = str(ev.get("type", ""))
+        reason = str(ev.get("reason", ""))
         age = _format_age(ev)
-        message = ev.get("message", "")
-        lines.append(f"{ev_type:<8} {reason:<20} {age:<30} {message}")
-    return "\n".join(lines)
+        message = str(ev.get("message", ""))
+        line = f"{ev_type:<8} {reason:<20} {age:<30} {message}"
+        result.append(line, style="red" if ev_type == "Warning" else "")
+    return result
 
 
 def _strip_managed_fields(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -43,12 +50,38 @@ def _strip_managed_fields(manifest: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _describe_body(manifest: dict[str, Any], events: list[dict[str, Any]]) -> str:
-    """Render the shared YAML + events body used by both describe views."""
+def _manifest_yaml(manifest: dict[str, Any]) -> str:
     cleaned = _strip_managed_fields(manifest)
-    yaml_text = yaml.safe_dump(cleaned, sort_keys=False, allow_unicode=True)
-    events_text = _render_events(events)
-    return f"{yaml_text}\n\nEVENTS\n{'─' * 60}\n{events_text}"
+    return yaml.safe_dump(cleaned, sort_keys=False, allow_unicode=True)
+
+
+def _describe_body(manifest: dict[str, Any], events: list[dict[str, Any]]) -> RenderableType:
+    """Render the shared YAML + events body used by both describe views.
+
+    The YAML section is syntax-highlighted; Warning events render red.
+    """
+    return _body_renderable(_manifest_yaml(manifest), _render_events(events))
+
+
+def _body_renderable(yaml_text: str, events_text: Text) -> RenderableType:
+    syntax = Syntax(
+        yaml_text,
+        "yaml",
+        theme="ansi_dark",
+        background_color="default",
+        word_wrap=True,
+    )
+    header = Text(f"\nEVENTS\n{'─' * 60}", style="bold")
+    return Group(syntax, header, events_text)
+
+
+def _body_plain(yaml_text: str, events_text: Text) -> str:
+    return f"{yaml_text}\n\nEVENTS\n{'─' * 60}\n{events_text.plain}"
+
+
+def describe_body_text(manifest: dict[str, Any], events: list[dict[str, Any]]) -> str:
+    """Plain-text body (no styling) — consumed by the agent UI bridge."""
+    return _body_plain(_manifest_yaml(manifest), _render_events(events))
 
 
 class DescribeScreen(ModalScreen[None]):
@@ -138,9 +171,13 @@ class DescribePane(Vertical):
             yield Static("", id="describe-pane-body", markup=False)
 
     def show(self, title: str, manifest: dict[str, Any], events: list[dict[str, Any]]) -> None:
-        self.body_text = _describe_body(manifest, events)
+        yaml_text = _manifest_yaml(manifest)
+        events_text = _render_events(events)
+        self.body_text = _body_plain(yaml_text, events_text)
         self.query_one("#describe-pane-title", Static).update(f"{title}  (Esc to close)")
-        self.query_one("#describe-pane-body", Static).update(self.body_text)
+        self.query_one("#describe-pane-body", Static).update(
+            _body_renderable(yaml_text, events_text)
+        )
         self.query_one(VerticalScroll).scroll_home(animate=False)
         self.display = True
 

@@ -83,6 +83,16 @@ def make_describe_app(
     )
 
 
+def _rendered_plain(widget: Any) -> str:
+    """Render a Static widget's content to plain text via a Rich console."""
+    from rich.console import Console
+
+    console = Console(width=400, force_terminal=False, legacy_windows=False)
+    with console.capture() as capture:
+        console.print(widget.content)
+    return capture.get()
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -106,7 +116,7 @@ async def test_d_opens_describe_screen_with_pod_name_and_events() -> None:
         # DescribeScreen should be pushed as a modal
         screen = app.screen
         assert isinstance(screen, DescribeScreen)
-        content = str(screen.query_one("#describe-body").render())
+        content = _rendered_plain(screen.query_one("#describe-body"))
         assert "my-pod" in str(content)
         assert "EVENTS" in str(content)
 
@@ -128,7 +138,7 @@ async def test_managed_fields_stripped_from_describe() -> None:
         await pilot.pause(0.2)
         screen = app.screen
         assert isinstance(screen, DescribeScreen)
-        content = str(str(screen.query_one("#describe-body").render()))
+        content = _rendered_plain(screen.query_one("#describe-body"))
         assert "managedFields" not in content
 
 
@@ -149,7 +159,7 @@ async def test_events_rendered_in_describe_screen() -> None:
         await pilot.pause(0.2)
         screen = app.screen
         assert isinstance(screen, DescribeScreen)
-        content = str(str(screen.query_one("#describe-body").render()))
+        content = _rendered_plain(screen.query_one("#describe-body"))
         assert "Pulled" in content
 
 
@@ -170,7 +180,7 @@ async def test_no_events_shows_no_events_placeholder() -> None:
         await pilot.pause(0.2)
         screen = app.screen
         assert isinstance(screen, DescribeScreen)
-        content = str(str(screen.query_one("#describe-body").render()))
+        content = _rendered_plain(screen.query_one("#describe-body"))
         assert "<no events>" in content
 
 
@@ -295,7 +305,7 @@ async def test_describe_non_pod_kind_skips_events() -> None:
         await pilot.pause(0.2)
         assert isinstance(app.screen, DescribeScreen)
         assert events_calls == []
-        content = str(app.screen.query_one("#describe-body").render())
+        content = _rendered_plain(app.screen.query_one("#describe-body"))
         assert "<no events>" in content
 
 
@@ -318,7 +328,7 @@ async def test_describe_body_renders_bracketed_text_literally() -> None:
         await pilot.press("d")
         await pilot.pause(0.2)
         assert isinstance(app.screen, DescribeScreen)
-        content = str(app.screen.query_one("#describe-body").render())
+        content = _rendered_plain(app.screen.query_one("#describe-body"))
         assert "[red]not-a-style[/red]" in content
 
 
@@ -340,3 +350,52 @@ async def test_describe_unknown_kind_notifies_error() -> None:
         assert not isinstance(app.screen, DescribeScreen)
         notifications = [n.message for n in app._notifications]
         assert any("Unknown resource kind" in m for m in notifications)
+
+
+# ---------------------------------------------------------------------------
+# Visual styling (rich renderable body)
+# ---------------------------------------------------------------------------
+
+
+def test_describe_body_yaml_is_syntax_highlighted() -> None:
+    """The YAML section renders through rich.Syntax with the ansi_dark theme."""
+    from rich.console import Group
+    from rich.syntax import Syntax
+
+    from korvid.ui.widgets.describe_screen import _describe_body
+
+    body = _describe_body(dict(_POD_MANIFEST), list(_EVENTS_LIST))
+    assert isinstance(body, Group)
+    syntax = body.renderables[0]
+    assert isinstance(syntax, Syntax)
+    assert syntax.lexer is not None
+    assert "my-pod" in syntax.code
+
+
+def test_warning_events_are_red() -> None:
+    """Warning event lines carry a red style; Normal lines do not."""
+    from rich.text import Text
+
+    from korvid.ui.widgets.describe_screen import _render_events
+
+    events = [
+        {"type": "Normal", "reason": "Pulled", "message": "ok"},
+        {"type": "Warning", "reason": "BackOff", "message": "restarting failed container"},
+    ]
+    rendered = _render_events(events)
+    assert isinstance(rendered, Text)
+    styles = [str(span.style) for span in rendered.spans]
+    assert any("red" in s for s in styles)
+    warning_line = next(line for line in rendered.plain.splitlines() if line.startswith("Warning"))
+    assert "BackOff" in warning_line
+
+
+def test_describe_body_text_stays_plain_string() -> None:
+    """describe_body_text keeps a plain-str body for the agent bridge."""
+    from korvid.ui.widgets.describe_screen import describe_body_text
+
+    text = describe_body_text(dict(_POD_MANIFEST), list(_EVENTS_LIST))
+    assert isinstance(text, str)
+    assert "my-pod" in text
+    assert "EVENTS" in text
+    assert "Pulled" in text

@@ -231,3 +231,411 @@ def test_pod_summary_containers_defaults_to_empty_tuple() -> None:
     }
     pod = PodSummary.from_manifest(manifest)
     assert pod.containers == ()
+
+
+class TestDisplayPhase:
+    """Displayed phase mirrors kubectl: container waiting/terminated reasons win."""
+
+    @staticmethod
+    def _pod(status: dict[str, Any], metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "metadata": {"name": "p", "namespace": "d", **(metadata or {})},
+            "spec": {},
+            "status": status,
+        }
+
+    def test_crashloopbackoff_overrides_running_phase(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Running",
+                    "containerStatuses": [
+                        {
+                            "ready": False,
+                            "restartCount": 12,
+                            "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+                        }
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "CrashLoopBackOff"
+
+    def test_imagepullbackoff_overrides_pending_phase(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "containerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "ImagePullBackOff"}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "ImagePullBackOff"
+
+    def test_terminated_reason_shown_for_succeeded_pod(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Succeeded",
+                    "containerStatuses": [
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "Completed", "exitCode": 0}},
+                        }
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Completed"
+
+    def test_oomkilled_terminated_reason(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Failed",
+                    "containerStatuses": [
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "OOMKilled", "exitCode": 137}},
+                        }
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "OOMKilled"
+
+    def test_deletion_timestamp_shows_terminating(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {"phase": "Running", "containerStatuses": [{"ready": True, "state": {}}]},
+                metadata={"deletionTimestamp": "2026-01-01T00:00:00Z"},
+            )
+        )
+        assert pod.phase == "Terminating"
+
+    def test_deletion_timestamp_wins_over_waiting_reason(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Running",
+                    "containerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "CrashLoopBackOff"}}}
+                    ],
+                },
+                metadata={"deletionTimestamp": "2026-01-01T00:00:00Z"},
+            )
+        )
+        assert pod.phase == "Terminating"
+
+    def test_running_container_keeps_phase(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Running",
+                    "containerStatuses": [
+                        {"ready": True, "state": {"running": {"startedAt": "2026-01-01"}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Running"
+
+    def test_status_reason_used_when_no_container_reason(self) -> None:
+        pod = PodSummary.from_manifest(self._pod({"phase": "Failed", "reason": "Evicted"}))
+        assert pod.phase == "Evicted"
+
+    def test_init_container_crashloop_shows_init_prefix(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "initContainerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "CrashLoopBackOff"}}}
+                    ],
+                    "containerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "PodInitializing"}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Init:CrashLoopBackOff"
+
+    def test_init_container_terminated_error_shows_init_prefix(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "initContainerStatuses": [
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "Error", "exitCode": 1}},
+                        }
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Init:Error"
+
+    def test_init_container_succeeded_falls_through_to_containers(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Running",
+                    "initContainerStatuses": [
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "Completed", "exitCode": 0}},
+                        }
+                    ],
+                    "containerStatuses": [
+                        {"ready": True, "state": {"running": {"startedAt": "2026-01-01"}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Running"
+
+    def test_init_container_in_progress_shows_counter(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "initContainerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "PodInitializing"}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Init:0/1"
+
+    def test_started_sidecar_init_container_skipped(self) -> None:
+        pod = PodSummary.from_manifest(
+            {
+                "metadata": {"name": "p", "namespace": "d"},
+                "spec": {"initContainers": [{"name": "sc", "restartPolicy": "Always"}]},
+                "status": {
+                    "phase": "Running",
+                    "initContainerStatuses": [
+                        {
+                            "name": "sc",
+                            "ready": True,
+                            "started": True,
+                            "state": {"running": {"startedAt": "2026-01-01"}},
+                        }
+                    ],
+                    "containerStatuses": [
+                        {"ready": True, "state": {"running": {"startedAt": "2026-01-01"}}}
+                    ],
+                },
+            }
+        )
+        assert pod.phase == "Running"
+
+    def test_completed_sidecar_with_running_main_shows_running(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "containerStatuses": [
+                        {"ready": True, "state": {"running": {"startedAt": "2026-01-01"}}},
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "Completed", "exitCode": 0}},
+                        },
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Running"
+
+    def test_completed_sidecar_without_pod_ready_shows_not_ready(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "False"}],
+                    "containerStatuses": [
+                        {"ready": True, "state": {"running": {"startedAt": "2026-01-01"}}},
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "Completed", "exitCode": 0}},
+                        },
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "NotReady"
+
+    def test_terminated_without_reason_falls_back_to_exit_code(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Failed",
+                    "containerStatuses": [
+                        {"ready": False, "state": {"terminated": {"exitCode": 2}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "ExitCode:2"
+
+    def test_terminated_without_reason_prefers_signal(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Failed",
+                    "containerStatuses": [
+                        {"ready": False, "state": {"terminated": {"exitCode": 137, "signal": 9}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Signal:9"
+
+    def test_terminated_zero_exit_no_reason_keeps_phase(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Succeeded",
+                    "containerStatuses": [
+                        {"ready": False, "state": {"terminated": {"exitCode": 0}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Succeeded"
+
+    def test_init_terminated_without_reason_falls_back_to_exit_code(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "initContainerStatuses": [
+                        {"ready": False, "state": {"terminated": {"exitCode": 3}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Init:ExitCode:3"
+
+    def test_init_progress_denominator_uses_spec_count(self) -> None:
+        pod = PodSummary.from_manifest(
+            {
+                "metadata": {"name": "p", "namespace": "d"},
+                "spec": {"initContainers": [{"name": "a"}, {"name": "b"}]},
+                "status": {
+                    "phase": "Pending",
+                    "initContainerStatuses": [
+                        {
+                            "name": "a",
+                            "ready": False,
+                            "state": {"waiting": {"reason": "PodInitializing"}},
+                        }
+                    ],
+                },
+            }
+        )
+        assert pod.phase == "Init:0/2"
+
+    def test_initialized_condition_true_skips_init_status(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Running",
+                    "conditions": [{"type": "Initialized", "status": "True"}],
+                    "initContainerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "PodInitializing"}}}
+                    ],
+                    "containerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "CrashLoopBackOff"}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "CrashLoopBackOff"
+
+    def test_initialized_condition_false_keeps_init_status(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "conditions": [{"type": "Initialized", "status": "False"}],
+                    "initContainerStatuses": [
+                        {"ready": False, "state": {"waiting": {"reason": "PodInitializing"}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Init:0/1"
+
+    def test_deleting_pod_on_lost_node_shows_unknown(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {"phase": "Running", "reason": "NodeLost"},
+                metadata={"deletionTimestamp": "2026-01-01T00:00:00Z"},
+            )
+        )
+        assert pod.phase == "Unknown"
+
+    def test_deleting_terminal_pod_on_lost_node_shows_unknown(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {"phase": "Failed", "reason": "NodeLost"},
+                metadata={"deletionTimestamp": "2026-01-01T00:00:00Z"},
+            )
+        )
+        assert pod.phase == "Unknown"
+
+    def test_deleting_succeeded_pod_keeps_completed(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Succeeded",
+                    "containerStatuses": [
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "Completed", "exitCode": 0}},
+                        }
+                    ],
+                },
+                metadata={"deletionTimestamp": "2026-01-01T00:00:00Z"},
+            )
+        )
+        assert pod.phase == "Completed"
+
+    def test_deleting_failed_pod_keeps_failure_reason(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Failed",
+                    "containerStatuses": [
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "OOMKilled", "exitCode": 137}},
+                        }
+                    ],
+                },
+                metadata={"deletionTimestamp": "2026-01-01T00:00:00Z"},
+            )
+        )
+        assert pod.phase == "OOMKilled"
+
+    def test_scheduling_gated_pod_shows_scheduling_gated(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "conditions": [
+                        {
+                            "type": "PodScheduled",
+                            "status": "False",
+                            "reason": "SchedulingGated",
+                        }
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "SchedulingGated"
