@@ -36,6 +36,10 @@ class AgentConfigurator(ABC):
     async def finish_device_login(self) -> None: ...
 
     @abstractmethod
+    async def list_models(self, settings: AgentSettings) -> list[str]:
+        """Models available for these settings, [] when unknown (caller falls back to input)."""
+
+    @abstractmethod
     async def test(self, settings: AgentSettings) -> str: ...
 
     @abstractmethod

@@ -12,9 +12,10 @@ from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 
 
 class FakeConfigurator(AgentConfigurator):
-    def __init__(self, test_error: str | None = None) -> None:
+    def __init__(self, test_error: str | None = None, models: list[str] | None = None) -> None:
         self.calls: list[Any] = []
         self.test_error = test_error
+        self.models: list[str] = models or []
 
     async def begin_device_login(self) -> DeviceLoginPrompt:
         self.calls.append("begin")
@@ -28,6 +29,10 @@ class FakeConfigurator(AgentConfigurator):
         if self.test_error:
             raise RuntimeError(self.test_error)
         return "ok"
+
+    async def list_models(self, settings: AgentSettings) -> list[str]:
+        self.calls.append(("list_models", settings))
+        return list(self.models)
 
     async def save(self, settings: AgentSettings) -> None:
         self.calls.append(("save", settings))

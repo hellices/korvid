@@ -192,6 +192,9 @@ async def test_ai_command_pushes_setup_screen() -> None:
         async def test(self, settings: Any) -> str:
             return "ok"
 
+        async def list_models(self, settings: Any) -> list[str]:
+            return []
+
         async def save(self, settings: Any) -> None:
             pass
 
@@ -253,6 +256,9 @@ async def test_model_command_swaps_model_and_saves() -> None:
         async def test(self, settings: Any) -> str:
             return "ok"
 
+        async def list_models(self, settings: Any) -> list[str]:
+            return []
+
         async def save(self, settings: AgentSettings) -> None:
             saved.append(settings)
 
@@ -311,6 +317,9 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
         async def test(self, settings: Any) -> str:
             return "ok"
 
+        async def list_models(self, settings: Any) -> list[str]:
+            return []
+
         async def save(self, settings: AgentSettings) -> None:
             saved.append(settings)
 
@@ -353,6 +362,9 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
 
         async def test(self, settings: Any) -> str:
             return "ok"
+
+        async def list_models(self, settings: Any) -> list[str]:
+            return []
 
         async def save(self, settings: AgentSettings) -> None:
             raise RuntimeError("disk full")
@@ -409,6 +421,9 @@ async def test_model_command_works_after_configured_startup() -> None:
 
         async def test(self, settings: Any) -> str:
             return "ok"
+
+        async def list_models(self, settings: Any) -> list[str]:
+            return []
 
         async def save(self, settings: AgentSettings) -> None:
             saved.append(settings)
@@ -479,6 +494,9 @@ async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
 
         async def test(self, settings: Any) -> str:
             return "ok"
+
+        async def list_models(self, settings: Any) -> list[str]:
+            return []
 
         async def save(self, settings: Any) -> None:
             pass

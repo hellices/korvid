@@ -24,6 +24,14 @@ COPILOT_CHAT_BASE_URL = "https://api.githubcopilot.com"
 _REFRESH_MARGIN_S = 60.0
 _DEFAULT_TOKEN_TTL_S = 600.0  # used when the exchange response omits expires_at
 _JSON_ACCEPT = {"Accept": "application/json"}
+# GitHub rejects the token exchange (HTTP 403 "Please only use approved
+# clients", notification_id: programmatic_token_generation) unless the
+# request identifies an editor client.
+_EDITOR_HEADERS = {
+    "Editor-Version": "vscode/1.95.0",
+    "Editor-Plugin-Version": "copilot-chat/0.22.4",
+    "User-Agent": "GitHubCopilotChat/0.22.4",
+}
 
 
 class DeviceLoginError(Exception):
@@ -131,7 +139,11 @@ class CopilotCredentialSource(CredentialSource):
     async def _refresh(self) -> None:
         resp = await self._client.get(
             COPILOT_TOKEN_URL,
-            headers={"Authorization": f"token {self._oauth_token}", **_JSON_ACCEPT},
+            headers={
+                "Authorization": f"token {self._oauth_token}",
+                **_JSON_ACCEPT,
+                **_EDITOR_HEADERS,
+            },
         )
         if resp.status_code != 200:
             raise DeviceLoginError(

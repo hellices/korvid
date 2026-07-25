@@ -166,3 +166,20 @@ async def test_concurrent_headers_refresh_once() -> None:
     )
     await asyncio.gather(src.headers(), src.headers(), src.headers())
     assert calls["n"] == 1
+
+
+async def test_token_exchange_sends_editor_identification_headers() -> None:
+    """GitHub rejects the copilot_internal/v2/token exchange with HTTP 403
+    ("Please only use approved clients") unless the request identifies an
+    editor client. Verified live: Editor-Version/plugin/User-Agent pass."""
+    seen: dict[str, str] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.update({k.lower(): v for k, v in req.headers.items()})
+        return httpx.Response(200, json={"token": "ct", "expires_at": 2000})
+
+    src = CopilotCredentialSource("gho_x", client=_client(handler), clock=lambda: 1000.0)
+    await src.headers()
+    assert "editor-version" in seen
+    assert "editor-plugin-version" in seen
+    assert "githubcopilot" in seen.get("user-agent", "").lower()
