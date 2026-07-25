@@ -17,6 +17,11 @@ dependencies = [
 [project.scripts]
 korvid = "korvid.__main__:main"
 
+[project.optional-dependencies]
+entra = [
+    "azure-identity>=1.19",
+]
+
 [build-system]
 # hatchling >=1.26 required: PEP 639 SPDX string form of `license` above
 requires = ["hatchling>=1.26"]
@@ -38,6 +43,7 @@ dev = [
     "deptry>=0.20",
     "pre-commit>=4",
     "types-PyYAML",
+    "azure-identity>=1.25.3",
 ]
 
 [tool.ruff]
