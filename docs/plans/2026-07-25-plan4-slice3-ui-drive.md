@@ -1,8 +1,8 @@
 # Plan 4 Slice 3 — Agent Drives the TUI (UI-Control Tools)
 
-**Status: IN PROGRESS** — branch `agent-ui-drive-slice3`.
+**Status: COMPLETE** — implemented on branch `agent-ui-drive-slice3` (PR #9); `make check` green and live-cluster smoke verified (agent navigated, filtered, and opened logs to diagnose a CrashLoopBackOff pod).
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:test-driven-development. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:test-driven-development. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make the agent act like GitHub Copilot CLI / OpenClaw agents inside korvid: instead of only answering in the chat panel, the agent **drives the TUI directly** — switching resource views, applying filters, opening the log pane, and opening describe — while narrating its reasoning. This implements design spec §4.1 ("UI Bus"), §5 ("agent-drive mode"), and §6 tool table row "UI control".
 
@@ -35,9 +35,9 @@
 - `ToolExecutor(kube, aliases, ui=None)`; `_dispatch` routes the four names to `self._ui`; when `ui is None` returns `ERROR: UI control unavailable`.
 - All results (including bridge errors) flow through `cap_result`.
 
-- [ ] Red: tests for dispatch-to-bridge, missing-bridge error, cap applied
-- [ ] Green: implement
-- [ ] `make check`
+- [x] Red: tests for dispatch-to-bridge, missing-bridge error, cap applied
+- [x] Green: implement
+- [x] `make check`
 
 ### Task 2: AgentRuntime accepts a tools list (agent layer)
 
@@ -46,9 +46,9 @@
 - `AgentRuntime(provider, executor, *, tools=None, …)` — defaults to `READ_TOOLS`; composition root passes `READ_TOOLS + UI_TOOLS`.
 - `SYSTEM_PROMPT` extended: "You can drive the korvid TUI … prefer showing evidence on screen (navigate/open_logs/open_describe/set_filter) while you narrate."
 
-- [ ] Red: test that provider.complete receives the injected tools list
-- [ ] Green: implement
-- [ ] `make check`
+- [x] Red: test that provider.complete receives the injected tools list
+- [x] Green: implement
+- [x] `make check`
 
 ### Task 3: KorvidApp implements the bridge (ui layer)
 
@@ -62,9 +62,9 @@ Methods (async, return `str`):
 - Each action notifies with an `agent` marker (e.g. `notify("agent: switched view to pods")`, severity=information) and never steals focus from the agent input.
 - Errors return `"ERROR: …"` strings — never raise (executor contract).
 
-- [ ] Red: pilot tests — navigate switches table, filter applies, describe pushes screen, invalid view returns ERROR
-- [ ] Green: implement
-- [ ] `make check`
+- [x] Red: pilot tests — navigate switches table, filter applies, describe pushes screen, invalid view returns ERROR
+- [x] Green: implement
+- [x] `make check`
 
 ### Task 4: composition-root wiring (late-bound proxy)
 
@@ -73,9 +73,9 @@ Methods (async, return `str`):
 - `_UIBridgeProxy` with `target: UIBridge | None`; each method forwards or returns `ERROR: UI not ready`.
 - Both initial wiring and `rebuild_agent` pass `ToolExecutor(kube, aliases, ui=proxy)` and `tools=READ_TOOLS + UI_TOOLS`; `proxy.target = app` set after `KorvidApp(...)`.
 
-- [ ] Red: wiring test — runtime built by `_build_agent_wiring` exposes UI tools and its executor reaches the proxy
-- [ ] Green: implement
-- [ ] `make check`
+- [x] Red: wiring test — runtime built by `_build_agent_wiring` exposes UI tools and its executor reaches the proxy
+- [x] Green: implement
+- [x] `make check`
 
 ### Task 5: agent panel UX polish for drive mode
 
@@ -83,10 +83,10 @@ Methods (async, return `str`):
 
 - UI tools render with a distinct marker (`🖥` instead of `🔧`) so users see screen actions vs cluster reads at a glance.
 
-- [ ] Red / Green / `make check`
+- [x] Red / Green / `make check`
 
 ### Task 6: verify, PR, review loop
 
-- [ ] Full `make check`
-- [ ] Live smoke against AKS (agent prompt: "show me failing pods and open the logs of the worst one")
-- [ ] PR + Copilot review loop until 0 unresolved; squash merge
+- [x] Full `make check`
+- [x] Live smoke against AKS (agent prompt: "show me failing pods and open the logs of the worst one")
+- [x] PR + Copilot review loop until 0 unresolved; squash merge

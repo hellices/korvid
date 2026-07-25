@@ -1363,6 +1363,10 @@ class KorvidApp(App[None]):
             return f"ERROR: unknown kind {kind!r} — not a resource kind in this cluster"
         if meta.namespaced and not namespace:
             return f"ERROR: kind {kind!r} is namespaced — provide the 'namespace' argument"
+        # Snapshot the visible state: if the user pushes a screen or navigates
+        # while the fetches below are pending, abort instead of covering it.
+        top_screen = self.screen_stack[-1] if self.screen_stack else None
+        view_before = (self.current_kind, self.current_scope)
         try:
             manifest = await self._get_manifest(meta.plural, namespace, name)
         except ApiStatusError as exc:
@@ -1377,6 +1381,12 @@ class KorvidApp(App[None]):
             except Exception:  # events are best-effort; the manifest still shows
                 logger.debug("agent describe: event fetch failed", exc_info=True)
         title = f"{meta.plural}/{namespace or '-'}/{name}"
+        current_top = self.screen_stack[-1] if self.screen_stack else None
+        if current_top is not top_screen or (self.current_kind, self.current_scope) != view_before:
+            return (
+                "ERROR: the screen changed while fetching the manifest "
+                "(user action takes priority) — retry if still needed"
+            )
         try:
             await self.push_screen(DescribeScreen(title, manifest, events))
         except Exception as exc:

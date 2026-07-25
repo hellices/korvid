@@ -399,3 +399,27 @@ async def test_agent_open_logs_rejects_unknown_container() -> None:
         assert out.startswith("ERROR:")
         assert "nope" in out
         assert "main" in out
+
+
+async def test_agent_open_describe_yields_to_user_screen_change_during_fetch() -> None:
+    """If the user opens a screen or navigates while the agent's manifest
+    fetch is pending, the agent must not cover it with a stale modal."""
+    app = make_app()
+    release = asyncio.Event()
+
+    async def slow_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        await release.wait()
+        return {"kind": "Pod", "metadata": {"name": name}}
+
+    app._get_manifest = slow_manifest
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        task = asyncio.create_task(app.agent_open_describe("pods", "web-1", "default"))
+        await asyncio.sleep(0.02)
+        user_screen = DescribeScreen("user's screen", {"kind": "Pod"}, [])
+        await app.push_screen(user_screen)
+        release.set()
+        out = await task
+        await pilot.pause()
+        assert out.startswith("ERROR:")
+        assert app.screen is user_screen
