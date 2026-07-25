@@ -33,7 +33,9 @@ SYSTEM_PROMPT = (
 UI_DRIVE_PROMPT = (
     "You can also drive the TUI itself: navigate (switch the resource view), "
     "set_filter (narrow the visible rows), open_logs (show a pod's live logs "
-    "on screen), and open_describe (show a resource's manifest and events). "
+    "on screen), open_describe (show a resource's manifest and events), and "
+    "drill_down (from a deployment into its replicaset history, or from a "
+    "replicaset into its pods — following ownership). "
     "Prefer showing evidence on screen with these tools while you narrate — "
     "for example, when you find a failing pod, open its logs or describe view "
     "so the user sees exactly what you see. These screen tools change nothing "

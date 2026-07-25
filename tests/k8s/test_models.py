@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.k8s.models import GenericSummary, PodSummary, ReplicaSetSummary, summary_for
 
 POD: dict[str, Any] = {
     "metadata": {"name": "checkout-7d9f", "namespace": "prod"},
@@ -178,6 +178,100 @@ def test_generic_summary_missing_creation_timestamp() -> None:
     manifest: dict[str, Any] = {"metadata": {"name": "x", "namespace": "ns"}}
     gs = GenericSummary.from_manifest("Pod", manifest)
     assert gs.created == ""
+
+
+def test_generic_summary_uid_and_owner_uids() -> None:
+    manifest: dict[str, Any] = {
+        "metadata": {
+            "name": "web-6d9f88",
+            "namespace": "prod",
+            "uid": "rs-uid-1",
+            "ownerReferences": [
+                {"kind": "Deployment", "name": "web", "uid": "dep-uid-1"},
+            ],
+        }
+    }
+    gs = GenericSummary.from_manifest("ReplicaSet", manifest)
+    assert gs.uid == "rs-uid-1"
+    assert gs.owner_uids == ("dep-uid-1",)
+
+
+def test_generic_summary_defaults_without_owner_info() -> None:
+    gs = GenericSummary.from_manifest("Pod", {"metadata": {"name": "x", "namespace": "ns"}})
+    assert gs.uid == ""
+    assert gs.owner_uids == ()
+
+
+def test_pod_summary_owner_uids() -> None:
+    manifest: dict[str, Any] = {
+        "metadata": {
+            "name": "web-6d9f88-abc",
+            "namespace": "prod",
+            "ownerReferences": [{"kind": "ReplicaSet", "name": "web-6d9f88", "uid": "rs-uid-1"}],
+        },
+        "spec": {},
+        "status": {},
+    }
+    pod = PodSummary.from_manifest(manifest)
+    assert pod.owner_uids == ("rs-uid-1",)
+
+
+# ---------------------------------------------------------------------------
+# ReplicaSetSummary + summary_for
+# ---------------------------------------------------------------------------
+
+
+def _rs_manifest() -> dict[str, Any]:
+    return {
+        "metadata": {
+            "name": "web-6d9f88",
+            "namespace": "prod",
+            "uid": "rs-uid-1",
+            "creationTimestamp": "2024-06-01T10:00:00Z",
+            "annotations": {"deployment.kubernetes.io/revision": "3"},
+            "ownerReferences": [{"kind": "Deployment", "name": "web", "uid": "dep-uid-1"}],
+        },
+        "spec": {"replicas": 2},
+        "status": {"replicas": 2, "readyReplicas": 1},
+    }
+
+
+def test_replicaset_summary_from_manifest() -> None:
+    rs = ReplicaSetSummary.from_manifest("ReplicaSet", _rs_manifest())
+    assert rs.name == "web-6d9f88"
+    assert rs.revision == "3"
+    assert rs.desired == 2
+    assert rs.current == 2
+    assert rs.ready == "1/2"
+    assert rs.owner_uids == ("dep-uid-1",)
+
+
+def test_replicaset_summary_scaled_to_zero() -> None:
+    manifest = _rs_manifest()
+    manifest["spec"] = {"replicas": 0}
+    manifest["status"] = {}
+    rs = ReplicaSetSummary.from_manifest("ReplicaSet", manifest)
+    assert rs.desired == 0
+    assert rs.current == 0
+    assert rs.ready == "0/0"
+
+
+def test_replicaset_summary_missing_revision() -> None:
+    manifest = _rs_manifest()
+    manifest["metadata"].pop("annotations")
+    rs = ReplicaSetSummary.from_manifest("ReplicaSet", manifest)
+    assert rs.revision == "-"
+
+
+def test_summary_for_dispatches_replicaset() -> None:
+    summary = summary_for("ReplicaSet", _rs_manifest())
+    assert isinstance(summary, ReplicaSetSummary)
+
+
+def test_summary_for_falls_back_to_generic() -> None:
+    summary = summary_for("Deployment", {"metadata": {"name": "web", "namespace": "prod"}})
+    assert isinstance(summary, GenericSummary)
+    assert not isinstance(summary, ReplicaSetSummary)
 
 
 def test_age_5m() -> None:

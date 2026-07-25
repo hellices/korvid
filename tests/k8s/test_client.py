@@ -8,6 +8,7 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.models import ReplicaSetSummary
 
 
 def _pod(name: str, ns: str = "default") -> dict[str, Any]:
@@ -231,6 +232,35 @@ async def test_watch_objects_yields_list_items_first() -> None:
     assert collected[0] == ("ADDED", "dep-a")
     assert collected[1] == ("ADDED", "dep-b")
     assert collected[2] == ("MODIFIED", "dep-a")
+
+
+async def test_watch_objects_replicaset_yields_rich_summary() -> None:
+    """ReplicaSet kinds get ReplicaSetSummary (revision/desired/ready) via summary_for."""
+    client = KubeClient()
+    meta = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True, ("rs",))
+    item: dict[str, Any] = {
+        "metadata": {
+            "name": "web-6d9f88",
+            "namespace": "default",
+            "uid": "rs-1",
+            "annotations": {"deployment.kubernetes.io/revision": "2"},
+        },
+        "spec": {"replicas": 3},
+        "status": {"replicas": 3, "readyReplicas": 3},
+    }
+    list_resp = {"metadata": {"resourceVersion": "1"}, "items": [item]}
+    fake_watch = _FakeWatch([])
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        collected = [s async for _, s in client.watch_objects(meta, "default")]
+
+    assert isinstance(collected[0], ReplicaSetSummary)
+    assert collected[0].revision == "2"
+    assert collected[0].ready == "3/3"
 
 
 async def test_watch_objects_passes_resource_version_to_watch() -> None:

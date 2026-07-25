@@ -72,6 +72,10 @@ class _FakeApp(UIBridge):
         self.calls.append(f"describe:{kind}/{name}")
         return "ok-describe"
 
+    async def agent_drill_down(self, name: str) -> str:
+        self.calls.append(f"drill:{name}")
+        return "ok-drill"
+
 
 async def test_proxy_without_target_returns_error() -> None:
     from korvid.__main__ import _UIBridgeProxy
@@ -81,6 +85,7 @@ async def test_proxy_without_target_returns_error() -> None:
     assert (await proxy.agent_set_filter("x")).startswith("ERROR:")
     assert (await proxy.agent_open_logs("p", "ns")).startswith("ERROR:")
     assert (await proxy.agent_open_describe("pods", "p")).startswith("ERROR:")
+    assert (await proxy.agent_drill_down("web")).startswith("ERROR:")
 
 
 async def test_proxy_forwards_to_target() -> None:
@@ -93,11 +98,13 @@ async def test_proxy_forwards_to_target() -> None:
     assert await proxy.agent_set_filter("web") == "ok-filter"
     assert await proxy.agent_open_logs("p", "ns") == "ok-logs"
     assert await proxy.agent_open_describe("pods", "p", "ns") == "ok-describe"
+    assert await proxy.agent_drill_down("web") == "ok-drill"
     assert app.calls == [
         "navigate:pods:prod",
         "filter:web",
         "logs:ns/p",
         "describe:pods/p",
+        "drill:web",
     ]
 
 

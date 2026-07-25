@@ -348,7 +348,7 @@ async def test_system_prompt_advertises_ui_driving_with_ui_tools() -> None:
     p = ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
     await collect(AgentRuntime(p, EchoExecutor(), tools=READ_TOOLS + UI_TOOLS), "go")
     system = p.calls[0][0]["content"]
-    for tool in ("navigate", "set_filter", "open_logs", "open_describe"):
+    for tool in ("navigate", "set_filter", "open_logs", "open_describe", "drill_down"):
         assert tool in system
 
 
