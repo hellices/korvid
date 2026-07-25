@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 from textual.widgets import Input, RichLog
 
@@ -49,7 +49,7 @@ class StubRuntime:
             await asyncio.Event().wait()
 
 
-def make_app(runtime: Any = None, model: str | None = "test-model") -> KorvidApp:
+def make_app(runtime: Any = None, model: str | None = "test-model", **kwargs: Any) -> KorvidApp:
     store = ResourceStore()
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
@@ -63,6 +63,7 @@ def make_app(runtime: Any = None, model: str | None = "test-model") -> KorvidApp
         watch_manager=WatchManager(store, source),
         agent_runtime=runtime,
         agent_model_name=model,
+        **kwargs,
     )
 
 
@@ -86,7 +87,7 @@ async def test_no_runtime_shows_setup_hint() -> None:
     app = make_app(runtime=None, model=None)
     async with app.run_test() as pilot:
         await pilot.press("ctrl+a")
-        assert "provider: openai-compat" in _panel_text(app)
+        assert "Run :ai" in _panel_text(app)
         assert app.query_one(AgentPanel).query_one("#agent-input", Input).disabled is True
 
 
@@ -174,4 +175,63 @@ async def test_setup_hint_not_duplicated_on_retoggle() -> None:
             await pilot.press("ctrl+a")  # open
             await pilot.press("ctrl+a")  # close
         await pilot.press("ctrl+a")
-        assert _panel_text(app).count("provider: openai-compat") == 1
+        assert _panel_text(app).count("Run :ai") == 1
+
+
+async def test_ai_command_pushes_setup_screen() -> None:
+    from korvid.ui.messages import UnknownCommand
+    from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
+
+    class NoopConfigurator:
+        async def begin_device_login(self) -> Any:
+            raise NotImplementedError
+
+        async def finish_device_login(self) -> None:
+            raise NotImplementedError
+
+        async def test(self, settings: Any) -> str:
+            return "ok"
+
+        async def save(self, settings: Any) -> None:
+            pass
+
+    app = make_app(runtime=None, model=None, agent_configurator=NoopConfigurator())
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("ai"))
+        await pilot.pause()
+        assert isinstance(app.screen, AgentSetupScreen)
+
+
+async def test_ai_command_without_configurator_notifies() -> None:
+    from korvid.ui.messages import UnknownCommand
+
+    app = make_app(runtime=None, model=None)
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("ai"))
+        await pilot.pause()
+        # No crash and no setup screen pushed.
+        from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
+
+        assert not isinstance(app.screen, AgentSetupScreen)
+
+
+async def test_apply_agent_settings_enables_agent() -> None:
+    from korvid.agent.setup import AgentSettings
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    runtime = cast("Any", StubRuntime([]))
+    settings = AgentSettings(
+        provider="ollama",
+        auth_method="none",
+        base_url="http://localhost:11434/v1",
+        model="llama3",
+    )
+    app = make_app(runtime=None, model=None, rebuild_agent=lambda s: runtime)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")  # open panel: setup hint, input disabled
+        app._apply_agent_settings(settings)
+        await pilot.pause()
+        assert app._agent_runtime is runtime
+        assert app._agent_model_name == "llama3"
+        assert "AI on" in str(app.query_one(StatusBar).render())
+        assert app.query_one(AgentPanel).query_one("#agent-input", Input).disabled is False

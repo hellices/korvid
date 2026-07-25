@@ -19,6 +19,7 @@ from textual.widgets import DataTable, Footer, Static
 
 from korvid.agent.events import AgentError
 from korvid.agent.runtime import AgentRuntime
+from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
@@ -41,6 +42,7 @@ from korvid.ui.messages import (
 )
 from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv, build_probe_argv
 from korvid.ui.widgets.agent_panel import AgentPanel
+from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribeScreen
@@ -158,6 +160,8 @@ class KorvidApp(App[None]):
         stream_logs: Callable[..., AsyncIterator[LogLine]] | None = None,
         agent_runtime: AgentRuntime | None = None,
         agent_model_name: str | None = None,
+        agent_configurator: AgentConfigurator | None = None,
+        rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -169,6 +173,8 @@ class KorvidApp(App[None]):
         self._stream_logs = stream_logs
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
+        self._agent_configurator = agent_configurator
+        self._rebuild_agent = rebuild_agent
         self._agent_task: asyncio.Task[None] | None = None
         self.aliases: dict[str, ResourceMeta] = (
             aliases if aliases is not None else dict(_DEFAULT_ALIASES)
@@ -474,11 +480,43 @@ class KorvidApp(App[None]):
         await self.push_screen(DescribeScreen(title, manifest, events))
 
     def on_unknown_command(self, message: UnknownCommand) -> None:
+        head = message.text.strip().split()[0] if message.text.strip() else ""
+        if head in {"ai", "agent"}:
+            self._open_agent_setup()
+            return
         self.notify(
             f"Unknown resource or command: {message.text}"
             " — not found in this cluster's API (CRD not installed?)",
             severity="warning",
         )
+
+    def _open_agent_setup(self) -> None:
+        if self._agent_configurator is None:
+            self.notify("Agent setup unavailable in this build", severity="warning")
+            return
+
+        def _done(result: AgentSettings | None) -> None:
+            if result is not None:
+                self._apply_agent_settings(result)
+
+        self.push_screen(AgentSetupScreen(self._agent_configurator), callback=_done)
+
+    def _apply_agent_settings(self, settings: AgentSettings) -> None:
+        """Swap in a fresh runtime built from the wizard's settings."""
+        if self._rebuild_agent is None:
+            self.notify("Agent rebuild unavailable in this build", severity="warning")
+            return
+        runtime = self._rebuild_agent(settings)
+        self._agent_runtime = runtime
+        self._agent_model_name = settings.model
+        self._refresh_status()
+        panel = self.query_one(AgentPanel)
+        if panel.display and runtime is not None:
+            in_tok, out_tok = runtime.total_tokens
+            panel.set_header(settings.model, in_tok, out_tok, estimated=runtime.usage_estimated)
+            agent_input = panel.query_one("#agent-input")
+            agent_input.disabled = False
+            agent_input.focus()
 
     def action_shell(self) -> None:
         """Drop into a shell inside the selected pod via kubectl exec.
