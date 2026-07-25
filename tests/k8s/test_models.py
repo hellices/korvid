@@ -438,6 +438,7 @@ class TestDisplayPhase:
             self._pod(
                 {
                     "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "True"}],
                     "containerStatuses": [
                         {"ready": True, "state": {"running": {"startedAt": "2026-01-01"}}},
                         {
@@ -449,6 +450,24 @@ class TestDisplayPhase:
             )
         )
         assert pod.phase == "Running"
+
+    def test_completed_sidecar_without_pod_ready_shows_not_ready(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "False"}],
+                    "containerStatuses": [
+                        {"ready": True, "state": {"running": {"startedAt": "2026-01-01"}}},
+                        {
+                            "ready": False,
+                            "state": {"terminated": {"reason": "Completed", "exitCode": 0}},
+                        },
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "NotReady"
 
     def test_terminated_without_reason_falls_back_to_exit_code(self) -> None:
         pod = PodSummary.from_manifest(

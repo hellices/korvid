@@ -227,6 +227,13 @@ def _is_scheduling_gated(status: dict[str, Any]) -> bool:
     )
 
 
+def _is_pod_ready(status: dict[str, Any]) -> bool:
+    return any(
+        c.get("type") == "Ready" and c.get("status") == "True"
+        for c in (status.get("conditions") or [])
+    )
+
+
 def _display_phase(
     meta: dict[str, Any],
     spec: dict[str, Any],
@@ -266,9 +273,10 @@ def _display_phase(
             reason = terminated_reason
         elif state.get("running") and cs.get("ready"):
             has_running = True
-    # A completed sidecar next to a running main container is a running pod.
+    # A completed sidecar next to a running main container is a running pod
+    # only once the pod reports Ready; otherwise kubectl shows NotReady.
     if reason == "Completed" and has_running:
-        return "Running"
+        return "Running" if _is_pod_ready(status) else "NotReady"
     return reason
 
 

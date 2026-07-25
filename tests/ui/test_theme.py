@@ -86,3 +86,6 @@ class TestInitPhaseStyle:
 
     def test_scheduling_gated_is_yellow(self) -> None:
         assert phase_style("SchedulingGated") == "yellow"
+
+    def test_not_ready_is_yellow(self) -> None:
+        assert phase_style("NotReady") == "yellow"

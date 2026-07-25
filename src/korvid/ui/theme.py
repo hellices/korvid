@@ -14,6 +14,7 @@ _PHASE_STYLES: dict[str, str] = {
     "ContainerCreating": "yellow",
     "PodInitializing": "yellow",
     "SchedulingGated": "yellow",
+    "NotReady": "yellow",
     "Terminating": "magenta",
 }
 
