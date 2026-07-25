@@ -78,3 +78,8 @@ class TestInitPhaseStyle:
 
     def test_init_progress_is_yellow(self) -> None:
         assert phase_style("Init:0/2") == "yellow"
+
+    def test_signal_and_exitcode_are_bold_red(self) -> None:
+        assert phase_style("Signal:9") == "bold red"
+        assert phase_style("ExitCode:2") == "bold red"
+        assert phase_style("Init:ExitCode:3") == "bold red"

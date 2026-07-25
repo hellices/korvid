@@ -17,7 +17,17 @@ _PHASE_STYLES: dict[str, str] = {
 }
 
 # Any phase containing one of these substrings is an error state.
-_ERROR_MARKERS = ("BackOff", "Err", "Error", "Failed", "OOMKilled", "Evicted", "CrashLoop")
+_ERROR_MARKERS = (
+    "BackOff",
+    "Err",
+    "Error",
+    "Failed",
+    "OOMKilled",
+    "Evicted",
+    "CrashLoop",
+    "Signal:",
+    "ExitCode:",
+)
 
 # Restart counts above this render bold red instead of yellow.
 RESTARTS_RED_THRESHOLD = 5

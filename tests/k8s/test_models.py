@@ -449,3 +449,55 @@ class TestDisplayPhase:
             )
         )
         assert pod.phase == "Running"
+
+    def test_terminated_without_reason_falls_back_to_exit_code(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Failed",
+                    "containerStatuses": [
+                        {"ready": False, "state": {"terminated": {"exitCode": 2}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "ExitCode:2"
+
+    def test_terminated_without_reason_prefers_signal(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Failed",
+                    "containerStatuses": [
+                        {"ready": False, "state": {"terminated": {"exitCode": 137, "signal": 9}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Signal:9"
+
+    def test_terminated_zero_exit_no_reason_keeps_phase(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Succeeded",
+                    "containerStatuses": [
+                        {"ready": False, "state": {"terminated": {"exitCode": 0}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Succeeded"
+
+    def test_init_terminated_without_reason_falls_back_to_exit_code(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                {
+                    "phase": "Pending",
+                    "initContainerStatuses": [
+                        {"ready": False, "state": {"terminated": {"exitCode": 3}}}
+                    ],
+                }
+            )
+        )
+        assert pod.phase == "Init:ExitCode:3"

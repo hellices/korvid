@@ -151,6 +151,26 @@ class GenericSummary:
         return f"{total_seconds // 60}m"
 
 
+def _terminated_reason(terminated: dict[str, Any]) -> str | None:
+    """kubectl-style reason for a terminated state; None when nothing to show.
+
+    Falls back to ``Signal:<n>`` / ``ExitCode:<n>`` when ``reason`` is empty;
+    a clean zero exit without a reason yields None.
+    """
+    if not terminated:
+        return None
+    reason = terminated.get("reason")
+    if reason:
+        return str(reason)
+    signal = terminated.get("signal")
+    if signal:
+        return f"Signal:{signal}"
+    exit_code = terminated.get("exitCode")
+    if exit_code:
+        return f"ExitCode:{exit_code}"
+    return None
+
+
 def _init_phase(spec: dict[str, Any], status: dict[str, Any]) -> str | None:
     """Init-container display status ('Init:<reason>' / 'Init:i/n'), or None when done.
 
@@ -171,7 +191,7 @@ def _init_phase(spec: dict[str, Any], status: dict[str, Any]) -> str | None:
         if str(cs.get("name")) in sidecar_names and cs.get("started"):
             continue
         if terminated:
-            return f"Init:{terminated.get('reason') or 'Error'}"
+            return f"Init:{_terminated_reason(terminated) or 'Error'}"
         waiting_reason = (state.get("waiting") or {}).get("reason")
         if waiting_reason and waiting_reason != "PodInitializing":
             return f"Init:{waiting_reason}"
@@ -201,11 +221,11 @@ def _display_phase(
     for cs in reversed(statuses):
         state = cs.get("state") or {}
         waiting_reason = (state.get("waiting") or {}).get("reason")
-        terminated_reason = (state.get("terminated") or {}).get("reason")
+        terminated_reason = _terminated_reason(state.get("terminated") or {})
         if waiting_reason:
             reason = str(waiting_reason)
         elif terminated_reason:
-            reason = str(terminated_reason)
+            reason = terminated_reason
         elif state.get("running") and cs.get("ready"):
             has_running = True
     # A completed sidecar next to a running main container is a running pod.
