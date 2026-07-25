@@ -352,3 +352,50 @@ async def test_agent_navigate_all_namespace_maps_to_all_scope() -> None:
         await pilot.pause()
         assert app.current_scope == ALL_NAMESPACES
         assert not out.startswith("ERROR:")
+
+
+async def test_agent_open_logs_ignores_same_named_non_pod_in_store() -> None:
+    """A deployment named like the requested pod must not make an unknown
+    pod look 'known' when the current view is not pods."""
+    app = make_app()
+
+    async def manifest_404(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        raise RuntimeError(f'pods "{name}" not found')
+
+    app._get_manifest = manifest_404
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        out_nav = await app.agent_navigate("deployments")
+        assert not out_nav.startswith("ERROR:")
+        await pilot.pause()
+        # 'api' exists in the store — but as a Deployment, not a Pod.
+        out = await app.agent_open_logs("api", "default")
+        assert out.startswith("ERROR:")
+        assert "api" in out
+
+
+async def test_agent_open_logs_rejects_unknown_pod_even_with_container() -> None:
+    """Supplying a container must not bypass pod validation."""
+    app = make_app()
+
+    async def manifest_404(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        raise RuntimeError(f'pods "{name}" not found')
+
+    app._get_manifest = manifest_404
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        out = await app.agent_open_logs("ghost", "default", "main")
+        assert out.startswith("ERROR:")
+        assert "ghost" in out
+
+
+async def test_agent_open_logs_rejects_unknown_container() -> None:
+    """A container name not present in the pod manifest is an ERROR, not a
+    silently-erroring background stream."""
+    app = make_app(manifest_containers=["main", "sidecar"])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        out = await app.agent_open_logs("web-1", "default", "nope")
+        assert out.startswith("ERROR:")
+        assert "nope" in out
+        assert "main" in out

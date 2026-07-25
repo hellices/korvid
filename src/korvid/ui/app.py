@@ -1294,14 +1294,21 @@ class KorvidApp(App[None]):
             return "ERROR: log streaming unavailable in this session"
         pane_gen = self._log_pane_gen
         try:
-            if container:
-                triples = [(namespace, pod, container)]
-            else:
-                triples = await self._agent_pod_triples(namespace, pod)
-            if not triples:
+            known = await self._agent_pod_triples(namespace, pod)
+            if not known:
                 # Validate before _cancel_log_tasks: a hallucinated pod name
                 # must not tear down the streams the user is watching.
                 return f"ERROR: pod {namespace}/{pod} not found (check the name and namespace)"
+            if container:
+                names = [c for _, _, c in known if c]
+                if names and container not in names:
+                    return (
+                        f"ERROR: container {container!r} not found in pod "
+                        f"{namespace}/{pod} (containers: {', '.join(names)})"
+                    )
+                triples = [(namespace, pod, container)]
+            else:
+                triples = known
             if pane_gen != self._log_pane_gen:
                 # The user (or another turn) changed the log pane while we were
                 # resolving containers — user keystrokes take priority.
@@ -1340,7 +1347,7 @@ class KorvidApp(App[None]):
         if containers:
             return [(namespace, pod, ctr) for ctr in containers]
         if any(
-            obj.namespace == namespace and obj.name == pod
+            obj.namespace == namespace and obj.name == pod and isinstance(obj, PodSummary)
             for obj in self.store.get(self.current_kind, self.current_scope)
         ):
             # Known pod without container info: blank container = server default.
