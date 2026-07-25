@@ -40,6 +40,14 @@ def _restarts_cell(restarts: int) -> Text:
     return Text(str(restarts), style=restarts_style(restarts))
 
 
+def _replicaset_sort_key(rs: ReplicaSetSummary) -> tuple[str, int, str]:
+    """Rollout-history order: newest revision first within each namespace
+    (matching what ``kubectl rollout history`` users expect); replicasets
+    without a numeric revision annotation sort last."""
+    revision = -int(rs.revision) if rs.revision.isdigit() else 1
+    return (rs.namespace, revision, rs.name)
+
+
 class ResourceTable(DataTable[str | Text]):
     _last_kind: str | None = None
     _last_all_namespaces: bool | None = None
@@ -94,7 +102,7 @@ class ResourceTable(DataTable[str | Text]):
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str
     ) -> None:
         replicasets = [r for r in rows if isinstance(r, ReplicaSetSummary)]
-        for rs in sorted(replicasets, key=lambda o: (o.namespace, o.name)):
+        for rs in sorted(replicasets, key=_replicaset_sort_key):
             if pattern and pattern.lower() not in rs.name.lower():
                 continue
             cells: list[str | Text] = [

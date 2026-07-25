@@ -367,30 +367,46 @@ class KorvidApp(App[None]):
     async def on_navigate_command(self, message: NavigateCommand) -> None:
         # An explicit :view / agent navigate abandons any drill-down context;
         # drill navigation goes through _navigate directly to keep its stack.
-        self._drill.clear()
-        await self._navigate(message.view, message.namespace)
+        # The stack clear happens inside the navigation lock so a concurrent
+        # drill (agent path) can never interleave between clear and the
+        # kind/scope transition, which would strand a filterless child view.
+        await self._navigate(message.view, message.namespace, drill_op=self._drill.clear)
 
-    async def _navigate(self, view: str | None, namespace: str | None) -> None:
+    async def _navigate(
+        self,
+        view: str | None,
+        namespace: str | None,
+        *,
+        drill_op: Callable[[], None] | None = None,
+    ) -> None:
         # The lock serializes the agent path (direct call from the agent
         # task) with the keyboard path (message pump): both mutate
         # current_kind/current_scope across awaits. The final state is the
         # latest command's — a user keystroke arriving after an agent
-        # navigate always lands last.
+        # navigate always lands last. ``drill_op`` mutates the drill stack
+        # inside the same critical section so stack and view transition as
+        # one transaction.
         async with self._nav_lock:
-            # A describe pane covering the table would show a stale manifest
-            # over the new view — dismiss it on any navigation, even when the
-            # requested kind/scope already matches.
-            self.query_one(DescribePane).hide()
-            new_kind = view if view is not None else self.current_kind
-            new_scope = namespace if namespace is not None else self.current_scope
-            if new_kind != self.current_kind or new_scope != self.current_scope:
-                await self._close_log_pane()
-                await self.watch_manager.stop(self.current_kind, self.current_scope)
-                self.current_kind = new_kind
-                self.current_scope = new_scope
-                await self.watch_manager.start(self.current_kind, self.current_scope)
+            if drill_op is not None:
+                drill_op()
+            await self._navigate_locked(view, namespace)
         self.post_message(ResourcesUpdated(self.current_kind))
         self._refresh_status()
+
+    async def _navigate_locked(self, view: str | None, namespace: str | None) -> None:
+        """Kind/scope transition body; caller must hold ``_nav_lock``."""
+        # A describe pane covering the table would show a stale manifest
+        # over the new view — dismiss it on any navigation, even when the
+        # requested kind/scope already matches.
+        self.query_one(DescribePane).hide()
+        new_kind = view if view is not None else self.current_kind
+        new_scope = namespace if namespace is not None else self.current_scope
+        if new_kind != self.current_kind or new_scope != self.current_scope:
+            await self._close_log_pane()
+            await self.watch_manager.stop(self.current_kind, self.current_scope)
+            self.current_kind = new_kind
+            self.current_scope = new_scope
+            await self.watch_manager.start(self.current_kind, self.current_scope)
 
     async def action_toggle_all_namespaces(self) -> None:
         """Toggle scope between ALL_NAMESPACES and the config-default namespace.
@@ -498,17 +514,40 @@ class KorvidApp(App[None]):
         uid = str(getattr(obj, "uid", "") or "")
         if not uid:
             return f"cannot drill into {name}: no uid available"
-        self._drill.push(
-            DrillLevel(
-                parent_kind=canonical,
-                parent_name=name,
-                parent_namespace=namespace,
-                parent_uid=uid,
-                child_kind=child,
-            )
+        level = DrillLevel(
+            parent_kind=canonical,
+            parent_name=name,
+            parent_namespace=namespace,
+            parent_uid=uid,
+            child_kind=child,
         )
-        await self._navigate(child, None)
+        # Push and navigate as one transaction under the navigation lock:
+        # a concurrent :view/agent navigate can then never observe (or
+        # strand) a pushed level without its matching child view. If the
+        # transition itself fails, the pushed level is rolled back.
+        async with self._nav_lock:
+            self._drill.push(level)
+            try:
+                await self._navigate_locked(child, None)
+            except BaseException:
+                self._drill.pop()
+                raise
+        self.post_message(ResourcesUpdated(self.current_kind))
+        self._refresh_status()
         return None
+
+    async def _pop_drill(self) -> bool:
+        """Pop one drill level and navigate back to its parent kind as one
+        transaction under the navigation lock. Returns False when the stack
+        was empty (nothing to pop)."""
+        async with self._nav_lock:
+            popped = self._drill.pop()
+            if popped is None:
+                return False
+            await self._navigate_locked(popped.parent_kind, None)
+        self.post_message(ResourcesUpdated(self.current_kind))
+        self._refresh_status()
+        return True
 
     async def _build_container_rows(
         self, namespace: str, name: str
@@ -822,9 +861,8 @@ class KorvidApp(App[None]):
             await self._close_log_pane()
             event.stop()
             return
-        popped = self._drill.pop()
-        if popped is not None:
-            await self._navigate(popped.parent_kind, None)
+        popped = await self._pop_drill()
+        if popped:
             event.stop()
 
     async def action_logs(self) -> None:
@@ -1477,6 +1515,13 @@ class KorvidApp(App[None]):
         return []
 
     async def agent_drill_down(self, name: str) -> str:
+        if isinstance(self.screen, DescribeScreen):
+            # Same user-priority guard as agent_navigate: drilling would
+            # change the table hidden under the modal the user is reading.
+            return (
+                "ERROR: a describe screen is open — the user is reading it; "
+                "ask them to close it (Esc) before changing the view"
+            )
         canonical = self._canonical_kind(self.current_kind)
         child = drill_child(canonical)
         if child is None:

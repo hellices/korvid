@@ -9,6 +9,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary, ReplicaSetSummary
 from korvid.ui.app import KorvidApp
+from korvid.ui.messages import NavigateCommand
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
 
@@ -90,7 +91,7 @@ def _default_data() -> dict[str, list[Summary]]:
     }
 
 
-async def _navigate(pilot, command: str) -> None:  # type: ignore[no-untyped-def]
+async def _navigate(pilot, command: str) -> None:  # type: ignore[no-untyped-def]  # Pilot is generic over the app's result type; the fixture's concrete type isn't exposed
     await pilot.press("colon")
     for ch in command:
         await pilot.press(ch if ch != " " else "space")
@@ -106,9 +107,20 @@ async def test_replicasets_view_has_history_columns() -> None:
         table = app.query_one(ResourceTable)
         labels = [str(col.label) for col in table.columns.values()]
         assert labels == ["NAME", "REVISION", "DESIRED", "CURRENT", "READY", "AGE"]
-        row = table.get_row_at(1)  # web-5c4e77 sorts after api-777
-        assert str(row[0]) == "web-5c4e77"
-        assert str(row[1]) == "1"
+        row = table.get_row_at(0)  # newest revision first (rollout-history order)
+        assert str(row[0]) == "web-6d9f88"
+        assert str(row[1]) == "2"
+
+
+async def test_replicasets_sorted_by_revision_descending() -> None:
+    app = make_app(_default_data())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "replicasets")
+        table = app.query_one(ResourceTable)
+        names = [str(table.get_row_at(i)[0]) for i in range(table.row_count)]
+        # rev 2 first; rev-1 ties break by name (api-777 before web-5c4e77).
+        assert names == ["web-6d9f88", "api-777", "web-5c4e77"]
 
 
 async def test_enter_on_deployment_drills_into_owned_replicasets() -> None:
@@ -226,3 +238,54 @@ async def test_agent_drill_down_without_child_kind_is_error() -> None:
         await pilot.pause(0.1)  # pods view: containers need a picker, not a kind
         out = await app.agent_drill_down("web-6d9f88-aaa")
         assert out.startswith("ERROR:")
+
+
+async def test_agent_drill_down_rejected_while_describe_screen_open() -> None:
+    """Same user-priority guard as agent_navigate: never change the table
+    hidden under a describe modal the user is reading."""
+    from korvid.ui.widgets.describe_screen import DescribeScreen
+
+    app = make_app(_default_data())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        await app.push_screen(DescribeScreen("deployments/default/web", {"kind": "Deployment"}, []))
+        await pilot.pause()
+        out = await app.agent_drill_down("web")
+        assert out.startswith("ERROR:")
+        assert app.current_kind == "deployments"
+        assert isinstance(app.screen, DescribeScreen)
+
+
+async def test_concurrent_drill_and_navigate_stay_consistent() -> None:
+    """An agent drill and a user :view navigation racing must never strand a
+    child view without its drill level (or vice versa): stack mutation and the
+    kind transition are one transaction under the nav lock."""
+    app = make_app(_default_data())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        gate = asyncio.Event()
+        orig_stop = app.watch_manager.stop
+
+        async def slow_stop(kind: str, scope: str) -> None:
+            await gate.wait()
+            await orig_stop(kind, scope)
+
+        app.watch_manager.stop = slow_stop  # type: ignore[method-assign]  # test seam to widen the race window
+        drill = asyncio.create_task(app.agent_drill_down("web"))
+        await asyncio.sleep(0.02)  # drill enters the lock and blocks in stop()
+        nav = asyncio.create_task(app.on_navigate_command(NavigateCommand("pods", None)))
+        await asyncio.sleep(0.02)
+        gate.set()
+        await drill
+        await nav
+        await pilot.pause(0.2)
+        # The user navigation queued behind the drill and lands last: the
+        # drill stack was cleared inside the same critical section, so the
+        # final pods view is unfiltered with no breadcrumb.
+        assert app.current_kind == "pods"
+        table = app.query_one(ResourceTable)
+        assert table.row_count == 2
+        status = str(app.query_one(StatusBar).content)
+        assert "deployments/" not in status
