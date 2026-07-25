@@ -219,7 +219,8 @@ def _display_phase(
     ``status.phase``; a deletionTimestamp always wins as Terminating.
     """
     if meta.get("deletionTimestamp"):
-        return "Terminating"
+        # kubectl exception: a pod deleting from an unreachable node is Unknown.
+        return "Unknown" if status.get("reason") == "NodeLost" else "Terminating"
     # kubectl scans regular containers once the pod is initialized; a stale
     # Init:* status must not hide a current CrashLoopBackOff.
     if not _is_initialized(status):
