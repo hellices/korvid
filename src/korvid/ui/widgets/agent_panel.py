@@ -20,13 +20,8 @@ from korvid.ui.messages import AgentPromptSubmitted
 _SETUP_HINT = (
     "Agent not configured.\n"
     "\n"
-    "Add to ~/.config/korvid/config.yaml:\n"
-    "\n"
-    "  agent:\n"
-    "    provider: openai-compat\n"
-    "    base_url: http://localhost:11434/v1\n"
-    "    model: llama3\n"
-    "    api_key_env: KORVID_API_KEY  # optional\n"
+    "Run :ai to configure the agent,\n"
+    "or edit ~/.config/korvid/config.yaml\n"
 )
 
 

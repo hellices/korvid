@@ -14,6 +14,9 @@ from korvid.ui.messages import (
 )
 
 _NS_KEYWORDS = {"ns", "namespaces"}
+# Built-ins handled by the app's unknown-command hook; a cluster CRD alias
+# (e.g. a `Model` resource) must never shadow them.
+_RESERVED_BUILTINS = {"ai", "agent", "model"}
 
 
 def parse_command(
@@ -30,6 +33,8 @@ def parse_command(
         return ShowNamespacePicker()
     if head in _NS_KEYWORDS and len(rest) == 1:
         return NavigateCommand(view=None, namespace=rest[0])
+    if head in _RESERVED_BUILTINS:
+        return UnknownCommand(text)
     plural = known(head)
     if plural is None:
         return UnknownCommand(text)

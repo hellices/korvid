@@ -112,7 +112,7 @@ async def test_setup_hint_disables_input() -> None:
         panel.show_setup_hint()
         await pilot.pause()
         assert app.query_one("#agent-input", Input).disabled is True
-        assert "provider: openai-compat" in _log_text(app)
+        assert "Run :ai" in _log_text(app)
 
 
 async def test_input_disabled_during_turn_reenabled_on_complete() -> None:

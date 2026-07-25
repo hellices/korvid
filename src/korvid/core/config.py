@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from os import chmod as os_chmod
+from os import fdopen as os_fdopen
+from os import fsync as os_fsync
+from os import replace as os_replace
 from pathlib import Path
+from stat import S_IMODE
+from tempfile import mkstemp
 from typing import Any
 
 import yaml
@@ -20,6 +26,7 @@ class KorvidConfig:
     agent_base_url: str | None = None
     agent_model: str | None = None
     agent_api_key_env: str | None = None
+    agent_auth_method: str | None = None
     keybindings: dict[str, str] = field(default_factory=dict)
     log_buffer_lines: int = 5000
 
@@ -30,10 +37,23 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     if not cfg_path.is_file():
         return KorvidConfig()
     raw: dict[str, Any] = yaml.safe_load(cfg_path.read_text()) or {}
-    agent_raw: dict[str, Any] = raw.get("agent") or {}
+    agent_value = raw.get("agent")
+    # User-edited configs can hold scalars where mappings are expected;
+    # treat anything that is not a mapping as absent instead of crashing.
+    agent_raw: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
     provider: str | None = agent_raw.get("provider")
     # Auto-activation: provider present -> on, unless explicitly disabled (§6.3).
     enabled = bool(provider) and agent_raw.get("enabled", True) is not False
+    api_key_env = _opt_str(agent_raw.get("api_key_env"))
+    auth_value = agent_raw.get("auth")
+    auth_raw: dict[str, Any] = auth_value if isinstance(auth_value, dict) else {}
+    auth_method = _opt_str(auth_raw.get("method"))
+    if auth_method is None and provider:
+        # Back-compat: configs written before agent.auth existed.
+        if provider == "github-copilot":
+            auth_method = "device-login"
+        else:
+            auth_method = "api_key" if api_key_env else "none"
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
@@ -41,10 +61,75 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_provider=provider,
         agent_base_url=_opt_str(agent_raw.get("base_url")),
         agent_model=_opt_str(agent_raw.get("model")),
-        agent_api_key_env=_opt_str(agent_raw.get("api_key_env")),
+        agent_api_key_env=api_key_env,
+        agent_auth_method=auth_method,
         keybindings=dict(raw.get("keybindings") or {}),
         log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
     )
+
+
+def save_agent_config(
+    path: Path,
+    *,
+    provider: str,
+    auth_method: str,
+    base_url: str | None,
+    model: str,
+    api_key_env: str | None,
+) -> None:
+    """Persist managed agent fields, preserving unrelated keys (read-modify-write)."""
+    raw: dict[str, Any] = {}
+    if path.is_file():
+        raw = yaml.safe_load(path.read_text()) or {}
+    existing = raw.get("agent")
+    agent: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    agent["provider"] = provider
+    agent["model"] = model
+    # Merge into any existing auth mapping: only `method` is managed here,
+    # unrelated nested keys must survive the read-modify-write.
+    existing_auth = agent.get("auth")
+    auth: dict[str, Any] = dict(existing_auth) if isinstance(existing_auth, dict) else {}
+    auth["method"] = auth_method
+    agent["auth"] = auth
+    # A completed wizard/model save is a user-confirmed enable: clear any
+    # stale explicit-disable switch so it cannot silently win after restart.
+    agent.pop("enabled", None)
+    if base_url:
+        agent["base_url"] = base_url
+    else:
+        agent.pop("base_url", None)
+    if api_key_env:
+        agent["api_key_env"] = api_key_env
+    else:
+        agent.pop("api_key_env", None)
+    raw["agent"] = agent
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(path, yaml.safe_dump(raw, sort_keys=False))
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Unique same-directory temp file + fsync + atomic replace: an
+    interrupted write can never leave truncated YAML behind (destroying
+    unrelated keys), a power loss cannot leave an empty file, and concurrent
+    writers cannot race on a shared temp name."""
+    try:
+        # Preserve an existing restrictive mode; default new files to 0600.
+        mode = S_IMODE(path.stat().st_mode)
+    except OSError:
+        mode = 0o600
+    fd, tmp_name = mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        # Write through the mkstemp fd and fsync it while still writable:
+        # Windows' fsync (_commit) rejects read-only handles.
+        with os_fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os_fsync(fh.fileno())
+        os_chmod(tmp, mode)
+        os_replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _parse_buffer_lines(value: Any) -> int:

@@ -11,10 +11,16 @@ dependencies = [
     "pyyaml>=6.0",
     "rich>=13.0",
     "httpx>=0.27",
+    "keyring>=25.7.0",
 ]
 
 [project.scripts]
 korvid = "korvid.__main__:main"
+
+[project.optional-dependencies]
+entra = [
+    "azure-identity>=1.19",
+]
 
 [build-system]
 # hatchling >=1.26 required: PEP 639 SPDX string form of `license` above
@@ -37,6 +43,7 @@ dev = [
     "deptry>=0.20",
     "pre-commit>=4",
     "types-PyYAML",
+    "azure-identity>=1.25.3",
 ]
 
 [tool.ruff]
@@ -89,3 +96,4 @@ known_first_party = ["korvid"]
 [tool.deptry.package_module_name_map]
 pyyaml = "yaml"
 kubernetes_asyncio = "kubernetes_asyncio"
+azure-identity = "azure"

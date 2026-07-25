@@ -110,3 +110,15 @@ def test_ns_view_none_means_keep_current_kind() -> None:
     assert isinstance(msg, NavigateCommand)
     assert msg.view is None
     assert msg.namespace == "kube-system"
+
+
+def test_builtin_names_reserved_over_resource_aliases() -> None:
+    """A cluster CRD alias like `model` must not shadow the :model built-in."""
+
+    def crd_known(head: str) -> str | None:
+        return {"model": "models", "agent": "agents", "ai": "ais"}.get(head)
+
+    for text in ("ai", "agent", "model gpt-4o"):
+        msg = parse_command(text, crd_known)
+        assert isinstance(msg, UnknownCommand)
+        assert msg.text == text

@@ -10,8 +10,12 @@ from __future__ import annotations
 import logging
 import os
 
+from korvid.agent.credentials import CredentialSource
 from korvid.agent.provider import LLMProvider
+from korvid.providers.entra import EntraCredentialSource
+from korvid.providers.github_copilot import COPILOT_CHAT_BASE_URL, CopilotCredentialSource
 from korvid.providers.openai_compat import OpenAICompatProvider
+from korvid.providers.static_creds import StaticHeaderSource
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +37,11 @@ def create_provider(
     *,
     enabled: bool,
     provider: str | None,
+    auth_method: str | None,
     base_url: str | None,
     model: str | None,
     api_key_env: str | None,
+    oauth_token: str | None = None,
 ) -> LLMProvider | None:
     """Build an LLM provider from neutral values, or None when unconfigured/misconfigured."""
     if not enabled:
@@ -43,18 +49,71 @@ def create_provider(
     # YAML can hand us non-string scalars (e.g. `provider: true`); only
     # strings are meaningful — anything else falls to the unknown branch.
     name = provider.lower() if isinstance(provider, str) else ""
+    if name == "github-copilot":
+        # Copilot only supports device-login; a stored OAuth token must not be
+        # consumed under a mistyped or explicitly different auth method.
+        if auth_method not in (None, "device-login"):
+            logger.warning(
+                "github-copilot requires auth method 'device-login', got %r — agent disabled",
+                auth_method,
+            )
+            return None
+        if not model:
+            logger.warning("github-copilot missing model — agent disabled")
+            return None
+        if not oauth_token:
+            logger.warning("github-copilot: not logged in — run :ai in the TUI")
+            return None
+        return OpenAICompatProvider(
+            base_url=base_url or COPILOT_CHAT_BASE_URL,
+            model=model,
+            credentials=CopilotCredentialSource(oauth_token),
+        )
     if name not in _OPENAI_COMPAT_ALIASES:
         logger.warning("unknown agent provider %r — agent disabled", provider)
         return None
     if not base_url or not model:
         logger.warning("agent provider %r missing base_url/model — agent disabled", name)
         return None
-    api_key = os.environ.get(api_key_env) if api_key_env else None
+    try:
+        credentials = build_credentials(name, auth_method, api_key_env)
+    except _AuthMisconfigured as exc:
+        logger.warning("%s — agent disabled", exc)
+        return None
     return OpenAICompatProvider(
         base_url=base_url,
         model=model,
-        api_key=api_key,
-        # Azure OpenAI authenticates with a raw key in the "api-key" header
-        # instead of a Bearer Authorization header.
-        auth_header="api-key" if name == "azure" else "Authorization",
+        credentials=credentials,
     )
+
+
+class _AuthMisconfigured(Exception):
+    """Auth settings are present but unusable — the agent must be disabled."""
+
+
+def build_credentials(
+    name: str, auth_method: str | None, api_key_env: str | None
+) -> CredentialSource | None:
+    """Credential source for a provider, or None when explicitly unauthenticated.
+
+    Raises when auth settings are present but unusable (unknown method,
+    missing API key env var) — callers decide whether that disables the
+    agent or merely skips an optional request.
+    """
+    method = auth_method or ("api_key" if api_key_env else "none")
+    if method == "entra":
+        return EntraCredentialSource()
+    if method == "api_key":
+        api_key = os.environ.get(api_key_env) if api_key_env else None
+        if not api_key:
+            raise _AuthMisconfigured(
+                f"auth method 'api_key' but {api_key_env or 'api_key_env'} is not set"
+            )
+        # Azure OpenAI authenticates with a raw key in the "api-key" header
+        # instead of a bearer Authorization header.
+        if name == "azure":
+            return StaticHeaderSource(api_key, header="api-key", prefix="")
+        return StaticHeaderSource(api_key)
+    if method == "none":
+        return None  # explicitly unauthenticated (e.g. local ollama)
+    raise _AuthMisconfigured(f"unknown agent auth method {method!r}")
