@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import shutil
 import subprocess
@@ -19,6 +20,7 @@ from textual.widgets import DataTable, Footer, Static
 
 from korvid.agent.events import AgentError
 from korvid.agent.runtime import AgentRuntime
+from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
@@ -41,6 +43,7 @@ from korvid.ui.messages import (
 )
 from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv, build_probe_argv
 from korvid.ui.widgets.agent_panel import AgentPanel
+from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 from korvid.ui.widgets.command_bar import CommandBar
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribeScreen
@@ -158,6 +161,8 @@ class KorvidApp(App[None]):
         stream_logs: Callable[..., AsyncIterator[LogLine]] | None = None,
         agent_runtime: AgentRuntime | None = None,
         agent_model_name: str | None = None,
+        agent_configurator: AgentConfigurator | None = None,
+        rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -169,6 +174,19 @@ class KorvidApp(App[None]):
         self._stream_logs = stream_logs
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
+        self._agent_configurator = agent_configurator
+        self._rebuild_agent = rebuild_agent
+        self._agent_settings: AgentSettings | None = None
+        # A runtime built from config.yaml at startup must seed the settings
+        # snapshot so :model works without running the :ai wizard first.
+        if agent_runtime is not None and config.agent_provider and config.agent_model:
+            self._agent_settings = AgentSettings(
+                provider=config.agent_provider,
+                auth_method=config.agent_auth_method or "none",
+                base_url=config.agent_base_url,
+                model=config.agent_model,
+                api_key_env=config.agent_api_key_env,
+            )
         self._agent_task: asyncio.Task[None] | None = None
         self.aliases: dict[str, ResourceMeta] = (
             aliases if aliases is not None else dict(_DEFAULT_ALIASES)
@@ -474,11 +492,104 @@ class KorvidApp(App[None]):
         await self.push_screen(DescribeScreen(title, manifest, events))
 
     def on_unknown_command(self, message: UnknownCommand) -> None:
+        parts = message.text.strip().split()
+        head = parts[0] if parts else ""
+        if head in {"ai", "agent"}:
+            self._open_agent_setup()
+            return
+        if head == "model":
+            self._handle_model_command(parts[1:])
+            return
         self.notify(
             f"Unknown resource or command: {message.text}"
             " — not found in this cluster's API (CRD not installed?)",
             severity="warning",
         )
+
+    def _open_agent_setup(self) -> None:
+        if self._agent_configurator is None:
+            self.notify("Agent setup unavailable in this build", severity="warning")
+            return
+        # The wizard applies the settings itself (via apply_settings) before
+        # persisting, so a refused swap keeps the wizard open and unsaved.
+        self.push_screen(
+            AgentSetupScreen(self._agent_configurator, apply_settings=self._apply_agent_settings)
+        )
+
+    def _handle_model_command(self, args: list[str]) -> None:
+        """`:model` shows the current model; `:model <name>` switches and persists it."""
+        if not args:
+            # Report only a live model: at startup config may carry a model
+            # name even though provider creation failed (runtime is None).
+            if self._agent_runtime is not None and self._agent_model_name:
+                self.notify(f"Agent model: {self._agent_model_name}")
+            else:
+                self.notify("Agent not configured — run :ai first", severity="warning")
+            return
+        settings = self._agent_settings
+        configurator = self._agent_configurator
+        if settings is None or configurator is None:
+            self.notify("Agent not configured — run :ai first", severity="warning")
+            return
+        new_settings = dataclasses.replace(settings, model=args[0])
+
+        async def _switch() -> None:
+            # Apply first: persistence must be conditional on a successful
+            # swap, or a refused change would silently take effect on restart.
+            if not self._apply_agent_settings(new_settings):
+                return  # _apply_agent_settings already notified the reason
+            try:
+                await configurator.save(new_settings)
+            except Exception as exc:  # runtime is live but disk is stale
+                # Do not name a revert target: after a previous failed save
+                # the in-memory snapshot may itself never have been persisted.
+                self.notify(
+                    f"Model applied, but save failed: {exc} — will revert to "
+                    "the last saved model on restart",
+                    severity="warning",
+                )
+                return
+            self.notify(f"Agent model set to {new_settings.model}")
+
+        self.run_worker(_switch(), exclusive=False)
+
+    def _apply_agent_settings(self, settings: AgentSettings) -> bool:
+        """Swap in a fresh runtime built from the wizard's settings.
+
+        Transactional: on any failure the previous runtime/settings are kept
+        and False is returned; the swap is also refused while a turn is live.
+        """
+        if self._rebuild_agent is None:
+            self.notify("Agent rebuild unavailable in this build", severity="warning")
+            return False
+        if self._agent_task is not None and not self._agent_task.done():
+            self.notify("Agent is busy — wait for the current turn to finish", severity="warning")
+            return False
+        try:
+            runtime = self._rebuild_agent(settings)
+        except Exception as exc:
+            self.notify(f"Agent rebuild failed: {exc}", severity="error")
+            return False
+        if runtime is None:
+            self.notify(
+                "Agent rebuild failed — check configuration; keeping previous agent",
+                severity="error",
+            )
+            return False
+        self._agent_runtime = runtime
+        self._agent_model_name = settings.model
+        self._agent_settings = settings
+        self._refresh_status()
+        panel = self.query_one(AgentPanel)
+        agent_input = panel.query_one("#agent-input")
+        # Always re-enable: the hint may have disabled it while the panel was
+        # open earlier; only focus/header rendering depends on visibility.
+        agent_input.disabled = False
+        if panel.display:
+            in_tok, out_tok = runtime.total_tokens
+            panel.set_header(settings.model, in_tok, out_tok, estimated=runtime.usage_estimated)
+            agent_input.focus()
+        return True
 
     def action_shell(self) -> None:
         """Drop into a shell inside the selected pod via kubectl exec.

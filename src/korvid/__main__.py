@@ -12,18 +12,21 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
+from korvid.agent.setup import AgentSettings
 from korvid.agent.tools import ToolExecutor
-from korvid.core.config import load_config
+from korvid.core.config import DEFAULT_CONFIG_PATH, KorvidConfig, load_config, save_agent_config
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.client import KubeClient, resolve_context_name
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+from korvid.providers.configurator import ProviderConfigurator
 from korvid.providers.registry import create_provider
+from korvid.providers.token_store import TokenStore
 from korvid.ui.app import KorvidApp
 
 logger = logging.getLogger(__name__)
@@ -57,6 +60,84 @@ async def _discover_in_background(
         return
     aliases.update(discovered)
     app.on_aliases_updated()
+
+
+def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Task[None]]) -> None:
+    """Close an old provider without blocking, keeping a strong task reference.
+
+    asyncio only holds weak references to tasks, so fire-and-forget tasks can
+    be garbage-collected before completion; the done callback also consumes
+    any close error to avoid 'Task exception was never retrieved' warnings.
+    """
+    task = asyncio.get_running_loop().create_task(provider.aclose())
+    tasks.add(task)
+
+    def _reap(t: asyncio.Task[None]) -> None:
+        tasks.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            logger.debug("old provider close failed", exc_info=t.exception())
+
+    task.add_done_callback(_reap)
+
+
+def _build_agent_wiring(
+    config: KorvidConfig, kube: KubeClient, aliases: dict[str, ResourceMeta]
+) -> tuple[
+    AgentRuntime | None,
+    ProviderConfigurator,
+    Callable[[AgentSettings], AgentRuntime | None],
+    list[LLMProvider | None],
+]:
+    """Build the initial agent runtime plus the :ai wizard's configurator/rebuild hooks."""
+    token_store = TokenStore()
+    oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
+    provider = create_provider(
+        enabled=config.agent_enabled,
+        provider=config.agent_provider,
+        auth_method=config.agent_auth_method,
+        base_url=config.agent_base_url,
+        model=config.agent_model,
+        api_key_env=config.agent_api_key_env,
+        oauth_token=oauth,
+    )
+    agent_runtime = AgentRuntime(provider, ToolExecutor(kube, aliases)) if provider else None
+
+    # Mutable holder so rebuild_agent/_shutdown always see the live provider.
+    provider_box: list[LLMProvider | None] = [provider]
+
+    def persist(settings: AgentSettings) -> None:
+        save_agent_config(
+            DEFAULT_CONFIG_PATH,
+            provider=settings.provider,
+            auth_method=settings.auth_method,
+            base_url=settings.base_url,
+            model=settings.model,
+            api_key_env=settings.api_key_env,
+        )
+
+    configurator = ProviderConfigurator(token_store, persist)
+    close_tasks: set[asyncio.Task[None]] = set()
+
+    def rebuild_agent(settings: AgentSettings) -> AgentRuntime | None:
+        old = provider_box[0]
+        if old is not None:
+            # Close in the background; the new provider takes over immediately.
+            _close_provider_in_background(old, close_tasks)
+        new_provider = create_provider(
+            enabled=True,
+            provider=settings.provider,
+            auth_method=settings.auth_method,
+            base_url=settings.base_url,
+            model=settings.model,
+            api_key_env=settings.api_key_env,
+            oauth_token=token_store.load("github-oauth"),
+        )
+        provider_box[0] = new_provider
+        if new_provider is None:
+            return None
+        return AgentRuntime(new_provider, ToolExecutor(kube, aliases))
+
+    return agent_runtime, configurator, rebuild_agent, provider_box
 
 
 async def _run() -> None:
@@ -98,14 +179,9 @@ async def _run() -> None:
 
     watch_manager = WatchManager(store, source)
 
-    provider = create_provider(
-        enabled=config.agent_enabled,
-        provider=config.agent_provider,
-        base_url=config.agent_base_url,
-        model=config.agent_model,
-        api_key_env=config.agent_api_key_env,
+    agent_runtime, configurator, rebuild_agent, provider_box = _build_agent_wiring(
+        config, kube, aliases
     )
-    agent_runtime = AgentRuntime(provider, ToolExecutor(kube, aliases)) if provider else None
 
     app = KorvidApp(
         config=config,
@@ -118,13 +194,15 @@ async def _run() -> None:
         stream_logs=kube.stream_logs,
         agent_runtime=agent_runtime,
         agent_model_name=config.agent_model,
+        agent_configurator=configurator,
+        rebuild_agent=rebuild_agent,
     )
 
     discovery_task = asyncio.create_task(_discover_in_background(kube, aliases, app))
     try:
         await app.run_async()
     finally:
-        await _shutdown(discovery_task, provider, kube)
+        await _shutdown(discovery_task, provider_box[0], kube)
 
 
 def main() -> None:

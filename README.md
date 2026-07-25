@@ -57,23 +57,60 @@ Tool results are capped at 8,000 characters and `Secret` data is masked before
 it ever reaches the model.  The header shows the model name and cumulative
 token usage (`~` marks estimated counts when the provider omits usage data).
 
-Configure any OpenAI-compatible endpoint in `~/.config/korvid/config.yaml`.
-Provider examples:
+### Setup
+
+The quickest way to configure the agent is inside the TUI: type `:ai`
+(alias `:agent`) to open the setup wizard.  It walks through provider,
+authentication, connection details, runs a live test call, and saves the
+result to `~/.config/korvid/config.yaml`.  Use `:model <name>` to switch
+models later without re-running the wizard (`:model` alone shows the
+current model).
+
+Each provider supports the auth method that fits it — GitHub device login,
+Microsoft Entra ID, an API key from the environment, or no auth at all:
 
 ```yaml
-# Ollama (local, no API key)
+# GitHub Copilot (log in via :ai inside korvid — no PAT needed)
 agent:
-  provider: ollama
-  base_url: http://localhost:11434/v1
-  model: llama3.1
+  provider: github-copilot
+  model: gpt-4o
+  auth: {method: device-login}
 
-# OpenAI
+# Azure OpenAI / AI Foundry with Entra ID (az login or managed identity)
 agent:
-  provider: openai
+  provider: azure
+  base_url: https://YOUR-RESOURCE.openai.azure.com/openai/v1
+  model: gpt-4o
+  auth: {method: entra}
+
+# Any OpenAI-compatible endpoint with an API key from the environment
+agent:
+  provider: openai-compat
   base_url: https://api.openai.com/v1
   model: gpt-4o-mini
   api_key_env: OPENAI_API_KEY
+  auth: {method: api_key}
 
+# Local Ollama (no auth)
+agent:
+  provider: ollama
+  base_url: http://localhost:11434/v1
+  model: llama3
+  auth: {method: none}
+```
+
+> **Warning:** GitHub Copilot support uses an unofficial internal API that
+> may change or break without notice.  It requires an active GitHub Copilot
+> subscription.
+
+Entra ID auth needs the optional extra: `pip install korvid[entra]`
+(or `uv sync --extra entra` for development).  Configs written before
+`agent.auth` existed keep working: `api_key_env` implies
+`auth: {method: api_key}`.
+
+More OpenAI-compatible endpoints:
+
+```yaml
 # GitHub Models (any GitHub account; uses a PAT with `models: read` scope)
 agent:
   provider: github
@@ -88,13 +125,6 @@ agent:
   model: claude-sonnet-4-5
   api_key_env: ANTHROPIC_API_KEY
 
-# Azure OpenAI (v1 API surface; korvid sends the key as an "api-key" header)
-agent:
-  provider: azure
-  base_url: https://<resource>.openai.azure.com/openai/v1
-  model: <deployment-name>
-  api_key_env: AZURE_OPENAI_API_KEY
-
 # vLLM / any self-hosted OpenAI-compatible server
 agent:
   provider: vllm
@@ -103,12 +133,12 @@ agent:
 ```
 
 `api_key_env` names the environment variable holding the key — the key itself
-never lives in the config file.  The GitHub Copilot subscription API
-(`api.githubcopilot.com`) requires an OAuth token exchange and is not supported
-yet; GitHub Models is the supported GitHub-hosted path.  Claude Code is a CLI
-product, not an API — use the Anthropic API entry above for Claude models.
+never lives in the config file.  OAuth tokens from device login are stored in
+the OS keyring (falling back to a `0600` file at
+`~/.config/korvid/credentials.json`).  Claude Code is a CLI product, not an
+API — use the Anthropic API entry above for Claude models.
 
-Without configuration, `Ctrl-A` shows a setup hint instead of a prompt.
+Without configuration, `Ctrl-A` shows a setup hint pointing at `:ai`.
 
 ## Installation
 

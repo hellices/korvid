@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from korvid.providers.openai_compat import OpenAICompatProvider, ProviderError
+from korvid.providers.static_creds import StaticHeaderSource
 
 
 def _sse(*chunks: dict[str, Any]) -> str:
@@ -23,7 +24,10 @@ def _provider(
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return OpenAICompatProvider(
-        base_url="http://x/v1", model="m1", api_key="sk-test", client=client
+        base_url="http://x/v1",
+        model="m1",
+        credentials=StaticHeaderSource("sk-test"),
+        client=client,
     )
 
 
@@ -123,7 +127,7 @@ async def test_aclose_closes_owned_client_only() -> None:
     await injected_client.aclose()
 
 
-async def test_no_auth_header_without_api_key() -> None:
+async def test_no_auth_header_without_credentials() -> None:
     cap: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -149,9 +153,8 @@ async def test_azure_style_api_key_header() -> None:
     provider = OpenAICompatProvider(
         base_url="http://x/openai/v1",
         model="m1",
-        api_key="azure-key",
+        credentials=StaticHeaderSource("azure-key", header="api-key", prefix=""),
         client=client,
-        auth_header="api-key",
     )
     _ = [e async for e in provider.complete([], [])]
     assert cap["headers"]["api-key"] == "azure-key"

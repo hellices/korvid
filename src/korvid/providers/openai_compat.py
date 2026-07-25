@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from korvid.agent.credentials import CredentialSource
 from korvid.agent.provider import LLMProvider
 
 
@@ -26,14 +27,12 @@ class OpenAICompatProvider(LLMProvider):
         self,
         base_url: str,
         model: str,
-        api_key: str | None = None,
+        credentials: CredentialSource | None = None,
         client: httpx.AsyncClient | None = None,
-        auth_header: str = "Authorization",
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
-        self._api_key = api_key
-        self._auth_header = auth_header
+        self._credentials = credentials
         self._client = client  # injected or lazily created on first call
         self._owns_client = client is None
 
@@ -49,20 +48,19 @@ class OpenAICompatProvider(LLMProvider):
         return self._client
 
     async def aclose(self) -> None:
-        """Close the lazily created HTTP client (injected clients stay open)."""
-        if self._owns_client and self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        """Close the lazily created HTTP client and credentials (injected clients stay open)."""
+        try:
+            if self._owns_client and self._client is not None:
+                await self._client.aclose()
+                self._client = None
+        finally:
+            if self._credentials is not None:
+                await self._credentials.aclose()
 
-    def _headers(self) -> dict[str, str]:
-        headers: dict[str, str] = {}
-        if self._api_key is not None:
-            if self._auth_header == "Authorization":
-                headers["Authorization"] = "Bearer " + self._api_key
-            else:
-                # e.g. Azure OpenAI expects the raw key in an "api-key" header
-                headers[self._auth_header] = self._api_key
-        return headers
+    async def _headers(self) -> dict[str, str]:
+        if self._credentials is not None:
+            return await self._credentials.headers()
+        return {}
 
     async def complete(
         self,
@@ -86,7 +84,7 @@ class OpenAICompatProvider(LLMProvider):
             "POST",
             f"{self._base_url}/chat/completions",
             json=payload,
-            headers=self._headers(),
+            headers=await self._headers(),
         ) as resp:
             if resp.status_code >= 300:
                 await resp.aread()
