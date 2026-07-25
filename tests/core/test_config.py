@@ -130,3 +130,41 @@ def test_save_agent_config_creates_file(tmp_path: Path) -> None:
         api_key_env=None,
     )
     assert load_config(p).agent_provider == "ollama"
+
+
+def test_save_agent_config_preserves_agent_extension_keys(tmp_path: Path) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text("agent:\n  provider: ollama\n  enabled: false\n  model: llama3\n")
+    save_agent_config(
+        p,
+        provider="ollama",
+        auth_method="none",
+        base_url="http://localhost:11434/v1",
+        model="llama3",
+        api_key_env=None,
+    )
+    import yaml
+
+    raw = yaml.safe_load(p.read_text())
+    assert raw["agent"]["enabled"] is False  # unrelated agent key kept
+
+
+def test_save_agent_config_drops_stale_optional_fields(tmp_path: Path) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "agent:\n  provider: openai-compat\n  base_url: https://x/v1\n"
+        "  model: m\n  api_key_env: K\n"
+    )
+    save_agent_config(
+        p,
+        provider="github-copilot",
+        auth_method="device-login",
+        base_url=None,
+        model="gpt-4o",
+        api_key_env=None,
+    )
+    import yaml
+
+    agent = yaml.safe_load(p.read_text())["agent"]
+    assert "base_url" not in agent
+    assert "api_key_env" not in agent

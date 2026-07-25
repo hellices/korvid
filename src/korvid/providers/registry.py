@@ -67,12 +67,20 @@ def create_provider(
     if not base_url or not model:
         logger.warning("agent provider %r missing base_url/model — agent disabled", name)
         return None
-    credentials = _build_credentials(name, auth_method, api_key_env)
+    try:
+        credentials = _build_credentials(name, auth_method, api_key_env)
+    except _AuthMisconfigured as exc:
+        logger.warning("%s — agent disabled", exc)
+        return None
     return OpenAICompatProvider(
         base_url=base_url,
         model=model,
         credentials=credentials,
     )
+
+
+class _AuthMisconfigured(Exception):
+    """Auth settings are present but unusable — the agent must be disabled."""
 
 
 def _build_credentials(
@@ -84,10 +92,14 @@ def _build_credentials(
     if method == "api_key":
         api_key = os.environ.get(api_key_env) if api_key_env else None
         if not api_key:
-            return None
+            raise _AuthMisconfigured(
+                f"auth method 'api_key' but {api_key_env or 'api_key_env'} is not set"
+            )
         # Azure OpenAI authenticates with a raw key in the "api-key" header
         # instead of a bearer Authorization header.
         if name == "azure":
             return StaticHeaderSource(api_key, header="api-key", prefix="")
         return StaticHeaderSource(api_key)
-    return None  # "none" and unknown methods -> unauthenticated
+    if method == "none":
+        return None  # explicitly unauthenticated (e.g. local ollama)
+    raise _AuthMisconfigured(f"unknown agent auth method {method!r}")

@@ -177,6 +177,16 @@ class KorvidApp(App[None]):
         self._agent_configurator = agent_configurator
         self._rebuild_agent = rebuild_agent
         self._agent_settings: AgentSettings | None = None
+        # A runtime built from config.yaml at startup must seed the settings
+        # snapshot so :model works without running the :ai wizard first.
+        if agent_runtime is not None and config.agent_provider and config.agent_model:
+            self._agent_settings = AgentSettings(
+                provider=config.agent_provider,
+                auth_method=config.agent_auth_method or "none",
+                base_url=config.agent_base_url,
+                model=config.agent_model,
+                api_key_env=config.agent_api_key_env,
+            )
         self._agent_task: asyncio.Task[None] | None = None
         self.aliases: dict[str, ResourceMeta] = (
             aliases if aliases is not None else dict(_DEFAULT_ALIASES)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from korvid.agent.setup import AgentSettings, DeviceLoginPrompt
+from korvid.agent.setup import AgentConfigurator, AgentSettings, DeviceLoginPrompt
 from korvid.providers.github_copilot import DeviceCodePrompt, GitHubDeviceFlow
 from korvid.providers.registry import create_provider
 from korvid.providers.token_store import TokenStore
@@ -12,7 +12,7 @@ from korvid.providers.token_store import TokenStore
 _PROBE_MESSAGE = {"role": "user", "content": "Reply with the single word: ok"}
 
 
-class ProviderConfigurator:
+class ProviderConfigurator(AgentConfigurator):
     """Implements korvid.agent.setup.AgentConfigurator (injected at composition root)."""
 
     def __init__(
@@ -28,9 +28,17 @@ class ProviderConfigurator:
         self._prompt: DeviceCodePrompt | None = None
 
     async def begin_device_login(self) -> DeviceLoginPrompt:
-        self._flow = self._flow_factory()
-        self._prompt = await self._flow.start()
-        return DeviceLoginPrompt(self._prompt.user_code, self._prompt.verification_uri)
+        flow = self._flow_factory()
+        try:
+            prompt = await flow.start()
+        except BaseException:
+            # Never leak the flow's HTTP client when the device-code request
+            # fails or the worker is cancelled before a prompt is obtained.
+            await flow.aclose()
+            raise
+        self._flow = flow
+        self._prompt = prompt
+        return DeviceLoginPrompt(prompt.user_code, prompt.verification_uri)
 
     async def finish_device_login(self) -> None:
         if self._flow is None or self._prompt is None:

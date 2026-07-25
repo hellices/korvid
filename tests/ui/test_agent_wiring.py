@@ -238,12 +238,12 @@ async def test_apply_agent_settings_enables_agent() -> None:
 
 
 async def test_model_command_swaps_model_and_saves() -> None:
-    from korvid.agent.setup import AgentSettings
+    from korvid.agent.setup import AgentConfigurator, AgentSettings
     from korvid.ui.messages import UnknownCommand
 
     saved: list[AgentSettings] = []
 
-    class Cfg:
+    class Cfg(AgentConfigurator):
         async def begin_device_login(self) -> Any:
             raise NotImplementedError
 
@@ -290,3 +290,58 @@ async def test_model_command_without_config_does_not_crash() -> None:
         app.on_unknown_command(UnknownCommand("model"))
         await pilot.pause()
         assert app._agent_model_name is None
+
+
+async def test_model_command_works_after_configured_startup() -> None:
+    """A runtime built from config.yaml at startup must seed _agent_settings
+    so :model works without running the :ai wizard first."""
+    from korvid.agent.setup import AgentConfigurator, AgentSettings
+    from korvid.ui.messages import UnknownCommand
+
+    saved: list[AgentSettings] = []
+
+    class Cfg(AgentConfigurator):
+        async def begin_device_login(self) -> Any:
+            raise NotImplementedError
+
+        async def finish_device_login(self) -> None:
+            raise NotImplementedError
+
+        async def test(self, settings: Any) -> str:
+            return "ok"
+
+        async def save(self, settings: AgentSettings) -> None:
+            saved.append(settings)
+
+    runtime = cast("Any", StubRuntime([]))
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
+        yield ("ADDED", _pod("web-1"))
+        while True:
+            await asyncio.sleep(0.01)
+
+    app = KorvidApp(
+        config=KorvidConfig(
+            namespace="default",
+            agent_enabled=True,
+            agent_provider="ollama",
+            agent_base_url="http://localhost:11434/v1",
+            agent_model="llama3",
+            agent_auth_method="none",
+        ),
+        store=store,
+        watch_manager=WatchManager(store, source),
+        agent_runtime=runtime,
+        agent_model_name="llama3",
+        agent_configurator=Cfg(),
+        rebuild_agent=lambda s: runtime,
+    )
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        for _ in range(4):
+            await pilot.pause()
+        assert app._agent_model_name == "gpt-4o"
+        assert saved
+        assert saved[-1].provider == "ollama"
+        assert saved[-1].model == "gpt-4o"

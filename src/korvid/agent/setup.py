@@ -7,8 +7,8 @@ composition root (tach layer rules: ui must not import providers).
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Protocol
 
 
 @dataclass(frozen=True)
@@ -26,11 +26,17 @@ class DeviceLoginPrompt:
     verification_uri: str
 
 
-class AgentConfigurator(Protocol):
+class AgentConfigurator(ABC):
+    """Boundary contract between the ui and providers layers (AGENTS.md: ABC)."""
+
+    @abstractmethod
     async def begin_device_login(self) -> DeviceLoginPrompt: ...
 
+    @abstractmethod
     async def finish_device_login(self) -> None: ...
 
+    @abstractmethod
     async def test(self, settings: AgentSettings) -> str: ...
 
+    @abstractmethod
     async def save(self, settings: AgentSettings) -> None: ...

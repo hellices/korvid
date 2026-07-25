@@ -179,7 +179,11 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
         except Exception as exc:  # keep the wizard open on probe failure
             self._status(f"Test failed: {exc} — press r to retry, Esc to cancel")
             return
-        await self._configurator.save(settings)
+        try:
+            await self._configurator.save(settings)
+        except Exception as exc:  # keep the wizard open on save failure
+            self._status(f"Save failed: {exc} — press r to retry, Esc to cancel")
+            return
         self.dismiss(settings)
 
     # ------------------------------------------------------------------

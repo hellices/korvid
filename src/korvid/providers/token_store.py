@@ -57,6 +57,8 @@ class TokenStore:
             raw = json.loads(self._path.read_text())
         except (OSError, ValueError):
             return {}
+        if not isinstance(raw, dict):
+            return {}
         return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
 
     def _write_file(self, data: dict[str, str]) -> None:

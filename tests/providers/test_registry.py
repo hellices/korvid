@@ -128,3 +128,34 @@ def test_entra_auth_builds_provider() -> None:
         oauth_token=None,
     )
     assert isinstance(p, OpenAICompatProvider)
+
+
+def test_api_key_method_with_missing_env_disables_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MISSING_KEY_ENV", raising=False)
+    assert (
+        create_provider(
+            enabled=True,
+            provider="openai-compat",
+            auth_method="api_key",
+            base_url="http://x/v1",
+            model="m",
+            api_key_env="MISSING_KEY_ENV",
+        )
+        is None
+    )
+
+
+def test_unknown_auth_method_disables_agent() -> None:
+    assert (
+        create_provider(
+            enabled=True,
+            provider="openai-compat",
+            auth_method="mystery-auth",
+            base_url="http://x/v1",
+            model="m",
+            api_key_env=None,
+        )
+        is None
+    )

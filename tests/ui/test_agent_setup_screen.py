@@ -7,11 +7,11 @@ from typing import Any
 from textual.app import App
 from textual.widgets import Input, OptionList, Static
 
-from korvid.agent.setup import AgentSettings, DeviceLoginPrompt
+from korvid.agent.setup import AgentConfigurator, AgentSettings, DeviceLoginPrompt
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 
 
-class FakeConfigurator:
+class FakeConfigurator(AgentConfigurator):
     def __init__(self, test_error: str | None = None) -> None:
         self.calls: list[Any] = []
         self.test_error = test_error
@@ -172,3 +172,23 @@ async def test_escape_dismisses_none() -> None:
         await pilot.pause()
         assert app.result is None
         assert cfg.calls == []
+
+
+async def test_save_failure_shows_error_and_keeps_screen_open() -> None:
+    class SaveFailConfigurator(FakeConfigurator):
+        async def save(self, settings: AgentSettings) -> None:
+            raise RuntimeError("disk full")
+
+    cfg = SaveFailConfigurator()
+    app = _Host(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "ollama")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+        assert app.result == "unset"  # not dismissed
+        status = app.screen.query_one("#setup-status", Static)
+        assert "disk full" in str(status.render())

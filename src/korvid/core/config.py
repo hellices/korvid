@@ -64,19 +64,23 @@ def save_agent_config(
     model: str,
     api_key_env: str | None,
 ) -> None:
-    """Persist the agent section, preserving unrelated top-level keys."""
+    """Persist managed agent fields, preserving unrelated keys (read-modify-write)."""
     raw: dict[str, Any] = {}
     if path.is_file():
         raw = yaml.safe_load(path.read_text()) or {}
-    agent: dict[str, Any] = {
-        "provider": provider,
-        "model": model,
-        "auth": {"method": auth_method},
-    }
+    existing = raw.get("agent")
+    agent: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    agent["provider"] = provider
+    agent["model"] = model
+    agent["auth"] = {"method": auth_method}
     if base_url:
         agent["base_url"] = base_url
+    else:
+        agent.pop("base_url", None)
     if api_key_env:
         agent["api_key_env"] = api_key_env
+    else:
+        agent.pop("api_key_env", None)
     raw["agent"] = agent
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(raw, sort_keys=False))

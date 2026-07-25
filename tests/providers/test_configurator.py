@@ -114,3 +114,27 @@ async def test_save_invokes_persist(tmp_path: Path) -> None:
     cfg = ProviderConfigurator(_store(tmp_path), persist=saved.append)
     await cfg.save(_SETTINGS)
     assert saved == [_SETTINGS]
+
+
+async def test_begin_device_login_closes_flow_on_start_failure(tmp_path: Path) -> None:
+    class FailingFlow(FakeFlow):
+        async def start(self) -> DeviceCodePrompt:
+            raise RuntimeError("network down")
+
+    flow = FailingFlow()
+    cfg = ProviderConfigurator(
+        _store(tmp_path),
+        persist=lambda s: None,
+        flow_factory=lambda: cast("GitHubDeviceFlow", flow),
+    )
+    with pytest.raises(RuntimeError):
+        await cfg.begin_device_login()
+    assert flow.closed
+
+
+def test_provider_configurator_implements_abc() -> None:
+    from korvid.agent.setup import AgentConfigurator
+
+    assert issubclass(ProviderConfigurator, AgentConfigurator)
+    with pytest.raises(TypeError):
+        AgentConfigurator()  # type: ignore[abstract]

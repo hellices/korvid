@@ -104,3 +104,30 @@ async def test_copilot_exchange_failure_raises() -> None:
     src = CopilotCredentialSource("gho_bad", client=_client(handler))
     with pytest.raises(DeviceLoginError):
         await src.headers()
+
+
+async def test_poll_slow_down_increases_interval_persistently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        [
+            {"error": "slow_down"},
+            {"error": "authorization_pending"},
+            {"access_token": "gho_tok", "token_type": "bearer"},
+        ]
+    )
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=next(responses))
+
+    flow = GitHubDeviceFlow(client=_client(handler))
+    sleeps: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+
+    monkeypatch.setattr("korvid.providers.github_copilot.asyncio.sleep", fake_sleep)
+    prompt = DeviceCodePrompt("u", "https://x", "d", 5, 900)
+    assert await flow.poll(prompt) == "gho_tok"
+    # slow_down bumps the interval for ALL subsequent polls (RFC 8628 §3.5).
+    assert sleeps == [10, 10]

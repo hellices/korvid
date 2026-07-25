@@ -52,3 +52,13 @@ def test_keyring_error_falls_back_to_file(tmp_path: Path, monkeypatch: pytest.Mo
     store = TokenStore(fallback_path=tmp_path / "creds.json")
     store.save("k", "v")
     assert store.load("k") == "v"
+
+
+def test_non_object_json_treated_as_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_keyring(monkeypatch)
+    p = tmp_path / "creds.json"
+    p.write_text("[]")  # valid JSON but not an object
+    store = TokenStore(fallback_path=p)
+    assert store.load("k") is None
+    store.save("k", "v")  # must not crash
+    assert store.load("k") == "v"
