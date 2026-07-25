@@ -81,6 +81,11 @@ _APPROVAL_TIMEOUT = 120.0
 #: endpoint must never hang a binding handler or an agent turn. On timeout
 #: the check fails open (writes stay approval-gated and audited).
 _PERMISSION_CHECK_TIMEOUT = 10.0
+#: Upper bound on the pre-approval uid lookup: a stalled API server must
+#: never leave an agent tool call (or the debug offer) pending indefinitely.
+#: On timeout the lookup fails open (write proceeds without a precondition,
+#: still approval-gated and audited).
+_UID_LOOKUP_TIMEOUT = 10.0
 
 
 class _ReplayFilter:
@@ -861,6 +866,19 @@ class KorvidApp(App[None]):
             # "missing permission: patch pods/ephemeralcontainers".
             return
         target = f"{name}/{container}" if container else name
+        try:
+            # Bind the offer to this pod incarnation: kubectl debug addresses
+            # the pod by namespace/name only, so without this a same-named
+            # replacement created while the dialog is open would receive the
+            # ephemeral container. _run_debug re-checks the uid just before
+            # executing and aborts on change. 404 -> the pod is already gone.
+            approved_uid = await self._target_uid("pods", namespace, name)
+        except ApiStatusError:
+            self.notify(
+                f"Debug fallback for {target} not offered - the pod no longer exists.",
+                severity="warning",
+            )
+            return
         if len(self.screen_stack) > 1:
             # The probe/RBAC pre-check ran concurrently with user input: never
             # stack the offer over a dialog that opened meanwhile.
@@ -873,7 +891,7 @@ class KorvidApp(App[None]):
 
         def _on_choice(confirmed: bool | None) -> None:
             if confirmed:
-                self.run_worker(self._run_debug(namespace, name, container))
+                self.run_worker(self._run_debug(namespace, name, container, approved_uid))
 
         # ConfirmScreen, not a generic picker: this offer appears
         # asynchronously (after the probe/RBAC round trip), and its
@@ -891,13 +909,19 @@ class KorvidApp(App[None]):
             _on_choice,
         )
 
-    async def _run_debug(self, namespace: str, name: str, container: str | None) -> None:
+    async def _run_debug(
+        self, namespace: str, name: str, container: str | None, approved_uid: str | None
+    ) -> None:
         """Attach an ephemeral busybox container via kubectl debug. This is a
         pod mutation: blocked in readonly sessions and audited fail-closed
         like every other write (user approval came from the fallback prompt).
-        Audit appends take blocking locks and fsync, so they run off the event
-        loop (like _audit_write) - intent is still recorded before the
-        mutation starts."""
+        kubectl cannot carry a uid precondition, so the approved pod
+        incarnation is re-verified immediately before executing and the debug
+        aborts when the pod was replaced or removed while the dialog was open
+        (narrowing the race from the unbounded dialog lifetime to the exec
+        latency). Audit appends take blocking locks and fsync, so they run off
+        the event loop (like _audit_write) - intent is still recorded before
+        the mutation starts."""
         if self.config.readonly:
             self.notify("Read-only mode: cluster writes are disabled", severity="warning")
             return
@@ -905,6 +929,22 @@ class KorvidApp(App[None]):
         if audit is None:
             self.notify("Writes disabled: no audit log configured", severity="warning")
             return
+        if approved_uid is not None:
+            try:
+                current_uid = await self._target_uid("pods", namespace, name)
+            except ApiStatusError:
+                self.notify(
+                    f"kubectl debug cancelled - pod {name} no longer exists.",
+                    severity="warning",
+                )
+                return
+            if current_uid is not None and current_uid != approved_uid:
+                self.notify(
+                    f"kubectl debug cancelled - pod {name} was replaced since"
+                    " the prompt was shown.",
+                    severity="warning",
+                )
+                return
         detail = "ephemeral debug container (kubectl debug)"
         try:
             await asyncio.to_thread(self._audit_debug, audit, namespace, name, detail, "intent")
@@ -2108,7 +2148,7 @@ class KorvidApp(App[None]):
             # meta.plural: alias resolution is first-wins, so a plural that
             # collides across groups could otherwise resolve to a different
             # resource than the one validated above.
-            uid = await self._agent_target_uid(kind.strip().lower(), ns, name)
+            uid = await self._target_uid(kind.strip().lower(), ns, name)
         except ApiStatusError:
             return f"ERROR: {self._gvr_label(meta)}/{name} not found{self._write_locus(ns)}"
         require = name if action == "delete" and not meta.namespaced else None
@@ -2132,24 +2172,31 @@ class KorvidApp(App[None]):
         self._mark_agent_action(f"{action} → {self._gvr_label(meta)}/{name}")
         return f"approved and executed: {action} {self._gvr_label(meta)}/{name}"
 
-    async def _agent_target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
-        """Uid of the agent's write target at request time, looked up by the
-        same alias the write was validated with (both resolve through the one
-        aliases mapping wired in __main__, so the manifest and the mutation
-        address the same resource even when plurals collide across groups).
+    async def _target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
+        """Uid of a write target at request time, looked up by the same alias
+        the write was validated with (both resolve through the one aliases
+        mapping wired in __main__, so the manifest and the mutation address
+        the same resource even when plurals collide across groups).
         Raises ApiStatusError(404) when the target does not exist (the caller
         turns that into an actionable error before bothering the user with a
         dialog). Fails open (None -> no precondition, matching the previous
         behaviour) when no manifest source is wired or the lookup fails for
-        infrastructure reasons - the write stays approval-gated and audited."""
+        infrastructure reasons - including a lookup slower than
+        _UID_LOOKUP_TIMEOUT, so a stalled API server cannot leave the caller
+        pending forever - the write stays approval-gated and audited."""
         if self._get_manifest is None:
             return None
         try:
-            manifest = await self._get_manifest(kind_alias, ns, name)
+            manifest = await asyncio.wait_for(
+                self._get_manifest(kind_alias, ns, name), _UID_LOOKUP_TIMEOUT
+            )
         except ApiStatusError as exc:
             if exc.status == 404:
                 raise
             logger.warning("uid lookup for %s/%s failed; writing without precondition", ns, name)
+            return None
+        except TimeoutError:
+            logger.warning("uid lookup for %s/%s timed out; writing without precondition", ns, name)
             return None
         except Exception:
             logger.exception("uid lookup for %s/%s failed; writing without precondition", ns, name)

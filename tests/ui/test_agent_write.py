@@ -579,3 +579,22 @@ async def test_agent_uid_lookup_uses_validated_alias(tmp_path: Path) -> None:
         await pilot.press("y")
         await task
     assert kinds == ["deploy"]  # the caller's alias, normalized - not "deployments"
+
+
+async def test_uid_lookup_times_out_fail_open(tmp_path: Path) -> None:
+    """A stalled manifest lookup must not hang the caller past the approval
+    deadline: the uid lookup is bounded by _UID_LOOKUP_TIMEOUT and fails open
+    (None -> no precondition) like other infrastructure failures."""
+    from unittest.mock import patch
+
+    started = asyncio.Event()
+
+    async def hanging(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        started.set()
+        await asyncio.Event().wait()  # never resolves
+        return {}
+
+    app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=hanging)
+    with patch("korvid.ui.app._UID_LOOKUP_TIMEOUT", 0.05):
+        assert await app._target_uid("pods", "default", "api-1") is None
+    assert started.is_set()  # the lookup really ran and was cancelled by the bound

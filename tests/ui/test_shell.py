@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -141,6 +141,7 @@ def make_app(
     audit: AuditLog | None = None,
     readonly: bool = False,
     permitted: bool | None = None,
+    get_manifest: Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -165,6 +166,7 @@ def make_app(
         watch_manager=WatchManager(store, source),
         aliases=dict(_TEST_ALIASES),
         audit=audit,
+        get_manifest=get_manifest,
         check_permission=None if permitted is None else check_permission,
     )
 
@@ -498,3 +500,110 @@ async def test_debug_fallback_offered_with_permission(tmp_path: Path) -> None:
             await pilot.press("s")
             await pilot.pause(0.3)
             assert isinstance(app.screen, ConfirmScreen)
+
+
+# ---------------------------------------------------------------------------
+# Debug fallback bound to the approved pod incarnation
+# ---------------------------------------------------------------------------
+
+
+def _uid_manifests(uids: list[str]) -> Callable[[str, str | None, str], Awaitable[dict[str, Any]]]:
+    """get_manifest fake yielding the next uid per call (the last uid repeats)."""
+    calls: list[str] = []
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        uid = uids[min(len(calls), len(uids) - 1)]
+        calls.append(kind)
+        return {"metadata": {"name": name, "namespace": ns or "", "uid": uid}}
+
+    return get_manifest
+
+
+async def test_debug_aborts_when_pod_replaced_after_prompt(tmp_path: Path) -> None:
+    """kubectl debug addresses the pod by namespace/name only, so the offer
+    captures the pod uid and the execution re-checks it: a same-named
+    replacement created while the dialog was open aborts the debug."""
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        [_pod("api-1")],
+        audit=AuditLog(audit_path),
+        get_manifest=_uid_manifests(["uid-original", "uid-replacement"]),
+    )
+    calls: list[list[str]] = []
+
+    def _fake_call(argv: list[str]) -> int:
+        calls.append(argv)
+        return 1 if argv[1] == "exec" else 0
+
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", side_effect=_fake_call),
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, ConfirmScreen)
+            await pilot.press("y")
+            await pilot.pause(0.2)
+    assert [argv[1] for argv in calls] == ["exec"]  # the debug never ran
+    # No mutation happened, so no debug intent may have been audited either.
+    assert not audit_path.exists() or "debug" not in audit_path.read_text()
+
+
+async def test_debug_runs_when_pod_uid_unchanged(tmp_path: Path) -> None:
+    """Same incarnation at prompt and execution time -> the debug proceeds."""
+    app = make_app(
+        [_pod("api-1")],
+        audit=AuditLog(tmp_path / "audit.jsonl"),
+        get_manifest=_uid_manifests(["uid-stable"]),
+    )
+    calls: list[list[str]] = []
+
+    def _fake_call(argv: list[str]) -> int:
+        calls.append(argv)
+        return 1 if argv[1] == "exec" else 0
+
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", side_effect=_fake_call),
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, ConfirmScreen)
+            await pilot.press("y")
+            await pilot.pause(0.2)
+    assert [argv[1] for argv in calls] == ["exec", "debug"]
+
+
+async def test_debug_not_offered_when_pod_gone(tmp_path: Path) -> None:
+    """404 on the pre-prompt uid capture means the pod is already gone: no
+    ConfirmScreen is offered for a target that cannot be debugged."""
+    from korvid.k8s.errors import ApiStatusError
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        raise ApiStatusError(404, "NotFound")
+
+    app = make_app(
+        [_pod("api-1")],
+        audit=AuditLog(tmp_path / "audit.jsonl"),
+        get_manifest=get_manifest,
+    )
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1) as mock_call,
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, ConfirmScreen)
+            mock_call.assert_called_once()  # only the failed exec; no debug
