@@ -50,6 +50,14 @@ def create_provider(
     # strings are meaningful — anything else falls to the unknown branch.
     name = provider.lower() if isinstance(provider, str) else ""
     if name == "github-copilot":
+        # Copilot only supports device-login; a stored OAuth token must not be
+        # consumed under a mistyped or explicitly different auth method.
+        if auth_method not in (None, "device-login"):
+            logger.warning(
+                "github-copilot requires auth method 'device-login', got %r — agent disabled",
+                auth_method,
+            )
+            return None
         if not model:
             logger.warning("github-copilot missing model — agent disabled")
             return None

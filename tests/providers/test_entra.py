@@ -34,3 +34,18 @@ async def test_token_cached_until_expiry_window() -> None:
     now["t"] = 9_999_999_999 - 100  # inside 300s refresh margin
     await src.headers()
     assert len(cred.calls) == 2
+
+
+async def test_concurrent_headers_single_token_request() -> None:
+    import asyncio
+
+    class SlowCredential(FakeCredential):
+        async def get_token(self, scope: str) -> SimpleNamespace:
+            self.calls.append(scope)
+            await asyncio.sleep(0.01)
+            return SimpleNamespace(token="tok", expires_on=9_999_999_999)
+
+    cred = SlowCredential()
+    src = EntraCredentialSource(credential=cred, clock=lambda: 1000.0)
+    await asyncio.gather(src.headers(), src.headers(), src.headers())
+    assert len(cred.calls) == 1

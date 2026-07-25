@@ -363,3 +363,86 @@ async def test_apply_agent_settings_notifies_on_rebuild_failure() -> None:
         await pilot.pause()
         msgs = [n.message for n in app._notifications]
         assert any("rebuild failed" in m.lower() for m in msgs)
+
+
+async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
+    from korvid.ui.messages import UnknownCommand
+
+    old_runtime = cast("Any", StubRuntime([]))
+
+    class Cfg2:
+        async def begin_device_login(self) -> Any:
+            raise NotImplementedError
+
+        async def finish_device_login(self) -> None:
+            raise NotImplementedError
+
+        async def test(self, settings: Any) -> str:
+            return "ok"
+
+        async def save(self, settings: Any) -> None:
+            pass
+
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
+        yield ("ADDED", _pod("web-1"))
+        while True:
+            await asyncio.sleep(0.01)
+
+    app = KorvidApp(
+        config=KorvidConfig(
+            namespace="default",
+            agent_enabled=True,
+            agent_provider="ollama",
+            agent_base_url="http://localhost:11434/v1",
+            agent_model="llama3",
+            agent_auth_method="none",
+        ),
+        store=store,
+        watch_manager=WatchManager(store, source),
+        agent_runtime=old_runtime,
+        agent_model_name="llama3",
+        agent_configurator=cast("Any", Cfg2()),
+        rebuild_agent=lambda s: None,  # rebuild always fails
+    )
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        for _ in range(4):
+            await pilot.pause()
+        # Transactional swap: the working runtime and settings must survive.
+        assert app._agent_runtime is old_runtime
+        assert app._agent_model_name == "llama3"
+        assert app._agent_settings is not None
+        assert app._agent_settings.model == "llama3"
+        msgs = [n.message for n in app._notifications]
+        assert not any("Agent model set" in m for m in msgs)  # no false success toast
+        assert any("rebuild failed" in m.lower() for m in msgs)
+
+
+async def test_model_switch_blocked_while_turn_running() -> None:
+    from korvid.agent.setup import AgentSettings
+
+    rebuilt: list[AgentSettings] = []
+    new_runtime = cast("Any", StubRuntime([]))
+
+    def rebuild(s: AgentSettings) -> Any:
+        rebuilt.append(s)
+        return new_runtime
+
+    old_runtime = cast("Any", StubRuntime([]))
+    app = make_app(runtime=old_runtime, model="llama3", rebuild_agent=rebuild)
+    settings = AgentSettings(
+        provider="ollama", auth_method="none", base_url="http://x/v1", model="new-model"
+    )
+    async with app.run_test() as pilot:
+        app._agent_task = asyncio.create_task(asyncio.sleep(30))  # simulate a live turn
+        try:
+            app._apply_agent_settings(settings)
+            await pilot.pause()
+            assert not rebuilt  # swap must be blocked mid-turn
+            assert app._agent_runtime is old_runtime
+            msgs = [n.message for n in app._notifications]
+            assert any("busy" in m.lower() for m in msgs)
+        finally:
+            app._agent_task.cancel()

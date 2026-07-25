@@ -824,14 +824,18 @@ class DeviceLoginPrompt:
     verification_uri: str
 
 
-class AgentConfigurator(Protocol):
+class AgentConfigurator(ABC):  # abc.ABC per AGENTS.md boundary rule (updated at review)
+    @abstractmethod
     async def begin_device_login(self) -> DeviceLoginPrompt: ...
+    @abstractmethod
     async def finish_device_login(self) -> None: ...
+    @abstractmethod
     async def test(self, settings: AgentSettings) -> str: ...
+    @abstractmethod
     async def save(self, settings: AgentSettings) -> None: ...
 ```
 
-- Produces: `ProviderConfigurator(token_store, persist: Callable[[AgentSettings], None], client: httpx.AsyncClient | None = None)` implementing the protocol. `finish_device_login` polls and stores OAuth token under key `"github-oauth"`. `test()` builds a provider via `create_provider` (oauth from store), sends `[{"role": "user", "content": "Reply with the single word: ok"}]` with `tools=[]`, returns concatenated text (must be non-empty, else raise `RuntimeError("provider returned no text")`); always `aclose()`s the provider (try/finally). `save()` calls `persist(settings)`.
+- Produces: `ProviderConfigurator(token_store, persist: Callable[[AgentSettings], None], client: httpx.AsyncClient | None = None)` implementing the ABC. `finish_device_login` polls and stores OAuth token under key `"github-oauth"`. `test()` builds a provider via `create_provider` (oauth from store), sends `[{"role": "user", "content": "Reply with the single word: ok"}]` with `tools=[]`, returns concatenated text (must be non-empty, else raise `RuntimeError("provider returned no text")`); always `aclose()`s the provider (try/finally). `save()` calls `persist(settings)`.
 
 - [x] **Step 1: Failing tests** — fake `GitHubDeviceFlow` injected via constructor param `flow_factory: Callable[[], GitHubDeviceFlow]`; fake provider path exercised by monkeypatching `korvid.providers.configurator.create_provider` to return a `ScriptedProvider`-style stub whose `complete` yields `{"type": "text_delta", "text": "ok"}` then `{"type": "done"}`. Cases: (a) device login stores token, (b) `test` returns "ok", (c) `test` raises on providerless settings (create_provider returns None → `RuntimeError`), (d) `save` invokes persist with settings.
 
@@ -840,7 +844,7 @@ class AgentConfigurator(Protocol):
 
 ```python
 # src/korvid/providers/configurator.py (core logic)
-class ProviderConfigurator:
+class ProviderConfigurator(AgentConfigurator):
     def __init__(
         self,
         token_store: TokenStore,

@@ -538,30 +538,46 @@ class KorvidApp(App[None]):
             except Exception as exc:  # keep the old runtime on failure
                 self.notify(f"Model switch failed: {exc}", severity="error")
                 return
-            self._apply_agent_settings(new_settings)
-            self.notify(f"Agent model set to {new_settings.model}")
+            if self._apply_agent_settings(new_settings):
+                self.notify(f"Agent model set to {new_settings.model}")
 
         self.run_worker(_switch(), exclusive=False)
 
-    def _apply_agent_settings(self, settings: AgentSettings) -> None:
-        """Swap in a fresh runtime built from the wizard's settings."""
+    def _apply_agent_settings(self, settings: AgentSettings) -> bool:
+        """Swap in a fresh runtime built from the wizard's settings.
+
+        Transactional: on any failure the previous runtime/settings are kept
+        and False is returned; the swap is also refused while a turn is live.
+        """
         if self._rebuild_agent is None:
             self.notify("Agent rebuild unavailable in this build", severity="warning")
-            return
-        runtime = self._rebuild_agent(settings)
+            return False
+        if self._agent_task is not None and not self._agent_task.done():
+            self.notify("Agent is busy — wait for the current turn to finish", severity="warning")
+            return False
+        try:
+            runtime = self._rebuild_agent(settings)
+        except Exception as exc:
+            self.notify(f"Agent rebuild failed: {exc}", severity="error")
+            return False
         if runtime is None:
-            self.notify("Agent rebuild failed — check configuration", severity="error")
+            self.notify(
+                "Agent rebuild failed — check configuration; keeping previous agent",
+                severity="error",
+            )
+            return False
         self._agent_runtime = runtime
         self._agent_model_name = settings.model
         self._agent_settings = settings
         self._refresh_status()
         panel = self.query_one(AgentPanel)
-        if panel.display and runtime is not None:
+        if panel.display:
             in_tok, out_tok = runtime.total_tokens
             panel.set_header(settings.model, in_tok, out_tok, estimated=runtime.usage_estimated)
             agent_input = panel.query_one("#agent-input")
             agent_input.disabled = False
             agent_input.focus()
+        return True
 
     def action_shell(self) -> None:
         """Drop into a shell inside the selected pod via kubectl exec.

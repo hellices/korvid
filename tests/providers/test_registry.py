@@ -159,3 +159,31 @@ def test_unknown_auth_method_disables_agent() -> None:
         )
         is None
     )
+
+
+def test_github_copilot_rejects_non_device_login_method() -> None:
+    assert (
+        create_provider(
+            enabled=True,
+            provider="github-copilot",
+            auth_method="none",
+            base_url=None,
+            model="gpt-4o",
+            api_key_env=None,
+            oauth_token="gho_tok",
+        )
+        is None
+    )
+
+
+def test_github_copilot_default_method_is_device_login() -> None:
+    provider = create_provider(
+        enabled=True,
+        provider="github-copilot",
+        auth_method=None,
+        base_url=None,
+        model="gpt-4o",
+        api_key_env=None,
+        oauth_token="gho_tok",
+    )
+    assert provider is not None

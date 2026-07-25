@@ -31,16 +31,23 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     if not cfg_path.is_file():
         return KorvidConfig()
     raw: dict[str, Any] = yaml.safe_load(cfg_path.read_text()) or {}
-    agent_raw: dict[str, Any] = raw.get("agent") or {}
+    agent_value = raw.get("agent")
+    # User-edited configs can hold scalars where mappings are expected;
+    # treat anything that is not a mapping as absent instead of crashing.
+    agent_raw: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
     provider: str | None = agent_raw.get("provider")
     # Auto-activation: provider present -> on, unless explicitly disabled (§6.3).
     enabled = bool(provider) and agent_raw.get("enabled", True) is not False
     api_key_env = _opt_str(agent_raw.get("api_key_env"))
-    auth_raw: dict[str, Any] = agent_raw.get("auth") or {}
+    auth_value = agent_raw.get("auth")
+    auth_raw: dict[str, Any] = auth_value if isinstance(auth_value, dict) else {}
     auth_method = _opt_str(auth_raw.get("method"))
     if auth_method is None and provider:
         # Back-compat: configs written before agent.auth existed.
-        auth_method = "api_key" if api_key_env else "none"
+        if provider == "github-copilot":
+            auth_method = "device-login"
+        else:
+            auth_method = "api_key" if api_key_env else "none"
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),

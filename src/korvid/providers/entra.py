@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from typing import Any
@@ -24,6 +25,10 @@ class EntraCredentialSource(CredentialSource):
         self._clock = clock
         self._token: str | None = None
         self._expires_on = 0.0
+        self._refresh_lock = asyncio.Lock()
+
+    def _needs_refresh(self) -> bool:
+        return self._token is None or self._clock() >= self._expires_on - _REFRESH_MARGIN_S
 
     def _get_credential(self) -> Any:
         if self._credential is None:
@@ -35,10 +40,13 @@ class EntraCredentialSource(CredentialSource):
         return self._credential
 
     async def headers(self) -> dict[str, str]:
-        if self._token is None or self._clock() >= self._expires_on - _REFRESH_MARGIN_S:
-            access = await self._get_credential().get_token(ENTRA_SCOPE)
-            self._token = str(access.token)
-            self._expires_on = float(access.expires_on)
+        if self._needs_refresh():
+            # Serialize refreshes so concurrent requests trigger one token call.
+            async with self._refresh_lock:
+                if self._needs_refresh():
+                    access = await self._get_credential().get_token(ENTRA_SCOPE)
+                    self._token = str(access.token)
+                    self._expires_on = float(access.expires_on)
         return {"Authorization": f"Bearer {self._token}"}
 
     async def aclose(self) -> None:
