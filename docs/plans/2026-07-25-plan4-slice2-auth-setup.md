@@ -6,7 +6,7 @@
 
 **Goal:** Let users connect korvid's agent to any provider × auth-method combination (GitHub Copilot device-login, Entra/AI Foundry, static API key, none) and configure it entirely inside the TUI via a `:ai` setup wizard.
 
-**Architecture:** A `CredentialSource` ABC in `korvid.agent` supplies per-request auth headers asynchronously; concrete sources live in `korvid.providers` (static key, GitHub Copilot device flow with short-lived token refresh, Entra via azure-identity). The TUI wizard talks to an `AgentConfigurator` protocol defined in `korvid.agent`; the concrete configurator and all wiring stay at the composition root (`__main__.py`), preserving tach layers (`ui` never imports `providers`).
+**Architecture:** A `CredentialSource` ABC in `korvid.agent` supplies per-request auth headers asynchronously; concrete sources live in `korvid.providers` (static key, GitHub Copilot device flow with short-lived token refresh, Entra via azure-identity). The TUI wizard talks to an `AgentConfigurator` ABC defined in `korvid.agent`; the concrete configurator and all wiring stay at the composition root (`__main__.py`), preserving tach layers (`ui` never imports `providers`).
 
 **Tech Stack:** Python 3.11+, httpx (SSE + device flow), keyring (token storage), azure-identity (optional extra), Textual ModalScreen.
 
@@ -798,7 +798,7 @@ def _build_credentials(
 
 ---
 
-### Task 6: AgentConfigurator protocol + composition-root implementation
+### Task 6: AgentConfigurator ABC + composition-root implementation
 
 **Files:**
 - Create: `src/korvid/agent/setup.py`
@@ -900,7 +900,7 @@ class ProviderConfigurator(AgentConfigurator):
 ```
 
 - [x] **Step 4: `make check` green.**
-- [x] **Step 5: Commit** — `feat: AgentConfigurator protocol and provider implementation`
+- [x] **Step 5: Commit** — `feat: AgentConfigurator protocol and provider implementation` (contract later converted to `abc.ABC` at review)
 
 ---
 

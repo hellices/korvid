@@ -137,4 +137,4 @@ def test_provider_configurator_implements_abc() -> None:
 
     assert issubclass(ProviderConfigurator, AgentConfigurator)
     with pytest.raises(TypeError, match="abstract"):
-        AgentConfigurator()  # type: ignore[abstract]
+        AgentConfigurator()  # type: ignore[abstract]  # instantiating ABC is the test
