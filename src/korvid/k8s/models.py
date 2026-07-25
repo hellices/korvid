@@ -151,6 +151,28 @@ class GenericSummary:
         return f"{total_seconds // 60}m"
 
 
+def _display_phase(
+    meta: dict[str, Any], status: dict[str, Any], statuses: list[dict[str, Any]]
+) -> str:
+    """Displayed pod status mirroring kubectl's printer.
+
+    Container waiting/terminated reasons (CrashLoopBackOff, OOMKilled, ...)
+    override ``status.phase``; a deletionTimestamp always wins as Terminating.
+    """
+    if meta.get("deletionTimestamp"):
+        return "Terminating"
+    reason = str(status.get("reason") or status.get("phase") or "Unknown")
+    for cs in reversed(statuses):
+        state = cs.get("state") or {}
+        waiting_reason = (state.get("waiting") or {}).get("reason")
+        terminated_reason = (state.get("terminated") or {}).get("reason")
+        if waiting_reason:
+            reason = str(waiting_reason)
+        elif terminated_reason:
+            reason = str(terminated_reason)
+    return reason
+
+
 @dataclass(frozen=True)
 class PodSummary:
     name: str
@@ -177,7 +199,7 @@ class PodSummary:
         return cls(
             name=str(meta.get("name", "")),
             namespace=str(meta.get("namespace", "")),
-            phase=str(status.get("phase", "Unknown")),
+            phase=_display_phase(meta, status, statuses),
             ready=f"{ready_count}/{len(statuses)}",
             restarts=restarts,
             node=spec.get("nodeName"),

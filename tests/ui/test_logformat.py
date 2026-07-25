@@ -167,3 +167,49 @@ def test_missing_msg_no_crash() -> None:
 def test_returns_text_instance() -> None:
     result = format_log_line("anything", formatted=False)
     assert isinstance(result, Text)
+
+
+# ---------------------------------------------------------------------------
+# formatted=True — plain-text (non-JSON) level detection
+# ---------------------------------------------------------------------------
+
+
+def _span_styles(result: Text) -> list[tuple[str, str]]:
+    """Return (substring, style) for each span in the Text."""
+    return [(result.plain[s.start : s.end], str(s.style)) for s in result.spans]
+
+
+def test_plain_error_level_word_red() -> None:
+    result = format_log_line("2026-07-25T10:00:00Z ERROR failed to connect", formatted=True)
+    assert result.plain == "2026-07-25T10:00:00Z ERROR failed to connect"
+    assert ("ERROR", "red") in _span_styles(result)
+
+
+def test_plain_warn_level_word_yellow() -> None:
+    result = format_log_line("WARN disk usage above 80%", formatted=True)
+    assert ("WARN", "yellow") in _span_styles(result)
+
+
+def test_plain_info_level_word_green() -> None:
+    result = format_log_line("INFO server started", formatted=True)
+    assert ("INFO", "green") in _span_styles(result)
+
+
+def test_plain_lowercase_level_detected() -> None:
+    result = format_log_line("level=error msg=boom", formatted=True)
+    assert ("error", "red") in _span_styles(result)
+
+
+def test_plain_timestamp_dimmed() -> None:
+    result = format_log_line("2026-07-25T10:00:00Z INFO ok", formatted=True)
+    assert ("2026-07-25T10:00:00Z", "dim") in _span_styles(result)
+
+
+def test_plain_level_inside_word_not_matched() -> None:
+    result = format_log_line("information about the request", formatted=True)
+    assert not result.spans
+
+
+def test_formatted_false_skips_plain_level_detection() -> None:
+    result = format_log_line("ERROR failed", formatted=False)
+    assert not result.spans

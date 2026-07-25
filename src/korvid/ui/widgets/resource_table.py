@@ -9,6 +9,7 @@ from textual.widgets import DataTable
 
 from korvid.core.store import Summary
 from korvid.k8s.models import GenericSummary, PodSummary
+from korvid.ui.theme import phase_style, ready_style, restarts_style
 
 _POD_COLS = ("NAME", "READY", "STATUS", "RESTARTS", "CPU R/L", "MEM R/L", "QOS", "NODE")
 _POD_COLS_ALL_NS = ("NAMESPACE", *_POD_COLS)
@@ -23,6 +24,18 @@ _QOS_STYLE = {"Guaranteed": "green", "Burstable": "chartreuse2", "BestEffort": "
 
 def _pod_sort_key(pod: PodSummary) -> tuple[int, str]:
     return (_QOS_RANK.get(pod.qos, 3), pod.name)
+
+
+def _phase_cell(phase: str) -> Text:
+    return Text(phase, style=phase_style(phase))
+
+
+def _ready_cell(ready: str) -> Text:
+    return Text(ready, style=ready_style(ready))
+
+
+def _restarts_cell(restarts: int) -> Text:
+    return Text(str(restarts), style=restarts_style(restarts))
 
 
 class ResourceTable(DataTable[str | Text]):
@@ -58,9 +71,9 @@ class ResourceTable(DataTable[str | Text]):
                     self.add_row(
                         pod.namespace,
                         pod.name,
-                        pod.ready,
-                        pod.phase,
-                        str(pod.restarts),
+                        _ready_cell(pod.ready),
+                        _phase_cell(pod.phase),
+                        _restarts_cell(pod.restarts),
                         f"{pod.cpu_request}/{pod.cpu_limit}",
                         f"{pod.mem_request}/{pod.mem_limit}",
                         qos_cell,
@@ -70,9 +83,9 @@ class ResourceTable(DataTable[str | Text]):
                 else:
                     self.add_row(
                         pod.name,
-                        pod.ready,
-                        pod.phase,
-                        str(pod.restarts),
+                        _ready_cell(pod.ready),
+                        _phase_cell(pod.phase),
+                        _restarts_cell(pod.restarts),
                         f"{pod.cpu_request}/{pod.cpu_limit}",
                         f"{pod.mem_request}/{pod.mem_limit}",
                         qos_cell,

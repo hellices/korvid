@@ -6,6 +6,7 @@ No Textual imports — this module may be used outside the UI layer.
 from __future__ import annotations
 
 import json
+import re
 
 from rich.text import Text
 
@@ -13,11 +14,20 @@ _LEVEL_KEY = "level"
 _TS_KEYS = frozenset({"ts", "time", "timestamp"})
 _MSG_KEYS = frozenset({"msg", "message"})
 
+# Standalone level words in plain-text (non-JSON) log lines.
+_PLAIN_LEVEL_RE = re.compile(
+    r"\b(trace|debug|info|warn(?:ing)?|error|fatal|panic|critical)\b", re.IGNORECASE
+)
+# ISO-8601-ish timestamps: 2026-07-25T10:00:00Z, with optional fraction/offset.
+_PLAIN_TS_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+
 
 def _level_style(level_str: str) -> str:
     """Return the Rich style for a log level string (case-insensitive)."""
     lower = level_str.lower()
-    if lower in ("error", "fatal"):
+    if lower in ("error", "fatal", "panic", "critical"):
         return "red"
     if lower in ("warn", "warning"):
         return "yellow"
@@ -70,6 +80,16 @@ def _parts_to_text(parts: list[tuple[str, str]]) -> Text:
     return result
 
 
+def _build_plain_text(text: str) -> Text:
+    """Style a non-JSON log line: level words colored, ISO timestamps dim."""
+    result = Text(text)
+    for match in _PLAIN_TS_RE.finditer(text):
+        result.stylize("dim", match.start(), match.end())
+    for match in _PLAIN_LEVEL_RE.finditer(text):
+        result.stylize(_level_style(match.group(1)), match.start(1), match.end(1))
+    return result
+
+
 def format_log_line(text: str, *, formatted: bool) -> Text:
     """Render a log line as structured or plain text.
 
@@ -83,15 +103,16 @@ def format_log_line(text: str, *, formatted: bool) -> Text:
     - remaining ``key=value`` pairs dim
     - order: level, ts, msg, then the rest in original dict order
 
-    Any other input — non-JSON, a JSON array/scalar, or ``formatted=False``
-    — returns a plain ``Text(text)`` with no spans.
+    Non-JSON input with ``formatted=True`` gets lightweight plain-text
+    styling: standalone level words colored, ISO timestamps dim.
+    ``formatted=False`` always returns an unstyled ``Text(text)``.
     """
     if not formatted:
         return Text(text)
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, ValueError):
-        return Text(text)
+        return _build_plain_text(text)
     if not isinstance(data, dict):
-        return Text(text)
+        return _build_plain_text(text)
     return _build_structured_text(data)
