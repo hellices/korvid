@@ -106,6 +106,14 @@ async def _to_view(pilot, view: str) -> None:  # type: ignore[no-untyped-def]  #
     await pilot.pause(0.1)
 
 
+async def _until(pilot, cond, timeout: float = 5.0) -> None:  # type: ignore[no-untyped-def]  # deterministic wait: poll an observable condition instead of a fixed sleep
+    for _ in range(int(timeout / 0.05)):
+        if cond():
+            return
+        await pilot.pause(0.05)
+    raise AssertionError("condition not met within timeout")
+
+
 async def test_ctrl_d_delete_confirmed_executes_and_audits(tmp_path: Path) -> None:
     rec = Recorder()
     audit_path = tmp_path / "audit.jsonl"
@@ -113,10 +121,9 @@ async def test_ctrl_d_delete_confirmed_executes_and_audits(tmp_path: Path) -> No
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("ctrl+d")
-        await pilot.pause()
-        assert isinstance(app.screen, ConfirmScreen)
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
         assert rec.calls == [("delete", "pods", "default", "web-1")]
         lines = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert lines[0]["outcome"] == "intent"  # recorded before the write ran
@@ -167,7 +174,7 @@ async def test_cluster_scoped_delete_requires_typed_name(tmp_path: Path) -> None
         for ch in "worker-1":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: rec.calls)
         assert rec.calls == [("delete", "nodes", None, "worker-1")]
 
 
@@ -178,10 +185,9 @@ async def test_rollout_restart_on_deployment(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await _to_view(pilot, "deployments")
         await pilot.press("r")
-        await pilot.pause()
-        assert isinstance(app.screen, ConfirmScreen)
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: rec.calls)
         assert rec.calls == [("restart", "deployments", "default", "web")]
 
 
@@ -203,14 +209,12 @@ async def test_scale_flow_prompts_then_confirms(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await _to_view(pilot, "deployments")
         await pilot.press("S")
-        await pilot.pause()
-        assert isinstance(app.screen, ReplicasPrompt)
+        await _until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
         await pilot.press("5")
         await pilot.press("enter")
-        await pilot.pause()
-        assert isinstance(app.screen, ConfirmScreen)
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: rec.calls)
         assert rec.calls == [("scale", "deployments", "default", "web", 5)]
 
 
@@ -221,9 +225,9 @@ async def test_failed_write_audits_error(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("ctrl+d")
-        await pilot.pause()
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: audit_path.exists() and "error" in audit_path.read_text())
         entry = json.loads(audit_path.read_text().splitlines()[-1])
         assert entry["outcome"].startswith("error")
 
@@ -246,10 +250,9 @@ async def test_permission_allowed_proceeds(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("ctrl+d")
-        await pilot.pause()
-        assert isinstance(app.screen, ConfirmScreen)
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: rec.calls)
         assert rec.calls == [("delete", "pods", "default", "web-1")]
 
 
@@ -263,10 +266,9 @@ async def test_unwritable_audit_blocks_write(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("ctrl+d")
-        await pilot.pause()
-        assert isinstance(app.screen, ConfirmScreen)
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await pilot.pause(0.2)
+        await pilot.pause(0.3)  # write path must stay blocked; nothing to wait on
         assert rec.calls == []
 
 
@@ -279,8 +281,7 @@ async def test_scale_prompt_prefills_current_replicas(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await _to_view(pilot, "deployments")
         await pilot.press("S")
-        await pilot.pause()
-        assert isinstance(app.screen, ReplicasPrompt)
+        await _until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
         # GenericSummary carries no desired count, so the field starts empty
         # and the label reports it as unknown instead of a misleading 0.
         assert app.screen.query_one(Input).value == ""

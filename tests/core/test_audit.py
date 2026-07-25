@@ -1,6 +1,7 @@
 """Audit log for cluster write operations (spec §6.2)."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -51,12 +52,16 @@ def test_append_creates_parent_dirs(tmp_path: Path) -> None:
 def test_audit_file_created_with_0600(tmp_path: Path) -> None:
     """Design contract: the audit log is created with 0600 permissions,
     regardless of the process umask."""
+    if os.name == "nt":  # pragma: no cover
+        pytest.skip("POSIX permission bits are not meaningful on Windows")
     path = tmp_path / "audit.jsonl"
     AuditLog(path).append(action="delete", kind="pods", namespace="default", name="w")
     assert (path.stat().st_mode & 0o777) == 0o600
 
 
 def test_audit_mode_enforced_on_existing_file(tmp_path: Path) -> None:
+    if os.name == "nt":  # pragma: no cover
+        pytest.skip("POSIX permission bits are not meaningful on Windows")
     path = tmp_path / "audit.jsonl"
     path.touch()
     path.chmod(0o644)

@@ -272,9 +272,10 @@ class KubeClient:
                 body=body,
                 _preload_content=False,
             )
-            # Consume the body so the pooled HTTP connection is released;
-            # with _preload_content=False the caller owns the response.
-            await _to_dict(resp)
+            # Drain the body so the pooled HTTP connection is released; with
+            # _preload_content=False the caller owns the response. Writes may
+            # return empty or non-JSON bodies, so no decode is attempted.
+            await resp.read()
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 

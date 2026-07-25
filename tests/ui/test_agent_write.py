@@ -23,6 +23,14 @@ _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("d
 _ALIASES = {"deployments": _DEPLOY_META, "deploy": _DEPLOY_META}
 
 
+async def _until(pilot, cond, timeout: float = 5.0) -> None:  # type: ignore[no-untyped-def]  # deterministic wait: poll an observable condition instead of a fixed sleep
+    for _ in range(int(timeout / 0.05)):
+        if cond():
+            return
+        await pilot.pause(0.05)
+    raise AssertionError("condition not met within timeout")
+
+
 class Recorder:
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
@@ -81,11 +89,9 @@ async def test_agent_delete_approved_by_user_key(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
-        await pilot.pause(0.2)
-        assert isinstance(app.screen, ConfirmScreen)
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert rec.calls == []  # nothing executes before the user's keystroke
         await pilot.press("y")
-        await pilot.pause(0.2)
         result = await task
         assert "delete" in result.lower()
         assert rec.calls == [("delete", "deployments", "default", "web")]
@@ -104,9 +110,8 @@ async def test_agent_delete_denied_by_user_key(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
-        await pilot.pause(0.2)
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("n")
-        await pilot.pause(0.2)
         result = await task
         assert "denied" in result.lower() or "declined" in result.lower()
         assert rec.calls == []
@@ -141,10 +146,8 @@ async def test_agent_scale_approved(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("scale", "deployments", "web", namespace="default", replicas=4)
         )
-        await pilot.pause(0.2)
-        assert isinstance(app.screen, ConfirmScreen)
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await pilot.pause(0.2)
         await task
         assert rec.calls == [("scale", "deployments", "default", "web", 4)]
 
@@ -195,10 +198,8 @@ async def test_agent_write_times_out_as_denial(
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
-        await pilot.pause(0.1)
-        assert isinstance(app.screen, ConfirmScreen)
-        await pilot.pause(0.5)  # no keystroke; let the timeout fire
-        result = await task
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        result = await task  # no keystroke; the timeout resolves it as a denial
         assert "denied" in result.lower()
         assert rec.calls == []
         assert not isinstance(app.screen, ConfirmScreen)
@@ -217,8 +218,7 @@ async def test_agent_dialog_shows_namespace(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("scale", "deployments", "web", namespace="prod", replicas=2)
         )
-        await pilot.pause(0.2)
-        assert isinstance(app.screen, ConfirmScreen)
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         texts = " ".join(str(s.render()) for s in app.screen.query(Static))
         assert "in namespace prod" in texts
         await pilot.press("n")
