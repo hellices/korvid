@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Callable
 
 import httpx
@@ -131,3 +132,35 @@ async def test_poll_slow_down_increases_interval_persistently(
     assert await flow.poll(prompt) == "gho_tok"
     # slow_down bumps the interval for ALL subsequent polls (RFC 8628 §3.5).
     assert sleeps == [10, 10]
+
+
+async def test_missing_expires_at_defaults_to_short_ttl() -> None:
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"token": "tok-1"})  # no expires_at
+
+    src = CopilotCredentialSource("gho_x", client=_client(handler), clock=lambda: 1000.0)
+    await src.headers()
+    await src.headers()
+    # Without expires_at the token must still be cached (conservative TTL),
+    # not re-exchanged on every request.
+    assert calls["n"] == 1
+
+
+async def test_concurrent_headers_refresh_once() -> None:
+    calls = {"n": 0}
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        await asyncio.sleep(0.01)
+        return httpx.Response(200, json={"token": "tok-1", "expires_at": 5000})
+
+    src = CopilotCredentialSource(
+        "gho_x",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        clock=lambda: 1000.0,
+    )
+    await asyncio.gather(src.headers(), src.headers(), src.headers())
+    assert calls["n"] == 1

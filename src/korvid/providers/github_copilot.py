@@ -22,6 +22,7 @@ ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
 COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
 COPILOT_CHAT_BASE_URL = "https://api.githubcopilot.com"
 _REFRESH_MARGIN_S = 60.0
+_DEFAULT_TOKEN_TTL_S = 600.0  # used when the exchange response omits expires_at
 _JSON_ACCEPT = {"Accept": "application/json"}
 
 
@@ -106,10 +107,17 @@ class CopilotCredentialSource(CredentialSource):
         self._clock = clock
         self._token: str | None = None
         self._expires_at = 0.0
+        self._refresh_lock = asyncio.Lock()
+
+    def _needs_refresh(self) -> bool:
+        return self._token is None or self._clock() >= self._expires_at - _REFRESH_MARGIN_S
 
     async def headers(self) -> dict[str, str]:
-        if self._token is None or self._clock() >= self._expires_at - _REFRESH_MARGIN_S:
-            await self._refresh()
+        if self._needs_refresh():
+            # Serialize refreshes so concurrent requests trigger one exchange.
+            async with self._refresh_lock:
+                if self._needs_refresh():
+                    await self._refresh()
         return {
             "Authorization": f"Bearer {self._token}",
             "Copilot-Integration-Id": "vscode-chat",
@@ -128,7 +136,12 @@ class CopilotCredentialSource(CredentialSource):
             )
         d = resp.json()
         self._token = str(d["token"])
-        self._expires_at = float(d.get("expires_at", 0))
+        if "expires_at" in d:
+            self._expires_at = float(d["expires_at"])
+        else:
+            # No expiry in the response: cache conservatively instead of
+            # re-exchanging on every request (extra round-trips, rate limits).
+            self._expires_at = self._clock() + _DEFAULT_TOKEN_TTL_S
 
     async def aclose(self) -> None:
         await self._client.aclose()

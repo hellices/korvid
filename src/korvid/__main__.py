@@ -62,6 +62,24 @@ async def _discover_in_background(
     app.on_aliases_updated()
 
 
+def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Task[None]]) -> None:
+    """Close an old provider without blocking, keeping a strong task reference.
+
+    asyncio only holds weak references to tasks, so fire-and-forget tasks can
+    be garbage-collected before completion; the done callback also consumes
+    any close error to avoid 'Task exception was never retrieved' warnings.
+    """
+    task = asyncio.get_running_loop().create_task(provider.aclose())
+    tasks.add(task)
+
+    def _reap(t: asyncio.Task[None]) -> None:
+        tasks.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            logger.debug("old provider close failed", exc_info=t.exception())
+
+    task.add_done_callback(_reap)
+
+
 def _build_agent_wiring(
     config: KorvidConfig, kube: KubeClient, aliases: dict[str, ResourceMeta]
 ) -> tuple[
@@ -98,12 +116,13 @@ def _build_agent_wiring(
         )
 
     configurator = ProviderConfigurator(token_store, persist)
+    close_tasks: set[asyncio.Task[None]] = set()
 
     def rebuild_agent(settings: AgentSettings) -> AgentRuntime | None:
         old = provider_box[0]
         if old is not None:
             # Close in the background; the new provider takes over immediately.
-            asyncio.get_running_loop().create_task(old.aclose())
+            _close_provider_in_background(old, close_tasks)
         new_provider = create_provider(
             enabled=True,
             provider=settings.provider,

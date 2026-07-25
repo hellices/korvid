@@ -549,6 +549,8 @@ class KorvidApp(App[None]):
             self.notify("Agent rebuild unavailable in this build", severity="warning")
             return
         runtime = self._rebuild_agent(settings)
+        if runtime is None:
+            self.notify("Agent rebuild failed — check configuration", severity="error")
         self._agent_runtime = runtime
         self._agent_model_name = settings.model
         self._agent_settings = settings

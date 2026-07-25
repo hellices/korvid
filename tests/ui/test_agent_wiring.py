@@ -345,3 +345,21 @@ async def test_model_command_works_after_configured_startup() -> None:
         assert saved
         assert saved[-1].provider == "ollama"
         assert saved[-1].model == "gpt-4o"
+
+
+async def test_apply_agent_settings_notifies_on_rebuild_failure() -> None:
+    from korvid.agent.setup import AgentSettings
+
+    settings = AgentSettings(
+        provider="openai-compat",
+        auth_method="api_key",
+        base_url="http://x/v1",
+        model="m",
+        api_key_env="MISSING_ENV",
+    )
+    app = make_app(runtime=None, model=None, rebuild_agent=lambda s: None)
+    async with app.run_test() as pilot:
+        app._apply_agent_settings(settings)
+        await pilot.pause()
+        msgs = [n.message for n in app._notifications]
+        assert any("rebuild failed" in m.lower() for m in msgs)
