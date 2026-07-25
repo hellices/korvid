@@ -79,7 +79,7 @@ async def test_device_login_stores_token(tmp_path: Path, monkeypatch: pytest.Mon
 
 async def test_finish_without_begin_raises(tmp_path: Path) -> None:
     cfg = ProviderConfigurator(_store(tmp_path), persist=lambda s: None)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="begin_device_login must be called first"):
         await cfg.finish_device_login()
 
 
@@ -96,7 +96,7 @@ async def test_probe_raises_when_provider_none(
 ) -> None:
     monkeypatch.setattr("korvid.providers.configurator.create_provider", lambda **kw: None)
     cfg = ProviderConfigurator(_store(tmp_path), persist=lambda s: None)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="configuration incomplete"):
         await cfg.test(_SETTINGS)
 
 
@@ -104,7 +104,7 @@ async def test_probe_raises_on_empty_text(tmp_path: Path, monkeypatch: pytest.Mo
     provider = ScriptedProvider([{"type": "done"}])
     monkeypatch.setattr("korvid.providers.configurator.create_provider", lambda **kw: provider)
     cfg = ProviderConfigurator(_store(tmp_path), persist=lambda s: None)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="provider returned no text"):
         await cfg.test(_SETTINGS)
     assert provider.closed
 
@@ -127,7 +127,7 @@ async def test_begin_device_login_closes_flow_on_start_failure(tmp_path: Path) -
         persist=lambda s: None,
         flow_factory=lambda: cast("GitHubDeviceFlow", flow),
     )
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="network down"):
         await cfg.begin_device_login()
     assert flow.closed
 
@@ -136,5 +136,5 @@ def test_provider_configurator_implements_abc() -> None:
     from korvid.agent.setup import AgentConfigurator
 
     assert issubclass(ProviderConfigurator, AgentConfigurator)
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="abstract"):
         AgentConfigurator()  # type: ignore[abstract]

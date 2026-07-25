@@ -134,7 +134,7 @@ def test_save_agent_config_creates_file(tmp_path: Path) -> None:
 
 def test_save_agent_config_preserves_agent_extension_keys(tmp_path: Path) -> None:
     p = tmp_path / "c.yaml"
-    p.write_text("agent:\n  provider: ollama\n  enabled: false\n  model: llama3\n")
+    p.write_text("agent:\n  provider: ollama\n  custom_note: keepme\n  model: llama3\n")
     save_agent_config(
         p,
         provider="ollama",
@@ -146,7 +146,7 @@ def test_save_agent_config_preserves_agent_extension_keys(tmp_path: Path) -> Non
     import yaml
 
     raw = yaml.safe_load(p.read_text())
-    assert raw["agent"]["enabled"] is False  # unrelated agent key kept
+    assert raw["agent"]["custom_note"] == "keepme"  # unrelated agent key kept
 
 
 def test_save_agent_config_drops_stale_optional_fields(tmp_path: Path) -> None:
@@ -182,3 +182,21 @@ def test_backcompat_github_copilot_defaults_to_device_login(tmp_path: Path) -> N
     p.write_text("agent:\n  provider: github-copilot\n  model: gpt-4o\n")
     cfg = load_config(p)
     assert cfg.agent_auth_method == "device-login"
+
+
+def test_save_agent_config_clears_explicit_disable(tmp_path: Path) -> None:
+    """Completing the wizard is a user-confirmed enable: a stale
+    `agent.enabled: false` must not silently override it after restart."""
+    p = tmp_path / "c.yaml"
+    p.write_text("agent:\n  provider: ollama\n  enabled: false\n  model: llama3\n")
+    save_agent_config(
+        p,
+        provider="ollama",
+        auth_method="none",
+        base_url="http://localhost:11434/v1",
+        model="llama3",
+        api_key_env=None,
+    )
+    import yaml
+
+    assert "enabled" not in yaml.safe_load(p.read_text())["agent"]

@@ -80,6 +80,9 @@ def save_agent_config(
     agent["provider"] = provider
     agent["model"] = model
     agent["auth"] = {"method": auth_method}
+    # A completed wizard/model save is a user-confirmed enable: clear any
+    # stale explicit-disable switch so it cannot silently win after restart.
+    agent.pop("enabled", None)
     if base_url:
         agent["base_url"] = base_url
     else:

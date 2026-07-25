@@ -60,7 +60,7 @@ async def test_poll_denied_raises() -> None:
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"error": "access_denied"})
 
-    with pytest.raises(DeviceLoginError):
+    with pytest.raises(DeviceLoginError, match="access_denied"):
         await GitHubDeviceFlow(client=_client(handler)).poll(
             DeviceCodePrompt("u", "x", "d", 0, 900)
         )
@@ -103,7 +103,7 @@ async def test_copilot_exchange_failure_raises() -> None:
         return httpx.Response(401, json={"message": "bad token"})
 
     src = CopilotCredentialSource("gho_bad", client=_client(handler))
-    with pytest.raises(DeviceLoginError):
+    with pytest.raises(DeviceLoginError, match="token exchange failed"):
         await src.headers()
 
 

@@ -22,12 +22,27 @@ class TokenStore:
             import keyring
 
             keyring.set_password(_SERVICE, key, value)
-            return
         except Exception:
             logger.debug("keyring unavailable; using file fallback", exc_info=True)
+            # The file copy is now the freshest value: best-effort removal of
+            # any stale keyring entry so load() cannot resurrect an older
+            # token once keyring recovers.
+            try:
+                import keyring
+
+                keyring.delete_password(_SERVICE, key)
+            except Exception:
+                logger.debug("stale keyring entry cleanup failed", exc_info=True)
+            data = self._read_file()
+            data[key] = value
+            self._write_file(data)
+            return
+        # Keyring save succeeded: drop any stale file copy so it can never
+        # shadow the fresh keyring value after a later keyring outage.
         data = self._read_file()
-        data[key] = value
-        self._write_file(data)
+        if key in data:
+            del data[key]
+            self._write_file(data)
 
     def load(self, key: str) -> str | None:
         try:

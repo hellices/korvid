@@ -62,3 +62,44 @@ def test_non_object_json_treated_as_empty(tmp_path: Path, monkeypatch: pytest.Mo
     assert store.load("k") is None
     store.save("k", "v")  # must not crash
     assert store.load("k") == "v"
+
+
+def test_keyring_save_clears_stale_file_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: dict[str, str] = {}
+    fake = types.SimpleNamespace(
+        set_password=lambda svc, k, v: calls.__setitem__(f"{svc}/{k}", v),
+        get_password=lambda svc, k: calls.get(f"{svc}/{k}"),
+        delete_password=lambda svc, k: calls.pop(f"{svc}/{k}", None),
+    )
+    monkeypatch.setitem(sys.modules, "keyring", fake)
+    p = tmp_path / "creds.json"
+    p.write_text('{"k": "old-file-token"}')  # left over from a keyring outage
+    store = TokenStore(fallback_path=p)
+    store.save("k", "new")
+    # The stale file copy must not survive a successful keyring save.
+    import json
+
+    assert "k" not in json.loads(p.read_text())
+    assert store.load("k") == "new"
+
+
+def test_failed_keyring_save_removes_stale_keyring_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: dict[str, str] = {"korvid/k": "old-keyring-token"}
+
+    def boom_set(*a: object) -> None:
+        raise RuntimeError("set failed")
+
+    fake = types.SimpleNamespace(
+        set_password=boom_set,
+        get_password=lambda svc, k: calls.get(f"{svc}/{k}"),
+        delete_password=lambda svc, k: calls.pop(f"{svc}/{k}", None),
+    )
+    monkeypatch.setitem(sys.modules, "keyring", fake)
+    store = TokenStore(fallback_path=tmp_path / "creds.json")
+    store.save("k", "new")
+    # keyring recovered later must not resurrect the old token via load().
+    assert store.load("k") == "new"
