@@ -50,6 +50,22 @@ def _unlock_file(fd: int) -> None:
         msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 
 
+def _sync_dir(path: Path) -> None:
+    """fsync a directory so entry changes (create/rename) are durable.
+
+    Windows cannot open directories with ``os.open``, but NTFS metadata
+    operations are journaled there, so skipping is safe.
+    """
+    try:
+        dir_fd = os.open(path, os.O_RDONLY)
+    except OSError:  # pragma: no cover - Windows-only branch; CI runs on POSIX
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def default_audit_path() -> Path:
     """XDG state dir (falls back to ~/.local/state) / korvid/audit.jsonl."""
     state = os.environ.get("XDG_STATE_HOME")
@@ -173,3 +189,13 @@ class AuditLog:
             raise
         with f:
             f.write(json.dumps(entry) + "\n")
+            # The record must be durable before the caller proceeds to mutate
+            # the cluster: a buffered write alone can be lost to a crash and
+            # silently break the fail-closed audit invariant. Any fsync
+            # failure propagates so the write stays blocked.
+            f.flush()
+            os.fsync(f.fileno())
+        # File creation and rotation renames live in the directory entry, so
+        # sync the parent too - otherwise the freshly synced data can belong
+        # to a file that does not survive the crash.
+        _sync_dir(self._path.parent)

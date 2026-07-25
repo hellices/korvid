@@ -204,3 +204,32 @@ def test_concurrent_appends_across_instances(tmp_path: Path) -> None:
     for f in files:
         for line in f.read_text().splitlines():
             json.loads(line)  # interleaved writes would corrupt a line
+
+
+def test_append_fsyncs_before_returning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The intent record must be durable (not just buffered) before the
+    caller proceeds to mutate the cluster."""
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def recording_fsync(fd: int) -> None:
+        synced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(action="delete", kind="pods", namespace="default", name="web-1")
+    # at least the log file and its parent directory were synced
+    assert len(synced) >= 2
+
+
+def test_append_fails_closed_when_fsync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing_fsync(fd: int) -> None:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(os, "fsync", failing_fsync)
+    log = AuditLog(tmp_path / "audit.jsonl")
+    with pytest.raises(OSError, match="disk gone"):
+        log.append(action="delete", kind="pods", namespace="default", name="web-1")
