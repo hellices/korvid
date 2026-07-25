@@ -1,4 +1,8 @@
-"""Tests for the :ai agent setup wizard (plan 4 slice 2, Task 7)."""
+"""Tests for the :ai agent setup wizard (plan 4 slice 2, Task 7).
+
+Flow (researched from opencode/crush/OpenClaw): provider -> auth ->
+fetch models -> filterable model list (typed fallback) -> test -> save.
+"""
 
 from __future__ import annotations
 
@@ -51,16 +55,28 @@ class _Host(App[None]):
         self.push_screen(AgentSetupScreen(self.configurator), callback=_done)
 
 
-def _select(app: App[None], option_id: str, prompt: str) -> None:
+def _select(app: App[None], option_id: str, wanted: str) -> None:
+    """Highlight the option whose id (or prompt) equals `wanted`."""
     ol = app.screen.query_one(option_id, OptionList)
     for i in range(ol.option_count):
-        if str(ol.get_option_at_index(i).prompt) == prompt:
+        opt = ol.get_option_at_index(i)
+        if opt.id == wanted or str(opt.prompt) == wanted:
             ol.highlighted = i
             return
-    raise AssertionError(f"option {prompt!r} not in {option_id}")
+    raise AssertionError(f"option {wanted!r} not in {option_id}")
+
+
+def _kinds(cfg: FakeConfigurator) -> list[str]:
+    return [c[0] if isinstance(c, tuple) else c for c in cfg.calls]
+
+
+async def _pump(pilot: Any, n: int = 8) -> None:
+    for _ in range(n):
+        await pilot.pause()
 
 
 async def test_ollama_path_tests_saves_and_dismisses() -> None:
+    """No models from the API -> typed model input fallback with defaults."""
     cfg = FakeConfigurator()
     app = _Host(cfg)
     async with app.run_test() as pilot:
@@ -68,35 +84,98 @@ async def test_ollama_path_tests_saves_and_dismisses() -> None:
         _select(app, "#setup-provider", "ollama")
         await pilot.press("enter")  # pick provider
         await pilot.press("enter")  # accept base_url default
+        await _pump(pilot)  # fetch models (empty) -> fallback input
         await pilot.press("enter")  # accept model default
-        for _ in range(6):
-            await pilot.pause()
+        await _pump(pilot)
         assert isinstance(app.result, AgentSettings)
         assert app.result.provider == "ollama"
         assert app.result.auth_method == "none"
         assert app.result.base_url == "http://localhost:11434/v1"
         assert app.result.model == "llama3"
-        kinds = [c[0] if isinstance(c, tuple) else c for c in cfg.calls]
-        assert kinds == ["test", "save"]
+        assert _kinds(cfg) == ["list_models", "test", "save"]
 
 
-async def test_github_copilot_path_runs_device_login() -> None:
-    cfg = FakeConfigurator()
+async def test_model_list_offers_fetched_models() -> None:
+    """Models returned by the API appear in a selectable list."""
+    cfg = FakeConfigurator(models=["llama3", "mistral"])
+    app = _Host(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "ollama")
+        await pilot.press("enter")
+        await pilot.press("enter")  # base_url default
+        await _pump(pilot)
+        model_list = app.screen.query_one("#setup-model-list", OptionList)
+        assert model_list.display is True
+        _select(app, "#setup-model-list", "mistral")
+        await pilot.press("enter")
+        await _pump(pilot)
+        assert isinstance(app.result, AgentSettings)
+        assert app.result.model == "mistral"
+
+
+async def test_model_list_typing_filters_options() -> None:
+    cfg = FakeConfigurator(models=["gpt-4o", "gpt-4o-mini", "claude-sonnet-4"])
+    app = _Host(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "ollama")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await _pump(pilot)
+        await pilot.press("c", "l", "a")  # filter input is focused
+        await pilot.pause()
+        model_list = app.screen.query_one("#setup-model-list", OptionList)
+        prompts = [
+            str(model_list.get_option_at_index(i).prompt) for i in range(model_list.option_count)
+        ]
+        assert prompts == ["claude-sonnet-4"]
+        await pilot.press("enter")  # accept the single highlighted match
+        await _pump(pilot)
+        assert isinstance(app.result, AgentSettings)
+        assert app.result.model == "claude-sonnet-4"
+
+
+async def test_github_copilot_logs_in_then_lists_models() -> None:
+    """Copilot: device login first, then models fetched with the new token."""
+
+    class LoginThenModels(FakeConfigurator):
+        async def finish_device_login(self) -> None:
+            await super().finish_device_login()
+            self.models = ["claude-sonnet-4", "gpt-4o"]
+
+    cfg = LoginThenModels()
     app = _Host(cfg)
     async with app.run_test() as pilot:
         await pilot.pause()
         _select(app, "#setup-provider", "github-copilot")
         await pilot.press("enter")
-        await pilot.press("enter")  # base_url (empty -> None)
-        await pilot.press("enter")  # model default gpt-4o
-        for _ in range(8):
-            await pilot.pause()
-        assert "begin" in cfg.calls
-        assert "finish" in cfg.calls
+        await _pump(pilot)
+        # login before any model/base_url question
+        kinds = _kinds(cfg)
+        assert kinds[: kinds.index("finish") + 1] == ["list_models", "begin", "finish"]
+        _select(app, "#setup-model-list", "claude-sonnet-4")
+        await pilot.press("enter")
+        await _pump(pilot)
         assert isinstance(app.result, AgentSettings)
         assert app.result.provider == "github-copilot"
         assert app.result.auth_method == "device-login"
         assert app.result.base_url is None
+        assert app.result.model == "claude-sonnet-4"
+
+
+async def test_github_copilot_skips_login_when_already_authenticated() -> None:
+    """If model listing already works, don't force a new device login."""
+    cfg = FakeConfigurator(models=["gpt-4o"])
+    app = _Host(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "github-copilot")
+        await pilot.press("enter")
+        await _pump(pilot)
+        assert "begin" not in cfg.calls
+        model_list = app.screen.query_one("#setup-model-list", OptionList)
+        assert model_list.display is True
 
 
 async def test_device_code_shown_during_login() -> None:
@@ -113,14 +192,24 @@ async def test_device_code_shown_during_login() -> None:
         await pilot.pause()
         _select(app, "#setup-provider", "github-copilot")
         await pilot.press("enter")
-        await pilot.press("enter")
-        await pilot.press("enter")
-        for _ in range(4):
-            await pilot.pause()
+        await _pump(pilot)
         device = app.screen.query_one("#setup-device-code", Static)
         text = str(device.render())
         assert "ABCD-1234" in text
         assert "github.com/login/device" in text
+
+
+async def test_checklist_shows_completed_steps() -> None:
+    cfg = FakeConfigurator()
+    app = _Host(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "ollama")
+        await pilot.press("enter")
+        await pilot.pause()
+        steps = str(app.screen.query_one("#setup-steps", Static).render())
+        assert "ollama" in steps
+        assert "✓" in steps
 
 
 async def test_probe_failure_keeps_screen_open_and_shows_error() -> None:
@@ -131,14 +220,13 @@ async def test_probe_failure_keeps_screen_open_and_shows_error() -> None:
         _select(app, "#setup-provider", "ollama")
         await pilot.press("enter")
         await pilot.press("enter")
-        await pilot.press("enter")
-        for _ in range(6):
-            await pilot.pause()
+        await _pump(pilot)
+        await pilot.press("enter")  # model default
+        await _pump(pilot)
         assert app.result == "unset"  # not dismissed
         status = app.screen.query_one("#setup-status", Static)
         assert "connection refused" in str(status.render())
-        kinds = [c[0] if isinstance(c, tuple) else c for c in cfg.calls]
-        assert "save" not in kinds
+        assert "save" not in _kinds(cfg)
 
 
 async def test_azure_offers_auth_choice() -> None:
@@ -158,14 +246,15 @@ async def test_azure_offers_auth_choice() -> None:
         assert inp.display is True
         inp.value = "https://foo.openai.azure.com/openai/v1"
         await pilot.press("enter")
+        await _pump(pilot)  # fetch models (empty) -> fallback input
         model = app.screen.query_one("#setup-model", Input)
         model.value = "gpt-4o"
         model.focus()
         await pilot.press("enter")
-        for _ in range(6):
-            await pilot.pause()
+        await _pump(pilot)
         assert isinstance(app.result, AgentSettings)
         assert app.result.auth_method == "entra"
+        assert app.result.model == "gpt-4o"
 
 
 async def test_escape_dismisses_none() -> None:
@@ -191,9 +280,9 @@ async def test_save_failure_shows_error_and_keeps_screen_open() -> None:
         _select(app, "#setup-provider", "ollama")
         await pilot.press("enter")
         await pilot.press("enter")
+        await _pump(pilot)
         await pilot.press("enter")
-        for _ in range(6):
-            await pilot.pause()
+        await _pump(pilot)
         assert app.result == "unset"  # not dismissed
         status = app.screen.query_one("#setup-status", Static)
         assert "disk full" in str(status.render())
@@ -236,9 +325,9 @@ async def test_save_failure_after_apply_warns_about_restart_revert() -> None:
         _select(app, "#setup-provider", "ollama")
         await pilot.press("enter")
         await pilot.press("enter")
+        await _pump(pilot)
         await pilot.press("enter")
-        for _ in range(6):
-            await pilot.pause()
+        await _pump(pilot)
         assert applied  # runtime swap happened before the failing save
         assert app.result == "unset"  # not dismissed
         text = str(app.screen.query_one("#setup-status", Static).render())
@@ -248,8 +337,8 @@ async def test_save_failure_after_apply_warns_about_restart_revert() -> None:
 
 
 async def test_retry_uses_edited_inputs() -> None:
-    """After a failed probe, `r` must test the currently visible input values,
-    not the snapshot captured on the original submission."""
+    """After a failed probe, Ctrl+R must test the currently visible input
+    values, not the snapshot captured on the original submission."""
     cfg = FakeConfigurator(test_error="boom")
     app = _Host(cfg)
     async with app.run_test() as pilot:
@@ -257,17 +346,16 @@ async def test_retry_uses_edited_inputs() -> None:
         _select(app, "#setup-provider", "ollama")
         await pilot.press("enter")
         await pilot.press("enter")
+        await _pump(pilot)
         await pilot.press("enter")
-        for _ in range(6):
-            await pilot.pause()
+        await _pump(pilot)
         cfg.test_error = None
         model_input = app.screen.query_one("#setup-model", Input)
         model_input.value = "edited-model"
         model_input.focus()
         # The real shortcut must work even while an Input is focused.
         await pilot.press("ctrl+r")
-        for _ in range(6):
-            await pilot.pause()
+        await _pump(pilot)
         tested = [c[1] for c in cfg.calls if isinstance(c, tuple) and c[0] == "test"]
         assert tested[-1].model == "edited-model"
 
@@ -294,12 +382,10 @@ async def test_apply_failure_keeps_wizard_open_and_skips_save() -> None:
         _select(app, "#setup-provider", "ollama")
         await pilot.press("enter")
         await pilot.press("enter")
+        await _pump(pilot)
         await pilot.press("enter")
-        for _ in range(6):
-            await pilot.pause()
+        await _pump(pilot)
         assert app.result == "unset"  # not dismissed
-        assert not any(
-            isinstance(c, tuple) and c[0] == "save" for c in cfg.calls
-        )  # config untouched
+        assert "save" not in _kinds(cfg)  # config untouched
         status = app.screen.query_one("#setup-status", Static)
         assert "Apply failed" in str(status.render())

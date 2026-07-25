@@ -1,4 +1,10 @@
-"""AgentSetupScreen: in-TUI agent setup wizard (`:ai`, plan 4 slice 2)."""
+"""AgentSetupScreen: in-TUI agent setup wizard (`:ai`, plan 4 slice 2).
+
+Flow modelled on opencode/crush onboarding research: provider -> auth ->
+fetch models from the API -> filterable model list (typed input fallback)
+-> live connection test -> save. Completed steps stay visible as a
+checklist so the wizard feels conversational rather than form-like.
+"""
 
 from __future__ import annotations
 
@@ -6,15 +12,15 @@ import dataclasses
 from collections.abc import Callable
 from typing import ClassVar
 
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
+from textual.widgets.option_list import Option
 
 from korvid.agent.setup import AgentConfigurator, AgentSettings
-
-_PROVIDERS = ("github-copilot", "openai-compat", "azure", "ollama")
 
 # provider -> (auth_method, default base_url, default model); azure asks for
 # auth separately and requires base_url/model, so its defaults are empty.
@@ -25,9 +31,16 @@ _DEFAULTS: dict[str, tuple[str, str, str]] = {
     "ollama": ("none", "http://localhost:11434/v1", "llama3"),
 }
 
+_PROVIDER_LABELS: dict[str, str] = {
+    "github-copilot": "github-copilot — sign in with GitHub (no API key)",
+    "openai-compat": "openai-compat — OpenAI-compatible API (API key)",
+    "azure": "azure — Azure OpenAI (Entra ID or API key)",
+    "ollama": "ollama — local models (no auth)",
+}
 
-class AgentSetupScreen(ModalScreen[AgentSettings | None]):
-    """Staged wizard: provider -> (azure auth) -> fields -> device login -> test."""
+
+class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
+    """Conversational wizard: one question at a time + completed-step checklist."""
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("escape", "cancel", "Cancel", show=True),
@@ -39,7 +52,7 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
         align: center middle;
     }
     AgentSetupScreen Vertical {
-        width: 60;
+        width: 70;
         max-width: 90%;
         height: auto;
         border: round $primary;
@@ -48,7 +61,10 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
     }
     AgentSetupScreen OptionList {
         height: auto;
-        max-height: 8;
+        max-height: 10;
+    }
+    AgentSetupScreen #setup-steps {
+        color: $success;
     }
     AgentSetupScreen #setup-status {
         color: $warning;
@@ -65,16 +81,26 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
         self._apply_settings = apply_settings
         self._provider = ""
         self._auth_method = ""
+        self._base_url: str | None = None
+        self._api_key_env: str | None = None
+        self._models: list[str] = []
         self._settings: AgentSettings | None = None
+        self._done_steps: list[str] = []
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Static("Agent setup — pick a provider", id="setup-title")
-            yield OptionList(*_PROVIDERS, id="setup-provider")
+            yield Static(id="setup-steps")
+            yield Static("Which AI provider would you like to use?", id="setup-title")
+            yield OptionList(
+                *(Option(_PROVIDER_LABELS[p], id=p) for p in _DEFAULTS),
+                id="setup-provider",
+            )
             yield OptionList("api_key", "entra", id="setup-auth")
             yield Input(id="setup-base-url", placeholder="base URL (empty for default)")
-            yield Input(id="setup-model", placeholder="model")
             yield Input(id="setup-api-key-env", placeholder="env var holding the API key")
+            yield Input(id="setup-model-filter", placeholder="type to filter — Enter to select")
+            yield OptionList(id="setup-model-list")
+            yield Input(id="setup-model", placeholder="model")
             yield Static(id="setup-device-code")
             yield Static(id="setup-status")
 
@@ -82,8 +108,10 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
         for widget_id in (
             "#setup-auth",
             "#setup-base-url",
-            "#setup-model",
             "#setup-api-key-env",
+            "#setup-model-filter",
+            "#setup-model-list",
+            "#setup-model",
             "#setup-device-code",
         ):
             self.query_one(widget_id).display = False
@@ -92,89 +120,192 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
         provider_list.focus()
 
     # ------------------------------------------------------------------
+    # Checklist / status helpers
+    # ------------------------------------------------------------------
+
+    def _mark_done(self, step: str) -> None:
+        self._done_steps.append(step)
+        lines = "\n".join(f"✓ {s}" for s in self._done_steps)
+        self.query_one("#setup-steps", Static).update(lines)
+
+    def _ask(self, question: str) -> None:
+        self.query_one("#setup-title", Static).update(question)
+
+    def _status(self, text: str) -> None:
+        self.query_one("#setup-status", Static).update(text)
+
+    # ------------------------------------------------------------------
     # Stage transitions
     # ------------------------------------------------------------------
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
-        choice = str(event.option.prompt)
         if event.option_list.id == "setup-provider":
-            self._provider = choice
+            self._provider = event.option.id or str(event.option.prompt)
             self.query_one("#setup-provider").display = False
-            if choice == "azure":
-                self.query_one("#setup-title", Static).update("Azure auth method")
+            self._mark_done(f"Provider: {self._provider}")
+            if self._provider == "azure":
+                self._ask("How should korvid authenticate with Azure?")
                 auth_list = self.query_one("#setup-auth", OptionList)
                 auth_list.display = True
                 auth_list.highlighted = 0
                 auth_list.focus()
                 return
-            self._auth_method = _DEFAULTS[choice][0]
-            self._show_fields()
+            self._auth_method = _DEFAULTS[self._provider][0]
+            self._after_auth_method()
         elif event.option_list.id == "setup-auth":
-            self._auth_method = choice
+            self._auth_method = str(event.option.prompt)
             self.query_one("#setup-auth").display = False
-            self._show_fields()
+            self._mark_done(f"Auth: {self._auth_method}")
+            self._after_auth_method()
+        elif event.option_list.id == "setup-model-list":
+            self._choose_model(str(event.option.prompt))
 
-    def _show_fields(self) -> None:
-        _, base_url, model = _DEFAULTS[self._provider]
-        self.query_one("#setup-title", Static).update(f"{self._provider} — connection")
+    def _after_auth_method(self) -> None:
+        if self._provider == "github-copilot":
+            self.run_worker(self._copilot_connect(), exclusive=True)
+            return
+        _, base_url, _ = _DEFAULTS[self._provider]
+        self._ask(f"Where is your {self._provider} endpoint?")
         base_input = self.query_one("#setup-base-url", Input)
-        model_input = self.query_one("#setup-model", Input)
         base_input.value = base_url
-        model_input.value = model
         base_input.display = True
-        model_input.display = True
-        if self._auth_method == "api_key":
-            self.query_one("#setup-api-key-env").display = True
         base_input.focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
         if event.input.id == "setup-base-url":
-            self.query_one("#setup-model", Input).focus()
-        elif event.input.id == "setup-model":
+            self._base_url = event.input.value.strip() or None
+            self._mark_done(f"Endpoint: {self._base_url or 'default'}")
             if self._auth_method == "api_key":
-                self.query_one("#setup-api-key-env", Input).focus()
+                self._ask("Which environment variable holds your API key?")
+                env_input = self.query_one("#setup-api-key-env", Input)
+                env_input.display = True
+                env_input.focus()
             else:
-                self._advance()
+                self.run_worker(self._fetch_models(), exclusive=True)
         elif event.input.id == "setup-api-key-env":
-            self._advance()
+            self._api_key_env = event.input.value.strip() or None
+            self._mark_done(f"API key env: {self._api_key_env or '(none)'}")
+            self.run_worker(self._fetch_models(), exclusive=True)
+        elif event.input.id == "setup-model-filter":
+            model_list = self.query_one("#setup-model-list", OptionList)
+            if model_list.highlighted is not None and model_list.option_count:
+                option = model_list.get_option_at_index(model_list.highlighted)
+                self._choose_model(str(option.prompt))
+        elif event.input.id == "setup-model":
+            model = event.input.value.strip()
+            if not model:
+                self._status("Model is required")
+                return
+            self._choose_model(model)
 
-    def _advance(self) -> None:
-        base_url = self.query_one("#setup-base-url", Input).value.strip() or None
-        model = self.query_one("#setup-model", Input).value.strip()
-        api_key_env = self.query_one("#setup-api-key-env", Input).value.strip() or None
-        if not model:
-            self._status("Model is required")
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "setup-model-filter":
             return
-        self._settings = AgentSettings(
+        event.stop()
+        needle = event.value.strip().lower()
+        matches = [m for m in self._models if needle in m.lower()]
+        self._populate_model_list(matches)
+
+    def on_key(self, event: events.Key) -> None:
+        # Let ↑/↓ drive the model list while the filter input keeps focus
+        # (crush/opencode-style type-to-filter picker).
+        if event.key not in ("up", "down"):
+            return
+        filter_input = self.query_one("#setup-model-filter", Input)
+        if not filter_input.display or not filter_input.has_focus:
+            return
+        event.stop()
+        model_list = self.query_one("#setup-model-list", OptionList)
+        if not model_list.option_count:
+            return
+        current = model_list.highlighted or 0
+        delta = 1 if event.key == "down" else -1
+        model_list.highlighted = (current + delta) % model_list.option_count
+
+    # ------------------------------------------------------------------
+    # Model step
+    # ------------------------------------------------------------------
+
+    def _draft_settings(self, model: str) -> AgentSettings:
+        return AgentSettings(
             provider=self._provider,
             auth_method=self._auth_method,
-            base_url=base_url,
+            base_url=self._base_url,
             model=model,
-            api_key_env=api_key_env,
+            api_key_env=self._api_key_env,
         )
-        if self._provider == "github-copilot":
-            self.run_worker(self._device_login(), exclusive=True)
+
+    def _show_model_step(self, models: list[str]) -> None:
+        self._models = models
+        default_model = _DEFAULTS[self._provider][2]
+        if models:
+            self._ask(f"Choose a model ({len(models)} available)")
+            self.query_one("#setup-model-filter", Input).display = True
+            model_list = self.query_one("#setup-model-list", OptionList)
+            model_list.display = True
+            self._populate_model_list(models)
+            if default_model in models:
+                model_list.highlighted = models.index(default_model)
+            self.query_one("#setup-model-filter", Input).focus()
         else:
-            self.run_worker(self._probe(), exclusive=True)
+            self._ask("Which model should korvid use?")
+            model_input = self.query_one("#setup-model", Input)
+            model_input.value = default_model
+            model_input.display = True
+            model_input.focus()
+
+    def _populate_model_list(self, models: list[str]) -> None:
+        model_list = self.query_one("#setup-model-list", OptionList)
+        model_list.clear_options()
+        model_list.add_options([Option(m) for m in models])
+        if models:
+            model_list.highlighted = 0
+
+    def _choose_model(self, model: str) -> None:
+        self.query_one("#setup-model-filter", Input).display = False
+        self.query_one("#setup-model-list", OptionList).display = False
+        self._mark_done(f"Model: {model}")
+        self._settings = self._draft_settings(model)
+        self.run_worker(self._probe(), exclusive=True)
 
     # ------------------------------------------------------------------
     # Workers
     # ------------------------------------------------------------------
 
-    async def _device_login(self) -> None:
+    async def _copilot_connect(self) -> None:
+        """Copilot: reuse an existing login when possible, else device login,
+        then offer the models the API actually serves."""
+        self._status("Checking for an existing GitHub login…")
+        models = await self._configurator.list_models(self._draft_settings(""))
+        if models:
+            self._mark_done("GitHub login (already signed in)")
+            self._status("")
+            self._show_model_step(models)
+            return
         device = self.query_one("#setup-device-code", Static)
         try:
             prompt = await self._configurator.begin_device_login()
             device.display = True
             device.update(f"Enter code {prompt.user_code} at {prompt.verification_uri}")
+            self._status("Waiting for authorization…")
             await self._configurator.finish_device_login()
         except Exception as exc:  # login errors must not crash the app
             self._status(f"Login failed: {exc}")
             return
         device.display = False
-        await self._probe()
+        self._mark_done("GitHub login")
+        self._status("Fetching available models…")
+        models = await self._configurator.list_models(self._draft_settings(""))
+        self._status("")
+        self._show_model_step(models)
+
+    async def _fetch_models(self) -> None:
+        self._status("Fetching available models…")
+        models = await self._configurator.list_models(self._draft_settings(""))
+        self._status("")
+        self._show_model_step(models)
 
     async def _probe(self) -> None:
         settings = self._settings
@@ -214,23 +345,27 @@ class AgentSetupScreen(ModalScreen[AgentSettings | None]):
     # Actions
     # ------------------------------------------------------------------
 
-    def _status(self, text: str) -> None:
-        self.query_one("#setup-status", Static).update(text)
-
     def action_retry(self) -> None:
         if self._settings is None:
             return
         # Re-read the still-visible inputs so an edit after a failed probe is
-        # actually tested (device login is not repeated for Copilot).
-        base_url = self.query_one("#setup-base-url", Input).value.strip() or None
-        model = self.query_one("#setup-model", Input).value.strip()
-        api_key_env = self.query_one("#setup-api-key-env", Input).value.strip() or None
-        if not model:
-            self._status("Model is required")
-            return
-        self._settings = dataclasses.replace(
-            self._settings, base_url=base_url, model=model, api_key_env=api_key_env
-        )
+        # actually tested (device login is not repeated for Copilot; a model
+        # picked from the list is kept unless the fallback input is visible).
+        updates: dict[str, str | None] = {}
+        base_input = self.query_one("#setup-base-url", Input)
+        if base_input.display:
+            updates["base_url"] = base_input.value.strip() or None
+        env_input = self.query_one("#setup-api-key-env", Input)
+        if env_input.display:
+            updates["api_key_env"] = env_input.value.strip() or None
+        model_input = self.query_one("#setup-model", Input)
+        if model_input.display:
+            model = model_input.value.strip()
+            if not model:
+                self._status("Model is required")
+                return
+            updates["model"] = model
+        self._settings = dataclasses.replace(self._settings, **updates)  # type: ignore[arg-type]  # str|None matches each field
         self.run_worker(self._probe(), exclusive=True)
 
     def action_cancel(self) -> None:
