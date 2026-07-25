@@ -316,6 +316,28 @@ class FakeBridge(UIBridge):
         self.calls.append(("drill_down", {"name": name}))
         return f"drilled into {name}"
 
+    async def agent_request_write(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+    ) -> str:
+        self.calls.append(
+            (
+                "request_write",
+                {
+                    "action": action,
+                    "kind": kind,
+                    "name": name,
+                    "namespace": namespace,
+                    "replicas": replicas,
+                },
+            )
+        )
+        return f"approved and executed: {action} {kind}/{name}"
+
 
 def make_ui_executor(bridge: Any) -> ToolExecutor:
     kube: Any = FakeKube()

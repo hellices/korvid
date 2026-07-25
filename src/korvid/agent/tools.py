@@ -160,6 +160,23 @@ class UIBridge(ABC):
     @abstractmethod
     async def agent_drill_down(self, name: str) -> str: ...
 
+    @abstractmethod
+    async def agent_request_write(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+    ) -> str:
+        """Request an approval-gated cluster write (spec §6.2).
+
+        The implementation must open a confirmation dialog that only the
+        *user's* keystroke can approve — the agent can neither open-and-confirm
+        nor bypass it. Returns the outcome (executed / denied / ERROR).
+        """
+        ...
+
 
 UI_TOOLS: list[dict[str, Any]] = [
     {
@@ -285,6 +302,98 @@ UI_TOOLS: list[dict[str, Any]] = [
 
 UI_TOOL_NAMES = frozenset(t["function"]["name"] for t in UI_TOOLS)
 
+#: Cluster mutations (spec §6.2). Every call routes through
+#: UIBridge.agent_request_write, which shows the user an approval dialog;
+#: the tool result reports whether the user approved and what happened.
+WRITE_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_resource",
+            "description": (
+                "Request deletion of a resource. This does NOT delete anything "
+                "directly: it opens an approval dialog in the TUI and the "
+                "operation runs only if the user approves it with a keystroke."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "description": "Resource kind or alias."},
+                    "name": {"type": "string", "description": "Resource name."},
+                    "namespace": {
+                        "type": "string",
+                        "description": "Namespace (required for namespaced resources).",
+                    },
+                },
+                "required": ["kind", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scale_resource",
+            "description": (
+                "Request scaling a deployment/replicaset/statefulset to a replica "
+                "count. Runs only after the user approves the request in the TUI "
+                "approval dialog."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "description": "Resource kind or alias."},
+                    "name": {"type": "string", "description": "Resource name."},
+                    "namespace": {
+                        "type": "string",
+                        "description": "Namespace of the workload.",
+                    },
+                    "replicas": {
+                        "type": "integer",
+                        "description": "Desired replica count (>= 0).",
+                    },
+                },
+                # scalable kinds are all namespaced apps/* workloads, so a
+                # call without a namespace can never succeed
+                "required": ["kind", "name", "namespace", "replicas"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rollout_restart",
+            "description": (
+                "Request a rolling restart of a deployment/statefulset/daemonset. "
+                "Runs only after the user approves the request in the TUI "
+                "approval dialog."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "description": "Resource kind or alias."},
+                    "name": {"type": "string", "description": "Resource name."},
+                    "namespace": {
+                        "type": "string",
+                        "description": "Namespace of the workload.",
+                    },
+                },
+                # restartable kinds are all namespaced apps/* workloads, so a
+                # call without a namespace can never succeed
+                "required": ["kind", "name", "namespace"],
+            },
+        },
+    },
+]
+
+WRITE_TOOL_NAMES = frozenset(t["function"]["name"] for t in WRITE_TOOLS)
+
+#: tool name -> action keyword passed to UIBridge.agent_request_write.
+_WRITE_ACTIONS = {
+    "delete_resource": "delete",
+    "scale_resource": "scale",
+    "rollout_restart": "rollout_restart",
+}
+
 
 class ToolExecutor:
     """Dispatches OpenAI tool calls to the Kubernetes client or the UI bridge."""
@@ -312,6 +421,8 @@ class ToolExecutor:
     async def _dispatch(self, name: str, arguments: dict[str, Any]) -> str:
         if name in UI_TOOL_NAMES:
             return await self._dispatch_ui(name, arguments)
+        if name in WRITE_TOOL_NAMES:
+            return await self._dispatch_write(name, arguments)
         if name == "list_resources":
             return await self._list_resources(arguments)
         if name == "get_resource":
@@ -337,6 +448,32 @@ class ToolExecutor:
             return await self._ui.agent_drill_down(str(args["name"]))
         return await self._ui.agent_open_describe(
             str(args["kind"]), str(args["name"]), args.get("namespace")
+        )
+
+    async def _dispatch_write(self, name: str, args: dict[str, Any]) -> str:
+        if self._ui is None:
+            raise ValueError("write actions require the interactive TUI session")
+        # Tool schemas are not runtime validation: reject wrong-typed values
+        # instead of coercing them (str(123) would show the user a target the
+        # model never named; int(1.9) an operation it never asked for).
+        kind = args.get("kind")
+        target = args.get("name")
+        namespace = args.get("namespace")
+        if not isinstance(kind, str):
+            raise ValueError(f"'kind' must be a string, got {kind!r}")
+        if not isinstance(target, str):
+            raise ValueError(f"'name' must be a string, got {target!r}")
+        if namespace is not None and not isinstance(namespace, str):
+            raise ValueError(f"'namespace' must be a string, got {namespace!r}")
+        replicas = args.get("replicas")
+        if replicas is not None and (isinstance(replicas, bool) or not isinstance(replicas, int)):
+            raise ValueError(f"'replicas' must be an integer, got {replicas!r}")
+        return await self._ui.agent_request_write(
+            _WRITE_ACTIONS[name],
+            kind,
+            target,
+            namespace,
+            replicas,
         )
 
     async def _list_resources(self, args: dict[str, Any]) -> str:

@@ -29,6 +29,7 @@ class KorvidConfig:
     agent_auth_method: str | None = None
     keybindings: dict[str, str] = field(default_factory=dict)
     log_buffer_lines: int = 5000
+    readonly: bool = False
 
 
 def load_config(path: Path | None = None) -> KorvidConfig:
@@ -65,6 +66,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_auth_method=auth_method,
         keybindings=dict(raw.get("keybindings") or {}),
         log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
+        readonly=raw.get("readonly") is True,
     )
 
 

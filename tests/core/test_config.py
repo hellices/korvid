@@ -35,6 +35,15 @@ def test_explicit_agent_off_wins(tmp_path: Path) -> None:
     assert cfg.agent_enabled is False  # explicit off switch (design doc §6.3-4)
 
 
+def test_readonly_defaults_false_and_loads_from_yaml(tmp_path: Path) -> None:
+    assert KorvidConfig().readonly is False
+    f = tmp_path / "config.yaml"
+    f.write_text("readonly: true\n")
+    assert load_config(f).readonly is True
+    f.write_text("readonly: banana\n")  # only a literal true enables it
+    assert load_config(f).readonly is False
+
+
 # ---------------------------------------------------------------------------
 # log_buffer_lines
 # ---------------------------------------------------------------------------

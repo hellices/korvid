@@ -26,7 +26,7 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from korvid.agent.tools import UI_TOOL_NAMES
+from korvid.agent.tools import UI_TOOL_NAMES, WRITE_TOOL_NAMES
 from korvid.ui.messages import AgentPromptSubmitted
 
 _SETUP_HINT = (
@@ -52,6 +52,15 @@ _TOOL_LABELS: dict[str, tuple[str, str]] = {
     "open_logs": ("opening logs of {pod} on screen", "screen → logs of {pod}"),
     "open_describe": ("opening describe of {name} on screen", "screen → describe of {name}"),
     "drill_down": ("drilling into {name} on screen", "screen → drilled into {name}"),
+    "delete_resource": ("requesting delete of {kind}/{name}", "delete request → {kind}/{name}"),
+    "scale_resource": (
+        "requesting scale of {kind}/{name} to {replicas}",
+        "scale request → {kind}/{name} = {replicas}",
+    ),
+    "rollout_restart": (
+        "requesting rollout restart of {kind}/{name}",
+        "restart request → {kind}/{name}",
+    ),
 }
 
 
@@ -63,7 +72,9 @@ def _fmt_tokens(n: int) -> str:
 
 
 def _tool_marker(name: str) -> str:
-    """Screen mutations (🖥) read differently from cluster reads (🔧)."""
+    """Cluster writes (⚠) vs screen mutations (🖥) vs cluster reads (🔧)."""
+    if name in WRITE_TOOL_NAMES:
+        return "⚠"
     return "🖥" if name in _UI_TOOLS else "🔧"
 
 
