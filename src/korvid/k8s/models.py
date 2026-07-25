@@ -119,10 +119,16 @@ class GenericSummary:
     created: str  # ISO-8601 timestamp or "" when absent
     uid: str = ""
     owner_uids: tuple[str, ...] = ()
+    #: spec.replicas when the kind carries one (Deployment/StatefulSet/...);
+    #: None otherwise - 0 must stay distinguishable from "not scalable".
+    desired: int | None = None
 
     @classmethod
     def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> GenericSummary:
         meta = manifest.get("metadata") or {}
+        replicas = (manifest.get("spec") or {}).get("replicas")
+        if isinstance(replicas, bool) or not isinstance(replicas, int):
+            replicas = None  # bools and non-integers are never a replica count
         return cls(
             name=str(meta.get("name", "")),
             namespace=str(meta.get("namespace", "")),
@@ -130,6 +136,7 @@ class GenericSummary:
             created=str(meta.get("creationTimestamp") or ""),
             uid=str(meta.get("uid") or ""),
             owner_uids=_owner_uids(meta),
+            desired=replicas,
         )
 
     def age(self, now: datetime | None = None) -> str:
@@ -161,10 +168,13 @@ class GenericSummary:
 
 @dataclass(frozen=True)
 class ReplicaSetSummary(GenericSummary):
-    """ReplicaSet summary with rollout-history fields for drill-down views."""
+    """ReplicaSet summary with rollout-history fields for drill-down views.
+
+    ``desired`` is inherited from GenericSummary (always set from
+    spec.replicas here).
+    """
 
     revision: str = "-"  # deployment.kubernetes.io/revision annotation
-    desired: int = 0
     current: int = 0
     ready: str = "0/0"
 

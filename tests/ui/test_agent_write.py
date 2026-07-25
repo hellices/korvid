@@ -197,11 +197,12 @@ async def test_agent_write_blocked_without_permission(tmp_path: Path) -> None:
         assert rec.calls == []
 
 
-async def test_agent_write_times_out_as_denial(
+async def test_agent_write_times_out_as_expired(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An unanswered approval dialog resolves as a denial (never hangs the
-    agent turn), executes nothing, audits nothing, and clears the dialog."""
+    """An unanswered approval dialog resolves as expired (never hangs the
+    agent turn, and never claims the user declined), executes nothing,
+    audits nothing, and clears the dialog."""
     monkeypatch.setattr("korvid.ui.app._APPROVAL_TIMEOUT", 0.2)
     rec = Recorder()
     audit_path = tmp_path / "audit.jsonl"
@@ -213,8 +214,9 @@ async def test_agent_write_times_out_as_denial(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
-        result = await task  # no keystroke; the timeout resolves it as a denial
-        assert "denied" in result.lower()
+        result = await task  # no keystroke; the timeout resolves it as expired
+        assert "expired" in result.lower()
+        assert "declined" not in result.lower()
         assert rec.calls == []
         assert not isinstance(app.screen, ConfirmScreen)
         assert not audit_path.exists()
@@ -263,18 +265,19 @@ async def test_agent_write_pending_while_panel_collapsed(tmp_path: Path) -> None
         assert rec.calls == [("delete", "deployments", "default", "web")]
 
 
-async def test_agent_write_collapsed_panel_times_out_as_denial(
+async def test_agent_write_collapsed_panel_times_out_as_expired(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A request that is never surfaced (the panel stays collapsed) resolves
-    as a denial after the approval window without ever pushing a modal."""
+    as expired after the approval window without ever pushing a modal."""
     monkeypatch.setattr("korvid.ui.app._APPROVAL_TIMEOUT", 0.3)
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         result = await app.agent_request_write("delete", "deployments", "web", namespace="default")
-        assert "denied" in result.lower()
+        assert "expired" in result.lower()
+        assert "declined" not in result.lower()
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
 

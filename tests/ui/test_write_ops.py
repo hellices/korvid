@@ -70,7 +70,9 @@ def make_app(
             )
         ],
         "deployments": [
-            GenericSummary(name="web", namespace="default", kind="Deployment", created="")
+            GenericSummary(
+                name="web", namespace="default", kind="Deployment", created="", desired=3
+            )
         ],
         "nodes": [GenericSummary(name="worker-1", namespace="", kind="Node", created="")],
     }
@@ -284,6 +286,6 @@ async def test_scale_prompt_prefills_current_replicas(tmp_path: Path) -> None:
         await _to_view(pilot, "deployments")
         await pilot.press("S")
         await _until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
-        # GenericSummary carries no desired count, so the field starts empty
-        # and the label reports it as unknown instead of a misleading 0.
-        assert app.screen.query_one(Input).value == ""
+        # Deployment summaries preserve spec.replicas as `desired`, so the
+        # prompt starts prefilled with the current count.
+        assert app.screen.query_one(Input).value == "3"

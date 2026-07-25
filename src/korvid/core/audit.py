@@ -13,10 +13,38 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-try:  # Unix only; on other platforms the in-process lock still applies
+try:  # POSIX interprocess lock
     import fcntl
-except ImportError:  # pragma: no cover - exercised only on Windows
-    fcntl = None  # type: ignore[assignment]
+except ImportError:  # pragma: no cover - fcntl is absent only on Windows; CI runs on POSIX
+    fcntl = None  # type: ignore[assignment]  # absence selects the msvcrt path below
+
+try:  # Windows interprocess lock
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]  # absent on POSIX, where flock is used
+
+
+def _lock_file(fd: int) -> None:
+    """Take an exclusive interprocess lock on ``fd``.
+
+    Uses ``flock`` on POSIX and ``msvcrt.locking`` on Windows; on platforms
+    with neither, callers fall back to in-process serialization only.
+    """
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    elif msvcrt is not None:  # pragma: no cover - Windows-only branch; CI runs on POSIX
+        # LK_LOCK retries once a second for ~10s, then raises OSError:
+        # under pathological contention the audit write fails closed
+        # instead of interleaving.
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+
+
+def _unlock_file(fd: int) -> None:
+    if fcntl is not None:
+        return  # flock is released when the descriptor is closed
+    if msvcrt is not None:  # pragma: no cover - Windows-only branch; CI runs on POSIX
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 
 
 def default_audit_path() -> Path:
@@ -33,8 +61,9 @@ class AuditLog:
     per the design contract (default 50 MB, configurable backup retention;
     at least one backup is always kept so rotation never discards history).
     Rotation and append are serialized with an in-process lock plus an
-    interprocess ``flock`` on a sidecar lock file, since several korvid
-    sessions may share the default path. ``append`` is synchronous file I/O —
+    interprocess lock (``flock`` on POSIX, ``msvcrt.locking`` on Windows) on
+    a sidecar lock file, since several korvid sessions may share the default
+    path. ``append`` is synchronous file I/O —
     call it via ``asyncio.to_thread`` from async contexts. All filesystem
     work happens inside ``append`` so a bad audit path never aborts startup;
     it only blocks writes (fail-closed).
@@ -102,21 +131,21 @@ class AuditLog:
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            if fcntl is None:  # pragma: no cover - Windows fallback
-                self._locked_append(entry)
-                return
-            # flock on a sidecar file (the log itself gets renamed by
-            # rotation) serializes rotate+append across processes too.
+            # Interprocess lock on a sidecar file (the log itself gets renamed
+            # by rotation) serializes rotate+append across korvid sessions.
             lock_fd = os.open(
                 self._path.with_name(f"{self._path.name}.lock"),
                 os.O_WRONLY | os.O_CREAT,
                 0o600,
             )
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
-                self._locked_append(entry)
+                _lock_file(lock_fd)
+                try:
+                    self._locked_append(entry)
+                finally:
+                    _unlock_file(lock_fd)
             finally:
-                os.close(lock_fd)  # releases the flock
+                os.close(lock_fd)
 
     def _locked_append(self, entry: dict[str, str | None]) -> None:
         self._rotate_if_needed()

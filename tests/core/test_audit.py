@@ -163,3 +163,26 @@ def test_concurrent_appends_do_not_race_rotation(tmp_path: Path) -> None:
     for f in files:
         for line in f.read_text().splitlines():
             json.loads(line)
+
+
+def test_concurrent_appends_across_instances(tmp_path: Path) -> None:
+    """Independent AuditLog instances (separate korvid sessions sharing the
+    default path) serialize rotate+append through the sidecar file lock, not
+    the per-instance threading.Lock."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = tmp_path / "audit.jsonl"
+    logs = [AuditLog(path, max_bytes=300, backups=2) for _ in range(4)]
+
+    def _write(i: int) -> None:
+        logs[i % len(logs)].append(
+            action="delete", kind="pods", namespace="default", name=f"pod-{i}"
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(_write, range(80)))  # raises if rotation races across instances
+    files = [p for p in tmp_path.iterdir() if not p.name.endswith(".lock")]
+    assert path in files
+    for f in files:
+        for line in f.read_text().splitlines():
+            json.loads(line)  # interleaved writes would corrupt a line

@@ -202,6 +202,26 @@ def test_generic_summary_defaults_without_owner_info() -> None:
     assert gs.owner_uids == ()
 
 
+def test_generic_summary_preserves_spec_replicas() -> None:
+    """Scalable kinds (Deployment/StatefulSet) keep spec.replicas as
+    `desired` so scale prompts can prefill the current count."""
+    manifest: dict[str, Any] = {
+        "metadata": {"name": "web", "namespace": "prod"},
+        "spec": {"replicas": 3},
+    }
+    gs = GenericSummary.from_manifest("Deployment", manifest)
+    assert gs.desired == 3
+
+
+def test_generic_summary_desired_none_without_replicas() -> None:
+    """Kinds without spec.replicas (or with a non-integer value) report
+    desired=None, never a misleading 0."""
+    gs = GenericSummary.from_manifest("Service", {"metadata": {"name": "svc", "namespace": "ns"}})
+    assert gs.desired is None
+    bad: dict[str, Any] = {"metadata": {"name": "x", "namespace": "ns"}, "spec": {"replicas": "3"}}
+    assert GenericSummary.from_manifest("Deployment", bad).desired is None
+
+
 def test_pod_summary_owner_uids() -> None:
     manifest: dict[str, Any] = {
         "metadata": {

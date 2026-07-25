@@ -11,7 +11,7 @@ import subprocess
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from time import monotonic
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -1971,12 +1971,17 @@ class KorvidApp(App[None]):
             verb, target = self._write_perm_target(action, meta)
             return f"ERROR: missing permission: {verb} {target}"
         require = name if action == "delete" and not meta.namespaced else None
-        approved = await self._await_user_approval(
+        decision = await self._await_user_approval(
             f"Agent requests: {action} {meta.plural}/{name}{self._write_locus(ns)}",
             operation,
             require_name=require,
         )
-        if not approved:
+        if decision == "expired":
+            return (
+                f"not approved: the request expired before the user responded"
+                f" ({action} {meta.plural}/{name})"
+            )
+        if decision != "approved":
             return f"denied: the user declined the {action} request for {meta.plural}/{name}"
         outcome = await self._run_write(action, meta.plural, ns, name, op(), detail=detail)
         if outcome != "done":
@@ -2071,7 +2076,7 @@ class KorvidApp(App[None]):
 
     async def _await_user_approval(
         self, title: str, operation: str, *, require_name: str | None = None
-    ) -> bool:
+    ) -> Literal["approved", "declined", "expired"]:
         """Show a ConfirmScreen and wait for the user's decision. Only real key
         input can resolve it. While the agent panel is collapsed, or another
         screen (a user dialog, describe, picker) is on top, the request stays
@@ -2080,7 +2085,9 @@ class KorvidApp(App[None]):
         active dialog where a stray keystroke could approve it); it surfaces
         when the panel is expanded with a clear screen. Pending and on-screen
         time share one deadline, so an unanswered or never-surfaced request
-        resolves as a denial and an agent turn can never hang forever."""
+        resolves as "expired" (distinct from an explicit "declined", so the
+        agent is never told the user declined when nobody answered) and an
+        agent turn can never hang forever."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _APPROVAL_TIMEOUT
         if not self._can_surface_approval():
@@ -2089,10 +2096,10 @@ class KorvidApp(App[None]):
             last_reminder = loop.time()
             while not self._can_surface_approval():
                 if loop.time() >= deadline:
-                    return False
+                    return "expired"
                 if loop.time() - last_reminder >= 30:
                     # The first toast fades after 10s: keep reminding so the
-                    # request does not silently expire as a denial.
+                    # request does not silently expire.
                     self.notify(pending_msg, severity="warning", timeout=10)
                     last_reminder = loop.time()
                 await asyncio.sleep(0.05)
@@ -2105,7 +2112,8 @@ class KorvidApp(App[None]):
         screen = ConfirmScreen(title, operation, require_name=require_name)
         await self.push_screen(screen, _done)
         try:
-            return await asyncio.wait_for(fut, timeout=max(deadline - loop.time(), 0.05))
+            confirmed = await asyncio.wait_for(fut, timeout=max(deadline - loop.time(), 0.05))
+            return "approved" if confirmed else "declined"
         except TimeoutError:
             # Late keystrokes are a no-op (the future is already resolved),
             # but clear the dialog when possible so it doesn't linger.
@@ -2117,7 +2125,7 @@ class KorvidApp(App[None]):
                     "Agent write request expired - dismiss the pending dialog with Esc",
                     severity="warning",
                 )
-            return False
+            return "expired"
 
     async def _show_describe(
         self,
