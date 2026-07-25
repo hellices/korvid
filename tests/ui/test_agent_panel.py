@@ -213,6 +213,29 @@ async def test_failed_tool_call_shows_error_summary() -> None:
         assert "404 not found" in _log_text(app)
 
 
+async def test_write_tool_calls_keep_warning_marker() -> None:
+    """Write tools carry the warning marker through start and finish so a
+    cluster mutation is never rendered like a harmless read."""
+    app = PanelApp()
+    async with app.run_test() as pilot:
+        panel = app.query_one(AgentPanel)
+        panel.begin_turn("scale it down")
+        panel.apply_event(
+            ToolCallStarted(
+                call_id="c1",
+                name="delete_resource",
+                arguments='{"kind": "pods", "name": "web-1", "namespace": "app"}',
+            )
+        )
+        await pilot.pause()
+        assert "⚠" in _log_text(app)  # visible while the request is pending
+        panel.apply_event(
+            ToolCallFinished(call_id="c1", name="delete_resource", ok=True, summary="")
+        )
+        await pilot.pause()
+        assert "⚠" in _log_text(app)  # still visible after completion
+
+
 async def test_ui_tool_calls_read_as_screen_actions() -> None:
     """UI-driving tools must read as screen actions so the user understands
     the agent changed what they see."""
