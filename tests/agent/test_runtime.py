@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, TurnComplete
-from korvid.agent.runtime import MAX_HISTORY_TURNS, AgentRuntime
+from korvid.agent.runtime import MAX_HISTORY_TURNS, SYSTEM_PROMPT, AgentRuntime
 
 
 class ScriptedProvider:
@@ -286,3 +286,74 @@ async def test_executor_exception_result_is_capped() -> None:
     tool_msg = next(m for m in p.calls[-1] if m.get("role") == "tool")
     assert len(tool_msg["content"]) <= MAX_RESULT_CHARS + 50
     assert tool_msg["content"].startswith("ERROR:")
+
+
+async def test_runtime_passes_injected_tools_to_provider() -> None:
+    """Slice 3: composition root injects READ_TOOLS + UI_TOOLS."""
+
+    seen: list[list[dict[str, Any]]] = []
+
+    class ToolSpyProvider(ScriptedProvider):
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            seen.append(tools)
+            async for ev in super().complete(messages, tools, stream=stream):
+                yield ev
+
+    custom = [{"type": "function", "function": {"name": "navigate", "parameters": {}}}]
+    p = ToolSpyProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
+    await collect(AgentRuntime(p, EchoExecutor(), tools=custom), "go")
+    assert seen == [custom]
+
+
+async def test_runtime_defaults_to_read_tools() -> None:
+    from korvid.agent.tools import READ_TOOLS
+
+    seen: list[list[dict[str, Any]]] = []
+
+    class ToolSpyProvider(ScriptedProvider):
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            seen.append(tools)
+            async for ev in super().complete(messages, tools, stream=stream):
+                yield ev
+
+    p = ToolSpyProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
+    await collect(AgentRuntime(p, EchoExecutor()), "go")
+    assert seen == [READ_TOOLS]
+
+
+async def test_system_prompt_omits_ui_driving_without_ui_tools() -> None:
+    """Read-only runtimes must not advertise UI tools the provider never saw."""
+    p = ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
+    await collect(AgentRuntime(p, EchoExecutor()), "go")
+    system = p.calls[0][0]["content"]
+    assert "navigate" not in system
+    assert "open_logs" not in system
+
+
+async def test_system_prompt_advertises_ui_driving_with_ui_tools() -> None:
+    from korvid.agent.tools import READ_TOOLS, UI_TOOLS
+
+    p = ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
+    await collect(AgentRuntime(p, EchoExecutor(), tools=READ_TOOLS + UI_TOOLS), "go")
+    system = p.calls[0][0]["content"]
+    for tool in ("navigate", "set_filter", "open_logs", "open_describe"):
+        assert tool in system
+
+
+def test_system_prompt_redirects_write_requests_to_kubectl() -> None:
+    """The agent has no write tools yet; instead of a bare refusal it must
+    offer the exact kubectl command the user can run."""
+    assert "kubectl" in SYSTEM_PROMPT
+    assert "write" in SYSTEM_PROMPT.lower() or "modify" in SYSTEM_PROMPT.lower()
