@@ -1,3 +1,4 @@
+import os
 import stat
 import sys
 import types
@@ -152,3 +153,40 @@ def test_interrupted_write_preserves_existing_credentials(
         with pytest.raises(OSError, match="disk full"):
             store.save("new", "value")
     assert store.load("old") == "keep-me"
+
+
+def test_write_fsyncs_before_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Data must reach disk before the rename, or a power loss can leave an
+    empty/old credentials file behind."""
+    import korvid.providers.token_store as ts_mod
+
+    _no_keyring(monkeypatch)
+    calls: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        calls.append("fsync")
+        real_fsync(fd)
+
+    def spy_replace(src: object, dst: object) -> None:
+        calls.append("replace")
+        real_replace(src, dst)  # type: ignore[arg-type]  # spy forwards Path args
+
+    with monkeypatch.context() as m:
+        m.setattr(ts_mod, "os_fsync", spy_fsync)
+        m.setattr(ts_mod, "os_replace", spy_replace)
+        TokenStore(fallback_path=tmp_path / "creds.json").save("k", "v")
+    assert calls == ["fsync", "replace"]
+
+
+def test_write_does_not_clobber_foreign_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The temp file name must be unique so two concurrent processes cannot
+    race on (and delete) each other's temp file."""
+    _no_keyring(monkeypatch)
+    foreign = tmp_path / "creds.json.tmp"
+    foreign.write_text("owned by another process")
+    TokenStore(fallback_path=tmp_path / "creds.json").save("k", "v")
+    assert foreign.read_text() == "owned by another process"

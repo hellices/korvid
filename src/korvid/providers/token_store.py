@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+from os import fsync as os_fsync
+from os import replace as os_replace
 from pathlib import Path
+from tempfile import mkstemp
 
 logger = logging.getLogger(__name__)
 
@@ -78,13 +81,20 @@ class TokenStore:
 
     def _write_file(self, data: dict[str, str]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        # Same-directory temp file + atomic replace: an interrupted write can
-        # never truncate the only stored copy of a credential.
-        tmp = self._path.with_name(self._path.name + ".tmp")
+        # Unique same-directory temp file + fsync + atomic replace: an
+        # interrupted write can never truncate the only stored credential
+        # copy, a power loss cannot leave an empty file, and concurrent
+        # writers cannot race on a shared temp name. mkstemp creates 0600.
+        fd, tmp_name = mkstemp(dir=self._path.parent, prefix=self._path.name + ".", suffix=".tmp")
+        os.close(fd)
+        tmp = Path(tmp_name)
         try:
-            tmp.touch(exist_ok=True)
-            os.chmod(tmp, 0o600)
             tmp.write_text(json.dumps(data))
-            os.replace(tmp, self._path)
+            fsync_fd = os.open(tmp, os.O_RDONLY)
+            try:
+                os_fsync(fsync_fd)
+            finally:
+                os.close(fsync_fd)
+            os_replace(tmp, self._path)
         finally:
             tmp.unlink(missing_ok=True)

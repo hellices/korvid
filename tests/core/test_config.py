@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -273,3 +274,53 @@ def test_save_agent_config_preserves_auth_extension_keys(tmp_path: Path) -> None
     auth = yaml.safe_load(p.read_text())["agent"]["auth"]
     assert auth["method"] == "api-key"
     assert auth["tenant_id"] == "contoso"
+
+
+def test_save_agent_config_fsyncs_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Data must reach disk before the rename, or a power loss can leave an
+    empty/old file behind (ext4 delayed allocation)."""
+    import korvid.core.config as cfg_mod
+
+    calls: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        calls.append("fsync")
+        real_fsync(fd)
+
+    def spy_replace(src: object, dst: object) -> None:
+        calls.append("replace")
+        real_replace(src, dst)  # type: ignore[arg-type]  # spy forwards Path args
+
+    with monkeypatch.context() as m:
+        m.setattr(cfg_mod, "os_fsync", spy_fsync)
+        m.setattr(cfg_mod, "os_replace", spy_replace)
+        save_agent_config(
+            tmp_path / "c.yaml",
+            provider="ollama",
+            auth_method="none",
+            base_url=None,
+            model="llama3",
+            api_key_env=None,
+        )
+    assert calls == ["fsync", "replace"]
+
+
+def test_save_agent_config_does_not_clobber_foreign_tmp(tmp_path: Path) -> None:
+    """The temp file name must be unique so two concurrent processes cannot
+    race on (and delete) each other's temp file."""
+    p = tmp_path / "c.yaml"
+    foreign = tmp_path / "c.yaml.tmp"
+    foreign.write_text("owned by another process")
+    save_agent_config(
+        p,
+        provider="ollama",
+        auth_method="none",
+        base_url=None,
+        model="llama3",
+        api_key_env=None,
+    )
+    assert foreign.read_text() == "owned by another process"
