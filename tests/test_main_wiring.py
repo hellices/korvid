@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from typing import Any, cast
 
 from korvid.__main__ import _close_provider_in_background
@@ -76,6 +77,17 @@ class _FakeApp(UIBridge):
         self.calls.append(f"drill:{name}")
         return "ok-drill"
 
+    async def agent_request_write(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+    ) -> str:
+        self.calls.append(f"write:{action}:{kind}/{name}")
+        return "ok-write"
+
 
 async def test_proxy_without_target_returns_error() -> None:
     from korvid.__main__ import _UIBridgeProxy
@@ -86,6 +98,7 @@ async def test_proxy_without_target_returns_error() -> None:
     assert (await proxy.agent_open_logs("p", "ns")).startswith("ERROR:")
     assert (await proxy.agent_open_describe("pods", "p")).startswith("ERROR:")
     assert (await proxy.agent_drill_down("web")).startswith("ERROR:")
+    assert (await proxy.agent_request_write("delete", "pods", "web-1")).startswith("ERROR:")
 
 
 async def test_proxy_forwards_to_target() -> None:
@@ -99,12 +112,14 @@ async def test_proxy_forwards_to_target() -> None:
     assert await proxy.agent_open_logs("p", "ns") == "ok-logs"
     assert await proxy.agent_open_describe("pods", "p", "ns") == "ok-describe"
     assert await proxy.agent_drill_down("web") == "ok-drill"
+    assert await proxy.agent_request_write("delete", "pods", "web-1", "ns") == "ok-write"
     assert app.calls == [
         "navigate:pods:prod",
         "filter:web",
         "logs:ns/p",
         "describe:pods/p",
         "drill:web",
+        "write:delete:pods/web-1",
     ]
 
 
@@ -133,5 +148,16 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
     names = [t["function"]["name"] for t in runtime._tools]
     assert "navigate" in names
     assert "list_resources" in names
+    assert "delete_resource" in names  # writes armed by default (approval-gated)
     executor = cast("Any", runtime._executor)
     assert executor._ui is proxy
+
+    # readonly strips every write tool: the model is never told they exist.
+    ro_runtime, _, _, _, _ = _build_agent_wiring(
+        dataclasses.replace(config, readonly=True), kube_stub, {}
+    )
+    assert ro_runtime is not None
+    ro_names = [t["function"]["name"] for t in ro_runtime._tools]
+    assert "delete_resource" not in ro_names
+    assert "scale_resource" not in ro_names
+    assert "rollout_restart" not in ro_names

@@ -235,14 +235,73 @@ class KubeClient:
         self, meta: ResourceMeta, namespace: str | None, name: str
     ) -> dict[str, Any]:
         """Fetch the raw manifest for a single object. ApiException → ApiStatusError."""
+        return await self._request_json(self._object_path(meta, namespace, name))
+
+    @staticmethod
+    def _object_path(meta: ResourceMeta, namespace: str | None, name: str) -> str:
         if meta.namespaced and namespace is not None:
-            path = (
+            return (
                 f"{meta.api_base}/namespaces/{_path_segment(namespace)}"
                 f"/{meta.plural}/{_path_segment(name)}"
             )
-        else:
-            path = f"{meta.api_base}/{meta.plural}/{_path_segment(name)}"
-        return await self._request_json(path)
+        return f"{meta.api_base}/{meta.plural}/{_path_segment(name)}"
+
+    async def _request_write(
+        self,
+        path: str,
+        method: str,
+        body: dict[str, Any] | None = None,
+        content_type: str | None = None,
+    ) -> None:
+        """Mutating request through the ApiClient; wraps ApiException as ApiStatusError."""
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        header_params: dict[str, str] = {}
+        if content_type is not None:
+            header_params["Content-Type"] = content_type
+        try:
+            await self._api.call_api(
+                path,
+                method,
+                auth_settings=["BearerToken"],
+                header_params=header_params,
+                body=body,
+                _preload_content=False,
+            )
+        except k8s_client.exceptions.ApiException as exc:
+            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+
+    async def delete_object(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
+        """DELETE a single object. ApiException → ApiStatusError."""
+        await self._request_write(self._object_path(meta, namespace, name), "DELETE")
+
+    async def scale_object(
+        self, meta: ResourceMeta, namespace: str | None, name: str, replicas: int
+    ) -> None:
+        """Set spec.replicas via the /scale subresource (merge patch)."""
+        await self._request_write(
+            f"{self._object_path(meta, namespace, name)}/scale",
+            "PATCH",
+            body={"spec": {"replicas": replicas}},
+            content_type="application/merge-patch+json",
+        )
+
+    async def rollout_restart(self, meta: ResourceMeta, namespace: str | None, name: str) -> None:
+        """Trigger a rolling restart the way kubectl does: patch the pod
+        template with a kubectl.kubernetes.io/restartedAt annotation."""
+        stamp = datetime.now().astimezone().isoformat()
+        await self._request_write(
+            self._object_path(meta, namespace, name),
+            "PATCH",
+            body={
+                "spec": {
+                    "template": {
+                        "metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": stamp}}
+                    }
+                }
+            },
+            content_type="application/strategic-merge-patch+json",
+        )
 
     async def stream_logs(
         self,

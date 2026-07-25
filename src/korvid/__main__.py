@@ -8,17 +8,19 @@ created on, so separate asyncio.run() calls would break with
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import dataclasses
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentSettings
-from korvid.agent.tools import READ_TOOLS, UI_TOOLS, ToolExecutor, UIBridge
+from korvid.agent.tools import READ_TOOLS, UI_TOOLS, WRITE_TOOLS, ToolExecutor, UIBridge
+from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import DEFAULT_CONFIG_PATH, KorvidConfig, load_config, save_agent_config
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -116,6 +118,18 @@ class _UIBridgeProxy(UIBridge):
             return self._NOT_READY
         return await self.target.agent_drill_down(name)
 
+    async def agent_request_write(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+    ) -> str:
+        if self.target is None:
+            return self._NOT_READY
+        return await self.target.agent_request_write(action, kind, name, namespace, replicas)
+
 
 def _build_agent_wiring(
     config: KorvidConfig, kube: KubeClient, aliases: dict[str, ResourceMeta]
@@ -130,6 +144,9 @@ def _build_agent_wiring(
     token_store = TokenStore()
     ui_proxy = _UIBridgeProxy()
     agent_tools = READ_TOOLS + UI_TOOLS
+    if not config.readonly:
+        # In readonly mode the model is never even told write tools exist.
+        agent_tools = agent_tools + WRITE_TOOLS
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
     provider = create_provider(
         enabled=config.agent_enabled,
@@ -186,13 +203,48 @@ def _build_agent_wiring(
     return agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy
 
 
-async def _run() -> None:
+def _build_write_ops(
+    kube: KubeClient, aliases: dict[str, ResourceMeta]
+) -> tuple[
+    Callable[[str, str | None, str], Awaitable[None]],
+    Callable[[str, str | None, str, int], Awaitable[None]],
+    Callable[[str, str | None, str], Awaitable[None]],
+]:
+    """Kind-string wrappers over the KubeClient write methods: the app speaks
+    plural kind strings; the client wants ResourceMeta resolved via aliases."""
+
+    def _meta_for(kind: str) -> ResourceMeta:
+        meta = aliases.get(kind)
+        if meta is None:
+            raise ValueError(f"Unknown resource kind: {kind!r}")
+        return meta
+
+    async def delete_object(kind: str, namespace: str | None, name: str) -> None:
+        await kube.delete_object(_meta_for(kind), namespace, name)
+
+    async def scale_object(kind: str, namespace: str | None, name: str, replicas: int) -> None:
+        await kube.scale_object(_meta_for(kind), namespace, name, replicas)
+
+    async def rollout_restart(kind: str, namespace: str | None, name: str) -> None:
+        await kube.rollout_restart(_meta_for(kind), namespace, name)
+
+    return delete_object, scale_object, rollout_restart
+
+
+def _load_startup_config(readonly: bool) -> KorvidConfig:
     config = load_config()
+    if readonly:
+        config = dataclasses.replace(config, readonly=True)
     # Pin the actual context name so kubectl subprocesses (shell/debug) and the
     # status bar reference this cluster even if current-context changes later.
     resolved_ctx = resolve_context_name(config.kube_context)
     if resolved_ctx != config.kube_context:
         config = dataclasses.replace(config, kube_context=resolved_ctx)
+    return config
+
+
+async def _run(readonly: bool = False) -> None:
+    config = _load_startup_config(readonly)
     kube = KubeClient()
     await kube.connect(config.kube_context)
     store = ResourceStore()
@@ -223,6 +275,8 @@ async def _run() -> None:
     async def get_events(namespace: str, name: str) -> list[dict[str, Any]]:
         return await kube.list_events_for(namespace, name)
 
+    delete_object, scale_object, rollout_restart = _build_write_ops(kube, aliases)
+
     watch_manager = WatchManager(store, source)
 
     agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy = _build_agent_wiring(
@@ -238,6 +292,10 @@ async def _run() -> None:
         get_manifest=get_manifest,
         get_events=get_events,
         stream_logs=kube.stream_logs,
+        delete_object=delete_object,
+        scale_object=scale_object,
+        rollout_restart=rollout_restart,
+        audit=AuditLog(default_audit_path()),
         agent_runtime=agent_runtime,
         agent_model_name=config.agent_model,
         agent_configurator=configurator,
@@ -255,7 +313,14 @@ async def _run() -> None:
 
 
 def main() -> None:
-    asyncio.run(_run())
+    parser = argparse.ArgumentParser(prog="korvid", description="Kubernetes TUI with an agent.")
+    parser.add_argument(
+        "--readonly",
+        action="store_true",
+        help="Disable all cluster write operations (keybindings and agent tools).",
+    )
+    args = parser.parse_args()
+    asyncio.run(_run(readonly=args.readonly))
 
 
 if __name__ == "__main__":

@@ -612,3 +612,78 @@ async def test_list_objects_raises_api_status_error() -> None:
         pytest.raises(ApiStatusError, match="API 403: Forbidden"),
     ):
         await client.list_objects(meta, "default")
+
+
+# Write operations (issue #16) -------------------------------------------------
+
+
+def _write_api() -> MagicMock:
+    """ApiClient mock whose call_api returns an empty JSON body."""
+    api = MagicMock()
+    resp = MagicMock()
+    resp.read = AsyncMock(return_value=b"{}")
+    api.call_api = AsyncMock(return_value=resp)
+    return api
+
+
+async def test_delete_object_issues_delete_on_object_path() -> None:
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.delete_object(_deploy_meta(), "default", "web")
+    args = api.call_api.call_args[0]
+    assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web"
+    assert args[1] == "DELETE"
+
+
+async def test_delete_object_encodes_segments() -> None:
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.delete_object(_deploy_meta(), "team/a", "dep#1")
+    path = api.call_api.call_args[0][0]
+    assert "team%2Fa" in path
+    assert "dep%231" in path
+    assert "team/a" not in path
+
+
+async def test_scale_object_patches_scale_subresource() -> None:
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.scale_object(_deploy_meta(), "default", "web", 5)
+    args, kwargs = api.call_api.call_args
+    assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web/scale"
+    assert args[1] == "PATCH"
+    assert kwargs["body"] == {"spec": {"replicas": 5}}
+    assert kwargs["header_params"]["Content-Type"] == "application/merge-patch+json"
+
+
+async def test_rollout_restart_patches_restartedAt_annotation() -> None:
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.rollout_restart(_deploy_meta(), "default", "web")
+    args, kwargs = api.call_api.call_args
+    assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web"
+    assert args[1] == "PATCH"
+    annotations = kwargs["body"]["spec"]["template"]["metadata"]["annotations"]
+    assert "kubectl.kubernetes.io/restartedAt" in annotations
+    assert kwargs["header_params"]["Content-Type"] == "application/strategic-merge-patch+json"
+
+
+async def test_write_api_error_raises_api_status_error() -> None:
+    client = KubeClient()
+    api = MagicMock()
+    api.call_api = AsyncMock(side_effect=ApiException(status=403, reason="Forbidden"))
+    with (
+        patch.object(client, "_api", api),
+        pytest.raises(ApiStatusError, match="API 403: Forbidden"),
+    ):
+        await client.delete_object(_deploy_meta(), "default", "web")
+
+
+async def test_write_without_connect_raises() -> None:
+    client = KubeClient()
+    with pytest.raises(RuntimeError, match="connect"):
+        await client.delete_object(_deploy_meta(), "default", "web")

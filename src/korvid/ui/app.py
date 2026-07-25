@@ -22,6 +22,7 @@ from korvid.agent.events import AgentError
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.agent.tools import UIBridge
+from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
@@ -48,6 +49,7 @@ from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv, buil
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 from korvid.ui.widgets.command_bar import CommandBar
+from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
@@ -71,6 +73,9 @@ _MAX_MULTI_STREAM_PODS = 8
 # small to read — comparing >4 replicas is what ``L`` (multi-stream) is for.
 _MAX_LOG_PODS = 4
 _MAX_RECONNECT_ATTEMPTS = 5
+#: Seconds an agent-requested approval dialog stays open before it counts as
+#: a denial - an unanswered dialog must never hang the agent turn forever.
+_APPROVAL_TIMEOUT = 120.0
 
 
 class _ReplayFilter:
@@ -137,6 +142,9 @@ class KorvidApp(App[None]):
         Binding("shift+n", "log_search_prev", "Prev hit"),
         Binding("N", "log_search_prev", "Prev hit", show=False),
         Binding("ctrl+a", "toggle_agent", "AI", priority=True),
+        Binding("ctrl+d", "delete_resource", "Delete"),
+        Binding("r", "rollout_restart", "Restart", show=False),
+        Binding("S", "scale_resource", "Scale", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -166,6 +174,10 @@ class KorvidApp(App[None]):
         agent_model_name: str | None = None,
         agent_configurator: AgentConfigurator | None = None,
         rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None = None,
+        delete_object: Callable[[str, str | None, str], Awaitable[None]] | None = None,
+        scale_object: Callable[[str, str | None, str, int], Awaitable[None]] | None = None,
+        rollout_restart: Callable[[str, str | None, str], Awaitable[None]] | None = None,
+        audit: AuditLog | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -175,6 +187,10 @@ class KorvidApp(App[None]):
         self._get_manifest = get_manifest
         self._get_events = get_events
         self._stream_logs = stream_logs
+        self._delete_object = delete_object
+        self._scale_object = scale_object
+        self._rollout_restart = rollout_restart
+        self._audit = audit
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
         self._agent_configurator = agent_configurator
@@ -1022,6 +1038,170 @@ class KorvidApp(App[None]):
                 return obj.containers
         return ()
 
+    # -- Write operations (issue #16): every path goes through a ConfirmScreen
+    # -- confirmed only by a user keystroke; executed writes are audited.
+
+    _RESTARTABLE: ClassVar[frozenset[str]] = frozenset(
+        {"deployments", "statefulsets", "daemonsets"}
+    )
+    _SCALABLE: ClassVar[frozenset[str]] = frozenset({"deployments", "replicasets", "statefulsets"})
+
+    def _write_target(self) -> tuple[ResourceMeta, str | None, str] | None:
+        """Resolve (meta, namespace, name) of the selected row for a write, or
+        None (with a notification) when writes are disabled or nothing usable
+        is selected. Cluster-scoped kinds get namespace=None."""
+        if self.config.readonly:
+            self.notify("Read-only mode: cluster writes are disabled", severity="warning")
+            return None
+        kind = self._canonical_kind(self.current_kind)
+        meta = self.aliases.get(kind)
+        if meta is None:
+            self.notify(f"Unknown resource kind {kind!r}", severity="warning")
+            return None
+        ns, name = self._selected_ns_name()
+        if name is None:
+            return None
+        return meta, (ns if meta.namespaced and ns else None), name
+
+    def _audit_write(
+        self, action: str, kind: str, namespace: str | None, name: str, detail: str, outcome: str
+    ) -> None:
+        if self._audit is not None:
+            self._audit.append(
+                action=action,
+                kind=kind,
+                namespace=namespace,
+                name=name,
+                detail=detail,
+                outcome=outcome,
+            )
+
+    async def _run_write(
+        self,
+        action: str,
+        kind: str,
+        namespace: str | None,
+        name: str,
+        op: Awaitable[None],
+        detail: str = "",
+    ) -> None:
+        """Execute an approved write; audit success or failure either way."""
+        try:
+            await op
+        except Exception as exc:
+            self._audit_write(action, kind, namespace, name, detail, f"error: {exc}")
+            self.notify(f"{action} {kind}/{name} failed: {exc}", severity="error")
+            return
+        self._audit_write(action, kind, namespace, name, detail, "success")
+        self.notify(f"{action} {kind}/{name}: done", severity="information")
+
+    async def action_delete_resource(self) -> None:
+        """Ctrl-D: delete the selected resource behind a layered confirmation
+        (cluster-scoped kinds require typing the resource name)."""
+        delete = self._delete_object
+        if delete is None:
+            self.notify("Delete unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name = target
+        where = f" in namespace {ns}" if ns else " (cluster-scoped)"
+        operation = f"DELETE {meta.plural}/{name}{where}"
+        require = None if meta.namespaced else name
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_write("delete", meta.plural, ns, name, delete(meta.plural, ns, name))
+                )
+
+        await self.push_screen(
+            ConfirmScreen(f"Delete {meta.plural}/{name}?", operation, require_name=require), _done
+        )
+
+    async def action_rollout_restart(self) -> None:
+        """r: rolling restart of the selected deployment/statefulset/daemonset."""
+        restart = self._rollout_restart
+        if restart is None:
+            self.notify("Rollout restart unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name = target
+        if meta.plural not in self._RESTARTABLE:
+            self.notify(f"rollout restart does not apply to {meta.plural}", severity="warning")
+            return
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_write(
+                        "rollout_restart", meta.plural, ns, name, restart(meta.plural, ns, name)
+                    )
+                )
+
+        await self.push_screen(
+            ConfirmScreen(
+                f"Rollout restart {meta.plural}/{name}?",
+                f"PATCH {meta.plural}/{name} pod template (restartedAt annotation)",
+            ),
+            _done,
+        )
+
+    def _current_replicas(self, ns: str | None, name: str) -> int:
+        for obj in self.store.get(self.current_kind, self.current_scope):
+            if obj.namespace == (ns or "") and obj.name == name:
+                return int(getattr(obj, "desired", 0) or 0)
+        return 0
+
+    async def action_scale_resource(self) -> None:
+        """S: scale the selected deployment/replicaset/statefulset (prompt, then confirm)."""
+        scale = self._scale_object
+        if scale is None:
+            self.notify("Scale unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name = target
+        if meta.plural not in self._SCALABLE:
+            self.notify(f"scale does not apply to {meta.plural}", severity="warning")
+            return
+        current = self._current_replicas(ns, name)
+
+        def _confirmed(replicas: int) -> Callable[[bool | None], None]:
+            def _done(confirmed: bool | None) -> None:
+                if confirmed:
+                    self.run_worker(
+                        self._run_write(
+                            "scale",
+                            meta.plural,
+                            ns,
+                            name,
+                            scale(meta.plural, ns, name, replicas),
+                            detail=f"replicas -> {replicas}",
+                        )
+                    )
+
+            return _done
+
+        def _on_replicas(replicas: int | None) -> None:
+            if replicas is None:
+                return
+            self.push_screen(
+                ConfirmScreen(
+                    f"Scale {meta.plural}/{name}?",
+                    f"PATCH {meta.plural}/{name}/scale: replicas {current} -> {replicas}",
+                ),
+                _confirmed(replicas),
+            )
+
+        await self.push_screen(
+            ReplicasPrompt(f"{meta.plural}/{name}", current=current), _on_replicas
+        )
+
     async def _open_log_pane(
         self,
         namespace: str,
@@ -1605,6 +1785,134 @@ class KorvidApp(App[None]):
         self._mark_agent_action(f"describe → {title}")
         return f"describe screen opened for {title} — manifest and events are on screen"
 
+    async def agent_request_write(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+    ) -> str:
+        """Approval-gated write requested by the agent (spec §6.2): opens the
+        same ConfirmScreen as the keybindings; only the user's keystroke can
+        approve it, and the outcome (executed/denied/error) flows back as the
+        tool result. Every executed write is audited with an agent marker."""
+        built = self._agent_write_op(action, kind, name, namespace, replicas)
+        if isinstance(built, str):
+            return built
+        meta, ns, op, operation, detail = built
+        require = name if action == "delete" and not meta.namespaced else None
+        approved = await self._await_user_approval(
+            f"Agent requests: {action} {meta.plural}/{name}", operation, require_name=require
+        )
+        if not approved:
+            return f"denied: the user declined the {action} request for {meta.plural}/{name}"
+        try:
+            await op()
+        except Exception as exc:
+            self._audit_write(action, meta.plural, ns, name, detail, f"error: {exc}")
+            return f"ERROR: {action} {meta.plural}/{name} failed: {exc}"
+        self._audit_write(action, meta.plural, ns, name, detail, "success")
+        self._mark_agent_action(f"{action} → {meta.plural}/{name}")
+        self.notify(f"{action} {meta.plural}/{name}: done", severity="information")
+        return f"approved and executed: {action} {meta.plural}/{name}"
+
+    def _agent_write_op(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None,
+        replicas: int | None,
+    ) -> tuple[ResourceMeta, str | None, Callable[[], Awaitable[None]], str, str] | str:
+        """Validate an agent write request; return (meta, ns, op, operation
+        description, audit detail) or an 'ERROR: ...' string."""
+        if self.config.readonly:
+            return "ERROR: read-only mode - cluster writes are disabled"
+        meta = self.aliases.get(kind.strip().lower())
+        if meta is None:
+            return f"ERROR: unknown kind {kind!r} - not a resource kind in this cluster"
+        if meta.namespaced and not namespace:
+            return f"ERROR: kind {kind!r} is namespaced - provide the 'namespace' argument"
+        ns = namespace if meta.namespaced else None
+        if action == "delete":
+            return self._agent_delete_op(meta, ns, name)
+        if action == "scale":
+            return self._agent_scale_op(meta, ns, name, replicas)
+        if action == "rollout_restart":
+            return self._agent_restart_op(meta, ns, name)
+        return f"ERROR: unknown write action {action!r}"
+
+    def _agent_delete_op(
+        self, meta: ResourceMeta, ns: str | None, name: str
+    ) -> tuple[ResourceMeta, str | None, Callable[[], Awaitable[None]], str, str] | str:
+        delete = self._delete_object
+        if delete is None:
+            return "ERROR: delete unavailable in this session"
+        where = f" in namespace {ns}" if ns else " (cluster-scoped)"
+        return (
+            meta,
+            ns,
+            lambda: delete(meta.plural, ns, name),
+            f"DELETE {meta.plural}/{name}{where}",
+            "requested by agent",
+        )
+
+    def _agent_scale_op(
+        self, meta: ResourceMeta, ns: str | None, name: str, replicas: int | None
+    ) -> tuple[ResourceMeta, str | None, Callable[[], Awaitable[None]], str, str] | str:
+        scale = self._scale_object
+        if scale is None:
+            return "ERROR: scale unavailable in this session"
+        if meta.plural not in self._SCALABLE:
+            return f"ERROR: scale does not apply to {meta.plural}"
+        if replicas is None or replicas < 0:
+            return "ERROR: scale requires a 'replicas' argument >= 0"
+        return (
+            meta,
+            ns,
+            lambda: scale(meta.plural, ns, name, replicas),
+            f"PATCH {meta.plural}/{name} scale -> {replicas} replicas",
+            f"replicas -> {replicas}; requested by agent",
+        )
+
+    def _agent_restart_op(
+        self, meta: ResourceMeta, ns: str | None, name: str
+    ) -> tuple[ResourceMeta, str | None, Callable[[], Awaitable[None]], str, str] | str:
+        restart = self._rollout_restart
+        if restart is None:
+            return "ERROR: rollout restart unavailable in this session"
+        if meta.plural not in self._RESTARTABLE:
+            return f"ERROR: rollout restart does not apply to {meta.plural}"
+        return (
+            meta,
+            ns,
+            lambda: restart(meta.plural, ns, name),
+            f"PATCH {meta.plural}/{name} pod template (restartedAt annotation)",
+            "requested by agent",
+        )
+
+    async def _await_user_approval(
+        self, title: str, operation: str, *, require_name: str | None = None
+    ) -> bool:
+        """Show a ConfirmScreen and wait for the user's decision. Only real key
+        input can resolve it; an unanswered dialog times out as a denial so an
+        agent turn can never hang forever."""
+        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+
+        def _done(confirmed: bool | None) -> None:
+            if not fut.done():
+                fut.set_result(bool(confirmed))
+
+        screen = ConfirmScreen(title, operation, require_name=require_name)
+        await self.push_screen(screen, _done)
+        try:
+            return await asyncio.wait_for(fut, timeout=_APPROVAL_TIMEOUT)
+        except TimeoutError:
+            if self.screen is screen:
+                self.pop_screen()
+            return False
+
     async def _show_describe(
         self,
         share: bool,
@@ -1676,3 +1984,13 @@ class AppUIBridge(UIBridge):
 
     async def agent_drill_down(self, name: str) -> str:
         return await self._app.agent_drill_down(name)
+
+    async def agent_request_write(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+    ) -> str:
+        return await self._app.agent_request_write(action, kind, name, namespace, replicas)

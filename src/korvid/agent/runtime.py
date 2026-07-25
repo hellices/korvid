@@ -15,17 +15,33 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, cap_result
+from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES, cap_result
 
 SYSTEM_PROMPT = (
     "You are korvid's Kubernetes diagnostic agent, embedded in a live TUI the "
     "user is looking at right now. "
     "Use tools to inspect cluster state, cite evidence from tool results, "
-    "and never guess resource state. "
-    "You have no write tools yet: when the user asks you to modify cluster "
-    "state (scale, edit, delete, restart, apply), say write actions are not "
-    "yet enabled in this agent and give the exact kubectl command they can "
-    "run themselves instead."
+    "and never guess resource state."
+)
+
+# Appended when no write tools are armed (readonly mode or writes not wired):
+# instead of a bare refusal the agent offers the exact kubectl command.
+NO_WRITE_PROMPT = (
+    "You have no write tools in this session: when the user asks you to "
+    "modify cluster state (scale, edit, delete, restart, apply), say write "
+    "actions are not enabled and give the exact kubectl command they can run "
+    "themselves instead."
+)
+
+# Appended only when the approval-gated write tools are armed.
+WRITE_PROMPT = (
+    "You can request cluster writes with delete_resource, scale_resource, and "
+    "rollout_restart. These never execute directly: each call opens an "
+    "approval dialog in the TUI, and the operation runs only if the user "
+    "approves it with a keystroke. State clearly what you are about to "
+    "request and why before calling a write tool, and report the outcome "
+    "(approved, denied, or failed) afterwards. Never retry a denied request "
+    "unless the user asks."
 )
 
 # Appended only when the runtime is armed with the UI-control tools, so the
@@ -98,8 +114,13 @@ class AgentRuntime:
         self._executor = executor
         self._tools = tools if tools is not None else READ_TOOLS
         prompt = SYSTEM_PROMPT
-        if any(t.get("function", {}).get("name") in UI_TOOL_NAMES for t in self._tools):
+        armed = {t.get("function", {}).get("name") for t in self._tools}
+        if armed & UI_TOOL_NAMES:
             prompt = f"{prompt} {UI_DRIVE_PROMPT}"
+        if armed & WRITE_TOOL_NAMES:
+            prompt = f"{prompt} {WRITE_PROMPT}"
+        else:
+            prompt = f"{prompt} {NO_WRITE_PROMPT}"
         self._max_iterations = max_iterations
         self._max_history_chars = max_history_chars
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
