@@ -76,6 +76,10 @@ _MAX_RECONNECT_ATTEMPTS = 5
 #: Seconds an agent-requested approval dialog stays open before it counts as
 #: a denial - an unanswered dialog must never hang the agent turn forever.
 _APPROVAL_TIMEOUT = 120.0
+#: Upper bound on the SubjectAccessReview pre-check: a stalled authorization
+#: endpoint must never hang a binding handler or an agent turn. On timeout
+#: the check fails open (writes stay approval-gated and audited).
+_PERMISSION_CHECK_TIMEOUT = 10.0
 
 
 class _ReplayFilter:
@@ -1173,6 +1177,47 @@ class KorvidApp(App[None]):
             return None
         return meta, (ns if meta.namespaced and ns else None), name
 
+    def _write_context_intact(
+        self, action: str, meta: ResourceMeta, ns: str | None, name: str
+    ) -> bool:
+        """Re-validate after an awaited pre-check, before pushing a dialog:
+        the permission check is an API round-trip, so the user may have opened
+        another screen or moved the selection meanwhile - and keystrokes typed
+        during the await must never land on a confirmation they did not see.
+        Abort (with a notification) unless the base screen is still on top and
+        the same row is still selected."""
+        if len(self.screen_stack) > 1:
+            self.notify(
+                f"{action} {meta.plural}/{name} cancelled -"
+                " another dialog opened during the permission check",
+                severity="warning",
+            )
+            return False
+        kind = self._canonical_kind(self.current_kind)
+        current_ns, current_name = self._selected_ns_name()
+        if (
+            self.aliases.get(kind) is not meta
+            or current_name != name
+            or (meta.namespaced and (current_ns or None) != ns)
+        ):
+            self.notify(
+                f"{action} {meta.plural}/{name} cancelled -"
+                " the selection changed during the permission check",
+                severity="warning",
+            )
+            return False
+        return True
+
+    async def _precheck_keybinding_write(
+        self, action: str, meta: ResourceMeta, ns: str | None, name: str
+    ) -> bool:
+        """RBAC pre-check plus post-await re-validation for binding handlers:
+        the check is an API round trip, so confirm the screen and selection
+        are unchanged before any dialog is pushed."""
+        if not await self._permitted(action, meta, ns, name):
+            return False
+        return self._write_context_intact(action, meta, ns, name)
+
     async def _permitted(
         self, action: str, meta: ResourceMeta, namespace: str | None, name: str
     ) -> bool:
@@ -1183,8 +1228,9 @@ class KorvidApp(App[None]):
             return True
         verb, subresource = self._WRITE_VERBS[action]
         try:
-            allowed = await self._check_permission(
-                verb, meta.plural, subresource, namespace, meta.group, name
+            allowed = await asyncio.wait_for(
+                self._check_permission(verb, meta.plural, subresource, namespace, meta.group, name),
+                timeout=_PERMISSION_CHECK_TIMEOUT,
             )
         except Exception:
             # Fail-open, but visibly: warn once so a persistently failing
@@ -1282,7 +1328,7 @@ class KorvidApp(App[None]):
         if target is None:
             return
         meta, ns, name = target
-        if not await self._permitted("delete", meta, ns, name):
+        if not await self._precheck_keybinding_write("delete", meta, ns, name):
             return
         operation = f"DELETE {meta.plural}/{name}{self._write_locus(ns)}"
         require = None if meta.namespaced else name
@@ -1310,7 +1356,7 @@ class KorvidApp(App[None]):
                 f"rollout restart does not apply to {self._gvr_label(meta)}", severity="warning"
             )
             return
-        if not await self._permitted("rollout_restart", meta, ns, name):
+        if not await self._precheck_keybinding_write("rollout_restart", meta, ns, name):
             return
 
         def _done(confirmed: bool | None) -> None:
@@ -1350,7 +1396,7 @@ class KorvidApp(App[None]):
         if (meta.group, meta.plural) not in self._SCALABLE:
             self.notify(f"scale does not apply to {self._gvr_label(meta)}", severity="warning")
             return
-        if not await self._permitted("scale", meta, ns, name):
+        if not await self._precheck_keybinding_write("scale", meta, ns, name):
             return
         current = self._current_replicas(ns, name)
 

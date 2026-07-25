@@ -208,6 +208,35 @@ async def test_agent_unknown_kind_is_error(tmp_path: Path) -> None:
         assert rec.calls == []
 
 
+async def test_stalled_permission_check_times_out_fail_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hung authorization endpoint must never hang the agent turn: the
+    pre-check is bounded and fails open into the normal approval gate."""
+    monkeypatch.setattr("korvid.ui.app._PERMISSION_CHECK_TIMEOUT", 0.1)
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", permitted=True)
+
+    async def stall(
+        verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
+    ) -> bool:
+        await asyncio.Event().wait()  # never resolves
+        return True
+
+    app._check_permission = stall
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        _expand_panel(app)
+        task = asyncio.ensure_future(
+            app.agent_request_write("delete", "deployments", "web", namespace="default")
+        )
+        # reaching the dialog proves the stalled check timed out fail-open
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        result = await task
+        assert result.startswith("approved and executed")
+
+
 async def test_agent_write_blocked_without_permission(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(rec, tmp_path / "audit.jsonl", permitted=False)

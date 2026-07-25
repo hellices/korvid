@@ -289,3 +289,32 @@ async def test_scale_prompt_prefills_current_replicas(tmp_path: Path) -> None:
         # Deployment summaries preserve spec.replicas as `desired`, so the
         # prompt starts prefilled with the current count.
         assert app.screen.query_one(Input).value == "3"
+
+
+async def test_dialog_opened_during_permission_check_aborts_write(tmp_path: Path) -> None:
+    """The RBAC pre-check is an API round trip: if the user opened another
+    dialog while it ran, the confirmation must not stack on top where a
+    queued keystroke could approve it unseen."""
+    from korvid.ui.widgets.pick_screen import PickScreen
+
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl", permitted=True)
+    release = asyncio.Event()
+
+    async def slow_check(
+        verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
+    ) -> bool:
+        await release.wait()
+        return True
+
+    app._check_permission = slow_check
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("ctrl+d")  # handler now awaits the stalled pre-check
+        await pilot.pause(0.1)
+        blocker = PickScreen("opened while the check was pending", ["a", "b"])
+        await app.push_screen(blocker)
+        release.set()
+        await pilot.pause(0.3)
+        assert app.screen is blocker  # no ConfirmScreen stacked on top
+        assert rec.calls == []
