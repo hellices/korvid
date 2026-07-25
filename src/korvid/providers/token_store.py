@@ -13,6 +13,9 @@ from tempfile import mkstemp
 logger = logging.getLogger(__name__)
 
 _SERVICE = "korvid"
+# Fallback-file marker recording a delete whose keyring removal failed;
+# load() honors it (never resurrects the token) and retries the cleanup.
+_PENDING_DELETE = "__pending_delete__:"
 DEFAULT_CREDENTIALS_PATH = Path.home() / ".config" / "korvid" / "credentials.json"
 
 
@@ -32,6 +35,7 @@ class TokenStore:
             # cannot resurrect an older token once keyring recovers.
             data = self._read_file()
             data[key] = value
+            data.pop(_PENDING_DELETE + key, None)  # a fresh save overrides it
             self._write_file(data)
             try:
                 import keyring
@@ -40,14 +44,24 @@ class TokenStore:
             except Exception:
                 logger.debug("stale keyring entry cleanup failed", exc_info=True)
             return
-        # Keyring save succeeded: drop any stale file copy so it can never
-        # shadow the fresh keyring value after a later keyring outage.
+        # Keyring save succeeded: drop any stale file copy (and any pending
+        # deletion marker) so neither can shadow the fresh keyring value.
         data = self._read_file()
-        if key in data:
-            del data[key]
+        if key in data or _PENDING_DELETE + key in data:
+            data.pop(key, None)
+            data.pop(_PENDING_DELETE + key, None)
             self._write_file(data)
 
     def load(self, key: str) -> str | None:
+        data = self._read_file()
+        if _PENDING_DELETE + key in data:
+            # A previous delete() could not remove the keyring entry.
+            # Retry the cleanup; until it succeeds the token stays deleted.
+            if not self._keyring_delete(key):
+                return None
+            del data[_PENDING_DELETE + key]
+            self._write_file(data)
+            return data.get(key)
         try:
             import keyring
 
@@ -56,19 +70,39 @@ class TokenStore:
                 return value
         except Exception:
             logger.debug("keyring unavailable; using file fallback", exc_info=True)
-        return self._read_file().get(key)
+        return data.get(key)
 
     def delete(self, key: str) -> None:
+        deleted = self._keyring_delete(key)
+        data = self._read_file()
+        changed = key in data or _PENDING_DELETE + key in data
+        data.pop(key, None)
+        data.pop(_PENDING_DELETE + key, None)
+        if not deleted:
+            # Record the pending deletion so a recovered keyring backend
+            # cannot resurrect the token through load().
+            data[_PENDING_DELETE + key] = "1"
+            changed = True
+        if changed:
+            self._write_file(data)
+
+    def _keyring_delete(self, key: str) -> bool:
+        """Remove the keyring entry; True when it is gone (deleted or absent)."""
         try:
             import keyring
 
             keyring.delete_password(_SERVICE, key)
-        except Exception:
-            logger.debug("keyring delete failed or unavailable", exc_info=True)
-        data = self._read_file()
-        if key in data:
-            del data[key]
-            self._write_file(data)
+        except ImportError:
+            return True  # no keyring backend -> nothing stored there
+        except Exception as exc:
+            # keyring.errors.PasswordDeleteError means the entry does not
+            # exist, which is a successful deletion. Matched by name so a
+            # broken keyring install cannot break the error path itself.
+            if type(exc).__name__ == "PasswordDeleteError":
+                return True
+            logger.debug("keyring delete failed", exc_info=True)
+            return False
+        return True
 
     def _read_file(self) -> dict[str, str]:
         try:

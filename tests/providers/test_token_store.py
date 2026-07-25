@@ -197,3 +197,108 @@ def test_write_does_not_clobber_foreign_tmp(
     foreign.write_text("owned by another process")
     TokenStore(fallback_path=tmp_path / "creds.json").save("k", "v")
     assert foreign.read_text() == "owned by another process"
+
+
+def test_delete_keyring_failure_blocks_resurrection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed keyring delete must not silently succeed: once the backend
+    recovers, load() must not resurrect the supposedly deleted token."""
+    calls: dict[str, str] = {"korvid/k": "zombie-token"}
+
+    def boom_delete(*a: object) -> None:
+        raise RuntimeError("backend outage")
+
+    fake = types.SimpleNamespace(
+        set_password=lambda svc, k, v: calls.__setitem__(f"{svc}/{k}", v),
+        get_password=lambda svc, k: calls.get(f"{svc}/{k}"),
+        delete_password=boom_delete,
+    )
+    monkeypatch.setitem(sys.modules, "keyring", fake)
+    store = TokenStore(fallback_path=tmp_path / "creds.json")
+    store.delete("k")
+    # Keyring still holds the token (delete failed), but load must honor
+    # the pending deletion instead of returning the zombie value.
+    assert calls.get("korvid/k") == "zombie-token"
+    assert store.load("k") is None
+
+
+def test_load_retries_keyring_cleanup_after_failed_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the backend recovers, load() finishes the pending deletion."""
+    calls: dict[str, str] = {"korvid/k": "zombie-token"}
+    fail = {"on": True}
+
+    def flaky_delete(svc: str, k: str) -> None:
+        if fail["on"]:
+            raise RuntimeError("backend outage")
+        calls.pop(f"{svc}/{k}", None)
+
+    fake = types.SimpleNamespace(
+        set_password=lambda svc, k, v: calls.__setitem__(f"{svc}/{k}", v),
+        get_password=lambda svc, k: calls.get(f"{svc}/{k}"),
+        delete_password=flaky_delete,
+    )
+    monkeypatch.setitem(sys.modules, "keyring", fake)
+    p = tmp_path / "creds.json"
+    store = TokenStore(fallback_path=p)
+    store.delete("k")  # keyring delete fails -> deletion pending
+    fail["on"] = False  # backend recovers
+    assert store.load("k") is None  # retry removes the keyring entry
+    assert "korvid/k" not in calls
+    # Pending-deletion marker is cleaned up once keyring cleanup succeeds.
+    import json
+
+    assert "k" not in json.loads(p.read_text())
+
+
+def test_delete_missing_keyring_entry_is_not_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PasswordDeleteError (entry absent) is a successful delete: no
+    pending-deletion marker should linger in the fallback file."""
+
+    class PasswordDeleteError(Exception):
+        pass
+
+    def missing(*a: object) -> None:
+        raise PasswordDeleteError("not found")
+
+    fake = types.SimpleNamespace(
+        set_password=lambda *a: None,
+        get_password=lambda svc, k: None,
+        delete_password=missing,
+    )
+    monkeypatch.setitem(sys.modules, "keyring", fake)
+    p = tmp_path / "creds.json"
+    p.write_text('{"k": "file-token"}')
+    store = TokenStore(fallback_path=p)
+    store.delete("k")
+    import json
+
+    assert json.loads(p.read_text()) == {}
+    assert store.load("k") is None
+
+
+def test_save_clears_pending_deletion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Saving a fresh value must override any pending deletion."""
+    calls: dict[str, str] = {"korvid/k": "zombie-token"}
+    fail = {"on": True}
+
+    def flaky_delete(svc: str, k: str) -> None:
+        if fail["on"]:
+            raise RuntimeError("backend outage")
+        calls.pop(f"{svc}/{k}", None)
+
+    fake = types.SimpleNamespace(
+        set_password=lambda svc, k, v: calls.__setitem__(f"{svc}/{k}", v),
+        get_password=lambda svc, k: calls.get(f"{svc}/{k}"),
+        delete_password=flaky_delete,
+    )
+    monkeypatch.setitem(sys.modules, "keyring", fake)
+    store = TokenStore(fallback_path=tmp_path / "creds.json")
+    store.delete("k")  # pending deletion
+    fail["on"] = False
+    store.save("k", "fresh")
+    assert store.load("k") == "fresh"
