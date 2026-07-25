@@ -139,6 +139,7 @@ def make_app(
     kube_context: str | None = None,
     audit: AuditLog | None = None,
     readonly: bool = False,
+    permitted: bool | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -151,12 +152,19 @@ def make_app(
         while True:
             await asyncio.sleep(0.01)
 
+    async def check_permission(
+        verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
+    ) -> bool:
+        assert permitted is not None
+        return permitted
+
     return KorvidApp(
         config=KorvidConfig(namespace="default", kube_context=kube_context, readonly=readonly),
         store=store,
         watch_manager=WatchManager(store, source),
         aliases=dict(_TEST_ALIASES),
         audit=audit,
+        check_permission=None if permitted is None else check_permission,
     )
 
 
@@ -437,3 +445,42 @@ async def test_debug_fallback_not_offered_without_audit() -> None:
             await pilot.pause(0.3)
             assert not isinstance(app.screen, PickScreen)
             mock_call.assert_called_once()
+
+
+async def test_debug_fallback_not_offered_without_permission(tmp_path: Path) -> None:
+    """RBAC pre-check (spec 7 safety contract): without patch
+    pods/ephemeralcontainers the picker is never shown - the user sees
+    'missing permission' instead of an approval that would then fail."""
+    app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"), permitted=False)
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1) as mock_call,
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", return_value=_noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.3)
+            assert not isinstance(app.screen, PickScreen)
+            notifications = [n.message for n in app._notifications]
+            assert any(
+                "missing permission: patch pods/ephemeralcontainers" in m for m in notifications
+            )
+            mock_call.assert_called_once()  # only the failed exec; no debug
+
+
+async def test_debug_fallback_offered_with_permission(tmp_path: Path) -> None:
+    """With patch pods/ephemeralcontainers allowed the picker still appears."""
+    app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"), permitted=True)
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1),
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", return_value=_noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.3)
+            assert isinstance(app.screen, PickScreen)

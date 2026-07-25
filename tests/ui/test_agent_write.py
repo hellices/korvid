@@ -17,6 +17,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary
 from korvid.ui.app import KorvidApp
+from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
@@ -29,6 +30,12 @@ async def _until(pilot, cond, timeout: float = 5.0) -> None:  # type: ignore[no-
             return
         await pilot.pause(0.05)
     raise AssertionError("condition not met within timeout")
+
+
+def _expand_panel(app: KorvidApp) -> None:
+    # Approval dialogs only surface while the panel is expanded (spec 6.1);
+    # tests that reach the dialog must open the panel first.
+    app.query_one(AgentPanel).display = True
 
 
 class Recorder:
@@ -86,6 +93,7 @@ async def test_agent_delete_approved_by_user_key(tmp_path: Path) -> None:
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
+        _expand_panel(app)
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
@@ -107,6 +115,7 @@ async def test_agent_delete_denied_by_user_key(tmp_path: Path) -> None:
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
+        _expand_panel(app)
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
@@ -143,6 +152,7 @@ async def test_agent_scale_approved(tmp_path: Path) -> None:
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
+        _expand_panel(app)
         task = asyncio.ensure_future(
             app.agent_request_write("scale", "deployments", "web", namespace="default", replicas=4)
         )
@@ -195,6 +205,7 @@ async def test_agent_write_times_out_as_denial(
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
+        _expand_panel(app)
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
@@ -215,6 +226,7 @@ async def test_agent_dialog_shows_namespace(tmp_path: Path) -> None:
     app = make_app(rec, tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
+        _expand_panel(app)
         task = asyncio.ensure_future(
             app.agent_request_write("scale", "deployments", "web", namespace="prod", replicas=2)
         )
@@ -223,4 +235,42 @@ async def test_agent_dialog_shows_namespace(tmp_path: Path) -> None:
         assert "in namespace prod" in texts
         await pilot.press("n")
         await task
+        assert rec.calls == []
+
+
+async def test_agent_write_pending_while_panel_collapsed(tmp_path: Path) -> None:
+    """Spec 6.1: approval dialogs never auto-open from the collapsed state.
+    The request stays pending and the dialog surfaces only when the user
+    expands the panel; normal keystrokes cannot land in a surprise modal."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        task = asyncio.ensure_future(
+            app.agent_request_write("delete", "deployments", "web", namespace="default")
+        )
+        await pilot.pause(0.3)  # issued while collapsed: no modal appears
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert rec.calls == []
+        _expand_panel(app)
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        result = await task
+        assert "executed" in result.lower()
+        assert rec.calls == [("delete", "deployments", "default", "web")]
+
+
+async def test_agent_write_collapsed_panel_times_out_as_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request that is never surfaced (the panel stays collapsed) resolves
+    as a denial after the approval window without ever pushing a modal."""
+    monkeypatch.setattr("korvid.ui.app._APPROVAL_TIMEOUT", 0.3)
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        result = await app.agent_request_write("delete", "deployments", "web", namespace="default")
+        assert "denied" in result.lower()
+        assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []

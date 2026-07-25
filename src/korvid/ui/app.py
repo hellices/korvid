@@ -828,11 +828,18 @@ class KorvidApp(App[None]):
                 shell_exists = False  # inconclusive — keep offering the fallback
             if shell_exists:
                 return
-            self.call_from_thread(self._offer_debug_fallback, namespace, name, container, exit_code)
+            self.call_from_thread(self._schedule_debug_offer, namespace, name, container, exit_code)
 
         self.run_worker(_probe_and_maybe_offer, thread=True)
 
-    def _offer_debug_fallback(
+    def _schedule_debug_offer(
+        self, namespace: str, name: str, container: str | None, exit_code: int
+    ) -> None:
+        """Sync shim for call_from_thread: the offer itself is async because
+        it awaits the RBAC pre-check."""
+        self.run_worker(self._offer_debug_fallback(namespace, name, container, exit_code))
+
+    async def _offer_debug_fallback(
         self, namespace: str, name: str, container: str | None, exit_code: int
     ) -> None:
         """Ask whether to attach a kubectl debug container after a failed shell."""
@@ -844,6 +851,12 @@ class KorvidApp(App[None]):
                 " (read-only mode or no audit log)",
                 severity="warning",
             )
+            return
+        pods_meta = self.aliases.get("pods")
+        if pods_meta is not None and not await self._permitted("debug", pods_meta, namespace, name):
+            # RBAC pre-check (spec debug safety contract): don't offer a
+            # picker the API server would reject; _permitted notified with
+            # "missing permission: patch pods/ephemeralcontainers".
             return
         target = f"{name}/{container}" if container else name
 
@@ -1096,7 +1109,15 @@ class KorvidApp(App[None]):
         "delete": ("delete", ""),
         "scale": ("patch", "scale"),
         "rollout_restart": ("patch", ""),
+        "debug": ("patch", "ephemeralcontainers"),
     }
+
+    @classmethod
+    def _write_perm_target(cls, action: str, meta: ResourceMeta) -> tuple[str, str]:
+        """(verb, resource[/subresource]) as shown in permission messages."""
+        verb, subresource = cls._WRITE_VERBS[action]
+        target = f"{meta.plural}/{subresource}" if subresource else meta.plural
+        return verb, target
 
     @staticmethod
     def _write_locus(ns: str | None) -> str:
@@ -1152,7 +1173,8 @@ class KorvidApp(App[None]):
                 )
             return True
         if not allowed:
-            self.notify(f"missing permission: {verb} {meta.plural}", severity="error")
+            _, target = self._write_perm_target(action, meta)
+            self.notify(f"missing permission: {verb} {target}", severity="error")
         return allowed
 
     async def _audit_write(
@@ -1624,6 +1646,11 @@ class KorvidApp(App[None]):
     # loop logic in AgentRuntime.
     # ------------------------------------------------------------------
 
+    def _agent_panel_expanded(self) -> bool:
+        """True when the agent chat panel is mounted and visible on screen."""
+        panels = self.query(AgentPanel)
+        return bool(panels) and panels.first(AgentPanel).display
+
     def action_toggle_agent(self) -> None:
         """Toggle the agent chat panel; show setup hint when unconfigured."""
         panel = self.query_one(AgentPanel)
@@ -1906,7 +1933,7 @@ class KorvidApp(App[None]):
         # instead of pushing a modal: a modal becomes the active screen and
         # would keep the chat input from taking focus. Resolved outside the
         # try below so a missing widget isn't masked as a generic push error.
-        share = bool(self.query(AgentPanel)) and self.query_one(AgentPanel).display
+        share = self._agent_panel_expanded()
         try:
             await self._show_describe(share, title, manifest, events)
         except Exception as exc:
@@ -1931,8 +1958,8 @@ class KorvidApp(App[None]):
             return built
         meta, ns, op, operation, detail = built
         if not await self._permitted(action, meta, ns, name):
-            verb, _ = self._WRITE_VERBS[action]
-            return f"ERROR: missing permission: {verb} {meta.plural}"
+            verb, target = self._write_perm_target(action, meta)
+            return f"ERROR: missing permission: {verb} {target}"
         require = name if action == "delete" and not meta.namespaced else None
         approved = await self._await_user_approval(
             f"Agent requests: {action} {meta.plural}/{name}{self._write_locus(ns)}",
@@ -2029,9 +2056,25 @@ class KorvidApp(App[None]):
         self, title: str, operation: str, *, require_name: str | None = None
     ) -> bool:
         """Show a ConfirmScreen and wait for the user's decision. Only real key
-        input can resolve it; an unanswered dialog times out as a denial so an
-        agent turn can never hang forever."""
-        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        input can resolve it. While the agent panel is collapsed the request
+        stays pending instead of pushing a modal (spec 6.1: approval dialogs
+        are never auto-opened from the collapsed state); the dialog surfaces
+        when the user expands the panel. Pending and on-screen time share one
+        deadline, so an unanswered or never-surfaced request resolves as a
+        denial and an agent turn can never hang forever."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _APPROVAL_TIMEOUT
+        if not self._agent_panel_expanded():
+            self.notify(
+                "Agent write approval pending - press Ctrl-A to open the agent panel",
+                severity="warning",
+                timeout=10,
+            )
+            while not self._agent_panel_expanded():
+                if loop.time() >= deadline:
+                    return False
+                await asyncio.sleep(0.05)
+        fut: asyncio.Future[bool] = loop.create_future()
 
         def _done(confirmed: bool | None) -> None:
             if not fut.done():
@@ -2040,7 +2083,7 @@ class KorvidApp(App[None]):
         screen = ConfirmScreen(title, operation, require_name=require_name)
         await self.push_screen(screen, _done)
         try:
-            return await asyncio.wait_for(fut, timeout=_APPROVAL_TIMEOUT)
+            return await asyncio.wait_for(fut, timeout=max(deadline - loop.time(), 0.05))
         except TimeoutError:
             # Late keystrokes are a no-op (the future is already resolved),
             # but clear the dialog when possible so it doesn't linger.
