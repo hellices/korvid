@@ -539,9 +539,11 @@ class KorvidApp(App[None]):
             try:
                 await configurator.save(new_settings)
             except Exception as exc:  # runtime is live but disk is stale
+                # Do not name a revert target: after a previous failed save
+                # the in-memory snapshot may itself never have been persisted.
                 self.notify(
                     f"Model applied, but save failed: {exc} — will revert to "
-                    f"{settings.model} on restart",
+                    "the last saved model on restart",
                     severity="warning",
                 )
                 return

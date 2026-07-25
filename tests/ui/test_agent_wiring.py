@@ -377,6 +377,20 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
         assert "disk full" in notes
         assert "revert" in notes.lower()
 
+        # A second failed switch must not claim the app will revert to the
+        # live-but-unsaved model: the in-memory snapshot is not what is on
+        # disk, so the warning must not name a specific model at all.
+        app.on_unknown_command(UnknownCommand("model claude-3"))
+        for _ in range(4):
+            await pilot.pause()
+        assert app._agent_model_name == "claude-3"
+        second = " ".join(
+            str(n.message)
+            for n in app._notifications
+            if "claude-3" in str(n.message) or "save failed" in str(n.message).lower()
+        )
+        assert "gpt-4o" not in second  # never promise a revert target we can't know
+
 
 async def test_model_command_works_after_configured_startup() -> None:
     """A runtime built from config.yaml at startup must seed _agent_settings
