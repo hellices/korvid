@@ -222,6 +222,14 @@ def test_generic_summary_desired_none_without_replicas() -> None:
     assert GenericSummary.from_manifest("Deployment", bad).desired is None
 
 
+def test_generic_summary_tolerates_non_mapping_spec() -> None:
+    """CRDs may legally define spec as an array or scalar; summarising such
+    objects must not raise and reports desired=None."""
+    for spec in (["a", "b"], "raw", 7, True):
+        manifest: dict[str, Any] = {"metadata": {"name": "x", "namespace": "ns"}, "spec": spec}
+        assert GenericSummary.from_manifest("Widget", manifest).desired is None
+
+
 def test_pod_summary_owner_uids() -> None:
     manifest: dict[str, Any] = {
         "metadata": {

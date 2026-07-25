@@ -126,7 +126,9 @@ class GenericSummary:
     @classmethod
     def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> GenericSummary:
         meta = manifest.get("metadata") or {}
-        replicas = (manifest.get("spec") or {}).get("replicas")
+        spec = manifest.get("spec")
+        # CRDs may define spec as an array or scalar; only mappings can carry replicas.
+        replicas = spec.get("replicas") if isinstance(spec, dict) else None
         if isinstance(replicas, bool) or not isinstance(replicas, int):
             replicas = None  # bools and non-integers are never a replica count
         return cls(
