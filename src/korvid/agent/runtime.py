@@ -15,13 +15,18 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from korvid.agent.tools import READ_TOOLS, cap_result
+from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, cap_result
 
 SYSTEM_PROMPT = (
     "You are korvid's Kubernetes diagnostic agent, embedded in a live TUI the "
     "user is looking at right now. "
     "Use tools to inspect cluster state, cite evidence from tool results, "
-    "and never guess resource state. "
+    "and never guess resource state."
+)
+
+# Appended only when the runtime is armed with the UI-control tools, so the
+# model is never told about capabilities the provider was not offered.
+UI_DRIVE_PROMPT = (
     "You can also drive the TUI itself: navigate (switch the resource view), "
     "set_filter (narrow the visible rows), open_logs (show a pod's live logs "
     "on screen), and open_describe (show a resource's manifest and events). "
@@ -86,9 +91,12 @@ class AgentRuntime:
         self._provider = provider
         self._executor = executor
         self._tools = tools if tools is not None else READ_TOOLS
+        prompt = SYSTEM_PROMPT
+        if any(t.get("function", {}).get("name") in UI_TOOL_NAMES for t in self._tools):
+            prompt = f"{prompt} {UI_DRIVE_PROMPT}"
         self._max_iterations = max_iterations
         self._max_history_chars = max_history_chars
-        self._messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self._messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
         self._total_in = 0
         self._total_out = 0
         self._estimated = False

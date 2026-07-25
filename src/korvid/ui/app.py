@@ -21,6 +21,7 @@ from textual.widgets import DataTable, Footer, Static
 from korvid.agent.events import AgentError
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
+from korvid.agent.tools import UIBridge
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
@@ -188,6 +189,10 @@ class KorvidApp(App[None]):
                 api_key_env=config.agent_api_key_env,
             )
         self._agent_task: asyncio.Task[None] | None = None
+        # Serializes view/scope switches: keyboard NavigateCommands and the
+        # agent's navigate tool share this handler, which yields while
+        # stopping/starting watches — interleaving would corrupt state.
+        self._nav_lock = asyncio.Lock()
         self.aliases: dict[str, ResourceMeta] = (
             aliases if aliases is not None else dict(_DEFAULT_ALIASES)
         )
@@ -350,14 +355,20 @@ class KorvidApp(App[None]):
         self.post_message(ResourcesUpdated(self.current_kind))
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
-        new_kind = message.view if message.view is not None else self.current_kind
-        new_scope = message.namespace if message.namespace is not None else self.current_scope
-        if new_kind != self.current_kind or new_scope != self.current_scope:
-            await self._close_log_pane()
-            await self.watch_manager.stop(self.current_kind, self.current_scope)
-            self.current_kind = new_kind
-            self.current_scope = new_scope
-            await self.watch_manager.start(self.current_kind, self.current_scope)
+        # The lock serializes the agent path (direct call from the agent
+        # task) with the keyboard path (message pump): both mutate
+        # current_kind/current_scope across awaits. The final state is the
+        # latest command's — a user keystroke arriving after an agent
+        # navigate always lands last.
+        async with self._nav_lock:
+            new_kind = message.view if message.view is not None else self.current_kind
+            new_scope = message.namespace if message.namespace is not None else self.current_scope
+            if new_kind != self.current_kind or new_scope != self.current_scope:
+                await self._close_log_pane()
+                await self.watch_manager.stop(self.current_kind, self.current_scope)
+                self.current_kind = new_kind
+                self.current_scope = new_scope
+                await self.watch_manager.start(self.current_kind, self.current_scope)
         self.post_message(ResourcesUpdated(self.current_kind))
         self._refresh_status()
 
@@ -1245,11 +1256,17 @@ class KorvidApp(App[None]):
         except Exception as exc:
             return f"ERROR: {exc}"
         rows = self.store.get(self.current_kind, self.current_scope)
+        # Report what the user actually sees: apply the same case-insensitive
+        # name filter as ResourceTable.show before counting.
+        if self.filter_pattern:
+            pat = self.filter_pattern.lower()
+            rows = [r for r in rows if pat in r.name.lower()]
         self._mark_agent_action(f"view → {self.current_kind} ({self.current_scope})")
         suffix = " (list may still be loading)" if not rows else ""
+        filter_note = f" (filter {self.filter_pattern!r} applied)" if self.filter_pattern else ""
         return (
             f"switched to {self.current_kind} in {self.current_scope} — "
-            f"{len(rows)} resources{suffix}"
+            f"{len(rows)} resources{filter_note}{suffix}"
         )
 
     async def agent_set_filter(self, pattern: str) -> str:
@@ -1273,7 +1290,7 @@ class KorvidApp(App[None]):
             if container:
                 triples = [(namespace, pod, container)]
             else:
-                triples = self._pod_triples(namespace, pod)
+                triples = await self._agent_pod_triples(namespace, pod)
             await self._cancel_log_tasks()
             self._log_pane_mode = "l"
             await self._open_log_pane(namespace, [(p, c) for _, p, c in triples], triples=triples)
@@ -1282,6 +1299,26 @@ class KorvidApp(App[None]):
         target = f"{namespace}/{pod}" + (f" [{container}]" if container else "")
         self._mark_agent_action(f"logs → {target}")
         return f"log pane opened for {target} — the user can now see the live logs"
+
+    async def _agent_pod_triples(self, namespace: str, pod: str) -> list[tuple[str, str, str]]:
+        """All (ns, pod, container) triples for a pod the agent targets.
+
+        The agent may open logs for a pod outside the visible view/scope, so
+        the live manifest is authoritative; the store bucket is only a
+        fallback (which itself degrades to a blank container = server default).
+        """
+        if self._get_manifest is not None:
+            try:
+                manifest = await self._get_manifest("pods", namespace, pod)
+            except Exception:
+                logger.debug("agent logs: manifest container lookup failed", exc_info=True)
+            else:
+                spec = manifest.get("spec") or {}
+                names = [c.get("name") for c in spec.get("containers") or []]
+                triples = [(namespace, pod, str(n)) for n in names if n]
+                if triples:
+                    return triples
+        return self._pod_triples(namespace, pod)
 
     async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
         if self._get_manifest is None:
@@ -1342,3 +1379,28 @@ class KorvidApp(App[None]):
                 await asyncio.gather(*tasks, return_exceptions=True)
         self._log_tasks.clear()
         await self.watch_manager.stop_all()
+
+
+class AppUIBridge(UIBridge):
+    """Nominal `UIBridge` adapter over `KorvidApp`.
+
+    The layer-boundary interface must be an `abc.ABC` (AGENTS.md), but
+    Textual's `App` metaclass conflicts with `ABCMeta`, so the app cannot
+    inherit `UIBridge` directly — this thin adapter conforms nominally and
+    delegates to the app's bridge methods.
+    """
+
+    def __init__(self, app: KorvidApp) -> None:
+        self._app = app
+
+    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        return await self._app.agent_navigate(view, namespace)
+
+    async def agent_set_filter(self, pattern: str) -> str:
+        return await self._app.agent_set_filter(pattern)
+
+    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
+        return await self._app.agent_open_logs(pod, namespace, container)
+
+    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
+        return await self._app.agent_open_describe(kind, name, namespace)

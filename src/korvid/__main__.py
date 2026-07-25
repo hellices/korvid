@@ -27,7 +27,7 @@ from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.providers.configurator import ProviderConfigurator
 from korvid.providers.registry import create_provider
 from korvid.providers.token_store import TokenStore
-from korvid.ui.app import KorvidApp
+from korvid.ui.app import AppUIBridge, KorvidApp
 
 logger = logging.getLogger(__name__)
 
@@ -80,11 +80,11 @@ def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Task
     task.add_done_callback(_reap)
 
 
-class _UIBridgeProxy:
+class _UIBridgeProxy(UIBridge):
     """Late-bound UI bridge: the ToolExecutor is built before the app exists,
     so it holds this proxy and the composition root points ``target`` at the
-    app right after construction. Until then every UI tool degrades to an
-    ERROR result instead of crashing the turn."""
+    app's bridge adapter right after construction. Until then every UI tool
+    degrades to an ERROR result instead of crashing the turn."""
 
     _NOT_READY = "ERROR: UI not ready"
 
@@ -240,7 +240,7 @@ async def _run() -> None:
     )
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.
-    ui_proxy.target = app
+    ui_proxy.target = AppUIBridge(app)
 
     discovery_task = asyncio.create_task(_discover_in_background(kube, aliases, app))
     try:

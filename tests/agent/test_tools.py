@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from korvid.agent.tools import MAX_RESULT_CHARS, READ_TOOLS, UI_TOOLS, ToolExecutor
+from korvid.agent.tools import MAX_RESULT_CHARS, READ_TOOLS, UI_TOOLS, ToolExecutor, UIBridge
 from korvid.k8s.discovery import PODS_META
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
@@ -288,7 +288,7 @@ async def test_get_resource_requires_namespace_for_namespaced_kind() -> None:
 # --- Slice 3: UI-control tools (spec §4.1 UI Bus / §6 UI control row) ---
 
 
-class FakeBridge:
+class FakeBridge(UIBridge):
     """Records UI-control calls; returns canned confirmations."""
 
     def __init__(self) -> None:

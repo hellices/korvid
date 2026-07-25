@@ -333,9 +333,20 @@ async def test_runtime_defaults_to_read_tools() -> None:
     assert seen == [READ_TOOLS]
 
 
-def test_system_prompt_explains_ui_driving() -> None:
-    """Slice 3: the model must know it can drive the TUI, not just answer."""
-    from korvid.agent.runtime import SYSTEM_PROMPT
+async def test_system_prompt_omits_ui_driving_without_ui_tools() -> None:
+    """Read-only runtimes must not advertise UI tools the provider never saw."""
+    p = ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
+    await collect(AgentRuntime(p, EchoExecutor()), "go")
+    system = p.calls[0][0]["content"]
+    assert "navigate" not in system
+    assert "open_logs" not in system
 
+
+async def test_system_prompt_advertises_ui_driving_with_ui_tools() -> None:
+    from korvid.agent.tools import READ_TOOLS, UI_TOOLS
+
+    p = ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
+    await collect(AgentRuntime(p, EchoExecutor(), tools=READ_TOOLS + UI_TOOLS), "go")
+    system = p.calls[0][0]["content"]
     for tool in ("navigate", "set_filter", "open_logs", "open_describe"):
-        assert tool in SYSTEM_PROMPT
+        assert tool in system

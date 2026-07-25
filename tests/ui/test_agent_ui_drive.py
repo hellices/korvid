@@ -49,6 +49,7 @@ def make_app(
     *,
     with_manifest: bool = True,
     with_logs: bool = True,
+    manifest_containers: list[str] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -63,10 +64,11 @@ def make_app(
             await asyncio.sleep(0.01)
 
     async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        containers = manifest_containers or ["main"]
         return {
             "kind": "Pod",
             "metadata": {"name": name, "namespace": namespace},
-            "spec": {"containers": [{"name": "main"}]},
+            "spec": {"containers": [{"name": c} for c in containers]},
         }
 
     async def stream_logs(
@@ -230,3 +232,57 @@ async def test_bridge_methods_return_error_instead_of_raising() -> None:
         out = await app.agent_open_describe("pods", "web-1", "default")
         assert out.startswith("ERROR:")
         assert "api down" in out
+
+
+# --- review round 1 fixes ---
+
+
+async def test_concurrent_navigations_serialize() -> None:
+    """Agent-path and keyboard-path navigation must not interleave mid-handler
+    (both stop/start watches and mutate current_kind/current_scope)."""
+    from korvid.ui.messages import NavigateCommand
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        active = 0
+        max_concurrent = 0
+        orig_stop = app.watch_manager.stop
+
+        async def slow_stop(kind: str, scope: str) -> None:
+            nonlocal active, max_concurrent
+            active += 1
+            max_concurrent = max(max_concurrent, active)
+            await asyncio.sleep(0.05)
+            active -= 1
+            await orig_stop(kind, scope)
+
+        app.watch_manager.stop = slow_stop  # type: ignore[method-assign]
+        t1 = asyncio.create_task(app.agent_navigate("deployments"))
+        t2 = asyncio.create_task(app.on_navigate_command(NavigateCommand("pods", "prod")))
+        await asyncio.gather(t1, t2)
+        assert max_concurrent == 1
+
+
+async def test_agent_navigate_row_count_respects_filter() -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.agent_set_filter("web-1")
+        await pilot.pause()
+        out = await app.agent_navigate("pods")
+        assert "1" in out
+        assert "2 resources" not in out
+
+
+async def test_agent_open_logs_resolves_containers_from_manifest() -> None:
+    """All containers must come from the manifest, not just the current store
+    bucket — the agent may target a pod outside the visible view/scope."""
+    app = make_app(manifest_containers=["main", "sidecar"])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        out = await app.agent_open_logs("other-pod", "elsewhere")
+        await pilot.pause()
+        assert not out.startswith("ERROR:")
+        containers = {c for _, _, c in app._current_log_triples}
+        assert containers == {"main", "sidecar"}

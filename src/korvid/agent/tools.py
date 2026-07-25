@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any
 
 import yaml
 
@@ -130,23 +131,28 @@ READ_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-class UIBridge(Protocol):
+class UIBridge(ABC):
     """Screen-control surface the agent may drive (spec §4.1 UI Bus).
 
-    Implemented structurally by the TUI app; the agent layer must not import
-    ui (tach layers), so this is a Protocol rather than an ABC. Every method
-    returns a short human/model-readable confirmation, or an "ERROR: …"
-    string — implementations must not raise.
+    Layer-boundary interface (AGENTS.md: `abc.ABC`); the concrete adapter
+    lives in the ui layer and is injected at the composition root, so the
+    agent layer never imports ui. Every method returns a short human/model-
+    readable confirmation, or an "ERROR: …" string — implementations must
+    not raise.
     """
 
+    @abstractmethod
     async def agent_navigate(self, view: str, namespace: str | None = None) -> str: ...
 
+    @abstractmethod
     async def agent_set_filter(self, pattern: str) -> str: ...
 
+    @abstractmethod
     async def agent_open_logs(
         self, pod: str, namespace: str, container: str | None = None
     ) -> str: ...
 
+    @abstractmethod
     async def agent_open_describe(
         self, kind: str, name: str, namespace: str | None = None
     ) -> str: ...
@@ -183,15 +189,19 @@ UI_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "set_filter",
             "description": (
-                "Apply a filter pattern to the visible resource table so the user "
-                "sees only matching rows. Pass an empty pattern to clear."
+                "Apply a case-insensitive substring filter to the visible resource "
+                "table so the user sees only rows whose name contains the pattern. "
+                "Not a regex. Pass an empty pattern to clear."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Substring/regex to filter rows by; '' clears the filter.",
+                        "description": (
+                            "Case-insensitive substring to match against resource "
+                            "names; '' clears the filter."
+                        ),
                     },
                 },
                 "required": ["pattern"],

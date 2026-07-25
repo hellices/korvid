@@ -6,6 +6,7 @@ import asyncio
 from typing import Any, cast
 
 from korvid.__main__ import _close_provider_in_background
+from korvid.agent.tools import UIBridge
 
 
 class _BoomProvider:
@@ -49,8 +50,8 @@ async def test_close_errors_are_consumed() -> None:
 # --- Slice 3: late-bound UI bridge proxy ---
 
 
-class _FakeApp:
-    """Minimal structural UIBridge."""
+class _FakeApp(UIBridge):
+    """Nominal test double for the app-side bridge."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -119,7 +120,8 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
         agent_model="m",
         agent_api_key_env="KORVID_TEST_KEY",
     )
-    runtime, _, _, _, proxy = _build_agent_wiring(config, object(), {})  # type: ignore[arg-type]
+    kube_stub = cast("Any", object())  # wiring never touches kube before a tool call
+    runtime, _, _, _, proxy = _build_agent_wiring(config, kube_stub, {})
     assert runtime is not None
     names = [t["function"]["name"] for t in runtime._tools]
     assert "navigate" in names
