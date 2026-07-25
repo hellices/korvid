@@ -444,12 +444,16 @@ class ToolExecutor:
         if self._ui is None:
             raise ValueError("write actions require the interactive TUI session")
         replicas = args.get("replicas")
+        if replicas is not None and (isinstance(replicas, bool) or not isinstance(replicas, int)):
+            # Tool schemas are not runtime validation: coercing 1.9 or true to
+            # an int would show the user an operation the model never asked for.
+            raise ValueError(f"'replicas' must be an integer, got {replicas!r}")
         return await self._ui.agent_request_write(
             _WRITE_ACTIONS[name],
             str(args["kind"]),
             str(args["name"]),
             args.get("namespace"),
-            int(replicas) if replicas is not None else None,
+            replicas,
         )
 
     async def _list_resources(self, args: dict[str, Any]) -> str:

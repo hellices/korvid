@@ -109,6 +109,21 @@ async def test_executor_routes_rollout_restart() -> None:
     assert bridge.writes[0]["action"] == "rollout_restart"
 
 
+async def test_executor_rejects_non_integer_replicas() -> None:
+    """Tool schemas are not runtime validation: coercing 1.9 or true to an
+    int would show the user an operation the model never requested."""
+    for bad in (1.9, True, "3"):
+        bridge = _FakeBridge()
+        executor = ToolExecutor(kube=None, aliases={}, ui=bridge)  # type: ignore[arg-type]
+        result = await executor.execute(
+            "scale_resource",
+            {"kind": "deployments", "name": "web", "namespace": "default", "replicas": bad},
+        )
+        assert result.startswith("ERROR:")
+        assert "replicas" in result
+        assert bridge.writes == []  # never reached the approval path
+
+
 async def test_executor_write_without_ui_is_error() -> None:
     executor = ToolExecutor(kube=None, aliases={}, ui=None)  # type: ignore[arg-type]
     result = await executor.execute("delete_resource", {"kind": "pods", "name": "web-1"})

@@ -1651,6 +1651,12 @@ class KorvidApp(App[None]):
         panels = self.query(AgentPanel)
         return bool(panels) and panels.first(AgentPanel).display
 
+    def _can_surface_approval(self) -> bool:
+        """An approval dialog may only appear when the panel is expanded AND
+        no other screen is stacked on top: pushing it over an active dialog
+        would let the user's next y/Enter approve an unexpected write."""
+        return self._agent_panel_expanded() and len(self.screen_stack) == 1
+
     def action_toggle_agent(self) -> None:
         """Toggle the agent chat panel; show setup hint when unconfigured."""
         panel = self.query_one(AgentPanel)
@@ -1989,6 +1995,12 @@ class KorvidApp(App[None]):
         if self._audit is None:
             # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
             return "ERROR: writes disabled - no audit log configured"
+        name = name.strip()
+        if not name:
+            # JSON Schema 'required' does not reject empty strings; an empty
+            # name would build a collection path instead of one exact object.
+            return "ERROR: 'name' must be a non-empty resource name"
+        namespace = namespace.strip() or None if namespace is not None else None
         meta = self.aliases.get(kind.strip().lower())
         if meta is None:
             return f"ERROR: unknown kind {kind!r} - not a resource kind in this cluster"
@@ -2056,21 +2068,23 @@ class KorvidApp(App[None]):
         self, title: str, operation: str, *, require_name: str | None = None
     ) -> bool:
         """Show a ConfirmScreen and wait for the user's decision. Only real key
-        input can resolve it. While the agent panel is collapsed the request
-        stays pending instead of pushing a modal (spec 6.1: approval dialogs
-        are never auto-opened from the collapsed state); the dialog surfaces
-        when the user expands the panel. Pending and on-screen time share one
-        deadline, so an unanswered or never-surfaced request resolves as a
-        denial and an agent turn can never hang forever."""
+        input can resolve it. While the agent panel is collapsed, or another
+        screen (a user dialog, describe, picker) is on top, the request stays
+        pending instead of pushing a modal (spec 6.1: approval dialogs are
+        never auto-opened from the collapsed state, and never stacked over an
+        active dialog where a stray keystroke could approve it); it surfaces
+        when the panel is expanded with a clear screen. Pending and on-screen
+        time share one deadline, so an unanswered or never-surfaced request
+        resolves as a denial and an agent turn can never hang forever."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _APPROVAL_TIMEOUT
-        if not self._agent_panel_expanded():
+        if not self._can_surface_approval():
             self.notify(
-                "Agent write approval pending - press Ctrl-A to open the agent panel",
+                "Agent write approval pending - open the agent panel (Ctrl-A) to review",
                 severity="warning",
                 timeout=10,
             )
-            while not self._agent_panel_expanded():
+            while not self._can_surface_approval():
                 if loop.time() >= deadline:
                     return False
                 await asyncio.sleep(0.05)

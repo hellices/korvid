@@ -19,6 +19,7 @@ from korvid.k8s.models import GenericSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from korvid.ui.widgets.pick_screen import PickScreen
 
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
 _ALIASES = {"deployments": _DEPLOY_META, "deploy": _DEPLOY_META}
@@ -272,5 +273,44 @@ async def test_agent_write_collapsed_panel_times_out_as_denial(
         await pilot.pause(0.1)
         result = await app.agent_request_write("delete", "deployments", "web", namespace="default")
         assert "denied" in result.lower()
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert rec.calls == []
+
+
+async def test_agent_write_waits_for_user_modal_to_close(tmp_path: Path) -> None:
+    """An approval never stacks on top of another open dialog: the user's
+    next keystroke must not land in a surprise cluster-write confirmation."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        _expand_panel(app)
+        await app.push_screen(PickScreen("pick a thing", ["a", "b"]))
+        task = asyncio.ensure_future(
+            app.agent_request_write("delete", "deployments", "web", namespace="default")
+        )
+        await pilot.pause(0.3)  # a user dialog is open: the approval waits
+        assert isinstance(app.screen, PickScreen)
+        app.pop_screen()
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        result = await task
+        assert "executed" in result.lower()
+        assert rec.calls == [("delete", "deployments", "default", "web")]
+
+
+async def test_agent_write_rejects_empty_name(tmp_path: Path) -> None:
+    """JSON Schema 'required' accepts empty strings; an empty name would
+    target a collection path instead of one exact object."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        for bad in ("", "   "):
+            result = await app.agent_request_write(
+                "delete", "deployments", bad, namespace="default"
+            )
+            assert result.startswith("ERROR:")
+            assert "name" in result
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []

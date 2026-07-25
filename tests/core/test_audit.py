@@ -84,6 +84,24 @@ def test_rotates_at_size_cap(tmp_path: Path) -> None:
             json.loads(line)
 
 
+def test_rotation_hardens_backup_permissions(tmp_path: Path) -> None:
+    """Rename preserves the source mode, so a permissive live file (e.g.
+    0644 from a pre-0600 version) must be chmodded before it becomes a
+    backup - the 0600 guarantee covers rotated files too."""
+    if os.name == "nt":  # pragma: no cover
+        pytest.skip("POSIX permission bits are not meaningful on Windows")
+    path = tmp_path / "audit.jsonl"
+    path.write_text('{"legacy": true}\n' * 20)
+    path.chmod(0o644)  # simulate a log written before the 0600 guarantee
+    AuditLog(path, max_bytes=1, backups=2).append(
+        action="delete", kind="pods", namespace="default", name="w"
+    )
+    backup = tmp_path / "audit.jsonl.1"
+    assert backup.exists()
+    assert (backup.stat().st_mode & 0o777) == 0o600
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
 def test_rotation_drops_oldest_backup(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     log = AuditLog(path, max_bytes=1, backups=2)  # rotate on every append

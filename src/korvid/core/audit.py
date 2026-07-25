@@ -73,7 +73,11 @@ class AuditLog:
         for i in range(self._backups - 1, 0, -1):
             src = self._path.with_name(f"{self._path.name}.{i}")
             if src.exists():
+                # rename preserves the mode: harden files written before the
+                # 0600 guarantee so backups never stay world-readable.
+                src.chmod(0o600)
                 src.rename(self._path.with_name(f"{self._path.name}.{i + 1}"))
+        self._path.chmod(0o600)
         self._path.rename(self._path.with_name(f"{self._path.name}.1"))
 
     def append(
