@@ -581,3 +581,20 @@ async def test_input_reenabled_even_when_panel_closed() -> None:
         await pilot.pause()
         await pilot.press("ctrl+a")  # reopen: input must be usable again
         assert app.query_one(AgentPanel).query_one("#agent-input", Input).disabled is False
+
+
+async def test_model_query_requires_live_runtime() -> None:
+    """`:model` must not report a model as active when the provider failed to
+    build at startup (runtime None) even though config carried a model name."""
+    from korvid.ui.messages import UnknownCommand
+
+    # Startup with a config model name but no runtime (e.g. missing API key).
+    app = make_app(runtime=None, model="gpt-4o")
+    notices: list[str] = []
+    app.notify = lambda msg, **kw: notices.append(str(msg))  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("model"))
+        await pilot.pause()
+    assert notices, "expected a notification"
+    assert "gpt-4o" not in notices[-1]
+    assert "not configured" in notices[-1]

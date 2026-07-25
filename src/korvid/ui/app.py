@@ -519,7 +519,9 @@ class KorvidApp(App[None]):
     def _handle_model_command(self, args: list[str]) -> None:
         """`:model` shows the current model; `:model <name>` switches and persists it."""
         if not args:
-            if self._agent_model_name:
+            # Report only a live model: at startup config may carry a model
+            # name even though provider creation failed (runtime is None).
+            if self._agent_runtime is not None and self._agent_model_name:
                 self.notify(f"Agent model: {self._agent_model_name}")
             else:
                 self.notify("Agent not configured — run :ai first", severity="warning")
