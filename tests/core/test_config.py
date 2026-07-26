@@ -413,3 +413,69 @@ def test_logs_scalar_section_tolerated(tmp_path: Path) -> None:
     cfg = load_config(cfg_file)
     assert cfg.log_wrap is False
     assert cfg.log_timestamps is False
+
+
+# ---------------------------------------------------------------------------
+# debug section (issue #52): debug image defaults for air-gapped clusters
+# ---------------------------------------------------------------------------
+
+
+def test_debug_defaults() -> None:
+    cfg = KorvidConfig()
+    assert cfg.debug_default_image is None
+    assert cfg.debug_images is None  # unconfigured, not "configured empty"
+
+
+def test_debug_from_yaml(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        "debug:\n"
+        "  default_image: registry.corp.local/tools/busybox:1.36\n"
+        "  images:\n"
+        "    jvm: registry.corp.local/tools/debug-jvm:latest\n"
+        "    python: registry.corp.local/tools/debug-python:latest\n"
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.debug_default_image == "registry.corp.local/tools/busybox:1.36"
+    assert cfg.debug_images == {
+        "jvm": "registry.corp.local/tools/debug-jvm:latest",
+        "python": "registry.corp.local/tools/debug-python:latest",
+    }
+
+
+def test_debug_scalar_section_tolerated(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("debug: nonsense\n")
+    cfg = load_config(cfg_file)
+    assert cfg.debug_default_image is None
+    assert cfg.debug_images is None
+
+
+def test_debug_explicit_empty_images_mapping_preserved(tmp_path: Path) -> None:
+    # `debug.images: {}` is a deliberate restriction (offer nothing public),
+    # distinct from the key being absent entirely.
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("debug:\n  images: {}\n")
+    cfg = load_config(cfg_file)
+    assert cfg.debug_images == {}
+
+
+def test_debug_malformed_images_value_fails_closed(tmp_path: Path) -> None:
+    # A present but non-mapping debug.images is still a restriction attempt:
+    # fail closed to an empty restricted mapping instead of silently
+    # re-enabling public zero-config images.
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("debug:\n  images: [jvm, python]\n")
+    assert load_config(cfg_file).debug_images == {}
+    cfg_file.write_text("debug:\n  images: nonsense\n")
+    assert load_config(cfg_file).debug_images == {}
+
+
+def test_debug_non_string_entries_dropped(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        "debug:\n  default_image: 7\n  images:\n    jvm: [a, b]\n    python: img:1\n"
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.debug_default_image is None
+    assert cfg.debug_images == {"python": "img:1"}
