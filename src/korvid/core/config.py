@@ -29,6 +29,8 @@ class KorvidConfig:
     agent_auth_method: str | None = None
     keybindings: dict[str, str] = field(default_factory=dict)
     log_buffer_lines: int = 5000
+    log_wrap: bool = False
+    log_timestamps: bool = False
     readonly: bool = False
     mcp_enabled: bool = False
     mcp_port: int = 7878
@@ -59,6 +61,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
             auth_method = "api_key" if api_key_env else "none"
     mcp_value = raw.get("mcp")
     mcp_raw: dict[str, Any] = mcp_value if isinstance(mcp_value, dict) else {}
+    logs_value = raw.get("logs")
+    logs_raw: dict[str, Any] = logs_value if isinstance(logs_value, dict) else {}
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
@@ -70,6 +74,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_auth_method=auth_method,
         keybindings=dict(raw.get("keybindings") or {}),
         log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
+        log_wrap=logs_raw.get("wrap") is True,
+        log_timestamps=logs_raw.get("timestamps") is True,
         readonly=raw.get("readonly") is True,
         mcp_enabled=mcp_raw.get("enabled") is True,
         mcp_port=_parse_port(mcp_raw.get("port")),

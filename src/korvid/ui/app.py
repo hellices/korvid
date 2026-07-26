@@ -37,6 +37,7 @@ from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
+from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.core.store import ALL_NAMESPACES, ResourceStore
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
@@ -318,6 +319,9 @@ class KorvidApp(App[None]):
         # not "shift+x"; bind both so the shortcut works outside Pilot tests.
         Binding("L", "logs_multi", "Multi-log", show=False),
         ("f", "log_format", "JSON/raw"),
+        Binding("w", "log_wrap", "Wrap", show=False),
+        Binding("t", "log_timestamps", "Timestamps", show=False),
+        Binding("ctrl+s", "log_save", "Save logs", show=False),
         ("p", "log_previous", "Prev logs"),
         ("n", "log_search_next", "Next hit"),
         Binding("shift+n", "log_search_prev", "Prev hit"),
@@ -468,6 +472,11 @@ class KorvidApp(App[None]):
         command_bar = self.query_one(CommandBar)
         command_bar.known = lambda a: self.aliases[a].plural if a in self.aliases else None
         command_bar.command_words = sorted({*self.aliases, "ns", "namespaces", "q", "quit"})
+        # Seed session-scoped log display settings from config (logs.wrap /
+        # logs.timestamps); the w/t keys toggle them from there.
+        log_pane = self.query_one(LogPane)
+        log_pane.wrap_lines = self.config.log_wrap
+        log_pane.show_timestamps = self.config.log_timestamps
         self._prefetch_namespaces()
 
         # Both callbacks fire from watch tasks on the same loop; post_message is
@@ -2563,12 +2572,45 @@ class KorvidApp(App[None]):
 
     async def action_log_format(self) -> None:
         """Toggle JSON/raw formatting and re-render the buffer (``f`` key)."""
+        self._toggle_log_display(LogPane.toggle_format)
+
+    async def action_log_wrap(self) -> None:
+        """Toggle line wrapping and re-render the buffer (``w`` key)."""
+        self._toggle_log_display(LogPane.toggle_wrap)
+
+    async def action_log_timestamps(self) -> None:
+        """Toggle the timestamp prefix and re-render the buffer (``t`` key)."""
+        self._toggle_log_display(LogPane.toggle_timestamps)
+
+    def _toggle_log_display(self, toggle: Callable[[LogPane], None]) -> None:
+        """Shared path for display toggles: flip the setting, replay the buffer.
+
+        ``LogPane.replay`` restores contextual banners (previous-logs,
+        overflow), so every toggle must funnel through here instead of
+        clearing panels ad hoc.
+        """
         log_pane = self.query_one(LogPane)
         if not log_pane.display:
             return
-        log_pane.toggle_format()
+        toggle(log_pane)
         if self._log_buffer is not None:
             log_pane.replay(self._log_buffer.lines())
+
+    def action_log_save(self) -> None:
+        """Save the current log buffer to a generated file (``ctrl+s``)."""
+        log_pane = self.query_one(LogPane)
+        if not log_pane.display or self._log_buffer is None:
+            return
+        lines = self._log_buffer.lines()
+        if not lines:
+            self.notify("Log buffer is empty — nothing to save", severity="warning")
+            return
+        try:
+            path = export_log_lines(lines, default_log_export_dir())
+        except OSError as exc:
+            self.notify(f"Failed to save logs: {exc}", severity="error")
+            return
+        self.notify(f"Logs saved to {path}")
 
     async def action_log_previous(self) -> None:
         """Re-open the same streams in previous-container-log mode (``p`` key)."""

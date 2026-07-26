@@ -24,6 +24,8 @@ maps each hit to its source panel and scrolls that panel.
 
 from __future__ import annotations
 
+from rich.measure import measure_renderables
+from rich.segment import Segment
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Container, Vertical
@@ -102,7 +104,10 @@ class LogPane(Widget):
         self._search_hits: list[int] = []
         self._search_idx: int = 0
         self._log_buffer: LogBuffer | None = None
+        self._banners: list[str] = []
         self.formatted: bool = True
+        self.wrap_lines: bool = False
+        self.show_timestamps: bool = False
         self.display = False
 
     def compose(self) -> ComposeResult:
@@ -147,6 +152,7 @@ class LogPane(Widget):
         self._search_hits = []
         self._search_idx = 0
         self._log_buffer = log_buffer
+        self._banners = []
         # Hide the search input in case it was open from a previous session.
         self.query_one("#log-search", Input).display = False
 
@@ -167,6 +173,8 @@ class LogPane(Widget):
                 # Bound RichLog to the buffer capacity (+ headroom for banner
                 # lines) so a long stream can't grow display memory unboundedly.
                 rich_log.max_lines = max_lines
+                # Session-scoped setting: reopening keeps the last wrap choice.
+                rich_log.wrap = self.wrap_lines
                 panel.display = True
             else:
                 panel.display = False
@@ -179,14 +187,19 @@ class LogPane(Widget):
         self._write_line(line)
 
     def replay(self, lines: list[LogLine]) -> None:
-        """Re-render all *lines* using the current ``formatted`` setting.
+        """Re-render all *lines* using the current display settings.
 
-        Called by the App after toggling ``formatted`` so the whole visible
-        buffer is re-displayed without re-buffering.  The App provides the
-        lines from its ``LogBuffer``; this method only touches the RichLogs.
+        Called by the App after toggling ``formatted`` / ``wrap_lines`` /
+        ``show_timestamps`` so the whole visible buffer is re-displayed
+        without re-buffering.  Contextual banners (previous-logs, overflow)
+        are re-written at the top of each panel: their exact original
+        position is not recoverable from the buffer, and for both banner
+        kinds the top is where the information belongs after a replay.
         """
         for i in range(len(self._panel_keys)):
             self._panel(i).query_one(RichLog).clear()
+        for banner in self._banners:
+            self._write_banner_text(banner)
         for line in lines:
             self._write_line(line)
 
@@ -206,7 +219,15 @@ class LogPane(Widget):
         self.write_banner("\u2500\u2500 buffer overflowed; oldest lines dropped \u2500\u2500")
 
     def write_banner(self, text: str) -> None:
-        """Write a plain informational banner line to every visible panel."""
+        """Write an informational banner line to every visible panel.
+
+        Banners are remembered so ``replay()`` can restore them after the
+        panels are cleared by a display toggle.
+        """
+        self._banners.append(text)
+        self._write_banner_text(text)
+
+    def _write_banner_text(self, text: str) -> None:
         for i in range(len(self._panel_keys)):
             self._panel(i).query_one(RichLog).write(text)
 
@@ -217,6 +238,7 @@ class LogPane(Widget):
         self._search_hits = []
         self._search_idx = 0
         self._log_buffer = None
+        self._banners = []
         self.query_one("#log-search", Input).display = False
         for i in range(MAX_PANELS):
             panel = self._panel(i)
@@ -228,6 +250,26 @@ class LogPane(Widget):
     def toggle_format(self) -> None:
         """Toggle between JSON-formatted and raw display; refresh header tag."""
         self.formatted = not self.formatted
+        self._update_header()
+
+    def toggle_wrap(self) -> None:
+        """Toggle line wrapping on every panel; refresh the header tag.
+
+        RichLog applies ``wrap`` at write time, so the caller must ``replay()``
+        the buffer afterwards to re-render existing lines.
+        """
+        self.wrap_lines = not self.wrap_lines
+        for i in range(MAX_PANELS):
+            self._panel(i).query_one(RichLog).wrap = self.wrap_lines
+        self._update_header()
+
+    def toggle_timestamps(self) -> None:
+        """Toggle the kubelet-timestamp prefix; refresh the header tag.
+
+        The caller must ``replay()`` the buffer afterwards so existing lines
+        are re-rendered with (or without) the prefix.
+        """
+        self.show_timestamps = not self.show_timestamps
         self._update_header()
 
     # ------------------------------------------------------------------
@@ -287,12 +329,43 @@ class LogPane(Widget):
         index = self._panel_index(f"{line.pod}/{line.container}")
         if index < 0:
             return
-        rich_log = self._panel(index).query_one(RichLog)
-        rich_log.write(format_log_line(line.text, formatted=self.formatted))
+        self._panel(index).query_one(RichLog).write(self._render_line_text(line))
+
+    def _render_line_text(self, line: LogLine) -> Text:
+        """Render *line* with the current format / timestamp settings."""
+        rendered = format_log_line(line.text, formatted=self.formatted)
+        if self.show_timestamps and line.timestamp is not None:
+            # Kubelet timestamps are UTC; show the user's local wall clock.
+            # Style only the prefix span — a base style would dim the body too.
+            prefixed = Text()
+            prefixed.append(line.timestamp.astimezone().strftime("%H:%M:%S") + " ", style="dim")
+            prefixed.append_text(rendered)
+            return prefixed
+        return rendered
+
+    def _display_rows(self, rich_log: RichLog, renderable: Text) -> int:
+        """Display rows *renderable* occupies in *rich_log* (mirrors ``RichLog.write``).
+
+        With wrap off RichLog renders each single-line ``Text`` as exactly one
+        row; with wrap on it re-renders at the same width ``write()`` used, so
+        one logical line can span several rows.
+        """
+        if not rich_log.wrap:
+            return 1
+        console = self.app.console
+        options = console.options
+        width = measure_renderables(console, options, [renderable]).maximum
+        render_width = max(min(width, rich_log.scrollable_content_region.width), rich_log.min_width)
+        segments = console.render(renderable, options.update_width(render_width))
+        return max(len(list(Segment.split_lines(segments))), 1)
 
     def _update_header(self) -> None:
         fmt_tag = "[json]" if self.formatted else "[raw]"
         header = f"{self._sources_text} {fmt_tag}"
+        if self.wrap_lines:
+            header = f"{header} [wrap]"
+        if self.show_timestamps:
+            header = f"{header} [ts]"
         if self._state:
             header = f"{header} \u2014 {self._state}"
         if self._search_counter:
@@ -320,19 +393,23 @@ class LogPane(Widget):
         if index < 0:
             return  # hit belongs to a source no longer shown
         rich_log = self._panel(index).query_one(RichLog)
-        # Per-panel line index: count earlier buffer lines routed to the same
-        # panel, then correct for banner lines / ring-buffer drops the RichLog
-        # still displays.
-        panel_line_idx = sum(
-            1
-            for line in lines[:hit_idx]
-            if self._panel_index(f"{line.pod}/{line.container}") == index
-        )
-        panel_total = sum(
-            1 for line in lines if self._panel_index(f"{line.pod}/{line.container}") == index
-        )
-        offset = len(rich_log.lines) - panel_total
-        rich_log.scroll_to(y=panel_line_idx + max(offset, 0), animate=False)
+        # Display row where the hit starts: sum the rendered heights of the
+        # earlier buffer lines routed to the same panel (one row each without
+        # wrap; possibly several with wrap).
+        start_row = 0
+        total_rows = 0
+        for i, line in enumerate(lines):
+            if self._panel_index(f"{line.pod}/{line.container}") != index:
+                continue
+            rows = self._display_rows(rich_log, self._render_line_text(line))
+            if i < hit_idx:
+                start_row += rows
+            total_rows += rows
+        # Rows the RichLog shows beyond the buffered lines (banners) minus
+        # rows it evicted from the top (``max_lines`` trimming) — the latter
+        # makes the offset negative.
+        offset = len(rich_log.lines) - total_rows
+        rich_log.scroll_to(y=max(start_row + offset, 0), animate=False)
 
     # ------------------------------------------------------------------
     # Event handlers
