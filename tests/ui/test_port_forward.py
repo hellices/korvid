@@ -679,3 +679,51 @@ async def test_reattach_fails_open_on_transport_error() -> None:
         await pilot.press("r")
         await until(pilot, lambda: len(procs) == 2)
         assert registry.forwards()[0].status == "alive"
+
+
+async def test_service_forward_rejects_undeclared_remote_port() -> None:
+    """kubectl resolves a Service remote port against spec.ports — undeclared fails."""
+    procs: list[_FakeProc] = []
+
+    async def svc_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        return {"spec": {"ports": [{"port": 80}]}}
+
+    app = make_app(
+        [],
+        forwards=_registry(procs),
+        extra_data={"services": [_svc("web")]},
+        get_manifest=svc_manifest,
+    )
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await app.on_navigate_command(NavigateCommand("services", None))
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            from textual.widgets import Input
+
+            app.screen.query_one("#pf-remote", Input).value = "9999"
+            await pilot.press("enter")
+            await pilot.pause()
+            # Screen stays open, nothing spawned — kubectl would reject it anyway.
+            assert isinstance(app.screen, PortForwardScreen)
+            assert procs == []
+
+
+async def test_pod_forward_allows_undeclared_remote_port() -> None:
+    """Pod declarations stay informational — any remote port is forwardable."""
+    procs: list[_FakeProc] = []
+    app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            from textual.widgets import Input
+
+            app.screen.query_one("#pf-remote", Input).value = "9999"
+            app.screen.query_one("#pf-local", Input).value = "9999"
+            await pilot.press("enter")
+            await until(pilot, lambda: len(procs) == 1)
+            assert "9999:9999" in procs[0].argv

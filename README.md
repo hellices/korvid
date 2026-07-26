@@ -135,8 +135,11 @@ debug:
 ## Port-forwarding
 
 `Shift-F` on a pod or service opens a port-forward dialog with the remote
-port prefilled from the target's declared ports (both fields stay editable —
-declaration is informational).  Forwards run as `kubectl port-forward`
+port prefilled from the target's declared ports.  For pods both fields stay
+fully editable — pod port declarations are informational and any remote port
+is forwardable.  For services kubectl only accepts remote ports declared in
+`Service.spec.ports`, so the dialog constrains the remote port to those.
+Forwards run as `kubectl port-forward`
 subprocesses bound to `127.0.0.1`, pinned to the kubeconfig context korvid
 connected with, and are tracked for the session: `:pf` lists them with live
 status, `Ctrl-D` stops the highlighted forward, and `r` re-attaches a broken

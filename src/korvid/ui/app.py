@@ -1394,7 +1394,10 @@ class KorvidApp(App[None]):
             if result is not None:
                 self._start_forward(kind, ns, name, local_port=result[0], remote_port=result[1])
 
-        await self.push_screen(PortForwardScreen(f"{kind}/{ns}/{name}", ports), _on_result)
+        await self.push_screen(
+            PortForwardScreen(f"{kind}/{ns}/{name}", ports, restrict_remote=kind == "services"),
+            _on_result,
+        )
 
     def _start_forward(
         self, kind: str, namespace: str, name: str, *, local_port: int, remote_port: int

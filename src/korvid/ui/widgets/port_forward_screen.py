@@ -1,8 +1,10 @@
 """Port-forward dialog (issue #38): collect local/remote ports for a target.
 
-Prefilled from the target's declared ports; both fields stay editable so a
-user can forward an undeclared port (kubectl allows it — declaration is
-informational).
+Prefilled from the target's declared ports. For pods both fields stay fully
+editable — an undeclared remote port is forwardable (kubectl treats pod
+declarations as informational). For services kubectl resolves the remote
+value against `Service.spec.ports` and rejects anything undeclared, so the
+dialog constrains the remote port to the discovered service ports.
 """
 
 from __future__ import annotations
@@ -71,22 +73,29 @@ class PortForwardScreen(ModalScreen["tuple[int, int] | None"]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
-    def __init__(self, target: str, remote_ports: list[int]) -> None:
+    def __init__(
+        self, target: str, remote_ports: list[int], *, restrict_remote: bool = False
+    ) -> None:
         """Args:
         target: human label of the forward target (``pods/ns/name``).
         remote_ports: declared ports for prefill; may be empty.
+        restrict_remote: when True (Service targets with discovered ports),
+            only ``remote_ports`` values are accepted as the remote port —
+            kubectl rejects a Service forward to an undeclared port.
         """
         super().__init__()
         self._target = target
         self._remote_ports = remote_ports
+        self._restrict_remote = restrict_remote and bool(remote_ports)
 
     def compose(self) -> ComposeResult:
         prefill = str(self._remote_ports[0]) if self._remote_ports else ""
         detected = ", ".join(str(p) for p in self._remote_ports) or "none declared"
+        ports_label = "Service ports" if self._restrict_remote else "Declared ports"
         with Vertical():
             yield Static(f"Port-forward {self._target}", classes="pf-title", markup=False)
             yield Static(
-                f"Declared ports: {detected}. Enter starts, Esc cancels.",
+                f"{ports_label}: {detected}. Enter starts, Esc cancels.",
                 classes="pf-hint",
                 markup=False,
             )
@@ -106,6 +115,15 @@ class PortForwardScreen(ModalScreen["tuple[int, int] | None"]):
         remote = _parse_port(self.query_one("#pf-remote", Input).value)
         if remote is None:
             self.notify("Remote port must be 1-65535", severity="warning")
+            return
+        if self._restrict_remote and remote not in self._remote_ports:
+            # kubectl resolves Service remote ports against spec.ports and
+            # fails on anything undeclared — reject it before spawning.
+            declared = ", ".join(str(p) for p in self._remote_ports)
+            self.notify(
+                f"Service forwards must target a declared service port ({declared})",
+                severity="warning",
+            )
             return
         local_text = self.query_one("#pf-local", Input).value
         # An empty local port mirrors the remote one (kubectl's `:port` form
