@@ -18,7 +18,7 @@ from time import monotonic
 from typing import Any, ClassVar, Literal
 
 import yaml
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.events import Key
 from textual.widgets import DataTable, Footer, Static
@@ -1713,6 +1713,15 @@ class KorvidApp(App[None]):
                 argv.append(tmp)
                 with self.suspend():
                     code = await asyncio.to_thread(subprocess.call, argv)
+            except SuspendNotSupported:
+                # Windows and other non-suspending drivers: cancel with a
+                # notification instead of an unhandled action error.
+                self.notify(
+                    "edit unavailable: this environment does not support"
+                    " suspending the TUI for an external editor",
+                    severity="error",
+                )
+                return None
             except (OSError, ValueError) as exc:
                 self.notify(f"editor {editor!r} failed: {exc}", severity="error")
                 return None

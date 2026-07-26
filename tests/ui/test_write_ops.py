@@ -1016,3 +1016,23 @@ async def test_e_edit_selection_change_during_fetch_never_opens_editor(tmp_path:
         )
     assert seen == []  # the editor never opened for the stale target
     assert rec.calls == []
+
+
+async def test_external_editor_suspend_not_supported_cancels(tmp_path: Path) -> None:
+    """Review round 10: drivers that cannot suspend (e.g. Windows) raise
+    SuspendNotSupported outside the OSError/ValueError handler - pressing e
+    there must cancel with a notification, not an unhandled action error.
+    The headless test driver does not support suspend, so no mocking is
+    needed to reproduce."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        with mock.patch.dict(os.environ, {"VISUAL": "true", "EDITOR": ""}):
+            result = await app._edit_in_external_editor("a: 1\n")
+        assert result is None
+        await _until(
+            pilot,
+            lambda: any("does not support" in n.message for n in app._notifications),
+        )
+    assert rec.calls == []
