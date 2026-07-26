@@ -164,6 +164,10 @@ def _pod_needs_hint(summary: PodSummary) -> bool:
     """
     if summary.trouble:
         return True
+    if summary.phase.startswith("Init:"):
+        # Routine init progress renders as Init:i/n; actual init failures
+        # already surface as trouble entries above.
+        return False
     if summary.phase not in _ROUTINE_PHASES:
         return True
     if summary.phase != "Running":

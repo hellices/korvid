@@ -327,6 +327,8 @@ def test_abnormal_phase_without_trouble_needs_hint() -> None:
     assert _pod_needs_hint(pod("Terminating", ready="0/1")) is False  # routine deletion
     assert _pod_needs_hint(pod("ContainerCreating", ready="0/1")) is False
     assert _pod_needs_hint(pod("Running", ready="0/1")) is True  # NotReady while Running
+    assert _pod_needs_hint(pod("Init:0/2", ready="0/1")) is False  # routine init progress
+    assert _pod_needs_hint(pod("Init:1/2")) is False
 
 
 async def test_recreated_pod_uid_change_mid_fetch_does_not_render_old_hint() -> None:
@@ -408,3 +410,15 @@ async def test_failed_fetch_is_retried_after_ttl_while_parked() -> None:
     async with app.run_test() as pilot:
         await until(pilot, lambda: len(attempts) >= 2, label="fetch retried after TTL")
         assert len(attempts) >= 2
+
+
+async def test_hint_strip_sits_above_status_bar() -> None:
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    app, _calls = make_app([_pod("web-1", (_CRASH,))])
+    async with app.run_test() as pilot:
+        strip = app.query_one(HintStrip)
+        await until(pilot, lambda: strip.display, label="hint strip visible")
+        await pilot.pause()
+        bar = app.query_one(StatusBar)
+        assert strip.region.y < bar.region.y  # hint renders above the status bar

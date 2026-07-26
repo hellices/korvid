@@ -84,11 +84,10 @@ def render_trouble_lines(
 
 
 class HintStrip(Static):
-    """Thin panel docked above the status bar; hidden while the row is healthy."""
+    """Thin panel above the status bar (normal flow); hidden while healthy."""
 
     DEFAULT_CSS = """
     HintStrip {
-        dock: bottom;
         height: auto;
         max-height: 4;
         padding: 0 1;
