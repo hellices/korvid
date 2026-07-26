@@ -1385,8 +1385,7 @@ class KorvidApp(App[None]):
         if self._get_manifest is not None:
             try:
                 manifest = await self._get_manifest(kind, ns, name)
-            except (ApiStatusError, ValueError) as exc:
-                # Prefill is a convenience — the dialog works without it.
+            except Exception as exc:  # prefill is a convenience — dialog works without it
                 logger.debug("manifest fetch for port prefill failed: %s", exc)
             else:
                 ports = candidate_remote_ports(kind, manifest)
@@ -1468,7 +1467,8 @@ class KorvidApp(App[None]):
 
         async def _target_exists(record: ForwardRecord) -> bool:
             # Only a confirmed 404 blocks the re-attach; when the target
-            # cannot be verified (no fetcher, transient errors) it proceeds.
+            # cannot be verified (no fetcher, transport or transient errors)
+            # it fails open and lets kubectl report the truth.
             if self._get_manifest is None:
                 return True
             spec = record.spec
@@ -1476,7 +1476,8 @@ class KorvidApp(App[None]):
                 await self._get_manifest(spec.kind, spec.namespace, spec.name)
             except ApiStatusError as exc:
                 return exc.status != 404
-            except ValueError:
+            except Exception as exc:  # verification is best-effort by design
+                logger.debug("re-attach target check failed: %s", exc)
                 return True
             return True
 

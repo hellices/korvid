@@ -639,3 +639,43 @@ async def test_failed_reattach_is_audited_with_error_outcome(tmp_path: Path) -> 
             label="failed re-attach audited",
         )
         assert "port-forward-start" in _audit_lines(tmp_path)
+
+
+async def test_forward_dialog_opens_when_manifest_fetch_breaks(tmp_path: Path) -> None:
+    """A transport failure during prefill must fall back to empty fields."""
+    procs: list[_FakeProc] = []
+
+    async def _boom(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        raise RuntimeError("connection reset")
+
+    app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_boom)
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            from textual.widgets import Input
+
+            assert app.screen.query_one("#pf-remote", Input).value == ""
+
+
+async def test_reattach_fails_open_on_transport_error() -> None:
+    """Only a confirmed 404 blocks re-attach — transport errors fail open."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+
+    async def _boom(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        raise RuntimeError("connection reset")
+
+    app = make_app([_pod("api-1")], forwards=registry, get_manifest=_boom)
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    procs[0].returncode = 1
+    async with app.run_test() as pilot:
+        await _wait_rows(app, pilot)
+        await _open_pf(app, pilot)
+        await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
+        await pilot.press("r")
+        await until(pilot, lambda: len(procs) == 2)
+        assert registry.forwards()[0].status == "alive"

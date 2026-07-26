@@ -243,6 +243,11 @@ def candidate_remote_ports(kind: str, manifest: dict[str, Any]) -> list[int]:
     ports: list[int] = []
     for entry in entries if isinstance(entries, list) else []:
         port = entry.get(port_key) if isinstance(entry, dict) else None
-        if isinstance(port, int) and 0 < port < 65536 and port not in ports:
+        if (
+            isinstance(port, int)
+            and not isinstance(port, bool)  # bool is an int subclass
+            and 0 < port < 65536
+            and port not in ports
+        ):
             ports.append(port)
     return ports

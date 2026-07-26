@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from korvid.core.portforward import ForwardRegistry, ForwardSpec
+from korvid.core.portforward import ForwardRegistry, ForwardSpec, candidate_remote_ports
 
 
 class _FakeProc:
@@ -313,3 +313,9 @@ def test_stop_all_covers_previously_stopped_stragglers() -> None:
     ):
         registry.stop_all()
     assert procs[0].killed
+
+
+def test_candidate_ports_excludes_booleans() -> None:
+    """bool is an int subclass — `port: true` must not become prefill 'True'."""
+    manifest = {"spec": {"containers": [{"ports": [{"containerPort": True}]}]}}
+    assert candidate_remote_ports("pods", manifest) == []
