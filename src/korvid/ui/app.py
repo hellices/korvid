@@ -118,6 +118,10 @@ logger = logging.getLogger(__name__)
 #: How often the app polls the forward registry for dead kubectl processes.
 _FORWARD_POLL_SECONDS = 2.0
 
+#: How long to wait for kubectl's readiness line before optimistically
+#: assuming a silent-but-running forward is fine.
+_FORWARD_READY_SECONDS = 5.0
+
 _MAX_MULTI_STREAM_PODS = 8
 # ``l`` accumulates side-by-side pod logs; beyond 4 pods each panel gets too
 # small to read — comparing >4 replicas is what ``L`` (multi-stream) is for.
@@ -1420,15 +1424,49 @@ class KorvidApp(App[None]):
             remote_port=remote_port,
         )
         try:
-            registry.start(spec)
+            record = registry.start(spec)
         except (OSError, ValueError) as exc:
             # OSError: spawn failed (kubectl missing). ValueError: local
             # port collision detected up front by the registry.
             self.notify(f"Port-forward failed to start: {exc}", severity="error")
             self._audit_forward("port-forward-start", spec, outcome=f"error: {exc}")
             return
+        # Popen returning only proves the child exists — success is reported
+        # after kubectl confirms the listener (or fails the bind/RBAC check).
+        self.run_worker(self._confirm_forward(record))
+
+    async def _confirm_forward(self, record: ForwardRecord, *, reattached: bool = False) -> None:
+        """Toast and audit a forward start only once kubectl signals ready.
+
+        An exit before the ready line is a failed start: the record is
+        dropped (fresh starts only — a failed re-attach stays listed as
+        broken for another try) and kubectl's last words become the error.
+        """
+        registry = self._forwards
+        if registry is None:  # pragma: no cover - callers hold a registry
+            return
+        spec = record.spec
+        status = await asyncio.to_thread(
+            registry.wait_ready, record.id, timeout=_FORWARD_READY_SECONDS
+        )
+        if status == "broken":
+            detail = record.last_output or "kubectl exited before the forward was ready"
+            if not reattached:
+                registry.stop(record.id)  # never worked — drop it from :pf
+            self.notify(f"Port-forward failed to start: {detail}", severity="error")
+            self._audit_forward("port-forward-start", spec, outcome=f"error: {detail}")
+            return
+        # "alive" — or still "starting" after the wait window (a silent but
+        # running kubectl): optimistic, liveness polling flags a later death.
+        if reattached:
+            self._audit_forward("port-forward-start", spec, outcome="reattached")
+            self.notify(f"Re-attached forward localhost:{spec.local_port}")
+            return
         self._audit_forward("port-forward-start", spec)
-        self.notify(f"Forwarding localhost:{local_port} → {namespace}/{name}:{remote_port}")
+        self.notify(
+            f"Forwarding localhost:{spec.local_port} → "
+            f"{spec.namespace}/{spec.name}:{spec.remote_port}"
+        )
 
     def _audit_forward(self, action: str, spec: ForwardSpec, *, outcome: str = "success") -> None:
         """Queue a forward audit entry; a single worker drains in FIFO order."""
@@ -1497,8 +1535,8 @@ class KorvidApp(App[None]):
             # Re-arm the broken toast right away: waiting for the next global
             # poll would silently swallow a breakage of the fresh process.
             self._broken_forwards.discard(record.id)
-            self._audit_forward("port-forward-start", record.spec, outcome="reattached")
-            self.notify(f"Re-attached forward localhost:{record.spec.local_port}")
+            # Same readiness handshake as a fresh start (issue #38 review).
+            self.run_worker(self._confirm_forward(record, reattached=True))
 
         def _on_reattach_error(record: ForwardRecord, exc: Exception) -> None:
             self._audit_forward("port-forward-start", record.spec, outcome=f"error: {exc}")
@@ -3981,8 +4019,9 @@ class KorvidApp(App[None]):
             await self._metrics.stop()
         if self._forwards is not None:
             # Session-scoped by design (issue #38): forwards never outlive
-            # the app that started them.
-            for record in self._forwards.stop_all():
+            # the app that started them. stop_all() polls synchronously up
+            # to the grace deadline — keep it off the closing event loop.
+            for record in await asyncio.to_thread(self._forwards.stop_all):
                 if self._audit is not None:
                     self._enqueue_forward_audit("port-forward-stop", record.spec, teardown=True)
         # Flush pending forward audits (e.g. a Ctrl-D pressed right before

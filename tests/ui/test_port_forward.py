@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -884,3 +885,42 @@ async def test_reattach_port_conflict_shows_clear_error() -> None:
         await until(pilot, lambda: any("already forwarded" in n for n in notices))
         assert broken.status == "broken"
         assert len(procs) == 2  # no doomed kubectl was spawned
+
+
+async def test_failed_start_reports_error_not_success(tmp_path: Path) -> None:
+    """kubectl dying before its ready line is a failed start, not a success."""
+    procs: list[_FakeProc] = []
+
+    class _DoomedProc(_FakeProc):
+        def __init__(self, argv: list[str]) -> None:
+            super().__init__(argv)
+            self.returncode = 1
+            self.stdout = io.StringIO("error: unable to listen on any of the requested ports\n")
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _DoomedProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")], forwards=registry, get_manifest=_pod_manifest, audit=_audit_log(tmp_path)
+    )
+    notices: list[str] = []
+    original = app.notify
+
+    def _capture(message: str, **kwargs: Any) -> Any:
+        notices.append(message)
+        return original(message, **kwargs)
+
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            app.notify = _capture  # type: ignore[method-assign]  # test spy
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: any("failed to start" in n for n in notices))
+            assert not any(n.startswith("Forwarding") for n in notices)
+            assert registry.forwards() == []
+            await until(pilot, lambda: "unable to listen" in _audit_lines(tmp_path))

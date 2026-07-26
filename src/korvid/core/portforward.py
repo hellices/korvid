@@ -8,13 +8,20 @@ Liveness is the design goal (issue #38): a hand-managed forward dies silently
 when its target pod restarts. `refresh()` polls every child process and marks
 exited ones ``broken`` instead of dropping them, so the UI can surface the
 breakage and offer a one-key re-attach.
+
+Startup is a handshake, not a guess: Popen returning only proves the child
+exists — kubectl validates the target, RBAC, and the local bind after that.
+A spawned forward is ``starting`` until kubectl prints its "Forwarding from"
+line (watched by a daemon reader thread); `wait_ready()` lets the caller
+block for that transition and report an early exit as a failed start.
 """
 
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, Protocol
@@ -26,6 +33,9 @@ _STOP_GRACE_SECONDS = 2.0
 
 #: Poll step while stop_all() waits out the shared grace deadline.
 _STOP_POLL_SECONDS = 0.05
+
+#: kubectl's readiness line — printed once per listener when the bind worked.
+_READY_PREFIX = "Forwarding from"
 
 
 class _ForwardProcess(Protocol):
@@ -53,12 +63,16 @@ class ForwardSpec:
 
 @dataclass
 class ForwardRecord:
-    """A tracked forward. ``status`` is one of ``alive`` / ``broken``."""
+    """A tracked forward. ``status``: ``starting`` / ``alive`` / ``broken``."""
 
     id: int
     spec: ForwardSpec
     status: str = "alive"
+    #: Last non-empty line kubectl printed — the failure detail on early exit.
+    last_output: str = ""
     _proc: _ForwardProcess | None = field(default=None, repr=False)
+    #: Set once the handshake resolved (ready line seen, or stdout hit EOF).
+    _ready: threading.Event | None = field(default=None, repr=False)
 
 
 class ForwardRegistry:
@@ -98,6 +112,7 @@ class ForwardRegistry:
         record = ForwardRecord(id=self._next_id, spec=spec, _proc=self._spawn(spec))
         self._next_id += 1
         self._records[record.id] = record
+        self._begin_handshake(record)
         return record
 
     def _spawn(self, spec: ForwardSpec) -> _ForwardProcess:
@@ -109,16 +124,70 @@ class ForwardRegistry:
             remote_port=spec.remote_port,
             context=self._context,
         )
-        # DEVNULL on purpose: kubectl chats on stdout for every connection
-        # and an unread PIPE would eventually block the child. Failure detail
-        # is conveyed by the exit itself (refresh() -> broken).
+        # stdout is read (readiness handshake + failure detail) by a daemon
+        # thread, so the child can never block on an unread PIPE. stderr is
+        # merged in: kubectl reports bind/RBAC errors there.
         proc: _ForwardProcess = self._popen(
             argv,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
         return proc
+
+    def _begin_handshake(self, record: ForwardRecord) -> None:
+        """Watch the child's output until kubectl confirms the listener."""
+        stream = getattr(record._proc, "stdout", None)
+        if stream is None:
+            # No readiness channel (injected test doubles) — trust the spawn.
+            record.status = "alive"
+            return
+        record.status = "starting"
+        record._ready = threading.Event()
+        threading.Thread(target=self._watch_output, args=(record, stream), daemon=True).start()
+
+    @staticmethod
+    def _watch_output(record: ForwardRecord, stream: Iterable[str]) -> None:
+        """Reader thread: drain kubectl's output for the child's lifetime."""
+        ready = record._ready
+        try:
+            for raw in stream:
+                line = raw.strip()
+                if line:
+                    record.last_output = line
+                if record.status == "starting" and line.startswith(_READY_PREFIX):
+                    record.status = "alive"
+                    if ready is not None:
+                        ready.set()
+        except (OSError, ValueError):  # pipe closed under us mid-read
+            pass
+        if ready is not None:
+            ready.set()  # EOF — the child exited (or closed its stdout)
+
+    def wait_ready(self, forward_id: int, *, timeout: float) -> str:
+        """Block until the forward's handshake resolves (call off the loop).
+
+        Returns:
+            The resulting status: ``alive`` when kubectl confirmed the
+            listener, ``broken`` when the child exited before that (the
+            record keeps kubectl's last words in ``last_output``), or
+            ``starting`` when the child is silent but still running after
+            ``timeout`` — optimistic: liveness polling covers a later death.
+        """
+        record = self._records.get(forward_id)
+        if record is None:
+            return "broken"
+        if record._ready is None or record.status == "alive":
+            return record.status
+        record._ready.wait(timeout)
+        if record.status == "alive":
+            return "alive"
+        proc = record._proc
+        if proc is not None and proc.poll() is not None:
+            record.status = "broken"
+            return "broken"
+        return "starting"
 
     def refresh(self) -> None:
         """Poll every tracked process; exited ones become ``broken``.
@@ -129,7 +198,7 @@ class ForwardRegistry:
         self._reap()
         for record in self._records.values():
             proc = record._proc
-            if record.status == "alive" and proc is not None and proc.poll() is not None:
+            if record.status != "broken" and proc is not None and proc.poll() is not None:
                 record.status = "broken"
 
     def forwards(self) -> list[ForwardRecord]:
@@ -165,12 +234,14 @@ class ForwardRegistry:
             ValueError: when another live forward has since claimed the
                 broken forward's local port.
         """
+        self.refresh()  # a stale 'alive' peer must not block the port check
         record = self._records.get(forward_id)
         if record is None or record.status != "broken":
             return None
         self._ensure_port_free(record.spec.local_port)
         record._proc = self._spawn(record.spec)
-        record.status = "alive"
+        record.last_output = ""
+        self._begin_handshake(record)
         return record
 
     def _ensure_port_free(self, local_port: int) -> None:
@@ -186,7 +257,7 @@ class ForwardRegistry:
             ValueError: when a live forward already uses ``local_port``.
         """
         for existing in self._records.values():
-            if existing.status == "alive" and existing.spec.local_port == local_port:
+            if existing.status != "broken" and existing.spec.local_port == local_port:
                 msg = f"local port {local_port} already forwarded by #{existing.id}"
                 raise ValueError(msg)
         remaining: list[tuple[_ForwardProcess, float, int]] = []

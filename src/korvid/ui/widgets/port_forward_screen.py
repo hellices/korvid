@@ -186,7 +186,7 @@ def forward_row(record: ForwardRecord) -> str:
     spec = record.spec
     prefix = FORWARDABLE_KINDS.get(spec.kind, spec.kind)
     return (
-        f"#{record.id}  {record.status:<6}  "
+        f"#{record.id}  {record.status:<8}  "
         f"localhost:{spec.local_port} -> {spec.namespace}/{prefix}/{spec.name}:{spec.remote_port}"
     )
 

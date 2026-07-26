@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import queue
+import time
 from time import monotonic
 from typing import Any
 from unittest.mock import patch
@@ -20,6 +22,8 @@ class _FakeProc:
         self.terminated = False
         self.killed = False
         self.waited = False
+        # None = no readiness channel; _piped_registry swaps in _GatedStream.
+        self.stdout: Any = None
 
     def poll(self) -> int | None:
         return self.returncode
@@ -377,3 +381,98 @@ def test_reattach_rejects_port_claimed_by_live_forward() -> None:
         registry.reattach(broken.id)
     assert broken.status == "broken"
     assert len(procs) == 2
+
+
+class _GatedStream:
+    """File-like stdout whose lines are fed by the test (None ends the stream)."""
+
+    def __init__(self) -> None:
+        self._lines: queue.Queue[str | None] = queue.Queue()
+
+    def __iter__(self) -> _GatedStream:
+        return self
+
+    def __next__(self) -> str:
+        line = self._lines.get()
+        if line is None:
+            raise StopIteration
+        return line
+
+    def feed(self, line: str | None) -> None:
+        self._lines.put(line)
+
+
+def _piped_registry(procs: list[_FakeProc]) -> ForwardRegistry:
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    return ForwardRegistry(popen=_popen)
+
+
+def test_start_is_not_alive_until_kubectl_reports_ready() -> None:
+    """Popen returning only proves the child exists — not a working forward."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    assert record.status == "starting"
+    registry.refresh()
+    assert record.status == "starting"
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
+
+
+def test_wait_ready_reports_failed_start_with_kubectl_detail() -> None:
+    """An exit before the ready line is a failed start, with kubectl's words."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    procs[0].stdout.feed("error: address already in use\n")
+    procs[0].stdout.feed(None)
+    procs[0].exit(1)
+    assert registry.wait_ready(record.id, timeout=2.0) == "broken"
+    deadline = monotonic() + 2.0
+    while not record.last_output and monotonic() < deadline:
+        time.sleep(0.01)
+    assert "address already in use" in record.last_output
+
+
+def test_wait_ready_times_out_while_kubectl_stays_silent() -> None:
+    """A silent child that has not exited is still starting, not broken."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    assert registry.wait_ready(record.id, timeout=0.1) == "starting"
+    assert record.status == "starting"
+
+
+def test_reattach_goes_through_readiness_again() -> None:
+    """The replacement kubectl gets the same handshake as a fresh start."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
+    procs[0].exit(1)
+    registry.refresh()
+    assert record.status == "broken"
+    revived = registry.reattach(record.id)
+    assert revived is not None
+    assert revived.status == "starting"
+    procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
+
+
+def test_reattach_port_check_ignores_peer_that_just_died() -> None:
+    """A stale 'alive' peer that already exited must not block a re-attach."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    broken = registry.start(_spec())
+    procs[0].exit(1)
+    registry.refresh()
+    registry.start(_spec(name="api-2"))  # claims 8080
+    procs[1].exit(1)  # dies, but no refresh runs before the re-attach
+    revived = registry.reattach(broken.id)
+    assert revived is not None
