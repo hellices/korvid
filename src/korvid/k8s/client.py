@@ -134,7 +134,11 @@ class KubeClient(WriteOps):
         try:
             resp = await self._core_v1.list_node(limit=5, _preload_content=False)
             data = await _to_dict(resp)
-        except k8s_client.exceptions.ApiException as exc:
+        except Exception as exc:
+            # Best-effort probe: RBAC denials arrive as ApiException, but
+            # transport failures (DNS, TLS, connection reset) surface as
+            # ordinary aiohttp/OS errors — none of them may abort startup.
+            # Cancellation (BaseException) still propagates.
             logger.debug("cloud provider detection failed: %s", exc)
             self._provider_info = detect_provider([])
             return self._provider_info

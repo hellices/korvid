@@ -159,3 +159,17 @@ async def test_connect_resets_provider_cache() -> None:
     with patch.object(client, "_core_v1", fake_v1_2):
         info = await client.detect_cloud_provider()
     assert info.provider == "gcp"
+
+
+async def test_detect_cloud_provider_transport_error_is_unknown() -> None:
+    """DNS/TLS/connection failures are not ApiExceptions; the best-effort
+    probe must still answer (and cache) unknown instead of raising."""
+    client = KubeClient()
+    fake_v1 = AsyncMock()
+    fake_v1.list_node.side_effect = OSError("connection reset by peer")
+    with patch.object(client, "_core_v1", fake_v1):
+        info = await client.detect_cloud_provider()
+        again = await client.detect_cloud_provider()
+    assert info.provider == "unknown"
+    assert again.provider == "unknown"
+    assert fake_v1.list_node.call_count == 1
