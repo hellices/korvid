@@ -322,3 +322,24 @@ def test_candidate_ports_excludes_booleans() -> None:
     """bool is an int subclass — `port: true` must not become prefill 'True'."""
     manifest = {"spec": {"containers": [{"ports": [{"containerPort": True}]}]}}
     assert candidate_remote_ports("pods", manifest) == []
+
+
+def test_start_rejects_duplicate_local_port() -> None:
+    """Reusing a live forward's local port must fail fast, not spawn kubectl."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    first = registry.start(_spec())
+    with pytest.raises(ValueError, match=f"local port 8080 already forwarded by #{first.id}"):
+        registry.start(_spec(name="api-2"))
+    assert len(procs) == 1
+
+
+def test_start_reuses_local_port_of_exited_forward() -> None:
+    """A dead forward no longer holds its local port — restarts must work."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    registry.start(_spec())
+    procs[0].exit(1)
+    record = registry.start(_spec(name="api-2"))
+    assert record.status == "alive"
+    assert len(procs) == 2

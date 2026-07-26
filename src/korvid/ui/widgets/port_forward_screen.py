@@ -132,6 +132,13 @@ class PortForwardScreen(ModalScreen["tuple[int, int] | None"]):
         if local is None:
             self.notify("Local port must be 1-65535", severity="warning")
             return
+        if local < 1024:
+            # Heads-up, not a block: non-root binds below 1024 usually fail,
+            # and kubectl would only report it as a delayed "broken" toast.
+            self.notify(
+                f"Local port {local} is privileged — binding may require root",
+                severity="warning",
+            )
         self.dismiss((local, remote))
 
     def action_cancel(self) -> None:
@@ -165,7 +172,7 @@ ForwardListScreen OptionList {
 
 _EMPTY_ROW = "No active port-forwards — press shift+f on a pod or service"
 
-#: How often the list re-polls the registry for died forwards.
+#: How often the list re-polls the registry for dead forwards.
 _REFRESH_SECONDS = 1.0
 
 

@@ -89,8 +89,15 @@ class ForwardRegistry:
 
         Raises:
             OSError: when the subprocess cannot be spawned (kubectl missing).
-            ValueError: when the spec's kind is not forwardable.
+            ValueError: when the spec's kind is not forwardable, or the local
+                port is already used by a live forward — kubectl would only
+                fail the bind asynchronously and masquerade as "broken".
         """
+        self.refresh()  # a just-died forward must not hold its local port
+        for existing in self._records.values():
+            if existing.status == "alive" and existing.spec.local_port == spec.local_port:
+                msg = f"local port {spec.local_port} already forwarded by #{existing.id}"
+                raise ValueError(msg)
         record = ForwardRecord(id=self._next_id, spec=spec, _proc=self._spawn(spec))
         self._next_id += 1
         self._records[record.id] = record

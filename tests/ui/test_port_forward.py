@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+
+from textual.widgets import Input
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -727,3 +730,125 @@ async def test_pod_forward_allows_undeclared_remote_port() -> None:
             await pilot.press("enter")
             await until(pilot, lambda: len(procs) == 1)
             assert "9999:9999" in procs[0].argv
+
+
+async def test_dialog_warns_on_privileged_local_port() -> None:
+    """A local port below 1024 gets a heads-up warning but is not blocked."""
+    procs: list[_FakeProc] = []
+    app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
+    notices: list[str] = []
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            screen = app.screen
+            original = screen.notify
+
+            def _capture(message: str, **kwargs: Any) -> Any:
+                notices.append(message)
+                return original(message, **kwargs)
+
+            screen.notify = _capture  # type: ignore[method-assign]  # test spy
+            screen.query_one("#pf-local", Input).value = "443"
+            await pilot.press("enter")
+            await until(pilot, lambda: len(procs) == 1)
+            assert any("privileged" in n for n in notices)
+            assert "443:8080" in procs[0].argv
+
+
+async def test_duplicate_local_port_start_shows_clear_error() -> None:
+    """A local-port collision must surface as a clear toast, not a broken toast."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    app = make_app([_pod("api-1")], forwards=registry, get_manifest=_pod_manifest)
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    notices: list[str] = []
+    original = app.notify
+
+    def _capture(message: str, **kwargs: Any) -> Any:
+        notices.append(message)
+        return original(message, **kwargs)
+
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            app.notify = _capture  # type: ignore[method-assign]  # test spy
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")  # prefilled 8080 collides with the live forward
+            await until(pilot, lambda: any("already forwarded" in n for n in notices))
+            assert len(procs) == 1  # no second kubectl was spawned
+            assert app.is_running
+
+
+async def test_stopping_broken_forward_releases_broken_flag() -> None:
+    """Stopping a broken forward must not leak its id in the broken set."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    app = make_app([_pod("api-1")], forwards=registry)
+    record = registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    procs[0].returncode = 1
+    async with app.run_test() as pilot:
+        await _wait_rows(app, pilot)
+        await until(pilot, lambda: record.id in app._broken_forwards, timeout=6.0)
+        await _open_pf(app, pilot)
+        await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: registry.forwards() == [])
+        assert record.id not in app._broken_forwards
+
+
+async def test_forward_audit_entries_keep_event_order(tmp_path: Path) -> None:
+    """A stalled start audit must not let the stop entry overtake it on disk."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    audit = _audit_log(tmp_path)
+    real_append = audit.append
+    release_start = threading.Event()
+
+    def _stalling_append(**kwargs: Any) -> None:
+        if kwargs.get("action") == "port-forward-start":
+            release_start.wait(timeout=5)
+        real_append(**kwargs)
+
+    audit.append = _stalling_append  # type: ignore[method-assign]  # test shim
+    app = make_app([_pod("api-1")], forwards=registry, get_manifest=_pod_manifest, audit=audit)
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: len(procs) == 1)
+            await _open_pf(app, pilot)
+            await pilot.press("ctrl+d")
+            await until(pilot, lambda: registry.forwards() == [])
+            # Only now may the start entry hit the disk.
+            release_start.set()
+            await until(pilot, lambda: _audit_lines(tmp_path).count("port-forward") >= 2)
+    events = [line for line in _audit_lines(tmp_path).splitlines() if "port-forward" in line]
+    assert len(events) == 2
+    assert "port-forward-start" in events[0]
+    assert "port-forward-stop" in events[1]
+
+
+async def test_pending_forward_audit_flushed_on_exit(tmp_path: Path) -> None:
+    """A stop audited right before quit must still reach the log."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    app = make_app([_pod("api-1")], forwards=registry, audit=_audit_log(tmp_path))
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    async with app.run_test() as pilot:
+        await _wait_rows(app, pilot)
+        await _open_pf(app, pilot)
+        await pilot.press("ctrl+d")
+        # Exit immediately: no wait for the audit write to land.
+    lines = _audit_lines(tmp_path)
+    assert lines.count("port-forward-stop") == 1

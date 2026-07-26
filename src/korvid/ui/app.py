@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +30,7 @@ from textual.events import Key
 from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Static
 from textual.widgets.data_table import CellDoesNotExist
+from textual.worker import Worker
 
 from korvid.agent.events import AgentError
 from korvid.agent.mcp_server import MCPController
@@ -113,7 +115,7 @@ _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
 
 logger = logging.getLogger(__name__)
 
-#: How often the app polls the forward registry for died kubectl processes.
+#: How often the app polls the forward registry for dead kubectl processes.
 _FORWARD_POLL_SECONDS = 2.0
 
 _MAX_MULTI_STREAM_PODS = 8
@@ -440,6 +442,10 @@ class KorvidApp(App[None]):
         self._metrics = metrics
         self._forwards = forwards
         self._broken_forwards: set[int] = set()
+        #: FIFO of pending forward audit entries; a single drainer preserves
+        #: event order (start before stop) that per-entry workers would not.
+        self._forward_audit_queue: deque[dict[str, Any]] = deque()
+        self._forward_audit_worker: Worker[None] | None = None
         #: pods/resize subresource discovered on the connected cluster
         #: (1.35 GA); gates the R keybinding and the resize agent tool.
         self._pod_resize_supported = pod_resize_supported
@@ -1415,7 +1421,9 @@ class KorvidApp(App[None]):
         )
         try:
             registry.start(spec)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # OSError: spawn failed (kubectl missing). ValueError: local
+            # port collision detected up front by the registry.
             self.notify(f"Port-forward failed to start: {exc}", severity="error")
             self._audit_forward("port-forward-start", spec, outcome=f"error: {exc}")
             return
@@ -1423,30 +1431,54 @@ class KorvidApp(App[None]):
         self.notify(f"Forwarding localhost:{local_port} → {namespace}/{name}:{remote_port}")
 
     def _audit_forward(self, action: str, spec: ForwardSpec, *, outcome: str = "success") -> None:
-        """Audit a forward start/stop in a thread worker (file IO under a lock)."""
-        audit = self._audit
-        if audit is None:
+        """Queue a forward audit entry; a single worker drains in FIFO order."""
+        if self._audit is None:
             # Forwards are read-only risk profile (issue #38): they stay
             # usable without an audit sink, unlike cluster writes.
             return
+        self._enqueue_forward_audit(action, spec, outcome=outcome)
+        worker = self._forward_audit_worker
+        if worker is None or worker.is_finished:
+            self._forward_audit_worker = self.run_worker(self._drain_forward_audits())
 
-        def _append() -> None:
+    def _enqueue_forward_audit(
+        self, action: str, spec: ForwardSpec, *, outcome: str = "success", teardown: bool = False
+    ) -> None:
+        detail = f"localhost:{spec.local_port} -> {spec.name}:{spec.remote_port}"
+        if teardown:
+            detail += " (session teardown)"
+        self._forward_audit_queue.append(
+            {
+                "action": action,
+                "kind": spec.kind,
+                "namespace": spec.namespace,
+                "name": spec.name,
+                "version": "v1",
+                "detail": detail,
+                "outcome": outcome,
+            }
+        )
+
+    async def _drain_forward_audits(self) -> None:
+        """Write queued forward audit entries strictly in enqueue order.
+
+        All queue operations happen on the event loop (single consumer), so
+        a quick start → Ctrl-D can never land in the log reversed. Entries
+        are popped only after the append so a cancelled drain leaves them
+        for the unmount flush — a rare duplicate beats a lost record.
+        Append failures are best-effort by design (read-only risk profile):
+        a full disk must not kill the app or block the forward.
+        """
+        audit = self._audit
+        if audit is None:
+            return
+        while self._forward_audit_queue:
+            entry = self._forward_audit_queue[0]
             try:
-                audit.append(
-                    action=action,
-                    kind=spec.kind,
-                    namespace=spec.namespace,
-                    name=spec.name,
-                    version="v1",
-                    detail=f"localhost:{spec.local_port} -> {spec.name}:{spec.remote_port}",
-                    outcome=outcome,
-                )
+                await asyncio.to_thread(audit.append, **entry)
             except OSError as exc:
-                # Best-effort by design (read-only risk profile) — a full disk
-                # must not kill the app via the worker's exit_on_error.
-                logger.warning("forward audit (%s) failed: %s", action, exc)
-
-        self.run_worker(_append, thread=True)
+                logger.warning("forward audit (%s) failed: %s", entry["action"], exc)
+            self._forward_audit_queue.popleft()
 
     def _open_forward_list(self) -> None:
         """`:pf` — the active-forwards screen with stop / re-attach keys."""
@@ -1455,6 +1487,9 @@ class KorvidApp(App[None]):
             return
 
         def _on_stop(record: ForwardRecord) -> None:
+            # A stopped broken forward will never poll alive again — drop its
+            # id so the broken set does not grow for the session's lifetime.
+            self._broken_forwards.discard(record.id)
             self._audit_forward("port-forward-stop", record.spec)
             self.notify(f"Stopped forward localhost:{record.spec.local_port}")
 
@@ -3927,34 +3962,6 @@ class KorvidApp(App[None]):
         empty.update(Text(message))
         empty.display = True
 
-    async def _audit_teardown_stops(self, records: list[ForwardRecord]) -> None:
-        """Best-effort audit for forwards stopped at session teardown.
-
-        Append failures (full disk, permissions) are logged and skipped: one
-        bad entry must not abort the rest of unmount — the forwards are
-        already stopped, and watch cleanup still has to run.
-        """
-        audit = self._audit
-        if audit is None:
-            return
-        for record in records:
-            spec = record.spec
-            try:
-                await asyncio.to_thread(
-                    audit.append,
-                    action="port-forward-stop",
-                    kind=spec.kind,
-                    namespace=spec.namespace,
-                    name=spec.name,
-                    version="v1",
-                    detail=(
-                        f"localhost:{spec.local_port} -> {spec.name}:{spec.remote_port}"
-                        " (session teardown)"
-                    ),
-                )
-            except OSError as exc:
-                logger.warning("teardown audit for forward #%s failed: %s", record.id, exc)
-
     async def on_unmount(self) -> None:
         # Cancel any active log stream tasks before the event loop shuts down.
         if self._ns_prefetch_task is not None:
@@ -3974,9 +3981,18 @@ class KorvidApp(App[None]):
             await self._metrics.stop()
         if self._forwards is not None:
             # Session-scoped by design (issue #38): forwards never outlive
-            # the app that started them. Audit synchronously (to_thread, not
-            # run_worker) — workers are already torn down at unmount.
-            await self._audit_teardown_stops(self._forwards.stop_all())
+            # the app that started them.
+            for record in self._forwards.stop_all():
+                if self._audit is not None:
+                    self._enqueue_forward_audit("port-forward-stop", record.spec, teardown=True)
+        # Flush pending forward audits (e.g. a Ctrl-D pressed right before
+        # quit) so no queued entry is lost: let a mid-drain worker finish,
+        # then drain the remainder directly — workers won't run past here.
+        worker = self._forward_audit_worker
+        if worker is not None and not worker.is_finished:
+            with contextlib.suppress(Exception):
+                await worker.wait()
+        await self._drain_forward_audits()
         await self.watch_manager.stop_all()
 
 
