@@ -31,7 +31,7 @@ from korvid.k8s.metrics import MetricsPoller
 from korvid.providers.configurator import ProviderConfigurator
 from korvid.providers.registry import create_provider
 from korvid.providers.token_store import TokenStore
-from korvid.ui.app import AppUIBridge, KorvidApp
+from korvid.ui.app import AppUIBridge, EventsFetcher, KorvidApp
 
 logger = logging.getLogger(__name__)
 
@@ -308,10 +308,15 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
             raise ValueError(f"Unknown resource kind: {kind!r}")
         return await kube.get_object(meta, namespace, name)
 
-    async def get_events(
-        namespace: str, name: str, *, uid: str | None = None
-    ) -> list[dict[str, Any]]:
-        return await kube.list_events_for(namespace, name, uid=uid)
+    class KubeEventsFetcher(EventsFetcher):
+        """Concrete events adapter over the shared KubeClient."""
+
+        async def fetch(
+            self, namespace: str, name: str, *, uid: str | None = None
+        ) -> list[dict[str, Any]]:
+            return await kube.list_events_for(namespace, name, uid=uid)
+
+    get_events = KubeEventsFetcher()
 
     watch_manager = WatchManager(store, source)
 

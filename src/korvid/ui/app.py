@@ -11,11 +11,12 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any, ClassVar, Literal, Protocol
+from typing import Any, ClassVar, Literal
 
 import yaml
 from textual.app import App, ComposeResult, SuspendNotSupported
@@ -23,6 +24,7 @@ from textual.binding import Binding
 from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
 from textual.events import Key
+from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Static
 from textual.widgets.data_table import CellDoesNotExist
 
@@ -95,8 +97,17 @@ _PERMISSION_CHECK_TIMEOUT = 10.0
 
 
 def _event_timestamp(event: dict[str, Any]) -> datetime | None:
-    """Absolute event time: events.k8s.io uses eventTime, core v1 lastTimestamp."""
-    return parse_rfc3339(str(event.get("lastTimestamp") or event.get("eventTime") or ""))
+    """Absolute time of the event's latest occurrence.
+
+    Repeating events record it in `series.lastObservedTime`; `lastTimestamp`
+    (core v1) and `eventTime` (events.k8s.io initial observation) are
+    fallbacks for non-series events.
+    """
+    series = event.get("series") or {}
+    raw = (
+        series.get("lastObservedTime") or event.get("lastTimestamp") or event.get("eventTime") or ""
+    )
+    return parse_rfc3339(str(raw))
 
 
 def _newest_warning(events: list[dict[str, Any]]) -> tuple[str, datetime | None] | None:
@@ -116,22 +127,47 @@ def _newest_warning(events: list[dict[str, Any]]) -> tuple[str, datetime | None]
     return line, _event_timestamp(newest)
 
 
-class EventsFetcher(Protocol):
-    """Events for one object; `uid` narrows out earlier same-named incarnations."""
+class EventsFetcher(ABC):
+    """Events for one object — layer-boundary interface (AGENTS.md: `abc.ABC`).
 
-    def __call__(
+    The concrete adapter wraps the k8s client and is wired in `__main__.py`.
+    `uid` narrows the query so earlier same-named incarnations are excluded.
+    """
+
+    @abstractmethod
+    async def fetch(
         self, namespace: str, name: str, *, uid: str | None = None
-    ) -> Awaitable[list[dict[str, Any]]]: ...
+    ) -> list[dict[str, Any]]: ...
+
+
+#: Display phases that are routine on their own — no hint without other signals.
+_ROUTINE_PHASES = frozenset(
+    {
+        "Running",
+        "Succeeded",
+        "Completed",
+        "Pending",
+        "ContainerCreating",
+        "PodInitializing",
+        "Terminating",
+    }
+)
 
 
 def _pod_needs_hint(summary: PodSummary) -> bool:
-    """Abnormal rows: captured trouble, or not-fully-ready (event-only hint).
+    """Abnormal rows: captured trouble, an abnormal display phase (Unknown,
+    status-only Failed), or a Running pod that is not fully ready.
 
-    A Running pod failing its readiness probe carries no container trouble —
-    the explanation lives only in Warning events (`Unhealthy`).
+    The latter two carry no container trouble — the explanation lives only
+    in Warning events (e.g. `Unhealthy` for a failing readiness probe), so
+    they still qualify for an event-only hint.
     """
     if summary.trouble:
         return True
+    if summary.phase not in _ROUTINE_PHASES:
+        return True
+    if summary.phase in {"Succeeded", "Completed"}:
+        return False  # a finished pod is 0/N ready by design
     ready, _, desired = summary.ready.partition("/")
     return bool(desired) and ready != desired
 
@@ -370,6 +406,7 @@ class KorvidApp(App[None]):
         # Hint strip event cache: "ns/name" -> (fetched_at, newest warning line
         # or None). Short TTL so a lingering cursor eventually sees new events.
         self._hint_event_cache: dict[str, tuple[float, str | None]] = {}
+        self._hint_refresh_timer: Timer | None = None
 
     @property
     def current_namespace(self) -> str:
@@ -645,11 +682,15 @@ class KorvidApp(App[None]):
         """Cursor movement drives the ops hint strip (pods view only)."""
         if not isinstance(event.data_table, ResourceTable):
             return
-        strip = self.query_one(HintStrip)
         if self.current_kind != "pods" or event.row_key is None:
-            strip.clear_hint()
+            self.query_one(HintStrip).clear_hint()
             return
-        row_key = str(event.row_key.value)
+        self._show_hint_for_row(str(event.row_key.value))
+
+    def _show_hint_for_row(self, row_key: str) -> None:
+        """Render the hint for one pod row: cached event line when fresh,
+        otherwise the status-derived hint plus a background event fetch."""
+        strip = self.query_one(HintStrip)
         summary = self._find_pod_summary(row_key)
         if summary is None or not _pod_needs_hint(summary):
             strip.clear_hint()
@@ -658,8 +699,7 @@ class KorvidApp(App[None]):
         # event line of its previous incarnation.
         cache_key = f"{row_key}#{summary.uid}"
         cached = self._hint_event_cache.get(cache_key)
-        now = monotonic()
-        if cached is not None and now - cached[0] < self._HINT_EVENT_TTL:
+        if cached is not None and monotonic() - cached[0] < self._HINT_EVENT_TTL:
             if summary.trouble or cached[1]:
                 strip.show_trouble(summary.trouble, event=cached[1])
             else:
@@ -678,6 +718,30 @@ class KorvidApp(App[None]):
                 group="hint-events",
             )
 
+    def _cursor_row_key(self) -> str | None:
+        """Row key under the table cursor, or None (empty table / no cursor)."""
+        table = self.query_one(ResourceTable)
+        if table.cursor_row < 0:
+            return None
+        try:
+            key = table.coordinate_to_cell_key(Coordinate(table.cursor_row, 0)).row_key
+        except CellDoesNotExist:
+            return None
+        return None if key is None else str(key.value)
+
+    def _schedule_hint_refresh(self, row_key: str) -> None:
+        """Re-evaluate a parked cursor when the cache entry expires; without
+        this a cursor that never moves would show the same event forever."""
+        if self._hint_refresh_timer is not None:
+            self._hint_refresh_timer.stop()
+
+        def _refresh() -> None:
+            self._hint_refresh_timer = None
+            if self.current_kind == "pods" and self._cursor_row_key() == row_key:
+                self._show_hint_for_row(row_key)
+
+        self._hint_refresh_timer = self.set_timer(self._HINT_EVENT_TTL, _refresh)
+
     def _find_pod_summary(self, row_key: str) -> PodSummary | None:
         parts = row_key.split("/", 1)
         if len(parts) != 2:
@@ -693,33 +757,35 @@ class KorvidApp(App[None]):
         if self._get_events is None:  # caller guards; satisfy the type checker
             return
         try:
-            events = await self._get_events(
+            events = await self._get_events.fetch(
                 summary.namespace, summary.name, uid=summary.uid or None
             )
         except Exception:  # events are decoration; the status-derived hint already shows
             self._store_hint_event(cache_key, None)
             return
-        line = _fresh_warning_line(events, summary)
-        self._store_hint_event(cache_key, line)
-        if line is None:
-            return
-        # Re-check the cursor: the user may have moved on during the fetch.
-        table = self.query_one(ResourceTable)
-        if self.current_kind != "pods" or table.cursor_row < 0:
-            return
-        try:
-            current = table.coordinate_to_cell_key(Coordinate(table.cursor_row, 0)).row_key
-        except CellDoesNotExist:
-            return
-        if current is None or str(current.value) != row_key:
-            return
         # The snapshot taken at highlight time may be stale after the await:
-        # re-read the store so a recovered pod is not shown with old trouble.
+        # re-read the store and filter/render against the *current* status.
         fresh = self._find_pod_summary(row_key)
-        if fresh is None or not _pod_needs_hint(fresh):
+        if fresh is None or fresh.uid != summary.uid:
+            # Deleted or recreated mid-fetch: the results describe the old
+            # incarnation. Re-evaluate the row so the new one gets its own pass.
+            if self.current_kind == "pods" and self._cursor_row_key() == row_key:
+                self._show_hint_for_row(row_key)
+            return
+        line = _fresh_warning_line(events, fresh)
+        self._store_hint_event(cache_key, line)
+        cursor_parked = self.current_kind == "pods" and self._cursor_row_key() == row_key
+        if cursor_parked:
+            self._schedule_hint_refresh(row_key)
+        if not cursor_parked:
+            return
+        if not _pod_needs_hint(fresh):
             self.query_one(HintStrip).clear_hint()
             return
-        self.query_one(HintStrip).show_trouble(fresh.trouble, event=line)
+        if fresh.trouble or line:
+            self.query_one(HintStrip).show_trouble(fresh.trouble, event=line)
+        else:
+            self.query_one(HintStrip).clear_hint()
 
     def _store_hint_event(self, cache_key: str, line: str | None) -> None:
         """Cache the fetched line; expired entries are swept on every write
@@ -899,7 +965,7 @@ class KorvidApp(App[None]):
         # to avoid showing events for unrelated objects with the same name.
         if self._get_events is not None and ns is not None and self.current_kind == "pods":
             try:
-                events = await self._get_events(namespace, name)
+                events = await self._get_events.fetch(namespace, name)
             except ApiStatusError as exc:
                 # Events are best-effort; surface but still show the manifest.
                 msg = explain_api_error(exc.status, exc.reason, "events", namespace)
@@ -2637,7 +2703,7 @@ class KorvidApp(App[None]):
         # Events are name-scoped only, so restrict to pods (same rule as `d`).
         if self._get_events is not None and namespace and meta.plural == "pods":
             try:
-                events = await self._get_events(namespace, name)
+                events = await self._get_events.fetch(namespace, name)
             except Exception:  # events are best-effort; the manifest still shows
                 logger.debug("agent describe: event fetch failed", exc_info=True)
         title = f"{meta.plural}/{namespace or '-'}/{name}"

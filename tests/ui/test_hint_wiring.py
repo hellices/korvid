@@ -11,7 +11,7 @@ from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.models import ContainerTrouble, PodSummary
-from korvid.ui.app import KorvidApp
+from korvid.ui.app import EventsFetcher, KorvidApp
 from korvid.ui.widgets.hint_strip import HintStrip
 from korvid.ui.widgets.resource_table import ResourceTable
 
@@ -26,6 +26,18 @@ _CRASH = ContainerTrouble(
     exit_reason="OOMKilled",
     restarts=12,
 )
+
+
+class _FnFetcher(EventsFetcher):
+    """Adapts a `(namespace, name, *, uid)` coroutine fn to the fetcher ABC."""
+
+    def __init__(self, fn: Any) -> None:
+        self._fn = fn
+
+    async def fetch(
+        self, namespace: str, name: str, *, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        return await self._fn(namespace, name, uid=uid)  # type: ignore[no-any-return]  # test fakes return list[dict]
 
 
 def _pod(name: str, trouble: tuple[ContainerTrouble, ...] = ()) -> PodSummary:
@@ -70,7 +82,7 @@ def make_app(
         store=store,
         watch_manager=WatchManager(store, _source(pods)),
         aliases=dict(_DEFAULT_TEST_ALIASES),
-        get_events=get_events,
+        get_events=_FnFetcher(get_events),
     )
     return app, calls
 
@@ -155,7 +167,7 @@ async def test_event_fetch_failure_still_shows_status_trouble() -> None:
         store=store,
         watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
         aliases=dict(_DEFAULT_TEST_ALIASES),
-        get_events=failing,
+        get_events=_FnFetcher(failing),
     )
     async with app.run_test() as pilot:
         await until(pilot, lambda: len(attempts) == 1, label="fetch attempted")
@@ -174,6 +186,7 @@ async def test_strip_absent_on_non_pod_views() -> None:
         await until(
             pilot, lambda: not app.query_one(HintStrip).display, label="strip off deploy view"
         )
+        assert app.query_one(HintStrip).display is False
 
 
 _OLD_EVENT = {
@@ -254,7 +267,7 @@ async def test_recovered_pod_is_not_rendered_with_stale_trouble() -> None:
         store=store,
         watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
         aliases=dict(_DEFAULT_TEST_ALIASES),
-        get_events=gated,
+        get_events=_FnFetcher(gated),
     )
     async with app.run_test() as pilot:
         await until(pilot, lambda: len(calls) == 1, label="fetch started")
@@ -264,3 +277,92 @@ async def test_recovered_pod_is_not_rendered_with_stale_trouble() -> None:
         await until(
             pilot, lambda: not app.query_one(HintStrip).display, label="strip cleared on recovery"
         )
+        assert app.query_one(HintStrip).display is False
+        assert str(app.query_one(HintStrip).render()) == ""
+
+
+def test_event_timestamp_prefers_series_last_observed_time() -> None:
+    from korvid.ui.app import _newest_warning
+
+    events: list[dict[str, Any]] = [
+        {
+            "type": "Warning",
+            "reason": "Older",
+            "message": "initial observation is newer but series is stale",
+            "eventTime": "2026-07-26T09:00:00Z",
+        },
+        {
+            "type": "Warning",
+            "reason": "Newer",
+            "message": "series keeps repeating",
+            "eventTime": "2026-07-26T01:00:00Z",
+            "series": {"count": 40, "lastObservedTime": "2026-07-26T10:00:00Z"},
+        },
+    ]
+    found = _newest_warning(events)
+    assert found is not None
+    assert found[0].startswith("Newer:")
+
+
+def test_abnormal_phase_without_trouble_needs_hint() -> None:
+    from korvid.ui.app import _pod_needs_hint
+
+    def pod(phase: str, ready: str = "1/1") -> PodSummary:
+        return PodSummary(
+            name="p",
+            namespace="default",
+            phase=phase,
+            ready=ready,
+            restarts=0,
+            node=None,
+        )
+
+    assert _pod_needs_hint(pod("Unknown")) is True  # node lost, containers may read 1/1
+    assert _pod_needs_hint(pod("Failed", ready="0/0")) is True  # status-only failure
+    assert _pod_needs_hint(pod("Running")) is False
+    assert _pod_needs_hint(pod("Completed", ready="0/1")) is False  # finished: 0/N by design
+    assert _pod_needs_hint(pod("Pending")) is False  # routine startup is not trouble
+    assert _pod_needs_hint(pod("Terminating")) is False  # routine deletion
+    assert _pod_needs_hint(pod("ContainerCreating")) is False
+
+
+async def test_recreated_pod_uid_change_mid_fetch_does_not_render_old_hint() -> None:
+    gate = asyncio.Event()
+
+    async def gated(namespace: str, name: str, *, uid: str | None = None) -> list[dict[str, Any]]:
+        await gate.wait()
+        return [
+            {
+                "type": "Warning",
+                "reason": "BackOff",
+                "message": "event of the dead incarnation",
+                "lastTimestamp": "2026-07-26T09:00:00Z",
+            }
+        ]
+
+    store = ResourceStore()
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
+        aliases=dict(_DEFAULT_TEST_ALIASES),
+        get_events=_FnFetcher(gated),
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(HintStrip).display, label="initial hint")
+        # Same name, new uid, healthy: a recreated pod replaces the old row.
+        recreated = PodSummary(
+            name="web-1",
+            namespace="default",
+            phase="Running",
+            ready="1/1",
+            restarts=0,
+            node=None,
+            uid="uid-new",
+        )
+        store.apply_event("pods", "default", "MODIFIED", recreated)
+        gate.set()
+        await until(
+            pilot, lambda: not app.query_one(HintStrip).display, label="no hint for new uid"
+        )
+        assert "dead incarnation" not in str(app.query_one(HintStrip).render())
