@@ -37,6 +37,7 @@ from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
+from korvid.core.secrets import mask_secret_manifest
 from korvid.core.store import ALL_NAMESPACES, ResourceStore
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
@@ -73,6 +74,7 @@ from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
+from korvid.ui.widgets.secret_screen import SecretScreen
 from korvid.ui.widgets.status_bar import StatusBar
 
 _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
@@ -1023,6 +1025,11 @@ class KorvidApp(App[None]):
                 self.notify(msg, severity="warning")
 
         title = f"{self.current_kind}/{namespace}/{name}"
+        if manifest.get("kind") == "Secret":
+            # Secrets get the dedicated masked viewer (spec §5 #9): values
+            # render masked; per-key reveal is explicit and audit-logged.
+            await self.push_screen(SecretScreen(title, manifest, audit=self._audit))
+            return
         await self.push_screen(DescribeScreen(title, manifest, events))
 
     def on_unknown_command(self, message: UnknownCommand) -> None:
@@ -3244,6 +3251,10 @@ class KorvidApp(App[None]):
     ) -> None:
         """Present a describe view: non-modal pane when sharing with the chat
         panel (modal screens would steal focus from the chat input)."""
+        if manifest.get("kind") == "Secret":
+            # Masking pipeline (design §7): this path is agent-driven, so the
+            # rendered body is LLM-adjacent — secret values must never appear.
+            manifest = mask_secret_manifest(manifest)
         if share:
             self.query_one(DescribePane).show(title, manifest, events)
         else:
