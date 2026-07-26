@@ -37,6 +37,7 @@ _POD_COLS = (
     "CPU R/L",
     "MEM R/L",
     "QOS",
+    "AGE",
     "NODE",
 )
 _POD_COLS_ALL_NS = ("NAMESPACE", *_POD_COLS)
@@ -297,6 +298,7 @@ class ResourceTable(DataTable[str | Text]):
                 f"{pod.cpu_request}/{pod.cpu_limit}",
                 f"{pod.mem_request}/{pod.mem_limit}",
                 Text(pod.qos, style=_QOS_STYLE.get(pod.qos, "dim")),
+                pod.age(),
                 pod.node or "-",
             ]
             if all_namespaces:
@@ -306,37 +308,42 @@ class ResourceTable(DataTable[str | Text]):
     def _add_replicaset_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
     ) -> None:
-        replicasets = [r for r in rows if isinstance(r, ReplicaSetSummary)]
-        if not presorted:
-            replicasets = sorted(replicasets, key=_replicaset_sort_key)
-        for rs in replicasets:
-            if pattern and pattern.lower() not in rs.name.lower():
-                continue
-            cells: list[str | Text] = [
-                rs.name,
-                rs.revision,
-                str(rs.desired),
-                str(rs.current),
-                _ready_cell(rs.ready),
-                rs.age(),
-            ]
-            if all_namespaces:
-                cells.insert(0, rs.namespace)
-            self.add_row(*cells, key=f"{rs.namespace}/{rs.name}")
-        # Rows that reached this view without ReplicaSet parsing (e.g. a
-        # future path that skips summary_for) still render NAME/AGE rather
-        # than silently disappearing.
-        fallbacks = [r for r in rows if not isinstance(r, ReplicaSetSummary)]
-        if not presorted:
-            fallbacks = sorted(fallbacks, key=lambda o: (o.namespace, o.name))
-        for obj in fallbacks:
+        # With a user sort active the incoming order is final: render it in
+        # one pass so fallback rows interleave in sorted position instead of
+        # being appended after every parsed ReplicaSet. The default view
+        # keeps rollout-history order with unparsed rows last.
+        if presorted:
+            ordered: list[Summary] = list(rows)
+        else:
+            replicasets = sorted(
+                (r for r in rows if isinstance(r, ReplicaSetSummary)), key=_replicaset_sort_key
+            )
+            # Rows that reached this view without ReplicaSet parsing (e.g. a
+            # future path that skips summary_for) still render NAME/AGE rather
+            # than silently disappearing.
+            fallbacks = sorted(
+                (r for r in rows if not isinstance(r, ReplicaSetSummary)),
+                key=lambda o: (o.namespace, o.name),
+            )
+            ordered = [*replicasets, *fallbacks]
+        for obj in ordered:
             if pattern and pattern.lower() not in obj.name.lower():
                 continue
-            age = obj.age() if isinstance(obj, GenericSummary) else ""
-            fallback_cells: list[str | Text] = [obj.name, "", "", "", "", age]
+            if isinstance(obj, ReplicaSetSummary):
+                cells: list[str | Text] = [
+                    obj.name,
+                    obj.revision,
+                    str(obj.desired),
+                    str(obj.current),
+                    _ready_cell(obj.ready),
+                    obj.age(),
+                ]
+            else:
+                age = obj.age() if isinstance(obj, GenericSummary) else ""
+                cells = [obj.name, "", "", "", "", age]
             if all_namespaces:
-                fallback_cells.insert(0, obj.namespace)
-            self.add_row(*fallback_cells, key=f"{obj.namespace}/{obj.name}")
+                cells.insert(0, obj.namespace)
+            self.add_row(*cells, key=f"{obj.namespace}/{obj.name}")
 
     def _add_helm_release_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False

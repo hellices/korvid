@@ -1036,6 +1036,24 @@ def test_pod_summary_created_defaults_to_empty() -> None:
     assert pod.created == ""
 
 
+def test_pod_summary_age_renders_like_generic() -> None:
+    """Feeds the pods AGE column (issue #37 sort indicator visibility)."""
+    pod = PodSummary.from_manifest(
+        {
+            "metadata": {"name": "x", "creationTimestamp": "2024-06-01T10:00:00Z"},
+            "spec": {},
+            "status": {},
+        }
+    )
+    now = datetime(2024, 6, 1, 13, 0, 0, tzinfo=UTC)
+    assert pod.age(now=now) == "3h"
+
+
+def test_pod_summary_age_dash_when_created_missing() -> None:
+    pod = PodSummary.from_manifest({"metadata": {"name": "x"}, "spec": {}, "status": {}})
+    assert pod.age() == "-"
+
+
 def test_pod_summary_carries_labels() -> None:
     """Labels feed the client-side `-l` filter (issue #44)."""
     manifest = {

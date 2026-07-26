@@ -7,12 +7,13 @@ from __future__ import annotations
 from dataclasses import replace
 
 from korvid.core.store import Summary
+from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.metrics import PodMetrics
-from korvid.k8s.models import GenericSummary
+from korvid.k8s.models import GenericSummary, ReplicaSetSummary
 from korvid.ui.widgets.describe_screen import DescribePane
 from korvid.ui.widgets.resource_table import ResourceTable
 
-from .test_app import _pod, make_app
+from .test_app import _DEFAULT_TEST_ALIASES, _pod, make_app
 from .test_metrics_wiring import make_app_with_metrics
 from .waits import until
 
@@ -70,6 +71,9 @@ async def test_shift_a_sorts_pods_newest_first() -> None:
             lambda: _names(table) == ["young", "mid", "old"],
             label="newest first",
         )
+        # Pods have an AGE column so the ▲/▼ direction stays visible (the
+        # indicator must never point at a column the user cannot see).
+        assert any(label.startswith("AGE") and "▼" in label for label in _header_labels(table))
 
 
 async def test_shift_c_sorts_by_cpu_missing_metrics_last() -> None:
@@ -162,8 +166,48 @@ async def test_sort_is_scoped_per_view_kind() -> None:
         await until(pilot, lambda: _names(table) == ["bb", "aa"], label="pods sort restored")
 
 
-async def test_shift_n_still_steps_search_when_log_pane_open() -> None:
-    """N must keep meaning 'previous hit' inside an open pane, not re-sort."""
+async def test_replicaset_fallback_rows_interleave_in_user_sort_order() -> None:
+    """With a user sort active, GenericSummary fallback rows must land in
+    sorted position, not be appended after every parsed ReplicaSet."""
+    rs_meta = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True, ("rs",))
+    rows: list[Summary] = [
+        ReplicaSetSummary(
+            name="zeta",
+            namespace="default",
+            kind="ReplicaSet",
+            created="2026-07-26T08:00:00Z",
+            revision="1",
+            desired=1,
+            current=1,
+            ready="1/1",
+        ),
+        GenericSummary(
+            name="alpha", namespace="default", kind="ReplicaSet", created="2026-07-26T09:00:00Z"
+        ),
+    ]
+    app = make_app(
+        [],
+        extra_data={"replicasets": rows},
+        aliases={**_DEFAULT_TEST_ALIASES, "replicasets": rs_meta},
+    )
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await pilot.press("colon")
+        for ch in "replicasets":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await until(pilot, lambda: table.row_count == 2, label="replicasets loaded")
+        await pilot.press("N")
+        await until(
+            pilot,
+            lambda: _names(table) == ["alpha", "zeta"],
+            label="fallback row interleaved by name",
+        )
+
+
+async def test_shift_n_still_steps_search_when_describe_pane_open() -> None:
+    """N must keep meaning 'previous hit' inside an open pane, not re-sort
+    (the log-pane path is covered in test_log_pane.py)."""
     app = make_app([_pod("bb"), _pod("aa")])
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
