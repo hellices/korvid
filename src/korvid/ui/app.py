@@ -587,6 +587,11 @@ class KorvidApp(App[None]):
         self.query_one(CommandBar).open()
 
     def action_open_filter(self) -> None:
+        # When the describe pane is open, / searches inside it (issue #42).
+        describe_pane = self.query_one(DescribePane)
+        if describe_pane.display:
+            describe_pane.open_search()
+            return
         # When the log pane is open, / opens the pane's inline search instead.
         log_pane = self.query_one(LogPane)
         if log_pane.display:
@@ -2583,12 +2588,20 @@ class KorvidApp(App[None]):
 
     def action_log_search_next(self) -> None:
         """Advance to the next search hit (``n`` key)."""
+        describe_pane = self.query_one(DescribePane)
+        if describe_pane.display:
+            describe_pane.search_next()
+            return
         log_pane = self.query_one(LogPane)
         if log_pane.display:
             log_pane.search_next()
 
     def action_log_search_prev(self) -> None:
         """Go back to the previous search hit (``N`` / shift+n key)."""
+        describe_pane = self.query_one(DescribePane)
+        if describe_pane.display:
+            describe_pane.search_prev()
+            return
         log_pane = self.query_one(LogPane)
         if log_pane.display:
             log_pane.search_prev()
