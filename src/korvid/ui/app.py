@@ -745,7 +745,10 @@ class KorvidApp(App[None]):
 
     def _cursor_row_key(self) -> str | None:
         """Row key under the table cursor, or None (empty table / no cursor)."""
-        table = self.query_one(ResourceTable)
+        try:
+            table = self.query_one(ResourceTable)
+        except NoMatches:  # timer fired while the app is shutting down
+            return None
         if table.cursor_row < 0:
             return None
         try:
