@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import json
 import logging
 import os
 import shlex
@@ -19,6 +20,7 @@ from time import monotonic
 from typing import Any, ClassVar, Literal
 
 import yaml
+from rich.text import Text
 from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.coordinate import Coordinate
@@ -35,11 +37,20 @@ from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.agent.tools import UIBridge
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
+from korvid.core.debugimage import (
+    FALLBACK_IMAGE,
+    ephemeral_container_names,
+    find_pull_failure,
+    recommend_debug_images,
+    same_image_ref,
+)
 from korvid.core.errors import explain_api_error
+from korvid.core.filters import ResourceFilter, parse_filter
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.core.secrets import mask_secret_manifest
-from korvid.core.store import ALL_NAMESPACES, ResourceStore
+from korvid.core.sorting import SortSpec, toggle_sort
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
@@ -69,11 +80,17 @@ from korvid.ui.messages import (
     UnknownCommand,
 )
 from korvid.ui.navigation import DrillLevel, NavigationStack
-from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv, build_probe_argv
+from korvid.ui.shell import (
+    DEBUG_IMAGE,
+    build_debug_argv,
+    build_exec_argv,
+    build_pod_get_argv,
+    build_probe_argv,
+)
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 from korvid.ui.widgets.command_bar import CommandBar
-from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
+from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt, ReplicasPrompt
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
@@ -345,8 +362,16 @@ class KorvidApp(App[None]):
         Binding("ctrl+s", "log_save", "Save logs", show=False),
         ("p", "log_previous", "Prev logs"),
         ("n", "log_search_next", "Next hit"),
-        Binding("shift+n", "log_search_prev", "Prev hit"),
-        Binding("N", "log_search_prev", "Prev hit", show=False),
+        Binding("shift+n", "log_search_prev", "Prev hit / Sort name"),
+        Binding("N", "log_search_prev", "Prev hit / Sort name", show=False),
+        # Column sorting (issue #37); shift+n doubles as sort-by-name when
+        # no search pane is open (see action_log_search_prev).
+        Binding("shift+a", "sort_by_age", "Sort age", show=False),
+        Binding("A", "sort_by_age", "Sort age", show=False),
+        Binding("shift+c", "sort_by_cpu", "Sort CPU", show=False),
+        Binding("C", "sort_by_cpu", "Sort CPU", show=False),
+        Binding("shift+m", "sort_by_mem", "Sort MEM", show=False),
+        Binding("M", "sort_by_mem", "Sort MEM", show=False),
         Binding("ctrl+a", "toggle_agent", "AI", priority=True),
         Binding("ctrl+d", "delete_resource", "Delete"),
         Binding("r", "rollout_restart", "Restart", show=False),
@@ -447,6 +472,14 @@ class KorvidApp(App[None]):
         self.current_kind: str = "pods"
         self.current_scope: str = config.namespace or "default"
         self.filter_pattern = ""
+        #: Parsed form of filter_pattern (label selector / regex / fuzzy /
+        #: inverse / hide-completed — issue #44); single matcher shared by
+        #: the table render and the agent's view of "what the user sees".
+        self._resource_filter: ResourceFilter = parse_filter("")
+        #: Active sort per view kind (issue #37): the choice survives watch
+        #: updates (every render re-applies it) and switching views restores
+        #: each kind's own sort.
+        self._sorts: dict[str, SortSpec] = {}
         # Drill-down levels (deploy -> rs -> pods); single source for the
         # breadcrumb line and the owner-uid filter on the current table.
         self._drill = NavigationStack()
@@ -602,6 +635,7 @@ class KorvidApp(App[None]):
         drill_uid = self._drill.parent_uid
         if drill_uid is not None and kind == self._drill.child_kind:
             rows = [r for r in rows if owned_by(r, drill_uid)]
+        rows = self._filtered_rows(rows)
         all_namespaces = self.current_scope == ALL_NAMESPACES
         metrics = None
         if kind == "pods" and self._metrics is not None and self._metrics.available:
@@ -614,9 +648,12 @@ class KorvidApp(App[None]):
             meta.plural if meta is not None else kind,
             rows,
             all_namespaces=all_namespaces,
-            pattern=self.filter_pattern,
+            # Filtering happened upstream (issue #44: labels/regex/fuzzy need
+            # the full summaries, not just names) — no name pattern remains.
+            pattern="",
             metrics=metrics,
             group=meta.group if meta is not None else "",
+            sort=self._sorts.get(kind),
         )
         self._refresh_empty_state(kind, table.row_count)
         # The strip is driven by RowHighlighted on the pods view; anything
@@ -659,11 +696,30 @@ class KorvidApp(App[None]):
 
     def on_filter_command(self, message: FilterCommand) -> None:
         self.filter_pattern = message.pattern
+        self._resource_filter = parse_filter(message.pattern)
         self.post_message(ResourcesUpdated(self.current_kind))
+        self._refresh_status()
 
     def on_clear_filter(self, message: ClearFilter) -> None:
         self.filter_pattern = ""
+        self._resource_filter = parse_filter("")
         self.post_message(ResourcesUpdated(self.current_kind))
+        self._refresh_status()
+
+    def _filtered_rows(self, rows: list[Summary]) -> list[Summary]:
+        """Apply the active filter the way the table renders it (issue #44)."""
+        flt = self._resource_filter
+        if not flt.active:
+            return rows
+        return [
+            r
+            for r in rows
+            if flt.matches(
+                r.name,
+                labels=dict(getattr(r, "labels", ())),
+                phase=getattr(r, "phase", None),
+            )
+        ]
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
         # An explicit :view / agent navigate abandons any drill-down context;
@@ -1425,18 +1481,24 @@ class KorvidApp(App[None]):
             return
         target = f"{name}/{container}" if container else name
         try:
-            # Bind the offer to this pod incarnation: kubectl debug addresses
-            # the pod by namespace/name only, so without this a same-named
-            # replacement created while the dialog is open would receive the
-            # ephemeral container. _run_debug re-checks the uid just before
-            # executing and aborts on change. 404 -> the pod is already gone.
-            approved_uid = await self._target_uid("pods", namespace, name)
+            # One manifest fetch serves two purposes: binding the offer to
+            # this pod incarnation (kubectl debug addresses the pod by
+            # namespace/name only, so without the uid a same-named
+            # replacement created while the dialogs are open would receive
+            # the ephemeral container - _run_debug re-checks the uid just
+            # before executing) and runtime detection for the image
+            # recommendation (issue #52). 404 -> the pod is already gone.
+            manifest = await self._debug_manifest(namespace, name)
         except ApiStatusError:
             self.notify(
                 f"Debug fallback for {target} not offered - the pod no longer exists.",
                 severity="warning",
             )
             return
+        approved_uid: str | None = None
+        if manifest is not None:
+            raw_uid = (manifest.get("metadata") or {}).get("uid")
+            approved_uid = str(raw_uid) if raw_uid else None
         if len(self.screen_stack) > 1:
             # The probe/RBAC pre-check ran concurrently with user input: never
             # stack the offer over a dialog that opened meanwhile.
@@ -1446,29 +1508,133 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return
+        self._pick_debug_image(namespace, name, container, exit_code, approved_uid, manifest or {})
+
+    def _pick_debug_image(
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        exit_code: int,
+        approved_uid: str | None,
+        manifest: dict[str, Any],
+    ) -> None:
+        """Debug image picker (issue #52): runtime-aware recommendation first,
+        alternatives after, plus a custom-image prompt."""
+        target = f"{name}/{container}" if container else name
+        options = recommend_debug_images(
+            manifest,
+            container,
+            images_cfg=self.config.debug_images,
+            default_image=self.config.debug_default_image,
+        )
+        prompts = {f"{opt.image}  ({opt.label})": opt.image for opt in options}
+        custom_choice = "Custom image…"
+
+        def _on_image(choice: str | None) -> None:
+            if choice is None:
+                return
+            if choice == custom_choice:
+
+                def _on_custom(image: str | None) -> None:
+                    if image:
+                        self._confirm_debug(
+                            namespace, name, container, exit_code, approved_uid, image
+                        )
+
+                self.push_screen(ImagePrompt(target), _on_custom)
+                return
+            self._confirm_debug(
+                namespace, name, container, exit_code, approved_uid, prompts[choice]
+            )
+
+        # Choosing an image is read-only: even if input buffered before this
+        # asynchronous picker existed selects an entry, the pod mutation is
+        # still gated by the ConfirmScreen pushed in _confirm_debug, whose
+        # creation-time key cutoff discards such buffered keystrokes.
+        # Air-gapped configs without a matching mapping produce no options:
+        # the picker then offers only the custom-image prompt.
+        title = f"Shell failed in {target} (exit {exit_code}) - choose a debug image."
+        if options:
+            title += f"\nRecommended: {options[0].image} - {options[0].reason}"
+        self.push_screen(
+            PickScreen(title, [*prompts, custom_choice]),
+            _on_image,
+        )
+
+    async def _debug_manifest(self, namespace: str, name: str) -> dict[str, Any] | None:
+        """Pod manifest at debug-offer time (uid binding + runtime detection).
+
+        Same semantics as `_target_uid`: raises `ApiStatusError(404)` when the
+        pod is gone; fails open (`None`) when no manifest source is wired or
+        the lookup fails or times out - the debug stays approval-gated and
+        audited, just without a uid precondition or a runtime recommendation.
+        """
+        if self._get_manifest is None:
+            return None
+        try:
+            return await asyncio.wait_for(
+                self._get_manifest("pods", namespace, name), _UID_LOOKUP_TIMEOUT
+            )
+        except ApiStatusError as exc:
+            if exc.status == 404:
+                raise
+            logger.warning(
+                "manifest lookup for %s/%s failed; offering debug without it", namespace, name
+            )
+            return None
+        except TimeoutError:
+            logger.warning(
+                "manifest lookup for %s/%s timed out; offering debug without it", namespace, name
+            )
+            return None
+        except Exception:
+            # Fail open like _target_uid: an infrastructure error must not
+            # escape the worker and silently swallow the debug offer.
+            logger.exception(
+                "manifest lookup for %s/%s failed; offering debug without it", namespace, name
+            )
+            return None
+
+    def _confirm_debug(
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        exit_code: int,
+        approved_uid: str | None,
+        image: str,
+    ) -> None:
+        """Approval gate for the debug fallback with the chosen image.
+
+        ConfirmScreen, not a generic picker: its creation-time key cutoff
+        discards any input buffered before the prompt existed - a queued
+        Enter or y must never start a pod mutation the user has not seen.
+        """
+        target = f"{name}/{container}" if container else name
 
         def _on_choice(confirmed: bool | None) -> None:
             if confirmed:
-                self.run_worker(self._run_debug(namespace, name, container, approved_uid))
+                self.run_worker(self._run_debug(namespace, name, container, approved_uid, image))
 
-        # ConfirmScreen, not a generic picker: this offer appears
-        # asynchronously (after the probe/RBAC round trip), and its
-        # creation-time key cutoff discards any input buffered before the
-        # prompt existed - a queued Enter or Down+Enter must never start a
-        # pod mutation the user has not seen.
         self.push_screen(
             ConfirmScreen(
                 f"Shell failed in {target} (exit {exit_code})",
-                f"kubectl debug: attach a {DEBUG_IMAGE} debug container to pod"
-                f" {name}{self._write_locus(namespace)} - the image likely has no"
-                " sh/bash (distroless). Note: the ephemeral container stays in the"
-                " pod spec until restart.",
+                f"kubectl debug: attach a {image} debug container to pod"
+                f" {name}{self._write_locus(namespace)} - the target image likely"
+                " has no sh/bash (distroless). Note: the ephemeral container stays"
+                " in the pod spec until restart.",
             ),
             _on_choice,
         )
 
     async def _run_debug(
-        self, namespace: str, name: str, container: str | None, approved_uid: str | None
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        approved_uid: str | None,
+        image: str = DEBUG_IMAGE,
     ) -> None:
         """Attach an ephemeral busybox container via kubectl debug. This is a
         pod mutation: blocked in readonly sessions and audited fail-closed
@@ -1487,46 +1653,237 @@ class KorvidApp(App[None]):
         if audit is None:
             self.notify("Writes disabled: no audit log configured", severity="warning")
             return
-        if approved_uid is not None:
-            try:
-                current_uid = await self._target_uid("pods", namespace, name)
-            except ApiStatusError:
-                self.notify(
-                    f"kubectl debug cancelled - pod {name} no longer exists.",
-                    severity="warning",
-                )
-                return
-            if current_uid is not None and current_uid != approved_uid:
-                self.notify(
-                    f"kubectl debug cancelled - pod {name} was replaced since"
-                    " the prompt was shown.",
-                    severity="warning",
-                )
-                return
-        detail = "ephemeral debug container (kubectl debug)"
+        if approved_uid is not None and not await self._debug_uid_unchanged(
+            namespace, name, approved_uid
+        ):
+            return
+        detail = f"ephemeral debug container (kubectl debug, image {image})"
         try:
             await asyncio.to_thread(self._audit_debug, audit, namespace, name, detail, "intent")
         except Exception:
             logger.exception("audit append failed; blocking kubectl debug")
             self.notify("Write blocked: audit log unavailable", severity="error")
             return
-        argv = build_debug_argv(namespace, name, container, context=self.config.kube_context)
+        argv = build_debug_argv(
+            namespace, name, container, context=self.config.kube_context, image=image
+        )
         target = f"{name}/{container}" if container else name
         with self.suspend():
-            exit_code = self._run_interactive(argv, f"korvid debug → {target} (exit to return)")
+            exit_code, pull_failure = self._run_debug_process(
+                argv,
+                f"korvid debug → {target} (exit to return)",
+                namespace,
+                name,
+                image,
+                approved_uid,
+            )
         self.refresh()
-        outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
-        try:
-            await asyncio.to_thread(self._audit_debug, audit, namespace, name, detail, outcome)
-        except Exception:
-            logger.exception("audit append failed after kubectl debug")
-            self.notify("Audit write failed for the executed debug", severity="warning")
+        if exit_code is None:
+            # The baseline snapshot saw a different pod incarnation: the
+            # attach never started.
+            await self._audit_debug_outcome(
+                audit, namespace, name, detail, "error: pod replaced before attach"
+            )
+            self.notify(
+                f"kubectl debug cancelled - pod {name} was replaced since the prompt was shown.",
+                severity="warning",
+            )
+            return
+        if pull_failure is not None:
+            outcome = f"error: image pull failed ({pull_failure})"
+        else:
+            outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
+        await self._audit_debug_outcome(audit, namespace, name, detail, outcome)
+        if pull_failure is not None:
+            self._offer_pull_retry(namespace, name, container, approved_uid, image, pull_failure)
+            return
         if exit_code != 0:
             self.notify(
                 f"kubectl debug exited with status {exit_code}"
                 " — check RBAC (pods/ephemeralcontainers) and cluster version",
                 severity="warning",
             )
+
+    async def _audit_debug_outcome(
+        self, audit: AuditLog, namespace: str, name: str, detail: str, outcome: str
+    ) -> None:
+        """Record how a kubectl debug run ended. Best-effort: the mutation
+        already happened (or was aborted), so a failed append only warns."""
+        try:
+            await asyncio.to_thread(self._audit_debug, audit, namespace, name, detail, outcome)
+        except Exception:
+            logger.exception("audit append failed after kubectl debug")
+            self.notify("Audit write failed for the executed debug", severity="warning")
+
+    _PULL_CHECK_INTERVAL = 2.5
+    _PULL_CHECK_DEADLINE = 30.0
+
+    async def _debug_uid_unchanged(self, namespace: str, name: str, approved_uid: str) -> bool:
+        """Re-verify the approved pod incarnation just before kubectl debug
+        executes; notifies and returns False when the pod is gone or replaced."""
+        try:
+            current_uid = await self._target_uid("pods", namespace, name)
+        except ApiStatusError:
+            self.notify(
+                f"kubectl debug cancelled - pod {name} no longer exists.",
+                severity="warning",
+            )
+            return False
+        if current_uid is not None and current_uid != approved_uid:
+            self.notify(
+                f"kubectl debug cancelled - pod {name} was replaced since the prompt was shown.",
+                severity="warning",
+            )
+            return False
+        return True
+
+    def _run_debug_process(
+        self,
+        argv: list[str],
+        banner: str,
+        namespace: str,
+        name: str,
+        image: str,
+        approved_uid: str | None,
+    ) -> tuple[int | None, str | None]:
+        """Run kubectl debug while watching for image pull failures.
+
+        kubectl debug hangs silently on `ErrImagePull`/`ImagePullBackOff`; for
+        the first `_PULL_CHECK_DEADLINE` seconds the pod's
+        `ephemeralContainerStatuses` are polled and a failing pull kills the
+        attach so the caller can offer a retry with the fallback image instead
+        of leaving the user staring at a hung terminal. Returns
+        `(exit_code, pull_failure_reason)`; an exit code of `None` means the
+        attach was aborted because the baseline snapshot saw a different pod
+        incarnation than the one approved.
+        """
+        print(f"\x1b[2J\x1b[H\x1b[2m{banner}\x1b[0m", flush=True)
+        # Snapshot ephemeral containers already on the pod: failed entries
+        # from earlier attempts can never be removed from the spec, and one
+        # using the same image must not be blamed on this new attach. Without
+        # a reliable baseline (snapshot failed) pull monitoring is disabled
+        # for this attempt - a plain wait, exactly as before this feature.
+        baseline = self._pod_status(namespace, name)
+        if baseline is not None and approved_uid is not None:
+            # The snapshot can block for seconds; don't let it widen the UID
+            # TOCTOU window - re-verify the incarnation it actually saw.
+            baseline_uid = (baseline.get("metadata") or {}).get("uid")
+            if baseline_uid is not None and baseline_uid != approved_uid:
+                return None, None
+        proc = subprocess.Popen(argv)
+        if baseline is None:
+            return proc.wait(), None
+        pre_existing = ephemeral_container_names(baseline)
+        deadline = monotonic() + self._PULL_CHECK_DEADLINE
+        while True:
+            try:
+                exit_code = proc.wait(timeout=self._PULL_CHECK_INTERVAL)
+            except subprocess.TimeoutExpired:
+                pass
+            else:
+                return self._debug_exit_result(exit_code, namespace, name, image, pre_existing)
+            # Check for a failure after EVERY timed wait - including the one
+            # during which the deadline elapsed - so a pull failure appearing
+            # at the edge of the window is still caught.
+            failure = self._check_pull_failure(namespace, name, image, ignore=pre_existing)
+            if failure is not None:
+                proc.kill()
+                proc.wait()
+                return 1, failure
+            if monotonic() > deadline:
+                # Pulls that survive the window are treated as slow-but-alive:
+                # stop polling and wait for the interactive session to end.
+                return self._debug_exit_result(proc.wait(), namespace, name, image, pre_existing)
+
+    def _debug_exit_result(
+        self, exit_code: int, namespace: str, name: str, image: str, ignore: frozenset[str]
+    ) -> tuple[int, str | None]:
+        """Final result for a finished kubectl debug process.
+
+        kubectl can give up and exit nonzero on its own when the pull fails:
+        a nonzero exit triggers one last pull-failure check so the fallback
+        retry is offered instead of a generic exit warning.
+        """
+        if exit_code != 0:
+            failure = self._check_pull_failure(namespace, name, image, ignore=ignore)
+            if failure is not None:
+                return exit_code, failure
+        return exit_code, None
+
+    def _pod_status(self, namespace: str, name: str) -> dict[str, Any] | None:
+        """Pod manifest via kubectl shell-out, best-effort (None on any error).
+
+        Used while the TUI is suspended - the async client sits behind the
+        paused event loop, so the manifest is fetched with a subprocess.
+        """
+        argv = build_pod_get_argv(namespace, name, context=self.config.kube_context)
+        try:
+            result = subprocess.run(argv, capture_output=True, timeout=5)
+            if result.returncode != 0:
+                return None
+            manifest: dict[str, Any] = json.loads(result.stdout)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            return None
+        return manifest
+
+    def _check_pull_failure(
+        self, namespace: str, name: str, image: str, *, ignore: frozenset[str] = frozenset()
+    ) -> str | None:
+        """Pull-failure reason for `image`'s ephemeral container, best-effort.
+
+        Runs while the TUI is suspended, so it shells out to kubectl; any
+        infrastructure error means "no failure detected" and the attach keeps
+        running. Containers named in `ignore` (pre-existing before the attach)
+        are never blamed.
+        """
+        manifest = self._pod_status(namespace, name)
+        if manifest is None:
+            return None
+        return find_pull_failure(manifest, image, ignore=ignore)
+
+    def _offer_pull_retry(
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        approved_uid: str | None,
+        image: str,
+        reason: str,
+    ) -> None:
+        """Offer an immediate retry with the fallback image after a pull failure.
+
+        Air-gapped guard: when `debug.images` is configured without a
+        `debug.default_image`, no public busybox is offered - notify only.
+        """
+        if self.config.debug_images is not None and not self.config.debug_default_image:
+            fallback = None
+        else:
+            fallback = self.config.debug_default_image or FALLBACK_IMAGE
+        target = f"{name}/{container}" if container else name
+        # Equivalent references (untagged vs :latest) would retry the very
+        # image that just failed - and each retry permanently adds another
+        # ephemeral container entry to the pod spec.
+        if fallback is None or same_image_ref(fallback, image) or len(self.screen_stack) > 1:
+            self.notify(
+                f"kubectl debug: image pull failed for {image} ({reason})",
+                severity="error",
+            )
+            return
+
+        def _on_choice(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(self._run_debug(namespace, name, container, approved_uid, fallback))
+
+        self.push_screen(
+            ConfirmScreen(
+                f"Image pull failed for {image} ({reason})",
+                f"Retry kubectl debug on {target}{self._write_locus(namespace)} with"
+                f" {fallback}? Note: the failed ephemeral container entry cannot be"
+                " removed from the pod spec; the retry attaches an additional"
+                " container.",
+            ),
+            _on_choice,
+        )
 
     @staticmethod
     def _audit_debug(audit: AuditLog, namespace: str, name: str, detail: str, outcome: str) -> None:
@@ -2972,6 +3329,7 @@ class KorvidApp(App[None]):
             label,
             breadcrumb=self._drill.breadcrumb(),
             mcp_label=mcp_label,
+            filter_label=self._resource_filter.describe(),
         )
 
     # ------------------------------------------------------------------
@@ -3050,7 +3408,7 @@ class KorvidApp(App[None]):
             log_pane.search_next()
 
     def action_log_search_prev(self) -> None:
-        """Go back to the previous search hit (``N`` / shift+n key)."""
+        """Previous search hit in an open pane; sort by name otherwise (``N``)."""
         describe_pane = self.query_one(DescribePane)
         if describe_pane.display:
             describe_pane.search_prev()
@@ -3058,6 +3416,32 @@ class KorvidApp(App[None]):
         log_pane = self.query_one(LogPane)
         if log_pane.display:
             log_pane.search_prev()
+            return
+        self._toggle_sort("name")
+
+    # ------------------------------------------------------------------
+    # Column sorting (issue #37) — data-model sort keys, per-kind state.
+    # ------------------------------------------------------------------
+
+    def _toggle_sort(self, column: str) -> None:
+        """Apply/flip a sort column for the current view kind and re-render."""
+        kind = self.current_kind
+        if column in ("cpu", "mem") and kind != "pods":
+            # Only the pods view has CPU/MEM columns and a metrics feed;
+            # elsewhere the keypress would silently discard the current
+            # order while showing no indicator, so ignore it.
+            return
+        self._sorts[kind] = toggle_sort(self._sorts.get(kind), column)
+        self._render_table(kind)
+
+    def action_sort_by_age(self) -> None:
+        self._toggle_sort("age")
+
+    def action_sort_by_cpu(self) -> None:
+        self._toggle_sort("cpu")
+
+    def action_sort_by_mem(self) -> None:
+        self._toggle_sort("mem")
 
     # ------------------------------------------------------------------
     # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,
@@ -3162,11 +3546,9 @@ class KorvidApp(App[None]):
         except Exception as exc:
             return f"ERROR: {exc}"
         rows = self.store.get(self.current_kind, self.current_scope)
-        # Report what the user actually sees: apply the same case-insensitive
-        # name filter as ResourceTable.show before counting.
-        if self.filter_pattern:
-            pat = self.filter_pattern.lower()
-            rows = [r for r in rows if pat in r.name.lower()]
+        # Report what the user actually sees: apply the same filter as the
+        # table render (substring/label/regex/… — issue #44) before counting.
+        rows = self._filtered_rows(rows)
         self._mark_agent_action(f"view → {self.current_kind} ({self.current_scope})")
         suffix = " (list may still be loading)" if not rows else ""
         filter_note = f" (filter {self.filter_pattern!r} applied)" if self.filter_pattern else ""
@@ -3299,12 +3681,9 @@ class KorvidApp(App[None]):
         drill_uid = self._drill.parent_uid
         if drill_uid is not None and self.current_kind == self._drill.child_kind:
             rows = [r for r in rows if owned_by(r, drill_uid)]
-        if self.filter_pattern:
-            # drill_down acts on the visible table: apply the same
-            # case-insensitive name filter as ResourceTable.show so the agent
-            # cannot drill into a row the filter is hiding.
-            pat = self.filter_pattern.lower()
-            rows = [r for r in rows if pat in r.name.lower()]
+        # drill_down acts on the visible table: apply the same filter as the
+        # table render so the agent cannot drill into a hidden row.
+        rows = self._filtered_rows(rows)
         matches = [r for r in rows if r.name == name]
         if not matches:
             return f"ERROR: no {canonical} named {name!r} in the current view"
@@ -3728,7 +4107,8 @@ class KorvidApp(App[None]):
             message = f"No {kind} matching '{self.filter_pattern}' — Esc to clear the filter"
         else:
             message = f"No {kind} in namespace '{self.current_scope}' — :ns <name> to switch"
-        empty.update(message)
+        # Text keeps user-entered filter text literal (never Rich markup).
+        empty.update(Text(message))
         empty.display = True
 
     async def on_unmount(self) -> None:

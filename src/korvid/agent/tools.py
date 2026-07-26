@@ -247,9 +247,13 @@ UI_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "set_filter",
             "description": (
-                "Apply a case-insensitive substring filter to the visible resource "
-                "table so the user sees only rows whose name contains the pattern. "
-                "Not a regex. Pass an empty pattern to clear."
+                "Apply a filter expression to the visible resource table. "
+                "Space-separated tokens are AND-combined: plain text is a "
+                "case-insensitive substring on the resource name; '~pat' is a "
+                "fuzzy subsequence match; '/pat/' or 're:pat' is a regex; "
+                "'!' before any name token negates it; '-l key=value[,k2=v2]' "
+                "is a label selector (a bare key tests existence); '-s' hides "
+                "Succeeded/Completed pods. Pass an empty pattern to clear."
             ),
             "parameters": {
                 "type": "object",
@@ -257,8 +261,8 @@ UI_TOOLS: list[dict[str, Any]] = [
                     "pattern": {
                         "type": "string",
                         "description": (
-                            "Case-insensitive substring to match against resource "
-                            "names; '' clears the filter."
+                            "Filter expression (grammar in the tool "
+                            "description); '' clears the filter."
                         ),
                     },
                 },

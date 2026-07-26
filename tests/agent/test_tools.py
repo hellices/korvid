@@ -382,6 +382,13 @@ def test_ui_tools_all_have_type_function() -> None:
         assert "parameters" in tool["function"]
 
 
+def test_set_filter_schema_documents_filter_grammar() -> None:
+    tool = next(t for t in UI_TOOLS if t["function"]["name"] == "set_filter")
+    desc = tool["function"]["description"]
+    for token in ("substring", "~", "regex", "!", "-l", "-s"):
+        assert token in desc
+
+
 async def test_navigate_dispatches_to_bridge() -> None:
     bridge = FakeBridge()
     out = await make_ui_executor(bridge).execute(

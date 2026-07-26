@@ -72,11 +72,14 @@ def build_debug_argv(
     pod: str,
     container: str | None = None,
     context: str | None = None,
+    image: str = DEBUG_IMAGE,
 ) -> list[str]:
-    """Return argv for `kubectl debug` attaching an ephemeral busybox container.
+    """Return argv for `kubectl debug` attaching an ephemeral debug container.
 
     This is the escape hatch for distroless images that ship no sh/bash.
     ``--target`` shares the target container's process namespace when given.
+    ``image`` defaults to busybox; the runtime-aware recommendation
+    (issue #52) passes a toolkit image instead.
     """
     return [
         "kubectl",
@@ -86,8 +89,27 @@ def build_debug_argv(
         "-n",
         namespace,
         pod,
-        f"--image={DEBUG_IMAGE}",
+        f"--image={image}",
         *([f"--target={container}"] if container else []),
         "--",
         "sh",
+    ]
+
+
+def build_pod_get_argv(namespace: str, pod: str, context: str | None = None) -> list[str]:
+    """Return argv fetching a pod's JSON, used to poll ephemeralContainerStatuses.
+
+    The pull-failure watch (issue #52) runs while kubectl debug is attached and
+    the TUI is suspended, so it shells out instead of using the async client.
+    """
+    return [
+        "kubectl",
+        "get",
+        "pod",
+        *_context_args(context),
+        "-n",
+        namespace,
+        pod,
+        "-o",
+        "json",
     ]

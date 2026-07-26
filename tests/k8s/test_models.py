@@ -1152,3 +1152,82 @@ def test_packagemanifest_summary_description_caps_and_falls_back() -> None:
     assert "line two" not in summary.description
     assert len(summary.description) <= 80
     assert summary.description.endswith("\u2026")
+
+
+def test_pod_summary_carries_creation_timestamp() -> None:
+    """Feeds age sorting (issue #37): timestamps compare, not '3h' strings."""
+    manifest = {
+        "metadata": {
+            "name": "web-1",
+            "namespace": "default",
+            "creationTimestamp": "2026-07-26T09:00:00Z",
+        },
+        "spec": {},
+        "status": {},
+    }
+    pod = PodSummary.from_manifest(manifest)
+    assert pod.created == "2026-07-26T09:00:00Z"
+
+
+def test_pod_summary_created_defaults_to_empty() -> None:
+    pod = PodSummary.from_manifest({"metadata": {"name": "x"}, "spec": {}, "status": {}})
+    assert pod.created == ""
+
+
+def test_pod_summary_age_renders_like_generic() -> None:
+    """Feeds the pods AGE column (issue #37 sort indicator visibility)."""
+    pod = PodSummary.from_manifest(
+        {
+            "metadata": {"name": "x", "creationTimestamp": "2024-06-01T10:00:00Z"},
+            "spec": {},
+            "status": {},
+        }
+    )
+    now = datetime(2024, 6, 1, 13, 0, 0, tzinfo=UTC)
+    assert pod.age(now=now) == "3h"
+
+
+def test_pod_summary_age_dash_when_created_missing() -> None:
+    pod = PodSummary.from_manifest({"metadata": {"name": "x"}, "spec": {}, "status": {}})
+    assert pod.age() == "-"
+
+
+def test_pod_summary_carries_labels() -> None:
+    """Labels feed the client-side `-l` filter (issue #44)."""
+    manifest = {
+        "metadata": {
+            "name": "web-1",
+            "namespace": "default",
+            "labels": {"app": "web", "tier": "front"},
+        },
+        "spec": {},
+        "status": {},
+    }
+    pod = PodSummary.from_manifest(manifest)
+    assert dict(pod.labels) == {"app": "web", "tier": "front"}
+
+
+def test_generic_summary_carries_labels() -> None:
+    manifest = {
+        "metadata": {"name": "web", "namespace": "default", "labels": {"app": "web"}},
+        "spec": {},
+    }
+    gs = GenericSummary.from_manifest("Deployment", manifest)
+    assert dict(gs.labels) == {"app": "web"}
+
+
+def test_replicaset_summary_carries_labels() -> None:
+    manifest = {
+        "metadata": {"name": "web-abc", "namespace": "default", "labels": {"app": "web"}},
+        "spec": {"replicas": 1},
+        "status": {},
+    }
+    rs = ReplicaSetSummary.from_manifest("ReplicaSet", manifest)
+    assert dict(rs.labels) == {"app": "web"}
+
+
+def test_summaries_default_to_no_labels() -> None:
+    gs = GenericSummary.from_manifest("ConfigMap", {"metadata": {"name": "cm"}})
+    pod = PodSummary.from_manifest({"metadata": {"name": "p"}, "spec": {}, "status": {}})
+    assert gs.labels == ()
+    assert pod.labels == ()

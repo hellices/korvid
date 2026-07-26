@@ -1,0 +1,286 @@
+"""Runtime-aware debug image recommendation for kubectl debug (issue #52).
+
+Pure heuristics over the pod manifest — no network calls, no probing inside
+the target container.  Detection is best-effort: an opaque image name (private
+registry digest) falls back to container ports and well-known env vars, and an
+unknown runtime simply yields the generic fallback image.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any
+
+#: Generic fallback when nothing is configured and no runtime is detected.
+FALLBACK_IMAGE = "busybox:1.36"
+
+#: De-facto standard network debugging toolkit.
+NETSHOOT_IMAGE = "nicolaka/netshoot"
+
+#: Curated per-runtime toolkit images (KoolKits).
+KOOLKITS_IMAGES = {
+    "jvm": "lightruncom/koolkits:jvm",
+    "python": "lightruncom/koolkits:python",
+    "nodejs": "lightruncom/koolkits:node",
+    "golang": "lightruncom/koolkits:golang",
+}
+
+#: What each toolkit brings, for the recommendation reason line.
+_RUNTIME_TOOLS = {
+    "jvm": "async-profiler, JDK tools (jcmd/jstack/jmap)",
+    "python": "pyflame-style profilers, pdb tooling, pip",
+    "nodejs": "node inspector tooling, npm",
+    "golang": "delve, go tool pprof",
+}
+
+# Image-name patterns per runtime; matched against the whole image reference
+# with word-ish boundaries so `gonzo` never matches golang's `go`.
+_IMAGE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "jvm",
+        re.compile(
+            r"(?:^|[/:._-])(temurin|openjdk|(?:amazon)?corretto|zulu|jre|jdk|java)(?:$|[/:._@-])"
+        ),
+    ),
+    ("python", re.compile(r"(?:^|[/:._-])(python|pypy)(?:$|[/:._@-])")),
+    ("nodejs", re.compile(r"(?:^|[/:._-])(node|nodejs)(?:$|[/:._@-])")),
+    ("golang", re.compile(r"(?:^|[/:._-])(golang|go)(?:$|[/:._@-])")),
+)
+
+#: Well-known debug/inspector ports.
+_PORT_SIGNALS = {
+    5005: ("jvm", "container port 5005 (JDWP)"),
+    9229: ("nodejs", "container port 9229 (Node inspector)"),
+}
+
+#: Well-known runtime env vars.
+_ENV_SIGNALS = {
+    "JAVA_TOOL_OPTIONS": "jvm",
+    "JAVA_OPTS": "jvm",
+    "PYTHONPATH": "python",
+    "NODE_OPTIONS": "nodejs",
+    "GODEBUG": "golang",
+}
+
+#: Waiting reasons that mean the ephemeral container image cannot be pulled.
+_PULL_FAILURE_REASONS = frozenset({"ErrImagePull", "ImagePullBackOff"})
+
+
+@dataclass(frozen=True)
+class DebugImageOption:
+    """One selectable debug image with a human-readable label and reason."""
+
+    image: str
+    label: str
+    reason: str
+
+
+def _strip_registry(image: str) -> str:
+    """Drop a syntactic registry component (dot, port, or `localhost` in the
+    first path segment), keeping the repository path, tag, and digest."""
+    head, _, rest = image.partition("/")
+    if rest and ("." in head or ":" in head or head == "localhost"):
+        return rest
+    return image
+
+
+def _find_container(manifest: dict[str, Any], container: str | None) -> dict[str, Any] | None:
+    spec = manifest.get("spec") or {}
+    containers: list[dict[str, Any]] = spec.get("containers") or []
+    if not containers:
+        return None
+    if container is None:
+        return containers[0]
+    for entry in containers:
+        if entry.get("name") == container:
+            return entry
+    return None
+
+
+def detect_runtime(manifest: dict[str, Any], container: str | None) -> tuple[str, str] | None:
+    """Best-effort runtime detection for the target container.
+
+    Returns `(runtime, reason)` — e.g. `("jvm", "image name 'openjdk:17'")` —
+    or `None` when nothing matches.  Signals in priority order: image name,
+    then well-known ports, then env vars.  Never probes the cluster.
+    """
+    entry = _find_container(manifest, container)
+    if entry is None:
+        return None
+
+    image = str(entry.get("image") or "")
+    for runtime, pattern in _IMAGE_PATTERNS:
+        # Match against the repository path only: a registry hostname like
+        # `python.registry.local` must never be taken as a runtime signal.
+        if pattern.search(_strip_registry(image)):
+            return (runtime, f"image name {image!r}")
+
+    for port_entry in entry.get("ports") or []:
+        port = port_entry.get("containerPort")
+        if port in _PORT_SIGNALS:
+            runtime, reason = _PORT_SIGNALS[port]
+            return (runtime, reason)
+
+    for env_entry in entry.get("env") or []:
+        runtime_match = _ENV_SIGNALS.get(str(env_entry.get("name") or ""))
+        if runtime_match:
+            return (runtime_match, f"env var {env_entry.get('name')}")
+
+    return None
+
+
+def recommend_debug_images(
+    manifest: dict[str, Any],
+    container: str | None,
+    *,
+    images_cfg: dict[str, str] | None = None,
+    default_image: str | None = None,
+) -> list[DebugImageOption]:
+    """Ordered debug-image options for the kubectl debug offer dialog.
+
+    Zero config: a detected runtime leads with its KoolKits toolkit, then
+    netshoot for network debugging, then the busybox fallback.  When
+    `images_cfg` is set (air-gapped / private registry), only configured
+    images are offered — public registry access is never assumed, so without
+    a configured `default_image` there is no generic fallback entry and the
+    list may be empty (the UI then offers only the custom-image prompt).
+    """
+    fallback = default_image or FALLBACK_IMAGE
+    if default_image:
+        fallback_label, fallback_reason = "default (configured)", "configured fallback image"
+    else:
+        fallback_label, fallback_reason = "minimal (busybox)", "lowest-common-denominator shell"
+    detected = detect_runtime(manifest, container)
+
+    options: list[DebugImageOption] = []
+
+    def _add(image: str, label: str, reason: str) -> None:
+        if any(same_image_ref(existing.image, image) for existing in options):
+            return
+        options.append(DebugImageOption(image=image, label=label, reason=reason))
+
+    if images_cfg is not None:
+        if detected is not None:
+            runtime, signal = detected
+            configured = images_cfg.get(runtime)
+            if configured:
+                _add(
+                    configured, f"{runtime} toolkit (configured)", f"detected {runtime} — {signal}"
+                )
+        if default_image:
+            _add(default_image, "default (configured)", "configured fallback image")
+        return options
+
+    if detected is not None:
+        runtime, signal = detected
+        _add(
+            KOOLKITS_IMAGES[runtime],
+            f"{runtime} toolkit (koolkits)",
+            f"detected {runtime} runtime ({signal}) — includes {_RUNTIME_TOOLS[runtime]}",
+        )
+        _add(NETSHOOT_IMAGE, "network toolkit (netshoot)", "network debugging tools")
+        _add(fallback, fallback_label, fallback_reason)
+        return options
+
+    _add(fallback, fallback_label, f"no runtime detected — {fallback_reason}")
+    _add(NETSHOOT_IMAGE, "network toolkit (netshoot)", "network debugging tools")
+    return options
+
+
+def ephemeral_container_names(manifest: dict[str, Any]) -> frozenset[str]:
+    """Names of ephemeral containers already present on the pod.
+
+    Union of `spec.ephemeralContainers` and `status.ephemeralContainerStatuses`:
+    an entry can exist in the spec before its status appears, and its stale
+    failure status arriving mid-attach must not be blamed on the new attempt.
+    Snapshot these before a `kubectl debug` attach so `find_pull_failure`
+    can ignore stale entries from earlier attempts (which can never be
+    removed from the pod spec) even when they used the same image.
+    """
+    spec = manifest.get("spec") or {}
+    status = manifest.get("status") or {}
+    entries = list(spec.get("ephemeralContainers") or []) + list(
+        status.get("ephemeralContainerStatuses") or []
+    )
+    return frozenset(str(entry.get("name") or "") for entry in entries)
+
+
+def _normalize_image_ref(image: str) -> str:
+    """Canonical form of an image reference for equality comparison.
+
+    Mirrors how Kubernetes resolves references before pulling: an untagged,
+    digest-less reference gets an implicit `:latest`; Docker Hub aliases
+    (`busybox` == `library/busybox` == `docker.io/library/busybox` ==
+    `index.docker.io/library/busybox`) collapse to one canonical name; when a
+    digest is present it pins the image and any accompanying tag is ignored.
+    Registry ports (`registry:5000/app`) are not tags: only a colon in the
+    last path segment counts.
+    """
+    digest: str | None = None
+    if "@" in image:
+        image, digest = image.split("@", 1)
+    tag: str | None = None
+    last_segment = image.rsplit("/", 1)[-1]
+    if ":" in last_segment:
+        tag = last_segment.rsplit(":", 1)[-1]
+        image = image[: len(image) - len(tag) - 1]
+    head, _, rest = image.partition("/")
+    if rest and ("." in head or ":" in head or head == "localhost"):
+        registry, path = head, rest
+    else:
+        registry, path = "docker.io", image
+    if registry in ("docker.io", "index.docker.io", "registry-1.docker.io"):
+        registry = "docker.io"
+        if "/" not in path:
+            path = f"library/{path}"
+    if digest is not None:
+        return f"{registry}/{path}@{digest}"
+    return f"{registry}/{path}:{tag or 'latest'}"
+
+
+def same_image_ref(a: str, b: str) -> bool:
+    """Whether two image references name the same Kubernetes image.
+
+    Compares canonical forms, so `registry/app` equals `registry/app:latest`,
+    `busybox` equals `docker.io/library/busybox`, and digest-pinned references
+    are equal regardless of an accompanying tag.
+    """
+    return _normalize_image_ref(a) == _normalize_image_ref(b)
+
+
+def find_pull_failure(
+    manifest: dict[str, Any], image: str, *, ignore: frozenset[str] = frozenset()
+) -> str | None:
+    """Return the pull-failure reason for `image`'s ephemeral container, if any.
+
+    Scans `status.ephemeralContainerStatuses` for a waiting state with
+    `ErrImagePull`/`ImagePullBackOff` on a container running `image`. Each
+    status entry is correlated by name with its `spec.ephemeralContainers`
+    declaration and the declared image is compared (after `:latest`
+    normalization) - container runtimes may canonicalize the status image
+    (`docker.io/library/` prefix, digests) while the spec preserves the
+    requested spelling. Entries named in `ignore` (pre-existing containers
+    snapshotted before the attach) are skipped, so a stale failure from an
+    earlier attempt with the same image never kills a new attach that is
+    pulling fine.
+    """
+    wanted = _normalize_image_ref(image)
+    spec = manifest.get("spec") or {}
+    declared_images = {
+        str(entry.get("name") or ""): str(entry.get("image") or "")
+        for entry in spec.get("ephemeralContainers") or []
+    }
+    status = manifest.get("status") or {}
+    for entry in status.get("ephemeralContainerStatuses") or []:
+        name = str(entry.get("name") or "")
+        if name in ignore:
+            continue
+        declared = declared_images.get(name) or str(entry.get("image") or "")
+        if _normalize_image_ref(declared) != wanted:
+            continue
+        waiting = (entry.get("state") or {}).get("waiting") or {}
+        reason = waiting.get("reason")
+        if reason in _PULL_FAILURE_REASONS:
+            return str(reason)
+    return None

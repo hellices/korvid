@@ -53,13 +53,19 @@ _ACTION_GROUPS: dict[str, tuple[str, ...]] = {
     "scale_resource": ("Table",),
     "edit_resource": ("Table",),
     "hint_details": ("Table",),
+    # Column sorting (issue #37); shift+n doubles as sort-by-name via
+    # log_search_prev's no-pane fallback.
+    "sort_by_age": ("Table",),
+    "sort_by_cpu": ("Table",),
+    "sort_by_mem": ("Table",),
     "log_format": ("Logs",),
     "log_wrap": ("Logs",),
     "log_timestamps": ("Logs",),
     "log_save": ("Logs",),
     "log_previous": ("Logs",),
     "log_search_next": ("Logs",),
-    "log_search_prev": ("Logs",),
+    # N steps back through hits in a pane, sorts by name in the table.
+    "log_search_prev": ("Logs", "Table"),
     "toggle_agent": ("Agent",),
 }
 
