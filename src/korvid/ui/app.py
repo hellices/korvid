@@ -113,6 +113,9 @@ _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
 
 logger = logging.getLogger(__name__)
 
+#: How often the app polls the forward registry for died kubectl processes.
+_FORWARD_POLL_SECONDS = 2.0
+
 _MAX_MULTI_STREAM_PODS = 8
 # ``l`` accumulates side-by-side pod logs; beyond 4 pods each panel gets too
 # small to read — comparing >4 replicas is what ``L`` (multi-stream) is for.
@@ -436,6 +439,7 @@ class KorvidApp(App[None]):
         self._edit_text = edit_text
         self._metrics = metrics
         self._forwards = forwards
+        self._broken_forwards: set[int] = set()
         #: pods/resize subresource discovered on the connected cluster
         #: (1.35 GA); gates the R keybinding and the resize agent tool.
         self._pod_resize_supported = pod_resize_supported
@@ -533,6 +537,10 @@ class KorvidApp(App[None]):
         log_pane = self.query_one(LogPane)
         log_pane.wrap_lines = self.config.log_wrap
         log_pane.show_timestamps = self.config.log_timestamps
+        if self._forwards is not None:
+            # Liveness is the point of tracked forwards (issue #38): a toast
+            # must fire when one breaks even while :pf is closed.
+            self.set_interval(_FORWARD_POLL_SECONDS, self._poll_forwards)
         self._prefetch_namespaces()
 
         # Both callbacks fire from watch tasks on the same loop; post_message is
@@ -1450,6 +1458,25 @@ class KorvidApp(App[None]):
         self.push_screen(
             ForwardListScreen(self._forwards, on_stop=_on_stop, on_reattach=_on_reattach)
         )
+
+    def _poll_forwards(self) -> None:
+        """Flag newly broken forwards with a toast (once per breakage)."""
+        registry = self._forwards
+        if registry is None:  # pragma: no cover - interval only set when present
+            return
+        registry.refresh()
+        for record in registry.forwards():
+            if record.status == "broken" and record.id not in self._broken_forwards:
+                self._broken_forwards.add(record.id)
+                self.notify(
+                    f"Port-forward localhost:{record.spec.local_port} ->"
+                    f" {record.spec.namespace}/{record.spec.name} broken"
+                    " (target gone?) — :pf to re-attach",
+                    severity="warning",
+                )
+            elif record.status == "alive":
+                # Re-attached: arm the toast again for the next breakage.
+                self._broken_forwards.discard(record.id)
 
     @staticmethod
     def _run_interactive(argv: list[str], banner: str) -> int:

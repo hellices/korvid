@@ -30,6 +30,7 @@ from korvid.agent.tools import (
 )
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import DEFAULT_CONFIG_PATH, KorvidConfig, load_config, save_agent_config
+from korvid.core.portforward import ForwardRegistry
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.client import KubeClient, resolve_context_name
@@ -436,6 +437,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         mcp=mcp_controller,
         metrics=MetricsPoller(kube.list_pod_metrics),
         pod_resize_supported=pod_resize_supported,
+        forwards=ForwardRegistry(context=config.kube_context),
     )
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.

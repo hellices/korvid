@@ -366,3 +366,44 @@ def test_pf_in_command_help() -> None:
     from korvid.ui.command import command_help
 
     assert any(":pf" in cmd for cmd, _ in command_help())
+
+
+# ---------------------------------------------------------------------------
+# Background liveness + session teardown
+# ---------------------------------------------------------------------------
+
+
+async def test_broken_forward_notifies_without_pf_screen() -> None:
+    """A forward dying must surface a toast even when :pf is closed."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    app = make_app([_pod("api-1")], forwards=registry)
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    notices: list[str] = []
+    original = app.notify
+
+    def _capture(message: str, **kwargs: Any) -> Any:
+        notices.append(message)
+        return original(message, **kwargs)
+
+    async with app.run_test() as pilot:
+        app.notify = _capture  # type: ignore[method-assign]  # test spy
+        await pilot.pause(0.1)
+        procs[0].returncode = 1
+        await until(pilot, lambda: any("broken" in n for n in notices), timeout=6.0)
+        assert any("localhost:8080" in n for n in notices)
+
+
+async def test_forwards_torn_down_on_exit() -> None:
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    app = make_app([_pod("api-1")], forwards=registry)
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+    assert procs[0].terminated
+    assert registry.forwards() == []

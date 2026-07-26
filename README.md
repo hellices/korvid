@@ -27,6 +27,7 @@ in the dialog; `--readonly` disables them all.
 | `0` | global | Toggle all-namespaces view |
 | `d` | table | Describe selected resource (manifest + events) |
 | `s` | pods table | Shell into selected pod (`kubectl exec`; offers `kubectl debug` fallback for distroless images) |
+| `Shift-F` | pods / services table | Port-forward the selected target (local port prompt; prefilled from declared ports) |
 | `l` | pods table | Open / close log pane for selected pod |
 | `L` | pods table | Merge logs of all currently filtered pods (up to 8) |
 | `f` | log pane | Toggle JSON-formatted / raw display |
@@ -130,6 +131,22 @@ debug:
     jvm: registry.corp.local/tools/debug-jvm:latest
     python: registry.corp.local/tools/debug-python:latest
 ```
+
+## Port-forwarding
+
+`Shift-F` on a pod or service opens a port-forward dialog with the remote
+port prefilled from the target's declared ports (both fields stay editable —
+declaration is informational).  Forwards run as `kubectl port-forward`
+subprocesses bound to `127.0.0.1`, pinned to the kubeconfig context korvid
+connected with, and are tracked for the session: `:pf` lists them with live
+status, `Ctrl-D` stops the highlighted forward, and `r` re-attaches a broken
+one in place.
+
+Liveness is first-class: when a target pod dies the forward flips to
+`broken` — with a toast even while `:pf` is closed — instead of failing
+silently the way a hand-run `kubectl port-forward` does.  Every forward is
+torn down when korvid exits, and start/stop are audit-logged (no approval
+dialog: a forward reads from the cluster, it never mutates it).
 
 ## AI agent
 
