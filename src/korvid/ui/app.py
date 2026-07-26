@@ -1707,6 +1707,10 @@ class KorvidApp(App[None]):
         if meta is None:
             self.notify(f"Unknown resource kind {kind!r}", severity="warning")
             return None
+        if meta.synthetic:
+            # Helm browser rows etc. are read-only views over other objects.
+            self.notify(f"{meta.kind} is a read-only view", severity="warning")
+            return None
         ns, name = self._selected_ns_name()
         if name is None:
             return None
@@ -3171,12 +3175,10 @@ class KorvidApp(App[None]):
             # (agent_request_write pre-strips: keep this for direct callers.)
             return "ERROR: 'name' must be a non-empty resource name"
         namespace = namespace.strip() or None if namespace is not None else None
-        meta = self.aliases.get(kind.strip().lower())
-        if meta is None:
-            return f"ERROR: unknown kind {kind!r} - not a resource kind in this cluster"
-        if meta.namespaced and not namespace:
-            return f"ERROR: kind {kind!r} is namespaced - provide the 'namespace' argument"
-        ns = namespace if meta.namespaced else None
+        resolved = self._agent_write_meta(kind, namespace)
+        if isinstance(resolved, str):
+            return resolved
+        meta, ns = resolved
         if action == "delete":
             return self._agent_delete_op(meta, ns, name)
         if action == "scale":
@@ -3186,6 +3188,21 @@ class KorvidApp(App[None]):
         if action == "resize":
             return self._agent_resize_op(meta, ns, name, resources)
         return f"ERROR: unknown write action {action!r}"
+
+    def _agent_write_meta(
+        self, kind: str, namespace: str | None
+    ) -> tuple[ResourceMeta, str | None] | str:
+        """Resolve an agent write's kind to a writable (meta, ns), or an
+        'ERROR: ...' string: synthetic view kinds (helm browser) are
+        read-only presentations of other objects and can never be written."""
+        meta = self.aliases.get(kind.strip().lower())
+        if meta is None:
+            return f"ERROR: unknown kind {kind!r} - not a resource kind in this cluster"
+        if meta.synthetic:
+            return f"ERROR: kind {kind!r} is a read-only korvid view - it cannot be written"
+        if meta.namespaced and not namespace:
+            return f"ERROR: kind {kind!r} is namespaced - provide the 'namespace' argument"
+        return meta, namespace if meta.namespaced else None
 
     def _agent_delete_op(
         self, meta: ResourceMeta, ns: str | None, name: str

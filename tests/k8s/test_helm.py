@@ -100,6 +100,15 @@ class TestDecodeRelease:
         with pytest.raises(ValueError, match="payload"):
             decode_release(_secret(data={"release": bad}))
 
+    def test_corrupt_deflate_stream_raises_value_error(self) -> None:
+        """A valid gzip header with a broken DEFLATE body raises zlib.error,
+        which must be normalized to ValueError like every other decode
+        failure - otherwise one corrupt Secret kills the whole watch."""
+        gzip_header_plus_garbage = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03" + b"\xff" * 16
+        bad = base64.b64encode(base64.b64encode(gzip_header_plus_garbage)).decode()
+        with pytest.raises(ValueError, match="payload"):
+            decode_release(_secret(data={"release": bad}))
+
 
 class TestReleaseFromSecret:
     def test_release_fields_from_labels_and_payload(self) -> None:
@@ -127,6 +136,18 @@ class TestReleaseFromSecret:
         assert rel.revision == 2
         assert rel.chart == "-"
         assert rel.app_version == "-"
+
+    def test_malformed_nested_payload_falls_back_without_raising(self) -> None:
+        """A payload can be a JSON object while nested fields are the wrong
+        type (list chart, string info); the extraction must fall back, not
+        raise AttributeError and kill the watch."""
+        broken: dict[str, Any] = {"name": "web", "chart": ["bad"], "info": "oops"}
+        secret = _secret("web", 2, data={"release": _encode(broken)})
+        rel = release_from_secret(secret)
+        assert rel.chart == "-"
+        assert rel.app_version == "-"
+        rev = revision_from_secret(secret)
+        assert rev.description == ""
 
     def test_revision_summary_is_keyed_per_revision_and_owned_by_release(self) -> None:
         rev = revision_from_secret(_secret("web", 3))
@@ -173,6 +194,17 @@ class TestReleaseTracker:
         out = tracker.apply("DELETED", release_from_secret(_secret("web", 1)))
         assert [(ev, r.name) for ev, r in out] == [("DELETED", "web")]
 
+    def test_delete_of_unobserved_revision_is_ignored(self) -> None:
+        """A DELETE for a revision the tracker never saw (e.g. pruned before
+        our LIST) must not repaint the release - only tracked revisions can
+        change the surfaced row."""
+        tracker = ReleaseTracker()
+        tracker.apply("ADDED", release_from_secret(_secret("web", 1)))
+        assert tracker.apply("DELETED", release_from_secret(_secret("web", 2))) == []
+        # v1 is still tracked: deleting it ends the release.
+        out = tracker.apply("DELETED", release_from_secret(_secret("web", 1)))
+        assert [(ev, r.name) for ev, r in out] == [("DELETED", "web")]
+
     def test_releases_are_tracked_per_namespace(self) -> None:
         tracker = ReleaseTracker()
         a = release_from_secret(_secret("web", 1))
@@ -216,6 +248,45 @@ class TestWatchHelmReleases:
         path = request_json.await_args.args[0]
         assert "/api/v1/namespaces/default/secrets" in path
         assert "fieldSelector=type%3Dhelm.sh%2Frelease.v1" in path
+        assert "labelSelector=owner%3Dhelm" in path  # non-helm Secrets of this type stay out
+
+    async def test_watch_phase_gets_bare_path_with_selector_params(self) -> None:
+        """The watch adapter passes query params through call_api; a path that
+        already embeds ?fieldSelector=... would get a second '?' appended and
+        lose the selectors for live updates."""
+        client = KubeClient()
+        list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "3"}, "items": []}
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+            patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch([])),
+            patch.object(
+                client, "_make_raw_watch_callable", wraps=client._make_raw_watch_callable
+            ) as factory,
+        ):
+            _ = [r async for r in client.watch_helm_releases("default")]
+        assert factory.call_args is not None
+        path = factory.call_args.args[0]
+        assert "?" not in path
+        extra = dict(factory.call_args.kwargs["extra_query"])
+        assert extra["fieldSelector"] == "type=helm.sh/release.v1"
+        assert extra["labelSelector"] == "owner=helm"
+
+    async def test_watch_callable_forwards_extra_query_to_call_api(self) -> None:
+        client = KubeClient()
+        api = MagicMock()
+        api.call_api = AsyncMock()
+        with patch.object(client, "_api", api):
+            fn = client._make_raw_watch_callable(
+                "/api/v1/secrets", extra_query=(("fieldSelector", "type=x"),)
+            )
+            await fn(watch=True, _preload_content=False, resource_version="7")
+        assert api.call_api.await_args is not None
+        assert api.call_api.await_args.args[0] == "/api/v1/secrets"
+        params = api.call_api.await_args.kwargs["query_params"]
+        assert ("fieldSelector", "type=x") in params
+        assert ("watch", "true") in params
+        assert ("resourceVersion", "7") in params
 
     async def test_all_namespaces_uses_cluster_path(self) -> None:
         client = KubeClient()

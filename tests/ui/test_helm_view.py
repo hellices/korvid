@@ -2,10 +2,12 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from rich.text import Text
 
+from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -77,6 +79,7 @@ def _revision(
 def make_app(
     data: dict[str, list[Summary]],
     manifests: dict[str, dict[str, Any]] | None = None,
+    audit_path: Path | None = None,
 ) -> tuple[KorvidApp, list[tuple[str, str | None, str]]]:
     store = ResourceStore()
     describe_calls: list[tuple[str, str | None, str]] = []
@@ -101,6 +104,7 @@ def make_app(
         list_namespaces=list_namespaces,
         aliases=dict(_ALIASES),
         get_manifest=get_manifest,
+        audit=AuditLog(audit_path) if audit_path is not None else None,
     )
     return app, describe_calls
 
@@ -213,3 +217,23 @@ async def test_d_on_release_describes_the_helm_release() -> None:
         assert kind == "helmreleases"
         assert namespace == "default"
         assert name in {"web", "db"}
+
+
+async def test_write_actions_reject_synthetic_helm_kinds(tmp_path: Path) -> None:
+    """Helm browser rows are read-only views over Secrets: Ctrl-D must not
+    open an approval dialog, and an agent-side write against the synthetic
+    kind must come back as an ERROR - neither may reach the API."""
+    app, _ = make_app(_default_data(), audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="releases listed")
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+        assert len(app.screen_stack) == 1  # no ConfirmScreen pushed
+        result = app._agent_write_op(
+            "delete", "helmreleases", "web", "default", None, None, restarted_at="s"
+        )
+        assert isinstance(result, str)
+        assert result.startswith("ERROR:")
+        assert "read-only" in result

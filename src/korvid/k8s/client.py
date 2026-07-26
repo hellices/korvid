@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -267,18 +267,20 @@ class KubeClient(WriteOps):
     # Releases are Secrets of type helm.sh/release.v1; the synthetic kinds
     # "helmreleases"/"helmrevisions" adapt the Secret stream - no helm binary.
 
-    def _helm_secrets_path(
-        self, namespace: str | None, *, label_selector: str | None = None
-    ) -> str:
-        base = (
+    def _helm_secrets_query(self, *, name: str | None = None) -> list[tuple[str, str]]:
+        """Selectors restricting the Secret stream to helm-owned release
+        Secrets (type + owner label; a non-helm Secret reusing the type must
+        not surface as a release), optionally pinned to one release name."""
+        label = "owner=helm" if name is None else f"owner=helm,name={name}"
+        return [("fieldSelector", f"type={HELM_SECRET_TYPE}"), ("labelSelector", label)]
+
+    @staticmethod
+    def _helm_secrets_base(namespace: str | None) -> str:
+        return (
             f"/api/v1/namespaces/{_path_segment(namespace)}/secrets"
             if namespace is not None
             else "/api/v1/secrets"
         )
-        params: list[tuple[str, str]] = [("fieldSelector", f"type={HELM_SECRET_TYPE}")]
-        if label_selector is not None:
-            params.append(("labelSelector", label_selector))
-        return f"{base}?{urlencode(params)}"
 
     async def _watch_helm_secrets(
         self, namespace: str | None
@@ -286,15 +288,18 @@ class KubeClient(WriteOps):
         """LIST then watch helm release Secrets; same contract as watch_objects."""
         if self._api is None:
             raise RuntimeError("connect() first")
-        list_path = self._helm_secrets_path(namespace)
-        data = await self._request_json(list_path)
+        base = self._helm_secrets_base(namespace)
+        params = self._helm_secrets_query()
+        data = await self._request_json(f"{base}?{urlencode(params)}")
         resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
         for item in data.get("items", []):
             yield ("ADDED", item)
         watch_kwargs: dict[str, Any] = {}
         if resource_version is not None:
             watch_kwargs["resource_version"] = resource_version
-        watch_func = self._make_raw_watch_callable(list_path)
+        # The watch adapter appends its own query params: hand it the bare
+        # path plus the selectors, never a path with the query pre-embedded.
+        watch_func = self._make_raw_watch_callable(base, extra_query=params)
         w = k8s_watch.Watch()
         try:
             async with w.stream(watch_func, **watch_kwargs) as stream:
@@ -329,7 +334,8 @@ class KubeClient(WriteOps):
         Raises ApiStatusError(404) when no matching revision Secret exists
         and ValueError when the payload does not decode.
         """
-        path = self._helm_secrets_path(namespace, label_selector=f"owner=helm,name={name}")
+        base = self._helm_secrets_base(namespace)
+        path = f"{base}?{urlencode(self._helm_secrets_query(name=name))}"
         data = await self._request_json(path)
 
         def _rev(secret: dict[str, Any]) -> int:
@@ -890,7 +896,9 @@ class KubeClient(WriteOps):
         result: list[dict[str, Any]] = list(data.get("items", []))
         return result
 
-    def _make_raw_watch_callable(self, path: str) -> Any:
+    def _make_raw_watch_callable(
+        self, path: str, extra_query: Sequence[tuple[str, str]] = ()
+    ) -> Any:
         """Return an async callable compatible with k8s_watch.Watch.stream.
 
         Watch.stream injects ``watch=True``, ``_preload_content=False``, and
@@ -899,6 +907,10 @@ class KubeClient(WriteOps):
         core-group (group=="", api_base="/api/v1") and extension-group resources,
         eliminating the broken ``/apis//v1/...`` URL that CustomObjectsApi would
         produce when ``group`` is empty.
+
+        ``extra_query`` carries selectors that must ride along with the watch
+        params; *path* must be bare (call_api appends ``?`` + query itself,
+        so a pre-embedded query string would be silently broken).
         """
         api = self._api
         if api is None:
@@ -912,7 +924,7 @@ class KubeClient(WriteOps):
         ) -> Any:
             # watch/_preload_content are injected by Watch.stream; _rest absorbs
             # any future kwargs it may add.
-            query_params: list[tuple[str, Any]] = [("watch", "true")]
+            query_params: list[tuple[str, Any]] = [*extra_query, ("watch", "true")]
             if resource_version is not None:
                 query_params.append(("resourceVersion", resource_version))
             return await api.call_api(

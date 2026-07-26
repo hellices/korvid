@@ -16,6 +16,7 @@ import base64
 import binascii
 import gzip
 import json
+import zlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,8 +29,10 @@ HELM_SECRET_TYPE = "helm.sh/release.v1"
 #: Synthetic metas: these kinds never hit ``/api/v1/helmreleases`` - the
 #: client watches Secrets and adapts - but navigation, aliasing, and
 #: drill-down all key off ResourceMeta like any real kind.
-HELM_RELEASES_META = ResourceMeta("HelmRelease", "helmreleases", "", "v1", True, ("helm",))
-HELM_REVISIONS_META = ResourceMeta("HelmRevision", "helmrevisions", "", "v1", True)
+HELM_RELEASES_META = ResourceMeta(
+    "HelmRelease", "helmreleases", "", "v1", True, ("helm",), synthetic=True
+)
+HELM_REVISIONS_META = ResourceMeta("HelmRevision", "helmrevisions", "", "v1", True, synthetic=True)
 
 
 def release_uid(namespace: str, name: str) -> str:
@@ -53,7 +56,7 @@ def decode_release(secret: dict[str, Any]) -> dict[str, Any]:
         inner = base64.b64decode(encoded, validate=True)
         raw = gzip.decompress(base64.b64decode(inner, validate=True))
         payload = json.loads(raw)
-    except (binascii.Error, gzip.BadGzipFile, json.JSONDecodeError, EOFError) as exc:
+    except (binascii.Error, gzip.BadGzipFile, zlib.error, json.JSONDecodeError, EOFError) as exc:
         raise ValueError(f"not a helm release payload: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError("not a helm release payload: JSON root is not an object")
@@ -96,6 +99,12 @@ def _secret_facts(secret: dict[str, Any]) -> tuple[str, str, int, str, str]:
     return name, namespace, revision, status, created
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+    """The value if it is a JSON object, else {} - nested payload fields can
+    be the wrong type in a hand-mangled Secret and must degrade, not raise."""
+    return value if isinstance(value, dict) else {}
+
+
 def _chart_facts(secret: dict[str, Any]) -> tuple[str, str, str]:
     """(chart name-version, app version, description) from the payload;
     label-only fallbacks when the payload does not decode - a corrupt
@@ -104,12 +113,12 @@ def _chart_facts(secret: dict[str, Any]) -> tuple[str, str, str]:
         payload = decode_release(secret)
     except ValueError:
         return "-", "-", ""
-    chart_meta = (payload.get("chart") or {}).get("metadata") or {}
+    chart_meta = _mapping(_mapping(payload.get("chart")).get("metadata"))
     chart_name = str(chart_meta.get("name") or "")
     chart_version = str(chart_meta.get("version") or "")
     chart = f"{chart_name}-{chart_version}" if chart_name and chart_version else chart_name or "-"
     app_version = str(chart_meta.get("appVersion") or "-")
-    description = str((payload.get("info") or {}).get("description") or "")
+    description = str(_mapping(payload.get("info")).get("description") or "")
     return chart, app_version, description
 
 
@@ -170,13 +179,16 @@ class ReleaseTracker:
         key = (rel.namespace, rel.name)
         if event_type == "DELETED":
             revs = self._revisions.get(key)
-            if revs is None:
-                return []  # never surfaced (e.g. a different namespace's release)
-            revs.pop(rel.revision, None)
+            if revs is None or rel.revision not in revs:
+                # Never surfaced (other namespace, or a revision pruned before
+                # our LIST): nothing on screen can change.
+                return []
+            was_max = rel.revision == max(revs)
+            del revs[rel.revision]
             if not revs:
                 del self._revisions[key]
                 return [("DELETED", rel)]
-            if rel.revision > max(revs):
+            if was_max:
                 return [("MODIFIED", revs[max(revs)])]
             return []
         revs = self._revisions.setdefault(key, {})
