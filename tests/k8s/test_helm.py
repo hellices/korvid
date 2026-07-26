@@ -100,6 +100,26 @@ class TestDecodeRelease:
         with pytest.raises(ValueError, match="payload"):
             decode_release(_secret(data={"release": bad}))
 
+    def test_gzip_bomb_is_rejected_with_value_error(self) -> None:
+        """The payload is cluster-controlled: a small Secret can gzip-expand
+        to hundreds of MB. Decompression is bounded and overflow becomes the
+        same ValueError as any other corrupt payload."""
+        huge_but_valid_json = (
+            '{"name": "web", "pad": "' + "a" * (64 * 1024 * 1024) + '"}'
+        ).encode()
+        bomb = base64.b64encode(base64.b64encode(gzip.compress(huge_but_valid_json)))
+        with pytest.raises(ValueError, match="payload"):
+            decode_release(_secret(data={"release": bomb.decode()}))
+
+    def test_deeply_nested_json_is_rejected_with_value_error(self) -> None:
+        """json.loads raises RecursionError on pathological nesting; that must
+        normalize to ValueError so the label-only fallback applies instead of
+        the watch dying over one hostile Secret."""
+        hostile = ("[" * 200_000) + ("]" * 200_000)
+        bad = base64.b64encode(base64.b64encode(gzip.compress(hostile.encode()))).decode()
+        with pytest.raises(ValueError, match="payload"):
+            decode_release(_secret(data={"release": bad}))
+
     def test_corrupt_deflate_stream_raises_value_error(self) -> None:
         """A valid gzip header with a broken DEFLATE body raises zlib.error,
         which must be normalized to ValueError like every other decode
@@ -350,6 +370,23 @@ class TestWatchHelmRevisions:
 
 
 class TestGetHelmRelease:
+    async def test_malformed_nested_payload_describes_with_fallbacks(self) -> None:
+        """The row survives a mangled payload via label fallbacks; describe on
+        that row must degrade the same way instead of raising AttributeError
+        outside action_describe's handled exceptions."""
+        broken: dict[str, Any] = {"name": "web", "chart": ["bad"], "info": "oops", "config": "x"}
+        secret = _secret("web", 2, data={"release": _encode(broken)})
+        client = KubeClient()
+        list_resp = {"metadata": {"resourceVersion": "1"}, "items": [secret]}
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        ):
+            detail = await client.get_helm_release("default", "web")
+        assert detail["revision"] == 2
+        assert detail["chart"] == "-"
+        assert detail["values"] == {}
+
     async def test_returns_decoded_metadata_and_values_without_manifest(self) -> None:
         client = KubeClient()
         list_resp = {"items": [_secret("web", 1), _secret("web", 3)]}

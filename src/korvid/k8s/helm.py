@@ -26,6 +26,11 @@ from korvid.k8s.models import GenericSummary
 #: Secret type helm 3 uses for its default (Secret) storage backend.
 HELM_SECRET_TYPE = "helm.sh/release.v1"
 
+#: Upper bound for a decompressed release payload. Real payloads are KBs to
+#: a few MB (chart + values + rendered manifest); the payload is
+#: cluster-controlled, so an unbounded gunzip is a decompression-bomb DoS.
+MAX_PAYLOAD_BYTES = 32 * 1024 * 1024
+
 #: Synthetic metas: these kinds never hit ``/api/v1/helmreleases`` - the
 #: client watches Secrets and adapts - but navigation, aliasing, and
 #: drill-down all key off ResourceMeta like any real kind.
@@ -42,21 +47,40 @@ def release_uid(namespace: str, name: str) -> str:
     return f"helm:{namespace}/{name}"
 
 
+def _bounded_gunzip(data: bytes) -> bytes:
+    """Gunzip with an output ceiling; oversize raises ValueError (bomb guard)."""
+    decompressor = zlib.decompressobj(wbits=31)  # 31 = gzip container
+    out = decompressor.decompress(data, MAX_PAYLOAD_BYTES)
+    if decompressor.unconsumed_tail:
+        raise ValueError(f"payload exceeds {MAX_PAYLOAD_BYTES} bytes decompressed")
+    return out
+
+
 def decode_release(secret: dict[str, Any]) -> dict[str, Any]:
     """Decode a release Secret's payload to the helm release JSON object.
 
     Raises:
-        ValueError: when ``data.release`` is missing or is not
-            base64(base64(gzip(json))).
+        ValueError: when ``data.release`` is missing, is not
+            base64(base64(gzip(json))), decompresses past
+            ``MAX_PAYLOAD_BYTES``, or nests deeply enough to overflow the
+            JSON parser - the payload is cluster-controlled and one hostile
+            Secret must not take down the watch.
     """
     encoded = (secret.get("data") or {}).get("release")
     if not isinstance(encoded, str) or not encoded:
         raise ValueError("Secret has no data.release key")
     try:
         inner = base64.b64decode(encoded, validate=True)
-        raw = gzip.decompress(base64.b64decode(inner, validate=True))
+        raw = _bounded_gunzip(base64.b64decode(inner, validate=True))
         payload = json.loads(raw)
-    except (binascii.Error, gzip.BadGzipFile, zlib.error, json.JSONDecodeError, EOFError) as exc:
+    except (
+        binascii.Error,
+        gzip.BadGzipFile,
+        zlib.error,
+        json.JSONDecodeError,
+        EOFError,
+        RecursionError,
+    ) as exc:
         raise ValueError(f"not a helm release payload: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError("not a helm release payload: JSON root is not an object")
@@ -120,6 +144,30 @@ def _chart_facts(secret: dict[str, Any]) -> tuple[str, str, str]:
     app_version = str(chart_meta.get("appVersion") or "-")
     description = str(_mapping(payload.get("info")).get("description") or "")
     return chart, app_version, description
+
+
+def release_detail(
+    payload: dict[str, Any], *, name: str, namespace: str, revision: int
+) -> dict[str, Any]:
+    """Describe dict from a decoded payload, tolerating malformed nested
+    fields the same way the row summaries do - a mangled Secret that still
+    lists must also still describe."""
+    info = _mapping(payload.get("info"))
+    chart_meta = _mapping(_mapping(payload.get("chart")).get("metadata"))
+    chart_name = str(chart_meta.get("name") or "")
+    chart_version = str(chart_meta.get("version") or "")
+    chart = f"{chart_name}-{chart_version}" if chart_name and chart_version else chart_name or "-"
+    return {
+        "name": name,
+        "namespace": namespace,
+        "revision": revision,
+        "status": str(info.get("status") or ""),
+        "chart": chart,
+        "appVersion": str(chart_meta.get("appVersion") or ""),
+        "lastDeployed": str(info.get("last_deployed") or ""),
+        "description": str(info.get("description") or ""),
+        "values": _mapping(payload.get("config")),
+    }
 
 
 def release_from_secret(secret: dict[str, Any]) -> HelmReleaseSummary:

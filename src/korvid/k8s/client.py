@@ -24,6 +24,7 @@ from korvid.k8s.helm import (
     HelmRevisionSummary,
     ReleaseTracker,
     decode_release,
+    release_detail,
     release_from_secret,
     revision_from_secret,
 )
@@ -352,21 +353,7 @@ class KubeClient(WriteOps):
             raise ApiStatusError(404, f"helm release {name!r} not found in {namespace!r}")
         chosen = max(items, key=_rev)
         payload = decode_release(chosen)
-        info = payload.get("info") or {}
-        chart_meta = (payload.get("chart") or {}).get("metadata") or {}
-        chart_name = str(chart_meta.get("name") or "")
-        chart_version = str(chart_meta.get("version") or "")
-        return {
-            "name": name,
-            "namespace": namespace,
-            "revision": _rev(chosen),
-            "status": str(info.get("status") or ""),
-            "chart": f"{chart_name}-{chart_version}" if chart_version else chart_name,
-            "appVersion": str(chart_meta.get("appVersion") or ""),
-            "lastDeployed": str(info.get("last_deployed") or ""),
-            "description": str(info.get("description") or ""),
-            "values": payload.get("config") or {},
-        }
+        return release_detail(payload, name=name, namespace=namespace, revision=_rev(chosen))
 
     async def list_pod_metrics(self, namespace: str | None) -> list[PodMetrics]:
         """Current pod usage from metrics.k8s.io; None lists all namespaces.

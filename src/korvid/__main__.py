@@ -93,10 +93,13 @@ async def _discover_in_background(
     except Exception:
         logger.warning("Resource discovery failed; staying pods-only", exc_info=True)
         return
-    aliases.update(discovered)
-    # Synthetic helm browser kinds must survive the merge: a CRD whose plural
-    # is also "helmreleases" (e.g. Flux) would otherwise hijack `:helm`
-    # navigation and break the release drill-down.
+    # Synthetic view kinds own their plurals outright: every discovered alias
+    # whose target plural collides (e.g. Flux's HelmRelease CRD contributes
+    # "hr" -> plural "helmreleases") is dropped, because navigation routes by
+    # plural and the alias would silently open the Secret-backed browser
+    # instead of the CRD it named.
+    reserved = {HELM_RELEASES_META.plural, HELM_REVISIONS_META.plural}
+    aliases.update({a: m for a, m in discovered.items() if m.plural not in reserved})
     aliases.update(build_alias_map([HELM_RELEASES_META, HELM_REVISIONS_META]))
     app.on_aliases_updated()
 
