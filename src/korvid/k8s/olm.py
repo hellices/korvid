@@ -87,7 +87,8 @@ def package_description(status: dict[str, Any]) -> str:
         text = text.strip()
         if text:
             if len(text) > MAX_DESCRIPTION_CHARS:
-                return text[:MAX_DESCRIPTION_CHARS] + "\u2026"
+                # The ellipsis counts against the cap, keeping the bound exact.
+                return text[: MAX_DESCRIPTION_CHARS - 1] + "\u2026"
             return text
     return ""
 

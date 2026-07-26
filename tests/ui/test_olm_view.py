@@ -506,3 +506,35 @@ async def test_foreign_subscriptions_kind_keeps_generic_columns() -> None:
         assert "CHANNEL" not in headers
         assert "INSTALLED CSV" not in headers
         assert table.get_row_at(0)[0] == "events-sub"
+
+
+async def test_group_qualified_alias_navigates_to_olm_not_foreign_crd() -> None:
+    """When a foreign CRD wins the bare 'subscriptions' alias, the
+    kubectl-style plural.group alias must still watch and render the OLM
+    Subscription - not silently open the foreign resource."""
+    foreign = ResourceMeta("Subscription", "subscriptions", "messaging.example.com", "v1", True)
+    olm_sub = SUB_META
+    qualified = f"subscriptions.{OPERATORS_GROUP}"
+    app = make_app(
+        {
+            "subscriptions": [
+                GenericSummary(
+                    name="foreign-sub",
+                    namespace="operators",
+                    kind="Subscription",
+                    created="2026-07-26T10:00:00Z",
+                    uid="f1",
+                )
+            ],
+            qualified: [_subscription("cert-manager")],
+        },
+        aliases={"subscriptions": foreign, qualified: olm_sub},
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, qualified, qualified)
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="olm subscription listed")
+        headers = [str(col.label) for col in table.columns.values()]
+        assert "CHANNEL" in headers  # the OLM typed table, not the generic one
+        assert table.get_row_at(0)[0] == "cert-manager"

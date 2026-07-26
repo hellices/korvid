@@ -1141,10 +1141,14 @@ def test_packagemanifest_summary_extracts_short_description() -> None:
 def test_packagemanifest_summary_description_caps_and_falls_back() -> None:
     manifest = _pkg_manifest()
     manifest["status"]["channels"] = [
-        {"name": "stable", "currentCSVDesc": {"description": "line one\nline two" + "x" * 200}}
+        {
+            "name": "stable",
+            "currentCSVDesc": {"description": "line one " + "x" * 200 + "\nline two"},
+        }
     ]
     summary = summary_for("PackageManifest", manifest)
     assert isinstance(summary, PackageManifestSummary)
     assert summary.description.startswith("line one")
-    assert "line two" not in summary.description or len(summary.description) <= 81
-    assert len(summary.description) <= 81
+    assert "line two" not in summary.description
+    assert len(summary.description) <= 80
+    assert summary.description.endswith("\u2026")

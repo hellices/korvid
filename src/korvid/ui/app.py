@@ -503,7 +503,7 @@ class KorvidApp(App[None]):
     async def on_mount(self) -> None:
         # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
         command_bar = self.query_one(CommandBar)
-        command_bar.known = lambda a: self.aliases[a].plural if a in self.aliases else None
+        command_bar.known = lambda a: self._canonical_kind(a) if a in self.aliases else None
         command_bar.command_words = sorted({*self.aliases, "ns", "namespaces", "q", "quit"})
         # Seed session-scoped log display settings from config (logs.wrap /
         # logs.timestamps); the w/t keys toggle them from there.
@@ -606,13 +606,17 @@ class KorvidApp(App[None]):
         metrics = None
         if kind == "pods" and self._metrics is not None and self._metrics.available:
             metrics = self._metrics.get
+        # Dispatch rendering on the resolved meta: a group-qualified view
+        # kind (alias collision) must still get its typed table, and the
+        # serving group scopes group-specific renderings (the OLM tables).
+        meta = self.aliases.get(kind)
         table.show(
-            kind,
+            meta.plural if meta is not None else kind,
             rows,
             all_namespaces=all_namespaces,
             pattern=self.filter_pattern,
             metrics=metrics,
-            group=getattr(self.aliases.get(kind), "group", "") or "",
+            group=meta.group if meta is not None else "",
         )
         self._refresh_empty_state(kind, table.row_count)
         # The strip is driven by RowHighlighted on the pods view; anything
@@ -994,7 +998,15 @@ class KorvidApp(App[None]):
 
     def _canonical_kind(self, kind: str) -> str:
         meta = self.aliases.get(kind)
-        return meta.plural if meta is not None else kind
+        if meta is None:
+            return kind
+        if self.aliases.get(meta.plural) == meta:
+            return meta.plural
+        # The bare plural belongs to a different meta (a same-plural CRD from
+        # another group won the alias collision): keep the qualified alias as
+        # the canonical view kind so watching, rendering, and writes all
+        # resolve the meta this alias actually names.
+        return kind
 
     async def _drill_down_selected(self, row_key: str) -> None:
         """Keyboard Enter: push a drill level for the selected row."""
