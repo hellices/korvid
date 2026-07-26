@@ -116,9 +116,9 @@ def test_builtin_names_reserved_over_resource_aliases() -> None:
     """A cluster CRD alias like `model` must not shadow the :model built-in."""
 
     def crd_known(head: str) -> str | None:
-        return {"model": "models", "agent": "agents", "ai": "ais"}.get(head)
+        return {"model": "models", "agent": "agents", "ai": "ais", "mcp": "mcps"}.get(head)
 
-    for text in ("ai", "agent", "model gpt-4o"):
+    for text in ("ai", "agent", "model gpt-4o", "mcp", "mcp on"):
         msg = parse_command(text, crd_known)
         assert isinstance(msg, UnknownCommand)
         assert msg.text == text

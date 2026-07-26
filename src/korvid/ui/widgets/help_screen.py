@@ -29,7 +29,37 @@ _KEY_NAMES = {
 }
 
 # Display order of the binding groups in the overlay.
-_GROUP_ORDER = ("Global", "Logs", "Describe", "Agent")
+_GROUP_ORDER = ("Global", "Table", "Logs", "Describe", "Agent")
+
+# Context(s) where each app action's key is actually pressed.  Key names and
+# descriptions are still generated from the live Binding objects; only the
+# grouping needs human context.  A test asserts every KorvidApp binding
+# action appears here, so new bindings cannot land unclassified.
+_ACTION_GROUPS: dict[str, tuple[str, ...]] = {
+    "quit": ("Global",),
+    "help": ("Global",),
+    "open_command": ("Global",),
+    "toggle_all_namespaces": ("Global",),
+    # `/` filters the table but searches inside the log / describe panes.
+    "open_filter": ("Table", "Logs"),
+    "describe": ("Table",),
+    "shell": ("Table",),
+    "logs": ("Table",),
+    "logs_multi": ("Table",),
+    "delete_resource": ("Table",),
+    "rollout_restart": ("Table",),
+    "resize_pod": ("Table",),
+    "scale_resource": ("Table",),
+    "edit_resource": ("Table",),
+    "log_format": ("Logs",),
+    "log_wrap": ("Logs",),
+    "log_timestamps": ("Logs",),
+    "log_save": ("Logs",),
+    "log_previous": ("Logs",),
+    "log_search_next": ("Logs",),
+    "log_search_prev": ("Logs",),
+    "toggle_agent": ("Agent",),
+}
 
 
 def key_label(key: str) -> str:
@@ -43,14 +73,8 @@ def key_label(key: str) -> str:
     return plain
 
 
-def _group_for_action(action: str) -> str:
-    if action.startswith(("log", "logs")):
-        return "Logs"
-    if "agent" in action:
-        return "Agent"
-    if "describe" in action:
-        return "Describe"
-    return "Global"
+def _groups_for_action(action: str) -> tuple[str, ...]:
+    return _ACTION_GROUPS.get(action, ("Global",))
 
 
 def _as_binding(binding: BindingType) -> Binding:
@@ -66,11 +90,13 @@ def collect_help(
 ) -> list[tuple[str, list[tuple[str, str]]]]:
     """Group ``(key, description)`` rows from real bindings for the overlay.
 
-    App bindings are grouped by their action name; the describe screen's own
-    bindings all land in the Describe group.  Alternate keys bound to the
-    same action (e.g. ``shift+l`` and ``L``) merge into one row under the
-    first key encountered, and hidden (``show=False``) bindings are included
-    on purpose — they are exactly the discoverability gap.
+    App bindings are grouped by the context where the key is pressed (see
+    `_ACTION_GROUPS`; multi-context keys like ``/`` appear in each group);
+    the describe screen's own bindings all land in the Describe group.
+    Alternate keys bound to the same action (e.g. ``shift+l`` and ``L``)
+    merge into one row under the first key encountered, and hidden
+    (``show=False``) bindings are included on purpose — they are exactly the
+    discoverability gap.
     """
     groups: dict[str, list[tuple[str, str]]] = {name: [] for name in _GROUP_ORDER}
     seen_actions: set[tuple[str, str]] = set()
@@ -84,7 +110,8 @@ def collect_help(
 
     for raw in app_bindings:
         binding = _as_binding(raw)
-        _add(_group_for_action(binding.action), binding)
+        for group in _groups_for_action(binding.action):
+            _add(group, binding)
     for raw in describe_bindings:
         _add("Describe", _as_binding(raw))
 
@@ -106,7 +133,8 @@ class HelpScreen(ModalScreen[None]):
     }
     HelpScreen VerticalScroll {
         width: 70;
-        max-height: 90%;
+        height: auto;
+        max-height: 80%;
         border: round $accent;
         padding: 1 2;
         background: $surface;

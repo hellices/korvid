@@ -50,23 +50,33 @@ def _bindings() -> list[Binding]:
         Binding("L", "logs_multi", "Multi-log", show=False),
         Binding("ctrl+a", "toggle_agent", "AI"),
         Binding("d", "describe", "Describe"),
+        Binding("slash", "open_filter", "Filter/Search"),
     ]
 
 
-def test_collect_help_groups_by_action() -> None:
+def test_collect_help_groups_by_context() -> None:
+    """Bindings land in the context where the key is actually pressed."""
     groups = dict(collect_help(_bindings(), []))
     assert ("q", "Quit") in groups["Global"]
-    assert ("l", "Logs") in groups["Logs"]
+    # l/d are pressed in the table even though they open other panes.
+    assert ("l", "Logs") in groups["Table"]
+    assert ("d", "Describe") in groups["Table"]
     assert ("w", "Wrap") in groups["Logs"]
     assert ("Ctrl-A", "AI") in groups["Agent"]
-    assert ("d", "Describe") in groups["Describe"]
+
+
+def test_collect_help_multi_context_binding_appears_in_each_group() -> None:
+    """`/` filters the table and searches the log pane — listed in both."""
+    groups = dict(collect_help(_bindings(), []))
+    assert ("/", "Filter/Search") in groups["Table"]
+    assert ("/", "Filter/Search") in groups["Logs"]
 
 
 def test_collect_help_merges_duplicate_action_keys() -> None:
     """L and shift+l run the same action — one row, first key label wins."""
     groups = dict(collect_help(_bindings(), []))
-    logs = groups["Logs"]
-    multi = [entry for entry in logs if entry[1] == "Multi-log"]
+    table = groups["Table"]
+    multi = [entry for entry in table if entry[1] == "Multi-log"]
     assert multi == [("Shift-L", "Multi-log")]
 
 
@@ -74,6 +84,15 @@ def test_collect_help_includes_hidden_bindings() -> None:
     """show=False bindings are the discoverability gap — they must be listed."""
     groups = dict(collect_help(_bindings(), []))
     assert any(desc == "Wrap" for _, desc in groups["Logs"])
+
+
+def test_every_app_binding_action_has_an_explicit_group() -> None:
+    """New app bindings must be classified — the overlay may not silently drift."""
+    from korvid.ui.widgets.help_screen import _ACTION_GROUPS
+
+    for binding in KorvidApp.BINDINGS:
+        action = binding.action if isinstance(binding, Binding) else binding[1]
+        assert action in _ACTION_GROUPS, f"unclassified binding action: {action}"
 
 
 def test_collect_help_describe_screen_bindings_join_describe_group() -> None:
@@ -93,6 +112,15 @@ def test_command_help_covers_grammar() -> None:
     assert any("ns" in k for k in entries)
     assert any("<kind>" in k for k in entries)
     assert any("ai" in k for k in entries)
+
+
+def test_command_help_covers_every_reserved_builtin() -> None:
+    """Each reserved builtin (:ai, :model, :mcp, ...) has a help row."""
+    from korvid.ui.command import _RESERVED_BUILTINS
+
+    joined = " ".join(f"{cmd} {desc}" for cmd, desc in command_help())
+    for name in _RESERVED_BUILTINS:
+        assert f":{name}" in joined, f"missing help entry for builtin :{name}"
 
 
 # ---------------------------------------------------------------------------
