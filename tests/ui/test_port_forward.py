@@ -10,14 +10,14 @@ from unittest.mock import patch
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
-from korvid.core.portforward import ForwardRegistry
+from korvid.core.portforward import ForwardRegistry, ForwardSpec
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.messages import NavigateCommand
-from korvid.ui.widgets.port_forward_screen import PortForwardScreen
+from korvid.ui.widgets.port_forward_screen import ForwardListScreen, PortForwardScreen
 
 from .waits import until
 
@@ -265,3 +265,104 @@ async def test_forward_dialog_rejects_invalid_port() -> None:
             # Screen stays open, nothing spawned.
             assert isinstance(app.screen, PortForwardScreen)
             assert procs == []
+
+
+# ---------------------------------------------------------------------------
+# :pf list screen
+# ---------------------------------------------------------------------------
+
+
+def _forward_rows(app: KorvidApp) -> list[str]:
+    from textual.widgets import OptionList
+
+    screen = app.screen
+    assert isinstance(screen, ForwardListScreen)
+    options = screen.query_one(OptionList)
+    return [str(options.get_option_at_index(i).prompt) for i in range(options.option_count)]
+
+
+async def _open_pf(app: KorvidApp, pilot: Any) -> None:
+    await pilot.press("colon")
+    for ch in "pf":
+        await pilot.press(ch)
+    await pilot.press("enter")
+    await until(pilot, lambda: isinstance(app.screen, ForwardListScreen))
+
+
+async def test_pf_command_lists_active_forwards() -> None:
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    app = make_app([_pod("api-1")], forwards=registry)
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _open_pf(app, pilot)
+        rows = _forward_rows(app)
+        assert len(rows) == 1
+        assert "alive" in rows[0]
+        assert "localhost:8080" in rows[0]
+        assert "default/api-1:80" in rows[0]
+
+
+async def test_pf_ctrl_d_stops_forward_and_audits(tmp_path: Path) -> None:
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    app = make_app([_pod("api-1")], forwards=registry, audit=_audit_log(tmp_path))
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _open_pf(app, pilot)
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: registry.forwards() == [])
+        assert procs[0].terminated
+        await until(pilot, lambda: "port-forward-stop" in _audit_lines(tmp_path))
+        assert "port-forward-stop" in _audit_lines(tmp_path)
+
+
+async def test_pf_marks_broken_forward_and_reattaches() -> None:
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    app = make_app([_pod("api-1")], forwards=registry)
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    procs[0].returncode = 1  # target pod died; kubectl exited
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _open_pf(app, pilot)
+        await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
+        await pilot.press("r")
+        await until(pilot, lambda: len(procs) == 2)
+        await until(pilot, lambda: any("alive" in row for row in _forward_rows(app)))
+        assert registry.forwards()[0].status == "alive"
+
+
+async def test_pf_empty_registry_shows_placeholder() -> None:
+    app = make_app([_pod("api-1")], forwards=_registry([]))
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _open_pf(app, pilot)
+        rows = _forward_rows(app)
+        assert rows == ["No active port-forwards — press shift+f on a pod or service"]
+
+
+async def test_pf_unavailable_without_registry() -> None:
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("colon")
+        for ch in "pf":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert not isinstance(app.screen, ForwardListScreen)
+
+
+def test_pf_in_command_help() -> None:
+    from korvid.ui.command import command_help
+
+    assert any(":pf" in cmd for cmd, _ in command_help())

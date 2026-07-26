@@ -48,7 +48,12 @@ from korvid.core.errors import explain_api_error
 from korvid.core.filters import ResourceFilter, parse_filter
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
-from korvid.core.portforward import ForwardRegistry, ForwardSpec, candidate_remote_ports
+from korvid.core.portforward import (
+    ForwardRecord,
+    ForwardRegistry,
+    ForwardSpec,
+    candidate_remote_ports,
+)
 from korvid.core.secrets import mask_secret_manifest
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -94,7 +99,7 @@ from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.pick_screen import PickScreen
-from korvid.ui.widgets.port_forward_screen import PortForwardScreen
+from korvid.ui.widgets.port_forward_screen import ForwardListScreen, PortForwardScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.secret_screen import SecretScreen
@@ -1185,6 +1190,9 @@ class KorvidApp(App[None]):
         if head == "mcp":
             self._handle_mcp_command(parts[1:])
             return
+        if head == "pf":
+            self._open_forward_list()
+            return
         self.notify(
             f"Unknown resource or command: {message.text}"
             " — not found in this cluster's API (CRD not installed?)",
@@ -1424,6 +1432,24 @@ class KorvidApp(App[None]):
             )
 
         self.run_worker(_append, thread=True)
+
+    def _open_forward_list(self) -> None:
+        """`:pf` — the active-forwards screen with stop / re-attach keys."""
+        if self._forwards is None:
+            self.notify("Port-forward unavailable in this build", severity="warning")
+            return
+
+        def _on_stop(record: ForwardRecord) -> None:
+            self._audit_forward("port-forward-stop", record.spec)
+            self.notify(f"Stopped forward localhost:{record.spec.local_port}")
+
+        def _on_reattach(record: ForwardRecord) -> None:
+            self._audit_forward("port-forward-start", record.spec, outcome="reattached")
+            self.notify(f"Re-attached forward localhost:{record.spec.local_port}")
+
+        self.push_screen(
+            ForwardListScreen(self._forwards, on_stop=_on_stop, on_reattach=_on_reattach)
+        )
 
     @staticmethod
     def _run_interactive(argv: list[str], banner: str) -> int:
