@@ -796,3 +796,63 @@ class TestExactRequestValues:
         pod = PodSummary.from_manifest(obj)
         assert pod.cpu_request_cores is None
         assert pod.mem_request_bytes is None
+
+
+class TestPodLevelRequests:
+    """K8s 1.34+ pod-level resources (spec.resources) take precedence over
+    the container-derived calculation (issue #12 review round 2)."""
+
+    def test_pod_level_requests_take_precedence(self) -> None:
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {
+                "resources": {"requests": {"cpu": "1", "memory": "2Gi"}},
+                "containers": [
+                    {
+                        "name": "c",
+                        "resources": {"requests": {"cpu": "150m", "memory": "1500Ki"}},
+                    }
+                ],
+            },
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_request_cores == pytest.approx(1.0)
+        assert pod.mem_request_bytes == 2 * 2**30
+        assert pod.cpu_request == "1000m"
+        assert pod.mem_request == "2048Mi"
+
+    def test_pod_level_partial_falls_back_per_resource(self) -> None:
+        """Pod-level sets only CPU: memory still comes from containers."""
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {
+                "resources": {"requests": {"cpu": "2"}},
+                "containers": [
+                    {
+                        "name": "c",
+                        "resources": {
+                            "requests": {"cpu": "150m", "memory": "64Mi"},
+                            "limits": {"memory": "128Mi"},
+                        },
+                    }
+                ],
+            },
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_request_cores == pytest.approx(2.0)
+        assert pod.mem_request_bytes == 64 * 2**20
+        assert pod.mem_limit == "128Mi"
+
+    def test_pod_level_limits_apply_too(self) -> None:
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {
+                "resources": {"limits": {"cpu": "4"}},
+                "containers": [{"name": "c", "resources": {"limits": {"cpu": "500m"}}}],
+            },
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_limit == "4000m"

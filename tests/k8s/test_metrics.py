@@ -222,3 +222,38 @@ class TestParseGuards:
 
     def test_non_list_items_yields_empty(self) -> None:
         assert parse_pod_metrics_list({"items": "bogus"}) == []
+
+
+async def test_poller_skips_notify_when_data_unchanged() -> None:
+    """Identical successive polls must not re-notify (issue #12 review round 2:
+    avoid a full table re-render every interval on a quiet cluster)."""
+    calls, fetch = _fetcher([[_WEB]])
+    updates: list[bool] = []
+    poller = MetricsPoller(fetch, interval=0.01, on_update=lambda: updates.append(True))
+    await poller.start("default")
+    try:
+        for _ in range(200):
+            if len(calls) >= 4:
+                break
+            await asyncio.sleep(0.01)
+        assert len(calls) >= 4
+        assert len(updates) == 1  # first successful poll only
+    finally:
+        await poller.stop()
+
+
+async def test_poller_notifies_again_when_data_changes() -> None:
+    changed = PodMetrics(name="web-1", namespace="default", cpu_cores=0.5, memory_bytes=2**21)
+    _calls, fetch = _fetcher([[_WEB], [changed]])
+    updates: list[bool] = []
+    poller = MetricsPoller(fetch, interval=0.01, on_update=lambda: updates.append(True))
+    await poller.start("default")
+    try:
+        for _ in range(200):
+            if len(updates) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(updates) == 2
+        assert poller.get("default", "web-1") == changed
+    finally:
+        await poller.stop()

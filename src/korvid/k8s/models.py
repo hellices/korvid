@@ -84,8 +84,12 @@ def _effective_value(spec: dict[str, Any], bucket: str, key: str) -> float | int
     sidecars are initContainers with restartPolicy: Always (K8s 1.28+): they
     run for the pod's lifetime so they add to the sum, not the init max.
     Returns None when nothing is declared. CPU is cores (float), memory is
-    bytes (int).
+    bytes (int). Pod-level resources (spec.resources, K8s 1.34+) take
+    precedence over the container-derived calculation, per resource.
     """
+    pod_level = ((spec.get("resources") or {}).get(bucket) or {}).get(key)
+    if pod_level is not None:
+        return parse_cpu(pod_level) if key == "cpu" else parse_memory(pod_level)
     init_containers = spec.get("initContainers") or []
     sidecars = [c for c in init_containers if c.get("restartPolicy") == "Always"]
     classic_init = [c for c in init_containers if c.get("restartPolicy") != "Always"]

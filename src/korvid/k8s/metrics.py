@@ -139,8 +139,9 @@ class MetricsPoller:
                 self._data = {}
                 self._available = False
             else:
-                self._data = {(m.namespace, m.name): m for m in metrics}
-                changed = True
+                new = {(m.namespace, m.name): m for m in metrics}
+                changed = new != self._data or not self._available
+                self._data = new
                 self._available = True
             if changed:
                 self._notify()
