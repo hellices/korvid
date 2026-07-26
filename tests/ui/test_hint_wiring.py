@@ -228,3 +228,39 @@ async def test_not_ready_running_pod_gets_event_only_hint() -> None:
             label="event-only hint shown",
         )
         assert calls == [("default", "web-1", "uid-web-1")]
+
+
+async def test_recovered_pod_is_not_rendered_with_stale_trouble() -> None:
+    # The pod recovers while the event fetch is in flight; the completion
+    # callback must re-read the store and clear instead of showing old trouble.
+    gate = asyncio.Event()
+    calls: list[str] = []
+
+    async def gated(namespace: str, name: str, *, uid: str | None = None) -> list[dict[str, Any]]:
+        calls.append(name)
+        await gate.wait()
+        return [
+            {
+                "type": "Warning",
+                "reason": "BackOff",
+                "message": "old restart loop",
+                "lastTimestamp": "2026-07-26T09:00:00Z",
+            }
+        ]
+
+    store = ResourceStore()
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
+        aliases=dict(_DEFAULT_TEST_ALIASES),
+        get_events=gated,
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: len(calls) == 1, label="fetch started")
+        # Pod recovers while the fetch is blocked on the gate.
+        store.apply_event("pods", "default", "MODIFIED", _pod("web-1"))
+        gate.set()
+        await until(
+            pilot, lambda: not app.query_one(HintStrip).display, label="strip cleared on recovery"
+        )

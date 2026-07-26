@@ -697,10 +697,10 @@ class KorvidApp(App[None]):
                 summary.namespace, summary.name, uid=summary.uid or None
             )
         except Exception:  # events are decoration; the status-derived hint already shows
-            self._hint_event_cache[cache_key] = (monotonic(), None)
+            self._store_hint_event(cache_key, None)
             return
         line = _fresh_warning_line(events, summary)
-        self._hint_event_cache[cache_key] = (monotonic(), line)
+        self._store_hint_event(cache_key, line)
         if line is None:
             return
         # Re-check the cursor: the user may have moved on during the fetch.
@@ -713,7 +713,24 @@ class KorvidApp(App[None]):
             return
         if current is None or str(current.value) != row_key:
             return
-        self.query_one(HintStrip).show_trouble(summary.trouble, event=line)
+        # The snapshot taken at highlight time may be stale after the await:
+        # re-read the store so a recovered pod is not shown with old trouble.
+        fresh = self._find_pod_summary(row_key)
+        if fresh is None or not _pod_needs_hint(fresh):
+            self.query_one(HintStrip).clear_hint()
+            return
+        self.query_one(HintStrip).show_trouble(fresh.trouble, event=line)
+
+    def _store_hint_event(self, cache_key: str, line: str | None) -> None:
+        """Cache the fetched line; expired entries are swept on every write
+        so the cache cannot grow without bound in a long-running session."""
+        now = monotonic()
+        expired = [
+            k for k, (at, _) in self._hint_event_cache.items() if now - at >= self._HINT_EVENT_TTL
+        ]
+        for k in expired:
+            del self._hint_event_cache[k]
+        self._hint_event_cache[cache_key] = (now, line)
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Enter drills down: pods -> containers (k9s convention); kinds with a
