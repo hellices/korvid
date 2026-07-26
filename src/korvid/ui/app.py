@@ -47,6 +47,7 @@ from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import PodSummary
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
+from korvid.ui.command import command_help
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -67,6 +68,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
+from korvid.ui.widgets.help_screen import HelpScreen, collect_help
 from korvid.ui.widgets.hint_strip import HintStrip, parse_rfc3339
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
@@ -308,6 +310,7 @@ class _ReplayFilter:
 class KorvidApp(App[None]):
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         ("q", "quit", "Quit"),
+        Binding("question_mark", "help", "Help"),
         ("colon", "open_command", "Command"),
         ("slash", "open_filter", "Filter/Search"),
         ("0", "toggle_all_namespaces", "All NS"),
@@ -589,6 +592,11 @@ class KorvidApp(App[None]):
 
     def on_show_error(self, message: ShowError) -> None:
         self.notify(message.detail, title=message.title, severity="error")
+
+    def action_help(self) -> None:
+        """Open the help overlay generated from the live binding lists (issue #41)."""
+        groups = collect_help(list(self.BINDINGS), list(DescribeScreen.BINDINGS))
+        self.push_screen(HelpScreen(groups, command_help()))
 
     def action_open_command(self) -> None:
         # Dismiss the filter bar first so no invisible filter stays active.

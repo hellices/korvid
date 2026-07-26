@@ -1,0 +1,205 @@
+"""Tests for the help screen (issue #41) — keybinding discovery via ``?``."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+
+from textual.binding import Binding
+
+from korvid.core.config import KorvidConfig
+from korvid.core.store import ResourceStore, Summary
+from korvid.core.watch import WatchManager
+from korvid.k8s.models import PodSummary
+from korvid.ui.app import KorvidApp
+from korvid.ui.command import command_help
+from korvid.ui.widgets.filter_bar import FilterBar
+from korvid.ui.widgets.help_screen import HelpScreen, collect_help, key_label
+
+from .waits import until
+
+# ---------------------------------------------------------------------------
+# Pure unit tests: key_label
+# ---------------------------------------------------------------------------
+
+
+def test_key_label_symbol_keys() -> None:
+    assert key_label("question_mark") == "?"
+    assert key_label("colon") == ":"
+    assert key_label("slash") == "/"
+
+
+def test_key_label_modifiers_and_case() -> None:
+    assert key_label("ctrl+s") == "Ctrl-S"
+    assert key_label("shift+n") == "Shift-N"
+    assert key_label("escape") == "Esc"
+    assert key_label("w") == "w"
+
+
+# ---------------------------------------------------------------------------
+# Pure unit tests: collect_help
+# ---------------------------------------------------------------------------
+
+
+def _bindings() -> list[Binding]:
+    return [
+        Binding("q", "quit", "Quit"),
+        Binding("l", "logs", "Logs"),
+        Binding("w", "log_wrap", "Wrap", show=False),
+        Binding("shift+l", "logs_multi", "Multi-log"),
+        Binding("L", "logs_multi", "Multi-log", show=False),
+        Binding("ctrl+a", "toggle_agent", "AI"),
+        Binding("d", "describe", "Describe"),
+    ]
+
+
+def test_collect_help_groups_by_action() -> None:
+    groups = dict(collect_help(_bindings(), []))
+    assert ("q", "Quit") in groups["Global"]
+    assert ("l", "Logs") in groups["Logs"]
+    assert ("w", "Wrap") in groups["Logs"]
+    assert ("Ctrl-A", "AI") in groups["Agent"]
+    assert ("d", "Describe") in groups["Describe"]
+
+
+def test_collect_help_merges_duplicate_action_keys() -> None:
+    """L and shift+l run the same action — one row, first key label wins."""
+    groups = dict(collect_help(_bindings(), []))
+    logs = groups["Logs"]
+    multi = [entry for entry in logs if entry[1] == "Multi-log"]
+    assert multi == [("Shift-L", "Multi-log")]
+
+
+def test_collect_help_includes_hidden_bindings() -> None:
+    """show=False bindings are the discoverability gap — they must be listed."""
+    groups = dict(collect_help(_bindings(), []))
+    assert any(desc == "Wrap" for _, desc in groups["Logs"])
+
+
+def test_collect_help_describe_screen_bindings_join_describe_group() -> None:
+    describe = [Binding("slash", "open_search", "Search")]
+    groups = dict(collect_help(_bindings(), describe))
+    assert ("/", "Search") in groups["Describe"]
+
+
+# ---------------------------------------------------------------------------
+# Pure unit tests: command_help
+# ---------------------------------------------------------------------------
+
+
+def test_command_help_covers_grammar() -> None:
+    entries = dict(command_help())
+    assert ":q" in entries
+    assert any("ns" in k for k in entries)
+    assert any("<kind>" in k for k in entries)
+    assert any("ai" in k for k in entries)
+
+
+# ---------------------------------------------------------------------------
+# Pilot tests
+# ---------------------------------------------------------------------------
+
+
+def _pod(name: str) -> PodSummary:
+    return PodSummary(
+        name=name,
+        namespace="default",
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node=None,
+    )
+
+
+def make_app(pods: list[PodSummary]) -> KorvidApp:
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        for obj in pods if kind == "pods" else []:
+            yield ("ADDED", obj)
+        while True:
+            await asyncio.sleep(0.01)
+
+    return KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, source),
+    )
+
+
+def _help_text(app: KorvidApp) -> str:
+    screen = app.screen
+    assert isinstance(screen, HelpScreen)
+    return screen.body_text()
+
+
+async def test_question_mark_opens_help() -> None:
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help open")
+        text = _help_text(app)
+        assert "Logs" in text
+        assert "Global" in text
+
+
+async def test_help_lists_every_app_binding_description() -> None:
+    """The overlay is generated from the real bindings — nothing may drift."""
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help open")
+        text = _help_text(app)
+        for binding in KorvidApp.BINDINGS:
+            if isinstance(binding, Binding):
+                description = binding.description
+            else:
+                description = binding[2] if len(binding) == 3 else ""
+            assert description in text
+
+
+async def test_help_lists_commands() -> None:
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help open")
+        text = _help_text(app)
+        assert ":ns" in text
+        assert "Commands" in text
+
+
+async def test_escape_and_q_close_help() -> None:
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help open")
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, HelpScreen), label="help closed")
+
+        await pilot.press("question_mark")
+        await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help reopen")
+        await pilot.press("q")
+        await until(pilot, lambda: not isinstance(app.screen, HelpScreen), label="help closed q")
+
+
+async def test_question_mark_in_filter_input_stays_text() -> None:
+    """Typing ? inside the filter Input must not hijack into the help screen."""
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("slash")
+        await until(pilot, lambda: app.query_one(FilterBar).display, label="filter open")
+        await pilot.press("question_mark")
+        await pilot.pause()
+        assert not isinstance(app.screen, HelpScreen)
+        assert app.query_one(FilterBar).value == "?"
+
+
+def test_help_screen_is_modal() -> None:
+    from textual.screen import ModalScreen
+
+    assert issubclass(HelpScreen, ModalScreen)

@@ -19,6 +19,7 @@ in the dialog; `--readonly` disables them all.
 | Key | Context | Action |
 |-----|---------|--------|
 | `:` | global | Open command bar — accepts `pods`, `deploy all`, `ns <name>`, `ai`, `model`, `q` |
+| `?` | global | Help overlay — keybindings grouped by context plus `:` commands (Esc/q closes) |
 | `/` | table | Open name filter (Enter keeps filter, Esc clears) |
 | `/` | log pane | Open inline log search |
 | `Enter` | table | Drill down: pods → containers; deploy → replicasets (history) → pods |

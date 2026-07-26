@@ -19,6 +19,23 @@ _NS_KEYWORDS = {"ns", "namespaces"}
 _RESERVED_BUILTINS = {"ai", "agent", "model"}
 
 
+def command_help() -> list[tuple[str, str]]:
+    """``(command, description)`` rows for the help overlay (issue #41).
+
+    Kept next to `parse_command` so grammar changes update the help text in
+    the same review.
+    """
+    ns = "|".join(sorted(_NS_KEYWORDS))
+    builtins = "|".join(sorted(_RESERVED_BUILTINS))
+    return [
+        (":q", "Quit (also :quit)"),
+        (f":{ns}", "Namespace picker, or :ns <name> to switch"),
+        (":<kind>", "Open a resource view (plural, singular, or alias)"),
+        (":<kind> <ns>", "Open a view scoped to a namespace ('all' for every namespace)"),
+        (f":{builtins}", "Agent built-ins (AI panel / model setup)"),
+    ]
+
+
 def parse_command(
     text: str,
     known: Callable[[str], str | None],
