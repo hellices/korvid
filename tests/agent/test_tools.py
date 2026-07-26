@@ -323,6 +323,7 @@ class FakeBridge(UIBridge):
         name: str,
         namespace: str | None = None,
         replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> str:
         self.calls.append(
             (
@@ -333,6 +334,7 @@ class FakeBridge(UIBridge):
                     "name": name,
                     "namespace": namespace,
                     "replicas": replicas,
+                    "resources": resources,
                 },
             )
         )
@@ -417,3 +419,199 @@ async def test_ui_tool_bridge_exception_is_error_result() -> None:
     out = await make_ui_executor(BoomBridge()).execute("set_filter", {"pattern": "x"})
     assert out.startswith("ERROR:")
     assert "widget gone" in out
+
+
+# -- In-place pod resize tool (issue #27) ------------------------------------
+
+
+def test_resize_tools_schema() -> None:
+    from korvid.agent.tools import RESIZE_TOOLS
+
+    assert [t["function"]["name"] for t in RESIZE_TOOLS] == ["resize_pod"]
+    fn = RESIZE_TOOLS[0]["function"]
+    assert RESIZE_TOOLS[0]["type"] == "function"
+    assert set(fn["parameters"]["required"]) == {"name", "namespace", "resources"}
+
+
+async def test_resize_pod_dispatches_to_bridge() -> None:
+    bridge = FakeBridge()
+    resources = {"app": {"requests": {"cpu": "200m"}}}
+    out = await make_ui_executor(bridge).execute(
+        "resize_pod",
+        {"name": "web-1", "namespace": "default", "resources": resources},
+    )
+    assert "approved and executed" in out
+    assert bridge.calls == [
+        (
+            "request_write",
+            {
+                "action": "resize",
+                "kind": "pods",
+                "name": "web-1",
+                "namespace": "default",
+                "replicas": None,
+                "resources": resources,
+            },
+        )
+    ]
+
+
+async def test_resize_pod_rejects_non_dict_resources() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute(
+        "resize_pod", {"name": "web-1", "namespace": "default", "resources": "250m"}
+    )
+    assert out.startswith("ERROR:")
+    assert bridge.calls == []
+
+
+async def test_resize_pod_rejects_malformed_container_entries() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute(
+        "resize_pod",
+        {"name": "web-1", "namespace": "default", "resources": {"app": {"requests": "250m"}}},
+    )
+    assert out.startswith("ERROR:")
+    assert bridge.calls == []
+
+
+async def test_resize_pod_rejects_unknown_section() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute(
+        "resize_pod",
+        {
+            "name": "web-1",
+            "namespace": "default",
+            "resources": {"app": {"claims": {"cpu": "250m"}}},
+        },
+    )
+    assert out.startswith("ERROR:")
+    assert bridge.calls == []
+
+
+async def test_resize_pod_rejects_invalid_quantity_amounts() -> None:
+    """A malformed amount must fail before the user is shown an approval
+    dialog for a request guaranteed to be rejected by the apiserver."""
+    bridge = FakeBridge()
+    for bad in ("lots", "", "-100m", "0"):
+        out = await make_ui_executor(bridge).execute(
+            "resize_pod",
+            {
+                "name": "web-1",
+                "namespace": "default",
+                "resources": {"app": {"requests": {"cpu": bad}}},
+            },
+        )
+        assert out.startswith("ERROR:"), bad
+    assert bridge.calls == []
+
+
+async def test_resize_pod_accepts_full_quantity_grammar() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute(
+        "resize_pod",
+        {
+            "name": "web-1",
+            "namespace": "default",
+            "resources": {"app": {"requests": {"cpu": "100u", "memory": ".5Gi"}}},
+        },
+    )
+    assert "approved and executed" in out
+
+
+async def test_resize_pod_rejects_blank_container_names() -> None:
+    """An empty or whitespace-only container key passes an isinstance check
+    but produces a patch Kubernetes is guaranteed to reject; it must fail
+    before any approval dialog opens."""
+    for container in ("", "   "):
+        bridge = FakeBridge()
+        executor = ToolExecutor(kube=None, aliases={}, ui=bridge)  # type: ignore[arg-type]
+        result = await executor.execute(
+            "resize_pod",
+            {
+                "name": "web-1",
+                "namespace": "default",
+                "resources": {container: {"requests": {"cpu": "1"}}},
+            },
+        )
+        assert result.startswith("ERROR:")
+        assert bridge.calls == []
+
+
+async def test_resize_pod_normalizes_padded_amounts() -> None:
+    """parse_quantity strips whitespace for validation, but Kubernetes'
+    quantity parser does not: a padded amount like ' 200m ' must be
+    normalized before it crosses the UI bridge, or the approved resize
+    fails server-side."""
+    bridge = FakeBridge()
+    executor = ToolExecutor(kube=None, aliases={}, ui=bridge)  # type: ignore[arg-type]
+    result = await executor.execute(
+        "resize_pod",
+        {
+            "name": "web-1",
+            "namespace": "default",
+            "resources": {"app": {"requests": {"cpu": " 200m "}}},
+        },
+    )
+    assert not result.startswith("ERROR:")
+    _, kwargs = bridge.calls[-1]
+    assert kwargs["resources"] == {"app": {"requests": {"cpu": "200m"}}}
+
+
+async def test_resize_pod_normalizes_padded_container_names() -> None:
+    """Kubernetes container names cannot contain spaces: a padded key like
+    ' app ' must be normalized before it crosses the UI bridge, not turned
+    into an approval dialog for a patch guaranteed to fail."""
+    bridge = FakeBridge()
+    executor = ToolExecutor(kube=None, aliases={}, ui=bridge)  # type: ignore[arg-type]
+    result = await executor.execute(
+        "resize_pod",
+        {
+            "name": "web-1",
+            "namespace": "default",
+            "resources": {" app ": {"requests": {"cpu": "200m"}}},
+        },
+    )
+    assert not result.startswith("ERROR:")
+    _, kwargs = bridge.calls[-1]
+    assert kwargs["resources"] == {"app": {"requests": {"cpu": "200m"}}}
+
+
+async def test_resize_pod_rejects_container_name_collision_after_normalization() -> None:
+    """'app' and ' app ' collapsing to one key must not silently drop one
+    requested set of changes (last-write-wins) - reject the collision."""
+    bridge = FakeBridge()
+    executor = ToolExecutor(kube=None, aliases={}, ui=bridge)  # type: ignore[arg-type]
+    result = await executor.execute(
+        "resize_pod",
+        {
+            "name": "web-1",
+            "namespace": "default",
+            "resources": {
+                "app": {"requests": {"cpu": "200m"}},
+                " app ": {"requests": {"memory": "1Gi"}},
+            },
+        },
+    )
+    assert result.startswith("ERROR:")
+    assert bridge.calls == []
+
+
+async def test_resize_pod_rejects_invalid_container_name_grammar() -> None:
+    """Container names are RFC 1123 DNS labels: lowercase alphanumerics and
+    hyphens, alphanumeric endpoints, at most 63 characters. Anything else
+    produces a patch the apiserver must reject - fail before the approval
+    dialog opens."""
+    for container in ("app sidecar", "App", "-app", "app-", "a" * 64):
+        bridge = FakeBridge()
+        executor = ToolExecutor(kube=None, aliases={}, ui=bridge)  # type: ignore[arg-type]
+        result = await executor.execute(
+            "resize_pod",
+            {
+                "name": "web-1",
+                "namespace": "default",
+                "resources": {container: {"requests": {"cpu": "1"}}},
+            },
+        )
+        assert result.startswith("ERROR:")
+        assert bridge.calls == []

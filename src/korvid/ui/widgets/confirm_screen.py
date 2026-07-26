@@ -15,7 +15,7 @@ from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
@@ -24,9 +24,10 @@ _DIALOG_CSS = """
 ConfirmScreen, ReplicasPrompt {
     align: center middle;
 }
-ConfirmScreen > Vertical, ReplicasPrompt > Vertical {
+ConfirmScreen > VerticalScroll, ReplicasPrompt > Vertical {
     width: 70;
     height: auto;
+    max-height: 80%;
     border: heavy $error;
     padding: 1 2;
     background: $surface;
@@ -92,7 +93,10 @@ class ConfirmScreen(ModalScreen[bool]):
         self._created_time = Message().time
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        # A resize on a multi-container pod can produce more operation and
+        # preview lines than a short terminal shows; a scrollable body keeps
+        # every requested change reviewable before approval.
+        with VerticalScroll():
             yield Static(self._title, classes="confirm-title", markup=False)
             yield Static(self._operation, classes="confirm-operation", markup=False)
             if self._preview is not None:

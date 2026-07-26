@@ -71,6 +71,7 @@ from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.pick_screen import PickScreen
+from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
 
@@ -324,6 +325,7 @@ class KorvidApp(App[None]):
         Binding("ctrl+a", "toggle_agent", "AI", priority=True),
         Binding("ctrl+d", "delete_resource", "Delete"),
         Binding("r", "rollout_restart", "Restart", show=False),
+        Binding("R", "resize_pod", "Resize", show=False),
         Binding("S", "scale_resource", "Scale", show=False),
         Binding("e", "edit_resource", "Edit", show=False),
     ]
@@ -362,6 +364,7 @@ class KorvidApp(App[None]):
         mcp: MCPController | None = None,
         edit_text: Callable[[str], Awaitable[str | None]] | None = None,
         metrics: MetricsPoller | None = None,
+        pod_resize_supported: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
@@ -377,6 +380,9 @@ class KorvidApp(App[None]):
         self._mcp = mcp
         self._edit_text = edit_text
         self._metrics = metrics
+        #: pods/resize subresource discovered on the connected cluster
+        #: (1.35 GA); gates the R keybinding and the resize agent tool.
+        self._pod_resize_supported = pod_resize_supported
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -1572,6 +1578,7 @@ class KorvidApp(App[None]):
         "rollout_restart": ("patch", ""),
         "debug": ("patch", "ephemeralcontainers"),
         "edit": ("update", ""),
+        "resize": ("patch", "resize"),
     }
 
     @staticmethod
@@ -2164,6 +2171,133 @@ class KorvidApp(App[None]):
                 f"Scale {self._gvr_label(meta)}/{name}?",
                 f"PATCH {self._gvr_label(meta)}/{name}/scale: replicas {shown} -> {replicas}"
                 f"{self._write_locus(ns)}",
+                preview=preview,
+            ),
+            _done,
+        )
+
+    async def action_resize_pod(self) -> None:
+        """R: in-place resize of the selected pod (prompt, then confirm).
+
+        Only offered on the pods view and only when discovery found the
+        pods/resize subresource (Kubernetes 1.35 GA)."""
+        ops = self._write_ops
+        if ops is None:
+            self.notify("Resize unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name, uid = target
+        if (meta.group, meta.plural) != ("", "pods"):
+            self.notify(f"resize does not apply to {self._gvr_label(meta)}", severity="warning")
+            return
+        if not self._pod_resize_supported:
+            self.notify(
+                "This cluster does not expose pods/resize (requires Kubernetes 1.35+)",
+                severity="warning",
+            )
+            return
+        if not await self._precheck_keybinding_write("resize", meta, ns, name):
+            return
+        containers = await self._pod_container_resources(ns, name)
+        if containers is None:
+            return
+        if not self._write_context_intact("resize", meta, ns, name, phase="the manifest fetch"):
+            return
+
+        def _on_resources(resources: dict[str, dict[str, dict[str, str]]] | None) -> None:
+            if not resources:
+                return
+            # The dry-run round trip must not run inside a screen callback:
+            # a worker fetches the preview, revalidates, then confirms.
+            self.run_worker(self._confirm_resize(meta, ns, name, uid, resources))
+
+        await self.push_screen(
+            ResizePrompt(f"{self._gvr_label(meta)}/{name}", containers=containers), _on_resources
+        )
+
+    async def _pod_container_resources(
+        self, ns: str | None, name: str
+    ) -> list[tuple[str, dict[str, dict[str, str]]]] | None:
+        """Current per-container requests/limits from the live manifest, in
+        spec order, to prefill the resize prompt; None (with a notification)
+        when the manifest cannot be fetched."""
+        if self._get_manifest is None:
+            self.notify("Resize unavailable: no manifest source", severity="warning")
+            return None
+        try:
+            manifest = await self._get_manifest("pods", ns, name)
+        except Exception as exc:
+            self.notify(f"Could not fetch pod manifest: {exc}", severity="error")
+            return None
+        containers: list[tuple[str, dict[str, dict[str, str]]]] = []
+        for spec in manifest.get("spec", {}).get("containers", []):
+            resources = {
+                section: dict(values)
+                for section, values in spec.get("resources", {}).items()
+                if section in ("requests", "limits") and isinstance(values, dict)
+            }
+            containers.append((str(spec.get("name", "")), resources))
+        if not containers:
+            self.notify("Pod manifest lists no containers", severity="warning")
+            return None
+        return containers
+
+    @staticmethod
+    def _resize_summary(resources: dict[str, dict[str, dict[str, str]]]) -> str:
+        """One-line 'app: requests.cpu=200m, limits.memory=1Gi; ...' summary
+        shown in the approval dialog and recorded in the audit detail."""
+        parts = []
+        for container, sections in resources.items():
+            changes = ", ".join(
+                f"{section}.{quantity}={value}"
+                for section, values in sections.items()
+                for quantity, value in values.items()
+            )
+            parts.append(f"{container}: {changes}")
+        return "; ".join(parts)
+
+    async def _confirm_resize(
+        self,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+        resources: dict[str, dict[str, dict[str, str]]],
+    ) -> None:
+        """Dry-run preview + approval dialog for an in-place pod resize.
+        Revalidates the selection after the preview round trip: keystrokes
+        during the await must never land on a confirmation for a different
+        row."""
+        ops = self._write_ops
+        if ops is None:
+            return
+        namespace = ns or ""
+        preview = await self._dry_run_preview(
+            ops.preview_resize(namespace, name, resources, uid=uid)
+        )
+        if not self._write_context_intact("resize", meta, ns, name, phase="the dry-run preview"):
+            return
+        summary = self._resize_summary(resources)
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_write(
+                        "resize",
+                        meta,
+                        ns,
+                        name,
+                        ops.resize_pod(namespace, name, resources, uid=uid),
+                        detail=summary,
+                    )
+                )
+
+        await self.push_screen(
+            ConfirmScreen(
+                f"Resize pods/{name}?",
+                f"PATCH pods/{name}/resize: {summary}{self._write_locus(ns)}",
                 preview=preview,
             ),
             _done,
@@ -2772,6 +2906,7 @@ class KorvidApp(App[None]):
         name: str,
         namespace: str | None = None,
         replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> str:
         """Approval-gated write requested by the agent (spec §6.2): opens the
         same ConfirmScreen as the keybindings; only the user's keystroke can
@@ -2781,7 +2916,9 @@ class KorvidApp(App[None]):
         # One stamp per approval request (rollout restarts only): the preview
         # and the executed write send the identical patch body.
         stamp = restart_stamp()
-        built = self._agent_write_op(action, kind, name, namespace, replicas, restarted_at=stamp)
+        built = self._agent_write_op(
+            action, kind, name, namespace, replicas, resources, restarted_at=stamp
+        )
         if isinstance(built, str):
             return built
         meta, ns, op, operation, detail = built
@@ -2800,7 +2937,9 @@ class KorvidApp(App[None]):
             uid = await self._target_uid(kind.strip().lower(), ns, name)
         except ApiStatusError:
             return f"ERROR: {self._gvr_label(meta)}/{name} not found{self._write_locus(ns)}"
-        preview = await self._preview_for_action(action, meta, ns, name, replicas, uid, stamp)
+        preview = await self._preview_for_action(
+            action, meta, ns, name, replicas, resources, uid, stamp
+        )
         require = name if action == "delete" and not meta.namespaced else None
         decision = await self._await_user_approval(
             f"Agent requests: {action} {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
@@ -2830,6 +2969,7 @@ class KorvidApp(App[None]):
         ns: str | None,
         name: str,
         replicas: int | None,
+        resources: dict[str, dict[str, dict[str, str]]] | None,
         uid: str | None,
         restarted_at: str,
     ) -> list[str] | None:
@@ -2848,6 +2988,10 @@ class KorvidApp(App[None]):
         if action == "rollout_restart":
             return await self._dry_run_preview(
                 ops.preview_rollout_restart(meta, ns, name, uid=uid, restarted_at=restarted_at)
+            )
+        if action == "resize" and resources:
+            return await self._dry_run_preview(
+                ops.preview_resize(ns or "", name, resources, uid=uid)
             )
         return None
 
@@ -2890,6 +3034,7 @@ class KorvidApp(App[None]):
         name: str,
         namespace: str | None,
         replicas: int | None,
+        resources: dict[str, dict[str, dict[str, str]]] | None,
         *,
         restarted_at: str,
     ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
@@ -2920,6 +3065,8 @@ class KorvidApp(App[None]):
             return self._agent_scale_op(meta, ns, name, replicas)
         if action == "rollout_restart":
             return self._agent_restart_op(meta, ns, name, restarted_at)
+        if action == "resize":
+            return self._agent_resize_op(meta, ns, name, resources)
         return f"ERROR: unknown write action {action!r}"
 
     def _agent_delete_op(
@@ -2971,6 +3118,32 @@ class KorvidApp(App[None]):
             f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
             f"{self._write_locus(ns)}",
             "requested by agent",
+        )
+
+    def _agent_resize_op(
+        self,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        resources: dict[str, dict[str, dict[str, str]]] | None,
+    ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
+        ops = self._write_ops
+        if ops is None:
+            return "ERROR: resize unavailable in this session"
+        if (meta.group, meta.plural) != ("", "pods"):
+            return f"ERROR: resize does not apply to {self._gvr_label(meta)}"
+        if not self._pod_resize_supported:
+            return "ERROR: this cluster does not expose pods/resize (requires Kubernetes 1.35+)"
+        if not resources:
+            return "ERROR: resize requires a non-empty 'resources' argument"
+        namespace = ns or ""
+        summary = self._resize_summary(resources)
+        return (
+            meta,
+            ns,
+            lambda uid: ops.resize_pod(namespace, name, resources, uid=uid),
+            f"PATCH pods/{name}/resize: {summary}{self._write_locus(ns)}",
+            f"{summary}; requested by agent",
         )
 
     async def _wait_until_surfaceable(self, deadline: float) -> bool:
@@ -3127,5 +3300,8 @@ class AppUIBridge(UIBridge):
         name: str,
         namespace: str | None = None,
         replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> str:
-        return await self._app.agent_request_write(action, kind, name, namespace, replicas)
+        return await self._app.agent_request_write(
+            action, kind, name, namespace, replicas, resources
+        )

@@ -1,0 +1,207 @@
+"""ResizePrompt collects per-container requests/limits for in-place pod
+resize (issue #27). Prefilled with current values; submit returns only the
+quantities that actually changed (strategic merge keeps the rest)."""
+
+from textual.app import App, ComposeResult
+from textual.widgets import Input, Static
+
+from korvid.ui.widgets.resize_prompt import ResizePrompt
+
+_CONTAINERS = [
+    (
+        "app",
+        {
+            "requests": {"cpu": "100m", "memory": "128Mi"},
+            "limits": {"cpu": "250m", "memory": "256Mi"},
+        },
+    ),
+    ("sidecar", {"requests": {"cpu": "50m"}}),
+]
+
+
+class HostApp(App[None]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.result: object = "unset"
+
+    def compose(self) -> ComposeResult:
+        yield Static("host")
+
+
+async def _open(app: HostApp) -> ResizePrompt:
+    prompt = ResizePrompt("pods/web-1 in default", containers=_CONTAINERS)
+
+    def _done(v: object) -> None:
+        app.result = v
+
+    await app.push_screen(prompt, _done)
+    return prompt
+
+
+async def test_inputs_prefilled_with_current_values() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await pilot.pause()
+        values = {i.id: i.value for i in app.screen.query(Input)}
+        assert values["resize-0-requests-cpu"] == "100m"
+        assert values["resize-0-limits-memory"] == "256Mi"
+        # unset quantities show empty (= keep as-is)
+        assert values["resize-1-requests-memory"] == ""
+        assert values["resize-1-limits-cpu"] == ""
+
+
+async def test_submit_returns_only_changed_quantities() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await pilot.pause()
+        app.screen.query_one("#resize-0-requests-cpu", Input).value = "200m"
+        app.screen.query_one("#resize-1-requests-cpu", Input).value = "75m"
+        app.screen.query_one("#resize-0-requests-cpu", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == {
+            "app": {"requests": {"cpu": "200m"}},
+            "sidecar": {"requests": {"cpu": "75m"}},
+        }
+
+
+async def test_escape_cancels_with_none() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.result is None
+
+
+async def test_invalid_quantity_blocks_submit() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await pilot.pause()
+        app.screen.query_one("#resize-0-requests-cpu", Input).value = "lots"
+        app.screen.query_one("#resize-0-requests-cpu", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == "unset"
+        assert app.screen is prompt
+
+
+async def test_submit_with_no_changes_stays_open() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await pilot.pause()
+        app.screen.query_one("#resize-0-requests-cpu", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == "unset"
+        assert app.screen is prompt
+
+
+async def test_clearing_a_field_keeps_current_value() -> None:
+    """Empty input means 'keep as-is', not 'remove the quantity'."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await pilot.pause()
+        app.screen.query_one("#resize-0-requests-cpu", Input).value = ""
+        app.screen.query_one("#resize-0-limits-cpu", Input).value = "500m"
+        app.screen.query_one("#resize-0-limits-cpu", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == {"app": {"limits": {"cpu": "500m"}}}
+
+
+async def test_full_kubernetes_quantity_grammar_accepted() -> None:
+    """Suffixes like 100n/100u and exponent forms (1e3) are valid quantities;
+    the prompt must not reject what the apiserver accepts."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await pilot.pause()
+        app.screen.query_one("#resize-0-requests-cpu", Input).value = "100u"
+        app.screen.query_one("#resize-0-requests-memory", Input).value = "1e3"
+        app.screen.query_one("#resize-0-requests-cpu", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == {"app": {"requests": {"cpu": "100u", "memory": "1e3"}}}
+
+
+async def test_negative_quantity_rejected() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await pilot.pause()
+        app.screen.query_one("#resize-0-requests-cpu", Input).value = "-100m"
+        app.screen.query_one("#resize-0-requests-cpu", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == "unset"
+        assert app.screen is prompt
+
+
+async def test_many_containers_scroll_instead_of_clipping() -> None:
+    """A multi-container pod can exceed the dialog height; every input must
+    stay reachable, so the form body scrolls."""
+    from textual.containers import VerticalScroll
+
+    containers = [(f"c{i}", {"requests": {"cpu": "100m"}}) for i in range(8)]
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = ResizePrompt("pods/web-1 in default", containers=containers)
+
+        def _done(v: object) -> None:
+            app.result = v
+
+        await app.push_screen(prompt, _done)
+        await pilot.pause()
+        assert len(app.screen.query(Input)) == 32
+        assert app.screen.query(VerticalScroll)
+
+
+async def test_zero_quantity_rejected() -> None:
+    """cpu=0 is server-valid but almost certainly a typo in a resize; the
+    prompt rejects it (removing a request belongs to manifest edit, not R)."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await pilot.pause()
+        app.screen.query_one("#resize-0-requests-cpu", Input).value = "0"
+        app.screen.query_one("#resize-0-requests-cpu", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == "unset"
+        assert app.screen is prompt
+
+
+async def test_bare_point_decimals_accepted() -> None:
+    """The Quantity grammar allows '<digits>.' and '.<digits>' forms."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await pilot.pause()
+        app.screen.query_one("#resize-0-requests-cpu", Input).value = ".5"
+        app.screen.query_one("#resize-0-limits-cpu", Input).value = "1."
+        app.screen.query_one("#resize-0-requests-cpu", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == {"app": {"requests": {"cpu": ".5"}, "limits": {"cpu": "1."}}}
+
+
+async def test_prompt_has_persistent_cpu_memory_labels() -> None:
+    """Placeholders vanish once a field is prefilled; when both current
+    quantities are plain values the two inputs would be indistinguishable.
+    Each container needs persistent cpu/memory column labels."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await pilot.pause()
+        labels = [
+            str(w.render()) for w in prompt.query(Static) if "resize-quantity-label" in w.classes
+        ]
+        assert "cpu" in labels
+        assert "memory" in labels

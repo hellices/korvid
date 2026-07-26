@@ -33,10 +33,12 @@ NO_WRITE_PROMPT = (
     "themselves instead."
 )
 
-# Appended only when the approval-gated write tools are armed.
+# Appended only when the approval-gated write tools are armed. The armed
+# tool names are prepended dynamically in __init__ so the instruction never
+# omits a conditionally registered tool (resize_pod) or advertises one that
+# was not offered.
 WRITE_PROMPT = (
-    "You can request cluster writes with delete_resource, scale_resource, and "
-    "rollout_restart. These never execute directly: each call opens an "
+    "These never execute directly: each call opens an "
     "approval dialog in the TUI, and the operation runs only if the user "
     "approves it with a keystroke. State clearly what you are about to "
     "request and why before calling a write tool, and report the outcome "
@@ -119,8 +121,10 @@ class AgentRuntime:
         armed = {t.get("function", {}).get("name") for t in self._tools}
         if armed & UI_TOOL_NAMES:
             prompt = f"{prompt} {UI_DRIVE_PROMPT}"
-        if armed & WRITE_TOOL_NAMES:
-            prompt = f"{prompt} {WRITE_PROMPT}"
+        armed_writes = sorted(armed & WRITE_TOOL_NAMES)
+        if armed_writes:
+            names = ", ".join(armed_writes)
+            prompt = f"{prompt} You can request cluster writes with {names}. {WRITE_PROMPT}"
         else:
             prompt = f"{prompt} {NO_WRITE_PROMPT}"
         self._max_iterations = max_iterations
