@@ -132,7 +132,8 @@ def test_app_handler_key_help_uses_known_groups() -> None:
 def test_command_help_covers_grammar() -> None:
     entries = dict(command_help())
     assert ":q" in entries
-    assert any("ns" in k for k in entries)
+    # Primary short form leads the alias list so the row reads `:ns|namespaces`.
+    assert ":ns|namespaces" in entries
     assert any("<kind>" in k for k in entries)
     assert any("ai" in k for k in entries)
 

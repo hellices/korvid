@@ -31,7 +31,8 @@ def command_help() -> list[tuple[str, str]]:
     Kept next to `parse_command` so grammar changes update the help text in
     the same review.
     """
-    ns = "|".join(sorted(_NS_KEYWORDS))
+    # Primary short form first, remaining aliases sorted for stability.
+    ns = "|".join(["ns", *sorted(_NS_KEYWORDS - {"ns"})])
     return [
         (":q", "Quit (also :quit)"),
         (f":{ns}", "Namespace picker, or :ns <name> to switch"),
