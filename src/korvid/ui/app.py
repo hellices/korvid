@@ -671,19 +671,23 @@ class KorvidApp(App[None]):
         # The stack clear happens inside the navigation lock so a concurrent
         # drill (agent path) can never interleave between clear and the
         # kind/scope transition, which would strand a filterless child view.
-        namespace = message.namespace
-        if namespace is None and message.view is not None:
-            meta = self.aliases.get(message.view)
-            if meta is not None and (meta.group, meta.plural) == (
-                PACKAGES_GROUP,
-                "packagemanifests",
-            ):
-                # Catalog entries live in catalog namespaces (e.g. "olm"),
-                # not the user's workload namespace: `:operators` without an
-                # explicit namespace would commonly show an empty table, so
-                # the catalog view defaults to the cluster-wide scope.
-                namespace = ALL_NAMESPACES
-        await self._navigate(message.view, namespace, drill_op=self._drill.clear)
+        await self._navigate(message.view, message.namespace, drill_op=self._drill.clear)
+
+    def _default_scope_for(self, view: str | None, namespace: str | None) -> str | None:
+        """Catalog entries live in catalog namespaces (e.g. "olm"), not the
+        user's workload namespace: any packagemanifests view without an
+        explicit namespace defaults to the cluster-wide scope or the table
+        would commonly come up empty. Applied inside _navigate so every
+        entry path (command bar, agent, drill) behaves alike."""
+        if namespace is not None or view is None:
+            return namespace
+        meta = self.aliases.get(view)
+        if meta is not None and (meta.group, meta.plural) == (
+            PACKAGES_GROUP,
+            "packagemanifests",
+        ):
+            return ALL_NAMESPACES
+        return None
 
     async def _navigate(
         self,
@@ -702,7 +706,7 @@ class KorvidApp(App[None]):
         async with self._nav_lock:
             if drill_op is not None:
                 drill_op()
-            await self._navigate_locked(view, namespace)
+            await self._navigate_locked(view, self._default_scope_for(view, namespace))
         self.post_message(ResourcesUpdated(self.current_kind))
         self._refresh_status()
 
@@ -2609,7 +2613,9 @@ class KorvidApp(App[None]):
             )
             return
         operation = (
-            f"CREATE subscriptions/{facts.package} in namespace {namespace}\n\n"
+            f"CREATE subscriptions/{facts.package} in namespace {namespace}\n"
+            "note: OLM requires an OperatorGroup in the target namespace -"
+            " without one the Subscription is accepted but stays pending\n\n"
             + yaml.safe_dump(manifest, sort_keys=False)
         )
 

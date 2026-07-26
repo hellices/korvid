@@ -144,3 +144,29 @@ async def test_escape_cancels_with_none() -> None:
         await pilot.press("escape")
         await until(pilot, lambda: app.result != "unset", label="prompt cancelled")
         assert app.result is None
+
+
+async def test_enter_buffered_before_prompt_does_not_submit_defaults() -> None:
+    """An Enter typed while the caller fetched the PackageManifest is
+    created before the prompt exists and must not submit the wizard with
+    defaults; a fresh Enter afterwards still submits."""
+    from textual import events
+
+    app = HostApp()
+    async with app.run_test() as pilot:
+        # Timestamped before the prompt exists, delivered after (same
+        # situation as a keystroke queued during the manifest fetch).
+        stale = events.Key("enter", None)
+        await pilot.pause()
+
+        await _open(app)
+        await _opened(app, pilot)
+        focused = app.focused
+        assert focused is not None
+        focused.post_message(stale)
+        await pilot.pause()
+        assert app.result == "unset"  # stale Enter discarded
+        await pilot.press("enter")
+        await until(pilot, lambda: app.result != "unset", label="fresh Enter submits")
+        result: object = app.result
+        assert result == ("operators", "stable", "Automatic")

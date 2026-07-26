@@ -18,6 +18,11 @@ from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
 
 MAX_RESULT_CHARS = 8000
 
+#: OperatorHub catalogs commonly serve hundreds of packages; keep the
+#: catalog listing well under the shared result cap so the installed
+#: section is never sacrificed to it.
+_MAX_CATALOG_PACKAGES = 60
+
 _TRUNCATION_SUFFIX = "\n… [truncated — narrow the query]"
 
 
@@ -658,27 +663,36 @@ class ToolExecutor:
                 " to list."
             )
         namespace: str | None = args.get("namespace")
-        lines = ["AVAILABLE (operator catalog):"]
-        for pkg in await self._kube.list_objects(pkg_meta, None):
-            channels = ",".join(getattr(pkg, "channels", ()) or ())
-            lines.append(
-                f"  {pkg.name}  catalog={getattr(pkg, 'catalog', '') or '?'}"
-                f"  default={getattr(pkg, 'default_channel', '') or '?'}"
-                f"  channels={channels or '?'}"
-            )
+        lines: list[str] = []
+        # Installed state first: it is what the user most likely asked
+        # about, and a large catalog must not push it past the result cap.
         sub_meta = resolve_olm_meta(self._aliases, "subscriptions", OPERATORS_GROUP)
         if sub_meta is not None:
             lines.append("INSTALLED (subscriptions):")
             subs = await self._kube.list_objects(sub_meta, namespace)
             if not subs:
                 lines.append("  (none)")
-            for sub in subs:
+            for sub in sorted(subs, key=lambda s: (s.namespace, s.name)):
                 lines.append(
                     f"  {sub.namespace}/{sub.name}"
                     f"  channel={getattr(sub, 'channel', '') or '?'}"
                     f"  csv={getattr(sub, 'installed_csv', '') or '?'}"
                     f"  state={getattr(sub, 'state', '') or '?'}"
                 )
+        lines.append("AVAILABLE (operator catalog):")
+        packages = sorted(await self._kube.list_objects(pkg_meta, None), key=lambda p: p.name)
+        # OperatorHub catalogs commonly serve hundreds of packages; cap the
+        # listing so the tool result stays within the shared result budget.
+        shown = packages[:_MAX_CATALOG_PACKAGES]
+        for pkg in shown:
+            channels = ",".join(getattr(pkg, "channels", ()) or ())
+            lines.append(
+                f"  {pkg.name}  catalog={getattr(pkg, 'catalog', '') or '?'}"
+                f"  default={getattr(pkg, 'default_channel', '') or '?'}"
+                f"  channels={channels or '?'}"
+            )
+        if len(packages) > len(shown):
+            lines.append(f"  ...and {len(packages) - len(shown)} more catalog packages")
         return "\n".join(lines)
 
     async def _get_resource(self, args: dict[str, Any]) -> str:

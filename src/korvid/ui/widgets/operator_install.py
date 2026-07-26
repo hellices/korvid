@@ -15,10 +15,12 @@ from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
+from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from korvid.k8s.olm import APPROVAL_MODES, PackageInstallFacts
+from korvid.ui.widgets.confirm_screen import FreshKeysInput
 
 _CSS = """
 OperatorInstallPrompt {
@@ -69,6 +71,11 @@ class OperatorInstallPrompt(ModalScreen["tuple[str, str, str] | None"]):
         super().__init__()
         self._facts = facts
         self._namespace = namespace
+        # Keystrokes queued while the caller fetched the PackageManifest
+        # predate this prompt; a buffered Enter must not submit the wizard
+        # with defaults before the user has seen it. Same clock as event
+        # timestamps (Message.time).
+        self._created_time = Message().time
 
     def compose(self) -> ComposeResult:
         facts = self._facts
@@ -88,7 +95,9 @@ class OperatorInstallPrompt(ModalScreen["tuple[str, str, str] | None"]):
             ):
                 with Horizontal(classes="install-row"):
                     yield Static(label, classes="install-label", markup=False)
-                    yield Input(value=value, id=field_id, select_on_focus=True)
+                    yield FreshKeysInput(
+                        self._created_time, value=value, id=field_id, select_on_focus=True
+                    )
 
     def on_mount(self) -> None:
         self.query(Input).first().focus()

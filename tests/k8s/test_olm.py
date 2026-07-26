@@ -135,3 +135,17 @@ def test_package_description_annotation_is_normalized_to_one_line() -> None:
         ],
     }
     assert package_description(status) == "First line."
+
+
+def test_build_subscription_rejects_non_dns1123_package_name() -> None:
+    """Catalog entries are cluster-supplied data: a package name that is not
+    a DNS-1123 subdomain must fail here, not in the API request path."""
+    with pytest.raises(ValueError, match="DNS-1123"):
+        build_subscription(
+            package="Bad_Name!",
+            namespace="operators",
+            channel="stable",
+            source="cat",
+            source_namespace="olm",
+            approval="Automatic",
+        )

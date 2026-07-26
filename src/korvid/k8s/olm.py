@@ -10,6 +10,7 @@ the Subscription manifest that the approval dialog shows in full.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -64,6 +65,10 @@ def channel_names(status: dict[str, Any]) -> tuple[str, ...]:
 #: Row cap for the catalog's short description: catalog objects come from
 #: the cluster and a hostile entry must not bloat the table.
 MAX_DESCRIPTION_CHARS = 80
+
+#: DNS-1123 subdomain (lowercase alphanumerics, '-' and '.'; 253-char cap
+#: checked separately) - what the API server requires of metadata.name.
+_DNS1123_SUBDOMAIN = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
 
 
 def package_description(status: dict[str, Any]) -> str:
@@ -144,6 +149,11 @@ def build_subscription(
     for label, value in fields.items():
         if not value.strip():
             raise ValueError(f"{label} must not be blank")
+    # Catalog entries are cluster-supplied data: the package name becomes
+    # metadata.name, so validate it as a DNS-1123 subdomain here rather than
+    # letting a hostile entry ride into the API request path.
+    if not _DNS1123_SUBDOMAIN.match(package.strip()) or len(package.strip()) > 253:
+        raise ValueError(f"package name {package.strip()!r} is not a valid DNS-1123 subdomain")
     if approval not in APPROVAL_MODES:
         raise ValueError(f"approval must be one of {APPROVAL_MODES}, got {approval!r}")
     return {

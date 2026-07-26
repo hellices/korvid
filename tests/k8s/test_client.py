@@ -993,3 +993,22 @@ async def test_create_object_requires_namespace_for_namespaced_kind() -> None:
     ):
         await client.create_object(sub_meta, None, {"metadata": {}})
     api.call_api.assert_not_called()
+
+
+async def test_create_object_posts_on_cluster_scoped_collection_path() -> None:
+    """create_object is a generic API: a cluster-scoped kind POSTs on the
+    bare collection path (no namespaces segment)."""
+    client = KubeClient()
+    api = _write_api()
+    og_meta = ResourceMeta("ClusterThing", "clusterthings", "example.com", "v1", False)
+    manifest = {
+        "apiVersion": "example.com/v1",
+        "kind": "ClusterThing",
+        "metadata": {"name": "global"},
+    }
+    with patch.object(client, "_api", api):
+        await client.create_object(og_meta, None, manifest)
+    args, kwargs = api.call_api.call_args
+    assert args[0] == "/apis/example.com/v1/clusterthings"
+    assert args[1] == "POST"
+    assert kwargs["body"] == manifest
