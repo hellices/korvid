@@ -101,6 +101,29 @@ def test_collect_help_describe_screen_bindings_join_describe_group() -> None:
     assert ("/", "Search") in groups["Describe"]
 
 
+def test_collect_help_appends_handler_keys_to_their_groups() -> None:
+    """Keys handled in event handlers (not BINDINGS) still get rows."""
+    handler_keys = [
+        ("Table", "enter", "Drill down"),
+        ("Table", "escape", "Pop drill level"),
+        ("Logs", "escape", "Close pane"),
+    ]
+    groups = dict(collect_help(_bindings(), [], handler_keys=handler_keys))
+    assert ("Enter", "Drill down") in groups["Table"]
+    assert ("Esc", "Pop drill level") in groups["Table"]
+    assert ("Esc", "Close pane") in groups["Logs"]
+
+
+def test_app_handler_key_help_uses_known_groups() -> None:
+    """HANDLER_KEY_HELP entries must reference groups the overlay renders."""
+    from korvid.ui.widgets.help_screen import _GROUP_ORDER
+
+    assert KorvidApp.HANDLER_KEY_HELP, "expected handler-key help metadata"
+    for group, key, description in KorvidApp.HANDLER_KEY_HELP:
+        assert group in _GROUP_ORDER, f"unknown group {group!r} for key {key!r}"
+        assert description
+
+
 # ---------------------------------------------------------------------------
 # Pure unit tests: command_help
 # ---------------------------------------------------------------------------
@@ -186,6 +209,21 @@ async def test_help_lists_every_app_binding_description() -> None:
             else:
                 description = binding[2] if len(binding) == 3 else ""
             assert description in text
+
+
+async def test_help_lists_handler_keys() -> None:
+    """Enter (drill down) and Esc (pop/close) are handled outside BINDINGS
+    but are real user-facing keys — the overlay must render them too."""
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help open")
+        text = _help_text(app)
+        for _, _, description in KorvidApp.HANDLER_KEY_HELP:
+            assert description in text
+        assert "Drill down" in text
+        assert "Enter" in text
 
 
 async def test_help_lists_commands() -> None:

@@ -87,6 +87,7 @@ def _as_binding(binding: BindingType) -> Binding:
 def collect_help(
     app_bindings: Sequence[BindingType],
     describe_bindings: Sequence[BindingType],
+    handler_keys: Sequence[tuple[str, str, str]] = (),
 ) -> list[tuple[str, list[tuple[str, str]]]]:
     """Group ``(key, description)`` rows from real bindings for the overlay.
 
@@ -97,6 +98,10 @@ def collect_help(
     merge into one row under the first key encountered, and hidden
     (``show=False``) bindings are included on purpose — they are exactly the
     discoverability gap.
+
+    `handler_keys` covers user-facing keys handled in event handlers rather
+    than ``BINDINGS`` (e.g. Enter drill-down, Esc close/pop); each entry is
+    ``(group, key, description)``.
     """
     groups: dict[str, list[tuple[str, str]]] = {name: [] for name in _GROUP_ORDER}
     seen_actions: set[tuple[str, str]] = set()
@@ -114,6 +119,8 @@ def collect_help(
             _add(group, binding)
     for raw in describe_bindings:
         _add("Describe", _as_binding(raw))
+    for group, key, description in handler_keys:
+        groups[group].append((key_label(key), description))
 
     return [(name, groups[name]) for name in _GROUP_ORDER if groups[name]]
 

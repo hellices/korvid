@@ -337,6 +337,16 @@ class KorvidApp(App[None]):
         Binding("e", "edit_resource", "Edit", show=False),
     ]
 
+    # User-facing keys handled in event handlers rather than BINDINGS:
+    # Enter drills down via `on_data_table_row_selected`, Escape closes
+    # panes / pops a drill level via `on_key`.  Listed here so the help
+    # overlay (`?`) renders them alongside the real bindings.
+    HANDLER_KEY_HELP: ClassVar[tuple[tuple[str, str, str], ...]] = (
+        ("Table", "enter", "Drill down (pods → containers, deploy → rs → pods)"),
+        ("Table", "escape", "Pop one drill-down level"),
+        ("Logs", "escape", "Close pane (or dismiss search)"),
+    )
+
     DEFAULT_CSS = """
     ResourceTable {
         height: 1fr;
@@ -595,7 +605,11 @@ class KorvidApp(App[None]):
 
     def action_help(self) -> None:
         """Open the help overlay generated from the live binding lists (issue #41)."""
-        groups = collect_help(list(self.BINDINGS), list(DescribeScreen.BINDINGS))
+        groups = collect_help(
+            list(self.BINDINGS),
+            list(DescribeScreen.BINDINGS),
+            handler_keys=self.HANDLER_KEY_HELP,
+        )
         self.push_screen(HelpScreen(groups, command_help()))
 
     def action_open_command(self) -> None:
