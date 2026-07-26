@@ -48,6 +48,7 @@ from korvid.core.errors import explain_api_error
 from korvid.core.filters import ResourceFilter, parse_filter
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
+from korvid.core.portforward import ForwardRegistry, ForwardSpec, candidate_remote_ports
 from korvid.core.secrets import mask_secret_manifest
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -56,6 +57,7 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import PodSummary
+from korvid.k8s.portforward import FORWARDABLE_KINDS
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.ui.command import command_help
@@ -92,6 +94,7 @@ from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.pick_screen import PickScreen
+from korvid.ui.widgets.port_forward_screen import PortForwardScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.secret_screen import SecretScreen
@@ -361,6 +364,9 @@ class KorvidApp(App[None]):
         Binding("S", "scale_resource", "Scale", show=False),
         Binding("e", "edit_resource", "Edit", show=False),
         Binding("i", "hint_details", "Hint details", show=False),
+        # Real terminals deliver Shift+F as "F" (see shift+l above).
+        Binding("shift+f", "port_forward", "Port-forward", show=False),
+        Binding("F", "port_forward", "Port-forward", show=False),
     ]
 
     # User-facing keys handled in event handlers rather than BINDINGS:
@@ -408,6 +414,7 @@ class KorvidApp(App[None]):
         edit_text: Callable[[str], Awaitable[str | None]] | None = None,
         metrics: MetricsPoller | None = None,
         pod_resize_supported: bool = False,
+        forwards: ForwardRegistry | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -423,6 +430,7 @@ class KorvidApp(App[None]):
         self._mcp = mcp
         self._edit_text = edit_text
         self._metrics = metrics
+        self._forwards = forwards
         #: pods/resize subresource discovered on the connected cluster
         #: (1.35 GA); gates the R keybinding and the resize agent tool.
         self._pod_resize_supported = pod_resize_supported
@@ -1339,6 +1347,83 @@ class KorvidApp(App[None]):
             return
 
         self._run_shell(namespace, name, containers[0] if containers else None)
+
+    async def action_port_forward(self) -> None:
+        """Open the port-forward dialog for the selected pod or service (shift+f)."""
+        if self.current_kind not in FORWARDABLE_KINDS:
+            self.notify("Port-forward is only available for pods and services", severity="warning")
+            return
+        if self._forwards is None:
+            self.notify("Port-forward unavailable in this build", severity="warning")
+            return
+        if shutil.which("kubectl") is None:
+            self.notify(
+                "kubectl not found on PATH — port-forward requires kubectl", severity="error"
+            )
+            return
+        ns, name = self._selected_ns_name()
+        if ns is None or name is None:
+            return
+        kind = self.current_kind
+        ports: list[int] = []
+        if self._get_manifest is not None:
+            try:
+                manifest = await self._get_manifest(kind, ns, name)
+            except (ApiStatusError, ValueError) as exc:
+                # Prefill is a convenience — the dialog works without it.
+                logger.debug("manifest fetch for port prefill failed: %s", exc)
+            else:
+                ports = candidate_remote_ports(kind, manifest)
+
+        def _on_result(result: tuple[int, int] | None) -> None:
+            if result is not None:
+                self._start_forward(kind, ns, name, local_port=result[0], remote_port=result[1])
+
+        await self.push_screen(PortForwardScreen(f"{kind}/{ns}/{name}", ports), _on_result)
+
+    def _start_forward(
+        self, kind: str, namespace: str, name: str, *, local_port: int, remote_port: int
+    ) -> None:
+        """Spawn a forward from the registry, audit it, and confirm to the user."""
+        registry = self._forwards
+        if registry is None:  # pragma: no cover - action guard already checked
+            return
+        spec = ForwardSpec(
+            kind=kind,
+            namespace=namespace,
+            name=name,
+            local_port=local_port,
+            remote_port=remote_port,
+        )
+        try:
+            registry.start(spec)
+        except OSError as exc:
+            self.notify(f"Port-forward failed to start: {exc}", severity="error")
+            self._audit_forward("port-forward-start", spec, outcome=f"error: {exc}")
+            return
+        self._audit_forward("port-forward-start", spec)
+        self.notify(f"Forwarding localhost:{local_port} → {namespace}/{name}:{remote_port}")
+
+    def _audit_forward(self, action: str, spec: ForwardSpec, *, outcome: str = "success") -> None:
+        """Audit a forward start/stop in a thread worker (file IO under a lock)."""
+        audit = self._audit
+        if audit is None:
+            # Forwards are read-only risk profile (issue #38): they stay
+            # usable without an audit sink, unlike cluster writes.
+            return
+
+        def _append() -> None:
+            audit.append(
+                action=action,
+                kind=spec.kind,
+                namespace=spec.namespace,
+                name=spec.name,
+                version="v1",
+                detail=f"localhost:{spec.local_port} -> {spec.name}:{spec.remote_port}",
+                outcome=outcome,
+            )
+
+        self.run_worker(_append, thread=True)
 
     @staticmethod
     def _run_interactive(argv: list[str], banner: str) -> int:
@@ -3771,6 +3856,10 @@ class KorvidApp(App[None]):
         self._log_tasks.clear()
         if self._metrics is not None:
             await self._metrics.stop()
+        if self._forwards is not None:
+            # Session-scoped by design (issue #38): forwards never outlive
+            # the app that started them.
+            self._forwards.stop_all()
         await self.watch_manager.stop_all()
 
 

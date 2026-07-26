@@ -168,3 +168,31 @@ class ForwardRegistry:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+
+def candidate_remote_ports(kind: str, manifest: dict[str, Any]) -> list[int]:
+    """Declared ports of a pod or service manifest, for dialog prefill.
+
+    Best-effort over a cluster-supplied document: anything malformed is
+    skipped, never raised — an empty result just means the user types the
+    port themselves.
+    """
+    spec = manifest.get("spec")
+    if not isinstance(spec, dict):
+        return []
+    if kind == "services":
+        entries = spec.get("ports")
+        port_key = "port"
+    else:
+        containers = spec.get("containers")
+        entries = []
+        for container in containers if isinstance(containers, list) else []:
+            if isinstance(container, dict) and isinstance(container.get("ports"), list):
+                entries.extend(container["ports"])
+        port_key = "containerPort"
+    ports: list[int] = []
+    for entry in entries if isinstance(entries, list) else []:
+        port = entry.get(port_key) if isinstance(entry, dict) else None
+        if isinstance(port, int) and 0 < port < 65536 and port not in ports:
+            ports.append(port)
+    return ports

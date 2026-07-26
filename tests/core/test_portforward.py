@@ -178,3 +178,32 @@ def test_start_failure_propagates_oserror() -> None:
     with pytest.raises(OSError, match="kubectl not found"):
         registry.start(_spec())
     assert registry.forwards() == []
+
+
+def test_candidate_ports_from_pod_manifest() -> None:
+    from korvid.core.portforward import candidate_remote_ports
+
+    manifest = {
+        "spec": {
+            "containers": [
+                {"name": "app", "ports": [{"containerPort": 8080}, {"containerPort": 9090}]},
+                {"name": "sidecar", "ports": [{"containerPort": 8080}]},
+            ]
+        }
+    }
+    assert candidate_remote_ports("pods", manifest) == [8080, 9090]
+
+
+def test_candidate_ports_from_service_manifest() -> None:
+    from korvid.core.portforward import candidate_remote_ports
+
+    manifest = {"spec": {"ports": [{"port": 80}, {"port": 443}]}}
+    assert candidate_remote_ports("services", manifest) == [80, 443]
+
+
+def test_candidate_ports_tolerate_malformed_manifest() -> None:
+    from korvid.core.portforward import candidate_remote_ports
+
+    assert candidate_remote_ports("pods", {}) == []
+    assert candidate_remote_ports("services", {"spec": {"ports": "nope"}}) == []
+    assert candidate_remote_ports("pods", {"spec": {"containers": [{"ports": [{}]}]}}) == []
