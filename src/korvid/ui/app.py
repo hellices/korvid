@@ -38,6 +38,7 @@ from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
+from korvid.core.secrets import mask_secret_manifest
 from korvid.core.store import ALL_NAMESPACES, ResourceStore
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
@@ -47,6 +48,7 @@ from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import PodSummary
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
+from korvid.ui.command import command_help
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -67,6 +69,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
+from korvid.ui.widgets.help_screen import HelpScreen, collect_help
 from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.hint_strip import HintStrip, parse_rfc3339
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
@@ -75,6 +78,7 @@ from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
+from korvid.ui.widgets.secret_screen import SecretScreen
 from korvid.ui.widgets.status_bar import StatusBar
 
 _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
@@ -315,6 +319,7 @@ class _ReplayFilter:
 class KorvidApp(App[None]):
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         ("q", "quit", "Quit"),
+        Binding("question_mark", "help", "Help"),
         ("colon", "open_command", "Command"),
         ("slash", "open_filter", "Filter/Search"),
         ("0", "toggle_all_namespaces", "All NS"),
@@ -341,6 +346,16 @@ class KorvidApp(App[None]):
         Binding("e", "edit_resource", "Edit", show=False),
         Binding("i", "hint_details", "Hint details", show=False),
     ]
+
+    # User-facing keys handled in event handlers rather than BINDINGS:
+    # Enter drills down via `on_data_table_row_selected`, Escape closes
+    # panes / pops a drill level via `on_key`.  Listed here so the help
+    # overlay (`?`) renders them alongside the real bindings.
+    HANDLER_KEY_HELP: ClassVar[tuple[tuple[str, str, str], ...]] = (
+        ("Table", "enter", "Drill down (pods → containers, deploy → rs → pods)"),
+        ("Table", "escape", "Pop one drill-down level"),
+        ("Logs", "escape", "Close pane (or dismiss search)"),
+    )
 
     DEFAULT_CSS = """
     ResourceTable {
@@ -597,6 +612,15 @@ class KorvidApp(App[None]):
 
     def on_show_error(self, message: ShowError) -> None:
         self.notify(message.detail, title=message.title, severity="error")
+
+    def action_help(self) -> None:
+        """Open the help overlay generated from the live binding lists (issue #41)."""
+        groups = collect_help(
+            list(self.BINDINGS),
+            list(DescribeScreen.BINDINGS),
+            handler_keys=self.HANDLER_KEY_HELP,
+        )
+        self.push_screen(HelpScreen(groups, command_help()))
 
     def action_open_command(self) -> None:
         # Dismiss the filter bar first so no invisible filter stays active.
@@ -1092,6 +1116,11 @@ class KorvidApp(App[None]):
                 self.notify(msg, severity="warning")
 
         title = f"{self.current_kind}/{namespace}/{name}"
+        if manifest.get("kind") == "Secret":
+            # Secrets get the dedicated masked viewer (spec §5 #9): values
+            # render masked; per-key reveal is explicit and audit-logged.
+            await self.push_screen(SecretScreen(title, manifest, audit=self._audit))
+            return
         await self.push_screen(DescribeScreen(title, manifest, events))
 
     def on_unknown_command(self, message: UnknownCommand) -> None:
@@ -3363,6 +3392,10 @@ class KorvidApp(App[None]):
     ) -> None:
         """Present a describe view: non-modal pane when sharing with the chat
         panel (modal screens would steal focus from the chat input)."""
+        if manifest.get("kind") == "Secret":
+            # Masking pipeline (design §7): this path is agent-driven, so the
+            # rendered body is LLM-adjacent — secret values must never appear.
+            manifest = mask_secret_manifest(manifest)
         if share:
             self.query_one(DescribePane).show(title, manifest, events)
         else:

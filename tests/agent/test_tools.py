@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from korvid.agent.tools import MAX_RESULT_CHARS, READ_TOOLS, UI_TOOLS, ToolExecutor, UIBridge
+from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
@@ -46,7 +47,7 @@ async def test_get_resource_masks_secret_data() -> None:
         "get_resource", {"kind": "pods", "name": "s", "namespace": "d"}
     )
     assert "aGVsbG8=" not in out
-    assert "***MASKED***" in out
+    assert MASK_PLACEHOLDER in out
     assert "managedFields" not in out
 
 
@@ -61,7 +62,7 @@ async def test_get_resource_masks_secret_string_data() -> None:
         "get_resource", {"kind": "pods", "name": "s", "namespace": "d"}
     )
     assert "super-secret" not in out
-    assert "***MASKED***" in out
+    assert MASK_PLACEHOLDER in out
 
 
 async def test_get_resource_strips_last_applied_annotation_on_secret() -> None:

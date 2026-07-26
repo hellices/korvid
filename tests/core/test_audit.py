@@ -317,3 +317,38 @@ def test_append_after_clean_tail_adds_no_blank_line(tmp_path: Path) -> None:
     lines = path.read_text().splitlines()
     assert len(lines) == 2
     assert all(json.loads(ln)["action"] == "delete" for ln in lines)
+
+
+def test_append_records_actor_identity(tmp_path: Path) -> None:
+    """Disclosure/write records answer *who*: the OS user by default (#39)."""
+    import getpass
+
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(action="secret-reveal", kind="secrets", namespace="default", name="s")
+    entry = json.loads((tmp_path / "audit.jsonl").read_text())
+    assert entry["actor"] == getpass.getuser()
+
+
+def test_append_actor_override(tmp_path: Path) -> None:
+    """An explicit actor (e.g. a service identity) wins over auto-detection."""
+    log = AuditLog(tmp_path / "audit.jsonl", actor="ci-bot")
+    log.append(action="delete", kind="pods", namespace="default", name="web-1")
+    entry = json.loads((tmp_path / "audit.jsonl").read_text())
+    assert entry["actor"] == "ci-bot"
+
+
+@pytest.mark.parametrize("exc_type", [KeyError, ImportError, OSError])
+def test_actor_detection_failures_fall_back_to_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc_type: type[Exception]
+) -> None:
+    """`getpass.getuser()` raises KeyError/ImportError on 3.11/3.12 (only
+    3.13 normalized to OSError); none of them may abort startup."""
+
+    def boom() -> str:
+        raise exc_type("no passwd entry")
+
+    monkeypatch.setattr("getpass.getuser", boom)
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(action="delete", kind="pods", namespace="default", name="web-1")
+    entry = json.loads((tmp_path / "audit.jsonl").read_text())
+    assert entry["actor"] == "unknown"
