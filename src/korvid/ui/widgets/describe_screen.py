@@ -5,14 +5,15 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 import yaml
-from rich.console import Group, RenderableType
+from rich.console import Console, Group, RenderableType
 from rich.syntax import Syntax
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.events import Key
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Header, Static
+from textual.widgets import Footer, Header, Input, Static
 
 
 def _format_age(event: dict[str, Any]) -> str:
@@ -63,16 +64,110 @@ def _describe_body(manifest: dict[str, Any], events: list[dict[str, Any]]) -> Re
     return _body_renderable(_manifest_yaml(manifest), _render_events(events))
 
 
-def _body_renderable(yaml_text: str, events_text: Text) -> RenderableType:
+def _body_renderable(
+    yaml_text: str,
+    events_text: Text,
+    *,
+    yaml_highlights: set[int] | None = None,
+) -> RenderableType:
     syntax = Syntax(
         yaml_text,
         "yaml",
         theme="ansi_dark",
         background_color="default",
         word_wrap=True,
+        highlight_lines=yaml_highlights,
     )
     header = Text(f"\nEVENTS\n{'─' * 60}", style="bold")
     return Group(syntax, header, events_text)
+
+
+class BodySearch:
+    """Case-insensitive line search over a describe body (YAML + events).
+
+    Mirrors the log pane's inline search semantics: substring match,
+    wraparound `n`/`N` navigation, and a "3/17" position counter. Hit
+    indices are source-line indices into the body (YAML lines, then the 3
+    separator lines, then event lines); `display_row` converts them to
+    wrap-aware rendered-row offsets for scrolling.
+    """
+
+    def __init__(self) -> None:
+        self._yaml_lines: list[str] = []
+        self._lines: list[str] = []
+        self.hits: list[int] = []
+        self._idx = 0
+
+    def set_body(self, yaml_text: str, events_text: Text) -> None:
+        """Load a new body and reset any previous search state."""
+        self._yaml_lines = yaml_text.splitlines()
+        self._lines = [
+            *self._yaml_lines,
+            "",
+            "EVENTS",
+            "─" * 60,
+            *events_text.plain.splitlines(),
+        ]
+        self.clear()
+
+    def clear(self) -> None:
+        """Drop all hits and reset the position."""
+        self.hits = []
+        self._idx = 0
+
+    def run(self, pattern: str) -> None:
+        """Search for *pattern* (case-insensitive substring) in the body."""
+        self._idx = 0
+        needle = pattern.strip().lower()
+        if not needle:
+            self.hits = []
+            return
+        self.hits = [i for i, line in enumerate(self._lines) if needle in line.lower()]
+
+    def next(self) -> None:
+        """Advance to the next hit, wrapping past the last one."""
+        if self.hits:
+            self._idx = (self._idx + 1) % len(self.hits)
+
+    def prev(self) -> None:
+        """Go back to the previous hit, wrapping before the first one."""
+        if self.hits:
+            self._idx = (self._idx - 1) % len(self.hits)
+
+    @property
+    def counter(self) -> str:
+        """Position counter like "3/17"; empty when there are no hits."""
+        if not self.hits:
+            return ""
+        return f"{self._idx + 1}/{len(self.hits)}"
+
+    @property
+    def current_line(self) -> int | None:
+        """Display-line index of the current hit; None without hits."""
+        if not self.hits:
+            return None
+        return self.hits[self._idx]
+
+    def yaml_highlights(self) -> set[int]:
+        """1-based YAML line numbers to highlight (hits in the YAML section)."""
+        return {h + 1 for h in self.hits if h < len(self._yaml_lines)}
+
+    def display_row(self, width: int) -> int | None:
+        """Rendered-row offset of the current hit at the given wrap *width*.
+
+        The body renders with word wrap (`Syntax(word_wrap=True)` and event
+        `Text`), so any source line longer than *width* occupies several
+        display rows and shifts everything after it. Scrolling by source-line
+        index would land above the match; this sums the wrapped height of
+        every line before the hit instead.
+        """
+        line = self.current_line
+        if line is None:
+            return None
+        if width <= 0:
+            return line
+        console = Console(width=width)
+        return sum(max(1, len(Text(text).wrap(console, width))) for text in self._lines[:line])
 
 
 def _body_plain(yaml_text: str, events_text: Text) -> str:
@@ -87,9 +182,17 @@ def describe_body_text(manifest: dict[str, Any], events: list[dict[str, Any]]) -
 class DescribeScreen(ModalScreen[None]):
     """Full-screen modal showing the raw manifest YAML and events for a resource."""
 
+    # Empty selector disables auto-focus: without this the hidden search
+    # Input grabs focus on push and swallows the / and n/N key bindings.
+    AUTO_FOCUS = ""
+
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
-        Binding("escape", "dismiss", "Close", show=True),
+        Binding("escape", "close_search_or_dismiss", "Close", show=True),
         Binding("q", "dismiss", "Close", show=False),
+        Binding("slash", "open_search", "Search", show=True),
+        Binding("n", "search_next", "Next hit", show=False),
+        Binding("shift+n", "search_prev", "Prev hit", show=False),
+        Binding("N", "search_prev", "Prev hit", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -104,6 +207,9 @@ class DescribeScreen(ModalScreen[None]):
     DescribeScreen #describe-body {
         width: 100%;
     }
+    DescribeScreen #describe-search {
+        height: 1;
+    }
     """
 
     def __init__(
@@ -116,9 +222,12 @@ class DescribeScreen(ModalScreen[None]):
         self._title = title
         self._manifest = manifest
         self._events = events
+        self._search = BodySearch()
+        self._pattern = ""
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield Input(placeholder="search…", id="describe-search")
         with VerticalScroll():
             # markup=False: manifest/event text is cluster-controlled and may
             # contain bracketed sequences Rich would misinterpret as styles.
@@ -129,6 +238,69 @@ class DescribeScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self.title = self._title
+        self.query_one("#describe-search", Input).display = False
+        self._search.set_body(_manifest_yaml(self._manifest), _render_events(self._events))
+
+    # ------------------------------------------------------------------
+    # Inline search (mirrors the log pane's / + n/N semantics)
+    # ------------------------------------------------------------------
+
+    def action_open_search(self) -> None:
+        """Show the inline search Input and give it focus (``/`` key)."""
+        search_input = self.query_one("#describe-search", Input)
+        search_input.value = ""
+        search_input.display = True
+        search_input.focus()
+
+    def action_search_next(self) -> None:
+        """Advance to the next hit and scroll to it (``n`` key)."""
+        self._search.next()
+        self._show_current_hit()
+
+    def action_search_prev(self) -> None:
+        """Go back to the previous hit and scroll to it (``N`` key)."""
+        self._search.prev()
+        self._show_current_hit()
+
+    def action_close_search_or_dismiss(self) -> None:
+        """Close the search input if open, otherwise dismiss the screen."""
+        search_input = self.query_one("#describe-search", Input)
+        if search_input.display or self._search.hits or self._pattern:
+            search_input.display = False
+            self._pattern = ""
+            self._search.clear()
+            self._refresh_body()
+            self.sub_title = ""
+            self.set_focus(None)
+            return
+        self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Run the search when the user submits a pattern."""
+        event.stop()
+        search_input = self.query_one("#describe-search", Input)
+        search_input.display = False
+        self.set_focus(None)
+        self._pattern = event.value.strip()
+        self._search.run(self._pattern)
+        self._refresh_body()
+        self._show_current_hit()
+
+    def _show_current_hit(self) -> None:
+        self.sub_title = self._search.counter
+        scroll = self.query_one(VerticalScroll)
+        row = self._search.display_row(width=self.query_one("#describe-body", Static).size.width)
+        if row is not None:
+            scroll.scroll_to(y=row, animate=False)
+
+    def _refresh_body(self) -> None:
+        yaml_text = _manifest_yaml(self._manifest)
+        events_text = _render_events(self._events)
+        if self._pattern and self._search.hits:
+            events_text.highlight_words([self._pattern], "reverse", case_sensitive=False)
+        self.query_one("#describe-body", Static).update(
+            _body_renderable(yaml_text, events_text, yaml_highlights=self._search.yaml_highlights())
+        )
 
 
 class DescribePane(Vertical):
@@ -154,6 +326,9 @@ class DescribePane(Vertical):
         padding: 0 1;
         text-style: bold;
     }
+    DescribePane #describe-pane-search {
+        height: 1;
+    }
     DescribePane VerticalScroll {
         height: 1fr;
         padding: 0 1;
@@ -164,17 +339,32 @@ class DescribePane(Vertical):
         super().__init__()
         self.display = False
         self.body_text = ""
+        self._base_title = ""
+        self._search = BodySearch()
+        self._pattern = ""
+        self._yaml_text = ""
+        self._events: list[dict[str, Any]] = []
 
     def compose(self) -> ComposeResult:
         yield Static("", id="describe-pane-title")
+        yield Input(placeholder="search…", id="describe-pane-search")
         with VerticalScroll():
             yield Static("", id="describe-pane-body", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#describe-pane-search", Input).display = False
 
     def show(self, title: str, manifest: dict[str, Any], events: list[dict[str, Any]]) -> None:
         yaml_text = _manifest_yaml(manifest)
         events_text = _render_events(events)
         self.body_text = _body_plain(yaml_text, events_text)
-        self.query_one("#describe-pane-title", Static).update(f"{title}  (Esc to close)")
+        self._base_title = title
+        self._pattern = ""
+        self._yaml_text = yaml_text
+        self._events = list(events)
+        self._search.set_body(yaml_text, events_text)
+        self.query_one("#describe-pane-search", Input).display = False
+        self._update_title()
         self.query_one("#describe-pane-body", Static).update(
             _body_renderable(yaml_text, events_text)
         )
@@ -183,3 +373,89 @@ class DescribePane(Vertical):
 
     def hide(self) -> None:
         self.display = False
+
+    # ------------------------------------------------------------------
+    # Inline search (same / + n/N semantics as DescribeScreen; the App
+    # routes slash/n/N here while the pane is displayed)
+    # ------------------------------------------------------------------
+
+    def open_search(self) -> None:
+        """Show the inline search Input and give it focus."""
+        search_input = self.query_one("#describe-pane-search", Input)
+        search_input.value = ""
+        search_input.display = True
+        search_input.focus()
+
+    def search_next(self) -> None:
+        """Advance to the next hit and scroll to it."""
+        self._search.next()
+        self._show_current_hit()
+
+    def search_prev(self) -> None:
+        """Go back to the previous hit and scroll to it."""
+        self._search.prev()
+        self._show_current_hit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Run the search when the user submits a pattern."""
+        event.stop()
+        search_input = self.query_one("#describe-pane-search", Input)
+        search_input.display = False
+        self.screen.set_focus(None)
+        self._pattern = event.value.strip()
+        self._search.run(self._pattern)
+        self._refresh_body()
+        self._show_current_hit()
+
+    def dismiss_search(self) -> bool:
+        """Close the search input / clear an active search.
+
+        Returns:
+            True when there was search state to dismiss (the caller should
+            treat Escape as consumed), False when no search was active.
+        """
+        search_input = self.query_one("#describe-pane-search", Input)
+        if not (search_input.display or self._search.hits or self._pattern):
+            return False
+        search_input.display = False
+        self._pattern = ""
+        self._search.clear()
+        self._refresh_body()
+        self._update_title()
+        self.screen.set_focus(None)
+        return True
+
+    def on_key(self, event: Key) -> None:
+        """Dismiss search on Escape while the input has focus.
+
+        With focus elsewhere (e.g. after submitting), Escape reaches
+        ``App.on_key`` instead, which calls ``dismiss_search()`` before
+        closing the pane.
+        """
+        if event.key == "escape" and self.dismiss_search():
+            event.stop()
+
+    def _show_current_hit(self) -> None:
+        self._update_title()
+        row = self._search.display_row(
+            width=self.query_one("#describe-pane-body", Static).size.width
+        )
+        if row is not None:
+            self.query_one(VerticalScroll).scroll_to(y=row, animate=False)
+
+    def _refresh_body(self) -> None:
+        events_text = _render_events(self._events)
+        if self._pattern and self._search.hits:
+            events_text.highlight_words([self._pattern], "reverse", case_sensitive=False)
+        self.query_one("#describe-pane-body", Static).update(
+            _body_renderable(
+                self._yaml_text, events_text, yaml_highlights=self._search.yaml_highlights()
+            )
+        )
+
+    def _update_title(self) -> None:
+        counter = self._search.counter
+        suffix = f"  {counter}" if counter else ""
+        self.query_one("#describe-pane-title", Static).update(
+            f"{self._base_title}{suffix}  (Esc to close)"
+        )
