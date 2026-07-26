@@ -11,6 +11,7 @@ import yaml
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.models import parse_quantity
 
 MAX_RESULT_CHARS = 8000
 
@@ -398,9 +399,10 @@ RESIZE_TOOLS: list[dict[str, Any]] = [
             "name": "resize_pod",
             "description": (
                 "Request an in-place resize of a running pod's CPU/memory "
-                "requests and limits (no restart; Kubernetes 1.35+). Runs "
-                "only after the user approves the request in the TUI "
-                "approval dialog."
+                "requests and limits without recreating the pod (Kubernetes "
+                "1.35+; containers whose resizePolicy is RestartContainer "
+                "are restarted in place). Runs only after the user approves "
+                "the request in the TUI approval dialog."
             ),
             "parameters": {
                 "type": "object",
@@ -434,6 +436,15 @@ _WRITE_ACTIONS = {
 }
 
 
+def _positive_quantity(amount: str) -> bool:
+    """Positive Kubernetes quantity (zero rejected: in a resize it means an
+    accidental request removal, which belongs to a manifest edit)."""
+    try:
+        return parse_quantity(amount) > 0
+    except ValueError:
+        return False
+
+
 def _validated_resources(value: Any) -> dict[str, dict[str, dict[str, str]]]:
     """Shape-check a resize 'resources' argument (container -> requests/limits
     -> quantity). Tool schemas are not runtime validation; a malformed value
@@ -451,6 +462,15 @@ def _validated_resources(value: Any) -> dict[str, dict[str, dict[str, str]]]:
             for quantity, amount in quantities.items():
                 if quantity not in ("cpu", "memory") or not isinstance(amount, str):
                     raise ValueError(f"invalid quantity {quantity!r}={amount!r} for {container!r}")
+                if not _positive_quantity(amount):
+                    # Same grammar the prompt enforces: a malformed or
+                    # non-positive amount must fail here, not in an approval
+                    # dialog for a request the apiserver is guaranteed to
+                    # reject (previews deliberately degrade to no preview).
+                    raise ValueError(
+                        f"{container}.{section}.{quantity}: {amount!r} is not a "
+                        "positive quantity (e.g. 250m, 512Mi)"
+                    )
     return value
 
 

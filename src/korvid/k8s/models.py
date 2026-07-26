@@ -8,10 +8,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-# Full Kubernetes Quantity grammar: signed decimal number followed by an
-# optional binarySI / decimalSI suffix or a decimal exponent (e.g. '12e3').
+# Full Kubernetes Quantity grammar: signed decimal number (including the
+# bare-point forms '<digits>.' and '.<digits>') followed by an optional
+# binarySI / decimalSI suffix or a decimal exponent (e.g. '12e3').
 _QUANTITY_RE = re.compile(
-    r"^(?P<number>[+-]?\d+(?:\.\d+)?)(?P<suffix>[eE][+-]?\d+|Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE])?$"
+    r"^(?P<number>[+-]?(?:\d+(?:\.\d*)?|\.\d+))"
+    r"(?P<suffix>[eE][+-]?\d+|Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE])?$"
 )
 _SUFFIX_MULTIPLIERS: dict[str, Decimal] = {
     "n": Decimal("1e-9"),

@@ -322,3 +322,15 @@ async def test_pod_resize_probe_passes_through_result() -> None:
             return True
 
     assert await main_mod._probe_pod_resize(cast("Any", FastKube())) is True
+
+
+async def test_pod_resize_probe_skipped_in_readonly() -> None:
+    """A readonly session can never expose either resize entry point, so the
+    probe must not spend a network round trip (or its timeout) on it."""
+    import korvid.__main__ as main_mod
+
+    class ExplodingKube:
+        async def supports_pod_resize(self) -> bool:
+            raise AssertionError("probe must not run in readonly mode")
+
+    assert await main_mod._probe_pod_resize(cast("Any", ExplodingKube()), readonly=True) is False

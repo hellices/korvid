@@ -487,3 +487,33 @@ async def test_resize_pod_rejects_unknown_section() -> None:
     )
     assert out.startswith("ERROR:")
     assert bridge.calls == []
+
+
+async def test_resize_pod_rejects_invalid_quantity_amounts() -> None:
+    """A malformed amount must fail before the user is shown an approval
+    dialog for a request guaranteed to be rejected by the apiserver."""
+    bridge = FakeBridge()
+    for bad in ("lots", "", "-100m", "0"):
+        out = await make_ui_executor(bridge).execute(
+            "resize_pod",
+            {
+                "name": "web-1",
+                "namespace": "default",
+                "resources": {"app": {"requests": {"cpu": bad}}},
+            },
+        )
+        assert out.startswith("ERROR:"), bad
+    assert bridge.calls == []
+
+
+async def test_resize_pod_accepts_full_quantity_grammar() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute(
+        "resize_pod",
+        {
+            "name": "web-1",
+            "namespace": "default",
+            "resources": {"app": {"requests": {"cpu": "100u", "memory": ".5Gi"}}},
+        },
+    )
+    assert "approved and executed" in out

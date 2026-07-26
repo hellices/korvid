@@ -176,3 +176,17 @@ async def test_zero_quantity_rejected() -> None:
         await pilot.pause()
         assert app.result == "unset"
         assert app.screen is prompt
+
+
+async def test_bare_point_decimals_accepted() -> None:
+    """The Quantity grammar allows '<digits>.' and '.<digits>' forms."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await pilot.pause()
+        app.screen.query_one("#resize-0-requests-cpu", Input).value = ".5"
+        app.screen.query_one("#resize-0-limits-cpu", Input).value = "1."
+        app.screen.query_one("#resize-0-requests-cpu", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == {"app": {"requests": {"cpu": ".5"}, "limits": {"cpu": "1."}}}

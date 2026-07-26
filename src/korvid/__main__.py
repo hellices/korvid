@@ -183,11 +183,15 @@ class _UIBridgeProxy(UIBridge):
 _RESIZE_PROBE_TIMEOUT = 3.0
 
 
-async def _probe_pod_resize(kube: KubeClient) -> bool:
+async def _probe_pod_resize(kube: KubeClient, *, readonly: bool = False) -> bool:
     """Bounded pods/resize capability probe (issue #27). A probe slower than
     _RESIZE_PROBE_TIMEOUT answers False - the feature stays off for this
     session rather than delaying startup (full resource discovery already
-    runs in the background for the same reason)."""
+    runs in the background for the same reason). Readonly sessions skip the
+    round trip entirely: neither resize entry point can ever be exposed, so
+    a slow discovery endpoint must not delay their startup either."""
+    if readonly:
+        return False
     try:
         return await asyncio.wait_for(kube.supports_pod_resize(), _RESIZE_PROBE_TIMEOUT)
     except TimeoutError:
@@ -357,7 +361,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
 
     # One bounded discovery round trip decides both the R keybinding and
     # whether the agent is offered the resize tool (issue #27).
-    pod_resize_supported = await _probe_pod_resize(kube)
+    pod_resize_supported = await _probe_pod_resize(kube, readonly=config.readonly)
 
     agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy = _build_agent_wiring(
         config, kube, aliases, pod_resize_supported=pod_resize_supported
