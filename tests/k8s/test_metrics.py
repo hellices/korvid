@@ -34,12 +34,10 @@ _METRICS_LIST = {
 class TestParsePodMetricsList:
     def test_sums_container_usage(self) -> None:
         metrics = parse_pod_metrics_list(_METRICS_LIST)
-        assert metrics[0] == PodMetrics(
-            name="web-1",
-            namespace="default",
-            cpu_cores=pytest.approx(0.15),  # type: ignore[arg-type]  # approx compares equal to float in the dataclass __eq__
-            memory_bytes=192 * 2**20,
-        )
+        assert metrics[0].name == "web-1"
+        assert metrics[0].namespace == "default"
+        assert metrics[0].cpu_cores == pytest.approx(0.15)
+        assert metrics[0].memory_bytes == 192 * 2**20
         assert metrics[1].cpu_cores == pytest.approx(1.0)
         assert metrics[1].memory_bytes == 2**30
 
@@ -257,3 +255,29 @@ async def test_poller_notifies_again_when_data_changes() -> None:
         assert poller.get("default", "web-1") == changed
     finally:
         await poller.stop()
+
+
+class TestContainerUsageParsing:
+    """Review fix (PR #51 r4): per-container usage must survive parsing -
+    limits are enforced per container, so severity needs the breakdown."""
+
+    def test_parses_container_breakdown(self) -> None:
+        from korvid.k8s.metrics import ContainerUsage
+
+        data = {
+            "items": [
+                {
+                    "metadata": {"name": "web-1", "namespace": "default"},
+                    "containers": [
+                        {"name": "app", "usage": {"cpu": "100m", "memory": "64Mi"}},
+                        {"name": "sidecar", "usage": {"cpu": "5m", "memory": "95Mi"}},
+                    ],
+                }
+            ]
+        }
+        (m,) = parse_pod_metrics_list(data)
+        assert m.containers == (
+            ContainerUsage(name="app", cpu_cores=0.1, memory_bytes=64 * 2**20),
+            ContainerUsage(name="sidecar", cpu_cores=0.005, memory_bytes=95 * 2**20),
+        )
+        assert m.memory_bytes == (64 + 95) * 2**20  # totals unchanged

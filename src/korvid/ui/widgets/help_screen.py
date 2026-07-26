@@ -51,6 +51,7 @@ _ACTION_GROUPS: dict[str, tuple[str, ...]] = {
     "resize_pod": ("Table",),
     "scale_resource": ("Table",),
     "edit_resource": ("Table",),
+    "hint_details": ("Table",),
     "log_format": ("Logs",),
     "log_wrap": ("Logs",),
     "log_timestamps": ("Logs",),

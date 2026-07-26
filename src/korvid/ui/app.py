@@ -69,6 +69,7 @@ from korvid.ui.widgets.containers_screen import ContainersScreen, build_containe
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.help_screen import HelpScreen, collect_help
+from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.hint_strip import HintStrip, parse_rfc3339
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
@@ -261,6 +262,12 @@ _UID_LOOKUP_TIMEOUT = 10.0
 #: approval flow.
 _PREVIEW_TIMEOUT = 3.0
 
+#: Upper bound on the hint-overlay events fetch (issue #34): the trouble half
+#: comes from the status the app already holds, so a stalled API connection
+#: must not delay the overlay past this - the events are marked unavailable
+#: instead.
+_HINT_EVENTS_TIMEOUT = 3.0
+
 
 class _ReplayFilter:
     """Drops tail lines replayed by the API after a reconnect.
@@ -335,6 +342,7 @@ class KorvidApp(App[None]):
         Binding("R", "resize_pod", "Resize", show=False),
         Binding("S", "scale_resource", "Scale", show=False),
         Binding("e", "edit_resource", "Edit", show=False),
+        Binding("i", "hint_details", "Hint details", show=False),
     ]
 
     # User-facing keys handled in event handlers rather than BINDINGS:
@@ -879,6 +887,58 @@ class KorvidApp(App[None]):
         for k in expired:
             del self._hint_event_cache[k]
         self._hint_event_cache[cache_key] = (now, line, event_ts)
+
+    def action_hint_details(self) -> None:
+        """Open the read-only detail overlay for the hinted pod row (issue #34):
+        the full trouble list plus recent Warning events - everything the
+        two-line strip folded away."""
+        if self.current_kind != "pods":
+            return
+        row_key = self._cursor_row_key()
+        if row_key is None:
+            return
+        summary = self._find_pod_summary(row_key)
+        if summary is None or not _pod_needs_hint(summary):
+            return
+        self.run_worker(
+            self._open_hint_details(row_key, summary), exclusive=True, group="hint-detail"
+        )
+
+    async def _open_hint_details(self, row_key: str, summary: PodSummary) -> None:
+        """Fetch events best-effort, then push the overlay: the trouble half
+        renders even when the events API fails ("unavailable" is stated, not
+        conflated with "no events"). The context is revalidated after the
+        await - the cursor, view, or screen stack may have changed meanwhile,
+        and stale details for the wrong pod are worse than none."""
+        events: list[dict[str, Any]] = []
+        events_unavailable = False
+        if self._get_events is not None:
+            try:
+                events = await asyncio.wait_for(
+                    self._get_events.fetch(
+                        summary.namespace, summary.name, uid=summary.uid or None
+                    ),
+                    timeout=_HINT_EVENTS_TIMEOUT,
+                )
+            except Exception:  # events are decoration; trouble alone still helps
+                events_unavailable = True
+        if len(self.screen_stack) > 1:  # another dialog opened during the fetch
+            return
+        if self.current_kind != "pods" or self._cursor_row_key() != row_key:
+            return
+        fresh = self._find_pod_summary(row_key)
+        if fresh is None or fresh.uid != summary.uid:
+            return  # deleted or recreated mid-fetch
+        if not _pod_needs_hint(fresh):
+            return  # recovered mid-fetch: the strip is gone, details would be noise
+        await self.push_screen(
+            HintDetailScreen(
+                f"{summary.namespace}/{summary.name}",
+                fresh.trouble,
+                events,
+                events_unavailable=events_unavailable,
+            )
+        )
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Enter drills down: pods -> containers (k9s convention); kinds with a
