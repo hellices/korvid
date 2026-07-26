@@ -422,3 +422,16 @@ async def test_hint_strip_sits_above_status_bar() -> None:
         await pilot.pause()
         bar = app.query_one(StatusBar)
         assert strip.region.y < bar.region.y  # hint renders above the status bar
+
+
+def test_event_timestamp_falls_back_to_first_and_creation_timestamp() -> None:
+    from korvid.ui.app import _event_timestamp
+
+    first_only = {"firstTimestamp": "2026-07-26T08:00:00Z"}
+    creation_only = {"metadata": {"creationTimestamp": "2026-07-26T07:00:00Z"}}
+    assert _event_timestamp(first_only) == datetime(2026, 7, 26, 8, 0, tzinfo=UTC)
+    assert _event_timestamp(creation_only) == datetime(2026, 7, 26, 7, 0, tzinfo=UTC)
+    assert _event_timestamp({}) is None
+    # lastTimestamp still wins over the deprecated fallbacks
+    both = {"lastTimestamp": "2026-07-26T09:00:00Z", "firstTimestamp": "2026-07-26T08:00:00Z"}
+    assert _event_timestamp(both) == datetime(2026, 7, 26, 9, 0, tzinfo=UTC)

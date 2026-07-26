@@ -101,11 +101,18 @@ def _event_timestamp(event: dict[str, Any]) -> datetime | None:
 
     Repeating events record it in `series.lastObservedTime`; `lastTimestamp`
     (core v1) and `eventTime` (events.k8s.io initial observation) are
-    fallbacks for non-series events.
+    fallbacks for non-series events, then the deprecated `firstTimestamp`
+    and finally `metadata.creationTimestamp` — a valid event may carry
+    only those, and treating it as undated would misorder or suppress it.
     """
     series = event.get("series") or {}
     raw = (
-        series.get("lastObservedTime") or event.get("lastTimestamp") or event.get("eventTime") or ""
+        series.get("lastObservedTime")
+        or event.get("lastTimestamp")
+        or event.get("eventTime")
+        or event.get("firstTimestamp")
+        or (event.get("metadata") or {}).get("creationTimestamp")
+        or ""
     )
     return parse_rfc3339(str(raw))
 
