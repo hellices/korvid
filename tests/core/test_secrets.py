@@ -123,3 +123,23 @@ class TestSecretKeys:
 
     def test_missing_sections(self) -> None:
         assert secret_keys({"kind": "Secret"}) == []
+
+
+class TestControlCharacterPayloads:
+    def test_del_char_is_binary(self) -> None:
+        # base64 "fw==" decodes to a lone DEL (0x7F) — non-printable, so it
+        # must render as a digest summary, not garbage.
+        result = reveal_value("fw==")
+        assert result.binary is True
+        assert "sha256=" in result.text
+
+    def test_c1_control_char_is_binary(self) -> None:
+        payload = "\x85partial".encode()
+        result = reveal_value(base64.b64encode(payload).decode())
+        assert result.binary is True
+        assert "sha256=" in result.text
+
+    def test_tab_and_newline_stay_text(self) -> None:
+        result = reveal_value(_b64("a\tb\r\nc"))
+        assert result.binary is False
+        assert result.text == "a\tb\r\nc"

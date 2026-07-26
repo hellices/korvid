@@ -53,9 +53,10 @@ def reveal_value(raw: str, *, encoded: bool = True) -> RevealedValue:
         text = payload.decode("utf-8")
     except UnicodeDecodeError:
         return _binary_summary(payload)
-    # Control characters (except common whitespace) mean the payload is not
-    # printable text — render the digest summary instead of garbage.
-    if any(ch not in "\t\n\r" and ord(ch) < 0x20 for ch in text):
+    # Non-printable characters (C0/C1 controls, DEL, …) other than common
+    # whitespace mean the payload is not text — render the digest summary
+    # instead of garbage.
+    if any(ch not in "\t\n\r" and not ch.isprintable() for ch in text):
         return _binary_summary(payload)
     return RevealedValue(text=text, binary=False)
 

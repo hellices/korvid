@@ -355,3 +355,62 @@ async def test_screen_context_never_contains_secret_values(tmp_path: Path) -> No
         assert "hunter2" not in context
         assert _b64("hunter2") not in context
         assert "plain-note" not in context
+
+
+async def test_reveal_audit_records_actor(tmp_path: Path) -> None:
+    """Reveal records answer *who* performed the disclosure (#39)."""
+    import getpass
+
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_secret_app(audit=AuditLog(audit_path))
+    async with app.run_test() as pilot:
+        screen = await _open_secret_screen(pilot, app)
+        keys = screen.row_keys()
+        for _ in range(keys.index(("password", "data"))):
+            await pilot.press("down")
+        await pilot.press("x")
+        await until(pilot, lambda: "hunter2" in _screen_text(screen), label="revealed")
+        entries = _audit_entries(audit_path)
+        assert entries[0]["actor"] == getpass.getuser()
+
+
+async def test_rapid_double_reveal_ends_masked(tmp_path: Path) -> None:
+    """Two quick `x` presses toggle reveal→hide even while the first press's
+    audit append is still pending: disclosure operations are serialized, so
+    a double press can never leave the value exposed by accident."""
+    app = make_secret_app(audit=AuditLog(tmp_path / "audit.jsonl"))
+    async with app.run_test() as pilot:
+        screen = await _open_secret_screen(pilot, app)
+        keys = screen.row_keys()
+        for _ in range(keys.index(("password", "data"))):
+            await pilot.press("down")
+        await pilot.press("x")
+        await pilot.press("x")  # no wait: races the first press's audit write
+        # Let both workers finish, then the value must be masked again.
+        await until(
+            pilot,
+            lambda: (
+                "hunter2" not in _screen_text(screen) and MASK_PLACEHOLDER in _screen_text(screen)
+            ),
+            label="re-masked after double press",
+        )
+        assert "hunter2" not in _screen_text(screen)
+
+
+async def test_copy_blocked_message_names_copy() -> None:
+    """The fail-closed notification for `c` says the *copy* was blocked,
+    not a reveal."""
+    from unittest import mock
+
+    app = make_secret_app(audit=None)
+    async with app.run_test() as pilot:
+        screen = await _open_secret_screen(pilot, app)
+        keys = screen.row_keys()
+        for _ in range(keys.index(("password", "data"))):
+            await pilot.press("down")
+        with mock.patch.object(screen, "notify") as notify:
+            await pilot.press("c")
+            await until(pilot, lambda: notify.called, label="blocked notification")
+        message = str(notify.call_args[0][0])
+        assert "copy" in message.lower()
+        assert "reveal" not in message.lower()

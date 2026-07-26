@@ -75,6 +75,11 @@ class SecretScreen(ModalScreen[None]):
         self._name: str = str(meta_dict.get("name") or "")
         self._keys: list[tuple[str, str]] = secret_keys(manifest)
         self._revealed: set[tuple[str, str]] = set()
+        # Serializes state-check → audit append → cell update: without it two
+        # rapid presses can both observe "hidden" while the first press's
+        # audit write is pending and leave the value exposed instead of
+        # toggling it back to masked.
+        self._disclosure_lock = asyncio.Lock()
 
     def row_keys(self) -> list[tuple[str, str]]:
         """The `(key, section)` pairs in display order (top to bottom)."""
@@ -120,10 +125,11 @@ class SecretScreen(ModalScreen[None]):
         Fail-closed: a missing audit sink or a failed append means the
         secret value must not be shown or copied.
         """
+        operation = action.removeprefix("secret-")  # "reveal" / "copy"
         audit = self._audit
         if audit is None:
             self.notify(
-                "Secret reveal blocked: no audit log configured",
+                f"Secret {operation} blocked: no audit log configured",
                 severity="warning",
             )
             return False
@@ -140,7 +146,7 @@ class SecretScreen(ModalScreen[None]):
         except Exception:
             self.log.error("audit append failed; blocking secret disclosure")
             self.notify(
-                "Secret reveal blocked: audit log unavailable",
+                f"Secret {operation} blocked: audit log unavailable",
                 severity="error",
             )
             return False
@@ -156,18 +162,19 @@ class SecretScreen(ModalScreen[None]):
         if entry is None:
             return
         key, section = entry
-        if entry in self._revealed:
-            self._revealed.discard(entry)
-            self._set_value_cell(key, section, MASK_PLACEHOLDER)
-            return
-        raw = self._raw_value(key, section)
-        if raw is None:
-            return
-        if not await self._audit_disclosure("secret-reveal", key, section):
-            return
-        revealed = reveal_value(raw, encoded=section == "data")
-        self._revealed.add(entry)
-        self._set_value_cell(key, section, revealed.text)
+        async with self._disclosure_lock:
+            if entry in self._revealed:
+                self._revealed.discard(entry)
+                self._set_value_cell(key, section, MASK_PLACEHOLDER)
+                return
+            raw = self._raw_value(key, section)
+            if raw is None:
+                return
+            if not await self._audit_disclosure("secret-reveal", key, section):
+                return
+            revealed = reveal_value(raw, encoded=section == "data")
+            self._revealed.add(entry)
+            self._set_value_cell(key, section, revealed.text)
 
     @work
     async def action_copy_value(self) -> None:
@@ -175,18 +182,19 @@ class SecretScreen(ModalScreen[None]):
         if entry is None:
             return
         key, section = entry
-        raw = self._raw_value(key, section)
-        if raw is None:
-            return
-        if not await self._audit_disclosure("secret-copy", key, section):
-            return
-        revealed = reveal_value(raw, encoded=section == "data")
-        if revealed.binary:
-            # There is no meaningful text form of a binary payload; copying
-            # the digest summary avoids pasting garbage into a terminal.
-            self.notify(f"{key} is binary — copied its digest summary", severity="warning")
-        self.app.copy_to_clipboard(revealed.text)
-        self.notify(f"Copied decoded value of {key!r}")
+        async with self._disclosure_lock:
+            raw = self._raw_value(key, section)
+            if raw is None:
+                return
+            if not await self._audit_disclosure("secret-copy", key, section):
+                return
+            revealed = reveal_value(raw, encoded=section == "data")
+            if revealed.binary:
+                # There is no meaningful text form of a binary payload; copying
+                # the digest summary avoids pasting garbage into a terminal.
+                self.notify(f"{key} is binary — copied its digest summary", severity="warning")
+            self.app.copy_to_clipboard(revealed.text)
+            self.notify(f"Copied decoded value of {key!r}")
 
     def action_close_screen(self) -> None:
         self.app.pop_screen()

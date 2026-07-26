@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from korvid.core.secrets import mask_secret_manifest
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
@@ -618,7 +619,7 @@ class ToolExecutor:
         if meta.namespaced and not namespace:
             raise ValueError(f"kind {kind!r} is namespaced — provide the 'namespace' argument")
         manifest = await self._kube.get_object(meta, namespace, name)
-        _mask_manifest(manifest)
+        manifest = _mask_manifest(manifest)
         return yaml.safe_dump(manifest, default_flow_style=False, allow_unicode=True)
 
     async def _get_logs(self, args: dict[str, Any]) -> str:
@@ -679,20 +680,16 @@ class ToolExecutor:
         return "\n".join(parts)
 
 
-def _mask_manifest(manifest: dict[str, Any]) -> None:
-    """Mutate manifest in-place: strip managedFields for all kinds; mask Secret data."""
+def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Strip managedFields for all kinds; mask Secret data.
+
+    Secret masking delegates to `korvid.core.secrets.mask_secret_manifest`
+    so the leak filter has exactly one implementation across every
+    LLM-facing path (agent tools here, the UI describe path in `app.py`).
+    """
     meta = manifest.get("metadata")
     if isinstance(meta, dict):
         meta.pop("managedFields", None)
     if manifest.get("kind") == "Secret":
-        # kubectl's client-side apply stores the full original manifest —
-        # including unmasked data/stringData — in this annotation.
-        if isinstance(meta, dict):
-            annotations = meta.get("annotations")
-            if isinstance(annotations, dict):
-                annotations.pop("kubectl.kubernetes.io/last-applied-configuration", None)
-        for field in ("data", "stringData"):
-            section = manifest.get(field)
-            if isinstance(section, dict):
-                for key in section:
-                    section[key] = "***MASKED***"
+        return mask_secret_manifest(manifest)
+    return manifest
