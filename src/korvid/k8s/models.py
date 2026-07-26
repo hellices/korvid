@@ -299,6 +299,75 @@ def _is_initialized(status: dict[str, Any]) -> bool:
     )
 
 
+#: Routine startup waiting reasons that must not read as trouble.
+_BENIGN_WAITING_REASONS = frozenset({"ContainerCreating", "PodInitializing"})
+
+
+@dataclass(frozen=True)
+class ContainerTrouble:
+    """Why one container is unhealthy, captured verbatim from its statuses.
+
+    Everything here comes from `containerStatuses` / `initContainerStatuses`
+    (waiting reason and message, last termination) so the hint strip renders
+    API data only — no synthesized diagnoses.
+    """
+
+    container: str
+    reason: str
+    message: str = ""
+    exit_code: int | None = None
+    exit_reason: str | None = None
+    finished_at: str | None = None
+    restarts: int = 0
+
+
+def _container_trouble(cs: dict[str, Any], *, name_prefix: str = "") -> ContainerTrouble | None:
+    """Trouble entry for one container status, or None when it is healthy.
+
+    Captures a non-benign waiting reason, or a current abnormal termination
+    (non-zero exit / signal). The most recent termination rides along either
+    way so "why" (exit 137 OOMKilled) shows next to "what" (CrashLoopBackOff).
+    """
+    state = cs.get("state") or {}
+    waiting = state.get("waiting") or {}
+    waiting_reason = str(waiting.get("reason") or "")
+    reason: str | None = None
+    if waiting_reason and waiting_reason not in _BENIGN_WAITING_REASONS:
+        reason = waiting_reason
+    terminated = state.get("terminated") or {}
+    if reason is None and terminated:
+        reason = _terminated_reason(terminated)
+        if reason == "Completed" or (reason is None):
+            return None
+    if reason is None:
+        return None
+    last = terminated or ((cs.get("lastState") or {}).get("terminated") or {})
+    exit_code = last.get("exitCode")
+    return ContainerTrouble(
+        container=f"{name_prefix}{cs.get('name', '')}",
+        reason=reason,
+        message=str(waiting.get("message") or ""),
+        exit_code=None if exit_code is None else int(exit_code),
+        exit_reason=str(last["reason"]) if last.get("reason") else None,
+        finished_at=str(last["finishedAt"]) if last.get("finishedAt") else None,
+        restarts=int(cs.get("restartCount", 0)),
+    )
+
+
+def _pod_trouble(status: dict[str, Any]) -> tuple[ContainerTrouble, ...]:
+    """Trouble entries for every unhealthy container, init containers first."""
+    entries: list[ContainerTrouble] = []
+    for cs in status.get("initContainerStatuses") or []:
+        entry = _container_trouble(cs, name_prefix="init:")
+        if entry is not None:
+            entries.append(entry)
+    for cs in status.get("containerStatuses") or []:
+        entry = _container_trouble(cs)
+        if entry is not None:
+            entries.append(entry)
+    return tuple(entries)
+
+
 def _deletion_status(meta: dict[str, Any], status: dict[str, Any], phase: str) -> str | None:
     """kubectl's deletion overrides: NodeLost is Unknown regardless of phase;
     the generic Terminating override applies only to non-terminal phases."""
@@ -393,6 +462,8 @@ class PodSummary:
     containers: tuple[str, ...] = ()
     uid: str = ""
     owner_uids: tuple[str, ...] = ()
+    #: Per-container failure details for the ops hint strip (#26); empty when healthy.
+    trouble: tuple[ContainerTrouble, ...] = ()
 
     @classmethod
     def from_manifest(cls, obj: dict[str, Any]) -> PodSummary:
@@ -423,4 +494,5 @@ class PodSummary:
             ),
             uid=str(meta.get("uid") or ""),
             owner_uids=_owner_uids(meta),
+            trouble=_pod_trouble(status),
         )

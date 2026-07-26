@@ -20,9 +20,11 @@ from typing import Any, ClassVar, Literal
 import yaml
 from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
+from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
 from textual.events import Key
 from textual.widgets import DataTable, Footer, Static
+from textual.widgets.data_table import CellDoesNotExist
 
 from korvid.agent.events import AgentError
 from korvid.agent.mcp_server import MCPController
@@ -62,6 +64,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
+from korvid.ui.widgets.hint_strip import HintStrip
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
@@ -89,6 +92,23 @@ _APPROVAL_TIMEOUT = 120.0
 #: endpoint must never hang a binding handler or an agent turn. On timeout
 #: the check fails open (writes stay approval-gated and audited).
 _PERMISSION_CHECK_TIMEOUT = 10.0
+
+
+def _event_timestamp(event: dict[str, Any]) -> str:
+    # ISO-8601 Zulu timestamps compare correctly as strings; events.k8s.io
+    # objects use eventTime where core v1 uses lastTimestamp.
+    return str(event.get("lastTimestamp") or event.get("eventTime") or "")
+
+
+def _newest_warning_line(events: list[dict[str, Any]]) -> str | None:
+    """Format the most recent Warning event as `reason: message`, or None."""
+    warnings = [e for e in events if e.get("type") == "Warning"]
+    if not warnings:
+        return None
+    newest = max(warnings, key=_event_timestamp)
+    reason = str(newest.get("reason") or "Warning")
+    message = str(newest.get("message") or "").strip()
+    return f"{reason}: {message}" if message else reason
 
 
 def _yaml_equal(a: object, b: object) -> bool:
@@ -302,6 +322,9 @@ class KorvidApp(App[None]):
         # Kinds with a table render already queued — coalesces the per-object
         # notifications of a LIST seed into a single rebuild (see _on_store_update).
         self._render_pending: set[str] = set()
+        # Hint strip event cache: "ns/name" -> (fetched_at, newest warning line
+        # or None). Short TTL so a lingering cursor eventually sees new events.
+        self._hint_event_cache: dict[str, tuple[float, str | None]] = {}
 
     @property
     def current_namespace(self) -> str:
@@ -331,6 +354,7 @@ class KorvidApp(App[None]):
         yield CommandBar()
         yield FilterBar()
         yield NamespacePicker()
+        yield HintStrip()
         yield StatusBar()
 
     async def on_mount(self) -> None:
@@ -442,6 +466,11 @@ class KorvidApp(App[None]):
             metrics=metrics,
         )
         self._refresh_empty_state(kind, table.row_count)
+        # The strip is driven by RowHighlighted on the pods view; anything
+        # else (view switch, table now empty) must not leave a stale hint.
+        if kind != "pods" or table.row_count == 0:
+            with contextlib.suppress(NoMatches):  # shutdown race, same as the table guard
+                self.query_one(HintStrip).clear_hint()
 
     def on_show_error(self, message: ShowError) -> None:
         self.notify(message.detail, title=message.title, severity="error")
@@ -562,6 +591,71 @@ class KorvidApp(App[None]):
 
     def on_quit_command(self, message: QuitCommand) -> None:
         self.exit()
+
+    #: Seconds a fetched warning-event line stays cached per pod. Short enough
+    #: that a cursor parked on a crashing pod eventually sees fresh events.
+    _HINT_EVENT_TTL = 15.0
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Cursor movement drives the ops hint strip (pods view only)."""
+        if not isinstance(event.data_table, ResourceTable):
+            return
+        strip = self.query_one(HintStrip)
+        if self.current_kind != "pods" or event.row_key is None:
+            strip.clear_hint()
+            return
+        row_key = str(event.row_key.value)
+        summary = self._find_pod_summary(row_key)
+        if summary is None or not summary.trouble:
+            strip.clear_hint()
+            return
+        cached = self._hint_event_cache.get(row_key)
+        now = monotonic()
+        if cached is not None and now - cached[0] < self._HINT_EVENT_TTL:
+            strip.show_trouble(summary.trouble, event=cached[1])
+            return
+        strip.show_trouble(summary.trouble)
+        if self._get_events is not None:
+            self.run_worker(
+                self._fetch_hint_event(row_key, summary),
+                exclusive=True,
+                group="hint-events",
+            )
+
+    def _find_pod_summary(self, row_key: str) -> PodSummary | None:
+        parts = row_key.split("/", 1)
+        if len(parts) != 2:
+            return None
+        namespace, name = parts
+        for obj in self.store.get("pods", self.current_scope):
+            if obj.namespace == namespace and obj.name == name and isinstance(obj, PodSummary):
+                return obj
+        return None
+
+    async def _fetch_hint_event(self, row_key: str, summary: PodSummary) -> None:
+        """Best-effort: append the newest warning event to the visible strip."""
+        if self._get_events is None:  # caller guards; satisfy the type checker
+            return
+        try:
+            events = await self._get_events(summary.namespace, summary.name)
+        except Exception:  # events are decoration; the status-derived hint already shows
+            self._hint_event_cache[row_key] = (monotonic(), None)
+            return
+        line = _newest_warning_line(events)
+        self._hint_event_cache[row_key] = (monotonic(), line)
+        if line is None:
+            return
+        # Re-check the cursor: the user may have moved on during the fetch.
+        table = self.query_one(ResourceTable)
+        if self.current_kind != "pods" or table.cursor_row < 0:
+            return
+        try:
+            current = table.coordinate_to_cell_key(Coordinate(table.cursor_row, 0)).row_key
+        except CellDoesNotExist:
+            return
+        if current is None or str(current.value) != row_key:
+            return
+        self.query_one(HintStrip).show_trouble(summary.trouble, event=line)
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Enter drills down: pods -> containers (k9s convention); kinds with a
