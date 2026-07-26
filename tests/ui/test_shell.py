@@ -206,7 +206,8 @@ def _pick_options(app: KorvidApp) -> list[str]:
 class _FakeProc:
     """subprocess.Popen stand-in: 'ok' exits 0 immediately; 'hang' raises
     TimeoutExpired on timed waits until killed (a stuck image pull);
-    'hang-once' survives exactly one poll cycle, then exits 0."""
+    'hang-once' survives exactly one poll cycle, then exits 0; 'fail' exits
+    nonzero immediately (kubectl gave up on its own)."""
 
     def __init__(self, argv: list[str], behavior: str) -> None:
         self.argv = argv
@@ -219,6 +220,8 @@ class _FakeProc:
             return 137
         if self.behavior == "ok":
             return 0
+        if self.behavior == "fail":
+            return 1
         if timeout is not None:
             self.timed_waits += 1
             if self.behavior == "hang-once" and self.timed_waits > 1:
@@ -901,6 +904,45 @@ async def test_debug_pull_failure_offers_retry_with_fallback(tmp_path: Path) -> 
     outcomes = [e["outcome"] for e in entries]
     assert any(o.startswith("error: image pull failed") for o in outcomes)
     assert outcomes[-1] == "success"
+
+
+async def test_debug_pull_failure_detected_when_process_exits_nonzero(tmp_path: Path) -> None:
+    """kubectl debug can give up and exit nonzero on its own when the pull
+    fails; the pod status is still checked once so the fallback retry is
+    offered instead of a generic exit warning."""
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app([_pod("api-1")], audit=AuditLog(audit_path), get_manifest=_jvm_manifest())
+    debug_calls: list[list[str]] = []
+
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1),
+        # The first attach exits nonzero immediately (kubectl gave up).
+        patch("korvid.ui.app.subprocess.Popen", side_effect=_fake_popen(debug_calls, ["fail"])),
+        patch(
+            "korvid.ui.app.subprocess.run",
+            side_effect=_pull_failure_run("lightruncom/koolkits:jvm"),
+        ),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            await pilot.press("enter")  # koolkits:jvm recommendation
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            await pilot.press("y")
+
+            def _retry_offered() -> bool:
+                screen = app.screen
+                return isinstance(screen, ConfirmScreen) and "ErrImagePull" in screen._title
+
+            await until(pilot, _retry_offered)
+            await until(
+                pilot,
+                lambda: audit_path.exists() and "image pull failed" in audit_path.read_text(),
+            )
+    assert len(debug_calls) == 1
 
 
 async def test_debug_pull_failure_no_retry_when_fallback_is_chosen_image(tmp_path: Path) -> None:

@@ -1680,9 +1680,11 @@ class KorvidApp(App[None]):
         deadline = monotonic() + self._PULL_CHECK_DEADLINE
         while True:
             try:
-                return proc.wait(timeout=self._PULL_CHECK_INTERVAL), None
+                exit_code = proc.wait(timeout=self._PULL_CHECK_INTERVAL)
             except subprocess.TimeoutExpired:
                 pass
+            else:
+                return self._debug_exit_result(exit_code, namespace, name, image, pre_existing)
             # Check for a failure after EVERY timed wait - including the one
             # during which the deadline elapsed - so a pull failure appearing
             # at the edge of the window is still caught.
@@ -1694,7 +1696,22 @@ class KorvidApp(App[None]):
             if monotonic() > deadline:
                 # Pulls that survive the window are treated as slow-but-alive:
                 # stop polling and wait for the interactive session to end.
-                return proc.wait(), None
+                return self._debug_exit_result(proc.wait(), namespace, name, image, pre_existing)
+
+    def _debug_exit_result(
+        self, exit_code: int, namespace: str, name: str, image: str, ignore: frozenset[str]
+    ) -> tuple[int, str | None]:
+        """Final result for a finished kubectl debug process.
+
+        kubectl can give up and exit nonzero on its own when the pull fails:
+        a nonzero exit triggers one last pull-failure check so the fallback
+        retry is offered instead of a generic exit warning.
+        """
+        if exit_code != 0:
+            failure = self._check_pull_failure(namespace, name, image, ignore=ignore)
+            if failure is not None:
+                return exit_code, failure
+        return exit_code, None
 
     def _pod_status(self, namespace: str, name: str) -> dict[str, Any] | None:
         """Pod manifest via kubectl shell-out, best-effort (None on any error).
