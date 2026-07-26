@@ -8,26 +8,28 @@ AI-native Kubernetes TUI — a k9s-style keyboard-first cockpit with an embedded
 
 ## Status
 
-Work in progress — core TUI, log viewer, and agent runtime functional.
-Read-heavy by design: cluster writes (delete / scale / rollout restart) exist
-but every one is approval-gated and audited; `--readonly` disables them all.
+Work in progress — core TUI, log viewer, live metrics, MCP server, and agent
+runtime are functional. Read-heavy by design: cluster writes (delete / scale /
+rollout restart / edit) exist but every one is approval-gated, dry-run
+previewed, and audited; `--readonly` disables them all.
 
 ## Keybindings
 
 | Key | Context | Action |
 |-----|---------|--------|
-| `:` | global | Open command bar — accepts `pods`, `deploy all`, `ns <name>`, `q` |
+| `:` | global | Open command bar — accepts `pods`, `deploy all`, `ns <name>`, `ai`, `model`, `q` |
 | `/` | table | Open name filter (Enter keeps filter, Esc clears) |
 | `/` | log pane | Open inline log search |
+| `Enter` | table | Drill down: pods → containers; deploy → replicasets (history) → pods |
+| `Esc` | table | Pop one drill-down level |
 | `0` | global | Toggle all-namespaces view |
 | `d` | table | Describe selected resource (manifest + events) |
-| `s` | pods table | Open shell inside selected pod via kubectl exec |
+| `s` | pods table | Shell into selected pod (`kubectl exec`; offers `kubectl debug` fallback for distroless images) |
 | `l` | pods table | Open / close log pane for selected pod |
 | `L` | pods table | Merge logs of all currently filtered pods (up to 8) |
 | `f` | log pane | Toggle JSON-formatted / raw display |
 | `p` | log pane | Reload pane with previous (terminated) container logs |
-| `n` | log pane | Jump to next search hit |
-| `N` | log pane | Jump to previous search hit |
+| `n` / `N` | log pane | Jump to next / previous search hit |
 | `Ctrl-D` | table | Delete selected resource (confirm dialog; cluster-scoped kinds require typing the name) |
 | `r` | table | Rolling restart of selected deployment / statefulset / daemonset (confirm dialog) |
 | `S` | table | Scale selected deployment / replicaset / statefulset (replica prompt + confirm dialog) |
@@ -65,7 +67,12 @@ Press `Ctrl-A` to open the agent panel — a chat sidebar that answers questions
 about the cluster you are looking at.  The agent sees your current screen
 context (view, namespace, selected resource, active filter) and inspects the
 cluster through read-only tools: fetching manifests, logs, events, and resource
-listings.
+listings.  It can also drive the TUI itself — navigate views, apply filters,
+drill down, and open the log pane or describe screen — so "show me the crashing
+pod's logs" lands you in the actual log viewer instead of a text dump.
+Tool results are capped at 8,000 characters and `Secret` data is masked before
+it ever reaches the model.  The header shows the model name and cumulative
+token usage (`~` marks estimated counts when the provider omits usage data).
 
 The agent can also *request* three write operations — delete, scale, and
 rollout restart — but it can never execute them itself.  Each request opens
@@ -98,10 +105,6 @@ Start with `korvid --readonly` (or set `readonly: true` in
 `~/.config/korvid/config.yaml`) to disable all cluster writes: the
 keybindings above are rejected and the write tools are never offered to the
 model.
-
-Tool results are capped at 8,000 characters and `Secret` data is masked before
-it ever reaches the model.  The header shows the model name and cumulative
-token usage (`~` marks estimated counts when the provider omits usage data).
 
 ### Setup
 
