@@ -14,7 +14,7 @@ from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import parse_quantity
-from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
+from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
 
 MAX_RESULT_CHARS = 8000
 
@@ -649,8 +649,8 @@ class ToolExecutor:
         """Catalog packages + installed subscriptions, straight from the
         cluster's own OLM objects (issue #29: no hardcoded operator
         knowledge; the tool explains itself when OLM is absent)."""
-        pkg_meta = self._aliases.get("packagemanifests")
-        if pkg_meta is None or pkg_meta.group != PACKAGES_GROUP:
+        pkg_meta = resolve_olm_meta(self._aliases, "packagemanifests", PACKAGES_GROUP)
+        if pkg_meta is None:
             return (
                 "OLM is not installed: the packages.operators.coreos.com API"
                 " group was not discovered, so there is no operator catalog"
@@ -665,8 +665,8 @@ class ToolExecutor:
                 f"  default={getattr(pkg, 'default_channel', '') or '?'}"
                 f"  channels={channels or '?'}"
             )
-        sub_meta = self._aliases.get("subscriptions")
-        if sub_meta is not None and sub_meta.group == OPERATORS_GROUP:
+        sub_meta = resolve_olm_meta(self._aliases, "subscriptions", OPERATORS_GROUP)
+        if sub_meta is not None:
             lines.append("INSTALLED (subscriptions):")
             subs = await self._kube.list_objects(sub_meta, namespace)
             if not subs:

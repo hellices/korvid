@@ -466,3 +466,33 @@ async def test_discovery_does_not_shadow_a_real_operators_kind() -> None:
     await _discover_in_background(FakeKube(), aliases, FakeApp())  # type: ignore[arg-type]
     assert aliases["operators"] is operators_meta
     assert aliases["packagemanifests"] is pkg_meta
+
+
+async def test_discovery_preserves_olm_metas_under_group_qualified_aliases() -> None:
+    """First-meta-wins alias collapsing must not hide OLM: when another API
+    group claims 'subscriptions' first, the OLM Subscription stays reachable
+    under its kubectl-style plural.group alias."""
+    from korvid.__main__ import _discover_in_background
+    from korvid.k8s.discovery import ResourceMeta
+
+    foreign_sub = ResourceMeta("Subscription", "subscriptions", "messaging.example.com", "v1", True)
+    olm_sub = ResourceMeta(
+        "Subscription", "subscriptions", "operators.coreos.com", "v1alpha1", True
+    )
+    pkg = ResourceMeta(
+        "PackageManifest", "packagemanifests", "packages.operators.coreos.com", "v1", True
+    )
+
+    class FakeKube:
+        async def discover_resources(self) -> list[ResourceMeta]:
+            return [foreign_sub, olm_sub, pkg]
+
+    class FakeApp:
+        def on_aliases_updated(self) -> None:
+            pass
+
+    aliases: dict[str, ResourceMeta] = {}
+    await _discover_in_background(FakeKube(), aliases, FakeApp())  # type: ignore[arg-type]
+    assert aliases["subscriptions"] is foreign_sub
+    assert aliases["subscriptions.operators.coreos.com"] is olm_sub
+    assert aliases["packagemanifests.packages.operators.coreos.com"] is pkg

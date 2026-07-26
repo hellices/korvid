@@ -1120,3 +1120,31 @@ def test_packagemanifest_summary_tolerates_non_list_channels() -> None:
     )
     assert isinstance(summary, PackageManifestSummary)
     assert summary.channels == ()
+
+
+def test_packagemanifest_summary_extracts_short_description() -> None:
+    """The default channel's CSV description annotation is the catalog's own
+    short description; it is capped so a hostile entry cannot bloat rows."""
+    manifest = _pkg_manifest()
+    manifest["status"]["channels"] = [
+        {"name": "candidate", "currentCSVDesc": {"annotations": {"description": "wrong"}}},
+        {
+            "name": "stable",
+            "currentCSVDesc": {"annotations": {"description": "X.509 certificate management"}},
+        },
+    ]
+    summary = summary_for("PackageManifest", manifest)
+    assert isinstance(summary, PackageManifestSummary)
+    assert summary.description == "X.509 certificate management"
+
+
+def test_packagemanifest_summary_description_caps_and_falls_back() -> None:
+    manifest = _pkg_manifest()
+    manifest["status"]["channels"] = [
+        {"name": "stable", "currentCSVDesc": {"description": "line one\nline two" + "x" * 200}}
+    ]
+    summary = summary_for("PackageManifest", manifest)
+    assert isinstance(summary, PackageManifestSummary)
+    assert summary.description.startswith("line one")
+    assert "line two" not in summary.description or len(summary.description) <= 81
+    assert len(summary.description) <= 81

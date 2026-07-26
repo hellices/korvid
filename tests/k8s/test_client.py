@@ -976,3 +976,20 @@ async def test_rollout_restart_with_stamp_pins_provided_stamp() -> None:
     annotations = kwargs["body"]["spec"]["template"]["metadata"]["annotations"]
     assert annotations["kubectl.kubernetes.io/restartedAt"] == "2026-07-26T00:00:00+00:00"
     assert kwargs["body"]["metadata"] == {"uid": "u-1"}
+
+
+async def test_create_object_requires_namespace_for_namespaced_kind() -> None:
+    """Kubernetes forbids cluster-wide POST on a namespaced collection:
+    reject the bad input locally instead of sending a guaranteed-invalid
+    request."""
+    client = KubeClient()
+    api = _write_api()
+    sub_meta = ResourceMeta(
+        "Subscription", "subscriptions", "operators.coreos.com", "v1alpha1", True
+    )
+    with (
+        patch.object(client, "_api", api),
+        pytest.raises(ValueError, match="requires a namespace"),
+    ):
+        await client.create_object(sub_meta, None, {"metadata": {}})
+    api.call_api.assert_not_called()

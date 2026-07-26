@@ -11,7 +11,12 @@ the Subscription manifest that the approval dialog shows in full.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from korvid.k8s.discovery import ResourceMeta
 
 #: Aggregated API group serving PackageManifest (the operator catalog).
 PACKAGES_GROUP = "packages.operators.coreos.com"
@@ -21,6 +26,21 @@ OPERATORS_GROUP = "operators.coreos.com"
 
 #: Valid values for ``spec.installPlanApproval``.
 APPROVAL_MODES = ("Automatic", "Manual")
+
+
+def resolve_olm_meta(
+    aliases: Mapping[str, ResourceMeta], plural: str, group: str
+) -> ResourceMeta | None:
+    """The OLM ResourceMeta for *plural* in *group*, or None when absent.
+
+    Prefers the kubectl-style ``plural.group`` alias (kept by discovery even
+    when a same-plural CRD from another group won the bare alias) and falls
+    back to the bare plural, accepting it only when the group matches.
+    """
+    meta = aliases.get(f"{plural}.{group}") or aliases.get(plural)
+    if meta is not None and meta.group == group:
+        return meta
+    return None
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -39,6 +59,37 @@ def channel_names(status: dict[str, Any]) -> tuple[str, ...]:
     return tuple(
         str(entry["name"]) for entry in channels if isinstance(entry, dict) and entry.get("name")
     )
+
+
+#: Row cap for the catalog's short description: catalog objects come from
+#: the cluster and a hostile entry must not bloat the table.
+MAX_DESCRIPTION_CHARS = 80
+
+
+def package_description(status: dict[str, Any]) -> str:
+    """Short description for a catalog entry, from its own CSV metadata.
+
+    Prefers the default channel's ``currentCSVDesc.annotations.description``
+    (the catalog's one-liner), falling back to the first line of the long
+    ``currentCSVDesc.description``. Capped at MAX_DESCRIPTION_CHARS.
+    """
+    channels = status.get("channels")
+    if not isinstance(channels, list):
+        return ""
+    default = str(status.get("defaultChannel") or "")
+    entries = [e for e in channels if isinstance(e, dict)]
+    ordered = sorted(entries, key=lambda e: e.get("name") != default)
+    for entry in ordered:
+        desc = _mapping(entry.get("currentCSVDesc"))
+        text = str(_mapping(desc.get("annotations")).get("description") or "")
+        if not text:
+            text = str(desc.get("description") or "").split("\n", 1)[0]
+        text = text.strip()
+        if text:
+            if len(text) > MAX_DESCRIPTION_CHARS:
+                return text[:MAX_DESCRIPTION_CHARS] + "\u2026"
+            return text
+    return ""
 
 
 @dataclass(frozen=True)

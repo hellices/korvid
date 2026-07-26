@@ -52,6 +52,7 @@ from korvid.k8s.olm import (
     PackageInstallFacts,
     build_subscription,
     package_install_facts,
+    resolve_olm_meta,
 )
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
@@ -2461,8 +2462,8 @@ class KorvidApp(App[None]):
         self, pkg_meta: ResourceMeta, ns: str | None, name: str, uid: str | None
     ) -> None:
         """Fetch the PackageManifest and open the install wizard."""
-        sub_meta = self.aliases.get("subscriptions")
-        if sub_meta is None or sub_meta.group != OPERATORS_GROUP:
+        sub_meta = resolve_olm_meta(self.aliases, "subscriptions", OPERATORS_GROUP)
+        if sub_meta is None:
             self.notify(
                 "Install unavailable: the OLM Subscription API was not discovered",
                 severity="warning",
@@ -2562,18 +2563,28 @@ class KorvidApp(App[None]):
         )
 
         def _done(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(
-                    self._run_write(
-                        "install",
-                        sub_meta,
-                        namespace,
-                        facts.package,
-                        ops.create_object(sub_meta, namespace, manifest),
-                        detail=f"channel={channel} approval={approval}"
-                        f" source={facts.catalog_source}",
-                    )
+            if not confirmed:
+                return
+            # create has no server-side uid precondition (there is no target
+            # object yet): recheck the catalog incarnation one last time at
+            # execution, after the confirmation gap.
+            if uid and self._selected_uid(ns, facts.package) != uid:
+                self.notify(
+                    f"install {self._gvr_label(pkg_meta)}/{facts.package} cancelled -"
+                    " the catalog entry changed during the approval dialog",
+                    severity="warning",
                 )
+                return
+            self.run_worker(
+                self._run_write(
+                    "install",
+                    sub_meta,
+                    namespace,
+                    facts.package,
+                    ops.create_object(sub_meta, namespace, manifest),
+                    detail=f"channel={channel} approval={approval} source={facts.catalog_source}",
+                )
+            )
 
         await self.push_screen(
             ConfirmScreen(f"Install operator {facts.package}?", operation), _done

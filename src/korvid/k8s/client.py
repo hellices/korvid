@@ -816,7 +816,12 @@ class KubeClient(WriteOps):
         manifest: dict[str, Any],
     ) -> None:
         """POST a new object onto the collection (OLM install, issue #29)."""
-        if meta.namespaced and namespace is not None:
+        if meta.namespaced:
+            if namespace is None:
+                # Kubernetes allows a cluster-wide LIST on a namespaced
+                # collection but never a POST: reject locally instead of
+                # sending a guaranteed-invalid request.
+                raise ValueError(f"creating a {meta.kind} requires a namespace")
             path = f"{meta.api_base}/namespaces/{_path_segment(namespace)}/{meta.plural}"
         else:
             path = f"{meta.api_base}/{meta.plural}"

@@ -36,6 +36,7 @@ from korvid.k8s.client import KubeClient, resolve_context_name
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.metrics import MetricsPoller
+from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.providers.configurator import ProviderConfigurator
 from korvid.providers.registry import create_provider
 from korvid.providers.token_store import TokenStore
@@ -89,7 +90,8 @@ async def _discover_in_background(
 ) -> None:
     """Merge full API discovery into *aliases* once available (shared dict)."""
     try:
-        discovered = build_alias_map(await kube.discover_resources())
+        metas = await kube.discover_resources()
+        discovered = build_alias_map(metas)
     except Exception:
         logger.warning("Resource discovery failed; staying pods-only", exc_info=True)
         return
@@ -101,10 +103,18 @@ async def _discover_in_background(
     reserved = {HELM_RELEASES_META.plural, HELM_REVISIONS_META.plural}
     aliases.update({a: m for a, m in discovered.items() if m.plural not in reserved})
     aliases.update(build_alias_map([HELM_RELEASES_META, HELM_REVISIONS_META]))
+    # build_alias_map keeps only the first meta per colliding alias, which
+    # can hide the OLM kinds behind a same-plural CRD from another group
+    # (e.g. a messaging "subscriptions"). Keep them reachable under their
+    # kubectl-style plural.group alias so the install flow and the agent's
+    # operator tool resolve the right API regardless of discovery order.
+    for meta in metas:
+        if meta.group in (PACKAGES_GROUP, OPERATORS_GROUP) and meta.plural not in reserved:
+            aliases.setdefault(f"{meta.plural}.{meta.group}", meta)
     # Where OLM serves the operator catalog, `:operators` opens it - unless a
     # real kind (e.g. OLM v1's Operator) already claims that alias.
-    pkg_meta = aliases.get("packagemanifests")
-    if pkg_meta is not None and pkg_meta.group == "packages.operators.coreos.com":
+    pkg_meta = aliases.get(f"packagemanifests.{PACKAGES_GROUP}")
+    if pkg_meta is not None:
         aliases.setdefault("operators", pkg_meta)
     app.on_aliases_updated()
 

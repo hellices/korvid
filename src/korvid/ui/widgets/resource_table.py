@@ -51,7 +51,7 @@ _HELM_REV_COLS = ("NAME", "REVISION", "STATUS", "CHART", "APP VERSION", "DESCRIP
 _HELM_REV_COLS_ALL_NS = ("NAMESPACE", *_HELM_REV_COLS)
 _GENERIC_COLS = ("NAME", "AGE")
 _GENERIC_COLS_ALL_NS = ("NAMESPACE", "NAME", "AGE")
-_PKG_COLS = ("NAME", "CATALOG", "DEFAULT CHANNEL", "CHANNELS", "AGE")
+_PKG_COLS = ("NAME", "CATALOG", "DEFAULT CHANNEL", "CHANNELS", "DESCRIPTION", "AGE")
 _PKG_COLS_ALL_NS = ("NAMESPACE", *_PKG_COLS)
 _SUB_COLS = ("NAME", "CHANNEL", "SOURCE", "INSTALLED CSV", "STATE", "AGE")
 _SUB_COLS_ALL_NS = ("NAMESPACE", *_SUB_COLS)
@@ -421,6 +421,7 @@ class ResourceTable(DataTable[str | Text]):
                 pkg.catalog or "-",
                 pkg.default_channel or "-",
                 ",".join(pkg.channels) or "-",
+                pkg.description or "-",
                 pkg.age(),
             ]
             if all_namespaces:

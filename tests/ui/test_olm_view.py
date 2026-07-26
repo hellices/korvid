@@ -189,7 +189,7 @@ async def test_operators_command_lists_packagemanifests_with_catalog_columns() -
         await _navigate(pilot, "operators", "packagemanifests")
         table = app.query_one(ResourceTable)
         labels = [str(col.label) for col in table.columns.values()]
-        assert labels == ["NAME", "CATALOG", "DEFAULT CHANNEL", "CHANNELS", "AGE"]
+        assert labels == ["NAME", "CATALOG", "DEFAULT CHANNEL", "CHANNELS", "DESCRIPTION", "AGE"]
         await until(pilot, lambda: table.row_count == 2, label="packages listed")
         rows = {str(table.get_row_at(i)[0]): table.get_row_at(i) for i in range(2)}
         assert str(rows["cert-manager"][1]) == "operatorhubio-catalog"

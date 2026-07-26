@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from korvid.k8s.olm import channel_names
+from korvid.k8s.olm import channel_names, package_description
 
 # Full Kubernetes Quantity grammar: signed decimal number (including the
 # bare-point forms '<digits>.' and '.<digits>') followed by an optional
@@ -289,6 +289,7 @@ class PackageManifestSummary(GenericSummary):
     catalog: str = ""
     default_channel: str = ""
     channels: tuple[str, ...] = ()
+    description: str = ""
 
     @classmethod
     def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> PackageManifestSummary:
@@ -299,6 +300,7 @@ class PackageManifestSummary(GenericSummary):
             catalog=str(status.get("catalogSource") or ""),
             default_channel=str(status.get("defaultChannel") or ""),
             channels=channel_names(status),
+            description=package_description(status),
         )
 
 
