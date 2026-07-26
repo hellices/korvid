@@ -88,6 +88,13 @@ def make_app(
     return app, calls
 
 
+def _hint_detail_workers_done(app: KorvidApp) -> bool:
+    """True once no hint-detail worker is pending or running - negative
+    overlay assertions are meaningless while the worker could still push
+    the screen (PR #51 r7)."""
+    return not any(w.group == "hint-detail" and not w.is_finished for w in app.workers)
+
+
 def _strip_text(app: KorvidApp) -> str:
     return str(app.query_one(HintStrip).render())
 
@@ -556,7 +563,7 @@ async def test_overlay_aborts_when_cursor_moves_during_event_fetch() -> None:
         await pilot.press("i")  # overlay fetch now blocked on the gate
         await pilot.press("down")  # cursor leaves the hinted row
         gate.set()
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _hint_detail_workers_done(app), label="overlay worker done")
         assert not isinstance(app.screen, HintDetailScreen)
 
 
@@ -616,7 +623,7 @@ async def test_overlay_aborts_when_pod_recovers_during_event_fetch() -> None:
         recovered = _pod("web-1")  # healthy now, same uid
         store.apply_event("pods", app.current_scope, "MODIFIED", recovered)
         gate.set()
-        await pilot.pause(0.1)
+        await until(pilot, lambda: _hint_detail_workers_done(app), label="overlay worker done")
         assert not isinstance(app.screen, HintDetailScreen)
 
 
