@@ -13,14 +13,19 @@ breakage and offer a one-key re-attach.
 from __future__ import annotations
 
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any, Protocol
 
 from korvid.k8s.portforward import build_port_forward_argv
 
-#: How long to wait for kubectl to exit after terminate() before kill().
+#: How long a terminated kubectl gets to exit before it is killed.
 _STOP_GRACE_SECONDS = 2.0
+
+#: Poll step while stop_all() waits out the shared grace deadline.
+_STOP_POLL_SECONDS = 0.05
 
 
 class _ForwardProcess(Protocol):
@@ -76,6 +81,8 @@ class ForwardRegistry:
         self._popen = popen
         self._records: dict[int, ForwardRecord] = {}
         self._next_id = 1
+        #: Terminated processes awaiting exit, with their kill deadlines.
+        self._reaping: list[tuple[_ForwardProcess, float]] = []
 
     def start(self, spec: ForwardSpec) -> ForwardRecord:
         """Spawn `kubectl port-forward` for ``spec`` and track it.
@@ -110,7 +117,12 @@ class ForwardRegistry:
         return proc
 
     def refresh(self) -> None:
-        """Poll every tracked process; exited ones become ``broken``."""
+        """Poll every tracked process; exited ones become ``broken``.
+
+        Also escalates previously stopped processes that outlived their
+        grace deadline to SIGKILL — stop() itself never blocks.
+        """
+        self._reap()
         for record in self._records.values():
             proc = record._proc
             if record.status == "alive" and proc is not None and proc.poll() is not None:
@@ -125,11 +137,16 @@ class ForwardRegistry:
         return self._records.get(forward_id)
 
     def stop(self, forward_id: int) -> ForwardRecord | None:
-        """Terminate and forget one forward; None when the id is unknown."""
+        """Signal one forward to exit and forget it; None when the id is unknown.
+
+        Non-blocking: the process gets SIGTERM immediately and a later
+        refresh() escalates to SIGKILL if it ignores the grace period, so a
+        wedged kubectl can never freeze the caller (the UI event loop).
+        """
         record = self._records.pop(forward_id, None)
         if record is None:
             return None
-        self._terminate(record)
+        self._signal_stop(record)
         return record
 
     def reattach(self, forward_id: int) -> ForwardRecord | None:
@@ -150,24 +167,52 @@ class ForwardRegistry:
         return record
 
     def stop_all(self) -> list[ForwardRecord]:
-        """Terminate every tracked forward (app exit / context teardown)."""
+        """Terminate every tracked forward (app exit / context teardown).
+
+        All children are signalled first, then waited on under one shared
+        grace deadline; stragglers are killed. Shutdown latency is therefore
+        bounded by a single grace period, not one per forward.
+
+        Returns:
+            The stopped records, so the caller can audit each stop.
+        """
         records = list(self._records.values())
         self._records.clear()
-        for record in records:
-            self._terminate(record)
+        live = [
+            record._proc
+            for record in records
+            if record._proc is not None and record._proc.poll() is None
+        ]
+        for proc in live:
+            proc.terminate()
+        deadline = monotonic() + _STOP_GRACE_SECONDS
+        while any(proc.poll() is None for proc in live):
+            if monotonic() > deadline:
+                for proc in live:
+                    if proc.poll() is None:
+                        proc.kill()
+                break
+            time.sleep(_STOP_POLL_SECONDS)
         return records
 
-    @staticmethod
-    def _terminate(record: ForwardRecord) -> None:
+    def _signal_stop(self, record: ForwardRecord) -> None:
         proc = record._proc
         if proc is None or proc.poll() is not None:
             return  # already exited (broken) — nothing to signal
         proc.terminate()
-        try:
-            proc.wait(timeout=_STOP_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+        self._reaping.append((proc, monotonic() + _STOP_GRACE_SECONDS))
+
+    def _reap(self) -> None:
+        """Advance stopped processes: drop exited ones, kill deadline-breakers."""
+        remaining: list[tuple[_ForwardProcess, float]] = []
+        for proc, deadline in self._reaping:
+            if proc.poll() is not None:
+                continue  # exited; poll() reaped it
+            if monotonic() > deadline:
+                proc.kill()
+            # Keep until poll() confirms the exit so the child is reaped.
+            remaining.append((proc, deadline))
+        self._reaping = remaining
 
 
 def candidate_remote_ports(kind: str, manifest: dict[str, Any]) -> list[int]:

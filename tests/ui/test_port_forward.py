@@ -14,6 +14,7 @@ from korvid.core.portforward import ForwardRegistry, ForwardSpec
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.messages import NavigateCommand
@@ -126,6 +127,14 @@ def _audit_lines(tmp_path: Path) -> str:
     return path.read_text() if path.exists() else ""
 
 
+async def _wait_rows(app: KorvidApp, pilot: Any) -> None:
+    """Wait until the resource table is populated (no fixed sleeps — CI runners are slow)."""
+    from korvid.ui.widgets.resource_table import ResourceTable
+
+    table = app.query_one(ResourceTable)
+    await until(pilot, lambda: table.row_count > 0, label="resource table rows")
+
+
 # ---------------------------------------------------------------------------
 # shift+f dialog
 # ---------------------------------------------------------------------------
@@ -136,7 +145,7 @@ async def test_forward_dialog_prefills_port_from_manifest() -> None:
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
     with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await _wait_rows(app, pilot)
             await pilot.press("F")
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
             assert isinstance(app.screen, PortForwardScreen)
@@ -158,7 +167,7 @@ async def test_forward_submit_starts_kubectl_and_audits(tmp_path: Path) -> None:
     )
     with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await _wait_rows(app, pilot)
             await pilot.press("F")
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
             await pilot.press("enter")
@@ -175,7 +184,7 @@ async def test_forward_dialog_custom_local_port() -> None:
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
     with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await _wait_rows(app, pilot)
             await pilot.press("F")
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
             from textual.widgets import Input
@@ -200,9 +209,9 @@ async def test_forward_works_for_services() -> None:
     )
     with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await pilot.pause()
             await app.on_navigate_command(NavigateCommand("services", None))
-            await pilot.pause(0.1)
+            await _wait_rows(app, pilot)
             await pilot.press("F")
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
             await pilot.press("enter")
@@ -218,11 +227,11 @@ async def test_forward_rejected_for_unforwardable_kind() -> None:
         extra_data={"deployments": [GenericSummary("web", "default", "Deployment", "")]},
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await pilot.pause()
         await app.on_navigate_command(NavigateCommand("deployments", None))
-        await pilot.pause(0.1)
+        await _wait_rows(app, pilot)
         await pilot.press("F")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert not isinstance(app.screen, PortForwardScreen)
         assert procs == []
 
@@ -230,9 +239,9 @@ async def test_forward_rejected_for_unforwardable_kind() -> None:
 async def test_forward_unavailable_without_registry() -> None:
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _wait_rows(app, pilot)
         await pilot.press("F")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert not isinstance(app.screen, PortForwardScreen)
 
 
@@ -241,7 +250,7 @@ async def test_forward_dialog_escape_cancels() -> None:
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
     with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await _wait_rows(app, pilot)
             await pilot.press("F")
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
             await pilot.press("escape")
@@ -254,14 +263,14 @@ async def test_forward_dialog_rejects_invalid_port() -> None:
     app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
     with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await _wait_rows(app, pilot)
             await pilot.press("F")
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
             from textual.widgets import Input
 
             app.screen.query_one("#pf-local", Input).value = "not-a-port"
             await pilot.press("enter")
-            await pilot.pause(0.1)
+            await pilot.pause()
             # Screen stays open, nothing spawned.
             assert isinstance(app.screen, PortForwardScreen)
             assert procs == []
@@ -297,7 +306,7 @@ async def test_pf_command_lists_active_forwards() -> None:
         ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _wait_rows(app, pilot)
         await _open_pf(app, pilot)
         rows = _forward_rows(app)
         assert len(rows) == 1
@@ -314,7 +323,7 @@ async def test_pf_ctrl_d_stops_forward_and_audits(tmp_path: Path) -> None:
         ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _wait_rows(app, pilot)
         await _open_pf(app, pilot)
         await pilot.press("ctrl+d")
         await until(pilot, lambda: registry.forwards() == [])
@@ -332,7 +341,7 @@ async def test_pf_marks_broken_forward_and_reattaches() -> None:
     )
     procs[0].returncode = 1  # target pod died; kubectl exited
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _wait_rows(app, pilot)
         await _open_pf(app, pilot)
         await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
         await pilot.press("r")
@@ -344,7 +353,7 @@ async def test_pf_marks_broken_forward_and_reattaches() -> None:
 async def test_pf_empty_registry_shows_placeholder() -> None:
     app = make_app([_pod("api-1")], forwards=_registry([]))
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _wait_rows(app, pilot)
         await _open_pf(app, pilot)
         rows = _forward_rows(app)
         assert rows == ["No active port-forwards — press shift+f on a pod or service"]
@@ -353,12 +362,12 @@ async def test_pf_empty_registry_shows_placeholder() -> None:
 async def test_pf_unavailable_without_registry() -> None:
     app = make_app([_pod("api-1")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _wait_rows(app, pilot)
         await pilot.press("colon")
         for ch in "pf":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await pilot.pause()
         assert not isinstance(app.screen, ForwardListScreen)
 
 
@@ -390,7 +399,7 @@ async def test_broken_forward_notifies_without_pf_screen() -> None:
 
     async with app.run_test() as pilot:
         app.notify = _capture  # type: ignore[method-assign]  # test spy
-        await pilot.pause(0.1)
+        await pilot.pause()
         procs[0].returncode = 1
         await until(pilot, lambda: any("broken" in n for n in notices), timeout=6.0)
         assert any("localhost:8080" in n for n in notices)
@@ -404,6 +413,65 @@ async def test_forwards_torn_down_on_exit() -> None:
         ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await pilot.pause()
     assert procs[0].terminated
     assert registry.forwards() == []
+
+
+async def test_teardown_stops_are_audited(tmp_path: Path) -> None:
+    """Session teardown must audit each stopped forward before unmount returns."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    app = make_app([_pod("api-1")], forwards=registry, audit=_audit_log(tmp_path))
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=9090, remote_port=90)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+    lines = _audit_lines(tmp_path)
+    assert lines.count("port-forward-stop") == 2
+    assert "session teardown" in lines
+
+
+async def test_pf_reattach_blocked_when_target_pod_gone() -> None:
+    """A Deployment replacement pod has a new name — re-attach must not retry it."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+
+    async def _gone(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        raise ApiStatusError(404, f'pods "{name}" not found')
+
+    app = make_app([_pod("api-1")], forwards=registry, get_manifest=_gone)
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    procs[0].returncode = 1  # target pod died; kubectl exited
+    async with app.run_test() as pilot:
+        await _wait_rows(app, pilot)
+        await _open_pf(app, pilot)
+        await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
+        await pilot.press("r")
+        await pilot.pause()
+        assert len(procs) == 1  # no new kubectl spawned for a vanished pod
+        assert registry.forwards()[0].status == "broken"
+
+
+async def test_pf_reattach_verifies_target_still_exists() -> None:
+    """When the target pod still exists, re-attach proceeds after the check."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    app = make_app([_pod("api-1")], forwards=registry, get_manifest=_pod_manifest)
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    procs[0].returncode = 1
+    async with app.run_test() as pilot:
+        await _wait_rows(app, pilot)
+        await _open_pf(app, pilot)
+        await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
+        await pilot.press("r")
+        await until(pilot, lambda: len(procs) == 2)
+        assert registry.forwards()[0].status == "alive"

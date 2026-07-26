@@ -1455,8 +1455,27 @@ class KorvidApp(App[None]):
             self._audit_forward("port-forward-start", record.spec, outcome="reattached")
             self.notify(f"Re-attached forward localhost:{record.spec.local_port}")
 
+        async def _target_exists(record: ForwardRecord) -> bool:
+            # Only a confirmed 404 blocks the re-attach; when the target
+            # cannot be verified (no fetcher, transient errors) it proceeds.
+            if self._get_manifest is None:
+                return True
+            spec = record.spec
+            try:
+                await self._get_manifest(spec.kind, spec.namespace, spec.name)
+            except ApiStatusError as exc:
+                return exc.status != 404
+            except ValueError:
+                return True
+            return True
+
         self.push_screen(
-            ForwardListScreen(self._forwards, on_stop=_on_stop, on_reattach=_on_reattach)
+            ForwardListScreen(
+                self._forwards,
+                on_stop=_on_stop,
+                on_reattach=_on_reattach,
+                target_exists=_target_exists,
+            )
         )
 
     def _poll_forwards(self) -> None:
@@ -3911,8 +3930,25 @@ class KorvidApp(App[None]):
             await self._metrics.stop()
         if self._forwards is not None:
             # Session-scoped by design (issue #38): forwards never outlive
-            # the app that started them.
-            self._forwards.stop_all()
+            # the app that started them. Audit synchronously (to_thread, not
+            # run_worker) — workers are already torn down at unmount.
+            audit = self._audit
+            for record in self._forwards.stop_all():
+                if audit is None:
+                    continue
+                spec = record.spec
+                await asyncio.to_thread(
+                    audit.append,
+                    action="port-forward-stop",
+                    kind=spec.kind,
+                    namespace=spec.namespace,
+                    name=spec.name,
+                    version="v1",
+                    detail=(
+                        f"localhost:{spec.local_port} -> {spec.name}:{spec.remote_port}"
+                        " (session teardown)"
+                    ),
+                )
         await self.watch_manager.stop_all()
 
 

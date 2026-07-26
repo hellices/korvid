@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from time import monotonic
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -207,3 +209,81 @@ def test_candidate_ports_tolerate_malformed_manifest() -> None:
     assert candidate_remote_ports("pods", {}) == []
     assert candidate_remote_ports("services", {"spec": {"ports": "nope"}}) == []
     assert candidate_remote_ports("pods", {"spec": {"containers": [{"ports": [{}]}]}}) == []
+
+
+class _StubbornProc(_FakeProc):
+    """Ignores terminate(); only kill() ends it."""
+
+    def terminate(self) -> None:
+        self.terminated = True  # signal recorded, process survives
+
+
+def test_stop_does_not_block_on_slow_process() -> None:
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _StubbornProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    record = registry.start(_spec())
+    stopped = registry.stop(record.id)  # must return immediately, no wait()
+    assert stopped is not None
+    assert procs[0].terminated
+    assert not procs[0].killed
+
+
+def test_refresh_kills_stopped_process_after_grace() -> None:
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _StubbornProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    record = registry.start(_spec())
+    registry.stop(record.id)
+    registry.refresh()
+    assert not procs[0].killed  # grace not yet elapsed
+    with patch("korvid.core.portforward.monotonic", return_value=monotonic() + 60.0):
+        registry.refresh()
+    assert procs[0].killed
+
+
+def test_stop_all_kills_stragglers_after_shared_deadline() -> None:
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _StubbornProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    registry.start(_spec())
+    registry.start(_spec(local_port=9090))
+    clock = monotonic()
+    first = iter([clock])
+
+    def _mono() -> float:
+        # First call computes the deadline; every later call is past it.
+        return next(first, clock + 60.0)
+
+    with (
+        patch("korvid.core.portforward.monotonic", side_effect=_mono),
+        patch("korvid.core.portforward.time.sleep"),
+    ):
+        records = registry.stop_all()
+    assert len(records) == 2
+    assert all(p.terminated for p in procs)
+    assert all(p.killed for p in procs)
+
+
+def test_stop_all_returns_stopped_records_for_auditing() -> None:
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    registry.start(_spec())
+    registry.start(_spec(local_port=9090))
+    records = registry.stop_all()
+    assert [r.spec.local_port for r in records] == [8080, 9090]

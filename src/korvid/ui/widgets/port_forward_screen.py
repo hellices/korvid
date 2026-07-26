@@ -7,7 +7,7 @@ informational).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import ClassVar
 
 from textual import on
@@ -182,11 +182,13 @@ class ForwardListScreen(ModalScreen[None]):
         *,
         on_stop: Callable[[ForwardRecord], None] | None = None,
         on_reattach: Callable[[ForwardRecord], None] | None = None,
+        target_exists: Callable[[ForwardRecord], Awaitable[bool]] | None = None,
     ) -> None:
         super().__init__()
         self._registry = registry
         self._on_stop = on_stop
         self._on_reattach = on_reattach
+        self._target_exists = target_exists
         self._ids: list[int] = []
 
     def compose(self) -> ComposeResult:
@@ -239,12 +241,21 @@ class ForwardListScreen(ModalScreen[None]):
             self._on_stop(stopped)
         self._rebuild()
 
-    def action_reattach_forward(self) -> None:
+    async def action_reattach_forward(self) -> None:
         record = self._highlighted_record()
         if record is None:
             return
         if record.status != "broken":
             self.notify("Forward is still alive — nothing to re-attach", severity="warning")
+            return
+        if self._target_exists is not None and not await self._target_exists(record):
+            # A Deployment replaces a dead pod under a new name — re-attaching
+            # to the old name would just fail again.
+            self.notify(
+                f"{record.spec.name} no longer exists — its replacement has a new"
+                " name; start a fresh forward with shift+f",
+                severity="warning",
+            )
             return
         try:
             revived = self._registry.reattach(record.id)
