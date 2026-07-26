@@ -332,3 +332,26 @@ def test_running_ready_with_abnormal_last_termination_is_not_trouble() -> None:
         "lastState": {"terminated": {"reason": "OOMKilled", "exitCode": 137}},
     }
     assert _container_trouble(cs) is None
+
+
+def test_running_state_empty_object_still_counts_as_running() -> None:
+    cs = {
+        "name": "app",
+        "ready": False,
+        "state": {"running": {}},  # startedAt is optional
+        "lastState": {"terminated": {"reason": "OOMKilled", "exitCode": 137}},
+    }
+    entry = _container_trouble(cs)
+    assert entry is not None
+    assert entry.reason == "NotReady"
+
+
+def test_ready_transition_time_is_captured() -> None:
+    manifest = _pod([])
+    manifest["status"]["conditions"] = [
+        {"type": "PodScheduled", "status": "True", "lastTransitionTime": "2026-07-26T06:00:00Z"},
+        {"type": "Ready", "status": "False", "lastTransitionTime": "2026-07-26T08:30:00Z"},
+    ]
+    summary = PodSummary.from_manifest(manifest)
+    assert summary.ready_transition_at == "2026-07-26T08:30:00Z"
+    assert PodSummary.from_manifest(_pod([])).ready_transition_at is None

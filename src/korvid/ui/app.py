@@ -188,18 +188,23 @@ def _pod_needs_hint(summary: PodSummary) -> bool:
 def _event_line_fresh(event_ts: datetime | None, summary: PodSummary) -> bool:
     """Whether a Warning may explain the *current* status.
 
-    An event older than the last termination explains a previous failure;
-    an undated event cannot be proven fresher than dated status trouble
-    (timestamp fields are optional), so both are suppressed.
+    An event older than the last termination or the last Ready-condition
+    flip explains a previous failure; an undated event cannot be proven
+    fresher than a dated status (timestamp fields are optional). Both are
+    suppressed.
     """
-    terminated_at = [
+    cutoffs = [
         ts
         for t in summary.trouble
         if t.finished_at and (ts := parse_rfc3339(t.finished_at)) is not None
     ]
-    if not terminated_at:
+    if summary.ready_transition_at:
+        ready_ts = parse_rfc3339(summary.ready_transition_at)
+        if ready_ts is not None:
+            cutoffs.append(ready_ts)
+    if not cutoffs:
         return True
-    return event_ts is not None and event_ts >= max(terminated_at)
+    return event_ts is not None and event_ts >= max(cutoffs)
 
 
 def _yaml_equal(a: object, b: object) -> bool:

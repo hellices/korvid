@@ -327,7 +327,9 @@ def _running_not_ready_reason(cs: dict[str, Any], state: dict[str, Any]) -> str 
     The useful failure data (exit 137 OOMKilled) then lives only in
     `lastState.terminated`; without this the row would get an event-only hint.
     """
-    if not state.get("running") or cs.get("ready") is not False:
+    if state.get("running") is None or cs.get("ready") is not False:
+        # `running` may serialize as an empty object (startedAt is optional),
+        # so presence is checked rather than truthiness.
         return None
     last = (cs.get("lastState") or {}).get("terminated") or {}
     if not last:
@@ -493,6 +495,14 @@ def _display_phase(
     return reason
 
 
+def _ready_transition_at(status: dict[str, Any]) -> str | None:
+    """When the pod's Ready condition last changed, or None if unrecorded."""
+    for cond in status.get("conditions") or []:
+        if cond.get("type") == "Ready" and cond.get("lastTransitionTime"):
+            return str(cond["lastTransitionTime"])
+    return None
+
+
 @dataclass(frozen=True)
 class PodSummary:
     name: str
@@ -515,6 +525,9 @@ class PodSummary:
     owner_uids: tuple[str, ...] = ()
     #: Per-container failure details for the ops hint strip (#26); empty when healthy.
     trouble: tuple[ContainerTrouble, ...] = ()
+    #: RFC 3339 time the Ready condition last flipped; freshness cutoff for
+    #: event-only hints (a Warning older than it explains a previous failure).
+    ready_transition_at: str | None = None
 
     @classmethod
     def from_manifest(cls, obj: dict[str, Any]) -> PodSummary:
@@ -546,4 +559,5 @@ class PodSummary:
             uid=str(meta.get("uid") or ""),
             owner_uids=_owner_uids(meta),
             trouble=_pod_trouble(status),
+            ready_transition_at=_ready_transition_at(status),
         )

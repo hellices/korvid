@@ -435,3 +435,24 @@ def test_event_timestamp_falls_back_to_first_and_creation_timestamp() -> None:
     # lastTimestamp still wins over the deprecated fallbacks
     both = {"lastTimestamp": "2026-07-26T09:00:00Z", "firstTimestamp": "2026-07-26T08:00:00Z"}
     assert _event_timestamp(both) == datetime(2026, 7, 26, 9, 0, tzinfo=UTC)
+
+
+def test_event_older_than_ready_transition_is_stale_for_event_only_hint() -> None:
+    from korvid.ui.app import _event_line_fresh
+
+    base = _pod("web-1", ())
+    not_ready = PodSummary(
+        name=base.name,
+        namespace=base.namespace,
+        phase="Running",
+        ready="0/1",
+        restarts=0,
+        node=None,
+        uid=base.uid,
+        ready_transition_at="2026-07-26T08:00:00Z",
+    )
+    before = datetime(2026, 7, 26, 7, 0, tzinfo=UTC)
+    after = datetime(2026, 7, 26, 9, 0, tzinfo=UTC)
+    assert _event_line_fresh(before, not_ready) is False  # explains a previous failure
+    assert _event_line_fresh(after, not_ready) is True
+    assert _event_line_fresh(None, not_ready) is False  # undated vs dated status

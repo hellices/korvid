@@ -44,13 +44,19 @@ def relative_age(value: str, *, now: datetime | None = None) -> str | None:
     return f"{int(hours / 24)}d"
 
 
+def _single_line(text: str) -> str:
+    """Collapse newlines and runs of whitespace: each hint entry must occupy
+    exactly one terminal row or it would push the event/overflow rows out."""
+    return " ".join(text.split())
+
+
 def _trouble_line(entry: ContainerTrouble, *, now: datetime | None = None) -> Text:
     """One-line rendering: `app CrashLoopBackOff: msg - exit 137 (OOMKilled), restarts 12`."""
     line = Text()
     line.append(f"{entry.container} ", style="bold")
     line.append(entry.reason, style=phase_style(entry.reason))
     if entry.message:
-        line.append(f": {entry.message}")
+        line.append(f": {_single_line(entry.message)}")
     tail: list[str] = []
     if entry.exit_code is not None:
         exit_part = f"exit {entry.exit_code}"
@@ -79,7 +85,7 @@ def render_trouble_lines(
     if remainder > 0:
         lines.append(Text(f"+{remainder} more container(s) failing", style="dim"))
     if event:
-        lines.append(Text(event, style="yellow"))
+        lines.append(Text(_single_line(event), style="yellow"))
     return lines
 
 
@@ -93,6 +99,10 @@ class HintStrip(Static):
         padding: 0 1;
         background: $surface;
         border-top: solid $warning;
+        /* One terminal row per logical entry: a long message must truncate,
+           not wrap, or it would push the overflow/event rows out of view. */
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
     """
 

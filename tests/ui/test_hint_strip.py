@@ -96,3 +96,35 @@ async def test_hint_strip_widget_shows_and_clears() -> None:
         assert strip.display is True
         strip.clear_hint()
         assert strip.display is False
+
+
+def test_multiline_message_is_collapsed_to_one_logical_line() -> None:
+    entry = ContainerTrouble(
+        container="app",
+        reason="CrashLoopBackOff",
+        message="line one\nline two\n  line three",
+    )
+    lines = render_trouble_lines((entry,), event="event first\nevent second")
+    assert len(lines) == 2
+    assert "\n" not in lines[0].plain
+    assert "line one line two line three" in lines[0].plain
+    assert lines[1].plain == "event first event second"
+
+
+async def test_long_message_occupies_one_visual_row() -> None:
+    from textual.app import App, ComposeResult
+
+    class _Harness(App[None]):
+        def compose(self) -> ComposeResult:
+            yield HintStrip()
+
+    entry = ContainerTrouble(container="app", reason="CrashLoopBackOff", message="word " * 200)
+    app = _Harness()
+    async with app.run_test(size=(80, 24)) as pilot:
+        strip = app.query_one(HintStrip)
+        strip.show_trouble((entry,), event="Back-off restarting failed container")
+        await pilot.pause()
+        # one trouble row + one event row: the long message truncates, never
+        # wraps, so the reserved event row stays visible
+        assert strip.display is True
+        assert strip.region.height == 3  # border-top + 2 content rows
