@@ -127,6 +127,20 @@ async def test_aclose_closes_owned_client_only() -> None:
     await injected_client.aclose()
 
 
+async def test_owned_client_read_timeout_allows_slow_local_inference() -> None:
+    """CPU-bound local backends (ollama) can take minutes before the first
+    SSE byte — a 60s read timeout kills them mid prompt-processing."""
+    owned = OpenAICompatProvider(base_url="http://x/v1", model="m1")
+    try:
+        timeout = owned._get_client().timeout
+        assert timeout.read is not None
+        assert timeout.read >= 300.0
+        assert timeout.connect is not None
+        assert timeout.connect <= 10.0
+    finally:
+        await owned.aclose()
+
+
 async def test_no_auth_header_without_credentials() -> None:
     cap: dict[str, Any] = {}
 

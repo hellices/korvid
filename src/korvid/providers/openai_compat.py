@@ -42,8 +42,11 @@ class OpenAICompatProvider(LLMProvider):
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
+            # Generous read timeout: local CPU backends (e.g. ollama) can
+            # spend minutes on prompt processing before the first SSE byte.
+            # Streaming resets the read clock per chunk, so hangs still fail.
             self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(60.0, connect=10.0),
+                timeout=httpx.Timeout(300.0, connect=10.0),
             )
         return self._client
 
