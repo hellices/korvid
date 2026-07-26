@@ -380,6 +380,23 @@ class TestWatchHelmRevisions:
 
 
 class TestGetHelmRelease:
+    async def test_undecodable_payload_describes_from_labels(self) -> None:
+        """A release whose latest Secret payload does not decode still lists
+        via the label fallback - describe on it must degrade to label-only
+        detail instead of raising ValueError at the caller."""
+        secret = _secret("web", 2, data={"release": base64.b64encode(b"junk").decode()})
+        client = KubeClient()
+        list_resp = {"metadata": {"resourceVersion": "1"}, "items": [secret]}
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        ):
+            detail = await client.get_helm_release("default", "web")
+        assert detail["revision"] == 2
+        assert detail["status"] == "deployed"  # from the Secret label
+        assert detail["values"] == {}
+        assert "could not be decoded" in detail["warning"]
+
     async def test_malformed_nested_payload_describes_with_fallbacks(self) -> None:
         """The row survives a mangled payload via label fallbacks; describe on
         that row must degrade the same way instead of raising AttributeError

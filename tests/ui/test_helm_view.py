@@ -183,8 +183,8 @@ async def test_enter_on_release_drills_into_its_revisions() -> None:
         await pilot.press("enter")
         await until(pilot, lambda: app.current_kind == "helmrevisions", label="drilled")
         await until(pilot, lambda: table.row_count == 3, label="web revisions only")
-        revs = sorted(str(table.get_row_at(i)[1]) for i in range(table.row_count))
-        assert revs == ["1", "2", "3"]
+        revs = [str(table.get_row_at(i)[1]) for i in range(table.row_count)]
+        assert revs == ["3", "2", "1"]  # newest first, like `helm history` reversed
         await pilot.press("escape")
         await until(pilot, lambda: app.current_kind == "helmreleases", label="popped")
 

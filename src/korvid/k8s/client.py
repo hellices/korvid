@@ -332,8 +332,10 @@ class KubeClient(WriteOps):
         values; the rendered manifest is deliberately dropped (it is the
         full template output and drowns the describe view).
 
-        Raises ApiStatusError(404) when no matching revision Secret exists
-        and ValueError when the payload does not decode.
+        Raises ApiStatusError(404) when no matching revision Secret exists;
+        an undecodable payload degrades to label-only detail with a
+        ``warning`` key (the browser lists such releases via the same
+        fallback, so describe must not fail where the row still shows).
         """
         base = self._helm_secrets_base(namespace)
         path = f"{base}?{urlencode(self._helm_secrets_query(name=name))}"
@@ -352,7 +354,16 @@ class KubeClient(WriteOps):
         if not items:
             raise ApiStatusError(404, f"helm release {name!r} not found in {namespace!r}")
         chosen = max(items, key=_rev)
-        payload = decode_release(chosen)
+        try:
+            payload = decode_release(chosen)
+        except ValueError:
+            # The browser lists this release via the label fallback; describe
+            # must degrade the same way, not error where the row still shows.
+            labels = (chosen.get("metadata") or {}).get("labels") or {}
+            detail = release_detail({}, name=name, namespace=namespace, revision=_rev(chosen))
+            detail["status"] = str(labels.get("status") or "")
+            detail["warning"] = "release payload could not be decoded; label-only detail"
+            return detail
         return release_detail(payload, name=name, namespace=namespace, revision=_rev(chosen))
 
     async def list_pod_metrics(self, namespace: str | None) -> list[PodMetrics]:
