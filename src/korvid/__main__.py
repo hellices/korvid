@@ -70,14 +70,19 @@ def _start_mcp(
 
 async def _stop_mcp(server: KorvidMCPServer, task: asyncio.Task[None]) -> None:
     """Graceful exit first (uvicorn drains connections and removes the
-    endpoint file); a hung shutdown must never block terminal restore."""
+    endpoint file); a hung shutdown must never block terminal restore.
+
+    Uses non-cancelling ``asyncio.wait`` deadlines: ``wait_for`` would await
+    the cancellation itself, which can hang indefinitely in stream cleanup.
+    If even the cancel does not land within its own deadline the task is
+    abandoned - exiting the process matters more than reaping it."""
     server.request_shutdown()
-    try:
-        await asyncio.wait_for(task, timeout=5)
-    except Exception:
+    done, _ = await asyncio.wait({task}, timeout=5)
+    if not done:
         task.cancel()
-        with contextlib.suppress(BaseException):
-            await task
+        done, _ = await asyncio.wait({task}, timeout=5)
+    if done and not task.cancelled() and (exc := task.exception()) is not None:
+        logger.error("MCP server task failed during shutdown", exc_info=exc)
 
 
 async def _shutdown(
@@ -132,37 +137,48 @@ class _UIBridgeProxy(UIBridge):
     """Late-bound UI bridge: the ToolExecutor is built before the app exists,
     so it holds this proxy and the composition root points ``target`` at the
     app's bridge adapter right after construction. Until then every UI tool
-    degrades to an ERROR result instead of crashing the turn."""
+    degrades to an ERROR result instead of crashing the turn.
+
+    All delegated calls are serialized through one lock: the built-in agent
+    and the MCP server's concurrent stateless requests share this proxy, and
+    the app's UI operations (log pane swaps, describe views) are not safe to
+    interleave - only navigation has its own lock inside the app."""
 
     _NOT_READY = "ERROR: UI not ready"
 
     def __init__(self) -> None:
         self.target: UIBridge | None = None
+        self._lock = asyncio.Lock()
 
     async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
         if self.target is None:
             return self._NOT_READY
-        return await self.target.agent_navigate(view, namespace)
+        async with self._lock:
+            return await self.target.agent_navigate(view, namespace)
 
     async def agent_set_filter(self, pattern: str) -> str:
         if self.target is None:
             return self._NOT_READY
-        return await self.target.agent_set_filter(pattern)
+        async with self._lock:
+            return await self.target.agent_set_filter(pattern)
 
     async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
         if self.target is None:
             return self._NOT_READY
-        return await self.target.agent_open_logs(pod, namespace, container)
+        async with self._lock:
+            return await self.target.agent_open_logs(pod, namespace, container)
 
     async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
         if self.target is None:
             return self._NOT_READY
-        return await self.target.agent_open_describe(kind, name, namespace)
+        async with self._lock:
+            return await self.target.agent_open_describe(kind, name, namespace)
 
     async def agent_drill_down(self, name: str) -> str:
         if self.target is None:
             return self._NOT_READY
-        return await self.target.agent_drill_down(name)
+        async with self._lock:
+            return await self.target.agent_drill_down(name)
 
     async def agent_request_write(
         self,
@@ -174,7 +190,8 @@ class _UIBridgeProxy(UIBridge):
     ) -> str:
         if self.target is None:
             return self._NOT_READY
-        return await self.target.agent_request_write(action, kind, name, namespace, replicas)
+        async with self._lock:
+            return await self.target.agent_request_write(action, kind, name, namespace, replicas)
 
 
 def _build_agent_wiring(

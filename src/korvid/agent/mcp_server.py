@@ -87,6 +87,7 @@ class KorvidMCPServer:
         self._started: anyio.Event = anyio.Event()
         self._bound_port: int | None = None
         self._uvicorn: uvicorn.Server | None = None
+        self._shutdown_requested = False
         self._server: Server[Any, Any] = Server("korvid")
         self._server.list_tools()(self.list_tools)  # type: ignore[no-untyped-call]  # SDK decorator factory is untyped
         self._server.call_tool()(self.call_tool)
@@ -136,7 +137,10 @@ class KorvidMCPServer:
 
         Preferred over cancelling the ``run()`` task: a hard cancel tears
         down uvicorn mid-request and leaks sockets/streams as warnings.
+        Safe to call before ``run()`` has started - the flag is re-checked
+        once the uvicorn server exists.
         """
+        self._shutdown_requested = True
         if self._uvicorn is not None:
             self._uvicorn.should_exit = True
 
@@ -165,6 +169,10 @@ class KorvidMCPServer:
         config = uvicorn.Config(app, host=_HOST, port=self._port, log_level="error")
         server = uvicorn.Server(config)
         self._uvicorn = server
+        # Close the startup/shutdown race: a request_shutdown() issued
+        # before this point set only the flag, so mirror it now.
+        if self._shutdown_requested:
+            server.should_exit = True
         # korvid owns the terminal: uvicorn's SIGINT/SIGTERM capture would
         # fight the TUI for signal handling, so neutralize it.
         server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign, assignment]  # TUI owns signals
@@ -172,7 +180,12 @@ class KorvidMCPServer:
         async def _publish_when_started() -> None:
             while not server.started:
                 await anyio.sleep(0.02)
-            self._bound_port = self._actual_port(server)
+            try:
+                self._bound_port = self._actual_port(server)
+            except RuntimeError:
+                # Startup lost the race against a pre-run request_shutdown():
+                # the sockets are already gone, nothing to publish.
+                return
             self._write_endpoint(self._bound_port)
             self._started.set()
 

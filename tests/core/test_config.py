@@ -368,3 +368,13 @@ def test_mcp_section_tolerates_scalars_and_bad_port(tmp_path: Path) -> None:
     cfg = load_config(f)
     assert cfg.mcp_enabled is True
     assert cfg.mcp_port == 7878
+
+
+def test_mcp_port_rejects_fractional_and_infinite_floats(tmp_path: Path) -> None:
+    """int() would truncate 7878.9 and raise OverflowError on .inf - both
+    must fall back to the default instead."""
+    for raw in ("7878.9", ".inf", ".nan"):
+        path = tmp_path / f"cfg-{raw.strip('.')}.yaml"
+        path.write_text(f"mcp:\n  enabled: true\n  port: {raw}\n")
+        config = load_config(path)
+        assert config.mcp_port == 7878

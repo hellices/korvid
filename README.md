@@ -174,7 +174,9 @@ looking at (navigate, filter, open logs/describe).  Write tools are **not**
 exposed: cluster mutations stay behind the in-TUI confirmation dialog.
 
 The live endpoint is also written to
-`~/.local/state/korvid/mcp-endpoint.json` while korvid runs.
+`$XDG_STATE_HOME/korvid/mcp-endpoint.json` (defaulting to
+`~/.local/state/korvid/mcp-endpoint.json` when `XDG_STATE_HOME` is unset)
+while korvid runs.
 
 **VS Code** (`.vscode/mcp.json`):
 

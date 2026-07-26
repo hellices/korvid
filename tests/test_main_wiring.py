@@ -185,3 +185,64 @@ async def test_build_mcp_server_enabled_exposes_read_and_ui_tools() -> None:
     assert server is not None
     names = [t.name for t in await server.list_tools()]
     assert names == [t["function"]["name"] for t in READ_TOOLS + UI_TOOLS]
+
+
+class _OverlapProbeBridge(UIBridge):
+    """Records whether any two bridge calls ever overlap in time."""
+
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+    async def _enter(self) -> str:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0)  # yield so a concurrent caller could interleave
+        self.active -= 1
+        return "ok"
+
+    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        return await self._enter()
+
+    async def agent_set_filter(self, pattern: str) -> str:
+        return await self._enter()
+
+    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
+        return await self._enter()
+
+    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
+        return await self._enter()
+
+    async def agent_drill_down(self, name: str) -> str:
+        return await self._enter()
+
+    async def agent_request_write(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+    ) -> str:
+        return await self._enter()
+
+
+async def test_ui_bridge_proxy_serializes_concurrent_callers() -> None:
+    """The proxy is shared by the built-in agent and the MCP server's
+    concurrent stateless requests; UI operations (log pane swaps, describe
+    views) are not safe to interleave, so calls must never overlap."""
+    from korvid.__main__ import _UIBridgeProxy
+
+    probe = _OverlapProbeBridge()
+    proxy = _UIBridgeProxy()
+    proxy.target = probe
+    await asyncio.gather(
+        proxy.agent_open_logs("a", "ns"),
+        proxy.agent_open_logs("b", "ns"),
+        proxy.agent_open_describe("pods", "a"),
+        proxy.agent_navigate("pods"),
+        proxy.agent_set_filter("x"),
+        proxy.agent_drill_down("a"),
+        proxy.agent_request_write("delete", "pods", "a"),
+    )
+    assert probe.max_active == 1

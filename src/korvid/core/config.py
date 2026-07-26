@@ -144,9 +144,13 @@ def _parse_port(value: Any) -> int:
     """Coerce mcp.port to a valid TCP port; fall back to 7878."""
     if isinstance(value, bool):  # YAML `true` would silently become port 1
         return 7878
+    if isinstance(value, float) and not value.is_integer():
+        # Rejects fractional ports (7878.9) as well as .inf/.nan, which
+        # int() would otherwise truncate or blow up on (OverflowError).
+        return 7878
     try:
         port = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 7878
     return port if 0 < port < 65536 else 7878
 

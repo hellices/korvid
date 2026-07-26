@@ -234,3 +234,12 @@ async def test_remove_endpoint_spares_foreign_record(tmp_path: Path) -> None:
         server.request_shutdown()
         await asyncio.wait_for(task, timeout=10)
     assert json.loads(endpoint_file.read_text()) == foreign
+
+
+async def test_shutdown_requested_before_run_exits_promptly() -> None:
+    """request_shutdown() issued before run() reaches uvicorn must not be
+    lost - the flag is mirrored onto the server once it exists, so shutdown
+    does not stall for the caller's hard-cancel deadline."""
+    server = make_server(port=0)
+    server.request_shutdown()
+    await asyncio.wait_for(server.run(), timeout=5)
