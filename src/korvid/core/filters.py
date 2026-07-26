@@ -104,6 +104,8 @@ def _parse_label_selector(
         if not part:
             return (), f"empty term in label selector {selector!r}"
         key, eq, value = part.partition("=")
+        if not key:
+            return (), f"empty key in label selector {selector!r}"
         pairs.append((key, value if eq else None))
     return tuple(pairs), None
 
@@ -126,11 +128,40 @@ def _parse_name_token(token: str) -> tuple[_NamePredicate | None, str | None, st
     return _substring(token), None, token
 
 
+def _add_name_token(
+    token: str,
+    predicates: list[_NamePredicate],
+    parts: list[str],
+) -> str | None:
+    """Parse one name token into `predicates`/`parts`; returns an error or None."""
+    negated = token.startswith("!")
+    if negated and len(token) == 1:
+        # A dangling `!` would negate the match-all empty substring and
+        # silently hide every row; surface it as a parse error instead.
+        return "missing pattern after '!'"
+    predicate, tok_error, description = _parse_name_token(token[1:] if negated else token)
+    if tok_error is not None:
+        return tok_error
+    if predicate is None:
+        return None
+    if negated:
+
+        def negate(name: str, _inner: _NamePredicate = predicate) -> bool:
+            return not _inner(name)
+
+        predicates.append(negate)
+        parts.append(f"!{description}")
+    else:
+        predicates.append(predicate)
+        parts.append(description)
+    return None
+
+
 def parse_filter(text: str) -> ResourceFilter:
     """Parse the filter bar text into a `ResourceFilter`.
 
-    Broken tokens (invalid regex, dangling `-l`) set `error` and are skipped
-    so a half-typed expression can never crash the render path.
+    Broken tokens (invalid regex, dangling `-l` or `!`) set `error` and are
+    skipped so a half-typed expression can never crash the render path.
     """
     predicates: list[_NamePredicate] = []
     selector_pairs: list[tuple[str, str | None]] = []
@@ -159,21 +190,9 @@ def parse_filter(text: str) -> ResourceFilter:
             parts.append("hide-completed")
             i += 1
             continue
-        negated = token.startswith("!")
-        predicate, tok_error, description = _parse_name_token(token[1:] if negated else token)
+        tok_error = _add_name_token(token, predicates, parts)
         if tok_error is not None:
             error = tok_error
-        elif predicate is not None:
-            if negated:
-
-                def negate(name: str, _inner: _NamePredicate = predicate) -> bool:
-                    return not _inner(name)
-
-                predicates.append(negate)
-                parts.append(f"!{description}")
-            else:
-                predicates.append(predicate)
-                parts.append(description)
         i += 1
 
     return ResourceFilter(

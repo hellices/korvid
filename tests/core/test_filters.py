@@ -118,6 +118,18 @@ def test_malformed_later_selector_keeps_earlier_one() -> None:
     assert not f.matches("x", labels={"app": "db"})
 
 
+def test_empty_label_key_is_error_and_ignored() -> None:
+    f = parse_filter("-l =web")
+    assert f.error is not None
+    assert f.matches("anything", labels={})
+
+
+def test_dangling_negation_is_error_and_ignored() -> None:
+    f = parse_filter("!")
+    assert f.error is not None
+    assert f.matches("anything")
+
+
 # ---------------------------------------------------------------------------
 # Hide completed (-s)
 # ---------------------------------------------------------------------------
