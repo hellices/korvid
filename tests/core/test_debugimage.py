@@ -215,6 +215,12 @@ def test_recommend_default_image_overrides_busybox() -> None:
     assert "busybox:1.36" not in [o.image for o in options if o.image.startswith("busybox")]
 
 
+def test_recommend_node_runtime_uses_koolkits_node_tag() -> None:
+    # The official KoolKits Node.js image tag is `node`, not `nodejs`.
+    options = recommend_debug_images(_pod(image="node:22"), "app")
+    assert options[0].image == "lightruncom/koolkits:node"
+
+
 def test_recommend_options_have_labels_and_reasons() -> None:
     for option in recommend_debug_images(_pod(image="node:22"), "app"):
         assert isinstance(option, DebugImageOption)

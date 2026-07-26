@@ -22,7 +22,7 @@ NETSHOOT_IMAGE = "nicolaka/netshoot"
 KOOLKITS_IMAGES = {
     "jvm": "lightruncom/koolkits:jvm",
     "python": "lightruncom/koolkits:python",
-    "nodejs": "lightruncom/koolkits:nodejs",
+    "nodejs": "lightruncom/koolkits:node",
     "golang": "lightruncom/koolkits:golang",
 }
 
