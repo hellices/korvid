@@ -92,16 +92,18 @@ class TestUsageCells:
         assert mem_pct.plain == "50"
         assert _style_of(mem_pct) == "green"
 
-    def test_thresholds_color_percent(self) -> None:
+    def test_thresholds_cap_at_yellow_without_limit(self) -> None:
+        """Issue #50: without a limit, bursting above request is expected
+        Burstable behavior - alarm color is capped at yellow, never red."""
         pod = self._pod()
         hot = PodMetrics(
             name="web-1", namespace="default", cpu_cores=0.19, memory_bytes=250 * 2**20
         )
         _, cpu_pct, _, mem_pct = _usage_cells(pod, hot)
         assert cpu_pct.plain == "95"
-        assert _style_of(cpu_pct) == "bold red"
+        assert _style_of(cpu_pct) == "yellow"
         assert mem_pct.plain == "98"
-        assert _style_of(mem_pct) == "bold red"
+        assert _style_of(mem_pct) == "yellow"
 
     def test_no_request_gives_dash_percent(self) -> None:
         pod = self._pod(
@@ -151,3 +153,69 @@ class TestUsagePercentPrecision:
         _, cpu_pct, _, _ = _usage_cells(self._pod(), metrics)
         assert cpu_pct.plain == "70"
         assert _style_of(cpu_pct) == "yellow"
+
+
+class TestLimitBasedSeverity:
+    """Issue #50: the displayed number stays usage-vs-request, but the color
+    keys off proximity to the *limit* (OOMKill / throttle territory) when one
+    is declared. Requests are scheduling guarantees, not caps: AKS addons
+    routinely burst to 300% of a tiny request while sitting far below limit."""
+
+    def _pod(self, **kwargs: object) -> PodSummary:
+        defaults: dict[str, object] = {
+            "name": "web-1",
+            "namespace": "default",
+            "phase": "Running",
+            "ready": "1/1",
+            "restarts": 0,
+            "node": "n1",
+            "cpu_request": "100m",
+            "mem_request": "32Mi",
+            "cpu_request_cores": 0.1,
+            "mem_request_bytes": 32 * 2**20,
+            "cpu_limit_cores": 1.0,
+            "mem_limit_bytes": 200 * 2**20,
+        }
+        defaults.update(kwargs)
+        return PodSummary(**defaults)  # type: ignore[arg-type]  # kwargs typed object; fields validated by the dataclass
+
+    def test_burst_above_request_far_below_limit_is_green(self) -> None:
+        """defender-publisher case: 91Mi used, 32Mi request (283%), 200Mi
+        limit (45%) - healthy, must render green despite the big number."""
+        metrics = PodMetrics(
+            name="web-1", namespace="default", cpu_cores=0.15, memory_bytes=91 * 2**20
+        )
+        _, cpu_pct, _, mem_pct = _usage_cells(self._pod(), metrics)
+        assert mem_pct.plain == "284"
+        assert _style_of(mem_pct) == "green"
+        assert cpu_pct.plain == "150"
+        assert _style_of(cpu_pct) == "green"
+
+    def test_near_limit_is_bold_red(self) -> None:
+        """95% of the 200Mi limit is OOMKill territory regardless of the
+        request-based number shown."""
+        metrics = PodMetrics(
+            name="web-1", namespace="default", cpu_cores=0.95, memory_bytes=190 * 2**20
+        )
+        _, cpu_pct, _, mem_pct = _usage_cells(self._pod(), metrics)
+        assert _style_of(mem_pct) == "bold red"
+        assert _style_of(cpu_pct) == "bold red"
+
+    def test_warn_band_of_limit_is_yellow(self) -> None:
+        metrics = PodMetrics(
+            name="web-1", namespace="default", cpu_cores=0.75, memory_bytes=150 * 2**20
+        )
+        _, cpu_pct, _, mem_pct = _usage_cells(self._pod(), metrics)
+        assert _style_of(mem_pct) == "yellow"
+        assert _style_of(cpu_pct) == "yellow"
+
+    def test_limit_severity_uses_rounded_percent(self) -> None:
+        """89.9% of limit rounds to 90 - must be red like 90, not yellow."""
+        metrics = PodMetrics(
+            name="web-1",
+            namespace="default",
+            cpu_cores=0.1,
+            memory_bytes=int(200 * 2**20 * 0.899),
+        )
+        _, _, _, mem_pct = _usage_cells(self._pod(), metrics)
+        assert _style_of(mem_pct) == "bold red"

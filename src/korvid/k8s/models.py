@@ -538,10 +538,14 @@ class PodSummary:
     mem_request: str = "-"
     cpu_limit: str = "-"
     mem_limit: str = "-"
-    #: Exact effective requests for ratio math; the display strings above are
-    #: rounded (1500Ki renders as 1Mi) and must never feed a percentage.
+    #: Exact effective requests/limits for ratio math; the display strings
+    #: above are rounded (1500Ki renders as 1Mi) and must never feed a
+    #: percentage. Limits drive severity coloring (issue #50): proximity to
+    #: the limit is OOMKill/throttle territory, over-request is normal burst.
     cpu_request_cores: float | None = None
     mem_request_bytes: int | None = None
+    cpu_limit_cores: float | None = None
+    mem_limit_bytes: int | None = None
     containers: tuple[str, ...] = ()
     uid: str = ""
     owner_uids: tuple[str, ...] = ()
@@ -561,6 +565,8 @@ class PodSummary:
         restarts = sum(int(s.get("restartCount", 0)) for s in statuses)
         cpu_request = _effective_value(spec, "requests", "cpu")
         mem_request = _effective_value(spec, "requests", "memory")
+        cpu_limit = _effective_value(spec, "limits", "cpu")
+        mem_limit = _effective_value(spec, "limits", "memory")
         return cls(
             name=str(meta.get("name", "")),
             namespace=str(meta.get("namespace", "")),
@@ -575,6 +581,8 @@ class PodSummary:
             mem_limit=_effective_resource(spec, "limits", "memory"),
             cpu_request_cores=None if cpu_request is None else float(cpu_request),
             mem_request_bytes=None if mem_request is None else int(mem_request),
+            cpu_limit_cores=None if cpu_limit is None else float(cpu_limit),
+            mem_limit_bytes=None if mem_limit is None else int(mem_limit),
             containers=tuple(
                 str(c["name"]) for c in (spec.get("containers") or []) if c.get("name")
             ),

@@ -64,14 +64,26 @@ def _restarts_cell(restarts: int) -> Text:
     return Text(str(restarts), style=restarts_style(restarts))
 
 
-def _percent_of_request(usage: float, request: float | None) -> Text:
+def _percent_of_request(usage: float, request: float | None, limit: float | None) -> Text:
     """Usage as % of the exact declared request; '-' when no request is
-    declared. The style is applied to the *rounded* value so the number the
-    user reads and its colour always agree (69.9 renders as 70 - yellow)."""
+    declared. Styles are applied to *rounded* values so the number the user
+    reads and its colour always agree (69.9 renders as 70 - yellow).
+
+    The severity color keys off proximity to the *limit* when one is
+    declared (issue #50): requests are scheduling guarantees, not caps, so
+    a Burstable pod at 300% of a tiny request may sit far below its limit
+    and be perfectly healthy - while 95% of the limit is OOMKill/throttle
+    territory regardless of the request-based number shown. Without a
+    limit the request-based color is capped at yellow (burst is expected).
+    """
     if request is None or request <= 0:
         return Text("-", style="dim")
     displayed = round(usage / request * 100)
-    return Text(str(displayed), style=usage_style(displayed))
+    if limit is not None and limit > 0:
+        style = usage_style(round(usage / limit * 100))
+    else:
+        style = usage_style(displayed, cap_at_warn=True)
+    return Text(str(displayed), style=style)
 
 
 def _usage_cells(pod: PodSummary, metrics: PodMetrics | None) -> tuple[Text, Text, Text, Text]:
@@ -82,11 +94,12 @@ def _usage_cells(pod: PodSummary, metrics: PodMetrics | None) -> tuple[Text, Tex
         return (dash, dash.copy(), dash.copy(), dash.copy())
     return (
         Text(format_cpu(metrics.cpu_cores)),
-        _percent_of_request(metrics.cpu_cores, pod.cpu_request_cores),
+        _percent_of_request(metrics.cpu_cores, pod.cpu_request_cores, pod.cpu_limit_cores),
         Text(format_memory(metrics.memory_bytes)),
         _percent_of_request(
             float(metrics.memory_bytes),
             None if pod.mem_request_bytes is None else float(pod.mem_request_bytes),
+            None if pod.mem_limit_bytes is None else float(pod.mem_limit_bytes),
         ),
     )
 

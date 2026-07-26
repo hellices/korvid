@@ -801,6 +801,37 @@ class TestExactRequestValues:
         assert pod.cpu_request_cores is None
         assert pod.mem_request_bytes is None
 
+    def test_from_manifest_fills_exact_limits(self) -> None:
+        """Issue #50: severity coloring needs exact limit values too."""
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {
+                "containers": [
+                    {
+                        "name": "c",
+                        "resources": {
+                            "requests": {"cpu": "100m", "memory": "32Mi"},
+                            "limits": {"cpu": "500m", "memory": "200Mi"},
+                        },
+                    }
+                ]
+            },
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_limit_cores == pytest.approx(0.5)
+        assert pod.mem_limit_bytes == 200 * 2**20
+
+    def test_no_limits_gives_none(self) -> None:
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {"containers": [{"name": "c"}]},
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_limit_cores is None
+        assert pod.mem_limit_bytes is None
+
 
 class TestPodLevelRequests:
     """K8s 1.34+ pod-level resources (spec.resources) take precedence over
