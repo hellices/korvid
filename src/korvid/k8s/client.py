@@ -16,6 +16,7 @@ from kubernetes_asyncio import config as k8s_config
 from kubernetes_asyncio import watch as k8s_watch
 
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import PodMetrics, parse_pod_metrics_list
@@ -275,8 +276,11 @@ class KubeClient(WriteOps):
         method: str,
         body: dict[str, Any] | None = None,
         content_type: str | None = None,
-    ) -> None:
-        """Mutating request through the ApiClient; wraps ApiException as ApiStatusError."""
+        query_params: list[tuple[str, str]] | None = None,
+    ) -> bytes:
+        """Mutating request through the ApiClient; wraps ApiException as
+        ApiStatusError. Returns the raw response body (dry-run previews parse
+        the would-be object out of it; plain writes ignore it)."""
         if self._api is None:
             raise RuntimeError("connect() first")
         header_params: dict[str, str] = {}
@@ -289,12 +293,14 @@ class KubeClient(WriteOps):
                 auth_settings=["BearerToken"],
                 header_params=header_params,
                 body=body,
+                query_params=query_params or [],
                 _preload_content=False,
             )
             # Drain the body so the pooled HTTP connection is released; with
             # _preload_content=False the caller owns the response. Writes may
-            # return empty or non-JSON bodies, so no decode is attempted.
-            await resp.read()
+            # return empty or non-JSON bodies, so no decode is attempted here.
+            raw: bytes = await resp.read()
+            return raw
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 
@@ -351,6 +357,19 @@ class KubeClient(WriteOps):
             return True
         return bool((data.get("status") or {}).get("allowed", False))
 
+    @staticmethod
+    def _delete_body(uid: str | None) -> dict[str, Any]:
+        """DeleteOptions body for a delete. propagationPolicy is stated
+        explicitly: an omitted policy lets existing finalizers or the
+        resource-specific default pick something else (e.g. orphan), which
+        would contradict the cascade note preview_delete shows the user.
+        A ``uid`` precondition pins the exact object incarnation being
+        approved. Keep preview_delete's note in sync with this body."""
+        body: dict[str, Any] = {"propagationPolicy": "Background"}
+        if uid:
+            body["preconditions"] = {"uid": uid}
+        return body
+
     async def delete_object(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> None:
@@ -358,13 +377,43 @@ class KubeClient(WriteOps):
         incarnation that was approved: if the object was deleted and recreated
         under the same name meanwhile, the API server refuses with 409 instead
         of deleting the replacement. ApiException → ApiStatusError."""
-        body = {"preconditions": {"uid": uid}} if uid else None
         await self._request_write(
             self._object_path(meta, namespace, name),
             "DELETE",
-            body=body,
-            content_type="application/json" if body else None,
+            body=self._delete_body(uid),
+            content_type="application/json",
         )
+
+    @staticmethod
+    def _scale_patch(replicas: int, uid: str | None) -> dict[str, Any]:
+        """Merge-patch body for the /scale subresource. A ``uid`` in the
+        patched metadata is an apiserver precondition: the patch is rejected
+        with 409 when the object was recreated. Shared by the real write and
+        its dry-run preview so the two can never drift apart."""
+        body: dict[str, Any] = {"spec": {"replicas": replicas}}
+        if uid:
+            body["metadata"] = {"uid": uid}
+        return body
+
+    @staticmethod
+    def _restart_patch(uid: str | None, restarted_at: str | None) -> dict[str, Any]:
+        """Strategic-merge-patch body for a rolling restart, the way kubectl
+        does it: stamp the pod template with a restartedAt annotation. Shared
+        by the real write and its dry-run preview; the caller passes the same
+        ``restarted_at`` (from writes.restart_stamp) to both so the previewed
+        request is byte-identical to the executed one. A missing stamp falls
+        back to now() for direct callers outside the approval flow."""
+        stamp = restarted_at or datetime.now().astimezone().isoformat()
+        body: dict[str, Any] = {
+            "spec": {
+                "template": {
+                    "metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": stamp}}
+                }
+            }
+        }
+        if uid:
+            body["metadata"] = {"uid": uid}
+        return body
 
     async def scale_object(
         self,
@@ -375,42 +424,161 @@ class KubeClient(WriteOps):
         *,
         uid: str | None = None,
     ) -> None:
-        """Set spec.replicas via the /scale subresource (merge patch). A
-        ``uid`` in the patched metadata is an apiserver precondition: the
-        patch is rejected with 409 when the object was recreated."""
-        body: dict[str, Any] = {"spec": {"replicas": replicas}}
-        if uid:
-            body["metadata"] = {"uid": uid}
+        """Set spec.replicas via the /scale subresource (merge patch)."""
         await self._request_write(
             f"{self._object_path(meta, namespace, name)}/scale",
             "PATCH",
-            body=body,
+            body=self._scale_patch(replicas, uid),
             content_type="application/merge-patch+json",
         )
 
     async def rollout_restart(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> None:
-        """Trigger a rolling restart the way kubectl does: patch the pod
-        template with a kubectl.kubernetes.io/restartedAt annotation. A
-        ``uid`` in the patched metadata is an apiserver precondition (409 on
-        mismatch), so the restart never lands on a recreated object."""
-        stamp = datetime.now().astimezone().isoformat()
-        body: dict[str, Any] = {
-            "spec": {
-                "template": {
-                    "metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": stamp}}
-                }
-            }
-        }
-        if uid:
-            body["metadata"] = {"uid": uid}
+        """Trigger a rolling restart by patching the pod template."""
+        await self.rollout_restart_with_stamp(meta, namespace, name, uid=uid)
+
+    async def rollout_restart_with_stamp(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        *,
+        uid: str | None = None,
+        restarted_at: str | None = None,
+    ) -> None:
+        """Restart whose patch body carries the caller-provided stamp, so the
+        approved write is byte-identical to the previewed dry run."""
         await self._request_write(
             self._object_path(meta, namespace, name),
             "PATCH",
-            body=body,
+            body=self._restart_patch(uid, restarted_at),
             content_type="application/strategic-merge-patch+json",
         )
+
+    async def _dry_run(
+        self,
+        path: str,
+        method: str,
+        body: dict[str, Any] | None,
+        content_type: str | None,
+    ) -> dict[str, Any]:
+        """Replay a write with ``dryRun=All`` and parse the would-be result.
+        Admission webhooks and validation run server-side; nothing persists."""
+        raw = await self._request_write(
+            path,
+            method,
+            body=body,
+            content_type=content_type,
+            query_params=[("dryRun", "All")],
+        )
+        result: dict[str, Any] = json.loads(raw)
+        return result
+
+    @staticmethod
+    def _pin_revision(body: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+        """Bind a dry-run patch to the GET snapshot it will be diffed against:
+        metadata.resourceVersion is an apiserver optimistic-concurrency
+        precondition, so a concurrent update between the two requests turns
+        into a 409 (preview degrades to None) instead of a diff that mixes
+        two revisions the server never evaluated together. Preview-only: the
+        approved write is pinned by uid, not frozen to this revision."""
+        rv = (current.get("metadata") or {}).get("resourceVersion")
+        if rv:
+            body.setdefault("metadata", {})["resourceVersion"] = str(rv)
+        return body
+
+    async def preview_scale(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        replicas: int,
+        *,
+        uid: str | None = None,
+    ) -> list[str] | None:
+        """Diff of the /scale subresource before vs after a dry-run scale.
+        The captured ``uid`` rides along as the same precondition the real
+        write carries, so the dry run replays the exact request being
+        approved - a same-named replacement fails here (409 -> None) instead
+        of previewing a diff the approved write can never apply. The dry run
+        is additionally pinned to the GET snapshot's resourceVersion (see
+        ``_pin_revision``). None on any failure: a preview must never block
+        the approval flow."""
+        path = f"{self._object_path(meta, namespace, name)}/scale"
+        try:
+            current = await self._request_json(path)
+            proposed = await self._dry_run(
+                path,
+                "PATCH",
+                self._pin_revision(self._scale_patch(replicas, uid), current),
+                "application/merge-patch+json",
+            )
+        except Exception:
+            logger.debug("scale dry-run preview failed", exc_info=True)
+            return None
+        return diff_manifests(current, proposed)
+
+    async def preview_rollout_restart(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        *,
+        uid: str | None = None,
+        restarted_at: str | None = None,
+    ) -> list[str] | None:
+        """Diff of the object before vs after a dry-run rollout restart.
+        ``uid`` semantics match ``preview_scale``; ``restarted_at`` is the
+        per-approval stamp shared with the executed write; the dry run is
+        pinned to the GET snapshot's resourceVersion (see ``_pin_revision``).
+        None on any failure: a preview must never block the approval flow."""
+        path = self._object_path(meta, namespace, name)
+        try:
+            current = await self._request_json(path)
+            proposed = await self._dry_run(
+                path,
+                "PATCH",
+                self._pin_revision(self._restart_patch(uid, restarted_at), current),
+                "application/strategic-merge-patch+json",
+            )
+        except Exception:
+            logger.debug("rollout restart dry-run preview failed", exc_info=True)
+            return None
+        return diff_manifests(current, proposed)
+
+    async def preview_delete(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> list[str] | None:
+        """Summary of the exact object a delete would remove, after the
+        server accepted a dry-run DELETE (admission webhooks included). The
+        dry run carries the same DeleteOptions body as the real delete, so a
+        captured ``uid`` precondition rejects a same-named replacement here
+        (409 -> None) instead of summarizing the wrong incarnation. A diff is
+        meaningless for a removal, so the useful preview is identity plus
+        cascading behaviour (the note mirrors _delete_body: explicit
+        Background propagation). The dry run is pinned to the GET snapshot
+        via a preconditions.resourceVersion so the summary always describes
+        the revision the server validated. None on any failure."""
+        path = self._object_path(meta, namespace, name)
+        body = self._delete_body(uid)
+        try:
+            manifest = await self._request_json(path)
+            rv = (manifest.get("metadata") or {}).get("resourceVersion")
+            if rv:
+                body.setdefault("preconditions", {})["resourceVersion"] = str(rv)
+            await self._dry_run(path, "DELETE", body, "application/json")
+        except Exception:
+            logger.debug("delete dry-run preview failed", exc_info=True)
+            return None
+        md = manifest.get("metadata") or {}
+        uid = md.get("uid") or "?"
+        created = md.get("creationTimestamp") or "?"
+        return [
+            f"- {meta.plural}/{name} (uid {uid}, created {created})",
+            "delete accepted by server dry-run;"
+            " dependents are deleted in the background (propagationPolicy: Background)",
+        ]
 
     async def replace_object(
         self,
