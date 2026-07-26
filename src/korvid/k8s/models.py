@@ -129,19 +129,34 @@ def _effective_value(spec: dict[str, Any], bucket: str, key: str) -> float | int
     return max(sum(parse_memory(v) for v in main) + int(sidecar_total), int(init_peak))
 
 
-def _complete_limit(spec: dict[str, Any], key: str) -> float | int | None:
+def _pod_initialized(status: dict[str, Any]) -> bool:
+    """Whether every classic init container has finished (Initialized=True)."""
+    return any(
+        c.get("type") == "Initialized" and c.get("status") == "True"
+        for c in status.get("conditions") or []
+    )
+
+
+def _complete_limit(spec: dict[str, Any], status: dict[str, Any], key: str) -> float | int | None:
     """The pod's true runtime ceiling for coloring, or None when it has none.
 
     Unlike `_effective_value` (scheduler math, tolerates partial sums), a
-    coloring limit must bound *every* running container: pod metrics
-    aggregate main containers and sidecars, so one unlimited container
-    makes any partial sum a fictitious cap. Pod-level limits (K8s 1.34+)
-    bound the whole pod by definition. Finished classic init containers
-    contribute no runtime usage and are ignored.
+    coloring limit must bound *every* container that may be contributing to
+    pod metrics: one unlimited container makes any partial sum a fictitious
+    cap. Pod-level limits (K8s 1.34+) bound the whole pod by definition.
+    Classic init containers are ignored only once the pod reports
+    Initialized=True - before that a still-running init's usage lands in
+    the metrics while the regular containers have not started, so a
+    regular-container sum would color against the wrong ceiling.
     """
     pod_level = ((spec.get("resources") or {}).get("limits") or {}).get(key)
     if pod_level is not None:
         return parse_cpu(pod_level) if key == "cpu" else parse_memory(pod_level)
+    classic_inits = [
+        c for c in (spec.get("initContainers") or []) if c.get("restartPolicy") != "Always"
+    ]
+    if classic_inits and not _pod_initialized(status):
+        return None
     running = list(spec.get("containers") or []) + [
         c for c in (spec.get("initContainers") or []) if c.get("restartPolicy") == "Always"
     ]
@@ -591,8 +606,8 @@ class PodSummary:
         restarts = sum(int(s.get("restartCount", 0)) for s in statuses)
         cpu_request = _effective_value(spec, "requests", "cpu")
         mem_request = _effective_value(spec, "requests", "memory")
-        cpu_limit = _complete_limit(spec, "cpu")
-        mem_limit = _complete_limit(spec, "memory")
+        cpu_limit = _complete_limit(spec, status, "cpu")
+        mem_limit = _complete_limit(spec, status, "memory")
         return cls(
             name=str(meta.get("name", "")),
             namespace=str(meta.get("namespace", "")),

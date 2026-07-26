@@ -66,8 +66,12 @@ def _restarts_cell(restarts: int) -> Text:
 
 def _percent_of_request(usage: float, request: float | None, limit: float | None) -> Text:
     """Usage as % of the exact declared request; '-' when no request is
-    declared. Styles are applied to *rounded* values so the number the user
-    reads and its colour always agree (69.9 renders as 70 - yellow).
+    declared. The number and the color deliberately answer different
+    questions: the number is usage relative to the *request* (scheduling
+    footprint), the color is severity relative to the *limit* - so 284%R
+    can legitimately render green. Thresholds are applied to rounded
+    values, never to a value the user cannot see (69.9 rounds to 70 before
+    the yellow comparison).
 
     The severity color keys off proximity to the *limit* when one is
     declared (issue #50): requests are scheduling guarantees, not caps, so

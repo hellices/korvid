@@ -994,15 +994,43 @@ class TestColoringLimitCompleteness:
         )
         assert pod.mem_limit_bytes == (256 + 64) * 2**20
 
-    def test_classic_init_without_limit_is_irrelevant(self) -> None:
+    def test_classic_init_is_irrelevant_once_initialized(self) -> None:
         # A finished classic init contributes no runtime usage: it must not
         # veto the ceiling of the running containers.
+        pod = PodSummary.from_manifest(
+            {
+                "metadata": {"name": "p", "namespace": "ns"},
+                "spec": {
+                    "containers": [
+                        {"name": "a", "resources": {"limits": {"memory": "256Mi"}}},
+                    ],
+                    "initContainers": [{"name": "init"}],
+                },
+                "status": {"conditions": [{"type": "Initialized", "status": "True"}]},
+            }
+        )
+        assert pod.mem_limit_bytes == 256 * 2**20
+
+    def test_classic_init_vetoes_ceiling_while_initializing(self) -> None:
+        # Review fix (PR #51 r3): before Initialized=True a classic init may
+        # still be running and its usage lands in pod metrics - a ceiling
+        # built from the regular containers alone would be fictitious.
         pod = self._pod(
             {
                 "containers": [
                     {"name": "a", "resources": {"limits": {"memory": "256Mi"}}},
                 ],
                 "initContainers": [{"name": "init"}],
+            }
+        )
+        assert pod.mem_limit_bytes is None
+
+    def test_no_classic_inits_needs_no_initialized_condition(self) -> None:
+        pod = self._pod(
+            {
+                "containers": [
+                    {"name": "a", "resources": {"limits": {"memory": "256Mi"}}},
+                ],
             }
         )
         assert pod.mem_limit_bytes == 256 * 2**20
