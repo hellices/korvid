@@ -1016,6 +1016,26 @@ class TestContainerLimits:
         assert pod.mem_limit_bytes is None
 
 
+def test_pod_summary_carries_creation_timestamp() -> None:
+    """Feeds age sorting (issue #37): timestamps compare, not '3h' strings."""
+    manifest = {
+        "metadata": {
+            "name": "web-1",
+            "namespace": "default",
+            "creationTimestamp": "2026-07-26T09:00:00Z",
+        },
+        "spec": {},
+        "status": {},
+    }
+    pod = PodSummary.from_manifest(manifest)
+    assert pod.created == "2026-07-26T09:00:00Z"
+
+
+def test_pod_summary_created_defaults_to_empty() -> None:
+    pod = PodSummary.from_manifest({"metadata": {"name": "x"}, "spec": {}, "status": {}})
+    assert pod.created == ""
+
+
 def test_pod_summary_carries_labels() -> None:
     """Labels feed the client-side `-l` filter (issue #44)."""
     manifest = {

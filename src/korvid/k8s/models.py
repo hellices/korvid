@@ -609,6 +609,10 @@ class PodSummary:
     #: RFC 3339 time the Ready condition last flipped; freshness cutoff for
     #: event-only hints (a Warning older than it explains a previous failure).
     ready_transition_at: str | None = None
+    #: metadata.creationTimestamp (RFC 3339 UTC) or "" when absent; feeds
+    #: age sorting (issue #37) — the pods view has no AGE column but the
+    #: sort key still works on the timestamp.
+    created: str = ""
 
     @classmethod
     def from_manifest(cls, obj: dict[str, Any]) -> PodSummary:
@@ -647,4 +651,5 @@ class PodSummary:
             labels=_labels(meta),
             trouble=_pod_trouble(status),
             ready_transition_at=_ready_transition_at(status),
+            created=str(meta.get("creationTimestamp") or ""),
         )
