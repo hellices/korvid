@@ -16,6 +16,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from korvid.agent.mcp_server import KorvidMCPServer, MCPController, default_endpoint_path
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentSettings
@@ -32,6 +33,29 @@ from korvid.providers.token_store import TokenStore
 from korvid.ui.app import AppUIBridge, KorvidApp
 
 logger = logging.getLogger(__name__)
+
+
+def _make_mcp_factory(
+    config: KorvidConfig,
+    kube: KubeClient,
+    aliases: dict[str, ResourceMeta],
+    ui: UIBridge | None,
+) -> Callable[[], KorvidMCPServer]:
+    """Factory the :mcp controller uses to build a fresh server per start.
+
+    The surface is read + UI-drive tools only - write tools stay with the
+    built-in agent until an approval UX for external callers is designed
+    (issue #11 non-goal)."""
+
+    def factory() -> KorvidMCPServer:
+        return KorvidMCPServer(
+            ToolExecutor(kube, aliases, ui=ui),
+            READ_TOOLS + UI_TOOLS,
+            port=config.mcp_port,
+            endpoint_path=default_endpoint_path(),
+        )
+
+    return factory
 
 
 async def _shutdown(
@@ -86,37 +110,48 @@ class _UIBridgeProxy(UIBridge):
     """Late-bound UI bridge: the ToolExecutor is built before the app exists,
     so it holds this proxy and the composition root points ``target`` at the
     app's bridge adapter right after construction. Until then every UI tool
-    degrades to an ERROR result instead of crashing the turn."""
+    degrades to an ERROR result instead of crashing the turn.
+
+    All delegated calls are serialized through one lock: the built-in agent
+    and the MCP server's concurrent stateless requests share this proxy, and
+    the app's UI operations (log pane swaps, describe views) are not safe to
+    interleave - only navigation has its own lock inside the app."""
 
     _NOT_READY = "ERROR: UI not ready"
 
     def __init__(self) -> None:
         self.target: UIBridge | None = None
+        self._lock = asyncio.Lock()
 
     async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
         if self.target is None:
             return self._NOT_READY
-        return await self.target.agent_navigate(view, namespace)
+        async with self._lock:
+            return await self.target.agent_navigate(view, namespace)
 
     async def agent_set_filter(self, pattern: str) -> str:
         if self.target is None:
             return self._NOT_READY
-        return await self.target.agent_set_filter(pattern)
+        async with self._lock:
+            return await self.target.agent_set_filter(pattern)
 
     async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
         if self.target is None:
             return self._NOT_READY
-        return await self.target.agent_open_logs(pod, namespace, container)
+        async with self._lock:
+            return await self.target.agent_open_logs(pod, namespace, container)
 
     async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
         if self.target is None:
             return self._NOT_READY
-        return await self.target.agent_open_describe(kind, name, namespace)
+        async with self._lock:
+            return await self.target.agent_open_describe(kind, name, namespace)
 
     async def agent_drill_down(self, name: str) -> str:
         if self.target is None:
             return self._NOT_READY
-        return await self.target.agent_drill_down(name)
+        async with self._lock:
+            return await self.target.agent_drill_down(name)
 
     async def agent_request_write(
         self,
@@ -128,7 +163,8 @@ class _UIBridgeProxy(UIBridge):
     ) -> str:
         if self.target is None:
             return self._NOT_READY
-        return await self.target.agent_request_write(action, kind, name, namespace, replicas)
+        async with self._lock:
+            return await self.target.agent_request_write(action, kind, name, namespace, replicas)
 
 
 def _build_agent_wiring(
@@ -203,10 +239,12 @@ def _build_agent_wiring(
     return agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy
 
 
-def _load_startup_config(readonly: bool) -> KorvidConfig:
+def _load_startup_config(readonly: bool, mcp: bool = False) -> KorvidConfig:
     config = load_config()
     if readonly:
         config = dataclasses.replace(config, readonly=True)
+    if mcp:
+        config = dataclasses.replace(config, mcp_enabled=True)
     # Pin the actual context name so kubectl subprocesses (shell/debug) and the
     # status bar reference this cluster even if current-context changes later.
     resolved_ctx = resolve_context_name(config.kube_context)
@@ -215,8 +253,33 @@ def _load_startup_config(readonly: bool) -> KorvidConfig:
     return config
 
 
-async def _run(readonly: bool = False) -> None:
-    config = _load_startup_config(readonly)
+async def _start_mcp_if_enabled(config: KorvidConfig, controller: MCPController) -> None:
+    if not config.mcp_enabled:
+        return
+    startup_msg = await controller.start()
+    if startup_msg.startswith("ERROR"):
+        logger.error("%s", startup_msg)
+
+
+async def _teardown(
+    controller: MCPController,
+    discovery_task: asyncio.Task[None],
+    provider: LLMProvider | None,
+    kube: KubeClient,
+) -> None:
+    """Bounded graceful MCP stop first; anything still pending is awaited
+    only *after* the critical provider/kube cleanup, matching what
+    asyncio.run()'s final task-gathering would do anyway - but explicitly,
+    with the exception consumed instead of swallowed."""
+    leftover = await controller.shutdown()
+    await _shutdown(discovery_task, provider, kube)
+    if leftover is not None:
+        with contextlib.suppress(BaseException):
+            await leftover
+
+
+async def _run(readonly: bool = False, mcp: bool = False) -> None:
+    config = _load_startup_config(readonly, mcp)
     kube = KubeClient()
     await kube.connect(config.kube_context)
     store = ResourceStore()
@@ -253,6 +316,8 @@ async def _run(readonly: bool = False) -> None:
         config, kube, aliases
     )
 
+    mcp_controller = MCPController(_make_mcp_factory(config, kube, aliases, ui_proxy))
+
     app = KorvidApp(
         config=config,
         store=store,
@@ -269,16 +334,19 @@ async def _run(readonly: bool = False) -> None:
         agent_model_name=config.agent_model,
         agent_configurator=configurator,
         rebuild_agent=rebuild_agent,
+        mcp=mcp_controller,
     )
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.
     ui_proxy.target = AppUIBridge(app)
 
+    await _start_mcp_if_enabled(config, mcp_controller)
+
     discovery_task = asyncio.create_task(_discover_in_background(kube, aliases, app))
     try:
         await app.run_async()
     finally:
-        await _shutdown(discovery_task, provider_box[0], kube)
+        await _teardown(mcp_controller, discovery_task, provider_box[0], kube)
 
 
 def main() -> None:
@@ -288,8 +356,14 @@ def main() -> None:
         action="store_true",
         help="Disable all cluster write operations (keybindings and agent tools).",
     )
+    parser.add_argument(
+        "--mcp",
+        action="store_true",
+        help="Expose read + UI-drive tools to external MCP hosts over"
+        " Streamable HTTP on 127.0.0.1 (port from config mcp.port, default 7878).",
+    )
     args = parser.parse_args()
-    asyncio.run(_run(readonly=args.readonly))
+    asyncio.run(_run(readonly=args.readonly, mcp=args.mcp))
 
 
 if __name__ == "__main__":

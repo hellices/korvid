@@ -161,3 +161,89 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
     assert "delete_resource" not in ro_names
     assert "scale_resource" not in ro_names
     assert "rollout_restart" not in ro_names
+
+
+def test_mcp_factory_builds_fresh_servers() -> None:
+    """uvicorn servers are single-use: each :mcp on must get a new one."""
+    from korvid.__main__ import _make_mcp_factory
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    config = KorvidConfig(mcp_enabled=True, mcp_port=1234)
+    factory = _make_mcp_factory(config, cast("KubeClient", object()), {}, None)
+    assert factory() is not factory()
+
+
+async def test_mcp_factory_exposes_read_and_ui_tools() -> None:
+    """The MCP surface is read + UI-drive: write tools stay with the
+    built-in agent until an approval UX for external callers exists."""
+    from korvid.__main__ import _make_mcp_factory
+    from korvid.agent.tools import READ_TOOLS, UI_TOOLS
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    config = KorvidConfig(mcp_enabled=True, mcp_port=1234)
+    server = _make_mcp_factory(config, cast("KubeClient", object()), {}, None)()
+    names = [t.name for t in await server.list_tools()]
+    assert names == [t["function"]["name"] for t in READ_TOOLS + UI_TOOLS]
+
+
+class _OverlapProbeBridge(UIBridge):
+    """Records whether any two bridge calls ever overlap in time."""
+
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+    async def _enter(self) -> str:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0)  # yield so a concurrent caller could interleave
+        self.active -= 1
+        return "ok"
+
+    async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        return await self._enter()
+
+    async def agent_set_filter(self, pattern: str) -> str:
+        return await self._enter()
+
+    async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
+        return await self._enter()
+
+    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
+        return await self._enter()
+
+    async def agent_drill_down(self, name: str) -> str:
+        return await self._enter()
+
+    async def agent_request_write(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+    ) -> str:
+        return await self._enter()
+
+
+async def test_ui_bridge_proxy_serializes_concurrent_callers() -> None:
+    """The proxy is shared by the built-in agent and the MCP server's
+    concurrent stateless requests; UI operations (log pane swaps, describe
+    views) are not safe to interleave, so calls must never overlap."""
+    from korvid.__main__ import _UIBridgeProxy
+
+    probe = _OverlapProbeBridge()
+    proxy = _UIBridgeProxy()
+    proxy.target = probe
+    await asyncio.gather(
+        proxy.agent_open_logs("a", "ns"),
+        proxy.agent_open_logs("b", "ns"),
+        proxy.agent_open_describe("pods", "a"),
+        proxy.agent_navigate("pods"),
+        proxy.agent_set_filter("x"),
+        proxy.agent_drill_down("a"),
+        proxy.agent_request_write("delete", "pods", "a"),
+    )
+    assert probe.max_active == 1
