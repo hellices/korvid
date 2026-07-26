@@ -10,8 +10,9 @@ AI-native Kubernetes TUI — a k9s-style keyboard-first cockpit with an embedded
 
 Work in progress — core TUI, log viewer, live metrics, MCP server, and agent
 runtime are functional. Read-heavy by design: cluster writes (delete / scale /
-rollout restart / edit) exist but every one is approval-gated, dry-run
-previewed, and audited; `--readonly` disables them all.
+rollout restart / edit) exist but every one is approval-gated and audited —
+delete, scale, and rollout restart additionally show a server dry-run preview
+in the dialog; `--readonly` disables them all.
 
 ## Keybindings
 

@@ -18,14 +18,19 @@ async def until(
 ) -> None:
     """Advance the app until `cond()` is truthy, or fail after `timeout` seconds.
 
-    The condition is re-checked once after the final pause so it cannot fail
-    on an outcome that arrived during the last tick, and `label` names the
+    The pauses always add up to the full requested timeout (a shorter final
+    step covers the remainder, so truncation never shortens the wait), the
+    condition is re-checked once after the final pause so it cannot fail on
+    an outcome that arrived during the last tick, and `label` names the
     awaited outcome in the failure message for easier CI diagnosis.
     """
-    for _ in range(int(timeout / 0.05)):
+    remaining = timeout
+    while remaining > 0:
         if cond():
             return
-        await pilot.pause(0.05)
+        step = min(0.05, remaining)
+        await pilot.pause(step)
+        remaining -= step
     if cond():
         return
     raise AssertionError(f"{label} not met within {timeout}s")
