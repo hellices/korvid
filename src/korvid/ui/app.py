@@ -49,6 +49,7 @@ from korvid.core.filters import ResourceFilter, parse_filter
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.core.secrets import mask_secret_manifest
+from korvid.core.sorting import SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
@@ -352,8 +353,16 @@ class KorvidApp(App[None]):
         Binding("ctrl+s", "log_save", "Save logs", show=False),
         ("p", "log_previous", "Prev logs"),
         ("n", "log_search_next", "Next hit"),
-        Binding("shift+n", "log_search_prev", "Prev hit"),
-        Binding("N", "log_search_prev", "Prev hit", show=False),
+        Binding("shift+n", "log_search_prev", "Prev hit / Sort name"),
+        Binding("N", "log_search_prev", "Prev hit / Sort name", show=False),
+        # Column sorting (issue #37); shift+n doubles as sort-by-name when
+        # no search pane is open (see action_log_search_prev).
+        Binding("shift+a", "sort_by_age", "Sort age", show=False),
+        Binding("A", "sort_by_age", "Sort age", show=False),
+        Binding("shift+c", "sort_by_cpu", "Sort CPU", show=False),
+        Binding("C", "sort_by_cpu", "Sort CPU", show=False),
+        Binding("shift+m", "sort_by_mem", "Sort MEM", show=False),
+        Binding("M", "sort_by_mem", "Sort MEM", show=False),
         Binding("ctrl+a", "toggle_agent", "AI", priority=True),
         Binding("ctrl+d", "delete_resource", "Delete"),
         Binding("r", "rollout_restart", "Restart", show=False),
@@ -457,6 +466,10 @@ class KorvidApp(App[None]):
         #: inverse / hide-completed — issue #44); single matcher shared by
         #: the table render and the agent's view of "what the user sees".
         self._resource_filter: ResourceFilter = parse_filter("")
+        #: Active sort per view kind (issue #37): the choice survives watch
+        #: updates (every render re-applies it) and switching views restores
+        #: each kind's own sort.
+        self._sorts: dict[str, SortSpec] = {}
         # Drill-down levels (deploy -> rs -> pods); single source for the
         # breadcrumb line and the owner-uid filter on the current table.
         self._drill = NavigationStack()
@@ -625,6 +638,7 @@ class KorvidApp(App[None]):
             # the full summaries, not just names) — no name pattern remains.
             pattern="",
             metrics=metrics,
+            sort=self._sorts.get(kind),
         )
         self._refresh_empty_state(kind, table.row_count)
         # The strip is driven by RowHighlighted on the pods view; anything
@@ -3079,7 +3093,7 @@ class KorvidApp(App[None]):
             log_pane.search_next()
 
     def action_log_search_prev(self) -> None:
-        """Go back to the previous search hit (``N`` / shift+n key)."""
+        """Previous search hit in an open pane; sort by name otherwise (``N``)."""
         describe_pane = self.query_one(DescribePane)
         if describe_pane.display:
             describe_pane.search_prev()
@@ -3087,6 +3101,32 @@ class KorvidApp(App[None]):
         log_pane = self.query_one(LogPane)
         if log_pane.display:
             log_pane.search_prev()
+            return
+        self._toggle_sort("name")
+
+    # ------------------------------------------------------------------
+    # Column sorting (issue #37) — data-model sort keys, per-kind state.
+    # ------------------------------------------------------------------
+
+    def _toggle_sort(self, column: str) -> None:
+        """Apply/flip a sort column for the current view kind and re-render."""
+        kind = self.current_kind
+        if column in ("cpu", "mem") and kind != "pods":
+            # Only the pods view has CPU/MEM columns and a metrics feed;
+            # elsewhere the keypress would silently discard the current
+            # order while showing no indicator, so ignore it.
+            return
+        self._sorts[kind] = toggle_sort(self._sorts.get(kind), column)
+        self._render_table(kind)
+
+    def action_sort_by_age(self) -> None:
+        self._toggle_sort("age")
+
+    def action_sort_by_cpu(self) -> None:
+        self._toggle_sort("cpu")
+
+    def action_sort_by_mem(self) -> None:
+        self._toggle_sort("mem")
 
     # ------------------------------------------------------------------
     # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,

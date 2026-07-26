@@ -71,6 +71,36 @@ def format_memory(size: int) -> str:
     return f"{round(size / 2**20)}Mi"
 
 
+def format_age(created: str, now: datetime | None = None) -> str:
+    """K9s-style age string ("5m", "3h", "2d") from an RFC 3339 timestamp.
+
+    Returns "-" when `created` is empty, unparsable, or in the future.
+    """
+    if not created:
+        return "-"
+    if now is None:
+        now = datetime.now(UTC)
+    try:
+        ts = created
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        created_dt = datetime.fromisoformat(ts)
+        if created_dt.tzinfo is None:
+            created_dt = created_dt.replace(tzinfo=UTC)
+    except ValueError:
+        return "-"
+    total_seconds = int((now - created_dt).total_seconds())
+    if total_seconds < 0:
+        return "-"
+    days = total_seconds // 86400
+    if days >= 1:
+        return f"{days}d"
+    hours = total_seconds // 3600
+    if hours >= 1:
+        return f"{hours}h"
+    return f"{total_seconds // 60}m"
+
+
 def _quantities(containers: list[dict[str, Any]], bucket: str, key: str) -> list[str]:
     return [
         str(q)
@@ -227,29 +257,7 @@ class GenericSummary:
 
     def age(self, now: datetime | None = None) -> str:
         """Return k9s-style age string ("5m", "3h", "2d"); "-" when created is empty."""
-        if not self.created:
-            return "-"
-        if now is None:
-            now = datetime.now(UTC)
-        try:
-            ts = self.created
-            if ts.endswith("Z"):
-                ts = ts[:-1] + "+00:00"
-            created_dt = datetime.fromisoformat(ts)
-            if created_dt.tzinfo is None:
-                created_dt = created_dt.replace(tzinfo=UTC)
-        except ValueError:
-            return "-"
-        total_seconds = int((now - created_dt).total_seconds())
-        if total_seconds < 0:
-            return "-"
-        days = total_seconds // 86400
-        if days >= 1:
-            return f"{days}d"
-        hours = total_seconds // 3600
-        if hours >= 1:
-            return f"{hours}h"
-        return f"{total_seconds // 60}m"
+        return format_age(self.created, now=now)
 
 
 @dataclass(frozen=True)
@@ -609,6 +617,13 @@ class PodSummary:
     #: RFC 3339 time the Ready condition last flipped; freshness cutoff for
     #: event-only hints (a Warning older than it explains a previous failure).
     ready_transition_at: str | None = None
+    #: metadata.creationTimestamp (RFC 3339 UTC) or "" when absent; feeds
+    #: the AGE column and age sorting (issue #37).
+    created: str = ""
+
+    def age(self, now: datetime | None = None) -> str:
+        """Return k9s-style age string ("5m", "3h", "2d"); "-" when created is empty."""
+        return format_age(self.created, now=now)
 
     @classmethod
     def from_manifest(cls, obj: dict[str, Any]) -> PodSummary:
@@ -647,4 +662,5 @@ class PodSummary:
             labels=_labels(meta),
             trouble=_pod_trouble(status),
             ready_transition_at=_ready_transition_at(status),
+            created=str(meta.get("creationTimestamp") or ""),
         )
