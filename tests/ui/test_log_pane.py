@@ -1163,6 +1163,64 @@ async def test_wrap_persists_across_reopen() -> None:
         assert "[wrap]" in _header_text(app)
 
 
+class WrapScrollFakeStream:
+    """Yields three long (wrapping) lines around one short 'findme' line."""
+
+    async def __call__(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncGenerator[LogLine, None]:
+        texts = ["a" * 300, "findme", "b" * 300, "c" * 300]
+        for t in texts:
+            yield LogLine(pod=pod, container=container, text=t)
+        if follow:
+            await asyncio.Event().wait()
+
+
+async def test_search_scroll_accounts_for_wrapped_rows() -> None:
+    """With wrap on, search scrolls by display rows, not logical line indexes."""
+    from textual.widgets import RichLog
+
+    stream = WrapScrollFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
+        await pilot.press("l")
+        await until(pilot, lambda: "findme" in _richlog_text(app), label="lines fed")
+        await pilot.press("w")
+        await until(pilot, lambda: "[wrap]" in _header_text(app), label="wrap tag on")
+
+        rich_log = app.query_one(LogPane).query_one(RichLog)
+        # The three identical long lines wrap to the same height; findme is 1 row.
+        long_rows = (len(rich_log.lines) - 1) // 3
+        assert long_rows >= 2, "long lines must wrap for this test to be meaningful"
+
+        scrolled: list[float] = []
+        original_scroll = rich_log.scroll_to
+
+        def _capture(*args: Any, **kwargs: Any) -> None:
+            scrolled.append(float(kwargs["y"]))
+            original_scroll(*args, **kwargs)
+
+        rich_log.scroll_to = _capture  # type: ignore[method-assign]
+
+        await pilot.press("slash")
+        await pilot.pause()
+        for ch in "findme":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        # The hit is buffered line 1 but sits below the wrapped rows of line 0.
+        assert scrolled == [long_rows]
+
+
 # ---------------------------------------------------------------------------
 # Issue #43: timestamps toggle (t)
 # ---------------------------------------------------------------------------
@@ -1170,6 +1228,8 @@ async def test_wrap_persists_across_reopen() -> None:
 
 class TimestampFakeStream:
     """Yields one line with a kubelet timestamp, one without, then blocks."""
+
+    STAMP = datetime(2026, 7, 26, 10, 30, 45, tzinfo=UTC)
 
     async def __call__(
         self,
@@ -1185,11 +1245,15 @@ class TimestampFakeStream:
             pod=pod,
             container=container,
             text="stamped-line",
-            timestamp=datetime(2026, 7, 26, 10, 30, 45, tzinfo=UTC),
+            timestamp=self.STAMP,
         )
         yield LogLine(pod=pod, container=container, text="bare-line")
         if follow:
             await asyncio.Event().wait()
+
+
+# Timestamps display in the user's local timezone, not kubelet UTC.
+_STAMP_LOCAL = TimestampFakeStream.STAMP.astimezone().strftime("%H:%M:%S")
 
 
 async def test_t_toggles_timestamp_prefix() -> None:
@@ -1201,20 +1265,46 @@ async def test_t_toggles_timestamp_prefix() -> None:
         await pilot.press("l")
         await until(pilot, lambda: "bare-line" in _richlog_text(app), label="lines fed")
 
-        assert "10:30:45" not in _richlog_text(app)
+        assert _STAMP_LOCAL not in _richlog_text(app)
         assert "[ts]" not in _header_text(app)
 
         await pilot.press("t")
         await until(pilot, lambda: "[ts]" in _header_text(app), label="ts tag on")
         text = _richlog_text(app)
-        assert "10:30:45 stamped-line" in text
+        assert f"{_STAMP_LOCAL} stamped-line" in text
         # Lines without a parsed timestamp render unchanged.
         assert "bare-line" in text
-        assert "10:30:45 bare-line" not in text
+        assert f"{_STAMP_LOCAL} bare-line" not in text
 
         await pilot.press("t")
         await until(pilot, lambda: "[ts]" not in _header_text(app), label="ts tag off")
-        assert "10:30:45" not in _richlog_text(app)
+        assert _STAMP_LOCAL not in _richlog_text(app)
+
+
+async def test_timestamp_prefix_dims_only_the_timestamp() -> None:
+    """The dim style covers only the HH:MM:SS prefix, not the log body."""
+    from textual.widgets import RichLog
+
+    stream = TimestampFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
+        await pilot.press("l")
+        await until(pilot, lambda: "bare-line" in _richlog_text(app), label="lines fed")
+        await pilot.press("t")
+        await until(
+            pilot,
+            lambda: f"{_STAMP_LOCAL} stamped-line" in _richlog_text(app),
+            label="stamped line",
+        )
+
+        rich_log = app.query_one(LogPane).query_one(RichLog)
+        strip = next(s for s in rich_log.lines if "stamped-line" in "".join(seg.text for seg in s))
+        body = next(seg for seg in strip if "stamped-line" in seg.text)
+        assert not (body.style is not None and body.style.dim)
+        prefix = next(seg for seg in strip if _STAMP_LOCAL in seg.text)
+        assert prefix.style is not None
+        assert prefix.style.dim
 
 
 async def test_t_closed_no_crash() -> None:
@@ -1242,7 +1332,7 @@ async def test_timestamps_persist_across_reopen() -> None:
         await pilot.press("l")  # reopen
         await until(
             pilot,
-            lambda: "10:30:45 stamped-line" in _richlog_text(app),
+            lambda: f"{_STAMP_LOCAL} stamped-line" in _richlog_text(app),
             label="stamped line after reopen",
         )
         assert "[ts]" in _header_text(app)
@@ -1334,7 +1424,7 @@ async def test_config_seeds_wrap_and_timestamp_defaults() -> None:
         await pilot.press("l")
         await until(
             pilot,
-            lambda: "10:30:45 stamped-line" in _richlog_text(app),
+            lambda: f"{_STAMP_LOCAL} stamped-line" in _richlog_text(app),
             label="stamped line",
         )
         assert all(rl.wrap is True for rl in _panel_richlogs(app))

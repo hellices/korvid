@@ -78,9 +78,12 @@ def export_log_lines(
         suffix = "" if attempt == 0 else f"-{attempt}"
         path = directory / f"korvid-{stem}-{stamp}{suffix}.log"
         try:
-            # Exclusive create: a same-second save picks the next suffix
-            # instead of truncating the earlier export.
-            with path.open("x") as fh:
+            # Exclusive create (a same-second save picks the next suffix
+            # instead of truncating the earlier export), owner-only mode
+            # (cluster logs may be sensitive), and explicit UTF-8 so a
+            # non-UTF-8 locale can't fail on non-ASCII log text.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with open(fd, "w", encoding="utf-8") as fh:
                 fh.write(content)
         except FileExistsError:
             continue

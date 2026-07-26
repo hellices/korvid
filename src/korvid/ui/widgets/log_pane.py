@@ -24,6 +24,8 @@ maps each hit to its source panel and scrolls that panel.
 
 from __future__ import annotations
 
+from rich.measure import measure_renderables
+from rich.segment import Segment
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Container, Vertical
@@ -327,13 +329,35 @@ class LogPane(Widget):
         index = self._panel_index(f"{line.pod}/{line.container}")
         if index < 0:
             return
-        rich_log = self._panel(index).query_one(RichLog)
+        self._panel(index).query_one(RichLog).write(self._render_line_text(line))
+
+    def _render_line_text(self, line: LogLine) -> Text:
+        """Render *line* with the current format / timestamp settings."""
         rendered = format_log_line(line.text, formatted=self.formatted)
         if self.show_timestamps and line.timestamp is not None:
-            prefixed = Text(line.timestamp.strftime("%H:%M:%S") + " ", style="dim")
+            # Kubelet timestamps are UTC; show the user's local wall clock.
+            # Style only the prefix span — a base style would dim the body too.
+            prefixed = Text()
+            prefixed.append(line.timestamp.astimezone().strftime("%H:%M:%S") + " ", style="dim")
             prefixed.append_text(rendered)
-            rendered = prefixed
-        rich_log.write(rendered)
+            return prefixed
+        return rendered
+
+    def _display_rows(self, rich_log: RichLog, renderable: Text) -> int:
+        """Display rows *renderable* occupies in *rich_log* (mirrors ``RichLog.write``).
+
+        With wrap off RichLog renders each single-line ``Text`` as exactly one
+        row; with wrap on it re-renders at the same width ``write()`` used, so
+        one logical line can span several rows.
+        """
+        if not rich_log.wrap:
+            return 1
+        console = self.app.console
+        options = console.options
+        width = measure_renderables(console, options, [renderable]).maximum
+        render_width = max(min(width, rich_log.scrollable_content_region.width), rich_log.min_width)
+        segments = console.render(renderable, options.update_width(render_width))
+        return max(len(list(Segment.split_lines(segments))), 1)
 
     def _update_header(self) -> None:
         fmt_tag = "[json]" if self.formatted else "[raw]"
@@ -369,19 +393,23 @@ class LogPane(Widget):
         if index < 0:
             return  # hit belongs to a source no longer shown
         rich_log = self._panel(index).query_one(RichLog)
-        # Per-panel line index: count earlier buffer lines routed to the same
-        # panel, then correct for banner lines / ring-buffer drops the RichLog
-        # still displays.
-        panel_line_idx = sum(
-            1
-            for line in lines[:hit_idx]
-            if self._panel_index(f"{line.pod}/{line.container}") == index
-        )
-        panel_total = sum(
-            1 for line in lines if self._panel_index(f"{line.pod}/{line.container}") == index
-        )
-        offset = len(rich_log.lines) - panel_total
-        rich_log.scroll_to(y=panel_line_idx + max(offset, 0), animate=False)
+        # Display row where the hit starts: sum the rendered heights of the
+        # earlier buffer lines routed to the same panel (one row each without
+        # wrap; possibly several with wrap).
+        start_row = 0
+        total_rows = 0
+        for i, line in enumerate(lines):
+            if self._panel_index(f"{line.pod}/{line.container}") != index:
+                continue
+            rows = self._display_rows(rich_log, self._render_line_text(line))
+            if i < hit_idx:
+                start_row += rows
+            total_rows += rows
+        # Rows the RichLog shows beyond the buffered lines (banners) minus
+        # rows it evicted from the top (``max_lines`` trimming) — the latter
+        # makes the offset negative.
+        offset = len(rich_log.lines) - total_rows
+        rich_log.scroll_to(y=max(start_row + offset, 0), animate=False)
 
     # ------------------------------------------------------------------
     # Event handlers

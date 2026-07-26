@@ -56,6 +56,20 @@ def test_export_includes_timestamp_when_present(tmp_path: Path) -> None:
     assert "\nbare\n" in content
 
 
+def test_export_file_is_private(tmp_path: Path) -> None:
+    """Exported cluster logs must not be readable by group/other users."""
+    path = export_log_lines([_line("secretish")], tmp_path)
+
+    assert path.stat().st_mode & 0o077 == 0
+
+
+def test_export_writes_utf8(tmp_path: Path) -> None:
+    """Non-ASCII log text is written as UTF-8 regardless of the locale."""
+    path = export_log_lines([_line("한글 로그 ✓")], tmp_path)
+
+    assert path.read_bytes().decode("utf-8") == "한글 로그 ✓\n"
+
+
 def test_export_creates_directory(tmp_path: Path) -> None:
     target = tmp_path / "nested" / "dir"
     now = datetime(2026, 7, 26, 10, 30, 45, tzinfo=UTC)
