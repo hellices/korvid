@@ -321,11 +321,29 @@ class ContainerTrouble:
     restarts: int = 0
 
 
+def _running_not_ready_reason(cs: dict[str, Any], state: dict[str, Any]) -> str | None:
+    """`NotReady` when a running-but-unready container previously died abnormally.
+
+    The useful failure data (exit 137 OOMKilled) then lives only in
+    `lastState.terminated`; without this the row would get an event-only hint.
+    """
+    if not state.get("running") or cs.get("ready") is not False:
+        return None
+    last = (cs.get("lastState") or {}).get("terminated") or {}
+    if not last:
+        return None
+    last_reason = _terminated_reason(last)
+    if last_reason is None or last_reason == "Completed":
+        return None
+    return "NotReady"
+
+
 def _container_trouble(cs: dict[str, Any], *, name_prefix: str = "") -> ContainerTrouble | None:
     """Trouble entry for one container status, or None when it is healthy.
 
-    Captures a non-benign waiting reason, or a current abnormal termination
-    (non-zero exit / signal). The most recent termination rides along either
+    Captures a non-benign waiting reason, a current abnormal termination
+    (non-zero exit / signal), or a running-but-unready container whose last
+    termination was abnormal. The most recent termination rides along either
     way so "why" (exit 137 OOMKilled) shows next to "what" (CrashLoopBackOff).
     """
     state = cs.get("state") or {}
@@ -339,6 +357,8 @@ def _container_trouble(cs: dict[str, Any], *, name_prefix: str = "") -> Containe
         reason = _terminated_reason(terminated)
         if reason == "Completed" or (reason is None):
             return None
+    if reason is None:
+        reason = _running_not_ready_reason(cs, state)
     if reason is None:
         return None
     last = terminated or ((cs.get("lastState") or {}).get("terminated") or {})

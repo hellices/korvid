@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from korvid.k8s.models import ContainerTrouble, PodSummary
+from korvid.k8s.models import ContainerTrouble, PodSummary, _container_trouble
 
 
 def _pod(
@@ -289,3 +289,46 @@ def test_pod_level_trouble_precedes_container_trouble() -> None:
     assert pod.trouble[0].container == "pod"
     assert pod.trouble[0].reason == "Evicted"
     assert pod.trouble[1].container == "app"
+
+
+def test_running_not_ready_with_abnormal_last_termination_is_trouble() -> None:
+    cs = {
+        "name": "app",
+        "ready": False,
+        "restartCount": 3,
+        "state": {"running": {"startedAt": "2026-07-26T08:00:00Z"}},
+        "lastState": {
+            "terminated": {
+                "reason": "OOMKilled",
+                "exitCode": 137,
+                "finishedAt": "2026-07-26T07:59:00Z",
+            }
+        },
+    }
+    entry = _container_trouble(cs)
+    assert entry is not None
+    assert entry.reason == "NotReady"
+    assert entry.exit_code == 137
+    assert entry.exit_reason == "OOMKilled"
+    assert entry.finished_at == "2026-07-26T07:59:00Z"
+    assert entry.restarts == 3
+
+
+def test_running_not_ready_with_completed_last_termination_is_not_trouble() -> None:
+    cs = {
+        "name": "app",
+        "ready": False,
+        "state": {"running": {}},
+        "lastState": {"terminated": {"reason": "Completed", "exitCode": 0}},
+    }
+    assert _container_trouble(cs) is None
+
+
+def test_running_ready_with_abnormal_last_termination_is_not_trouble() -> None:
+    cs = {
+        "name": "app",
+        "ready": True,
+        "state": {"running": {}},
+        "lastState": {"terminated": {"reason": "OOMKilled", "exitCode": 137}},
+    }
+    assert _container_trouble(cs) is None
