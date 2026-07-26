@@ -163,26 +163,27 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
     assert "rollout_restart" not in ro_names
 
 
-def test_build_mcp_server_disabled_returns_none() -> None:
-    from korvid.__main__ import _build_mcp_server
+def test_mcp_factory_builds_fresh_servers() -> None:
+    """uvicorn servers are single-use: each :mcp on must get a new one."""
+    from korvid.__main__ import _make_mcp_factory
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
-    config = KorvidConfig()  # mcp disabled by default
-    assert _build_mcp_server(config, cast("KubeClient", object()), {}, None) is None
+    config = KorvidConfig(mcp_enabled=True, mcp_port=1234)
+    factory = _make_mcp_factory(config, cast("KubeClient", object()), {}, None)
+    assert factory() is not factory()
 
 
-async def test_build_mcp_server_enabled_exposes_read_and_ui_tools() -> None:
+async def test_mcp_factory_exposes_read_and_ui_tools() -> None:
     """The MCP surface is read + UI-drive: write tools stay with the
     built-in agent until an approval UX for external callers exists."""
-    from korvid.__main__ import _build_mcp_server
+    from korvid.__main__ import _make_mcp_factory
     from korvid.agent.tools import READ_TOOLS, UI_TOOLS
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
     config = KorvidConfig(mcp_enabled=True, mcp_port=1234)
-    server = _build_mcp_server(config, cast("KubeClient", object()), {}, None)
-    assert server is not None
+    server = _make_mcp_factory(config, cast("KubeClient", object()), {}, None)()
     names = [t.name for t in await server.list_tools()]
     assert names == [t["function"]["name"] for t in READ_TOOLS + UI_TOOLS]
 

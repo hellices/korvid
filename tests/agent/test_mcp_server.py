@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from korvid.agent.mcp_server import KorvidMCPServer, default_endpoint_path
+from korvid.agent.mcp_server import KorvidMCPServer, MCPController, default_endpoint_path
 from korvid.agent.tools import READ_TOOLS, UI_TOOLS, ToolExecutor
 from korvid.k8s.discovery import PODS_META
 
@@ -243,3 +243,95 @@ async def test_shutdown_requested_before_run_exits_promptly() -> None:
     server = make_server(port=0)
     server.request_shutdown()
     await asyncio.wait_for(server.run(), timeout=5)
+
+
+async def test_remove_endpoint_spares_non_dict_record(tmp_path: Path) -> None:
+    """A non-dict JSON body (e.g. `[]` from another tool) is foreign data:
+    removal must neither crash nor delete it."""
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    server = make_server(port=0, endpoint_path=endpoint_file)
+    task = asyncio.create_task(server.run())
+    try:
+        await asyncio.wait_for(server.wait_started(), timeout=10)
+        endpoint_file.write_text("[]")
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+    assert endpoint_file.read_text() == "[]"
+
+
+# ---------------------------------------------------------------------------
+# MCPController (:mcp on/off runtime lifecycle)
+# ---------------------------------------------------------------------------
+
+
+async def test_controller_start_stop_roundtrip(tmp_path: Path) -> None:
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    controller = MCPController(lambda: make_server(port=0, endpoint_path=endpoint_file))
+    assert controller.status() == "MCP off"
+    msg = await asyncio.wait_for(controller.start(), timeout=15)
+    assert msg.startswith("MCP on :")
+    assert controller.running
+    assert controller.status() == msg
+    assert endpoint_file.exists()
+    msg = await asyncio.wait_for(controller.stop(), timeout=15)
+    assert msg == "MCP off"
+    assert not controller.running
+    assert not endpoint_file.exists()
+
+
+async def test_controller_start_is_idempotent(tmp_path: Path) -> None:
+    """A second :mcp on while running reports state instead of spawning a
+    second server."""
+    built: list[KorvidMCPServer] = []
+
+    def factory() -> KorvidMCPServer:
+        server = make_server(port=0, endpoint_path=tmp_path / "mcp-endpoint.json")
+        built.append(server)
+        return server
+
+    controller = MCPController(factory)
+    first = await asyncio.wait_for(controller.start(), timeout=15)
+    second = await asyncio.wait_for(controller.start(), timeout=15)
+    assert second == first
+    assert len(built) == 1
+    await asyncio.wait_for(controller.stop(), timeout=15)
+
+
+async def test_controller_restart_builds_fresh_server(tmp_path: Path) -> None:
+    """uvicorn servers are single-use: on -> off -> on must run a new one."""
+    built: list[KorvidMCPServer] = []
+
+    def factory() -> KorvidMCPServer:
+        server = make_server(port=0, endpoint_path=tmp_path / "mcp-endpoint.json")
+        built.append(server)
+        return server
+
+    controller = MCPController(factory)
+    await asyncio.wait_for(controller.start(), timeout=15)
+    await asyncio.wait_for(controller.stop(), timeout=15)
+    msg = await asyncio.wait_for(controller.start(), timeout=15)
+    assert msg.startswith("MCP on :")
+    assert len(built) == 2
+    assert built[0] is not built[1]
+    await asyncio.wait_for(controller.stop(), timeout=15)
+
+
+async def test_controller_start_reports_bind_failure() -> None:
+    """Port already taken: the user gets an ERROR line and the controller is
+    back to a startable state (task fully reaped)."""
+    with socket.socket() as blocker:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        taken = blocker.getsockname()[1]
+        controller = MCPController(lambda: make_server(port=taken))
+        msg = await asyncio.wait_for(controller.start(), timeout=15)
+    assert msg.startswith("ERROR")
+    assert not controller.running
+    assert controller.status() == "MCP off"
+
+
+async def test_controller_stop_without_start_is_noop() -> None:
+    controller = MCPController(lambda: make_server(port=0))
+    assert await asyncio.wait_for(controller.stop(), timeout=5) == "MCP off"
+    assert await controller.shutdown() is None

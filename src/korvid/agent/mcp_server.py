@@ -17,11 +17,12 @@ endpoint is published to a small discovery file (see
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from starlette.routing import Mount
 from starlette.types import Receive, Scope, Send
 
 from korvid.agent.tools import ToolExecutor
+from korvid.core.audit import interprocess_lock
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,12 @@ def default_endpoint_path() -> Path:
     state = os.environ.get("XDG_STATE_HOME")
     base = Path(state) if state else Path.home() / ".local" / "state"
     return base / "korvid" / "mcp-endpoint.json"
+
+
+def _endpoint_lock_path(endpoint_path: Path) -> Path:
+    """Sibling lock file serializing endpoint publication/removal across
+    korvid processes."""
+    return endpoint_path.with_name(endpoint_path.name + ".lock")
 
 
 class KorvidMCPServer:
@@ -124,12 +132,21 @@ class KorvidMCPServer:
         result = await self._executor.execute(name, arguments or {})
         return [types.TextContent(type="text", text=result)]
 
+    @property
+    def bound_port(self) -> int | None:
+        """Actual TCP port once started; None before startup completes."""
+        return self._bound_port
+
     async def wait_started(self) -> int:
         """Block until the HTTP server is accepting connections; return the
-        bound port (useful when constructed with ``port=0``)."""
+        bound port (useful when constructed with ``port=0``).
+
+        Raises RuntimeError if startup failed (bind error) - the event is
+        set either way so callers never hang on a server that will not come
+        up."""
         await self._started.wait()
-        if self._bound_port is None:  # pragma: no cover - set before _started
-            raise RuntimeError("MCP server signalled start without a bound port")
+        if self._bound_port is None:
+            raise RuntimeError(f"MCP server failed to start on {_HOST}:{self._port}")
         return self._bound_port
 
     def request_shutdown(self) -> None:
@@ -205,6 +222,9 @@ class KorvidMCPServer:
                         self._port,
                     )
                 finally:
+                    # Wake anyone blocked in wait_started(); with _bound_port
+                    # unset they get a RuntimeError instead of hanging.
+                    self._started.set()
                     tg.cancel_scope.cancel()
         finally:
             self._remove_endpoint()
@@ -221,9 +241,10 @@ class KorvidMCPServer:
         """Publish the endpoint for host auto-discovery (best-effort: the
         server is useful even when the state dir is not writable).
 
-        Written atomically (temp file + rename) so concurrent korvid
-        instances never leave a torn record behind.
-        """
+        Publication and removal are serialized across processes via a
+        sibling lock file, and the record is written atomically (temp file
+        + rename), so concurrent korvid instances never tear or lose each
+        other's records."""
         path = self._endpoint_path
         if path is None:
             return
@@ -234,23 +255,118 @@ class KorvidMCPServer:
                 "port": port,
                 "pid": os.getpid(),
             }
-            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(payload))
-            tmp.replace(path)
+            with interprocess_lock(_endpoint_lock_path(path)):
+                tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+                tmp.write_text(json.dumps(payload))
+                tmp.replace(path)
         except OSError:
             logger.warning("could not write MCP endpoint file %s", path)
 
     def _remove_endpoint(self) -> None:
         """Remove the discovery file, but only if it is still *ours*: another
         korvid instance may have published a newer record at the same
-        default path, and exiting must not delete that."""
+        default path, and exiting must not delete that.  The read-check-
+        unlink runs under the same cross-process lock as publication, so a
+        record replaced between the read and the unlink cannot be lost."""
         path = self._endpoint_path
         if path is None:
             return
         try:
-            info = json.loads(path.read_text())
+            with interprocess_lock(_endpoint_lock_path(path)):
+                info = json.loads(path.read_text())
+                if (
+                    isinstance(info, dict)
+                    and info.get("pid") == os.getpid()
+                    and info.get("port") == self._bound_port
+                ):
+                    path.unlink(missing_ok=True)
         except (OSError, ValueError):
             return
-        if info.get("pid") == os.getpid() and info.get("port") == self._bound_port:
-            with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
+
+
+class MCPController:
+    """Runtime lifecycle for the embedded MCP server.
+
+    Backs the TUI's ``:mcp`` command and status display: start/stop the
+    server while korvid runs and report its state.  Each start builds a
+    fresh :class:`KorvidMCPServer` via the injected factory - uvicorn
+    servers are single-use.
+    """
+
+    def __init__(self, factory: Callable[[], KorvidMCPServer]) -> None:
+        self._factory = factory
+        self._server: KorvidMCPServer | None = None
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def status(self) -> str:
+        """One-line state for the status bar / bare ``:mcp``."""
+        if self.running and self._server is not None:
+            port = self._server.bound_port
+            return f"MCP on :{port}" if port is not None else "MCP starting"
+        return "MCP off"
+
+    async def start(self) -> str:
+        """Start the server; return a user-facing status/error line."""
+        if self.running:
+            return self.status()
+        server = self._factory()
+        task = asyncio.create_task(server.run())
+        self._server = server
+        self._task = task
+        try:
+            port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        except (TimeoutError, RuntimeError):
+            # Bind failure: run() already logged and is returning; reap the
+            # task so the failure is fully consumed.
+            self._server = None
+            self._task = None
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(task, timeout=5)
+            return "ERROR: MCP failed to start (port in use?)"
+        return f"MCP on :{port}"
+
+    async def stop(self) -> str:
+        """Gracefully stop the server; bounded so the TUI never blocks."""
+        pending = await self.shutdown()
+        if pending is not None:
+            # Keep the reference so the eventual completion is observable
+            # (and awaitable at process exit) instead of orphaned.
+            self._task = pending
+            return "MCP stopping (cleanup is taking long)"
+        return "MCP off"
+
+    async def shutdown(self) -> asyncio.Task[None] | None:
+        """Stop the server with bounded waits; never raises.
+
+        Returns the still-pending task if even cancellation did not land
+        within its deadline, so the caller can decide to await it after
+        more urgent cleanup - abandoning it would leave asyncio.run()'s
+        final task-gathering to block on it invisibly.
+        """
+        server, task = self._server, self._task
+        self._server = None
+        self._task = None
+        if server is None or task is None or task.done():
+            self._consume_result(task)
+            return None
+        server.request_shutdown()
+        done, _ = await asyncio.wait({task}, timeout=5)
+        if not done:
+            task.cancel()
+            done, _ = await asyncio.wait({task}, timeout=5)
+        if not done:
+            return task
+        self._consume_result(task)
+        return None
+
+    @staticmethod
+    def _consume_result(task: asyncio.Task[None] | None) -> None:
+        if task is None or not task.done() or task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("MCP server task failed", exc_info=exc)

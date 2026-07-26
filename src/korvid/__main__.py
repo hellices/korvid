@@ -16,7 +16,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-from korvid.agent.mcp_server import KorvidMCPServer, default_endpoint_path
+from korvid.agent.mcp_server import KorvidMCPServer, MCPController, default_endpoint_path
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentSettings
@@ -35,54 +35,27 @@ from korvid.ui.app import AppUIBridge, KorvidApp
 logger = logging.getLogger(__name__)
 
 
-def _build_mcp_server(
+def _make_mcp_factory(
     config: KorvidConfig,
     kube: KubeClient,
     aliases: dict[str, ResourceMeta],
     ui: UIBridge | None,
-) -> KorvidMCPServer | None:
-    """MCP server for external hosts when enabled; read + UI-drive tools
-    only - write tools stay with the built-in agent until an approval UX
-    for external callers is designed (issue #11 non-goal)."""
-    if not config.mcp_enabled:
-        return None
-    return KorvidMCPServer(
-        ToolExecutor(kube, aliases, ui=ui),
-        READ_TOOLS + UI_TOOLS,
-        port=config.mcp_port,
-        endpoint_path=default_endpoint_path(),
-    )
+) -> Callable[[], KorvidMCPServer]:
+    """Factory the :mcp controller uses to build a fresh server per start.
 
+    The surface is read + UI-drive tools only - write tools stay with the
+    built-in agent until an approval UX for external callers is designed
+    (issue #11 non-goal)."""
 
-def _start_mcp(
-    config: KorvidConfig,
-    kube: KubeClient,
-    aliases: dict[str, ResourceMeta],
-    ui: UIBridge | None,
-) -> tuple[KorvidMCPServer, asyncio.Task[None]] | None:
-    """Build and launch the MCP server when enabled; pair it with its task
-    so ``_stop_mcp`` can tear both down."""
-    server = _build_mcp_server(config, kube, aliases, ui)
-    if server is None:
-        return None
-    return server, asyncio.create_task(server.run())
+    def factory() -> KorvidMCPServer:
+        return KorvidMCPServer(
+            ToolExecutor(kube, aliases, ui=ui),
+            READ_TOOLS + UI_TOOLS,
+            port=config.mcp_port,
+            endpoint_path=default_endpoint_path(),
+        )
 
-
-async def _stop_mcp(server: KorvidMCPServer, task: asyncio.Task[None]) -> None:
-    """Graceful exit first (uvicorn drains connections and removes the
-    endpoint file); a hung shutdown must never block terminal restore.
-
-    Uses non-cancelling ``asyncio.wait`` deadlines: ``wait_for`` would await
-    the cancellation itself, which can hang indefinitely in stream cleanup.
-    If even the cancel does not land within its own deadline the task is
-    abandoned - exiting the process matters more than reaping it."""
-    server.request_shutdown()
-    done, _ = await asyncio.wait({task}, timeout=5)
-    if not done:
-        task.cancel()
-        done, _ = await asyncio.wait({task}, timeout=5)
-    if done and not task.cancelled() and (exc := task.exception()) is not None:
-        logger.error("MCP server task failed during shutdown", exc_info=exc)
+    return factory
 
 
 async def _shutdown(
@@ -280,6 +253,31 @@ def _load_startup_config(readonly: bool, mcp: bool = False) -> KorvidConfig:
     return config
 
 
+async def _start_mcp_if_enabled(config: KorvidConfig, controller: MCPController) -> None:
+    if not config.mcp_enabled:
+        return
+    startup_msg = await controller.start()
+    if startup_msg.startswith("ERROR"):
+        logger.error("%s", startup_msg)
+
+
+async def _teardown(
+    controller: MCPController,
+    discovery_task: asyncio.Task[None],
+    provider: LLMProvider | None,
+    kube: KubeClient,
+) -> None:
+    """Bounded graceful MCP stop first; anything still pending is awaited
+    only *after* the critical provider/kube cleanup, matching what
+    asyncio.run()'s final task-gathering would do anyway - but explicitly,
+    with the exception consumed instead of swallowed."""
+    leftover = await controller.shutdown()
+    await _shutdown(discovery_task, provider, kube)
+    if leftover is not None:
+        with contextlib.suppress(BaseException):
+            await leftover
+
+
 async def _run(readonly: bool = False, mcp: bool = False) -> None:
     config = _load_startup_config(readonly, mcp)
     kube = KubeClient()
@@ -318,6 +316,8 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         config, kube, aliases
     )
 
+    mcp_controller = MCPController(_make_mcp_factory(config, kube, aliases, ui_proxy))
+
     app = KorvidApp(
         config=config,
         store=store,
@@ -334,20 +334,19 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         agent_model_name=config.agent_model,
         agent_configurator=configurator,
         rebuild_agent=rebuild_agent,
+        mcp=mcp_controller,
     )
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.
     ui_proxy.target = AppUIBridge(app)
 
-    mcp_running = _start_mcp(config, kube, aliases, ui_proxy)
+    await _start_mcp_if_enabled(config, mcp_controller)
 
     discovery_task = asyncio.create_task(_discover_in_background(kube, aliases, app))
     try:
         await app.run_async()
     finally:
-        if mcp_running is not None:
-            await _stop_mcp(*mcp_running)
-        await _shutdown(discovery_task, provider_box[0], kube)
+        await _teardown(mcp_controller, discovery_task, provider_box[0], kube)
 
 
 def main() -> None:

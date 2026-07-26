@@ -19,6 +19,7 @@ from textual.events import Key
 from textual.widgets import DataTable, Footer, Static
 
 from korvid.agent.events import AgentError
+from korvid.agent.mcp_server import MCPController
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.agent.tools import UIBridge
@@ -188,6 +189,7 @@ class KorvidApp(App[None]):
         audit: AuditLog | None = None,
         check_permission: Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
         | None = None,
+        mcp: MCPController | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -200,6 +202,7 @@ class KorvidApp(App[None]):
         self._write_ops = write_ops
         self._audit = audit
         self._check_permission = check_permission
+        self._mcp = mcp
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -653,6 +656,9 @@ class KorvidApp(App[None]):
         if head == "model":
             self._handle_model_command(parts[1:])
             return
+        if head == "mcp":
+            self._handle_mcp_command(parts[1:])
+            return
         self.notify(
             f"Unknown resource or command: {message.text}"
             " — not found in this cluster's API (CRD not installed?)",
@@ -703,6 +709,27 @@ class KorvidApp(App[None]):
                 )
                 return
             self.notify(f"Agent model set to {new_settings.model}")
+
+        self.run_worker(_switch(), exclusive=False)
+
+    def _handle_mcp_command(self, args: list[str]) -> None:
+        """`:mcp` shows server state; `:mcp on` / `:mcp off` toggle it live."""
+        mcp = self._mcp
+        if mcp is None:
+            self.notify("MCP unavailable in this build", severity="warning")
+            return
+        if not args:
+            self.notify(mcp.status())
+            return
+        action = args[0].lower()
+        if action not in ("on", "off"):
+            self.notify("Usage: :mcp [on|off]", severity="warning")
+            return
+
+        async def _switch() -> None:
+            msg = await (mcp.start() if action == "on" else mcp.stop())
+            self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
+            self._refresh_status()
 
         self.run_worker(_switch(), exclusive=False)
 
@@ -1762,11 +1789,13 @@ class KorvidApp(App[None]):
         # create_provider may return None (unknown provider, missing base_url/
         # model) while agent_enabled is still true in config.
         label = "AI on" if self._agent_runtime is not None else "AI off"
+        mcp_label = self._mcp.status() if self._mcp is not None else ""
         self.query_one(StatusBar).update_status(
             self.config.kube_context,
             self.current_scope,
             label,
             breadcrumb=self._drill.breadcrumb(),
+            mcp_label=mcp_label,
         )
 
     # ------------------------------------------------------------------
