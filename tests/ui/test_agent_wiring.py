@@ -599,3 +599,73 @@ async def test_model_query_requires_live_runtime() -> None:
     assert notices, "expected a notification"
     assert "gpt-4o" not in notices[-1]
     assert "not configured" in notices[-1]
+
+
+class FakeMCP:
+    """Duck-typed MCPController: records lifecycle calls, scripted replies."""
+
+    def __init__(self, start_msg: str = "MCP on :7878") -> None:
+        self.calls: list[str] = []
+        self.start_msg = start_msg
+        self._running = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def status(self) -> str:
+        return "MCP on :7878" if self._running else "MCP off"
+
+    async def start(self) -> str:
+        self.calls.append("start")
+        if not self.start_msg.startswith("ERROR"):
+            self._running = True
+        return self.start_msg
+
+    async def stop(self) -> str:
+        self.calls.append("stop")
+        self._running = False
+        return "MCP off"
+
+
+async def test_mcp_command_toggles_server_and_status_bar() -> None:
+    from korvid.ui.messages import UnknownCommand
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    mcp = FakeMCP()
+    app = make_app(StubRuntime([]), mcp=mcp)
+    async with app.run_test() as pilot:
+        assert "MCP off" in str(app.query_one(StatusBar).render())
+        app.on_unknown_command(UnknownCommand("mcp on"))
+        for _ in range(4):
+            await pilot.pause()
+        assert mcp.calls == ["start"]
+        assert "MCP on :7878" in str(app.query_one(StatusBar).render())
+        app.on_unknown_command(UnknownCommand("mcp off"))
+        for _ in range(4):
+            await pilot.pause()
+        assert mcp.calls == ["start", "stop"]
+        assert "MCP off" in str(app.query_one(StatusBar).render())
+
+
+async def test_mcp_command_bare_and_bad_args_do_not_touch_server() -> None:
+    from korvid.ui.messages import UnknownCommand
+
+    mcp = FakeMCP()
+    app = make_app(StubRuntime([]), mcp=mcp)
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("mcp"))
+        app.on_unknown_command(UnknownCommand("mcp bogus"))
+        await pilot.pause()
+        assert mcp.calls == []
+
+
+async def test_mcp_command_without_controller_does_not_crash() -> None:
+    from korvid.ui.messages import UnknownCommand
+
+    app = make_app(StubRuntime([]))
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("mcp on"))
+        await pilot.pause()
+        msgs = [str(n.message) for n in app._notifications]
+        assert any("MCP unavailable" in m for m in msgs)

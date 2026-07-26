@@ -10,10 +10,12 @@ be written, the write is blocked) and an outcome record
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import threading
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 
@@ -51,6 +53,23 @@ def _unlock_file(fd: int) -> None:
     if msvcrt is not None:  # pragma: no cover - Windows-only branch; CI runs on POSIX
         os.lseek(fd, 0, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+
+@contextlib.contextmanager
+def interprocess_lock(lock_path: Path) -> Iterator[None]:
+    """Exclusive cross-process mutex backed by ``lock_path``.
+
+    Used wherever multiple korvid processes coordinate around a shared
+    state file (audit log, MCP endpoint discovery record). The lock file
+    itself is left in place - deleting it would reintroduce the race.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as fh:
+        _lock_file(fh.fileno())
+        try:
+            yield
+        finally:
+            _unlock_file(fh.fileno())
 
 
 def _sync_dir(path: Path) -> None:
