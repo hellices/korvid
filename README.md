@@ -18,10 +18,10 @@ in the dialog; `--readonly` disables them all.
 
 | Key | Context | Action |
 |-----|---------|--------|
-| `:` | global | Open command bar — accepts `pods`, `deploy all`, `ns <name>`, `ai`, `model`, `q` |
+| `:` | global | Open command bar — accepts `pods`, `deploy all`, `helm`, `ns <name>`, `ai`, `model`, `q` |
 | `/` | table | Open name filter (Enter keeps filter, Esc clears) |
 | `/` | log pane | Open inline log search |
-| `Enter` | table | Drill down: pods → containers; deploy → replicasets (history) → pods |
+| `Enter` | table | Drill down: pods → containers; deploy → replicasets (history) → pods; helm release → revisions |
 | `Esc` | table | Pop one drill-down level |
 | `0` | global | Toggle all-namespaces view |
 | `d` | table | Describe selected resource (manifest + events) |
@@ -71,6 +71,18 @@ diagnoses.  Anything that does not fit folds behind `+N more (i: details)`;
 press `i` to open a read-only overlay with every troubled container (full
 message, exit code, restart count, last-seen age) and the pod's recent
 Warning events.
+
+## Helm release browser
+
+`:helm` lists every installed Helm release — no helm binary required.
+korvid reads the release Secrets Helm 3 stores in the cluster
+(`type=helm.sh/release.v1`) and decodes them in place, showing name,
+revision, status, chart, and app version, live-updated through the same
+watch pipeline as any other view.  `Enter` drills into the release's
+revision history (newest first, like `helm history`); `d` describes a
+release or a single revision with the decoded metadata and the
+user-supplied values — the rendered manifest blob is deliberately left
+out.  This slice is read-only; install/upgrade/rollback lands separately.
 
 ## Log viewer
 
