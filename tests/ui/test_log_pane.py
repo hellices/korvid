@@ -1245,3 +1245,58 @@ async def test_timestamps_persist_across_reopen() -> None:
         await pilot.pause(0.15)
         assert "10:30:45 stamped-line" in _richlog_text(app)
         assert "[ts]" in _header_text(app)
+
+
+# ---------------------------------------------------------------------------
+# Issue #43: save buffer to file (ctrl+s)
+# ---------------------------------------------------------------------------
+
+
+async def test_ctrl_s_saves_buffer_and_notifies(monkeypatch: Any, tmp_path: Any) -> None:
+    """ctrl+s writes the buffer under the export dir and toasts the path."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    stream = JsonFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.1)
+
+        saved = list((tmp_path / "korvid" / "logs").glob("korvid-myapp-*.log"))
+        assert len(saved) == 1
+        assert "greeting" in saved[0].read_text()
+        msgs = [n.message for n in app._notifications]
+        assert any(str(saved[0]) in m for m in msgs)
+
+
+async def test_ctrl_s_closed_no_crash(monkeypatch: Any, tmp_path: Any) -> None:
+    """ctrl+s with the pane closed writes nothing."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.05)
+        assert not (tmp_path / "korvid" / "logs").exists()
+
+
+async def test_ctrl_s_write_failure_notifies_error(monkeypatch: Any, tmp_path: Any) -> None:
+    """An OSError during export surfaces as an error toast, not a crash."""
+    blocker = tmp_path / "blocked"
+    blocker.write_text("")  # a file where a directory is needed
+    monkeypatch.setenv("XDG_DATA_HOME", str(blocker))
+    stream = JsonFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.1)
+
+        errors = [n for n in app._notifications if n.severity == "error"]
+        assert any("save" in n.message.lower() for n in errors)

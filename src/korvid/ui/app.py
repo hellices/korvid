@@ -37,6 +37,7 @@ from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
+from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.core.store import ALL_NAMESPACES, ResourceStore
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
@@ -320,6 +321,7 @@ class KorvidApp(App[None]):
         ("f", "log_format", "JSON/raw"),
         Binding("w", "log_wrap", "Wrap", show=False),
         Binding("t", "log_timestamps", "Timestamps", show=False),
+        Binding("ctrl+s", "log_save", "Save logs", show=False),
         ("p", "log_previous", "Prev logs"),
         ("n", "log_search_next", "Next hit"),
         Binding("shift+n", "log_search_prev", "Prev hit"),
@@ -2581,6 +2583,22 @@ class KorvidApp(App[None]):
         log_pane.toggle_timestamps()
         if self._log_buffer is not None:
             log_pane.replay(self._log_buffer.lines())
+
+    def action_log_save(self) -> None:
+        """Save the current log buffer to a generated file (``ctrl+s``)."""
+        log_pane = self.query_one(LogPane)
+        if not log_pane.display or self._log_buffer is None:
+            return
+        lines = self._log_buffer.lines()
+        if not lines:
+            self.notify("Log buffer is empty — nothing to save", severity="warning")
+            return
+        try:
+            path = export_log_lines(lines, default_log_export_dir())
+        except OSError as exc:
+            self.notify(f"Failed to save logs: {exc}", severity="error")
+            return
+        self.notify(f"Logs saved to {path}")
 
     async def action_log_previous(self) -> None:
         """Re-open the same streams in previous-container-log mode (``p`` key)."""
