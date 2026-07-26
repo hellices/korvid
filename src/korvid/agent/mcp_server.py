@@ -311,8 +311,12 @@ class MCPController:
 
     async def start(self) -> str:
         """Start the server; return a user-facing status/error line."""
-        if self.running:
-            return self.status()
+        if self._task is not None:
+            if not self._task.done():
+                return self.status()
+            self._consume_result(self._task)
+            self._server = None
+            self._task = None
         server = self._factory()
         task = asyncio.create_task(server.run())
         self._server = server
@@ -320,12 +324,17 @@ class MCPController:
         try:
             port = await asyncio.wait_for(server.wait_started(), timeout=10)
         except (TimeoutError, RuntimeError):
-            # Bind failure: run() already logged and is returning; reap the
-            # task so the failure is fully consumed.
-            self._server = None
-            self._task = None
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(task, timeout=5)
+            # Bind failure: run() is already returning on its own.  Reap it
+            # with a non-cancelling deadline (cancelling and awaiting the
+            # cancellation could hang in stream cleanup); if it is somehow
+            # still pending, ownership is retained so a later shutdown can
+            # finish the job instead of orphaning the task.
+            server.request_shutdown()
+            done, _ = await asyncio.wait({task}, timeout=5)
+            if done:
+                self._consume_result(task)
+                self._server = None
+                self._task = None
             return "ERROR: MCP failed to start (port in use?)"
         return f"MCP on :{port}"
 
@@ -333,34 +342,36 @@ class MCPController:
         """Gracefully stop the server; bounded so the TUI never blocks."""
         pending = await self.shutdown()
         if pending is not None:
-            # Keep the reference so the eventual completion is observable
-            # (and awaitable at process exit) instead of orphaned.
-            self._task = pending
+            # shutdown() kept ownership, so the eventual completion stays
+            # observable (and awaitable at app teardown) instead of orphaned.
             return "MCP stopping (cleanup is taking long)"
         return "MCP off"
 
     async def shutdown(self) -> asyncio.Task[None] | None:
         """Stop the server with bounded waits; never raises.
 
-        Returns the still-pending task if even cancellation did not land
-        within its deadline, so the caller can decide to await it after
-        more urgent cleanup - abandoning it would leave asyncio.run()'s
-        final task-gathering to block on it invisibly.
+        Cancellation-safe: ownership is cleared only once the task is
+        *observed* done, so a ``:mcp off`` worker cancelled mid-wait (or a
+        timed-out earlier attempt) leaves the references in place for the
+        next shutdown to find.  Returns the still-pending task if even
+        cancellation did not land within its deadline, so the caller can
+        await it after more urgent cleanup - abandoning it would leave
+        asyncio.run()'s final task-gathering to block on it invisibly.
         """
         server, task = self._server, self._task
+        if server is None or task is None:
+            return None
+        if not task.done():
+            server.request_shutdown()
+            done, _ = await asyncio.wait({task}, timeout=5)
+            if not done:
+                task.cancel()
+                done, _ = await asyncio.wait({task}, timeout=5)
+            if not done:
+                return task
+        self._consume_result(task)
         self._server = None
         self._task = None
-        if server is None or task is None or task.done():
-            self._consume_result(task)
-            return None
-        server.request_shutdown()
-        done, _ = await asyncio.wait({task}, timeout=5)
-        if not done:
-            task.cancel()
-            done, _ = await asyncio.wait({task}, timeout=5)
-        if not done:
-            return task
-        self._consume_result(task)
         return None
 
     @staticmethod

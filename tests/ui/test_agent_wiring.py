@@ -667,3 +667,5 @@ async def test_mcp_command_without_controller_does_not_crash() -> None:
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("mcp on"))
         await pilot.pause()
+        msgs = [str(n.message) for n in app._notifications]
+        assert any("MCP unavailable" in m for m in msgs)

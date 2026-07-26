@@ -236,13 +236,16 @@ async def test_remove_endpoint_spares_foreign_record(tmp_path: Path) -> None:
     assert json.loads(endpoint_file.read_text()) == foreign
 
 
-async def test_shutdown_requested_before_run_exits_promptly() -> None:
+async def test_shutdown_requested_before_run_exits_promptly(tmp_path: Path) -> None:
     """request_shutdown() issued before run() reaches uvicorn must not be
     lost - the flag is mirrored onto the server once it exists, so shutdown
     does not stall for the caller's hard-cancel deadline."""
-    server = make_server(port=0)
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    server = make_server(port=0, endpoint_path=endpoint_file)
     server.request_shutdown()
     await asyncio.wait_for(server.run(), timeout=5)
+    # The server never served: no discovery record survives the early exit.
+    assert not endpoint_file.exists()
 
 
 async def test_remove_endpoint_spares_non_dict_record(tmp_path: Path) -> None:
@@ -335,3 +338,21 @@ async def test_controller_stop_without_start_is_noop() -> None:
     controller = MCPController(lambda: make_server(port=0))
     assert await asyncio.wait_for(controller.stop(), timeout=5) == "MCP off"
     assert await controller.shutdown() is None
+
+
+async def test_controller_shutdown_survives_cancellation(tmp_path: Path) -> None:
+    """A cancelled shutdown (e.g. Textual killing a :mcp off worker at app
+    exit) must not lose ownership: the next shutdown still finds the server
+    task and stops it."""
+    controller = MCPController(
+        lambda: make_server(port=0, endpoint_path=tmp_path / "mcp-endpoint.json")
+    )
+    await asyncio.wait_for(controller.start(), timeout=15)
+    shutdown_attempt = asyncio.create_task(controller.shutdown())
+    await asyncio.sleep(0)  # let it reach the non-cancelling wait
+    shutdown_attempt.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown_attempt
+    # Ownership retained: teardown can still reach and stop the server.
+    assert await asyncio.wait_for(controller.shutdown(), timeout=15) is None
+    assert not controller.running
