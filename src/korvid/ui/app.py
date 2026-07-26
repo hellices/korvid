@@ -318,6 +318,7 @@ class KorvidApp(App[None]):
         # not "shift+x"; bind both so the shortcut works outside Pilot tests.
         Binding("L", "logs_multi", "Multi-log", show=False),
         ("f", "log_format", "JSON/raw"),
+        Binding("w", "log_wrap", "Wrap", show=False),
         ("p", "log_previous", "Prev logs"),
         ("n", "log_search_next", "Next hit"),
         Binding("shift+n", "log_search_prev", "Prev hit"),
@@ -2559,6 +2560,15 @@ class KorvidApp(App[None]):
         if not log_pane.display:
             return
         log_pane.toggle_format()
+        if self._log_buffer is not None:
+            log_pane.replay(self._log_buffer.lines())
+
+    async def action_log_wrap(self) -> None:
+        """Toggle line wrapping and re-render the buffer (``w`` key)."""
+        log_pane = self.query_one(LogPane)
+        if not log_pane.display:
+            return
+        log_pane.toggle_wrap()
         if self._log_buffer is not None:
             log_pane.replay(self._log_buffer.lines())
 

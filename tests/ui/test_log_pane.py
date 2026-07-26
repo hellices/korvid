@@ -1093,3 +1093,71 @@ async def test_open_log_pane_caps_spawned_streams_at_max_panels() -> None:
         assert len(panels) == MAX_PANELS
         msgs = [n.message for n in app._notifications]
         assert any(str(MAX_PANELS) in m for m in msgs)
+
+
+# ---------------------------------------------------------------------------
+# Issue #43: wrap toggle (w)
+# ---------------------------------------------------------------------------
+
+
+def _panel_richlogs(app: KorvidApp) -> list[Any]:
+    """Visible panels' RichLog widgets."""
+    from textual.widgets import RichLog
+
+    pane = app.query_one(LogPane)
+    return [
+        pane.query_one(f"#log-panel-{i}").query_one(RichLog) for i in range(len(pane._panel_keys))
+    ]
+
+
+async def test_w_toggles_wrap_on_panels_and_header() -> None:
+    """w flips RichLog.wrap on every visible panel and tags the header."""
+    stream = JsonFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+
+        assert all(rl.wrap is False for rl in _panel_richlogs(app))
+        assert "[wrap]" not in _header_text(app)
+
+        await pilot.press("w")
+        await pilot.pause(0.05)
+        assert all(rl.wrap is True for rl in _panel_richlogs(app))
+        assert "[wrap]" in _header_text(app)
+        # Buffer content survives the wrap re-render.
+        assert "greeting" in _richlog_text(app)
+
+        await pilot.press("w")
+        await pilot.pause(0.05)
+        assert all(rl.wrap is False for rl in _panel_richlogs(app))
+        assert "[wrap]" not in _header_text(app)
+
+
+async def test_w_closed_no_crash() -> None:
+    """Pressing w with the pane closed is a no-op."""
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("w")
+        await pilot.pause(0.05)
+        assert app.query_one(LogPane).display is False
+
+
+async def test_wrap_persists_across_reopen() -> None:
+    """The wrap setting survives closing and reopening the pane (session-scoped)."""
+    stream = JsonFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+        await pilot.press("w")
+        await pilot.pause(0.05)
+        await pilot.press("l")  # close
+        await pilot.pause(0.1)
+        await pilot.press("l")  # reopen
+        await pilot.pause(0.15)
+        assert all(rl.wrap is True for rl in _panel_richlogs(app))
+        assert "[wrap]" in _header_text(app)

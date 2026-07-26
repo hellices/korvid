@@ -103,6 +103,7 @@ class LogPane(Widget):
         self._search_idx: int = 0
         self._log_buffer: LogBuffer | None = None
         self.formatted: bool = True
+        self.wrap_lines: bool = False
         self.display = False
 
     def compose(self) -> ComposeResult:
@@ -167,6 +168,8 @@ class LogPane(Widget):
                 # Bound RichLog to the buffer capacity (+ headroom for banner
                 # lines) so a long stream can't grow display memory unboundedly.
                 rich_log.max_lines = max_lines
+                # Session-scoped setting: reopening keeps the last wrap choice.
+                rich_log.wrap = self.wrap_lines
                 panel.display = True
             else:
                 panel.display = False
@@ -228,6 +231,17 @@ class LogPane(Widget):
     def toggle_format(self) -> None:
         """Toggle between JSON-formatted and raw display; refresh header tag."""
         self.formatted = not self.formatted
+        self._update_header()
+
+    def toggle_wrap(self) -> None:
+        """Toggle line wrapping on every panel; refresh the header tag.
+
+        RichLog applies ``wrap`` at write time, so the caller must ``replay()``
+        the buffer afterwards to re-render existing lines.
+        """
+        self.wrap_lines = not self.wrap_lines
+        for i in range(MAX_PANELS):
+            self._panel(i).query_one(RichLog).wrap = self.wrap_lines
         self._update_header()
 
     # ------------------------------------------------------------------
@@ -293,6 +307,8 @@ class LogPane(Widget):
     def _update_header(self) -> None:
         fmt_tag = "[json]" if self.formatted else "[raw]"
         header = f"{self._sources_text} {fmt_tag}"
+        if self.wrap_lines:
+            header = f"{header} [wrap]"
         if self._state:
             header = f"{header} \u2014 {self._state}"
         if self._search_counter:
