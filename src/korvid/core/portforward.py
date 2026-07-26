@@ -185,6 +185,11 @@ class ForwardRegistry:
         ]
         for proc in live:
             proc.terminate()
+        # Include earlier ctrl+d stops still awaiting their grace kill — a
+        # stubborn forward must not outlive the session just because the
+        # user exited before the next refresh() tick.
+        live.extend(proc for proc, _ in self._reaping if proc.poll() is None)
+        self._reaping.clear()
         deadline = monotonic() + _STOP_GRACE_SECONDS
         while any(proc.poll() is None for proc in live):
             if monotonic() > deadline:

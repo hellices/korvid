@@ -287,3 +287,29 @@ def test_stop_all_returns_stopped_records_for_auditing() -> None:
     registry.start(_spec(local_port=9090))
     records = registry.stop_all()
     assert [r.spec.local_port for r in records] == [8080, 9090]
+
+
+def test_stop_all_covers_previously_stopped_stragglers() -> None:
+    """A stubborn proc stopped with ctrl+d must not outlive session teardown."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _StubbornProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    record = registry.start(_spec())
+    registry.stop(record.id)  # moved to the reap list, still alive
+    clock = monotonic()
+    first = iter([clock])
+
+    def _mono() -> float:
+        return next(first, clock + 60.0)
+
+    with (
+        patch("korvid.core.portforward.monotonic", side_effect=_mono),
+        patch("korvid.core.portforward.time.sleep"),
+    ):
+        registry.stop_all()
+    assert procs[0].killed

@@ -10,6 +10,8 @@ def test_pod_forward_argv() -> None:
     assert argv == [
         "kubectl",
         "port-forward",
+        "--address",
+        "127.0.0.1",
         "-n",
         "default",
         "pod/api-1",
@@ -22,6 +24,8 @@ def test_service_forward_argv() -> None:
     assert argv == [
         "kubectl",
         "port-forward",
+        "--address",
+        "127.0.0.1",
         "-n",
         "prod",
         "service/api",

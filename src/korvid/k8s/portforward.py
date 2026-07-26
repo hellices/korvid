@@ -28,9 +28,9 @@ def build_port_forward_argv(
 ) -> list[str]:
     """Return argv for `kubectl port-forward` to a pod or service.
 
-    Binds to kubectl's default address (127.0.0.1) on purpose: a forward is
-    a local debugging convenience, never a way to expose the cluster on the
-    network.
+    Binds explicitly to ``127.0.0.1``: kubectl's default ``localhost`` also
+    tries ``::1``, and a forward is a local debugging convenience, never a
+    way to expose the cluster on the network.
 
     Raises:
         ValueError: when ``kind`` is not a forwardable resource kind.
@@ -41,6 +41,8 @@ def build_port_forward_argv(
     return [
         "kubectl",
         "port-forward",
+        "--address",
+        "127.0.0.1",
         *(["--context", context] if context else []),
         "-n",
         namespace,
