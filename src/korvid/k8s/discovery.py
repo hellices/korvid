@@ -13,6 +13,9 @@ class ResourceMeta:
     version: str  # "v1"
     namespaced: bool
     shortnames: tuple[str, ...] = ()
+    #: korvid-invented view kinds (e.g. the helm browser) that have no API
+    #: endpoint: navigation may use them, API-path consumers must not.
+    synthetic: bool = False
 
     @property
     def api_base(self) -> str:

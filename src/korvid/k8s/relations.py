@@ -15,6 +15,7 @@ from typing import Any
 _DRILL_CHILDREN: dict[str, str] = {
     "deployments": "replicasets",
     "replicasets": "pods",
+    "helmreleases": "helmrevisions",
 }
 
 

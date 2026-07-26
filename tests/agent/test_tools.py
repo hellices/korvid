@@ -107,6 +107,30 @@ async def test_unknown_tool_and_kind_return_error_text() -> None:
     assert (await ex.execute("list_resources", {"kind": "wat"})).startswith("ERROR:")
 
 
+async def test_synthetic_kinds_are_not_api_resources() -> None:
+    """Synthetic view kinds (helm browser, issue #28) live in the alias map
+    for navigation, but they have no API endpoint - the read tools must
+    reject them instead of requesting /api/v1/helmreleases."""
+    from korvid.k8s.helm import HELM_RELEASES_META
+
+    class ExplodingKube:
+        async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+            raise AssertionError("synthetic kind must not reach the API client")
+
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            raise AssertionError("synthetic kind must not reach the API client")
+
+    ex = ToolExecutor(ExplodingKube(), {"helmreleases": HELM_RELEASES_META})  # type: ignore[arg-type]
+    for tool, args in (
+        ("list_resources", {"kind": "helmreleases"}),
+        ("get_resource", {"kind": "helmreleases", "name": "web", "namespace": "d"}),
+        ("get_events", {"kind": "helmreleases", "name": "web", "namespace": "d"}),
+    ):
+        out = await ex.execute(tool, args)
+        assert out.startswith("ERROR:")
+        assert "not an API resource" in out
+
+
 async def test_result_is_capped() -> None:
     kube = FakeKube()
     kube.manifest = {"kind": "Pod", "metadata": {"name": "a"}, "blob": "x" * 20000}

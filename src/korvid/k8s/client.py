@@ -6,10 +6,10 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio import config as k8s_config
@@ -18,6 +18,16 @@ from kubernetes_asyncio import watch as k8s_watch
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.helm import (
+    HELM_SECRET_TYPE,
+    HelmReleaseSummary,
+    HelmRevisionSummary,
+    ReleaseTracker,
+    decode_release,
+    release_detail,
+    release_from_secret,
+    revision_from_secret,
+)
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import PodMetrics, parse_pod_metrics_list
 from korvid.k8s.models import GenericSummary, PodSummary, summary_for
@@ -253,6 +263,113 @@ class KubeClient(WriteOps):
     ) -> dict[str, Any]:
         """Fetch the raw manifest for a single object. ApiException → ApiStatusError."""
         return await self._request_json(self._object_path(meta, namespace, name))
+
+    # Helm release browsing (issue #28) ----------------------------------
+    # Releases are Secrets of type helm.sh/release.v1; the synthetic kinds
+    # "helmreleases"/"helmrevisions" adapt the Secret stream - no helm binary.
+
+    def _helm_secrets_query(self, *, name: str | None = None) -> list[tuple[str, str]]:
+        """Selectors restricting the Secret stream to helm-owned release
+        Secrets (type + owner label; a non-helm Secret reusing the type must
+        not surface as a release), optionally pinned to one release name."""
+        label = "owner=helm" if name is None else f"owner=helm,name={name}"
+        return [("fieldSelector", f"type={HELM_SECRET_TYPE}"), ("labelSelector", label)]
+
+    @staticmethod
+    def _helm_secrets_base(namespace: str | None) -> str:
+        return (
+            f"/api/v1/namespaces/{_path_segment(namespace)}/secrets"
+            if namespace is not None
+            else "/api/v1/secrets"
+        )
+
+    async def _watch_helm_secrets(
+        self, namespace: str | None
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """LIST then watch helm release Secrets; same contract as watch_objects."""
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        base = self._helm_secrets_base(namespace)
+        params = self._helm_secrets_query()
+        data = await self._request_json(f"{base}?{urlencode(params)}")
+        resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
+        for item in data.get("items", []):
+            yield ("ADDED", item)
+        watch_kwargs: dict[str, Any] = {}
+        if resource_version is not None:
+            watch_kwargs["resource_version"] = resource_version
+        # The watch adapter appends its own query params: hand it the bare
+        # path plus the selectors, never a path with the query pre-embedded.
+        watch_func = self._make_raw_watch_callable(base, extra_query=params)
+        w = k8s_watch.Watch()
+        try:
+            async with w.stream(watch_func, **watch_kwargs) as stream:
+                async for event in stream:
+                    yield (str(event["type"]), event["raw_object"])
+        except k8s_client.exceptions.ApiException as exc:
+            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+
+    async def watch_helm_releases(
+        self, namespace: str | None
+    ) -> AsyncIterator[tuple[str, HelmReleaseSummary]]:
+        """Release rows (latest revision per release) from the Secret stream."""
+        tracker = ReleaseTracker()
+        async for event_type, secret in self._watch_helm_secrets(namespace):
+            for out in tracker.apply(event_type, release_from_secret(secret)):
+                yield out
+
+    async def watch_helm_revisions(
+        self, namespace: str | None
+    ) -> AsyncIterator[tuple[str, HelmRevisionSummary]]:
+        """One row per revision Secret (drill-down history under a release)."""
+        async for event_type, secret in self._watch_helm_secrets(namespace):
+            yield (event_type, revision_from_secret(secret))
+
+    async def get_helm_release(
+        self, namespace: str, name: str, revision: int | None = None
+    ) -> dict[str, Any]:
+        """Decoded release detail for describe: metadata plus user-supplied
+        values; the rendered manifest is deliberately dropped (it is the
+        full template output and drowns the describe view).
+
+        Raises ApiStatusError(404) when no matching revision Secret exists;
+        an undecodable payload degrades to label-only detail with a
+        ``warning`` key (the browser lists such releases via the same
+        fallback, so describe must not fail where the row still shows).
+        """
+        base = self._helm_secrets_base(namespace)
+        path = f"{base}?{urlencode(self._helm_secrets_query(name=name))}"
+        data = await self._request_json(path)
+
+        def _rev(secret: dict[str, Any]) -> int:
+            labels = (secret.get("metadata") or {}).get("labels") or {}
+            try:
+                return int(labels.get("version") or 0)
+            except ValueError:
+                return 0
+
+        items = list(data.get("items", []))
+        if revision is not None:
+            items = [s for s in items if _rev(s) == revision]
+        if not items:
+            raise ApiStatusError(404, f"helm release {name!r} not found in {namespace!r}")
+        chosen = max(items, key=_rev)
+        labels = (chosen.get("metadata") or {}).get("labels") or {}
+        try:
+            payload = decode_release(chosen)
+        except ValueError:
+            # The browser lists this release via the label fallback; describe
+            # must degrade the same way, not error where the row still shows.
+            detail = release_detail({}, name=name, namespace=namespace, revision=_rev(chosen))
+            detail["status"] = str(labels.get("status") or "")
+            detail["warning"] = "release payload could not be decoded; label-only detail"
+            return detail
+        detail = release_detail(payload, name=name, namespace=namespace, revision=_rev(chosen))
+        if not detail["status"]:
+            # A payload can decode while ``info`` is missing or malformed;
+            # the row shows the Secret's status label, so describe must too.
+            detail["status"] = str(labels.get("status") or "")
+        return detail
 
     async def list_pod_metrics(self, namespace: str | None) -> list[PodMetrics]:
         """Current pod usage from metrics.k8s.io; None lists all namespaces.
@@ -782,7 +899,9 @@ class KubeClient(WriteOps):
         result: list[dict[str, Any]] = list(data.get("items", []))
         return result
 
-    def _make_raw_watch_callable(self, path: str) -> Any:
+    def _make_raw_watch_callable(
+        self, path: str, extra_query: Sequence[tuple[str, str]] = ()
+    ) -> Any:
         """Return an async callable compatible with k8s_watch.Watch.stream.
 
         Watch.stream injects ``watch=True``, ``_preload_content=False``, and
@@ -791,6 +910,10 @@ class KubeClient(WriteOps):
         core-group (group=="", api_base="/api/v1") and extension-group resources,
         eliminating the broken ``/apis//v1/...`` URL that CustomObjectsApi would
         produce when ``group`` is empty.
+
+        ``extra_query`` carries selectors that must ride along with the watch
+        params; *path* must be bare (call_api appends ``?`` + query itself,
+        so a pre-embedded query string would be silently broken).
         """
         api = self._api
         if api is None:
@@ -804,7 +927,7 @@ class KubeClient(WriteOps):
         ) -> Any:
             # watch/_preload_content are injected by Watch.stream; _rest absorbs
             # any future kwargs it may add.
-            query_params: list[tuple[str, Any]] = [("watch", "true")]
+            query_params: list[tuple[str, Any]] = [*extra_query, ("watch", "true")]
             if resource_version is not None:
                 query_params.append(("resourceVersion", resource_version))
             return await api.call_api(

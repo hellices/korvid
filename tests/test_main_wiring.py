@@ -6,6 +6,8 @@ import asyncio
 import dataclasses
 from typing import Any, cast
 
+import pytest
+
 from korvid.__main__ import _close_provider_in_background
 from korvid.agent.tools import UIBridge
 
@@ -334,3 +336,64 @@ async def test_pod_resize_probe_skipped_in_readonly() -> None:
             raise AssertionError("probe must not run in readonly mode")
 
     assert await main_mod._probe_pod_resize(cast("Any", ExplodingKube()), readonly=True) is False
+
+
+async def test_discovery_drops_aliases_shadowing_synthetic_helm_views() -> None:
+    """A CRD sharing the reserved plural (e.g. Flux HelmRelease) must not
+    leave aliases behind: `:hr` resolving to plural "helmreleases" would
+    navigate to the synthetic Secret browser, not the CRD the alias named."""
+    from korvid.__main__ import _discover_in_background
+    from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+    from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
+
+    flux_meta = ResourceMeta(
+        "HelmRelease", "helmreleases", "helm.toolkit.fluxcd.io", "v2", True, ("hr",)
+    )
+
+    class FakeKube:
+        async def discover_resources(self) -> list[ResourceMeta]:
+            return [PODS_META, flux_meta]
+
+    class FakeApp:
+        def on_aliases_updated(self) -> None:
+            pass
+
+    aliases = build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META])
+    await _discover_in_background(FakeKube(), aliases, FakeApp())  # type: ignore[arg-type]
+    assert aliases["helmreleases"] is HELM_RELEASES_META
+    assert aliases["helm"] is HELM_RELEASES_META
+    assert aliases["helmrevisions"] is HELM_REVISIONS_META
+    assert "hr" not in aliases  # Flux's shortname would silently misroute
+    assert aliases["pods"] is PODS_META
+
+
+async def test_get_manifest_routes_helm_revision_names_to_specific_revision() -> None:
+    """`d` on a revision row named "web.v3" must fetch exactly that revision;
+    the parsing lives in the _make_get_manifest factory, not the client."""
+    from korvid.__main__ import _make_get_manifest
+    from korvid.k8s.discovery import PODS_META, build_alias_map
+    from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
+
+    calls: list[tuple[str, str, int | None]] = []
+
+    class FakeKube:
+        async def get_helm_release(
+            self, namespace: str, name: str, revision: int | None = None
+        ) -> dict[str, object]:
+            calls.append((namespace, name, revision))
+            return {"name": name, "revision": revision}
+
+    aliases = build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META])
+    get_manifest = _make_get_manifest(FakeKube(), aliases)  # type: ignore[arg-type]
+
+    await get_manifest("helmrevisions", "default", "web.v3")
+    assert calls[-1] == ("default", "web", 3)
+
+    await get_manifest("helmreleases", "default", "web")
+    release_call: tuple[str, str, int | None] = ("default", "web", None)
+    assert calls[-1] == release_call
+
+    with pytest.raises(ValueError, match="revision"):
+        await get_manifest("helmrevisions", "default", "not-a-revision-row")
+    with pytest.raises(ValueError, match="namespace"):
+        await get_manifest("helmreleases", None, "web")
