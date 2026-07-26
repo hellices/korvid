@@ -74,7 +74,8 @@ Warning events.
 
 ## Helm release browser
 
-`:helm` lists every installed Helm release — no helm binary required.
+`:helm` lists the Helm releases installed in the current namespace — no
+helm binary required (press `0` to widen the view to all namespaces).
 korvid reads the release Secrets Helm 3 stores in the cluster
 (`type=helm.sh/release.v1`) and decodes them in place, showing name,
 revision, status, chart, and app version, live-updated through the same

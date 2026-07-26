@@ -16,6 +16,7 @@ import pytest
 
 from korvid.k8s.helm import (
     HELM_SECRET_TYPE,
+    MAX_DISPLAY_CHARS,
     HelmReleaseSummary,
     HelmRevisionSummary,
     ReleaseTracker,
@@ -178,6 +179,22 @@ class TestReleaseFromSecret:
         assert rel.app_version == "-"
         rev = revision_from_secret(secret)
         assert rev.description == ""
+
+    def test_oversized_display_fields_are_truncated(self) -> None:
+        """The decode ceiling bounds total bytes, not individual strings: a
+        highly compressible Secret can put ~everything into one field. Each
+        rendered value is capped so hostile Secrets cannot balloon the table."""
+        huge = "a" * 1_000_000
+        payload = _payload()
+        payload["chart"]["metadata"]["name"] = huge
+        payload["info"]["description"] = huge
+        secret = _secret("web", 2, data={"release": _encode(payload)})
+        rel = release_from_secret(secret)
+        assert len(rel.chart) <= MAX_DISPLAY_CHARS + 1  # +1 for the ellipsis
+        assert rel.chart.endswith("\u2026")
+        rev = revision_from_secret(secret)
+        assert len(rev.description) <= MAX_DISPLAY_CHARS + 1
+        assert rev.description.endswith("\u2026")
 
     def test_revision_summary_is_keyed_per_revision_and_owned_by_release(self) -> None:
         rev = revision_from_secret(_secret("web", 3))

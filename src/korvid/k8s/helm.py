@@ -31,6 +31,20 @@ HELM_SECRET_TYPE = "helm.sh/release.v1"
 #: cluster-controlled, so an unbounded gunzip is a decompression-bomb DoS.
 MAX_PAYLOAD_BYTES = 32 * 1024 * 1024
 
+#: Per-field cap for payload strings that end up in table cells: the byte
+#: ceiling bounds the whole payload, not one field, so a compressible Secret
+#: could otherwise put ~everything into a single rendered value.
+MAX_DISPLAY_CHARS = 200
+
+
+def _display(value: Any) -> str:
+    """String for a table cell, truncated with an ellipsis when hostile-long."""
+    text = str(value)
+    if len(text) > MAX_DISPLAY_CHARS:
+        return text[:MAX_DISPLAY_CHARS] + "\u2026"
+    return text
+
+
 #: Synthetic metas: these kinds never hit ``/api/v1/helmreleases`` - the
 #: client watches Secrets and adapts - but navigation, aliasing, and
 #: drill-down all key off ResourceMeta like any real kind.
@@ -148,7 +162,7 @@ def _chart_facts(secret: dict[str, Any]) -> tuple[str, str, str]:
     chart = f"{chart_name}-{chart_version}" if chart_name and chart_version else chart_name or "-"
     app_version = str(chart_meta.get("appVersion") or "-")
     description = str(_mapping(payload.get("info")).get("description") or "")
-    return chart, app_version, description
+    return _display(chart), _display(app_version), _display(description)
 
 
 def release_detail(
