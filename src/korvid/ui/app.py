@@ -2555,7 +2555,10 @@ class KorvidApp(App[None]):
         # all-namespaces view (the catalog default since `:operators`
         # opens cluster-wide).
         view_ns = self.current_namespace
-        default_ns = view_ns if view_ns != ALL_NAMESPACES else (self.config.namespace or "")
+        # Same fallback as current_scope's initialization: with zero config,
+        # config.namespace is None while the effective workload namespace is
+        # "default" - an empty prefill would fail validation on submit.
+        default_ns = view_ns if view_ns != ALL_NAMESPACES else (self.config.namespace or "default")
         await self.push_screen(
             OperatorInstallPrompt(facts, namespace=default_ns),
             _on_choices,
@@ -3142,7 +3145,9 @@ class KorvidApp(App[None]):
             # Same mapping as the human ':view all' command path.
             namespace = ALL_NAMESPACES
         try:
-            await self.on_navigate_command(NavigateCommand(meta.plural, namespace))
+            # Canonical view kind, not the bare plural: safe under alias
+            # collisions (same rule as the command-bar path).
+            await self.on_navigate_command(NavigateCommand(self._canonical_kind(key), namespace))
         except Exception as exc:
             return f"ERROR: {exc}"
         rows = self.store.get(self.current_kind, self.current_scope)

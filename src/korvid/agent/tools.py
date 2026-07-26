@@ -652,8 +652,9 @@ class ToolExecutor:
         pkg_meta = resolve_olm_meta(self._aliases, "packagemanifests", PACKAGES_GROUP)
         if pkg_meta is None:
             return (
-                "OLM is not installed: the packages.operators.coreos.com API"
-                " group was not discovered, so there is no operator catalog"
+                "OLM was not detected: the packages.operators.coreos.com API"
+                " group was not discovered (it may be absent, or discovery"
+                " may still be running), so there is no operator catalog"
                 " to list."
             )
         namespace: str | None = args.get("namespace")

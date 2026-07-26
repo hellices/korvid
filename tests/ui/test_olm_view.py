@@ -146,6 +146,7 @@ def make_app(
     write_ops: WriteOps | None = None,
     aliases: dict[str, ResourceMeta] | None = None,
     fetch_log: list[str] | None = None,
+    config: KorvidConfig | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
 
@@ -168,7 +169,7 @@ def make_app(
         return ["default", "operators"]
 
     return KorvidApp(
-        config=KorvidConfig(namespace="operators"),
+        config=config if config is not None else KorvidConfig(namespace="operators"),
         store=store,
         watch_manager=WatchManager(store, source),
         list_namespaces=list_namespaces,
@@ -626,3 +627,28 @@ async def test_approve_cancels_when_installplan_uid_changed_during_fetch(
         )
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
+
+
+async def test_install_wizard_prefills_default_namespace_with_zero_config(
+    tmp_path: Path,
+) -> None:
+    """With zero config, config.namespace is None while the effective
+    workload namespace is "default": the wizard must prefill "default"
+    (an empty namespace would fail validation on submit)."""
+    app = make_app(
+        {"packagemanifests": [_package("cert-manager")]},
+        manifests={"cert-manager": _pkg_manifest("cert-manager")},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+        config=KorvidConfig(namespace=None),
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "operators", "packagemanifests")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="package listed")
+        await pilot.press("I")
+        await until(
+            pilot, lambda: isinstance(app.screen, OperatorInstallPrompt), label="wizard open"
+        )
+        ns_input = app.screen.query_one("#install-namespace")
+        assert getattr(ns_input, "value", "") == "default"
