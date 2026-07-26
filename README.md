@@ -46,6 +46,31 @@ in the dialog; `--readonly` disables them all.
 | `q` | global | Quit |
 | `Esc` | log pane | Close pane (or dismiss search / filter bar) |
 
+### Remapping keys
+
+Every key above can be remapped via the `keybindings:` section of
+`~/.config/korvid/config.yaml`, mapping an **action name** to a new key
+(Textual key syntax — `x`, `f1`, `ctrl+q`, `shift+g`):
+
+```yaml
+keybindings:
+  delete_resource: ctrl+x   # free Ctrl-D for the terminal
+  sort_by_age: g
+```
+
+Action names: `quit`, `help`, `open_command`, `open_filter`,
+`toggle_all_namespaces`, `describe`, `shell`, `logs`, `logs_multi`,
+`log_format`, `log_wrap`, `log_timestamps`, `log_save`, `log_previous`,
+`log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
+`sort_by_mem`, `toggle_agent`, `delete_resource`, `rollout_restart`,
+`resize_pod`, `scale_resource`, `edit_resource`, `hint_details`.
+
+Unknown actions, duplicate keys, and keys that shadow another action's
+default produce a startup warning and are skipped — never a crash. The
+approval dialogs' confirm keys are **not remappable** by design: writes are
+only ever confirmed by the fixed keystrokes. The help overlay (`?`) always
+shows the effective keys.
+
 ## Live metrics
 
 The pods table shows live `CPU` / `MEM` usage and `%CPU/R` / `%MEM/R`
