@@ -11,7 +11,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
-from korvid.ui.app import KorvidApp
+from korvid.ui.app import EventsFetcher, KorvidApp
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 
@@ -66,6 +66,18 @@ def fake_source(pods: list[PodSummary]) -> Any:
     return source
 
 
+class _FnEvents(EventsFetcher):
+    """Adapts a plain `(namespace, name)` coroutine fn to the fetcher ABC."""
+
+    def __init__(self, fn: Any) -> None:
+        self._fn = fn
+
+    async def fetch(
+        self, namespace: str, name: str, *, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        return await self._fn(namespace, name)  # type: ignore[no-any-return]  # test fakes return list[dict]
+
+
 def make_describe_app(
     pods: list[PodSummary],
     *,
@@ -73,6 +85,8 @@ def make_describe_app(
     get_events: Any = None,
 ) -> KorvidApp:
     store = ResourceStore()
+    if get_events is not None and not isinstance(get_events, EventsFetcher):
+        get_events = _FnEvents(get_events)
     return KorvidApp(
         config=KorvidConfig(namespace="default"),
         store=store,
