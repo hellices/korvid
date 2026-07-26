@@ -54,19 +54,25 @@ class PreviewOps(WriteOps):
         return self.lines
 
     async def preview_delete(
-        self, meta: ResourceMeta, namespace: str | None, name: str
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> list[str] | None:
-        return await self._preview(("delete", namespace, name))
+        return await self._preview(("delete", namespace, name, uid))
 
     async def preview_scale(
-        self, meta: ResourceMeta, namespace: str | None, name: str, replicas: int
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        replicas: int,
+        *,
+        uid: str | None = None,
     ) -> list[str] | None:
-        return await self._preview(("scale", namespace, name, replicas))
+        return await self._preview(("scale", namespace, name, replicas, uid))
 
     async def preview_rollout_restart(
-        self, meta: ResourceMeta, namespace: str | None, name: str
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> list[str] | None:
-        return await self._preview(("restart", namespace, name))
+        return await self._preview(("restart", namespace, name, uid))
 
     async def delete_object(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
@@ -104,7 +110,9 @@ class PreviewOps(WriteOps):
 def make_app(ops: WriteOps, audit_path: Path) -> KorvidApp:
     store = ResourceStore()
     deploys = [
-        GenericSummary(name="web", namespace="default", kind="Deployment", created="", desired=3)
+        GenericSummary(
+            name="web", namespace="default", kind="Deployment", created="", desired=3, uid="u-web"
+        )
     ]
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
@@ -153,7 +161,7 @@ async def test_delete_dialog_shows_dry_run_preview(tmp_path: Path) -> None:
         await pilot.press("ctrl+d")
         await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert "- deployments/web (uid u1, created t1)" in _preview_render(app)
-        assert ops.preview_calls == [("delete", "default", "web")]
+        assert ops.preview_calls == [("delete", "default", "web", "u-web")]
 
 
 async def test_restart_dialog_shows_dry_run_preview(tmp_path: Path) -> None:
@@ -165,7 +173,7 @@ async def test_restart_dialog_shows_dry_run_preview(tmp_path: Path) -> None:
         await pilot.press("r")
         await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert "restartedAt" in _preview_render(app)
-        assert ops.preview_calls == [("restart", "default", "web")]
+        assert ops.preview_calls == [("restart", "default", "web", "u-web")]
 
 
 async def test_scale_dialog_previews_requested_replicas(tmp_path: Path) -> None:
@@ -180,7 +188,7 @@ async def test_scale_dialog_previews_requested_replicas(tmp_path: Path) -> None:
         await pilot.press("enter")
         await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert "~ spec.replicas: 3 -> 5" in _preview_render(app)
-        assert ops.preview_calls == [("scale", "default", "web", 5)]
+        assert ops.preview_calls == [("scale", "default", "web", 5, "u-web")]
         await pilot.press("y")
         await _until(pilot, lambda: ops.calls)
         assert ops.calls == [("scale", "default", "web", 5)]
@@ -218,9 +226,9 @@ async def test_no_preview_support_falls_back(tmp_path: Path) -> None:
 
     class Plain(PreviewOps):
         async def preview_delete(
-            self, meta: ResourceMeta, namespace: str | None, name: str
+            self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
         ) -> list[str] | None:
-            return await WriteOps.preview_delete(self, meta, namespace, name)
+            return await WriteOps.preview_delete(self, meta, namespace, name, uid=uid)
 
     ops = Plain()
     app = make_app(ops, tmp_path / "audit.jsonl")
@@ -243,7 +251,7 @@ async def test_agent_write_dialog_shows_preview(tmp_path: Path) -> None:
         )
         await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert "~ spec.replicas: 3 -> 4" in _preview_render(app)
-        assert ("scale", "default", "web", 4) in ops.preview_calls
+        assert ("scale", "default", "web", 4, None) in ops.preview_calls
         await pilot.press("y")
         result = await task
         assert result.startswith("approved and executed")

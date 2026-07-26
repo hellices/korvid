@@ -138,3 +138,64 @@ async def test_write_ops_defaults_return_none() -> None:
     assert await ops.preview_scale(meta, "default", "web", 5) is None
     assert await ops.preview_rollout_restart(meta, "default", "web") is None
     assert await ops.preview_delete(meta, "default", "web") is None
+
+
+async def test_preview_scale_pins_uid_precondition() -> None:
+    """The dry-run must replay the request being approved: with a captured
+    uid the preview patch carries the same metadata.uid precondition as the
+    real write, so a same-named replacement fails the preview (409 -> None)
+    instead of rendering a diff the approved write can never apply."""
+    client = KubeClient()
+    api = MagicMock()
+    api.call_api = AsyncMock(
+        side_effect=[
+            _resp({"spec": {"replicas": 3}}),
+            _resp({"spec": {"replicas": 5}}),
+        ]
+    )
+    with patch.object(client, "_api", api):
+        lines = await client.preview_scale(_deploy_meta(), "default", "web", 5, uid="u-1")
+    assert lines == ["~ spec.replicas: 3 -> 5"]
+    _, kwargs = api.call_api.call_args_list[1]
+    assert kwargs["body"] == {"spec": {"replicas": 5}, "metadata": {"uid": "u-1"}}
+
+
+async def test_preview_rollout_restart_pins_uid_precondition() -> None:
+    client = KubeClient()
+    api = MagicMock()
+    current = {"metadata": {"name": "web"}, "spec": {"template": {"metadata": {}}}}
+    api.call_api = AsyncMock(side_effect=[_resp(current), _resp(current)])
+    with patch.object(client, "_api", api):
+        await client.preview_rollout_restart(_deploy_meta(), "default", "web", uid="u-1")
+    _, kwargs = api.call_api.call_args_list[1]
+    assert kwargs["body"]["metadata"] == {"uid": "u-1"}
+
+
+async def test_preview_delete_pins_uid_precondition() -> None:
+    """The dry-run DELETE carries the same DeleteOptions preconditions body
+    as the real delete: a replacement object is rejected server-side and the
+    preview degrades to None instead of summarizing the wrong incarnation."""
+    client = KubeClient()
+    api = MagicMock()
+    manifest = {"metadata": {"name": "web", "uid": "u-1", "creationTimestamp": "t"}}
+    api.call_api = AsyncMock(side_effect=[_resp(manifest), _resp({"kind": "Status"})])
+    with patch.object(client, "_api", api):
+        lines = await client.preview_delete(_deploy_meta(), "default", "web", uid="u-1")
+    assert lines is not None
+    _, kwargs = api.call_api.call_args_list[1]
+    assert kwargs["body"] == {"preconditions": {"uid": "u-1"}}
+    assert kwargs["header_params"]["Content-Type"] == "application/json"
+
+
+async def test_preview_delete_replacement_returns_none() -> None:
+    """A 409 from the uid precondition (object was recreated) yields no
+    preview - the dialog then opens without one rather than showing the
+    replacement's identity."""
+    client = KubeClient()
+    api = MagicMock()
+    manifest = {"metadata": {"name": "web", "uid": "u-2", "creationTimestamp": "t"}}
+    api.call_api = AsyncMock(
+        side_effect=[_resp(manifest), ApiException(status=409, reason="Conflict")]
+    )
+    with patch.object(client, "_api", api):
+        assert await client.preview_delete(_deploy_meta(), "default", "web", uid="u-1") is None

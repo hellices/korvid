@@ -357,6 +357,15 @@ class KubeClient(WriteOps):
             return True
         return bool((data.get("status") or {}).get("allowed", False))
 
+    @staticmethod
+    def _delete_body(uid: str | None) -> dict[str, Any] | None:
+        """DeleteOptions body for a delete. A ``uid`` precondition pins the
+        exact object incarnation being approved. No propagationPolicy is set,
+        so dependents are deleted in the background (the API server default);
+        preview_delete's cascade note describes exactly this - keep the two
+        in sync if delete options are ever added here."""
+        return {"preconditions": {"uid": uid}} if uid else None
+
     async def delete_object(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> None:
@@ -364,7 +373,7 @@ class KubeClient(WriteOps):
         incarnation that was approved: if the object was deleted and recreated
         under the same name meanwhile, the API server refuses with 409 instead
         of deleting the replacement. ApiException → ApiStatusError."""
-        body = {"preconditions": {"uid": uid}} if uid else None
+        body = self._delete_body(uid)
         await self._request_write(
             self._object_path(meta, namespace, name),
             "DELETE",
@@ -387,7 +396,10 @@ class KubeClient(WriteOps):
     def _restart_patch(uid: str | None) -> dict[str, Any]:
         """Strategic-merge-patch body for a rolling restart, the way kubectl
         does it: stamp the pod template with a restartedAt annotation. Shared
-        by the real write and its dry-run preview."""
+        by the real write and its dry-run preview - but the stamp is taken at
+        call time, so the value shown in a preview diff differs from the one
+        the write later sends; only the annotation's presence (and that it
+        changed) matters, both stamps trigger the same rollout."""
         stamp = datetime.now().astimezone().isoformat()
         body: dict[str, Any] = {
             "spec": {
@@ -448,9 +460,19 @@ class KubeClient(WriteOps):
         return result
 
     async def preview_scale(
-        self, meta: ResourceMeta, namespace: str | None, name: str, replicas: int
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        replicas: int,
+        *,
+        uid: str | None = None,
     ) -> list[str] | None:
         """Diff of the /scale subresource before vs after a dry-run scale.
+        The captured ``uid`` rides along as the same precondition the real
+        write carries, so the dry run replays the exact request being
+        approved - a same-named replacement fails here (409 -> None) instead
+        of previewing a diff the approved write can never apply.
         None on any failure: a preview must never block the approval flow."""
         path = f"{self._object_path(meta, namespace, name)}/scale"
         try:
@@ -458,7 +480,7 @@ class KubeClient(WriteOps):
             proposed = await self._dry_run(
                 path,
                 "PATCH",
-                self._scale_patch(replicas, None),
+                self._scale_patch(replicas, uid),
                 "application/merge-patch+json",
             )
         except Exception:
@@ -467,15 +489,16 @@ class KubeClient(WriteOps):
         return diff_manifests(current, proposed)
 
     async def preview_rollout_restart(
-        self, meta: ResourceMeta, namespace: str | None, name: str
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> list[str] | None:
         """Diff of the object before vs after a dry-run rollout restart.
-        None on any failure: a preview must never block the approval flow."""
+        ``uid`` semantics match :meth:`preview_scale`. None on any failure:
+        a preview must never block the approval flow."""
         path = self._object_path(meta, namespace, name)
         try:
             current = await self._request_json(path)
             proposed = await self._dry_run(
-                path, "PATCH", self._restart_patch(None), "application/strategic-merge-patch+json"
+                path, "PATCH", self._restart_patch(uid), "application/strategic-merge-patch+json"
             )
         except Exception:
             logger.debug("rollout restart dry-run preview failed", exc_info=True)
@@ -483,16 +506,21 @@ class KubeClient(WriteOps):
         return diff_manifests(current, proposed)
 
     async def preview_delete(
-        self, meta: ResourceMeta, namespace: str | None, name: str
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> list[str] | None:
         """Summary of the exact object a delete would remove, after the
-        server accepted a dry-run DELETE (admission webhooks included). A
-        diff is meaningless for a removal, so the useful preview is identity
-        plus cascading behaviour. None on any failure."""
+        server accepted a dry-run DELETE (admission webhooks included). The
+        dry run carries the same DeleteOptions body as the real delete, so a
+        captured ``uid`` precondition rejects a same-named replacement here
+        (409 -> None) instead of summarizing the wrong incarnation. A diff is
+        meaningless for a removal, so the useful preview is identity plus
+        cascading behaviour (the note mirrors _delete_body: background
+        propagation, the server default). None on any failure."""
         path = self._object_path(meta, namespace, name)
+        body = self._delete_body(uid)
         try:
             manifest = await self._request_json(path)
-            await self._dry_run(path, "DELETE", None, None)
+            await self._dry_run(path, "DELETE", body, "application/json" if body else None)
         except Exception:
             logger.debug("delete dry-run preview failed", exc_info=True)
             return None

@@ -60,20 +60,30 @@ class WriteOps(abc.ABC):
     # -- approval dialog falls back to the synthesized operation string.
 
     async def preview_scale(
-        self, meta: ResourceMeta, namespace: str | None, name: str, replicas: int
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        replicas: int,
+        *,
+        uid: str | None = None,
     ) -> list[str] | None:
-        """Diff lines a ``dryRun=All`` scale would produce; None = no preview."""
+        """Diff lines a ``dryRun=All`` scale would produce; None = no preview.
+        A ``uid`` must be carried as the same precondition as the real write,
+        so the preview replays the exact request being approved."""
         return None
 
     async def preview_rollout_restart(
-        self, meta: ResourceMeta, namespace: str | None, name: str
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> list[str] | None:
-        """Diff lines a ``dryRun=All`` restart would produce; None = no preview."""
+        """Diff lines a ``dryRun=All`` restart would produce; None = no preview.
+        ``uid`` semantics match :meth:`preview_scale`."""
         return None
 
     async def preview_delete(
-        self, meta: ResourceMeta, namespace: str | None, name: str
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> list[str] | None:
         """Object summary + cascade note after a ``dryRun=All`` delete was
-        accepted by the server; None = no preview."""
+        accepted by the server; None = no preview. ``uid`` semantics match
+        :meth:`preview_scale`."""
         return None

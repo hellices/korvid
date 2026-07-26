@@ -1549,7 +1549,7 @@ class KorvidApp(App[None]):
         meta, ns, name, uid = target
         if not await self._precheck_keybinding_write("delete", meta, ns, name):
             return
-        preview = await self._dry_run_preview(ops.preview_delete(meta, ns, name))
+        preview = await self._dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
         if not self._write_context_intact("delete", meta, ns, name, phase="the dry-run preview"):
             return
         operation = f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}"
@@ -1590,7 +1590,7 @@ class KorvidApp(App[None]):
             return
         if not await self._precheck_keybinding_write("rollout_restart", meta, ns, name):
             return
-        preview = await self._dry_run_preview(ops.preview_rollout_restart(meta, ns, name))
+        preview = await self._dry_run_preview(ops.preview_rollout_restart(meta, ns, name, uid=uid))
         if not self._write_context_intact(
             "rollout_restart", meta, ns, name, phase="the dry-run preview"
         ):
@@ -1861,7 +1861,7 @@ class KorvidApp(App[None]):
         ops = self._write_ops
         if ops is None:
             return
-        preview = await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas))
+        preview = await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
         if not self._write_context_intact("scale", meta, ns, name, phase="the dry-run preview"):
             return
 
@@ -2517,7 +2517,7 @@ class KorvidApp(App[None]):
             uid = await self._target_uid(kind.strip().lower(), ns, name)
         except ApiStatusError:
             return f"ERROR: {self._gvr_label(meta)}/{name} not found{self._write_locus(ns)}"
-        preview = await self._preview_for_action(action, meta, ns, name, replicas)
+        preview = await self._preview_for_action(action, meta, ns, name, replicas, uid)
         require = name if action == "delete" and not meta.namespaced else None
         decision = await self._await_user_approval(
             f"Agent requests: {action} {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
@@ -2547,18 +2547,21 @@ class KorvidApp(App[None]):
         ns: str | None,
         name: str,
         replicas: int | None,
+        uid: str | None,
     ) -> list[str] | None:
         """Dry-run preview for an agent-requested write; None (no preview)
-        for unknown actions or a scale without a validated replica count."""
+        for unknown actions or a scale without a validated replica count.
+        The captured ``uid`` rides along so the dry run replays the exact
+        request that would execute on approval."""
         ops = self._write_ops
         if ops is None:
             return None
         if action == "delete":
-            return await self._dry_run_preview(ops.preview_delete(meta, ns, name))
+            return await self._dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
         if action == "scale" and replicas is not None:
-            return await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas))
+            return await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
         if action == "rollout_restart":
-            return await self._dry_run_preview(ops.preview_rollout_restart(meta, ns, name))
+            return await self._dry_run_preview(ops.preview_rollout_restart(meta, ns, name, uid=uid))
         return None
 
     async def _target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
