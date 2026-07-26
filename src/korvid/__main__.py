@@ -13,7 +13,7 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from korvid.agent.mcp_server import KorvidMCPServer, MCPController, default_endpoint_path
@@ -34,6 +34,7 @@ from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.client import KubeClient, resolve_context_name
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.metrics import MetricsPoller
 from korvid.providers.configurator import ProviderConfigurator
 from korvid.providers.registry import create_provider
@@ -92,7 +93,14 @@ async def _discover_in_background(
     except Exception:
         logger.warning("Resource discovery failed; staying pods-only", exc_info=True)
         return
-    aliases.update(discovered)
+    # Synthetic view kinds own their plurals outright: every discovered alias
+    # whose target plural collides (e.g. Flux's HelmRelease CRD contributes
+    # "hr" -> plural "helmreleases") is dropped, because navigation routes by
+    # plural and the alias would silently open the Secret-backed browser
+    # instead of the CRD it named.
+    reserved = {HELM_RELEASES_META.plural, HELM_REVISIONS_META.plural}
+    aliases.update({a: m for a, m in discovered.items() if m.plural not in reserved})
+    aliases.update(build_alias_map([HELM_RELEASES_META, HELM_REVISIONS_META]))
     app.on_aliases_updated()
 
 
@@ -318,21 +326,26 @@ async def _teardown(
             await leftover
 
 
-async def _run(readonly: bool = False, mcp: bool = False) -> None:
-    config = _load_startup_config(readonly, mcp)
-    kube = KubeClient()
-    await kube.connect(config.kube_context)
-    store = ResourceStore()
+def _make_watch_source(
+    kube: KubeClient, aliases: dict[str, ResourceMeta]
+) -> Callable[[str, str], AsyncIterator[tuple[str, Summary]]]:
+    """Watch source for the WatchManager: kind + scope -> summary events.
 
-    # Start with pods only so the UI appears immediately; full discovery runs
-    # in the background and merges into this dict (closures + app share it).
-    aliases = build_alias_map([PODS_META])
+    Extracted from _run for complexity; *aliases* is the live shared dict
+    that background discovery mutates.
+    """
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         ns = None if scope == ALL_NAMESPACES else scope
         if kind == "pods":
             async for ev, pod in kube.watch_pods(ns):
                 yield (ev, pod)
+        elif kind == HELM_RELEASES_META.plural:
+            async for ev, rel in kube.watch_helm_releases(ns):
+                yield (ev, rel)
+        elif kind == HELM_REVISIONS_META.plural:
+            async for ev, rev in kube.watch_helm_revisions(ns):
+                yield (ev, rev)
         elif kind in aliases:
             meta = aliases[kind]
             async for ev, obj in kube.watch_objects(meta, ns):
@@ -341,11 +354,46 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
             logger.warning("Unknown resource kind %r requested for watch; stopping", kind)
             raise ValueError(f"Unknown resource kind: {kind!r}")
 
+    return source
+
+
+def _make_get_manifest(
+    kube: KubeClient, aliases: dict[str, ResourceMeta]
+) -> Callable[[str, str | None, str], Awaitable[dict[str, Any]]]:
+    """Describe fetcher: helm kinds decode release Secrets, the rest GET raw."""
+
     async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        if kind == HELM_RELEASES_META.plural:
+            if namespace is None:
+                raise ValueError("helm releases are namespaced; namespace required")
+            return await kube.get_helm_release(namespace, name)
+        if kind == HELM_REVISIONS_META.plural:
+            # Revision rows are named "<release>.v<revision>".
+            release, _, rev = name.rpartition(".v")
+            if namespace is None or not release or not rev.isdigit():
+                raise ValueError(f"not a helm revision row: {name!r}")
+            return await kube.get_helm_release(namespace, release, revision=int(rev))
         meta = aliases.get(kind)
         if meta is None:
             raise ValueError(f"Unknown resource kind: {kind!r}")
         return await kube.get_object(meta, namespace, name)
+
+    return get_manifest
+
+
+async def _run(readonly: bool = False, mcp: bool = False) -> None:
+    config = _load_startup_config(readonly, mcp)
+    kube = KubeClient()
+    await kube.connect(config.kube_context)
+    store = ResourceStore()
+
+    # Start with pods only so the UI appears immediately; full discovery runs
+    # in the background and merges into this dict (closures + app share it).
+    # The helm browser kinds are synthetic (Secret-backed, issue #28) and are
+    # always present - discovery never returns them.
+    aliases = build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META])
+    source = _make_watch_source(kube, aliases)
+    get_manifest = _make_get_manifest(kube, aliases)
 
     class KubeEventsFetcher(EventsFetcher):
         """Concrete events adapter over the shared KubeClient."""

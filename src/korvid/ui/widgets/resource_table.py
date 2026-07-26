@@ -9,6 +9,7 @@ from rich.text import Text
 from textual.widgets import DataTable
 
 from korvid.core.store import Summary
+from korvid.k8s.helm import HelmReleaseSummary, HelmRevisionSummary
 from korvid.k8s.metrics import PodMetrics
 from korvid.k8s.models import (
     ContainerLimits,
@@ -40,8 +41,16 @@ _POD_COLS = (
 _POD_COLS_ALL_NS = ("NAMESPACE", *_POD_COLS)
 _RS_COLS = ("NAME", "REVISION", "DESIRED", "CURRENT", "READY", "AGE")
 _RS_COLS_ALL_NS = ("NAMESPACE", *_RS_COLS)
+_HELM_COLS = ("NAME", "REVISION", "STATUS", "CHART", "APP VERSION", "AGE")
+_HELM_COLS_ALL_NS = ("NAMESPACE", *_HELM_COLS)
+_HELM_REV_COLS = ("NAME", "REVISION", "STATUS", "CHART", "APP VERSION", "DESCRIPTION", "AGE")
+_HELM_REV_COLS_ALL_NS = ("NAMESPACE", *_HELM_REV_COLS)
 _GENERIC_COLS = ("NAME", "AGE")
 _GENERIC_COLS_ALL_NS = ("NAMESPACE", "NAME", "AGE")
+
+#: Helm release/revision status colors: steady-state good is green, hard
+#: failure red, history entries dim, anything transitional yellow.
+_HELM_STATUS_STYLE = {"deployed": "green", "failed": "bold red", "superseded": "dim"}
 
 # Eviction order reversed: pods evicted last render first.
 _QOS_RANK = {"Guaranteed": 0, "Burstable": 1, "BestEffort": 2}
@@ -55,6 +64,10 @@ def _pod_sort_key(pod: PodSummary) -> tuple[int, str]:
 
 def _phase_cell(phase: str) -> Text:
     return Text(phase, style=phase_style(phase))
+
+
+def _helm_status_cell(status: str) -> Text:
+    return Text(status, style=_HELM_STATUS_STYLE.get(status, "yellow"))
 
 
 def _ready_cell(ready: str) -> Text:
@@ -191,6 +204,10 @@ class ResourceTable(DataTable[str | Text]):
                 self.add_columns(*(_POD_COLS_ALL_NS if all_namespaces else _POD_COLS))
             elif kind == "replicasets":
                 self.add_columns(*(_RS_COLS_ALL_NS if all_namespaces else _RS_COLS))
+            elif kind == "helmreleases":
+                self.add_columns(*(_HELM_COLS_ALL_NS if all_namespaces else _HELM_COLS))
+            elif kind == "helmrevisions":
+                self.add_columns(*(_HELM_REV_COLS_ALL_NS if all_namespaces else _HELM_REV_COLS))
             else:
                 self.add_columns(*(_GENERIC_COLS_ALL_NS if all_namespaces else _GENERIC_COLS))
             self._last_kind = kind
@@ -204,6 +221,10 @@ class ResourceTable(DataTable[str | Text]):
             )
         elif kind == "replicasets":
             self._add_replicaset_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
+        elif kind == "helmreleases":
+            self._add_helm_release_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
+        elif kind == "helmrevisions":
+            self._add_helm_revision_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
         else:
             self._add_generic_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
 
@@ -265,6 +286,46 @@ class ResourceTable(DataTable[str | Text]):
             if all_namespaces:
                 fallback_cells.insert(0, obj.namespace)
             self.add_row(*fallback_cells, key=f"{obj.namespace}/{obj.name}")
+
+    def _add_helm_release_rows(
+        self, rows: list[Summary], *, all_namespaces: bool, pattern: str
+    ) -> None:
+        releases = [r for r in rows if isinstance(r, HelmReleaseSummary)]
+        for rel in sorted(releases, key=lambda r: (r.namespace, r.name)):
+            if pattern and pattern.lower() not in rel.name.lower():
+                continue
+            cells: list[str | Text] = [
+                rel.name,
+                str(rel.revision),
+                _helm_status_cell(rel.status),
+                rel.chart,
+                rel.app_version,
+                rel.age(),
+            ]
+            if all_namespaces:
+                cells.insert(0, rel.namespace)
+            self.add_row(*cells, key=f"{rel.namespace}/{rel.name}")
+
+    def _add_helm_revision_rows(
+        self, rows: list[Summary], *, all_namespaces: bool, pattern: str
+    ) -> None:
+        revisions = [r for r in rows if isinstance(r, HelmRevisionSummary)]
+        # Newest revision first: helm history order, matching replicaset views.
+        for rev in sorted(revisions, key=lambda r: (r.namespace, r.release, -r.revision)):
+            if pattern and pattern.lower() not in rev.name.lower():
+                continue
+            cells: list[str | Text] = [
+                rev.name,
+                str(rev.revision),
+                _helm_status_cell(rev.status),
+                rev.chart,
+                rev.app_version,
+                rev.description,
+                rev.age(),
+            ]
+            if all_namespaces:
+                cells.insert(0, rev.namespace)
+            self.add_row(*cells, key=f"{rev.namespace}/{rev.name}")
 
     def _add_generic_rows(self, rows: list[Summary], *, all_namespaces: bool, pattern: str) -> None:
         generics = cast(list[GenericSummary], rows)

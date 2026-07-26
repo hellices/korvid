@@ -288,7 +288,8 @@ UI_TOOLS: list[dict[str, Any]] = [
             "description": (
                 "Drill into a row of the visible table following the ownership "
                 "chain the user sees on screen: a deployment opens its replicaset "
-                "revision history, a replicaset opens its pods. Screen-only."
+                "revision history, a replicaset opens its pods, and a helm "
+                "release opens its revision history. Screen-only."
             ),
             "parameters": {
                 "type": "object",
@@ -596,12 +597,21 @@ class ToolExecutor:
             resources,
         )
 
+    def _api_meta(self, kind: str) -> ResourceMeta:
+        """Alias lookup for tools that build API paths: synthetic view kinds
+        (helm browser) have no endpoint and must be rejected here, not turned
+        into a nonexistent ``/api/v1/helmreleases`` request."""
+        meta = self._aliases.get(kind)
+        if meta is None:
+            raise ValueError(f"unknown kind {kind!r}")
+        if meta.synthetic:
+            raise ValueError(f"kind {kind!r} is a korvid view, not an API resource")
+        return meta
+
     async def _list_resources(self, args: dict[str, Any]) -> str:
         kind = str(args["kind"]).strip().lower()
         namespace: str | None = args.get("namespace")
-        if kind not in self._aliases:
-            raise ValueError(f"unknown kind {kind!r}")
-        meta = self._aliases[kind]
+        meta = self._api_meta(kind)
         summaries = await self._kube.list_objects(meta, namespace)
         if not summaries:
             return "(none)"
@@ -611,9 +621,7 @@ class ToolExecutor:
         kind = str(args["kind"]).strip().lower()
         name = str(args["name"])
         namespace: str | None = args.get("namespace")
-        if kind not in self._aliases:
-            raise ValueError(f"unknown kind {kind!r}")
-        meta = self._aliases[kind]
+        meta = self._api_meta(kind)
         # A namespaced kind without a namespace would hit an invalid
         # cluster-scoped path — give the model an actionable error instead.
         if meta.namespaced and not namespace:
@@ -650,9 +658,7 @@ class ToolExecutor:
         kind = str(args["kind"]).strip().lower()
         namespace = str(args["namespace"])
         name = str(args["name"])
-        if kind not in self._aliases:
-            raise ValueError(f"unknown kind {kind!r}")
-        meta = self._aliases[kind]
+        meta = self._api_meta(kind)
         # Fetch the live object so events are scoped to this exact incarnation
         # (kind + UID), not merely anything sharing the name.
         uid: str | None = None
