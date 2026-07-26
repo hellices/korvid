@@ -136,6 +136,10 @@ def recommend_debug_images(
     list may be empty (the UI then offers only the custom-image prompt).
     """
     fallback = default_image or FALLBACK_IMAGE
+    if default_image:
+        fallback_label, fallback_reason = "default (configured)", "configured fallback image"
+    else:
+        fallback_label, fallback_reason = "minimal (busybox)", "lowest-common-denominator shell"
     detected = detect_runtime(manifest, container)
 
     options: list[DebugImageOption] = []
@@ -165,10 +169,10 @@ def recommend_debug_images(
             f"detected {runtime} runtime ({signal}) — includes {_RUNTIME_TOOLS[runtime]}",
         )
         _add(NETSHOOT_IMAGE, "network toolkit (netshoot)", "network debugging tools")
-        _add(fallback, "minimal (busybox)", "lowest-common-denominator shell")
+        _add(fallback, fallback_label, fallback_reason)
         return options
 
-    _add(fallback, "minimal (busybox)", "no runtime detected — generic shell")
+    _add(fallback, fallback_label, f"no runtime detected — {fallback_reason}")
     _add(NETSHOOT_IMAGE, "network toolkit (netshoot)", "network debugging tools")
     return options
 
@@ -192,25 +196,44 @@ def ephemeral_container_names(manifest: dict[str, Any]) -> frozenset[str]:
 
 
 def _normalize_image_ref(image: str) -> str:
-    """Normalize an image reference the way Kubernetes does before pulling.
+    """Canonical form of an image reference for equality comparison.
 
-    An untagged, digest-less reference gets an implicit `:latest`. Registry
-    ports (`registry:5000/app`) are not tags: only a colon in the last path
-    segment counts. Digested references are left untouched.
+    Mirrors how Kubernetes resolves references before pulling: an untagged,
+    digest-less reference gets an implicit `:latest`; Docker Hub aliases
+    (`busybox` == `library/busybox` == `docker.io/library/busybox` ==
+    `index.docker.io/library/busybox`) collapse to one canonical name; when a
+    digest is present it pins the image and any accompanying tag is ignored.
+    Registry ports (`registry:5000/app`) are not tags: only a colon in the
+    last path segment counts.
     """
+    digest: str | None = None
     if "@" in image:
-        return image
+        image, digest = image.split("@", 1)
+    tag: str | None = None
     last_segment = image.rsplit("/", 1)[-1]
     if ":" in last_segment:
-        return image
-    return f"{image}:latest"
+        tag = last_segment.rsplit(":", 1)[-1]
+        image = image[: len(image) - len(tag) - 1]
+    head, _, rest = image.partition("/")
+    if rest and ("." in head or ":" in head or head == "localhost"):
+        registry, path = head, rest
+    else:
+        registry, path = "docker.io", image
+    if registry in ("docker.io", "index.docker.io", "registry-1.docker.io"):
+        registry = "docker.io"
+        if "/" not in path:
+            path = f"library/{path}"
+    if digest is not None:
+        return f"{registry}/{path}@{digest}"
+    return f"{registry}/{path}:{tag or 'latest'}"
 
 
 def same_image_ref(a: str, b: str) -> bool:
     """Whether two image references name the same Kubernetes image.
 
-    Compares after the implicit-`:latest` normalization Kubernetes applies
-    before pulling, so `registry/app` and `registry/app:latest` are equal.
+    Compares canonical forms, so `registry/app` equals `registry/app:latest`,
+    `busybox` equals `docker.io/library/busybox`, and digest-pinned references
+    are equal regardless of an accompanying tag.
     """
     return _normalize_image_ref(a) == _normalize_image_ref(b)
 

@@ -273,6 +273,41 @@ def test_same_image_ref() -> None:
     assert not same_image_ref("nicolaka/netshoot", "busybox")
 
 
+def test_same_image_ref_docker_hub_aliases() -> None:
+    # Docker Hub references have canonical aliases: a short name, the
+    # library/ namespace, and the docker.io / index.docker.io registries all
+    # name the same image.
+    assert same_image_ref("docker.io/library/busybox:1.36", "busybox:1.36")
+    assert same_image_ref("index.docker.io/library/busybox", "busybox:latest")
+    assert same_image_ref("docker.io/nicolaka/netshoot", "nicolaka/netshoot")
+    assert not same_image_ref("quay.io/busybox:1.36", "busybox:1.36")
+
+
+def test_same_image_ref_digest_ignores_tag() -> None:
+    # A digest pins the image: an accompanying tag is informational only.
+    assert same_image_ref("busybox:1.36@sha256:abcd", "busybox@sha256:abcd")
+    assert same_image_ref("docker.io/library/busybox@sha256:abcd", "busybox@sha256:abcd")
+    assert not same_image_ref("busybox@sha256:abcd", "busybox@sha256:ffff")
+
+
+def test_recommend_configured_default_label_with_detected_runtime() -> None:
+    # A configured default_image must not be labelled busybox.
+    options = recommend_debug_images(
+        _pod(image="node:22"), "app", default_image="registry.corp.local/tools/tk:1"
+    )
+    entry = next(o for o in options if o.image == "registry.corp.local/tools/tk:1")
+    assert entry.label == "default (configured)"
+    assert "busybox" not in entry.label
+    assert "busybox" not in entry.reason
+
+
+def test_recommend_configured_default_label_unknown_runtime() -> None:
+    options = recommend_debug_images(_pod(), "app", default_image="registry.corp.local/tools/tk:1")
+    assert options[0].image == "registry.corp.local/tools/tk:1"
+    assert options[0].label == "default (configured)"
+    assert "busybox" not in options[0].reason
+
+
 # ---------------------------------------------------------------------------
 # find_pull_failure
 # ---------------------------------------------------------------------------
