@@ -229,20 +229,25 @@ async def test_stringdata_value_revealed_without_decode(tmp_path: Path) -> None:
 
 async def test_reveal_blocked_without_audit_log() -> None:
     """No audit sink ⇒ reveal is blocked (fail-closed), value stays masked."""
+    from unittest import mock
+
     app = make_secret_app(audit=None)
     async with app.run_test() as pilot:
         screen = await _open_secret_screen(pilot, app)
         keys = screen.row_keys()
         for _ in range(keys.index(("password", "data"))):
             await pilot.press("down")
-        await pilot.press("x")
-        await pilot.pause()
+        with mock.patch.object(screen, "notify") as notify:
+            await pilot.press("x")
+            # The blocked notification proves the disclosure worker finished.
+            await until(pilot, lambda: notify.called, label="blocked notification")
         assert "hunter2" not in _screen_text(screen)
         assert MASK_PLACEHOLDER in _screen_text(screen)
 
 
 async def test_reveal_blocked_when_audit_append_fails(tmp_path: Path) -> None:
     """Audit write failure ⇒ the reveal is blocked, value stays masked."""
+    from unittest import mock
 
     class BrokenAudit(AuditLog):
         def append(self, **kwargs: Any) -> None:
@@ -254,8 +259,9 @@ async def test_reveal_blocked_when_audit_append_fails(tmp_path: Path) -> None:
         keys = screen.row_keys()
         for _ in range(keys.index(("password", "data"))):
             await pilot.press("down")
-        await pilot.press("x")
-        await pilot.pause()
+        with mock.patch.object(screen, "notify") as notify:
+            await pilot.press("x")
+            await until(pilot, lambda: notify.called, label="blocked notification")
         assert "hunter2" not in _screen_text(screen)
 
 
@@ -281,14 +287,17 @@ async def test_copy_decoded_value_audited(tmp_path: Path) -> None:
 
 async def test_copy_blocked_without_audit_log() -> None:
     """Copy is a secret disclosure too: no audit sink ⇒ blocked."""
+    from unittest import mock
+
     app = make_secret_app(audit=None)
     async with app.run_test() as pilot:
         screen = await _open_secret_screen(pilot, app)
         keys = screen.row_keys()
         for _ in range(keys.index(("password", "data"))):
             await pilot.press("down")
-        await pilot.press("c")
-        await pilot.pause()
+        with mock.patch.object(screen, "notify") as notify:
+            await pilot.press("c")
+            await until(pilot, lambda: notify.called, label="blocked notification")
         assert app.clipboard != "hunter2"
 
 
@@ -439,3 +448,32 @@ async def test_copy_invalid_base64_message_does_not_claim_digest(tmp_path: Path)
         warning = messages[0]
         assert "digest" not in warning.lower()
         assert "summary" in warning.lower()
+
+
+async def test_reveal_renders_bracketed_value_literally(tmp_path: Path) -> None:
+    """Secret values are arbitrary text: bracketed content such as
+    `[bold]token[/bold]` must render with its literal brackets, never be
+    interpreted as Rich markup (which would also crash on malformed input)."""
+    from rich.console import Console
+
+    manifest = json.loads(json.dumps(_SECRET_MANIFEST))
+    manifest["data"]["markup"] = _b64("[bold]token[/bold]")
+    manifest["data"]["broken-markup"] = _b64("[unclosed and ]invalid[/nope]")
+    app = make_secret_app(audit=AuditLog(tmp_path / "audit.jsonl"), manifest=manifest)
+    async with app.run_test() as pilot:
+        screen = await _open_secret_screen(pilot, app)
+        keys = screen.row_keys()
+        for _ in range(keys.index(("markup", "data"))):
+            await pilot.press("down")
+        await pilot.press("x")
+        await until(pilot, lambda: "token" in _screen_text(screen), label="revealed")
+        from textual.widgets import DataTable
+
+        table = screen.query_one(DataTable)
+        row = table.get_row(list(table.rows)[keys.index(("markup", "data"))])
+        # Render the VALUE cell the way Rich would: a plain str is markup-
+        # interpreted (brackets vanish), a Text renders literally.
+        console = Console(width=200, force_terminal=False, legacy_windows=False)
+        with console.capture() as capture:
+            console.print(row[2])
+        assert "[bold]token[/bold]" in capture.get()

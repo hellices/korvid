@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, ClassVar
 
+from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -168,7 +169,9 @@ class SecretScreen(ModalScreen[None]):
 
     def _set_value_cell(self, key: str, section: str, value: str) -> None:
         table = self.query_one(DataTable)
-        table.update_cell(f"{section}/{key}", table.ordered_columns[2].key, value)
+        # Secret values are arbitrary text — wrap in Text so bracketed
+        # content is rendered literally, never interpreted as Rich markup.
+        table.update_cell(f"{section}/{key}", table.ordered_columns[2].key, Text(value))
 
     @work
     async def action_toggle_reveal(self) -> None:
