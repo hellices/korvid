@@ -107,7 +107,7 @@ def _trouble_line(entry: ContainerTrouble, *, now: datetime | None = None) -> Te
         tail.append(f"restarts {entry.restarts}")
     if entry.finished_at:
         age = relative_age(entry.finished_at, now=now)
-        tail.append(f"last {age} ago" if age else f"last {entry.finished_at}")
+        tail.append(f"last seen {age} ago" if age else f"last seen {entry.finished_at}")
     if tail:
         line.append(f" - {', '.join(tail)}", style="dim")
     return line

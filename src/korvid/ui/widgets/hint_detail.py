@@ -65,7 +65,7 @@ def _append_trouble_block(body: Text, entry: Any, *, now: datetime | None) -> No
         tail.append(f"restarts {entry.restarts}")
     if entry.finished_at:
         age = relative_age(entry.finished_at, now=now)
-        tail.append(f"last {age} ago" if age else f"last {entry.finished_at}")
+        tail.append(f"last seen {age} ago" if age else f"last seen {entry.finished_at}")
     if tail:
         body.append(f"  {', '.join(tail)}\n", style="dim")
 

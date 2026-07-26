@@ -101,21 +101,24 @@ def _usage_severity(
 ) -> str:
     """Style for a usage cell. The number shown is usage-vs-request, but the
     color answers a different question - proximity to an enforced ceiling
-    (issue #50): pod-level limit first (whole-pod by definition), else the
-    worst per-container ratio; containers without a limit contribute a
-    yellow-capped request-based fallback (burst is expected, never critical).
+    (issue #50). Both ceilings count: a pod-level limit caps the aggregate
+    cgroup while each container cgroup still enforces its own limit, so the
+    style is the most severe of the two.  When neither fully bounds usage
+    (no pod limit and some container unlimited), a yellow-capped
+    request-based fallback joins in (burst is expected, never critical).
     """
     pod_limit = pod.cpu_limit_cores if key == "cpu" else pod.mem_limit_bytes
-    if pod_limit is not None and pod_limit > 0:
-        return usage_style(round(usage / float(pod_limit) * 100))
+    if pod_limit is not None and pod_limit <= 0:
+        pod_limit = None
     worst_pct, all_limited = _max_container_pct(metrics, pod.container_limits, key)
-    if worst_pct is None:
-        return usage_style(displayed, cap_at_warn=True)
-    limited = usage_style(worst_pct)
-    if all_limited:
-        return limited
-    fallback = usage_style(displayed, cap_at_warn=True)
-    return max(limited, fallback, key=lambda st: _STYLE_SEVERITY.get(st, 0))
+    styles: list[str] = []
+    if pod_limit is not None:
+        styles.append(usage_style(round(usage / float(pod_limit) * 100)))
+    if worst_pct is not None:
+        styles.append(usage_style(worst_pct))
+    if pod_limit is None and not (worst_pct is not None and all_limited):
+        styles.append(usage_style(displayed, cap_at_warn=True))
+    return max(styles, key=lambda st: _STYLE_SEVERITY.get(st, 0))
 
 
 def _percent_of_request(

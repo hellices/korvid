@@ -320,3 +320,34 @@ class TestPerContainerSeverity:
         )
         _, _, _, mem_pct = _usage_cells(pod, metrics)
         assert _style_of(mem_pct) == "bold red"
+
+    def test_pod_level_limit_does_not_mask_container_near_own_limit(self) -> None:
+        """Review fix (PR #51 r5): the pod cgroup caps the aggregate, but each
+        container cgroup still enforces its own limit - both ceilings count."""
+        pod = self._pod(
+            (
+                ContainerLimits(name="app", cpu_cores=None, mem_bytes=None),
+                ContainerLimits(name="sidecar", cpu_cores=None, mem_bytes=100 * 2**20),
+            ),
+            mem_limit_bytes=1024 * 2**20,  # whole-pod limit: aggregate is only ~10%
+        )
+        metrics = PodMetrics(
+            name="web-1",
+            namespace="default",
+            cpu_cores=0.0,
+            memory_bytes=100 * 2**20,
+            containers=(
+                ContainerUsage(name="app", cpu_cores=0.0, memory_bytes=5 * 2**20),
+                ContainerUsage(name="sidecar", cpu_cores=0.0, memory_bytes=95 * 2**20),
+            ),
+        )
+        _, _, _, mem_pct = _usage_cells(pod, metrics)
+        assert _style_of(mem_pct) == "bold red"  # sidecar at 95% of its own limit
+
+    def test_pod_level_limit_still_colors_when_no_container_samples(self) -> None:
+        pod = self._pod((), mem_limit_bytes=100 * 2**20)
+        metrics = PodMetrics(
+            name="web-1", namespace="default", cpu_cores=0.0, memory_bytes=95 * 2**20
+        )
+        _, _, _, mem_pct = _usage_cells(pod, metrics)
+        assert _style_of(mem_pct) == "bold red"  # 95% of the pod-level limit

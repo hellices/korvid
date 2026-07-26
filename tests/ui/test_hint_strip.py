@@ -32,7 +32,7 @@ def test_render_crashloop_line_shows_reason_message_and_last_exit() -> None:
     assert "back-off 5m0s restarting failed container" in text
     assert "exit 137 (OOMKilled)" in text
     assert "restarts 12" in text
-    assert "last 5m ago" in text  # relative age, not the raw RFC 3339 timestamp
+    assert "last seen 5m ago" in text  # relative age, not the raw RFC 3339 timestamp
     assert "2026-" not in text
 
 
