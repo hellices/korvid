@@ -259,6 +259,12 @@ _UID_LOOKUP_TIMEOUT = 10.0
 #: approval flow.
 _PREVIEW_TIMEOUT = 3.0
 
+#: Upper bound on the hint-overlay events fetch (issue #34): the trouble half
+#: comes from the status the app already holds, so a stalled API connection
+#: must not delay the overlay past this - the events are marked unavailable
+#: instead.
+_HINT_EVENTS_TIMEOUT = 3.0
+
 
 class _ReplayFilter:
     """Drops tail lines replayed by the API after a reconnect.
@@ -872,8 +878,11 @@ class KorvidApp(App[None]):
         events_unavailable = False
         if self._get_events is not None:
             try:
-                events = await self._get_events.fetch(
-                    summary.namespace, summary.name, uid=summary.uid or None
+                events = await asyncio.wait_for(
+                    self._get_events.fetch(
+                        summary.namespace, summary.name, uid=summary.uid or None
+                    ),
+                    timeout=_HINT_EVENTS_TIMEOUT,
                 )
             except Exception:  # events are decoration; trouble alone still helps
                 events_unavailable = True

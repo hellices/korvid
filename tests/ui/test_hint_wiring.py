@@ -618,3 +618,41 @@ async def test_overlay_aborts_when_pod_recovers_during_event_fetch() -> None:
         gate.set()
         await pilot.pause(0.1)
         assert not isinstance(app.screen, HintDetailScreen)
+
+
+async def test_overlay_opens_when_event_fetch_stalls(monkeypatch: Any) -> None:
+    """Review fix (PR #51 r6): a stalled events API must not hold the overlay
+    hostage for the HTTP client's full timeout - bound the wait with a short
+    UI timeout and open with the events marked unavailable."""
+    from korvid.ui import app as app_mod
+    from korvid.ui.widgets.hint_detail import HintDetailScreen
+
+    monkeypatch.setattr(app_mod, "_HINT_EVENTS_TIMEOUT", 0.05)
+    stall = asyncio.Event()
+
+    async def get_events(
+        namespace: str, name: str, *, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        await stall.wait()  # never set: simulates a hung API connection
+        return []
+
+    store = ResourceStore()
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
+        aliases=dict(_DEFAULT_TEST_ALIASES),
+        get_events=_FnFetcher(get_events),
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(HintStrip).display, label="strip visible")
+        await pilot.press("i")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, HintDetailScreen),
+            label="overlay open despite stalled event fetch",
+        )
+        text = str(app.screen.query_one("#hint-detail-body").render())
+        assert "CrashLoopBackOff" in text
+        assert "warning events unavailable" in text
+        stall.set()
