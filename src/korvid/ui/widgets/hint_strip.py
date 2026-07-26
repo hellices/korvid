@@ -6,6 +6,7 @@ plus an optional warning event line) — no synthesized diagnoses.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 
 from rich.text import Text
@@ -14,8 +15,16 @@ from textual.widgets import Static
 from korvid.k8s.models import ContainerTrouble
 from korvid.ui.theme import phase_style
 
-#: At most this many per-container detail lines; the rest collapse to "+N more".
-_MAX_DETAIL_LINES = 2
+#: Total line budget for the strip (issue #34): everything beyond it folds
+#: behind the on-demand detail overlay, indicated by "+N more (i: details)".
+_MAX_STRIP_LINES = 2
+
+#: Fragments that repeat what the cursor row already shows (container name,
+#: pod name with namespace and uid) - pure noise inside a hint message.
+_NOISE_FRAGMENT_RE = re.compile(r"\s*\b(?:container|pod)=\S+")
+
+#: Normalization for reason-vs-event dedupe: case and separators ignored.
+_NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
 
 
 def parse_rfc3339(value: str) -> datetime | None:
@@ -50,13 +59,44 @@ def _single_line(text: str) -> str:
     return " ".join(text.split())
 
 
+def _clean_message(message: str) -> str:
+    """Single-line message with `container=...` / `pod=name_ns(uid)` fragments
+    removed - they repeat what the cursor row and the line prefix already
+    show. Only removal, never rewording: the strip stays verbatim API data."""
+    return _single_line(_NOISE_FRAGMENT_RE.sub("", message))
+
+
+def _normalize(text: str) -> str:
+    return _NORMALIZE_RE.sub("", text.lower())
+
+
+def _event_repeats_trouble(event: str, trouble: tuple[ContainerTrouble, ...]) -> bool:
+    """Whether the Warning event restates a status-derived entry: the BackOff
+    event and the CrashLoopBackOff status describe the same failure, and two
+    near-identical lines bury the signal (issue #34). True when the event's
+    reason (the part before ':') matches a trouble reason or is its suffix
+    after normalization. Suffix (not substring) matching: a short generic
+    reason (`Failed`) appearing inside `FailedScheduling` describes a
+    different failure, while `BackOff` ending `CrashLoopBackOff` is the
+    same story."""
+    reason = _normalize(event.split(":", 1)[0])
+    if not reason:
+        return False
+    return any(_normalize(entry.reason).endswith(reason) for entry in trouble)
+
+
 def _trouble_line(entry: ContainerTrouble, *, now: datetime | None = None) -> Text:
-    """One-line rendering: `app CrashLoopBackOff: msg - exit 137 (OOMKilled), restarts 12`."""
+    """Structured one-line rendering (issue #34), composed from parsed fields:
+    `\u25cf demo-app CrashLoopBackOff: back-off 5m0s - exit 137 (OOMKilled), restarts 696`
+    - bullet and reason carry the severity color, the container is cyan, and
+    counters are dim, so reason/container/message no longer run together."""
+    style = phase_style(entry.reason)
     line = Text()
-    line.append(f"{entry.container} ", style="bold")
-    line.append(entry.reason, style=phase_style(entry.reason))
-    if entry.message:
-        line.append(f": {_single_line(entry.message)}")
+    line.append("\u25cf ", style=style)
+    line.append(f"{entry.container} ", style="bold cyan")
+    line.append(entry.reason, style=style)
+    if entry.message and (cleaned := _clean_message(entry.message)):
+        line.append(f": {cleaned}")
     tail: list[str] = []
     if entry.exit_code is not None:
         exit_part = f"exit {entry.exit_code}"
@@ -67,7 +107,7 @@ def _trouble_line(entry: ContainerTrouble, *, now: datetime | None = None) -> Te
         tail.append(f"restarts {entry.restarts}")
     if entry.finished_at:
         age = relative_age(entry.finished_at, now=now)
-        tail.append(f"last {age} ago" if age else f"last {entry.finished_at}")
+        tail.append(f"last seen {age} ago" if age else f"last seen {entry.finished_at}")
     if tail:
         line.append(f" - {', '.join(tail)}", style="dim")
     return line
@@ -79,13 +119,21 @@ def render_trouble_lines(
     event: str | None = None,
     now: datetime | None = None,
 ) -> list[Text]:
-    """Compact hint lines for the strip: capped detail lines, then the event."""
-    lines = [_trouble_line(entry, now=now) for entry in trouble[:_MAX_DETAIL_LINES]]
-    remainder = len(trouble) - _MAX_DETAIL_LINES
-    if remainder > 0:
-        lines.append(Text(f"+{remainder} more container(s) failing", style="dim"))
-    if event:
-        lines.append(Text(_single_line(event), style="yellow"))
+    """At most `_MAX_STRIP_LINES` concise lines (issue #34). An event
+    restating a status entry is dropped; when the entries plus the event
+    exceed the budget, everything past the first line folds behind the
+    detail overlay, indicated by `+N more (i: details)`."""
+    if event and _event_repeats_trouble(event, trouble):
+        event = None
+    total = len(trouble) + (1 if event else 0)
+    if total <= _MAX_STRIP_LINES:
+        lines = [_trouble_line(entry, now=now) for entry in trouble]
+        if event:
+            lines.append(Text(_single_line(event), style="yellow"))
+        return lines
+    shown = trouble[: _MAX_STRIP_LINES - 1]
+    lines = [_trouble_line(entry, now=now) for entry in shown]
+    lines.append(Text(f"+{total - len(shown)} more (i: details)", style="dim"))
     return lines
 
 
@@ -95,9 +143,9 @@ class HintStrip(Static):
     DEFAULT_CSS = """
     HintStrip {
         height: auto;
-        /* border-top consumes one layout row; the content can be up to four
-           rows (two details, +N more, newest event), hence 1 + 4. */
-        max-height: 5;
+        /* border-top consumes one layout row; the content is capped at two
+           rows (issue #34) - the rest lives in the detail overlay. */
+        max-height: 3;
         padding: 0 1;
         background: $surface;
         border-top: solid $warning;

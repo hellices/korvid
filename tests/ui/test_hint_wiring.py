@@ -88,6 +88,13 @@ def make_app(
     return app, calls
 
 
+def _hint_detail_workers_done(app: KorvidApp) -> bool:
+    """True once no hint-detail worker is pending or running - negative
+    overlay assertions are meaningless while the worker could still push
+    the screen (PR #51 r7)."""
+    return not any(w.group == "hint-detail" and not w.is_finished for w in app.workers)
+
+
 def _strip_text(app: KorvidApp) -> str:
     return str(app.query_one(HintStrip).render())
 
@@ -119,8 +126,8 @@ async def test_warning_event_is_fetched_and_appended() -> None:
     events = [
         {
             "type": "Warning",
-            "reason": "BackOff",
-            "message": "restarting failed container app",
+            "reason": "FailedMount",
+            "message": "MountVolume.SetUp failed",
             "lastTimestamp": "2026-07-26T08:00:00Z",
         },
         {
@@ -134,13 +141,37 @@ async def test_warning_event_is_fetched_and_appended() -> None:
     async with app.run_test() as pilot:
         await until(
             pilot,
-            lambda: "restarting failed container app" in _strip_text(app),
+            lambda: "MountVolume.SetUp failed" in _strip_text(app),
             label="event line shown",
         )
         text = _strip_text(app)
-        assert "BackOff: restarting failed container app" in text
+        assert "FailedMount: MountVolume.SetUp failed" in text
         assert "image pulled" not in text  # Normal events never shown
         assert calls == [("default", "web-1", "uid-web-1")]
+
+
+async def test_event_restating_the_trouble_is_not_appended() -> None:
+    """Issue #34 end-to-end: the freshest Warning is usually the BackOff event
+    behind the CrashLoopBackOff status - the strip shows only one of them."""
+    events = [
+        {
+            "type": "Warning",
+            "reason": "BackOff",
+            "message": "restarting failed container app",
+            "lastTimestamp": "2026-07-26T08:00:00Z",
+        },
+    ]
+    app, calls = make_app([_pod("web-1", (_CRASH,))], events=events)
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: calls == [("default", "web-1", "uid-web-1")],
+            label="event fetched",
+        )
+        await pilot.pause()
+        text = _strip_text(app)
+        assert "CrashLoopBackOff" in text
+        assert "restarting failed container app" not in text
 
 
 async def test_event_fetch_is_cached_per_pod() -> None:
@@ -458,3 +489,177 @@ def test_event_older_than_ready_transition_is_stale_for_event_only_hint() -> Non
     # Nearly every pod has a Ready condition, so an undated Warning is in
     # practice always suppressed: a wrong "cause" is worse than none.
     assert _event_line_fresh(None, not_ready) is False
+
+
+async def test_i_on_troubled_row_opens_detail_overlay() -> None:
+    """Issue #34: `i` opens the read-only detail overlay for the hinted row."""
+    from korvid.ui.widgets.hint_detail import HintDetailScreen
+
+    events = [
+        {
+            "type": "Warning",
+            "reason": "BackOff",
+            "message": "restarting failed container app",
+            "lastTimestamp": "2026-07-26T08:00:00Z",
+        },
+    ]
+    app, _calls = make_app([_pod("web-1", (_CRASH,))], events=events)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(HintStrip).display, label="strip visible")
+        await pilot.press("i")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, HintDetailScreen),
+            label="detail overlay open",
+        )
+        text = str(app.screen.query_one("#hint-detail-body").render())
+        assert "CrashLoopBackOff" in text
+        assert "restarting failed container app" in text
+        await pilot.press("escape")
+        await until(
+            pilot,
+            lambda: not isinstance(app.screen, HintDetailScreen),
+            label="overlay dismissed",
+        )
+
+
+async def test_i_on_healthy_row_is_a_noop() -> None:
+    from korvid.ui.widgets.hint_detail import HintDetailScreen
+
+    app, calls = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1)
+        await pilot.pause(0.1)
+        await pilot.press("i")
+        await pilot.pause(0.1)
+        assert not isinstance(app.screen, HintDetailScreen)
+        assert calls == []  # no hint -> no event fetch for the overlay either
+
+
+async def test_overlay_aborts_when_cursor_moves_during_event_fetch() -> None:
+    """Review fix (PR #51): the overlay fetch awaits the events API; if the
+    cursor moved meanwhile the details describe the wrong pod - abort."""
+    from korvid.ui.widgets.hint_detail import HintDetailScreen
+
+    gate = asyncio.Event()
+
+    async def get_events(
+        namespace: str, name: str, *, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        await gate.wait()
+        return []
+
+    store = ResourceStore()
+    pods = [_pod("aaa-1", (_CRASH,)), _pod("zzz-1")]
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, _source(pods)),
+        aliases=dict(_DEFAULT_TEST_ALIASES),
+        get_events=_FnFetcher(get_events),
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(HintStrip).display, label="strip on aaa-1")
+        await pilot.press("i")  # overlay fetch now blocked on the gate
+        await pilot.press("down")  # cursor leaves the hinted row
+        gate.set()
+        await until(pilot, lambda: _hint_detail_workers_done(app), label="overlay worker done")
+        assert not isinstance(app.screen, HintDetailScreen)
+
+
+async def test_overlay_reports_unavailable_events_on_fetch_failure() -> None:
+    async def get_events(
+        namespace: str, name: str, *, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        raise RuntimeError("events API down")
+
+    store = ResourceStore()
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
+        aliases=dict(_DEFAULT_TEST_ALIASES),
+        get_events=_FnFetcher(get_events),
+    )
+    async with app.run_test() as pilot:
+        from korvid.ui.widgets.hint_detail import HintDetailScreen
+
+        await until(pilot, lambda: app.query_one(HintStrip).display, label="strip visible")
+        await pilot.press("i")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, HintDetailScreen),
+            label="overlay open despite event failure",
+        )
+        text = str(app.screen.query_one("#hint-detail-body").render())
+        assert "CrashLoopBackOff" in text
+        assert "warning events unavailable" in text
+
+
+async def test_overlay_aborts_when_pod_recovers_during_event_fetch() -> None:
+    """Review fix (PR #51 r2): a pod that recovered mid-fetch no longer
+    qualifies for a hint - opening an empty detail modal would be noise."""
+    from korvid.ui.widgets.hint_detail import HintDetailScreen
+
+    gate = asyncio.Event()
+
+    async def get_events(
+        namespace: str, name: str, *, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        await gate.wait()
+        return []
+
+    store = ResourceStore()
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
+        aliases=dict(_DEFAULT_TEST_ALIASES),
+        get_events=_FnFetcher(get_events),
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(HintStrip).display, label="strip visible")
+        await pilot.press("i")  # overlay fetch blocked on the gate
+        recovered = _pod("web-1")  # healthy now, same uid
+        store.apply_event("pods", app.current_scope, "MODIFIED", recovered)
+        gate.set()
+        await until(pilot, lambda: _hint_detail_workers_done(app), label="overlay worker done")
+        assert not isinstance(app.screen, HintDetailScreen)
+
+
+async def test_overlay_opens_when_event_fetch_stalls(monkeypatch: Any) -> None:
+    """Review fix (PR #51 r6): a stalled events API must not hold the overlay
+    hostage for the HTTP client's full timeout - bound the wait with a short
+    UI timeout and open with the events marked unavailable."""
+    from korvid.ui import app as app_mod
+    from korvid.ui.widgets.hint_detail import HintDetailScreen
+
+    monkeypatch.setattr(app_mod, "_HINT_EVENTS_TIMEOUT", 0.05)
+    stall = asyncio.Event()
+
+    async def get_events(
+        namespace: str, name: str, *, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        await stall.wait()  # never set: simulates a hung API connection
+        return []
+
+    store = ResourceStore()
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
+        aliases=dict(_DEFAULT_TEST_ALIASES),
+        get_events=_FnFetcher(get_events),
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(HintStrip).display, label="strip visible")
+        await pilot.press("i")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, HintDetailScreen),
+            label="overlay open despite stalled event fetch",
+        )
+        text = str(app.screen.query_one("#hint-detail-body").render())
+        assert "CrashLoopBackOff" in text
+        assert "warning events unavailable" in text
+        stall.set()
