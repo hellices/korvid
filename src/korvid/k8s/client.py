@@ -399,6 +399,31 @@ class KubeClient(WriteOps):
             content_type="application/strategic-merge-patch+json",
         )
 
+    async def replace_object(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        manifest: dict[str, Any],
+        *,
+        uid: str | None = None,
+    ) -> None:
+        """PUT-replace the object with an edited manifest (kubectl edit).
+        A ``uid`` injected into metadata is an apiserver precondition: the
+        replace is rejected with 409 when the live object is a different
+        incarnation than the one that was approved.  The manifest should
+        carry the fetched ``resourceVersion`` so concurrent modifications
+        surface as 409 conflicts instead of being clobbered."""
+        body = manifest
+        if uid:
+            body = {**manifest, "metadata": {**(manifest.get("metadata") or {}), "uid": uid}}
+        await self._request_write(
+            self._object_path(meta, namespace, name),
+            "PUT",
+            body=body,
+            content_type="application/json",
+        )
+
     async def stream_logs(
         self,
         namespace: str,
