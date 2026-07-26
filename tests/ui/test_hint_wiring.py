@@ -119,8 +119,8 @@ async def test_warning_event_is_fetched_and_appended() -> None:
     events = [
         {
             "type": "Warning",
-            "reason": "BackOff",
-            "message": "restarting failed container app",
+            "reason": "FailedMount",
+            "message": "MountVolume.SetUp failed",
             "lastTimestamp": "2026-07-26T08:00:00Z",
         },
         {
@@ -134,13 +134,37 @@ async def test_warning_event_is_fetched_and_appended() -> None:
     async with app.run_test() as pilot:
         await until(
             pilot,
-            lambda: "restarting failed container app" in _strip_text(app),
+            lambda: "MountVolume.SetUp failed" in _strip_text(app),
             label="event line shown",
         )
         text = _strip_text(app)
-        assert "BackOff: restarting failed container app" in text
+        assert "FailedMount: MountVolume.SetUp failed" in text
         assert "image pulled" not in text  # Normal events never shown
         assert calls == [("default", "web-1", "uid-web-1")]
+
+
+async def test_event_restating_the_trouble_is_not_appended() -> None:
+    """Issue #34 end-to-end: the freshest Warning is usually the BackOff event
+    behind the CrashLoopBackOff status - the strip shows only one of them."""
+    events = [
+        {
+            "type": "Warning",
+            "reason": "BackOff",
+            "message": "restarting failed container app",
+            "lastTimestamp": "2026-07-26T08:00:00Z",
+        },
+    ]
+    app, calls = make_app([_pod("web-1", (_CRASH,))], events=events)
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: calls == [("default", "web-1", "uid-web-1")],
+            label="event fetched",
+        )
+        await pilot.pause()
+        text = _strip_text(app)
+        assert "CrashLoopBackOff" in text
+        assert "restarting failed container app" not in text
 
 
 async def test_event_fetch_is_cached_per_pod() -> None:
@@ -458,3 +482,48 @@ def test_event_older_than_ready_transition_is_stale_for_event_only_hint() -> Non
     # Nearly every pod has a Ready condition, so an undated Warning is in
     # practice always suppressed: a wrong "cause" is worse than none.
     assert _event_line_fresh(None, not_ready) is False
+
+
+async def test_i_on_troubled_row_opens_detail_overlay() -> None:
+    """Issue #34: `i` opens the read-only detail overlay for the hinted row."""
+    from korvid.ui.widgets.hint_detail import HintDetailScreen
+
+    events = [
+        {
+            "type": "Warning",
+            "reason": "BackOff",
+            "message": "restarting failed container app",
+            "lastTimestamp": "2026-07-26T08:00:00Z",
+        },
+    ]
+    app, _calls = make_app([_pod("web-1", (_CRASH,))], events=events)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(HintStrip).display, label="strip visible")
+        await pilot.press("i")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, HintDetailScreen),
+            label="detail overlay open",
+        )
+        text = str(app.screen.query_one("#hint-detail-body").render())
+        assert "CrashLoopBackOff" in text
+        assert "restarting failed container app" in text
+        await pilot.press("escape")
+        await until(
+            pilot,
+            lambda: not isinstance(app.screen, HintDetailScreen),
+            label="overlay dismissed",
+        )
+
+
+async def test_i_on_healthy_row_is_a_noop() -> None:
+    from korvid.ui.widgets.hint_detail import HintDetailScreen
+
+    app, calls = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1)
+        await pilot.pause(0.1)
+        await pilot.press("i")
+        await pilot.pause(0.1)
+        assert not isinstance(app.screen, HintDetailScreen)
+        assert calls == []  # no hint -> no event fetch for the overlay either

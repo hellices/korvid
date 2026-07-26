@@ -66,6 +66,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
+from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.hint_strip import HintStrip, parse_rfc3339
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
@@ -328,6 +329,7 @@ class KorvidApp(App[None]):
         Binding("R", "resize_pod", "Resize", show=False),
         Binding("S", "scale_resource", "Scale", show=False),
         Binding("e", "edit_resource", "Edit", show=False),
+        Binding("i", "hint_details", "Hint details", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -843,6 +845,37 @@ class KorvidApp(App[None]):
         for k in expired:
             del self._hint_event_cache[k]
         self._hint_event_cache[cache_key] = (now, line, event_ts)
+
+    def action_hint_details(self) -> None:
+        """Open the read-only detail overlay for the hinted pod row (issue #34):
+        the full trouble list plus recent Warning events - everything the
+        two-line strip folded away."""
+        if self.current_kind != "pods":
+            return
+        row_key = self._cursor_row_key()
+        if row_key is None:
+            return
+        summary = self._find_pod_summary(row_key)
+        if summary is None or not _pod_needs_hint(summary):
+            return
+        self.run_worker(self._open_hint_details(summary), exclusive=True, group="hint-detail")
+
+    async def _open_hint_details(self, summary: PodSummary) -> None:
+        """Fetch events best-effort, then push the overlay: the trouble half
+        renders even when the events API fails or is unavailable."""
+        events: list[dict[str, Any]] = []
+        if self._get_events is not None:
+            try:
+                events = await self._get_events.fetch(
+                    summary.namespace, summary.name, uid=summary.uid or None
+                )
+            except Exception:  # events are decoration; trouble alone still helps
+                events = []
+        if isinstance(self.screen, HintDetailScreen):  # rapid double-press
+            return
+        await self.push_screen(
+            HintDetailScreen(f"{summary.namespace}/{summary.name}", summary.trouble, events)
+        )
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Enter drills down: pods -> containers (k9s convention); kinds with a
