@@ -517,3 +517,22 @@ async def test_resize_pod_accepts_full_quantity_grammar() -> None:
         },
     )
     assert "approved and executed" in out
+
+
+async def test_resize_pod_rejects_blank_container_names() -> None:
+    """An empty or whitespace-only container key passes an isinstance check
+    but produces a patch Kubernetes is guaranteed to reject; it must fail
+    before any approval dialog opens."""
+    for container in ("", "   "):
+        bridge = FakeBridge()
+        executor = ToolExecutor(kube=None, aliases={}, ui=bridge)  # type: ignore[arg-type]
+        result = await executor.execute(
+            "resize_pod",
+            {
+                "name": "web-1",
+                "namespace": "default",
+                "resources": {container: {"requests": {"cpu": "1"}}},
+            },
+        )
+        assert result.startswith("ERROR:")
+        assert bridge.calls == []

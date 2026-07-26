@@ -200,3 +200,25 @@ def test_write_prompt_forbids_retrying_expired_requests() -> None:
     explicit denial - reissuing it would keep reopening approval dialogs
     the user is not acting on."""
     assert "Never retry a denied or expired request" in WRITE_PROMPT
+
+
+def test_write_prompt_enumerates_armed_write_tools() -> None:
+    """The system instruction must list exactly the write tools that were
+    armed: enumerating a fixed trio steers the model away from resize_pod
+    on clusters that support it."""
+    from korvid.agent.tools import RESIZE_TOOLS
+
+    runtime = AgentRuntime(
+        _NullProvider(),
+        _NullExecutor(),
+        tools=READ_TOOLS + WRITE_TOOLS + RESIZE_TOOLS,
+    )
+    assert "resize_pod" in _system_prompt(runtime)
+
+
+def test_write_prompt_omits_unarmed_resize_tool() -> None:
+    """Without RESIZE_TOOLS armed the prompt must not advertise resize_pod."""
+    runtime = AgentRuntime(_NullProvider(), _NullExecutor(), tools=READ_TOOLS + WRITE_TOOLS)
+    prompt = _system_prompt(runtime)
+    assert "resize_pod" not in prompt
+    assert "delete_resource" in prompt

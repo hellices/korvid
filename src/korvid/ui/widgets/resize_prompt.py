@@ -74,6 +74,11 @@ ResizePrompt .resize-row Input {
     width: 1fr;
     margin-right: 1;
 }
+ResizePrompt .resize-quantity-label {
+    width: 1fr;
+    margin-right: 1;
+    color: $text-muted;
+}
 """
 
 
@@ -108,6 +113,12 @@ class ResizePrompt(ModalScreen["dict[str, dict[str, dict[str, str]]] | None"]):
             )
             for index, (name, resources) in enumerate(self._containers):
                 yield Static(name, classes="resize-container", markup=False)
+                # Persistent column labels: placeholders disappear once a
+                # field is prefilled, leaving plain values indistinguishable.
+                with Horizontal(classes="resize-row"):
+                    yield Static("", classes="resize-label")
+                    for quantity in _QUANTITIES:
+                        yield Static(quantity, classes="resize-quantity-label", markup=False)
                 for section in _SECTIONS:
                     with Horizontal(classes="resize-row"):
                         yield Static(section, classes="resize-label", markup=False)

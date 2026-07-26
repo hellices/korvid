@@ -190,3 +190,18 @@ async def test_bare_point_decimals_accepted() -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert app.result == {"app": {"requests": {"cpu": ".5"}, "limits": {"cpu": "1."}}}
+
+
+async def test_prompt_has_persistent_cpu_memory_labels() -> None:
+    """Placeholders vanish once a field is prefilled; when both current
+    quantities are plain values the two inputs would be indistinguishable.
+    Each container needs persistent cpu/memory column labels."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await pilot.pause()
+        labels = [
+            str(w.render()) for w in prompt.query(Static) if "resize-quantity-label" in w.classes
+        ]
+        assert "cpu" in labels
+        assert "memory" in labels
