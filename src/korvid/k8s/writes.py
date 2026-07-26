@@ -11,9 +11,18 @@ the object was deleted and recreated under the same name meanwhile.
 from __future__ import annotations
 
 import abc
+from datetime import datetime
 from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
+
+
+def restart_stamp() -> str:
+    """One restartedAt value per approval request. The caller generates it
+    once and passes the same stamp to the dry-run preview and to the executed
+    write, so the diff shown to the user is byte-identical to what runs
+    (exact-replay guarantee, issue #19)."""
+    return datetime.now().astimezone().isoformat()
 
 
 class WriteOps(abc.ABC):
@@ -39,9 +48,17 @@ class WriteOps(abc.ABC):
 
     @abc.abstractmethod
     async def rollout_restart(
-        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        *,
+        uid: str | None = None,
+        restarted_at: str | None = None,
     ) -> None:
-        """Trigger a rolling restart by patching the pod template."""
+        """Trigger a rolling restart by patching the pod template.
+        ``restarted_at`` is the stamp from :func:`restart_stamp`; passing the
+        same value that the preview used keeps the two requests identical."""
 
     @abc.abstractmethod
     async def replace_object(
@@ -74,10 +91,17 @@ class WriteOps(abc.ABC):
         return None
 
     async def preview_rollout_restart(
-        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        *,
+        uid: str | None = None,
+        restarted_at: str | None = None,
     ) -> list[str] | None:
         """Diff lines a ``dryRun=All`` restart would produce; None = no preview.
-        ``uid`` semantics match :meth:`preview_scale`."""
+        ``uid`` semantics match :meth:`preview_scale`; ``restarted_at`` must be
+        the same stamp the executed write will send (see :func:`restart_stamp`)."""
         return None
 
     async def preview_delete(

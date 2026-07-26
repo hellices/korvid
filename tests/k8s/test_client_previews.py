@@ -127,7 +127,7 @@ async def test_write_ops_defaults_return_none() -> None:
         async def scale_object(self, meta, namespace, name, replicas, *, uid=None):  # type: ignore[no-untyped-def]  # signature match not under test
             pass
 
-        async def rollout_restart(self, meta, namespace, name, *, uid=None):  # type: ignore[no-untyped-def]  # signature match not under test
+        async def rollout_restart(self, meta, namespace, name, *, uid=None, restarted_at=None):  # type: ignore[no-untyped-def]  # signature match not under test
             pass
 
         async def replace_object(self, meta, namespace, name, manifest, *, uid=None):  # type: ignore[no-untyped-def]  # signature match not under test
@@ -199,3 +199,26 @@ async def test_preview_delete_replacement_returns_none() -> None:
     )
     with patch.object(client, "_api", api):
         assert await client.preview_delete(_deploy_meta(), "default", "web", uid="u-1") is None
+
+
+async def test_preview_and_write_share_caller_provided_restart_stamp() -> None:
+    """Exact-replay guarantee: the caller generates one restartedAt stamp per
+    approval request and passes the same value to the preview and to the
+    executed write, so the diff shown is byte-identical to what runs."""
+    client = KubeClient()
+    api = MagicMock()
+    current = {"metadata": {"name": "web"}, "spec": {"template": {"metadata": {}}}}
+    api.call_api = AsyncMock(side_effect=[_resp(current), _resp(current), _resp(current)])
+    stamp = "2026-07-26T00:00:00+00:00"
+    with patch.object(client, "_api", api):
+        await client.preview_rollout_restart(
+            _deploy_meta(), "default", "web", uid="u-1", restarted_at=stamp
+        )
+        await client.rollout_restart(
+            _deploy_meta(), "default", "web", uid="u-1", restarted_at=stamp
+        )
+    preview_body = api.call_api.call_args_list[1][1]["body"]
+    write_body = api.call_api.call_args_list[2][1]["body"]
+    assert preview_body == write_body
+    annotations = write_body["spec"]["template"]["metadata"]["annotations"]
+    assert annotations["kubectl.kubernetes.io/restartedAt"] == stamp

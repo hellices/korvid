@@ -70,9 +70,15 @@ class PreviewOps(WriteOps):
         return await self._preview(("scale", namespace, name, replicas, uid))
 
     async def preview_rollout_restart(
-        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        *,
+        uid: str | None = None,
+        restarted_at: str | None = None,
     ) -> list[str] | None:
-        return await self._preview(("restart", namespace, name, uid))
+        return await self._preview(("restart", namespace, name, uid, restarted_at))
 
     async def delete_object(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
@@ -91,9 +97,15 @@ class PreviewOps(WriteOps):
         self.calls.append(("scale", namespace, name, replicas))
 
     async def rollout_restart(
-        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        *,
+        uid: str | None = None,
+        restarted_at: str | None = None,
     ) -> None:
-        self.calls.append(("restart", namespace, name))
+        self.calls.append(("restart", namespace, name, restarted_at))
 
     async def replace_object(
         self,
@@ -173,7 +185,14 @@ async def test_restart_dialog_shows_dry_run_preview(tmp_path: Path) -> None:
         await pilot.press("r")
         await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert "restartedAt" in _preview_render(app)
-        assert ops.preview_calls == [("restart", "default", "web", "u-web")]
+        assert ops.preview_calls[0][:4] == ("restart", "default", "web", "u-web")
+        # Exact replay: the stamp shown in the preview is the stamp the
+        # approved write executes with - generated once per request.
+        stamp = ops.preview_calls[0][4]
+        assert stamp
+        await pilot.press("y")
+        await _until(pilot, lambda: ops.calls)
+        assert ops.calls == [("restart", "default", "web", stamp)]
 
 
 async def test_scale_dialog_previews_requested_replicas(tmp_path: Path) -> None:

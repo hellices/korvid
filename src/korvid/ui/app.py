@@ -41,7 +41,7 @@ from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import PodSummary
 from korvid.k8s.relations import drill_child, owned_by
-from korvid.k8s.writes import WriteOps
+from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -1590,7 +1590,12 @@ class KorvidApp(App[None]):
             return
         if not await self._precheck_keybinding_write("rollout_restart", meta, ns, name):
             return
-        preview = await self._dry_run_preview(ops.preview_rollout_restart(meta, ns, name, uid=uid))
+        # One stamp per approval: the previewed request and the executed
+        # write are byte-identical (exact-replay guarantee).
+        stamp = restart_stamp()
+        preview = await self._dry_run_preview(
+            ops.preview_rollout_restart(meta, ns, name, uid=uid, restarted_at=stamp)
+        )
         if not self._write_context_intact(
             "rollout_restart", meta, ns, name, phase="the dry-run preview"
         ):
@@ -1604,7 +1609,7 @@ class KorvidApp(App[None]):
                         meta,
                         ns,
                         name,
-                        ops.rollout_restart(meta, ns, name, uid=uid),
+                        ops.rollout_restart(meta, ns, name, uid=uid, restarted_at=stamp),
                     )
                 )
 
@@ -2498,7 +2503,10 @@ class KorvidApp(App[None]):
         approve it, and the outcome (executed/denied/error) flows back as the
         tool result. Every executed write is audited with an agent marker."""
         name = name.strip()  # every stage below must see the exact same target
-        built = self._agent_write_op(action, kind, name, namespace, replicas)
+        # One stamp per approval request (rollout restarts only): the preview
+        # and the executed write send the identical patch body.
+        stamp = restart_stamp()
+        built = self._agent_write_op(action, kind, name, namespace, replicas, restarted_at=stamp)
         if isinstance(built, str):
             return built
         meta, ns, op, operation, detail = built
@@ -2517,7 +2525,7 @@ class KorvidApp(App[None]):
             uid = await self._target_uid(kind.strip().lower(), ns, name)
         except ApiStatusError:
             return f"ERROR: {self._gvr_label(meta)}/{name} not found{self._write_locus(ns)}"
-        preview = await self._preview_for_action(action, meta, ns, name, replicas, uid)
+        preview = await self._preview_for_action(action, meta, ns, name, replicas, uid, stamp)
         require = name if action == "delete" and not meta.namespaced else None
         decision = await self._await_user_approval(
             f"Agent requests: {action} {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
@@ -2548,11 +2556,13 @@ class KorvidApp(App[None]):
         name: str,
         replicas: int | None,
         uid: str | None,
+        restarted_at: str,
     ) -> list[str] | None:
         """Dry-run preview for an agent-requested write; None (no preview)
         for unknown actions or a scale without a validated replica count.
-        The captured ``uid`` rides along so the dry run replays the exact
-        request that would execute on approval."""
+        The captured ``uid`` and per-approval ``restarted_at`` stamp ride
+        along so the dry run replays the exact request that would execute
+        on approval."""
         ops = self._write_ops
         if ops is None:
             return None
@@ -2561,7 +2571,9 @@ class KorvidApp(App[None]):
         if action == "scale" and replicas is not None:
             return await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
         if action == "rollout_restart":
-            return await self._dry_run_preview(ops.preview_rollout_restart(meta, ns, name, uid=uid))
+            return await self._dry_run_preview(
+                ops.preview_rollout_restart(meta, ns, name, uid=uid, restarted_at=restarted_at)
+            )
         return None
 
     async def _target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
@@ -2603,9 +2615,12 @@ class KorvidApp(App[None]):
         name: str,
         namespace: str | None,
         replicas: int | None,
+        *,
+        restarted_at: str,
     ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
         """Validate an agent write request; return (meta, ns, op, operation
-        description, audit detail) or an 'ERROR: ...' string."""
+        description, audit detail) or an 'ERROR: ...' string. ``restarted_at``
+        is the per-approval stamp a rollout restart shares with its preview."""
         if self.config.readonly:
             return "ERROR: read-only mode - cluster writes are disabled"
         if self._audit is None:
@@ -2629,7 +2644,7 @@ class KorvidApp(App[None]):
         if action == "scale":
             return self._agent_scale_op(meta, ns, name, replicas)
         if action == "rollout_restart":
-            return self._agent_restart_op(meta, ns, name)
+            return self._agent_restart_op(meta, ns, name, restarted_at)
         return f"ERROR: unknown write action {action!r}"
 
     def _agent_delete_op(
@@ -2665,7 +2680,7 @@ class KorvidApp(App[None]):
         )
 
     def _agent_restart_op(
-        self, meta: ResourceMeta, ns: str | None, name: str
+        self, meta: ResourceMeta, ns: str | None, name: str, restarted_at: str
     ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
         ops = self._write_ops
         if ops is None:
@@ -2675,7 +2690,7 @@ class KorvidApp(App[None]):
         return (
             meta,
             ns,
-            lambda uid: ops.rollout_restart(meta, ns, name, uid=uid),
+            lambda uid: ops.rollout_restart(meta, ns, name, uid=uid, restarted_at=restarted_at),
             f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
             f"{self._write_locus(ns)}",
             "requested by agent",

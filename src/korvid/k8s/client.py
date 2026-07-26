@@ -393,14 +393,14 @@ class KubeClient(WriteOps):
         return body
 
     @staticmethod
-    def _restart_patch(uid: str | None) -> dict[str, Any]:
+    def _restart_patch(uid: str | None, restarted_at: str | None) -> dict[str, Any]:
         """Strategic-merge-patch body for a rolling restart, the way kubectl
         does it: stamp the pod template with a restartedAt annotation. Shared
-        by the real write and its dry-run preview - but the stamp is taken at
-        call time, so the value shown in a preview diff differs from the one
-        the write later sends; only the annotation's presence (and that it
-        changed) matters, both stamps trigger the same rollout."""
-        stamp = datetime.now().astimezone().isoformat()
+        by the real write and its dry-run preview; the caller passes the same
+        ``restarted_at`` (from writes.restart_stamp) to both so the previewed
+        request is byte-identical to the executed one. A missing stamp falls
+        back to now() for direct callers outside the approval flow."""
+        stamp = restarted_at or datetime.now().astimezone().isoformat()
         body: dict[str, Any] = {
             "spec": {
                 "template": {
@@ -430,13 +430,19 @@ class KubeClient(WriteOps):
         )
 
     async def rollout_restart(
-        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        *,
+        uid: str | None = None,
+        restarted_at: str | None = None,
     ) -> None:
         """Trigger a rolling restart by patching the pod template."""
         await self._request_write(
             self._object_path(meta, namespace, name),
             "PATCH",
-            body=self._restart_patch(uid),
+            body=self._restart_patch(uid, restarted_at),
             content_type="application/strategic-merge-patch+json",
         )
 
@@ -489,16 +495,26 @@ class KubeClient(WriteOps):
         return diff_manifests(current, proposed)
 
     async def preview_rollout_restart(
-        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        *,
+        uid: str | None = None,
+        restarted_at: str | None = None,
     ) -> list[str] | None:
         """Diff of the object before vs after a dry-run rollout restart.
-        ``uid`` semantics match :meth:`preview_scale`. None on any failure:
-        a preview must never block the approval flow."""
+        ``uid`` semantics match :meth:`preview_scale`; ``restarted_at`` is the
+        per-approval stamp shared with the executed write. None on any
+        failure: a preview must never block the approval flow."""
         path = self._object_path(meta, namespace, name)
         try:
             current = await self._request_json(path)
             proposed = await self._dry_run(
-                path, "PATCH", self._restart_patch(uid), "application/strategic-merge-patch+json"
+                path,
+                "PATCH",
+                self._restart_patch(uid, restarted_at),
+                "application/strategic-merge-patch+json",
             )
         except Exception:
             logger.debug("rollout restart dry-run preview failed", exc_info=True)
