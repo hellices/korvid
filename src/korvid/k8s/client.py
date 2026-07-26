@@ -92,6 +92,9 @@ class KubeClient(WriteOps):
         await k8s_config.load_kube_config(context=context)
         self._api = k8s_client.ApiClient()
         self._core_v1 = k8s_client.CoreV1Api(self._api)
+        # A new connection may target a different cluster; discard any
+        # capability discovered against the previous one.
+        self._pod_resize_supported = None
 
     async def list_namespaces(self) -> list[str]:
         if self._core_v1 is None:

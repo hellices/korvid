@@ -4,6 +4,8 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from korvid.k8s.client import KubeClient
 
 
@@ -140,3 +142,21 @@ async def test_supports_pod_resize_false_without_patch_verb() -> None:
     )
     with patch.object(client, "_api", api):
         assert await client.supports_pod_resize() is False
+
+
+@pytest.mark.asyncio
+async def test_connect_resets_resize_discovery_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconnecting (possibly to another cluster) must invalidate the cache."""
+
+    async def fake_load(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("korvid.k8s.client.k8s_config.load_kube_config", fake_load)
+    monkeypatch.setattr("korvid.k8s.client.k8s_client.ApiClient", lambda: object())
+    monkeypatch.setattr("korvid.k8s.client.k8s_client.CoreV1Api", lambda api: object())
+    client = KubeClient()
+    client._pod_resize_supported = True
+    await client.connect(context="other-cluster")
+    assert client._pod_resize_supported is None
