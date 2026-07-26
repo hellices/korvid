@@ -403,13 +403,33 @@ def _pod_level_trouble(status: dict[str, Any]) -> ContainerTrouble | None:
     return None
 
 
+_RESIZE_CONDITIONS = ("PodResizePending", "PodResizeInProgress")
+
+
+def _resize_trouble(status: dict[str, Any]) -> list[ContainerTrouble]:
+    """In-place resize outcome conditions (1.35 GA, issue #27) as hint
+    entries: a pending resize (Infeasible/Deferred) or one in progress is
+    exactly what an operator parked on the row wants explained."""
+    entries: list[ContainerTrouble] = []
+    for cond in status.get("conditions") or []:
+        if cond.get("type") in _RESIZE_CONDITIONS and cond.get("status") == "True":
+            reason = str(cond.get("reason") or "")
+            message = str(cond.get("message") or "")
+            detail = f"{reason}: {message}" if reason and message else reason or message
+            entries.append(
+                ContainerTrouble(container="pod", reason=str(cond["type"]), message=detail)
+            )
+    return entries
+
+
 def _pod_trouble(status: dict[str, Any]) -> tuple[ContainerTrouble, ...]:
-    """Trouble entries: pod-level failure first, then unhealthy containers
-    (init containers before app containers)."""
+    """Trouble entries: pod-level failure first, then resize outcomes, then
+    unhealthy containers (init containers before app containers)."""
     entries: list[ContainerTrouble] = []
     pod_level = _pod_level_trouble(status)
     if pod_level is not None:
         entries.append(pod_level)
+    entries.extend(_resize_trouble(status))
     for cs in status.get("initContainerStatuses") or []:
         entry = _container_trouble(cs, name_prefix="init:")
         if entry is not None:

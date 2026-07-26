@@ -44,6 +44,7 @@ class _FakeBridge(UIBridge):
         name: str,
         namespace: str | None = None,
         replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> str:
         self.writes.append(
             {
@@ -60,7 +61,9 @@ class _FakeBridge(UIBridge):
 def test_write_tool_schemas() -> None:
     names = {t["function"]["name"] for t in WRITE_TOOLS}
     assert names == {"delete_resource", "scale_resource", "rollout_restart"}
-    assert frozenset(names) == WRITE_TOOL_NAMES
+    # resize_pod lives outside WRITE_TOOLS (conditionally registered) but is
+    # always dispatchable, so the name set includes it.
+    assert frozenset(names) | {"resize_pod"} == WRITE_TOOL_NAMES
     for tool in WRITE_TOOLS:
         fn = tool["function"]
         required = set(fn["parameters"]["required"])

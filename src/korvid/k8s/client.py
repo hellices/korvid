@@ -15,7 +15,7 @@ from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio import config as k8s_config
 from kubernetes_asyncio import watch as k8s_watch
 
-from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
@@ -85,6 +85,8 @@ class KubeClient(WriteOps):
         self._api: k8s_client.ApiClient | None = None
         self._core_v1: k8s_client.CoreV1Api | None = None
         self._ssar_warned = False
+        #: pods/resize discovery result; None until the first successful check.
+        self._pod_resize_supported: bool | None = None
 
     async def connect(self, context: str | None = None) -> None:
         await k8s_config.load_kube_config(context=context)
@@ -455,6 +457,83 @@ class KubeClient(WriteOps):
             body=self._restart_patch(uid, restarted_at),
             content_type="application/strategic-merge-patch+json",
         )
+
+    @staticmethod
+    def _resize_patch(
+        resources: dict[str, dict[str, dict[str, str]]], uid: str | None
+    ) -> dict[str, Any]:
+        """Strategic-merge-patch body for the pods/resize subresource
+        (issue #27): per-container resources keyed by name, so quantities not
+        named are kept. A ``uid`` in metadata is the same apiserver
+        precondition the other writes use. Shared by the real write and its
+        dry-run preview so the two can never drift apart."""
+        containers = [{"name": container, "resources": res} for container, res in resources.items()]
+        body: dict[str, Any] = {"spec": {"containers": containers}}
+        if uid:
+            body["metadata"] = {"uid": uid}
+        return body
+
+    def _pod_resize_path(self, namespace: str, name: str) -> str:
+        return f"{self._object_path(PODS_META, namespace, name)}/resize"
+
+    async def resize_pod(
+        self,
+        namespace: str,
+        name: str,
+        resources: dict[str, dict[str, dict[str, str]]],
+        *,
+        uid: str | None = None,
+    ) -> None:
+        """In-place resize of a running pod (1.35 GA): PATCH the
+        ``pods/resize`` subresource with new requests/limits."""
+        await self._request_write(
+            self._pod_resize_path(namespace, name),
+            "PATCH",
+            body=self._resize_patch(resources, uid),
+            content_type="application/strategic-merge-patch+json",
+        )
+
+    async def supports_pod_resize(self) -> bool:
+        """Whether this cluster exposes the ``pods/resize`` subresource
+        (stable in 1.35). Cached per connection once discovery succeeds; a
+        transient discovery failure answers False without caching, so the
+        feature is not permanently disabled by one bad round trip."""
+        if self._pod_resize_supported is None:
+            try:
+                core = await self._request_json("/api/v1")
+            except Exception:
+                logger.debug("pods/resize discovery failed", exc_info=True)
+                return False
+            self._pod_resize_supported = any(
+                r.get("name") == "pods/resize" for r in core.get("resources", [])
+            )
+        return self._pod_resize_supported
+
+    async def preview_resize(
+        self,
+        namespace: str,
+        name: str,
+        resources: dict[str, dict[str, dict[str, str]]],
+        *,
+        uid: str | None = None,
+    ) -> list[str] | None:
+        """Diff of the pod before vs after a dry-run resize. ``uid``
+        semantics match ``preview_scale``; the dry run is pinned to the GET
+        snapshot's resourceVersion (see ``_pin_revision``). None on any
+        failure: a preview must never block the approval flow."""
+        path = self._pod_resize_path(namespace, name)
+        try:
+            current = await self._request_json(self._object_path(PODS_META, namespace, name))
+            proposed = await self._dry_run(
+                path,
+                "PATCH",
+                self._pin_revision(self._resize_patch(resources, uid), current),
+                "application/strategic-merge-patch+json",
+            )
+        except Exception:
+            logger.debug("resize dry-run preview failed", exc_info=True)
+            return None
+        return diff_manifests(current, proposed)
 
     async def _dry_run(
         self,

@@ -355,3 +355,40 @@ def test_ready_transition_time_is_captured() -> None:
     summary = PodSummary.from_manifest(manifest)
     assert summary.ready_transition_at == "2026-07-26T08:30:00Z"
     assert PodSummary.from_manifest(_pod([])).ready_transition_at is None
+
+
+def test_pod_resize_pending_condition_is_trouble() -> None:
+    manifest = _pod([])
+    manifest["status"]["conditions"] = [
+        {
+            "type": "PodResizePending",
+            "status": "True",
+            "reason": "Infeasible",
+            "message": "Node didn't have enough capacity: cpu",
+        },
+    ]
+    summary = PodSummary.from_manifest(manifest)
+    assert len(summary.trouble) == 1
+    entry = summary.trouble[0]
+    assert entry.container == "pod"
+    assert entry.reason == "PodResizePending"
+    assert "Infeasible" in entry.message
+    assert "enough capacity" in entry.message
+
+
+def test_pod_resize_in_progress_condition_is_trouble() -> None:
+    manifest = _pod([])
+    manifest["status"]["conditions"] = [
+        {"type": "PodResizeInProgress", "status": "True"},
+    ]
+    summary = PodSummary.from_manifest(manifest)
+    assert [t.reason for t in summary.trouble] == ["PodResizeInProgress"]
+    assert summary.trouble[0].message == ""
+
+
+def test_resize_condition_false_is_not_trouble() -> None:
+    manifest = _pod([])
+    manifest["status"]["conditions"] = [
+        {"type": "PodResizePending", "status": "False", "reason": "Deferred"},
+    ]
+    assert PodSummary.from_manifest(manifest).trouble == ()

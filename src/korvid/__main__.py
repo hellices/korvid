@@ -20,7 +20,14 @@ from korvid.agent.mcp_server import KorvidMCPServer, MCPController, default_endp
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentSettings
-from korvid.agent.tools import READ_TOOLS, UI_TOOLS, WRITE_TOOLS, ToolExecutor, UIBridge
+from korvid.agent.tools import (
+    READ_TOOLS,
+    RESIZE_TOOLS,
+    UI_TOOLS,
+    WRITE_TOOLS,
+    ToolExecutor,
+    UIBridge,
+)
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import DEFAULT_CONFIG_PATH, KorvidConfig, load_config, save_agent_config
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -161,15 +168,22 @@ class _UIBridgeProxy(UIBridge):
         name: str,
         namespace: str | None = None,
         replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> str:
         if self.target is None:
             return self._NOT_READY
         async with self._lock:
-            return await self.target.agent_request_write(action, kind, name, namespace, replicas)
+            return await self.target.agent_request_write(
+                action, kind, name, namespace, replicas, resources
+            )
 
 
 def _build_agent_wiring(
-    config: KorvidConfig, kube: KubeClient, aliases: dict[str, ResourceMeta]
+    config: KorvidConfig,
+    kube: KubeClient,
+    aliases: dict[str, ResourceMeta],
+    *,
+    pod_resize_supported: bool = False,
 ) -> tuple[
     AgentRuntime | None,
     ProviderConfigurator,
@@ -184,6 +198,10 @@ def _build_agent_wiring(
     if not config.readonly:
         # In readonly mode the model is never even told write tools exist.
         agent_tools = agent_tools + WRITE_TOOLS
+        if pod_resize_supported:
+            # Offered only when discovery found pods/resize (1.35 GA): the
+            # model is never told about a tool the cluster cannot honor.
+            agent_tools = agent_tools + RESIZE_TOOLS
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
     provider = create_provider(
         enabled=config.agent_enabled,
@@ -320,8 +338,12 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
 
     watch_manager = WatchManager(store, source)
 
+    # One discovery round trip decides both the R keybinding and whether the
+    # agent is offered the resize tool (issue #27).
+    pod_resize_supported = await kube.supports_pod_resize()
+
     agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy = _build_agent_wiring(
-        config, kube, aliases
+        config, kube, aliases, pod_resize_supported=pod_resize_supported
     )
 
     mcp_controller = MCPController(_make_mcp_factory(config, kube, aliases, ui_proxy))
@@ -344,6 +366,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         rebuild_agent=rebuild_agent,
         mcp=mcp_controller,
         metrics=MetricsPoller(kube.list_pod_metrics),
+        pod_resize_supported=pod_resize_supported,
     )
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.

@@ -34,6 +34,7 @@ in the dialog; `--readonly` disables them all.
 | `Ctrl-D` | table | Delete selected resource (confirm dialog; cluster-scoped kinds require typing the name) |
 | `r` | table | Rolling restart of selected deployment / statefulset / daemonset (confirm dialog) |
 | `S` | table | Scale selected deployment / replicaset / statefulset (replica prompt + confirm dialog) |
+| `R` | pods table | In-place resize of pod CPU/memory requests/limits (Kubernetes 1.35+; prompt + confirm dialog) |
 | `e` | table | Edit selected resource manifest in `$VISUAL`/`$EDITOR` (kubectl edit style; confirm dialog before the PUT) |
 | `Ctrl-A` | global | Toggle AI agent panel |
 | `q` | global | Quit |
@@ -75,8 +76,10 @@ Tool results are capped at 8,000 characters and `Secret` data is masked before
 it ever reaches the model.  The header shows the model name and cumulative
 token usage (`~` marks estimated counts when the provider omits usage data).
 
-The agent can also *request* three write operations — delete, scale, and
-rollout restart — but it can never execute them itself.  Each request opens
+The agent can also *request* write operations — delete, scale, rollout
+restart, and (on clusters that expose the `pods/resize` subresource,
+Kubernetes 1.35+) in-place pod resize — but it can never execute them
+itself.  Each request opens
 the same confirmation dialog as the keybindings (marked with a ⚠ in the tool
 log), and only your keystroke in that dialog approves it; an unanswered
 dialog expires without executing anything.  Every executed write — yours or
@@ -88,7 +91,7 @@ write is blocked.
 
 ### Dry-run previews
 
-Before a delete, scale, or rollout restart dialog opens, korvid replays the
+Before a delete, scale, resize, or rollout restart dialog opens, korvid replays the
 write server-side with `dryRun=All` and shows the reported outcome inside the
 dialog: a compact diff for scale and restart (`~ spec.replicas: 3 -> 5`,
 additions green, removals red) and an object summary plus cascading note for

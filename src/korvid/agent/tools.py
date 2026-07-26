@@ -168,6 +168,7 @@ class UIBridge(ABC):
         name: str,
         namespace: str | None = None,
         replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> str:
         """Request an approval-gated cluster write (spec §6.2).
 
@@ -385,14 +386,72 @@ WRITE_TOOLS: list[dict[str, Any]] = [
     },
 ]
 
-WRITE_TOOL_NAMES = frozenset(t["function"]["name"] for t in WRITE_TOOLS)
+#: In-place pod resize (issue #27), kept out of WRITE_TOOLS so the
+#: composition root registers it only when discovery found the pods/resize
+#: subresource (1.35 GA) - the model is never told about a tool the cluster
+#: cannot honor. Dispatch below still recognizes it unconditionally: an
+#: unregistered tool call fails in the UI gate, not with "unknown tool".
+RESIZE_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "resize_pod",
+            "description": (
+                "Request an in-place resize of a running pod's CPU/memory "
+                "requests and limits (no restart; Kubernetes 1.35+). Runs "
+                "only after the user approves the request in the TUI "
+                "approval dialog."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Pod name."},
+                    "namespace": {"type": "string", "description": "Namespace of the pod."},
+                    "resources": {
+                        "type": "object",
+                        "description": (
+                            "Container name -> {'requests'/'limits' -> "
+                            "{'cpu'/'memory' -> quantity}}. Only the "
+                            "quantities present are changed, e.g. "
+                            '{"app": {"requests": {"cpu": "200m"}}}.'
+                        ),
+                    },
+                },
+                "required": ["name", "namespace", "resources"],
+            },
+        },
+    },
+]
+
+WRITE_TOOL_NAMES = frozenset(t["function"]["name"] for t in WRITE_TOOLS + RESIZE_TOOLS)
 
 #: tool name -> action keyword passed to UIBridge.agent_request_write.
 _WRITE_ACTIONS = {
     "delete_resource": "delete",
     "scale_resource": "scale",
     "rollout_restart": "rollout_restart",
+    "resize_pod": "resize",
 }
+
+
+def _validated_resources(value: Any) -> dict[str, dict[str, dict[str, str]]]:
+    """Shape-check a resize 'resources' argument (container -> requests/limits
+    -> quantity). Tool schemas are not runtime validation; a malformed value
+    must fail here, before the user is shown an approval dialog for it."""
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"'resources' must be a non-empty object, got {value!r}")
+    for container, sections in value.items():
+        if not isinstance(container, str) or not isinstance(sections, dict) or not sections:
+            raise ValueError(f"invalid resources entry for {container!r}: {sections!r}")
+        for section, quantities in sections.items():
+            if section not in ("requests", "limits"):
+                raise ValueError(f"'resources' sections must be requests/limits, got {section!r}")
+            if not isinstance(quantities, dict) or not quantities:
+                raise ValueError(f"invalid {section!r} for {container!r}: {quantities!r}")
+            for quantity, amount in quantities.items():
+                if quantity not in ("cpu", "memory") or not isinstance(amount, str):
+                    raise ValueError(f"invalid quantity {quantity!r}={amount!r} for {container!r}")
+    return value
 
 
 class ToolExecutor:
@@ -456,7 +515,8 @@ class ToolExecutor:
         # Tool schemas are not runtime validation: reject wrong-typed values
         # instead of coercing them (str(123) would show the user a target the
         # model never named; int(1.9) an operation it never asked for).
-        kind = args.get("kind")
+        # resize_pod targets pods by definition, so its schema has no 'kind'.
+        kind = "pods" if name == "resize_pod" else args.get("kind")
         target = args.get("name")
         namespace = args.get("namespace")
         if not isinstance(kind, str):
@@ -468,12 +528,16 @@ class ToolExecutor:
         replicas = args.get("replicas")
         if replicas is not None and (isinstance(replicas, bool) or not isinstance(replicas, int)):
             raise ValueError(f"'replicas' must be an integer, got {replicas!r}")
+        resources = args.get("resources")
+        if name == "resize_pod":
+            resources = _validated_resources(resources)
         return await self._ui.agent_request_write(
             _WRITE_ACTIONS[name],
             kind,
             target,
             namespace,
             replicas,
+            resources,
         )
 
     async def _list_resources(self, args: dict[str, Any]) -> str:

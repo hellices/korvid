@@ -323,6 +323,7 @@ class FakeBridge(UIBridge):
         name: str,
         namespace: str | None = None,
         replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> str:
         self.calls.append(
             (
@@ -333,6 +334,7 @@ class FakeBridge(UIBridge):
                     "name": name,
                     "namespace": namespace,
                     "replicas": replicas,
+                    "resources": resources,
                 },
             )
         )
@@ -417,3 +419,71 @@ async def test_ui_tool_bridge_exception_is_error_result() -> None:
     out = await make_ui_executor(BoomBridge()).execute("set_filter", {"pattern": "x"})
     assert out.startswith("ERROR:")
     assert "widget gone" in out
+
+
+# -- In-place pod resize tool (issue #27) ------------------------------------
+
+
+def test_resize_tools_schema() -> None:
+    from korvid.agent.tools import RESIZE_TOOLS
+
+    assert [t["function"]["name"] for t in RESIZE_TOOLS] == ["resize_pod"]
+    fn = RESIZE_TOOLS[0]["function"]
+    assert RESIZE_TOOLS[0]["type"] == "function"
+    assert set(fn["parameters"]["required"]) == {"name", "namespace", "resources"}
+
+
+async def test_resize_pod_dispatches_to_bridge() -> None:
+    bridge = FakeBridge()
+    resources = {"app": {"requests": {"cpu": "200m"}}}
+    out = await make_ui_executor(bridge).execute(
+        "resize_pod",
+        {"name": "web-1", "namespace": "default", "resources": resources},
+    )
+    assert "approved and executed" in out
+    assert bridge.calls == [
+        (
+            "request_write",
+            {
+                "action": "resize",
+                "kind": "pods",
+                "name": "web-1",
+                "namespace": "default",
+                "replicas": None,
+                "resources": resources,
+            },
+        )
+    ]
+
+
+async def test_resize_pod_rejects_non_dict_resources() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute(
+        "resize_pod", {"name": "web-1", "namespace": "default", "resources": "250m"}
+    )
+    assert out.startswith("ERROR:")
+    assert bridge.calls == []
+
+
+async def test_resize_pod_rejects_malformed_container_entries() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute(
+        "resize_pod",
+        {"name": "web-1", "namespace": "default", "resources": {"app": {"requests": "250m"}}},
+    )
+    assert out.startswith("ERROR:")
+    assert bridge.calls == []
+
+
+async def test_resize_pod_rejects_unknown_section() -> None:
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute(
+        "resize_pod",
+        {
+            "name": "web-1",
+            "namespace": "default",
+            "resources": {"app": {"claims": {"cpu": "250m"}}},
+        },
+    )
+    assert out.startswith("ERROR:")
+    assert bridge.calls == []
