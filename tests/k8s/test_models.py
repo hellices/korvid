@@ -1104,3 +1104,19 @@ def test_summary_for_dispatches_csv() -> None:
     assert summary.version == "1.14.4"
     assert summary.phase == "Succeeded"
     assert summary.display_name == "cert-manager"
+
+
+def test_packagemanifest_summary_tolerates_non_list_channels() -> None:
+    """status.channels as a scalar must not break summary construction
+    (a malformed catalog entry must never kill the watch)."""
+    summary = summary_for(
+        "PackageManifest",
+        {
+            "apiVersion": "packages.operators.coreos.com/v1",
+            "kind": "PackageManifest",
+            "metadata": {"name": "p", "namespace": "olm", "uid": "u1"},
+            "status": {"channels": 1},
+        },
+    )
+    assert isinstance(summary, PackageManifestSummary)
+    assert summary.channels == ()

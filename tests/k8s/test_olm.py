@@ -107,3 +107,13 @@ class TestBuildSubscription:
         kwargs[field] = "  "
         with pytest.raises(ValueError, match=field.replace("_", " ")):
             build_subscription(**kwargs)
+
+
+def test_package_install_facts_tolerates_non_list_channels() -> None:
+    """A truthy scalar in status.channels must not crash the wizard path -
+    the server stays the sole validator for such a catalog entry."""
+    facts = package_install_facts(
+        {"metadata": {"name": "p"}, "status": {"channels": 1, "defaultChannel": "stable"}}
+    )
+    assert facts.channels == ()
+    assert facts.default_channel == "stable"

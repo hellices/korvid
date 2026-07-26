@@ -611,6 +611,7 @@ class KorvidApp(App[None]):
             all_namespaces=all_namespaces,
             pattern=self.filter_pattern,
             metrics=metrics,
+            group=getattr(self.aliases.get(kind), "group", "") or "",
         )
         self._refresh_empty_state(kind, table.row_count)
         # The strip is driven by RowHighlighted on the pods view; anything
@@ -2446,7 +2447,7 @@ class KorvidApp(App[None]):
             return
         meta, ns, name, uid = target
         if (meta.group, meta.plural) == (PACKAGES_GROUP, "packagemanifests"):
-            await self._start_operator_install(meta, ns, name)
+            await self._start_operator_install(meta, ns, name, uid)
         elif (meta.group, meta.plural) == (OPERATORS_GROUP, "installplans"):
             await self._start_installplan_approve(meta, ns, name, uid)
         else:
@@ -2457,7 +2458,7 @@ class KorvidApp(App[None]):
             )
 
     async def _start_operator_install(
-        self, pkg_meta: ResourceMeta, ns: str | None, name: str
+        self, pkg_meta: ResourceMeta, ns: str | None, name: str, uid: str | None
     ) -> None:
         """Fetch the PackageManifest and open the install wizard."""
         sub_meta = self.aliases.get("subscriptions")
@@ -2475,6 +2476,17 @@ class KorvidApp(App[None]):
         except Exception as exc:
             self.notify(f"Could not fetch the package manifest: {exc}", severity="error")
             return
+        # The wizard must be fed the incarnation the user selected: if the
+        # catalog entry was deleted and recreated under the same name during
+        # the fetch, its facts (channels, catalog source) may differ.
+        fetched_uid = str(manifest.get("metadata", {}).get("uid") or "")
+        if uid and fetched_uid and fetched_uid != uid:
+            self.notify(
+                f"install {self._gvr_label(pkg_meta)}/{name} cancelled -"
+                " the catalog entry changed during the manifest fetch",
+                severity="warning",
+            )
+            return
         facts = package_install_facts(manifest)
         if not self._write_context_intact(
             "install", pkg_meta, ns, name, phase="the manifest fetch"
@@ -2486,7 +2498,9 @@ class KorvidApp(App[None]):
                 return
             # The SSAR round trip must not run inside a screen callback:
             # a worker re-checks, revalidates, then confirms.
-            self.run_worker(self._confirm_operator_install(pkg_meta, sub_meta, ns, facts, choices))
+            self.run_worker(
+                self._confirm_operator_install(pkg_meta, sub_meta, ns, uid, facts, choices)
+            )
 
         # The row namespace is where the catalog lives (e.g. "olm"), not
         # where the user works: prefill the wizard with the active view
@@ -2503,6 +2517,7 @@ class KorvidApp(App[None]):
         pkg_meta: ResourceMeta,
         sub_meta: ResourceMeta,
         ns: str | None,
+        uid: str | None,
         facts: PackageInstallFacts,
         choices: tuple[str, str, str],
     ) -> None:
@@ -2531,6 +2546,15 @@ class KorvidApp(App[None]):
         if not self._write_context_intact(
             "install", pkg_meta, ns, facts.package, phase="the install wizard"
         ):
+            return
+        if uid and self._selected_uid(ns, facts.package) != uid:
+            # Same name, different incarnation: the catalog entry was
+            # replaced while the wizard was open.
+            self.notify(
+                f"install {self._gvr_label(pkg_meta)}/{facts.package} cancelled -"
+                " the catalog entry changed during the install wizard",
+                severity="warning",
+            )
             return
         operation = (
             f"CREATE subscriptions/{facts.package} in namespace {namespace}\n\n"
@@ -2576,6 +2600,17 @@ class KorvidApp(App[None]):
             return
         spec = manifest.get("spec")
         spec = spec if isinstance(spec, dict) else {}
+        approval_mode = str(spec.get("approval") or "")
+        if approval_mode != "Manual":
+            # An Automatic (or malformed) plan is OLM's own to approve;
+            # flipping it manually would race the operator.
+            self.notify(
+                f"installplans/{name} has approval mode"
+                f" {approval_mode or '?'!r} - only pending Manual plans"
+                " can be approved here",
+                severity="warning",
+            )
+            return
         if spec.get("approved"):
             self.notify(f"installplans/{name} is already approved", severity="information")
             return

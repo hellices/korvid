@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from korvid.k8s.olm import channel_names
+
 # Full Kubernetes Quantity grammar: signed decimal number (including the
 # bare-point forms '<digits>.' and '.<digits>') followed by an optional
 # binarySI / decimalSI suffix or a decimal exponent (e.g. '12e3').
@@ -296,11 +298,7 @@ class PackageManifestSummary(GenericSummary):
             **vars(base),
             catalog=str(status.get("catalogSource") or ""),
             default_channel=str(status.get("defaultChannel") or ""),
-            channels=tuple(
-                str(entry["name"])
-                for entry in status.get("channels") or []
-                if isinstance(entry, dict) and entry.get("name")
-            ),
+            channels=channel_names(status),
         )
 
 

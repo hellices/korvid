@@ -144,6 +144,7 @@ def make_app(
     *,
     olm: bool = True,
     write_ops: WriteOps | None = None,
+    aliases: dict[str, ResourceMeta] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
 
@@ -164,7 +165,7 @@ def make_app(
         store=store,
         watch_manager=WatchManager(store, source),
         list_namespaces=list_namespaces,
-        aliases=_aliases(olm=olm),
+        aliases=aliases if aliases is not None else _aliases(olm=olm),
         get_manifest=get_manifest,
         audit=AuditLog(audit_path) if audit_path is not None else None,
         write_ops=write_ops,
@@ -261,7 +262,7 @@ def _pkg_manifest(name: str) -> dict[str, Any]:
     return {
         "apiVersion": f"{PACKAGES_GROUP}/v1",
         "kind": "PackageManifest",
-        "metadata": {"name": name, "namespace": "olm"},
+        "metadata": {"name": name, "namespace": "olm", "uid": f"pkg-{name}"},
         "status": {
             "catalogSource": "operatorhubio-catalog",
             "catalogSourceNamespace": "olm",
@@ -281,7 +282,9 @@ def _installplan(name: str, *, approved: bool) -> GenericSummary:
     )
 
 
-def _installplan_manifest(name: str, *, approved: bool) -> dict[str, Any]:
+def _installplan_manifest(
+    name: str, *, approved: bool, approval_mode: str = "Manual"
+) -> dict[str, Any]:
     return {
         "apiVersion": f"{OPERATORS_GROUP}/v1alpha1",
         "kind": "InstallPlan",
@@ -292,7 +295,7 @@ def _installplan_manifest(name: str, *, approved: bool) -> dict[str, Any]:
             "resourceVersion": "41",
         },
         "spec": {
-            "approval": "Manual",
+            "approval": approval_mode,
             "approved": approved,
             "clusterServiceVersionNames": ["cert-manager.v1.14.4"],
         },
@@ -418,3 +421,88 @@ async def test_approve_key_on_already_approved_installplan_notifies(tmp_path: Pa
             label="already-approved notice",
         )
         assert rec.calls == []
+
+
+async def test_install_cancelled_when_catalog_row_was_recreated(tmp_path: Path) -> None:
+    """The fetched PackageManifest must be the same incarnation the user
+    selected: a stale row (deleted + recreated under the same name) must not
+    feed the wizard."""
+    rec = Recorder()
+    manifest = _pkg_manifest("cert-manager")
+    manifest["metadata"]["uid"] = "pkg-other-incarnation"
+    app = make_app(
+        {"packagemanifests": [_package("cert-manager")]},
+        manifests={"cert-manager": manifest},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=rec,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "operators", "packagemanifests")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="package listed")
+        await pilot.press("I")
+        await until(
+            pilot,
+            lambda: any("changed" in str(n.message) for n in app._notifications),
+            label="stale row rejected",
+        )
+        assert not isinstance(app.screen, OperatorInstallPrompt)
+        assert rec.calls == []
+
+
+async def test_approve_key_on_automatic_installplan_notifies(tmp_path: Path) -> None:
+    """Only pending *manual* plans are approvable: an Automatic plan is
+    OLM's own to approve, and flipping it would race the operator."""
+    rec = Recorder()
+    app = make_app(
+        {"installplans": [_installplan("install-abc", approved=False)]},
+        manifests={
+            "install-abc": _installplan_manifest(
+                "install-abc", approved=False, approval_mode="Automatic"
+            )
+        },
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=rec,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "installplans", "installplans")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="installplan listed")
+        await pilot.press("I")
+        await until(
+            pilot,
+            lambda: any("Automatic" in str(n.message) for n in app._notifications),
+            label="automatic plan refused",
+        )
+        assert rec.calls == []
+
+
+async def test_foreign_subscriptions_kind_keeps_generic_columns() -> None:
+    """A CRD from another API group whose plural happens to be
+    'subscriptions' must not get the OLM typed table."""
+    foreign = ResourceMeta("Subscription", "subscriptions", "messaging.example.com", "v1", True)
+    app = make_app(
+        {
+            "subscriptions": [
+                GenericSummary(
+                    name="events-sub",
+                    namespace="operators",
+                    kind="Subscription",
+                    created="2026-07-26T10:00:00Z",
+                    uid="f1",
+                )
+            ]
+        },
+        aliases={"subscriptions": foreign},
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="row listed")
+        headers = [str(col.label) for col in table.columns.values()]
+        assert "CHANNEL" not in headers
+        assert "INSTALLED CSV" not in headers
+        assert table.get_row_at(0)[0] == "events-sub"

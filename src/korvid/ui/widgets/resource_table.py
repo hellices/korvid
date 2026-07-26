@@ -22,6 +22,7 @@ from korvid.k8s.models import (
     format_cpu,
     format_memory,
 )
+from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.ui.theme import phase_style, ready_style, restarts_style, usage_style
 
 #: Looks up live metrics for (namespace, name); None disables the join.
@@ -96,6 +97,25 @@ _COLS_BY_KIND: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "subscriptions": (_SUB_COLS, _SUB_COLS_ALL_NS),
     "clusterserviceversions": (_CSV_COLS, _CSV_COLS_ALL_NS),
 }
+
+
+#: OLM plurals are only special when served by the OLM API groups: a CRD
+#: from another group whose plural happens to be "subscriptions" must keep
+#: the generic rendering (its summaries are generic too).
+_KIND_GROUPS: dict[str, str] = {
+    "packagemanifests": PACKAGES_GROUP,
+    "subscriptions": OPERATORS_GROUP,
+    "clusterserviceversions": OPERATORS_GROUP,
+}
+
+
+def _typed_kind(kind: str, group: str) -> str:
+    """*kind* when its typed rendering applies to this API *group*, else a
+    name that falls through every typed lookup to the generic path."""
+    expected = _KIND_GROUPS.get(kind)
+    if expected is not None and group != expected:
+        return f"{group}/{kind}"
+    return kind
 
 
 def _columns_for(kind: str, *, all_namespaces: bool) -> tuple[str, ...]:
@@ -230,8 +250,14 @@ class ResourceTable(DataTable[str | Text]):
         all_namespaces: bool,
         pattern: str,
         metrics: MetricsLookup | None = None,
+        group: str = "",
     ) -> None:
-        """Render rows into the table; rebuilds columns when (kind, all_namespaces) changes."""
+        """Render rows into the table; rebuilds columns when (kind, all_namespaces) changes.
+
+        ``group`` is the API group serving *kind*: typed renderings that are
+        specific to one group (the OLM tables) apply only there.
+        """
+        kind = _typed_kind(kind, group)
         if (kind, all_namespaces) != (self._last_kind, self._last_all_namespaces):
             self.clear(columns=True)
             self.add_columns(*_columns_for(kind, all_namespaces=all_namespaces))

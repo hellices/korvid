@@ -29,6 +29,18 @@ def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def channel_names(status: dict[str, Any]) -> tuple[str, ...]:
+    """Channel names from a PackageManifest ``status``, tolerating a missing
+    or mistyped ``channels`` field (a malformed catalog entry yields an empty
+    tuple - never a crash - leaving the server as the sole validator)."""
+    channels = status.get("channels")
+    if not isinstance(channels, list):
+        return ()
+    return tuple(
+        str(entry["name"]) for entry in channels if isinstance(entry, dict) and entry.get("name")
+    )
+
+
 @dataclass(frozen=True)
 class PackageInstallFacts:
     """What the install wizard needs from one PackageManifest."""
@@ -44,14 +56,9 @@ def package_install_facts(manifest: dict[str, Any]) -> PackageInstallFacts:
     """Extract wizard inputs from a PackageManifest, tolerating malformed
     nested fields (empty facts mean nothing to preselect, never a crash)."""
     status = _mapping(manifest.get("status"))
-    channels = tuple(
-        str(entry["name"])
-        for entry in status.get("channels") or []
-        if isinstance(entry, dict) and entry.get("name")
-    )
     return PackageInstallFacts(
         package=str(_mapping(manifest.get("metadata")).get("name") or ""),
-        channels=channels,
+        channels=channel_names(status),
         default_channel=str(status.get("defaultChannel") or ""),
         catalog_source=str(status.get("catalogSource") or ""),
         catalog_source_namespace=str(status.get("catalogSourceNamespace") or ""),
