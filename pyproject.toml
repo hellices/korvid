@@ -20,6 +20,7 @@ dependencies = [
     "anyio>=4.5",
     "starlette>=0.36",
     "uvicorn>=0.30",
+    "regex>=2026.7.19",
 ]
 
 [project.scripts]
@@ -52,6 +53,7 @@ dev = [
     "pre-commit>=4",
     "types-PyYAML",
     "azure-identity>=1.25.3",
+    "types-regex>=2026.7.19.20260720",
 ]
 
 [tool.ruff]

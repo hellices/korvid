@@ -20,7 +20,7 @@ in the dialog; `--readonly` disables them all.
 |-----|---------|--------|
 | `:` | global | Open command bar — accepts `pods`, `deploy all`, `helm`, `ns <name>`, `ai`, `model`, `q` |
 | `?` | global | Help overlay — keybindings grouped by context plus `:` commands (Esc/q/`?` closes) |
-| `/` | table | Open name filter (Enter keeps filter, Esc clears) |
+| `/` | table | Open filter — name, `~fuzzy`, `/regex/`, `!exclude`, `-l k=v`, `-s` hide Completed (Enter keeps, Esc clears) |
 | `/` | log pane | Open inline log search |
 | `Enter` | table | Drill down: pods → containers; deploy → replicasets (history) → pods; helm release → revisions |
 | `Esc` | table | Pop one drill-down level |
