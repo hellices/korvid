@@ -149,3 +149,32 @@ def test_build_subscription_rejects_non_dns1123_package_name() -> None:
             source_namespace="olm",
             approval="Automatic",
         )
+
+
+@pytest.mark.parametrize("bad", ["a..b", "a.-b", "a-.b", ".a", "a."])
+def test_build_subscription_rejects_malformed_subdomain_labels(bad: str) -> None:
+    """Each dot-separated label must individually satisfy DNS-1123; the
+    loose character-class check let sequences like 'a..b' through."""
+    with pytest.raises(ValueError, match="DNS-1123"):
+        build_subscription(
+            package=bad,
+            namespace="operators",
+            channel="stable",
+            source="cat",
+            source_namespace="olm",
+            approval="Automatic",
+        )
+
+
+def test_build_subscription_rejects_non_dns1123_namespace() -> None:
+    """The namespace is user-typed and becomes metadata.namespace: a typo
+    (space, uppercase, dot) fails here instead of as a server error."""
+    with pytest.raises(ValueError, match="DNS-1123 label"):
+        build_subscription(
+            package="cert-manager",
+            namespace="My Namespace",
+            channel="stable",
+            source="cat",
+            source_namespace="olm",
+            approval="Automatic",
+        )

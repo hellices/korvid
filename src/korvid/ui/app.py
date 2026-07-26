@@ -2530,8 +2530,7 @@ class KorvidApp(App[None]):
         # The wizard must be fed the incarnation the user selected: if the
         # catalog entry was deleted and recreated under the same name during
         # the fetch, its facts (channels, catalog source) may differ.
-        fetched_uid = str(manifest.get("metadata", {}).get("uid") or "")
-        if uid and fetched_uid and fetched_uid != uid:
+        if not self._uid_intact_after_fetch(manifest, ns, name, uid):
             self.notify(
                 f"install {self._gvr_label(pkg_meta)}/{name} cancelled -"
                 " the catalog entry changed during the manifest fetch",

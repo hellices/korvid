@@ -66,9 +66,15 @@ def channel_names(status: dict[str, Any]) -> tuple[str, ...]:
 #: the cluster and a hostile entry must not bloat the table.
 MAX_DESCRIPTION_CHARS = 80
 
-#: DNS-1123 subdomain (lowercase alphanumerics, '-' and '.'; 253-char cap
-#: checked separately) - what the API server requires of metadata.name.
-_DNS1123_SUBDOMAIN = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+#: DNS-1123 subdomain: dot-separated labels, each individually
+#: ``[a-z0-9]([-a-z0-9]*[a-z0-9])?`` (kubernetes' own pattern); the
+#: 253-char cap is checked separately.
+_DNS1123_SUBDOMAIN = re.compile(
+    r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+)
+
+#: DNS-1123 label (namespaces): no dots, 63-char cap checked separately.
+_DNS1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
 
 def package_description(status: dict[str, Any]) -> str:
@@ -154,6 +160,10 @@ def build_subscription(
     # letting a hostile entry ride into the API request path.
     if not _DNS1123_SUBDOMAIN.match(package.strip()) or len(package.strip()) > 253:
         raise ValueError(f"package name {package.strip()!r} is not a valid DNS-1123 subdomain")
+    # The namespace is user-typed in the wizard and becomes
+    # metadata.namespace: catch a typo here instead of a server error.
+    if not _DNS1123_LABEL.match(namespace.strip()) or len(namespace.strip()) > 63:
+        raise ValueError(f"namespace {namespace.strip()!r} is not a valid DNS-1123 label")
     if approval not in APPROVAL_MODES:
         raise ValueError(f"approval must be one of {APPROVAL_MODES}, got {approval!r}")
     return {

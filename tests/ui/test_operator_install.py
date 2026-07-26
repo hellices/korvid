@@ -157,14 +157,14 @@ async def test_enter_buffered_before_prompt_does_not_submit_defaults() -> None:
         # Timestamped before the prompt exists, delivered after (same
         # situation as a keystroke queued during the manifest fetch).
         stale = events.Key("enter", None)
-        await pilot.pause()
-
         await _open(app)
         await _opened(app, pilot)
         focused = app.focused
         assert focused is not None
         focused.post_message(stale)
-        await pilot.pause()
+        # A fresh interaction drains the queued stale event deterministically
+        # before the assertion (repository convention: no raw time pauses).
+        await pilot.press("tab")
         assert app.result == "unset"  # stale Enter discarded
         await pilot.press("enter")
         await until(pilot, lambda: app.result != "unset", label="fresh Enter submits")
