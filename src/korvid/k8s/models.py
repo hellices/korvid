@@ -354,9 +354,40 @@ def _container_trouble(cs: dict[str, Any], *, name_prefix: str = "") -> Containe
     )
 
 
+def _pod_level_trouble(status: dict[str, Any]) -> ContainerTrouble | None:
+    """Pod-scoped failure with no container status: Evicted, Unschedulable, ...
+
+    Rendered with the pseudo-container name `pod` so the strip reads
+    `pod Evicted: The node was low on resource: memory.`
+    """
+    if str(status.get("phase") or "") == "Succeeded":
+        return None
+    reason = str(status.get("reason") or "")
+    if reason:
+        return ContainerTrouble(
+            container="pod", reason=reason, message=str(status.get("message") or "")
+        )
+    for cond in status.get("conditions") or []:
+        if (
+            cond.get("type") == "PodScheduled"
+            and cond.get("status") == "False"
+            and cond.get("reason")
+        ):
+            return ContainerTrouble(
+                container="pod",
+                reason=str(cond["reason"]),
+                message=str(cond.get("message") or ""),
+            )
+    return None
+
+
 def _pod_trouble(status: dict[str, Any]) -> tuple[ContainerTrouble, ...]:
-    """Trouble entries for every unhealthy container, init containers first."""
+    """Trouble entries: pod-level failure first, then unhealthy containers
+    (init containers before app containers)."""
     entries: list[ContainerTrouble] = []
+    pod_level = _pod_level_trouble(status)
+    if pod_level is not None:
+        entries.append(pod_level)
     for cs in status.get("initContainerStatuses") or []:
         entry = _container_trouble(cs, name_prefix="init:")
         if entry is not None:

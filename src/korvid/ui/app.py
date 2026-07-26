@@ -12,10 +12,10 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Protocol
 
 import yaml
 from textual.app import App, ComposeResult, SuspendNotSupported
@@ -64,7 +64,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
-from korvid.ui.widgets.hint_strip import HintStrip
+from korvid.ui.widgets.hint_strip import HintStrip, parse_rfc3339
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
@@ -94,21 +94,66 @@ _APPROVAL_TIMEOUT = 120.0
 _PERMISSION_CHECK_TIMEOUT = 10.0
 
 
-def _event_timestamp(event: dict[str, Any]) -> str:
-    # ISO-8601 Zulu timestamps compare correctly as strings; events.k8s.io
-    # objects use eventTime where core v1 uses lastTimestamp.
-    return str(event.get("lastTimestamp") or event.get("eventTime") or "")
+def _event_timestamp(event: dict[str, Any]) -> datetime | None:
+    """Absolute event time: events.k8s.io uses eventTime, core v1 lastTimestamp."""
+    return parse_rfc3339(str(event.get("lastTimestamp") or event.get("eventTime") or ""))
 
 
-def _newest_warning_line(events: list[dict[str, Any]]) -> str | None:
-    """Format the most recent Warning event as `reason: message`, or None."""
+def _newest_warning(events: list[dict[str, Any]]) -> tuple[str, datetime | None] | None:
+    """(line, timestamp) of the most recent Warning event, or None.
+
+    Timestamps are parsed before comparing: RFC 3339 strings do not sort
+    chronologically once fractional seconds or offsets differ.
+    """
     warnings = [e for e in events if e.get("type") == "Warning"]
     if not warnings:
         return None
-    newest = max(warnings, key=_event_timestamp)
+    epoch = datetime.min.replace(tzinfo=UTC)
+    newest = max(warnings, key=lambda e: _event_timestamp(e) or epoch)
     reason = str(newest.get("reason") or "Warning")
     message = str(newest.get("message") or "").strip()
-    return f"{reason}: {message}" if message else reason
+    line = f"{reason}: {message}" if message else reason
+    return line, _event_timestamp(newest)
+
+
+class EventsFetcher(Protocol):
+    """Events for one object; `uid` narrows out earlier same-named incarnations."""
+
+    def __call__(
+        self, namespace: str, name: str, *, uid: str | None = None
+    ) -> Awaitable[list[dict[str, Any]]]: ...
+
+
+def _pod_needs_hint(summary: PodSummary) -> bool:
+    """Abnormal rows: captured trouble, or not-fully-ready (event-only hint).
+
+    A Running pod failing its readiness probe carries no container trouble —
+    the explanation lives only in Warning events (`Unhealthy`).
+    """
+    if summary.trouble:
+        return True
+    ready, _, desired = summary.ready.partition("/")
+    return bool(desired) and ready != desired
+
+
+def _fresh_warning_line(events: list[dict[str, Any]], summary: PodSummary) -> str | None:
+    """The newest Warning line, unless it predates the captured status.
+
+    An event older than the last termination explains a previous failure,
+    not the one on screen — showing it would mislead.
+    """
+    found = _newest_warning(events)
+    if found is None:
+        return None
+    line, event_ts = found
+    terminated_at = [
+        ts
+        for t in summary.trouble
+        if t.finished_at and (ts := parse_rfc3339(t.finished_at)) is not None
+    ]
+    if terminated_at and event_ts is not None and event_ts < max(terminated_at):
+        return None
+    return line
 
 
 def _yaml_equal(a: object, b: object) -> bool:
@@ -250,7 +295,7 @@ class KorvidApp(App[None]):
         list_namespaces: Callable[[], Awaitable[list[str]]] | None = None,
         aliases: dict[str, ResourceMeta] | None = None,
         get_manifest: (Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None) = None,
-        get_events: (Callable[[str, str], Awaitable[list[dict[str, Any]]]] | None) = None,
+        get_events: EventsFetcher | None = None,
         stream_logs: Callable[..., AsyncIterator[LogLine]] | None = None,
         agent_runtime: AgentRuntime | None = None,
         agent_model_name: str | None = None,
@@ -606,18 +651,29 @@ class KorvidApp(App[None]):
             return
         row_key = str(event.row_key.value)
         summary = self._find_pod_summary(row_key)
-        if summary is None or not summary.trouble:
+        if summary is None or not _pod_needs_hint(summary):
             strip.clear_hint()
             return
-        cached = self._hint_event_cache.get(row_key)
+        # uid in the cache key: a recreated pod must not inherit the cached
+        # event line of its previous incarnation.
+        cache_key = f"{row_key}#{summary.uid}"
+        cached = self._hint_event_cache.get(cache_key)
         now = monotonic()
         if cached is not None and now - cached[0] < self._HINT_EVENT_TTL:
-            strip.show_trouble(summary.trouble, event=cached[1])
+            if summary.trouble or cached[1]:
+                strip.show_trouble(summary.trouble, event=cached[1])
+            else:
+                strip.clear_hint()
             return
-        strip.show_trouble(summary.trouble)
+        if summary.trouble:
+            strip.show_trouble(summary.trouble)
+        else:
+            # Event-only hint (e.g. Running but not ready): nothing to show
+            # until the warning event arrives.
+            strip.clear_hint()
         if self._get_events is not None:
             self.run_worker(
-                self._fetch_hint_event(row_key, summary),
+                self._fetch_hint_event(row_key, cache_key, summary),
                 exclusive=True,
                 group="hint-events",
             )
@@ -632,17 +688,19 @@ class KorvidApp(App[None]):
                 return obj
         return None
 
-    async def _fetch_hint_event(self, row_key: str, summary: PodSummary) -> None:
+    async def _fetch_hint_event(self, row_key: str, cache_key: str, summary: PodSummary) -> None:
         """Best-effort: append the newest warning event to the visible strip."""
         if self._get_events is None:  # caller guards; satisfy the type checker
             return
         try:
-            events = await self._get_events(summary.namespace, summary.name)
+            events = await self._get_events(
+                summary.namespace, summary.name, uid=summary.uid or None
+            )
         except Exception:  # events are decoration; the status-derived hint already shows
-            self._hint_event_cache[row_key] = (monotonic(), None)
+            self._hint_event_cache[cache_key] = (monotonic(), None)
             return
-        line = _newest_warning_line(events)
-        self._hint_event_cache[row_key] = (monotonic(), line)
+        line = _fresh_warning_line(events, summary)
+        self._hint_event_cache[cache_key] = (monotonic(), line)
         if line is None:
             return
         # Re-check the cursor: the user may have moved on during the fetch.

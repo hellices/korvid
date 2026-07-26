@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from korvid.k8s.models import ContainerTrouble
-from korvid.ui.widgets.hint_strip import HintStrip, render_trouble_lines
+from korvid.ui.widgets.hint_strip import HintStrip, relative_age, render_trouble_lines
+
+_NOW = datetime(2026, 7, 26, 8, 5, 0, tzinfo=UTC)
 
 
 def test_render_crashloop_line_shows_reason_message_and_last_exit() -> None:
@@ -18,7 +22,8 @@ def test_render_crashloop_line_shows_reason_message_and_last_exit() -> None:
                 finished_at="2026-07-26T08:00:00Z",
                 restarts=12,
             ),
-        )
+        ),
+        now=_NOW,
     )
     assert len(lines) == 1
     text = lines[0].plain
@@ -27,6 +32,16 @@ def test_render_crashloop_line_shows_reason_message_and_last_exit() -> None:
     assert "back-off 5m0s restarting failed container" in text
     assert "exit 137 (OOMKilled)" in text
     assert "restarts 12" in text
+    assert "last 5m ago" in text  # relative age, not the raw RFC 3339 timestamp
+    assert "2026-" not in text
+
+
+def test_relative_age_buckets() -> None:
+    assert relative_age("2026-07-26T08:04:20Z", now=_NOW) == "40s"
+    assert relative_age("2026-07-26T07:20:00Z", now=_NOW) == "45m"
+    assert relative_age("2026-07-26T01:05:00Z", now=_NOW) == "7h"
+    assert relative_age("2026-07-20T08:05:00Z", now=_NOW) == "6d"
+    assert relative_age("not-a-timestamp", now=_NOW) is None
 
 
 def test_render_waiting_without_termination_omits_exit_segment() -> None:

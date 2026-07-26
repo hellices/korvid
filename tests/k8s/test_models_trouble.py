@@ -24,6 +24,14 @@ def _pod(
     }
 
 
+def _manifest(status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "metadata": {"name": "web-1", "namespace": "default", "uid": "u1"},
+        "spec": {"containers": [{"name": "app"}]},
+        "status": status,
+    }
+
+
 def test_healthy_pod_has_no_trouble() -> None:
     summary = PodSummary.from_manifest(
         _pod([{"name": "app", "ready": True, "restartCount": 0, "state": {"running": {}}}])
@@ -212,3 +220,72 @@ def test_multiple_troubled_containers_all_captured() -> None:
         )
     )
     assert [t.container for t in summary.trouble] == ["app", "sidecar"]
+
+
+def test_evicted_pod_reports_pod_level_trouble() -> None:
+    manifest = _manifest(
+        {
+            "phase": "Failed",
+            "reason": "Evicted",
+            "message": "The node was low on resource: memory.",
+        }
+    )
+    pod = PodSummary.from_manifest(manifest)
+    assert pod.trouble == (
+        ContainerTrouble(
+            container="pod",
+            reason="Evicted",
+            message="The node was low on resource: memory.",
+        ),
+    )
+
+
+def test_unschedulable_pending_pod_reports_pod_level_trouble() -> None:
+    manifest = _manifest(
+        {
+            "phase": "Pending",
+            "conditions": [
+                {
+                    "type": "PodScheduled",
+                    "status": "False",
+                    "reason": "Unschedulable",
+                    "message": "0/3 nodes are available: 3 Insufficient cpu.",
+                }
+            ],
+        }
+    )
+    pod = PodSummary.from_manifest(manifest)
+    assert pod.trouble == (
+        ContainerTrouble(
+            container="pod",
+            reason="Unschedulable",
+            message="0/3 nodes are available: 3 Insufficient cpu.",
+        ),
+    )
+
+
+def test_succeeded_pod_with_status_reason_is_not_trouble() -> None:
+    manifest = _manifest({"phase": "Succeeded", "reason": "Completed"})
+    pod = PodSummary.from_manifest(manifest)
+    assert pod.trouble == ()
+
+
+def test_pod_level_trouble_precedes_container_trouble() -> None:
+    manifest = _manifest(
+        {
+            "phase": "Failed",
+            "reason": "Evicted",
+            "message": "node pressure",
+            "containerStatuses": [
+                {
+                    "name": "app",
+                    "restartCount": 3,
+                    "state": {"waiting": {"reason": "CrashLoopBackOff", "message": "back-off"}},
+                }
+            ],
+        }
+    )
+    pod = PodSummary.from_manifest(manifest)
+    assert pod.trouble[0].container == "pod"
+    assert pod.trouble[0].reason == "Evicted"
+    assert pod.trouble[1].container == "app"

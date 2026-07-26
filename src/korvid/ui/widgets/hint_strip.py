@@ -6,6 +6,8 @@ plus an optional warning event line) — no synthesized diagnoses.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from rich.text import Text
 from textual.widgets import Static
 
@@ -16,7 +18,33 @@ from korvid.ui.theme import phase_style
 _MAX_DETAIL_LINES = 2
 
 
-def _trouble_line(entry: ContainerTrouble) -> Text:
+def parse_rfc3339(value: str) -> datetime | None:
+    """Parse an RFC 3339 timestamp; None when malformed or naive."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def relative_age(value: str, *, now: datetime | None = None) -> str | None:
+    """Compact age like `40s` / `45m` / `7h` / `6d`, or None when unparsable."""
+    parsed = parse_rfc3339(value)
+    if parsed is None:
+        return None
+    seconds = max(0.0, ((now or datetime.now(UTC)) - parsed).total_seconds())
+    if seconds < 120:  # display bucket boundary
+        return f"{int(seconds)}s"
+    minutes = seconds / 60
+    if minutes < 120:  # display bucket boundary
+        return f"{int(minutes)}m"
+    hours = minutes / 60
+    if hours < 48:  # display bucket boundary
+        return f"{int(hours)}h"
+    return f"{int(hours / 24)}d"
+
+
+def _trouble_line(entry: ContainerTrouble, *, now: datetime | None = None) -> Text:
     """One-line rendering: `app CrashLoopBackOff: msg - exit 137 (OOMKilled), restarts 12`."""
     line = Text()
     line.append(f"{entry.container} ", style="bold")
@@ -32,7 +60,8 @@ def _trouble_line(entry: ContainerTrouble) -> Text:
     if entry.restarts:
         tail.append(f"restarts {entry.restarts}")
     if entry.finished_at:
-        tail.append(f"last {entry.finished_at}")
+        age = relative_age(entry.finished_at, now=now)
+        tail.append(f"last {age} ago" if age else f"last {entry.finished_at}")
     if tail:
         line.append(f" - {', '.join(tail)}", style="dim")
     return line
@@ -42,9 +71,10 @@ def render_trouble_lines(
     trouble: tuple[ContainerTrouble, ...],
     *,
     event: str | None = None,
+    now: datetime | None = None,
 ) -> list[Text]:
     """Compact hint lines for the strip: capped detail lines, then the event."""
-    lines = [_trouble_line(entry) for entry in trouble[:_MAX_DETAIL_LINES]]
+    lines = [_trouble_line(entry, now=now) for entry in trouble[:_MAX_DETAIL_LINES]]
     remainder = len(trouble) - _MAX_DETAIL_LINES
     if remainder > 0:
         lines.append(Text(f"+{remainder} more container(s) failing", style="dim"))

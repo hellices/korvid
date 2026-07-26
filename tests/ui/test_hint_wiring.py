@@ -55,11 +55,13 @@ def _source(pods: list[PodSummary]):  # type: ignore[no-untyped-def]  # returns 
 def make_app(
     pods: list[PodSummary],
     events: list[dict[str, Any]] | None = None,
-) -> tuple[KorvidApp, list[tuple[str, str]]]:
-    calls: list[tuple[str, str]] = []
+) -> tuple[KorvidApp, list[tuple[str, str, str | None]]]:
+    calls: list[tuple[str, str, str | None]] = []
 
-    async def get_events(namespace: str, name: str) -> list[dict[str, Any]]:
-        calls.append((namespace, name))
+    async def get_events(
+        namespace: str, name: str, *, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        calls.append((namespace, name, uid))
         return events or []
 
     store = ResourceStore()
@@ -125,7 +127,7 @@ async def test_warning_event_is_fetched_and_appended() -> None:
         text = _strip_text(app)
         assert "BackOff: restarting failed container app" in text
         assert "image pulled" not in text  # Normal events never shown
-        assert calls == [("default", "web-1")]
+        assert calls == [("default", "web-1", "uid-web-1")]
 
 
 async def test_event_fetch_is_cached_per_pod() -> None:
@@ -137,11 +139,14 @@ async def test_event_fetch_is_cached_per_pod() -> None:
         await pilot.press("up")  # api-1 (healthy, no fetch)
         await pilot.press("down")  # web-1 again: cached, no second fetch
         await pilot.pause(0.2)
-        assert calls == [("default", "web-1")]
+        assert calls == [("default", "web-1", "uid-web-1")]
 
 
 async def test_event_fetch_failure_still_shows_status_trouble() -> None:
-    async def failing(namespace: str, name: str) -> list[dict[str, Any]]:
+    attempts: list[str] = []
+
+    async def failing(namespace: str, name: str, *, uid: str | None = None) -> list[dict[str, Any]]:
+        attempts.append(name)
         raise RuntimeError("events unavailable")
 
     store = ResourceStore()
@@ -153,6 +158,7 @@ async def test_event_fetch_failure_still_shows_status_trouble() -> None:
         get_events=failing,
     )
     async with app.run_test() as pilot:
+        await until(pilot, lambda: len(attempts) == 1, label="fetch attempted")
         await until(pilot, lambda: app.query_one(HintStrip).display, label="strip visible")
         assert "CrashLoopBackOff" in _strip_text(app)
 
@@ -168,3 +174,57 @@ async def test_strip_absent_on_non_pod_views() -> None:
         await until(
             pilot, lambda: not app.query_one(HintStrip).display, label="strip off deploy view"
         )
+
+
+_OLD_EVENT = {
+    "type": "Warning",
+    "reason": "FailedScheduling",
+    "message": "stale event from a previous incarnation",
+    "lastTimestamp": "2026-07-26T06:00:00Z",
+}
+
+
+async def test_event_older_than_status_termination_is_suppressed() -> None:
+    # _CRASH terminated at 08:00; a 06:00 warning must not explain it.
+    crash = ContainerTrouble(
+        container="app",
+        reason="CrashLoopBackOff",
+        exit_code=137,
+        finished_at="2026-07-26T08:00:00Z",
+        restarts=3,
+    )
+    app, calls = make_app([_pod("web-1", (crash,))], events=[_OLD_EVENT])
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: len(calls) == 1, label="fetch done")
+        await pilot.pause(0.2)
+        assert "stale event" not in _strip_text(app)
+        assert "CrashLoopBackOff" in _strip_text(app)
+
+
+async def test_not_ready_running_pod_gets_event_only_hint() -> None:
+    # Readiness-probe failures leave trouble empty; the strip is event-only.
+    pod = PodSummary(
+        name="web-1",
+        namespace="default",
+        phase="Running",
+        ready="0/1",
+        restarts=0,
+        node=None,
+        uid="uid-web-1",
+    )
+    events = [
+        {
+            "type": "Warning",
+            "reason": "Unhealthy",
+            "message": "Readiness probe failed: HTTP 503",
+            "lastTimestamp": "2026-07-26T08:00:00Z",
+        }
+    ]
+    app, calls = make_app([pod], events=events)
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: "Readiness probe failed" in _strip_text(app),
+            label="event-only hint shown",
+        )
+        assert calls == [("default", "web-1", "uid-web-1")]

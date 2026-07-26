@@ -308,8 +308,10 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
             raise ValueError(f"Unknown resource kind: {kind!r}")
         return await kube.get_object(meta, namespace, name)
 
-    async def get_events(namespace: str, name: str) -> list[dict[str, Any]]:
-        return await kube.list_events_for(namespace, name)
+    async def get_events(
+        namespace: str, name: str, *, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        return await kube.list_events_for(namespace, name, uid=uid)
 
     watch_manager = WatchManager(store, source)
 
