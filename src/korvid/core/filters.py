@@ -103,6 +103,25 @@ class ResourceFilter:
         return " · ".join(parts)
 
 
+#: Kubernetes label name/value segment: alphanumeric ends, `-_.` inside, ≤63.
+_LABEL_NAME_RE = regex.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$")
+#: Optional DNS-subdomain prefix before `/` in a label key, ≤253.
+_LABEL_PREFIX_RE = regex.compile(
+    r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"
+)
+
+
+def _valid_label_key(key: str) -> bool:
+    prefix, slash, name = key.rpartition("/")
+    if slash and (not prefix or len(prefix) > 253 or not _LABEL_PREFIX_RE.match(prefix)):
+        return False
+    return bool(_LABEL_NAME_RE.match(name))
+
+
+def _valid_label_value(value: str) -> bool:
+    return value == "" or bool(_LABEL_NAME_RE.match(value))
+
+
 def _parse_label_selector(
     selector: str,
 ) -> tuple[tuple[tuple[str, str | None], ...], str | None]:
@@ -112,8 +131,13 @@ def _parse_label_selector(
         if not part:
             return (), f"empty term in label selector {selector!r}"
         key, eq, value = part.partition("=")
-        if not key:
-            return (), f"empty key in label selector {selector!r}"
+        # Keys/values that cannot occur on a Kubernetes object (e.g. the
+        # half-typed 'app==web' or 'app!') would silently hide every row;
+        # reject them so the token is reported and skipped instead.
+        if not _valid_label_key(key):
+            return (), f"invalid label key {key!r} in selector {selector!r}"
+        if eq and not _valid_label_value(value):
+            return (), f"invalid label value {value!r} in selector {selector!r}"
         pairs.append((key, value if eq else None))
     return tuple(pairs), None
 

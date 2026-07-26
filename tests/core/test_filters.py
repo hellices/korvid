@@ -139,6 +139,30 @@ def test_empty_label_key_is_error_and_ignored() -> None:
     assert f.matches("anything", labels={})
 
 
+def test_double_equals_selector_is_error_and_ignored() -> None:
+    f = parse_filter("-l app==web")
+    assert f.error is not None
+    assert f.matches("anything", labels={})
+
+
+def test_invalid_label_key_is_error_and_ignored() -> None:
+    f = parse_filter("-l app!")
+    assert f.error is not None
+    assert f.matches("anything", labels={})
+
+
+def test_prefixed_label_key_is_accepted() -> None:
+    f = parse_filter("-l app.kubernetes.io/name=web")
+    assert f.matches("x", labels={"app.kubernetes.io/name": "web"})
+    assert not f.matches("x", labels={"app.kubernetes.io/name": "db"})
+
+
+def test_empty_label_value_is_accepted() -> None:
+    f = parse_filter("-l app=")
+    assert f.matches("x", labels={"app": ""})
+    assert not f.matches("x", labels={"app": "web"})
+
+
 def test_dangling_negation_is_error_and_ignored() -> None:
     f = parse_filter("!")
     assert f.error is not None
