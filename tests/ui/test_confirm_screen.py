@@ -232,3 +232,40 @@ async def test_require_name_discards_keys_buffered_before_dialog() -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert results == [True]
+
+
+async def test_preview_lines_rendered() -> None:
+    """Dry-run preview lines (issue #19) appear in the dialog."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(
+            ConfirmScreen(
+                "Scale deployments/web?",
+                "PATCH deployments/web/scale: replicas 3 -> 5",
+                preview=["~ spec.replicas: 3 -> 5"],
+            )
+        )
+        await pilot.pause()
+        node = app.screen.query_one(".confirm-preview", Static)
+        assert "~ spec.replicas: 3 -> 5" in str(node.render())
+        assert "dry-run" in str(node.render())
+
+
+async def test_no_preview_widget_without_preview() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(ConfirmScreen("Delete pod", "DELETE pods/web-1"))
+        await pilot.pause()
+        assert not app.screen.query(".confirm-preview")
+
+
+async def test_empty_preview_reports_no_changes() -> None:
+    """A dry-run that produced no visible change is itself information."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(
+            ConfirmScreen("Scale deployments/web?", "replicas 3 -> 3", preview=[])
+        )
+        await pilot.pause()
+        node = app.screen.query_one(".confirm-preview", Static)
+        assert "no changes" in str(node.render())

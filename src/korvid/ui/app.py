@@ -41,7 +41,7 @@ from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import PodSummary
 from korvid.k8s.relations import drill_child, owned_by
-from korvid.k8s.writes import WriteOps
+from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -131,6 +131,12 @@ def _yaml_equal(a: object, b: object) -> bool:
 #: On timeout the lookup fails open (write proceeds without a precondition,
 #: still approval-gated and audited).
 _UID_LOOKUP_TIMEOUT = 10.0
+
+#: Upper bound on the pre-dialog dry-run round trip (issue #19): a slow or
+#: unreachable API server delays the approval dialog by at most this long,
+#: after which it opens without a preview - a preview must never block the
+#: approval flow.
+_PREVIEW_TIMEOUT = 3.0
 
 
 class _ReplayFilter:
@@ -1520,6 +1526,16 @@ class KorvidApp(App[None]):
         self.notify(f"{action} {kind}/{name}: done", severity="information")
         return "done"
 
+    async def _dry_run_preview(self, coro: Awaitable[list[str] | None]) -> list[str] | None:
+        """Await a WriteOps preview with a hard deadline; None on timeout or
+        any error (the dialog then opens without a preview, exactly as before
+        issue #19 - a preview must never block or break the approval flow)."""
+        try:
+            return await asyncio.wait_for(coro, _PREVIEW_TIMEOUT)
+        except Exception:
+            logger.debug("dry-run preview failed; dialog opens without it", exc_info=True)
+            return None
+
     async def action_delete_resource(self) -> None:
         """Ctrl-D: delete the selected resource behind a layered confirmation
         (cluster-scoped kinds require typing the resource name)."""
@@ -1532,6 +1548,9 @@ class KorvidApp(App[None]):
             return
         meta, ns, name, uid = target
         if not await self._precheck_keybinding_write("delete", meta, ns, name):
+            return
+        preview = await self._dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
+        if not self._write_context_intact("delete", meta, ns, name, phase="the dry-run preview"):
             return
         operation = f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}"
         require = None if meta.namespaced else name
@@ -1546,7 +1565,10 @@ class KorvidApp(App[None]):
 
         await self.push_screen(
             ConfirmScreen(
-                f"Delete {self._gvr_label(meta)}/{name}?", operation, require_name=require
+                f"Delete {self._gvr_label(meta)}/{name}?",
+                operation,
+                require_name=require,
+                preview=preview,
             ),
             _done,
         )
@@ -1568,6 +1590,16 @@ class KorvidApp(App[None]):
             return
         if not await self._precheck_keybinding_write("rollout_restart", meta, ns, name):
             return
+        # One stamp per approval: the previewed request and the executed
+        # write are byte-identical (exact-replay guarantee).
+        stamp = restart_stamp()
+        preview = await self._dry_run_preview(
+            ops.preview_rollout_restart(meta, ns, name, uid=uid, restarted_at=stamp)
+        )
+        if not self._write_context_intact(
+            "rollout_restart", meta, ns, name, phase="the dry-run preview"
+        ):
+            return
 
         def _done(confirmed: bool | None) -> None:
             if confirmed:
@@ -1577,7 +1609,7 @@ class KorvidApp(App[None]):
                         meta,
                         ns,
                         name,
-                        ops.rollout_restart(meta, ns, name, uid=uid),
+                        ops.rollout_restart_with_stamp(meta, ns, name, uid=uid, restarted_at=stamp),
                     )
                 )
 
@@ -1586,6 +1618,7 @@ class KorvidApp(App[None]):
                 f"Rollout restart {self._gvr_label(meta)}/{name}?",
                 f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
                 f"{self._write_locus(ns)}",
+                preview=preview,
             ),
             _done,
         )
@@ -1806,37 +1839,59 @@ class KorvidApp(App[None]):
             return
         current = self._current_replicas(ns, name)
 
-        def _confirmed(replicas: int) -> Callable[[bool | None], None]:
-            def _done(confirmed: bool | None) -> None:
-                if confirmed:
-                    self.run_worker(
-                        self._run_write(
-                            "scale",
-                            meta,
-                            ns,
-                            name,
-                            ops.scale_object(meta, ns, name, replicas, uid=uid),
-                            detail=f"replicas -> {replicas}",
-                        )
-                    )
-
-            return _done
-
         def _on_replicas(replicas: int | None) -> None:
             if replicas is None:
                 return
-            shown = "?" if current is None else current
-            self.push_screen(
-                ConfirmScreen(
-                    f"Scale {self._gvr_label(meta)}/{name}?",
-                    f"PATCH {self._gvr_label(meta)}/{name}/scale: replicas {shown} -> {replicas}"
-                    f"{self._write_locus(ns)}",
-                ),
-                _confirmed(replicas),
-            )
+            # The dry-run round trip must not run inside a screen callback:
+            # a worker fetches the preview, revalidates, then confirms.
+            self.run_worker(self._confirm_scale(meta, ns, name, uid, current, replicas))
 
         await self.push_screen(
             ReplicasPrompt(f"{self._gvr_label(meta)}/{name}", current=current), _on_replicas
+        )
+
+    async def _confirm_scale(
+        self,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+        current: int | None,
+        replicas: int,
+    ) -> None:
+        """Dry-run preview + approval dialog for a scale, after the replica
+        count is known. Revalidates the selection after the preview round
+        trip: keystrokes during the await must never land on a confirmation
+        for a different row."""
+        ops = self._write_ops
+        if ops is None:
+            return
+        preview = await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
+        if not self._write_context_intact("scale", meta, ns, name, phase="the dry-run preview"):
+            return
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_write(
+                        "scale",
+                        meta,
+                        ns,
+                        name,
+                        ops.scale_object(meta, ns, name, replicas, uid=uid),
+                        detail=f"replicas -> {replicas}",
+                    )
+                )
+
+        shown = "?" if current is None else current
+        await self.push_screen(
+            ConfirmScreen(
+                f"Scale {self._gvr_label(meta)}/{name}?",
+                f"PATCH {self._gvr_label(meta)}/{name}/scale: replicas {shown} -> {replicas}"
+                f"{self._write_locus(ns)}",
+                preview=preview,
+            ),
+            _done,
         )
 
     async def _open_log_pane(
@@ -2448,7 +2503,10 @@ class KorvidApp(App[None]):
         approve it, and the outcome (executed/denied/error) flows back as the
         tool result. Every executed write is audited with an agent marker."""
         name = name.strip()  # every stage below must see the exact same target
-        built = self._agent_write_op(action, kind, name, namespace, replicas)
+        # One stamp per approval request (rollout restarts only): the preview
+        # and the executed write send the identical patch body.
+        stamp = restart_stamp()
+        built = self._agent_write_op(action, kind, name, namespace, replicas, restarted_at=stamp)
         if isinstance(built, str):
             return built
         meta, ns, op, operation, detail = built
@@ -2467,11 +2525,13 @@ class KorvidApp(App[None]):
             uid = await self._target_uid(kind.strip().lower(), ns, name)
         except ApiStatusError:
             return f"ERROR: {self._gvr_label(meta)}/{name} not found{self._write_locus(ns)}"
+        preview = await self._preview_for_action(action, meta, ns, name, replicas, uid, stamp)
         require = name if action == "delete" and not meta.namespaced else None
         decision = await self._await_user_approval(
             f"Agent requests: {action} {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
             operation,
             require_name=require,
+            preview=preview,
         )
         if decision == "expired":
             return (
@@ -2487,6 +2547,34 @@ class KorvidApp(App[None]):
             return f"ERROR: {action} {self._gvr_label(meta)}/{name} {outcome}"
         self._mark_agent_action(f"{action} → {self._gvr_label(meta)}/{name}")
         return f"approved and executed: {action} {self._gvr_label(meta)}/{name}"
+
+    async def _preview_for_action(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        replicas: int | None,
+        uid: str | None,
+        restarted_at: str,
+    ) -> list[str] | None:
+        """Dry-run preview for an agent-requested write; None (no preview)
+        for unknown actions or a scale without a validated replica count.
+        The captured ``uid`` and per-approval ``restarted_at`` stamp ride
+        along so the dry run replays the exact request that would execute
+        on approval."""
+        ops = self._write_ops
+        if ops is None:
+            return None
+        if action == "delete":
+            return await self._dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
+        if action == "scale" and replicas is not None:
+            return await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
+        if action == "rollout_restart":
+            return await self._dry_run_preview(
+                ops.preview_rollout_restart(meta, ns, name, uid=uid, restarted_at=restarted_at)
+            )
+        return None
 
     async def _target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
         """Uid of a write target at request time, looked up by the same alias
@@ -2527,9 +2615,12 @@ class KorvidApp(App[None]):
         name: str,
         namespace: str | None,
         replicas: int | None,
+        *,
+        restarted_at: str,
     ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
         """Validate an agent write request; return (meta, ns, op, operation
-        description, audit detail) or an 'ERROR: ...' string."""
+        description, audit detail) or an 'ERROR: ...' string. ``restarted_at``
+        is the per-approval stamp a rollout restart shares with its preview."""
         if self.config.readonly:
             return "ERROR: read-only mode - cluster writes are disabled"
         if self._audit is None:
@@ -2553,7 +2644,7 @@ class KorvidApp(App[None]):
         if action == "scale":
             return self._agent_scale_op(meta, ns, name, replicas)
         if action == "rollout_restart":
-            return self._agent_restart_op(meta, ns, name)
+            return self._agent_restart_op(meta, ns, name, restarted_at)
         return f"ERROR: unknown write action {action!r}"
 
     def _agent_delete_op(
@@ -2589,7 +2680,7 @@ class KorvidApp(App[None]):
         )
 
     def _agent_restart_op(
-        self, meta: ResourceMeta, ns: str | None, name: str
+        self, meta: ResourceMeta, ns: str | None, name: str, restarted_at: str
     ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
         ops = self._write_ops
         if ops is None:
@@ -2599,7 +2690,9 @@ class KorvidApp(App[None]):
         return (
             meta,
             ns,
-            lambda uid: ops.rollout_restart(meta, ns, name, uid=uid),
+            lambda uid: ops.rollout_restart_with_stamp(
+                meta, ns, name, uid=uid, restarted_at=restarted_at
+            ),
             f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
             f"{self._write_locus(ns)}",
             "requested by agent",
@@ -2626,7 +2719,12 @@ class KorvidApp(App[None]):
         return True
 
     async def _await_user_approval(
-        self, title: str, operation: str, *, require_name: str | None = None
+        self,
+        title: str,
+        operation: str,
+        *,
+        require_name: str | None = None,
+        preview: list[str] | None = None,
     ) -> Literal["approved", "declined", "expired"]:
         """Show a ConfirmScreen and wait for the user's decision. Only real key
         input can resolve it. While the agent panel is collapsed, or another
@@ -2649,7 +2747,7 @@ class KorvidApp(App[None]):
             if not fut.done():
                 fut.set_result(bool(confirmed))
 
-        screen = ConfirmScreen(title, operation, require_name=require_name)
+        screen = ConfirmScreen(title, operation, require_name=require_name, preview=preview)
         await self.push_screen(screen, _done)
         # Recheck after mounting: surfacing the dialog (or push_screen itself)
         # can consume the last of the budget, and a fixed minimum here would

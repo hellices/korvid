@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -69,11 +70,19 @@ class ConfirmScreen(ModalScreen[bool]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
-    def __init__(self, title: str, operation: str, *, require_name: str | None = None) -> None:
+    def __init__(
+        self,
+        title: str,
+        operation: str,
+        *,
+        require_name: str | None = None,
+        preview: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self._title = title
         self._operation = operation
         self._require_name = require_name
+        self._preview = preview
         # Same clock as event timestamps (Message.time): key events created
         # before this moment were buffered while the caller's pre-checks ran
         # and must never confirm an operation the user had not yet seen.
@@ -86,6 +95,8 @@ class ConfirmScreen(ModalScreen[bool]):
         with Vertical():
             yield Static(self._title, classes="confirm-title", markup=False)
             yield Static(self._operation, classes="confirm-operation", markup=False)
+            if self._preview is not None:
+                yield Static(self._preview_text(), classes="confirm-preview")
             if self._require_name is None:
                 yield Static("y = confirm    n/Esc = cancel", classes="confirm-hint")
             else:
@@ -100,6 +111,21 @@ class ConfirmScreen(ModalScreen[bool]):
     def on_mount(self) -> None:
         if self._require_name is not None:
             self.query_one(Input).focus()
+
+    def _preview_text(self) -> Text:
+        """Server dry-run outcome (issue #19), one styled line per change:
+        additions green, removals red, modifications yellow. An empty diff is
+        rendered explicitly - 'the server reports no changes' is information,
+        distinct from 'no preview was available' (no widget at all)."""
+        text = Text("server dry-run preview:", style="bold")
+        if not self._preview:
+            text.append("\n  no changes reported", style="dim")
+            return text
+        styles = {"+": "green", "-": "red", "~": "yellow"}
+        for line in self._preview:
+            text.append("\n  ")
+            text.append(line, style=styles.get(line[:1], "dim"))
+        return text
 
     def on_key(self, event: events.Key) -> None:
         if self._require_name is None:

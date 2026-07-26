@@ -78,6 +78,20 @@ agent-requested — is recorded in an audit log at
 0600 permissions, size-rotated).  If the audit entry cannot be written, the
 write is blocked.
 
+### Dry-run previews
+
+Before a delete, scale, or rollout restart dialog opens, korvid replays the
+write server-side with `dryRun=All` and shows the reported outcome inside the
+dialog: a compact diff for scale and restart (`~ spec.replicas: 3 -> 5`,
+additions green, removals red) and an object summary plus cascading note for
+delete.  Admission webhooks and validation run during the dry-run, so the
+preview is a point-in-time server evaluation of the exact request body the
+approved write will send; the cluster can still change between preview and
+execution (admission runs again then), and a uid precondition rejects writes
+against a replaced object.  If the round trip fails or
+takes longer than a few seconds, the dialog simply opens without a preview —
+a preview never blocks the approval flow.
+
 ### Read-only mode
 
 Start with `korvid --readonly` (or set `readonly: true` in
