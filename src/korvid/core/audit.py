@@ -122,10 +122,15 @@ def default_audit_path() -> Path:
 
 
 def _default_actor() -> str:
-    """The OS user running korvid — audit entries must answer *who*."""
+    """The OS user running korvid — audit entries must answer *who*.
+
+    `getpass.getuser()` raises `KeyError`/`ImportError` on Python 3.11/3.12
+    (3.13 normalized all failures to `OSError`); none of them may abort
+    startup, so catch every documented variant.
+    """
     try:
         return getpass.getuser()
-    except OSError:  # no passwd entry / no env hints (containers, CI)
+    except (OSError, KeyError, ImportError):  # no passwd entry / env hints
         return "unknown"
 
 

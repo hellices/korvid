@@ -119,38 +119,52 @@ class SecretScreen(ModalScreen[None]):
             return str(entries[key])
         return None
 
-    async def _audit_disclosure(self, action: str, key: str, section: str) -> bool:
-        """Record the disclosure before it happens; False blocks it.
+    async def _record_intent(self, action: str, key: str, section: str) -> bool:
+        """Persist the disclosure *intent* before it happens; False blocks it.
 
-        Fail-closed: a missing audit sink or a failed append means the
-        secret value must not be shown or copied.
+        Same contract as cluster writes (`app._execute_write`): fail-closed —
+        a missing audit sink or a failed append means the secret value must
+        not be shown or copied. The outcome record follows the disclosure.
         """
         operation = action.removeprefix("secret-")  # "reveal" / "copy"
-        audit = self._audit
-        if audit is None:
+        if self._audit is None:
             self.notify(
                 f"Secret {operation} blocked: no audit log configured",
                 severity="warning",
             )
             return False
         try:
-            await asyncio.to_thread(
-                audit.append,
-                action=action,
-                kind=self._kind,
-                namespace=self._namespace,
-                name=self._name,
-                detail=f"key={key} section={section}",
-                outcome="success",
-            )
+            await self._append_audit(action, key, section, "intent")
         except Exception:
-            self.log.error("audit append failed; blocking secret disclosure")
+            self.log.error("audit intent record failed; blocking secret disclosure")
             self.notify(
                 f"Secret {operation} blocked: audit log unavailable",
                 severity="error",
             )
             return False
         return True
+
+    async def _record_outcome(self, action: str, key: str, section: str, outcome: str) -> None:
+        """Append the outcome after the disclosure; best-effort like writes
+        (the disclosure already happened — the intent record is the gate)."""
+        try:
+            await self._append_audit(action, key, section, outcome)
+        except Exception:
+            self.log.error("audit outcome record failed after secret disclosure")
+
+    async def _append_audit(self, action: str, key: str, section: str, outcome: str) -> None:
+        audit = self._audit
+        if audit is None:  # pragma: no cover - callers gate on the intent path
+            raise RuntimeError("audit log not configured")
+        await asyncio.to_thread(
+            audit.append,
+            action=action,
+            kind=self._kind,
+            namespace=self._namespace,
+            name=self._name,
+            detail=f"key={key} section={section}",
+            outcome=outcome,
+        )
 
     def _set_value_cell(self, key: str, section: str, value: str) -> None:
         table = self.query_one(DataTable)
@@ -170,11 +184,16 @@ class SecretScreen(ModalScreen[None]):
             raw = self._raw_value(key, section)
             if raw is None:
                 return
-            if not await self._audit_disclosure("secret-reveal", key, section):
+            if not await self._record_intent("secret-reveal", key, section):
                 return
-            revealed = reveal_value(raw, encoded=section == "data")
-            self._revealed.add(entry)
-            self._set_value_cell(key, section, revealed.text)
+            try:
+                revealed = reveal_value(raw, encoded=section == "data")
+                self._revealed.add(entry)
+                self._set_value_cell(key, section, revealed.text)
+            except Exception as exc:
+                await self._record_outcome("secret-reveal", key, section, f"error: {exc}")
+                raise
+            await self._record_outcome("secret-reveal", key, section, "success")
 
     @work
     async def action_copy_value(self) -> None:
@@ -186,14 +205,22 @@ class SecretScreen(ModalScreen[None]):
             raw = self._raw_value(key, section)
             if raw is None:
                 return
-            if not await self._audit_disclosure("secret-copy", key, section):
+            if not await self._record_intent("secret-copy", key, section):
                 return
-            revealed = reveal_value(raw, encoded=section == "data")
-            if revealed.binary:
-                # There is no meaningful text form of a binary payload; copying
-                # the digest summary avoids pasting garbage into a terminal.
-                self.notify(f"{key} is binary — copied its digest summary", severity="warning")
-            self.app.copy_to_clipboard(revealed.text)
+            try:
+                revealed = reveal_value(raw, encoded=section == "data")
+                if revealed.binary:
+                    # Binary and undecodable payloads have no meaningful text
+                    # form; copying the safe summary avoids pasting garbage.
+                    self.notify(
+                        f"{key} is not plain text — copied its safe summary instead",
+                        severity="warning",
+                    )
+                self.app.copy_to_clipboard(revealed.text)
+            except Exception as exc:
+                await self._record_outcome("secret-copy", key, section, f"error: {exc}")
+                raise
+            await self._record_outcome("secret-copy", key, section, "success")
             self.notify(f"Copied decoded value of {key!r}")
 
     def action_close_screen(self) -> None:

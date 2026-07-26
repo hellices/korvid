@@ -335,3 +335,20 @@ def test_append_actor_override(tmp_path: Path) -> None:
     log.append(action="delete", kind="pods", namespace="default", name="web-1")
     entry = json.loads((tmp_path / "audit.jsonl").read_text())
     assert entry["actor"] == "ci-bot"
+
+
+@pytest.mark.parametrize("exc_type", [KeyError, ImportError, OSError])
+def test_actor_detection_failures_fall_back_to_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc_type: type[Exception]
+) -> None:
+    """`getpass.getuser()` raises KeyError/ImportError on 3.11/3.12 (only
+    3.13 normalized to OSError); none of them may abort startup."""
+
+    def boom() -> str:
+        raise exc_type("no passwd entry")
+
+    monkeypatch.setattr("getpass.getuser", boom)
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.append(action="delete", kind="pods", namespace="default", name="web-1")
+    entry = json.loads((tmp_path / "audit.jsonl").read_text())
+    assert entry["actor"] == "unknown"

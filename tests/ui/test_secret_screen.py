@@ -165,17 +165,19 @@ async def test_reveal_decodes_and_audits(tmp_path: Path) -> None:
             await pilot.press("down")
         await pilot.press("x")
         await until(pilot, lambda: "hunter2" in _screen_text(screen), label="revealed value")
+        await until(pilot, lambda: len(_audit_entries(audit_path)) == 2, label="audit entries")
         entries = _audit_entries(audit_path)
-        assert len(entries) == 1
-        entry = entries[0]
-        assert entry["action"] == "secret-reveal"
-        assert entry["kind"] == "secrets"
-        assert entry["namespace"] == "default"
-        assert entry["name"] == "db-creds"
-        assert "password" in entry["detail"]
-        assert entry["outcome"] == "success"
-        # timestamp present (who/when/which key)
-        assert entry["timestamp"]
+        # Same contract as cluster writes: an intent record persisted before
+        # the disclosure, then the outcome after it happened.
+        assert [e["outcome"] for e in entries] == ["intent", "success"]
+        for entry in entries:
+            assert entry["action"] == "secret-reveal"
+            assert entry["kind"] == "secrets"
+            assert entry["namespace"] == "default"
+            assert entry["name"] == "db-creds"
+            assert "password" in entry["detail"]
+            # timestamp present (who/when/which key)
+            assert entry["timestamp"]
 
 
 async def test_reveal_toggles_back_to_masked(tmp_path: Path) -> None:
@@ -386,15 +388,16 @@ async def test_rapid_double_reveal_ends_masked(tmp_path: Path) -> None:
             await pilot.press("down")
         await pilot.press("x")
         await pilot.press("x")  # no wait: races the first press's audit write
-        # Let both workers finish, then the value must be masked again.
+        # Wait for both toggle workers to actually finish — the masked state
+        # is true *before* they run, so it can't serve as the wait condition.
         await until(
             pilot,
-            lambda: (
-                "hunter2" not in _screen_text(screen) and MASK_PLACEHOLDER in _screen_text(screen)
-            ),
-            label="re-masked after double press",
+            lambda: all(w.is_finished for w in screen.workers),
+            label="both toggle workers finished",
         )
-        assert "hunter2" not in _screen_text(screen)
+        text = _screen_text(screen)
+        assert "hunter2" not in text
+        assert MASK_PLACEHOLDER in text
 
 
 async def test_copy_blocked_message_names_copy() -> None:
@@ -414,3 +417,25 @@ async def test_copy_blocked_message_names_copy() -> None:
         message = str(notify.call_args[0][0])
         assert "copy" in message.lower()
         assert "reveal" not in message.lower()
+
+
+async def test_copy_invalid_base64_message_does_not_claim_digest(tmp_path: Path) -> None:
+    """Invalid base64 has no digest; the copy notification must not claim
+    a digest summary was copied."""
+    from unittest import mock
+
+    manifest = json.loads(json.dumps(_SECRET_MANIFEST))
+    manifest["data"]["broken"] = "!!! not base64 !!!"
+    app = make_secret_app(audit=AuditLog(tmp_path / "audit.jsonl"), manifest=manifest)
+    async with app.run_test() as pilot:
+        screen = await _open_secret_screen(pilot, app)
+        keys = screen.row_keys()
+        for _ in range(keys.index(("broken", "data"))):
+            await pilot.press("down")
+        with mock.patch.object(screen, "notify") as notify:
+            await pilot.press("c")
+            await until(pilot, lambda: notify.call_count >= 2, label="copy notifications")
+        messages = [str(call.args[0]) for call in notify.call_args_list]
+        warning = messages[0]
+        assert "digest" not in warning.lower()
+        assert "summary" in warning.lower()
