@@ -2564,28 +2564,27 @@ class KorvidApp(App[None]):
 
     async def action_log_format(self) -> None:
         """Toggle JSON/raw formatting and re-render the buffer (``f`` key)."""
-        log_pane = self.query_one(LogPane)
-        if not log_pane.display:
-            return
-        log_pane.toggle_format()
-        if self._log_buffer is not None:
-            log_pane.replay(self._log_buffer.lines())
+        self._toggle_log_display(LogPane.toggle_format)
 
     async def action_log_wrap(self) -> None:
         """Toggle line wrapping and re-render the buffer (``w`` key)."""
-        log_pane = self.query_one(LogPane)
-        if not log_pane.display:
-            return
-        log_pane.toggle_wrap()
-        if self._log_buffer is not None:
-            log_pane.replay(self._log_buffer.lines())
+        self._toggle_log_display(LogPane.toggle_wrap)
 
     async def action_log_timestamps(self) -> None:
         """Toggle the timestamp prefix and re-render the buffer (``t`` key)."""
+        self._toggle_log_display(LogPane.toggle_timestamps)
+
+    def _toggle_log_display(self, toggle: Callable[[LogPane], None]) -> None:
+        """Shared path for display toggles: flip the setting, replay the buffer.
+
+        ``LogPane.replay`` restores contextual banners (previous-logs,
+        overflow), so every toggle must funnel through here instead of
+        clearing panels ad hoc.
+        """
         log_pane = self.query_one(LogPane)
         if not log_pane.display:
             return
-        log_pane.toggle_timestamps()
+        toggle(log_pane)
         if self._log_buffer is not None:
             log_pane.replay(self._log_buffer.lines())
 

@@ -92,3 +92,41 @@ def test_default_export_dir_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     expected = Path.home() / ".local" / "share" / "korvid" / "logs"
     assert default_log_export_dir() == expected
+
+
+def test_export_same_timestamp_does_not_overwrite(tmp_path: Path) -> None:
+    """Two saves within the same second must produce two files."""
+    now = datetime(2026, 7, 26, 10, 30, 45, tzinfo=UTC)
+
+    first = export_log_lines([_line("first")], tmp_path, now=now)
+    second = export_log_lines([_line("second")], tmp_path, now=now)
+
+    assert first != second
+    assert first.read_text() == "first\n"
+    assert second.read_text() == "second\n"
+
+
+def test_export_single_pod_multi_container_uses_pod_stem(tmp_path: Path) -> None:
+    """One pod with several containers keeps the pod-name filename."""
+    lines = [
+        _line("a", pod="web", container="nginx"),
+        _line("b", pod="web", container="sidecar"),
+    ]
+    now = datetime(2026, 7, 26, 10, 30, 45, tzinfo=UTC)
+
+    path = export_log_lines(lines, tmp_path, now=now)
+
+    assert path.name == "korvid-web-20260726-103045.log"
+    # Lines still carry the pod/container prefix for attribution.
+    assert path.read_text() == "web/nginx a\nweb/sidecar b\n"
+
+
+def test_export_truncates_long_pod_name(tmp_path: Path) -> None:
+    """A 253-char pod name must not push the filename past OS limits."""
+    lines = [_line("x", pod="p" * 253)]
+    now = datetime(2026, 7, 26, 10, 30, 45, tzinfo=UTC)
+
+    path = export_log_lines(lines, tmp_path, now=now)
+
+    assert path.is_file()
+    assert len(path.name.encode()) <= 255

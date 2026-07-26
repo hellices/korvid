@@ -16,6 +16,14 @@ from korvid.k8s.logs import LogLine
 # are DNS labels in practice, but interpolated file names are never trusted.
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
+# Longest allowed sanitized stem. Keeps the whole filename (prefix, stem,
+# timestamp, collision suffix, extension) far below the common 255-byte
+# filesystem component limit even for 253-char Kubernetes pod names.
+_MAX_STEM_LEN = 100
+
+# Bounded scan for a free filename when saves collide within one second.
+_MAX_COLLISION_SUFFIX = 1000
+
 
 def default_log_export_dir() -> Path:
     """Directory for saved log files: ``$XDG_DATA_HOME/korvid/logs`` or
@@ -33,11 +41,12 @@ def export_log_lines(
 ) -> Path:
     """Write *lines* to a generated file under *directory* and return its path.
 
-    The filename is ``korvid-<pod>-<YYYYmmdd-HHMMSS>.log`` for a single-pod
-    buffer and ``korvid-logs-<...>.log`` when lines span multiple sources.
-    Multi-source buffers prefix each line with ``pod/container`` so the file
-    stays attributable; kubelet timestamps are written in ISO form when
-    present.
+    The filename is ``korvid-<pod>-<YYYYmmdd-HHMMSS>.log`` when every line
+    comes from one pod and ``korvid-logs-<...>.log`` when lines span multiple
+    pods; a ``-N`` suffix is appended if the name is already taken so a save
+    can never overwrite an earlier one.  Multi-source buffers prefix each
+    line with ``pod/container`` so the file stays attributable; kubelet
+    timestamps are written in ISO form when present.
 
     Raises:
         ValueError: If *lines* is empty (nothing to save).
@@ -48,11 +57,11 @@ def export_log_lines(
 
     sources = {(line.pod, line.container) for line in lines}
     multi_source = len(sources) > 1
-    stem = "logs" if multi_source else _sanitize(lines[0].pod)
+    pods = {line.pod for line in lines}
+    stem = _sanitize(pods.pop()) if len(pods) == 1 else "logs"
 
     stamp = (now or datetime.now(UTC)).strftime("%Y%m%d-%H%M%S")
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"korvid-{stem}-{stamp}.log"
 
     rendered: list[str] = []
     for line in lines:
@@ -63,14 +72,27 @@ def export_log_lines(
             parts.append(line.timestamp.isoformat())
         parts.append(line.text)
         rendered.append(" ".join(parts))
-    path.write_text("\n".join(rendered) + "\n")
-    return path
+    content = "\n".join(rendered) + "\n"
+
+    for attempt in range(_MAX_COLLISION_SUFFIX):
+        suffix = "" if attempt == 0 else f"-{attempt}"
+        path = directory / f"korvid-{stem}-{stamp}{suffix}.log"
+        try:
+            # Exclusive create: a same-second save picks the next suffix
+            # instead of truncating the earlier export.
+            with path.open("x") as fh:
+                fh.write(content)
+        except FileExistsError:
+            continue
+        return path
+    raise OSError(f"could not find a free export filename under {directory}")
 
 
 def _sanitize(name: str) -> str:
-    """Reduce *name* to a safe filename fragment (never empty)."""
+    """Reduce *name* to a safe, bounded filename fragment (never empty)."""
     cleaned = _UNSAFE_CHARS.sub("_", name)
     # No path-traversal fragments and no hidden-file leading dot.
     while ".." in cleaned:
         cleaned = cleaned.replace("..", "_")
-    return cleaned.lstrip(".") or "logs"
+    cleaned = cleaned.lstrip(".")[:_MAX_STEM_LEN]
+    return cleaned or "logs"

@@ -31,7 +31,7 @@ in the dialog; `--readonly` disables them all.
 | `f` | log pane | Toggle JSON-formatted / raw display |
 | `w` | log pane | Toggle line wrap |
 | `t` | log pane | Toggle kubelet-timestamp prefix |
-| `Ctrl-S` | log pane | Save the current buffer to `~/.local/share/korvid/logs/` |
+| `Ctrl-S` | log pane | Save the current buffer to `$XDG_DATA_HOME/korvid/logs/` (default `~/.local/share/korvid/logs/`) |
 | `p` | log pane | Reload pane with previous (terminated) container logs |
 | `n` / `N` | log pane | Jump to next / previous search hit |
 | `Ctrl-D` | table | Delete selected resource (confirm dialog; cluster-scoped kinds require typing the name) |

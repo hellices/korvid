@@ -18,6 +18,8 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.log_pane import LogPane
 from korvid.ui.widgets.resource_table import ResourceTable
 
+from .waits import until
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1115,33 +1117,31 @@ async def test_w_toggles_wrap_on_panels_and_header() -> None:
     stream = JsonFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(pilot, lambda: "greeting" in _richlog_text(app), label="first line")
 
         assert all(rl.wrap is False for rl in _panel_richlogs(app))
         assert "[wrap]" not in _header_text(app)
 
         await pilot.press("w")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "[wrap]" in _header_text(app), label="wrap tag on")
         assert all(rl.wrap is True for rl in _panel_richlogs(app))
-        assert "[wrap]" in _header_text(app)
         # Buffer content survives the wrap re-render.
         assert "greeting" in _richlog_text(app)
 
         await pilot.press("w")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "[wrap]" not in _header_text(app), label="wrap tag off")
         assert all(rl.wrap is False for rl in _panel_richlogs(app))
-        assert "[wrap]" not in _header_text(app)
 
 
 async def test_w_closed_no_crash() -> None:
     """Pressing w with the pane closed is a no-op."""
     app = make_app([_pod("myapp")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("w")
-        await pilot.pause(0.05)
+        await pilot.pause()
         assert app.query_one(LogPane).display is False
 
 
@@ -1150,15 +1150,15 @@ async def test_wrap_persists_across_reopen() -> None:
     stream = JsonFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(pilot, lambda: app.query_one(LogPane).display, label="pane open")
         await pilot.press("w")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "[wrap]" in _header_text(app), label="wrap tag on")
         await pilot.press("l")  # close
-        await pilot.pause(0.1)
+        await until(pilot, lambda: not app.query_one(LogPane).display, label="pane closed")
         await pilot.press("l")  # reopen
-        await pilot.pause(0.15)
+        await until(pilot, lambda: app.query_one(LogPane).display, label="pane open")
         assert all(rl.wrap is True for rl in _panel_richlogs(app))
         assert "[wrap]" in _header_text(app)
 
@@ -1197,35 +1197,33 @@ async def test_t_toggles_timestamp_prefix() -> None:
     stream = TimestampFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(pilot, lambda: "bare-line" in _richlog_text(app), label="lines fed")
 
         assert "10:30:45" not in _richlog_text(app)
         assert "[ts]" not in _header_text(app)
 
         await pilot.press("t")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "[ts]" in _header_text(app), label="ts tag on")
         text = _richlog_text(app)
         assert "10:30:45 stamped-line" in text
         # Lines without a parsed timestamp render unchanged.
         assert "bare-line" in text
         assert "10:30:45 bare-line" not in text
-        assert "[ts]" in _header_text(app)
 
         await pilot.press("t")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "[ts]" not in _header_text(app), label="ts tag off")
         assert "10:30:45" not in _richlog_text(app)
-        assert "[ts]" not in _header_text(app)
 
 
 async def test_t_closed_no_crash() -> None:
     """Pressing t with the pane closed is a no-op."""
     app = make_app([_pod("myapp")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("t")
-        await pilot.pause(0.05)
+        await pilot.pause()
         assert app.query_one(LogPane).display is False
 
 
@@ -1234,16 +1232,19 @@ async def test_timestamps_persist_across_reopen() -> None:
     stream = TimestampFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(pilot, lambda: app.query_one(LogPane).display, label="pane open")
         await pilot.press("t")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "[ts]" in _header_text(app), label="ts tag on")
         await pilot.press("l")  # close
-        await pilot.pause(0.1)
+        await until(pilot, lambda: not app.query_one(LogPane).display, label="pane closed")
         await pilot.press("l")  # reopen
-        await pilot.pause(0.15)
-        assert "10:30:45 stamped-line" in _richlog_text(app)
+        await until(
+            pilot,
+            lambda: "10:30:45 stamped-line" in _richlog_text(app),
+            label="stamped line after reopen",
+        )
         assert "[ts]" in _header_text(app)
 
 
@@ -1258,12 +1259,16 @@ async def test_ctrl_s_saves_buffer_and_notifies(monkeypatch: Any, tmp_path: Any)
     stream = JsonFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(pilot, lambda: "greeting" in _richlog_text(app), label="line buffered")
 
         await pilot.press("ctrl+s")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: list((tmp_path / "korvid" / "logs").glob("korvid-myapp-*.log")),
+            label="file saved",
+        )
 
         saved = list((tmp_path / "korvid" / "logs").glob("korvid-myapp-*.log"))
         assert len(saved) == 1
@@ -1277,9 +1282,9 @@ async def test_ctrl_s_closed_no_crash(monkeypatch: Any, tmp_path: Any) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     app = make_app([_pod("myapp")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("ctrl+s")
-        await pilot.pause(0.05)
+        await pilot.pause()
         assert not (tmp_path / "korvid" / "logs").exists()
 
 
@@ -1291,12 +1296,16 @@ async def test_ctrl_s_write_failure_notifies_error(monkeypatch: Any, tmp_path: A
     stream = JsonFakeStream()
     app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(pilot, lambda: "greeting" in _richlog_text(app), label="line buffered")
 
         await pilot.press("ctrl+s")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: any(n.severity == "error" for n in app._notifications),
+            label="error toast",
+        )
 
         errors = [n for n in app._notifications if n.severity == "error"]
         assert any("save" in n.message.lower() for n in errors)
@@ -1321,11 +1330,80 @@ async def test_config_seeds_wrap_and_timestamp_defaults() -> None:
         stream_logs=stream,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
         await pilot.press("l")
-        await pilot.pause(0.15)
+        await until(
+            pilot,
+            lambda: "10:30:45 stamped-line" in _richlog_text(app),
+            label="stamped line",
+        )
         assert all(rl.wrap is True for rl in _panel_richlogs(app))
         header = _header_text(app)
         assert "[wrap]" in header
         assert "[ts]" in header
-        assert "10:30:45 stamped-line" in _richlog_text(app)
+
+
+async def test_wrap_toggle_preserves_previous_banner() -> None:
+    """Toggling wrap in previous-log mode keeps the contextual banner."""
+    recording = RecordingFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=recording)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
+        await pilot.press("l")
+        await until(pilot, lambda: app.query_one(LogPane).display, label="pane open")
+        await pilot.press("p")
+        await until(pilot, lambda: "previous" in _richlog_text(app), label="previous banner")
+
+        await pilot.press("w")
+        await until(
+            pilot,
+            lambda: "[wrap]" in _header_text(app),
+            label="wrap tag after toggle",
+        )
+        assert "previous" in _richlog_text(app)
+
+
+async def test_timestamp_toggle_preserves_overflow_banner() -> None:
+    """Toggling timestamps after a buffer overflow keeps the overflow banner."""
+    store = ResourceStore()
+    pods = [_pod("myapp", containers=("main",))]
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, object]]:
+        for p in pods:
+            yield ("ADDED", p)
+        while True:
+            await asyncio.sleep(0.01)
+
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default", log_buffer_lines=1),
+        store=store,
+        watch_manager=WatchManager(store, source),  # type: ignore[arg-type]
+        stream_logs=_overflow_stream,
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="pod row")
+        await pilot.press("l")
+        await until(pilot, lambda: "overflowed" in _richlog_text(app), label="overflow banner")
+
+        await pilot.press("t")
+        await until(
+            pilot,
+            lambda: "[ts]" in _header_text(app),
+            label="ts tag after toggle",
+        )
+        assert "overflowed" in _richlog_text(app)
+
+
+async def _overflow_stream(
+    namespace: str,
+    pod: str,
+    container: str,
+    *,
+    previous: bool = False,
+    follow: bool = True,
+    tail_lines: int = 200,
+) -> AsyncGenerator[LogLine, None]:
+    for i in range(3):  # 3 lines into a 1-line buffer forces overflow
+        yield LogLine(pod=pod, container=container, text=f"line{i}")
+    if follow:
+        await asyncio.Event().wait()

@@ -102,6 +102,7 @@ class LogPane(Widget):
         self._search_hits: list[int] = []
         self._search_idx: int = 0
         self._log_buffer: LogBuffer | None = None
+        self._banners: list[str] = []
         self.formatted: bool = True
         self.wrap_lines: bool = False
         self.show_timestamps: bool = False
@@ -149,6 +150,7 @@ class LogPane(Widget):
         self._search_hits = []
         self._search_idx = 0
         self._log_buffer = log_buffer
+        self._banners = []
         # Hide the search input in case it was open from a previous session.
         self.query_one("#log-search", Input).display = False
 
@@ -183,14 +185,19 @@ class LogPane(Widget):
         self._write_line(line)
 
     def replay(self, lines: list[LogLine]) -> None:
-        """Re-render all *lines* using the current ``formatted`` setting.
+        """Re-render all *lines* using the current display settings.
 
-        Called by the App after toggling ``formatted`` so the whole visible
-        buffer is re-displayed without re-buffering.  The App provides the
-        lines from its ``LogBuffer``; this method only touches the RichLogs.
+        Called by the App after toggling ``formatted`` / ``wrap_lines`` /
+        ``show_timestamps`` so the whole visible buffer is re-displayed
+        without re-buffering.  Contextual banners (previous-logs, overflow)
+        are re-written at the top of each panel: their exact original
+        position is not recoverable from the buffer, and for both banner
+        kinds the top is where the information belongs after a replay.
         """
         for i in range(len(self._panel_keys)):
             self._panel(i).query_one(RichLog).clear()
+        for banner in self._banners:
+            self._write_banner_text(banner)
         for line in lines:
             self._write_line(line)
 
@@ -210,7 +217,15 @@ class LogPane(Widget):
         self.write_banner("\u2500\u2500 buffer overflowed; oldest lines dropped \u2500\u2500")
 
     def write_banner(self, text: str) -> None:
-        """Write a plain informational banner line to every visible panel."""
+        """Write an informational banner line to every visible panel.
+
+        Banners are remembered so ``replay()`` can restore them after the
+        panels are cleared by a display toggle.
+        """
+        self._banners.append(text)
+        self._write_banner_text(text)
+
+    def _write_banner_text(self, text: str) -> None:
         for i in range(len(self._panel_keys)):
             self._panel(i).query_one(RichLog).write(text)
 
@@ -221,6 +236,7 @@ class LogPane(Widget):
         self._search_hits = []
         self._search_idx = 0
         self._log_buffer = None
+        self._banners = []
         self.query_one("#log-search", Input).display = False
         for i in range(MAX_PANELS):
             panel = self._panel(i)
