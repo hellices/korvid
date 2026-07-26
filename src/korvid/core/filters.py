@@ -119,7 +119,11 @@ def _parse_name_token(token: str) -> tuple[_NamePredicate | None, str | None, st
             return None, "missing pattern after '~'", ""
         return _fuzzy(token[1:]), None, f"~{token[1:]}"
     pattern: str | None = None
-    if len(token) >= 2 and token.startswith("/") and token.endswith("/"):
+    if token.startswith("/"):
+        # Any slash-prefixed token is regex syntax; resource names cannot
+        # contain '/', so falling back to substring would empty the table.
+        if len(token) < 2 or not token.endswith("/"):
+            return None, f"unterminated regex {token!r}", ""
         pattern = token[1:-1]
     elif token.startswith("re:"):
         pattern = token[3:]

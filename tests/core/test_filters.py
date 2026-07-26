@@ -156,6 +156,18 @@ def test_negated_empty_regex_is_error_and_ignored() -> None:
     assert f.matches("anything")
 
 
+def test_unterminated_regex_is_error_and_ignored() -> None:
+    f = parse_filter("/foo")
+    assert f.error is not None
+    assert f.matches("anything")
+
+
+def test_negated_unterminated_regex_is_error_and_ignored() -> None:
+    f = parse_filter("!/[")
+    assert f.error is not None
+    assert f.matches("anything")
+
+
 # ---------------------------------------------------------------------------
 # Hide completed (-s)
 # ---------------------------------------------------------------------------
