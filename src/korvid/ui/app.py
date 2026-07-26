@@ -671,7 +671,19 @@ class KorvidApp(App[None]):
         # The stack clear happens inside the navigation lock so a concurrent
         # drill (agent path) can never interleave between clear and the
         # kind/scope transition, which would strand a filterless child view.
-        await self._navigate(message.view, message.namespace, drill_op=self._drill.clear)
+        namespace = message.namespace
+        if namespace is None and message.view is not None:
+            meta = self.aliases.get(message.view)
+            if meta is not None and (meta.group, meta.plural) == (
+                PACKAGES_GROUP,
+                "packagemanifests",
+            ):
+                # Catalog entries live in catalog namespaces (e.g. "olm"),
+                # not the user's workload namespace: `:operators` without an
+                # explicit namespace would commonly show an empty table, so
+                # the catalog view defaults to the cluster-wide scope.
+                namespace = ALL_NAMESPACES
+        await self._navigate(message.view, namespace, drill_op=self._drill.clear)
 
     async def _navigate(
         self,
@@ -2520,9 +2532,11 @@ class KorvidApp(App[None]):
 
         # The row namespace is where the catalog lives (e.g. "olm"), not
         # where the user works: prefill the wizard with the active view
-        # namespace instead, blank on the all-namespaces view.
+        # namespace, or the configured workload namespace on the
+        # all-namespaces view (the catalog default since `:operators`
+        # opens cluster-wide).
         view_ns = self.current_namespace
-        default_ns = view_ns if view_ns != ALL_NAMESPACES else ""
+        default_ns = view_ns if view_ns != ALL_NAMESPACES else (self.config.namespace or "")
         await self.push_screen(
             OperatorInstallPrompt(facts, namespace=default_ns),
             _on_choices,

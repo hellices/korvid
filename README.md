@@ -90,7 +90,9 @@ out.  This slice is read-only; install/upgrade/rollback lands separately.
 ## Operator catalog (OLM)
 
 Where [OLM](https://olm.operatorframework.io/) is installed, `:operators`
-opens the operator catalog: every PackageManifest the cluster's catalog
+opens the operator catalog cluster-wide (catalog entries live in catalog
+namespaces, so the view defaults to all namespaces; `:operators <ns>`
+scopes it): every PackageManifest the cluster's catalog
 sources serve, with its catalog, default channel, and available channels.
 `:subscriptions`, `:csv`, and `:installplans` show the installed side with
 typed columns (subscription channel/state, CSV version/phase).  Without

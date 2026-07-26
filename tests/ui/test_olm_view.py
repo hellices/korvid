@@ -9,7 +9,7 @@ from rich.text import Text
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
-from korvid.core.store import ResourceStore, Summary
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import (
@@ -150,8 +150,12 @@ def make_app(
     store = ResourceStore()
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        # Honor the watch scope like the real client does: catalog entries
+        # live in catalog namespaces (e.g. "olm"), so a namespace-scoped
+        # watch must not leak them into an unrelated workload namespace.
         for obj in data.get(kind, []):
-            yield ("ADDED", obj)
+            if scope == ALL_NAMESPACES or obj.namespace == scope:
+                yield ("ADDED", obj)
         while True:
             await asyncio.sleep(0.01)
 
@@ -191,12 +195,23 @@ async def test_operators_command_lists_packagemanifests_with_catalog_columns() -
         await _navigate(pilot, "operators", "packagemanifests")
         table = app.query_one(ResourceTable)
         labels = [str(col.label) for col in table.columns.values()]
-        assert labels == ["NAME", "CATALOG", "DEFAULT CHANNEL", "CHANNELS", "DESCRIPTION", "AGE"]
+        # `:operators` opens cluster-wide (catalogs live in their own
+        # namespaces), so the NAMESPACE column leads.
+        assert labels == [
+            "NAMESPACE",
+            "NAME",
+            "CATALOG",
+            "DEFAULT CHANNEL",
+            "CHANNELS",
+            "DESCRIPTION",
+            "AGE",
+        ]
         await until(pilot, lambda: table.row_count == 2, label="packages listed")
-        rows = {str(table.get_row_at(i)[0]): table.get_row_at(i) for i in range(2)}
-        assert str(rows["cert-manager"][1]) == "operatorhubio-catalog"
-        assert str(rows["cert-manager"][2]) == "stable"
-        assert str(rows["cert-manager"][3]) == "candidate,stable"
+        rows = {str(table.get_row_at(i)[1]): table.get_row_at(i) for i in range(2)}
+        assert str(rows["cert-manager"][0]) == "olm"
+        assert str(rows["cert-manager"][2]) == "operatorhubio-catalog"
+        assert str(rows["cert-manager"][3]) == "stable"
+        assert str(rows["cert-manager"][4]) == "candidate,stable"
 
 
 async def test_operators_command_without_olm_explains_why() -> None:
@@ -555,3 +570,28 @@ async def test_install_fetches_manifest_by_canonical_view_kind(tmp_path: Path) -
             pilot, lambda: isinstance(app.screen, OperatorInstallPrompt), label="wizard open"
         )
         assert fetch_log == [qualified]
+
+
+async def test_operators_command_defaults_to_all_namespaces() -> None:
+    """Catalog entries live in catalog namespaces (e.g. "olm"), not the
+    user's workload namespace: a bare `:operators` (and any packagemanifests
+    view without an explicit namespace) must default to the cluster-wide
+    scope or the table would commonly come up empty."""
+    app = make_app({"packagemanifests": [_package("cert-manager")]})
+    async with app.run_test() as pilot:
+        assert app.current_scope == "operators"  # workload namespace from config
+        await _navigate(pilot, "operators", "packagemanifests")
+        assert app.current_scope == ALL_NAMESPACES
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="catalog listed cluster-wide")
+
+
+async def test_operators_command_honors_explicit_namespace() -> None:
+    """An explicitly supplied namespace still wins over the all-namespaces
+    default (`:operators olm`)."""
+    app = make_app({"packagemanifests": [_package("cert-manager")]})
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "operators olm", "packagemanifests")
+        assert app.current_scope == "olm"
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="catalog listed in olm ns")
