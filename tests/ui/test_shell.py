@@ -614,6 +614,7 @@ async def test_debug_fallback_offered_with_permission(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             await pilot.press("s")
             await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            assert isinstance(app.screen, PickScreen)
 
 
 # ---------------------------------------------------------------------------

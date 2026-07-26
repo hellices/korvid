@@ -221,19 +221,29 @@ def find_pull_failure(
     """Return the pull-failure reason for `image`'s ephemeral container, if any.
 
     Scans `status.ephemeralContainerStatuses` for a waiting state with
-    `ErrImagePull`/`ImagePullBackOff` on a container running `image` (compared
-    after `:latest` normalization, since Kubernetes reports untagged references
-    with an explicit `:latest`). Entries named in `ignore` (pre-existing
-    containers snapshotted before the attach) are skipped, so a stale failure
-    from an earlier attempt with the same image never kills a new attach that
-    is pulling fine.
+    `ErrImagePull`/`ImagePullBackOff` on a container running `image`. Each
+    status entry is correlated by name with its `spec.ephemeralContainers`
+    declaration and the declared image is compared (after `:latest`
+    normalization) - container runtimes may canonicalize the status image
+    (`docker.io/library/` prefix, digests) while the spec preserves the
+    requested spelling. Entries named in `ignore` (pre-existing containers
+    snapshotted before the attach) are skipped, so a stale failure from an
+    earlier attempt with the same image never kills a new attach that is
+    pulling fine.
     """
     wanted = _normalize_image_ref(image)
+    spec = manifest.get("spec") or {}
+    declared_images = {
+        str(entry.get("name") or ""): str(entry.get("image") or "")
+        for entry in spec.get("ephemeralContainers") or []
+    }
     status = manifest.get("status") or {}
     for entry in status.get("ephemeralContainerStatuses") or []:
-        if str(entry.get("name") or "") in ignore:
+        name = str(entry.get("name") or "")
+        if name in ignore:
             continue
-        if _normalize_image_ref(str(entry.get("image") or "")) != wanted:
+        declared = declared_images.get(name) or str(entry.get("image") or "")
+        if _normalize_image_ref(declared) != wanted:
             continue
         waiting = (entry.get("state") or {}).get("waiting") or {}
         reason = waiting.get("reason")

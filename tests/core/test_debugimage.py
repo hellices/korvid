@@ -351,6 +351,43 @@ def test_find_pull_failure_different_tags_do_not_match() -> None:
     assert find_pull_failure(manifest, "busybox:1.36") is None
 
 
+def test_find_pull_failure_matches_spec_declared_image_when_status_canonicalized() -> None:
+    # Container runtimes may canonicalize the status image (docker.io/library/
+    # prefix, or a digest); the spec entry preserves the requested spelling,
+    # so the correlation must go through the ephemeral container's name.
+    manifest = {
+        "spec": {"ephemeralContainers": [{"name": "debugger", "image": "busybox:1.36"}]},
+        "status": {
+            "ephemeralContainerStatuses": [
+                {
+                    "name": "debugger",
+                    "image": "docker.io/library/busybox:1.36",
+                    "state": {"waiting": {"reason": "ErrImagePull"}},
+                }
+            ]
+        },
+    }
+    assert find_pull_failure(manifest, "busybox:1.36") == "ErrImagePull"
+
+
+def test_find_pull_failure_spec_declared_other_image_not_blamed() -> None:
+    # The spec-declared image wins over a coincidentally similar status image:
+    # a failure on a different requested image is not this attach's failure.
+    manifest = {
+        "spec": {"ephemeralContainers": [{"name": "debugger", "image": "other:1"}]},
+        "status": {
+            "ephemeralContainerStatuses": [
+                {
+                    "name": "debugger",
+                    "image": "busybox:1.36",
+                    "state": {"waiting": {"reason": "ErrImagePull"}},
+                }
+            ]
+        },
+    }
+    assert find_pull_failure(manifest, "busybox:1.36") is None
+
+
 def test_ephemeral_container_names() -> None:
     manifest = _pod_with_ephemeral_status("busybox:1.36", "ErrImagePull")
     assert ephemeral_container_names(manifest) == frozenset({"debugger-abc"})
