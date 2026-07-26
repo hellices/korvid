@@ -36,8 +36,13 @@ class PodMetrics:
 
 def parse_pod_metrics_list(data: dict[str, Any]) -> list[PodMetrics]:
     """Parse a PodMetricsList document; malformed items are skipped, never fatal."""
+    items = data.get("items")
+    if not isinstance(items, list):
+        return []
     metrics: list[PodMetrics] = []
-    for item in data.get("items") or []:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
         parsed = _parse_item(item)
         if parsed is not None:
             metrics.append(parsed)
@@ -45,9 +50,14 @@ def parse_pod_metrics_list(data: dict[str, Any]) -> list[PodMetrics]:
 
 
 def _parse_item(item: dict[str, Any]) -> PodMetrics | None:
-    meta = item.get("metadata") or {}
+    meta = item.get("metadata")
+    if not isinstance(meta, dict):
+        return None
     name = meta.get("name")
-    if not isinstance(name, str) or not name:
+    namespace = meta.get("namespace")
+    # The UI joins on (namespace, name): an item missing either can never
+    # match a pod row, so it is dropped rather than stored unreachable.
+    if not isinstance(name, str) or not name or not isinstance(namespace, str) or not namespace:
         return None
     cpu = 0.0
     memory = 0
@@ -63,7 +73,7 @@ def _parse_item(item: dict[str, Any]) -> PodMetrics | None:
         return None
     return PodMetrics(
         name=name,
-        namespace=str(meta.get("namespace") or ""),
+        namespace=namespace,
         cpu_cores=cpu,
         memory_bytes=memory,
     )

@@ -19,7 +19,7 @@ from korvid.ui.widgets.resource_table import ResourceTable
 from .test_app import _DEFAULT_TEST_ALIASES, _pod
 
 
-def _source(pods: list[PodSummary]):  # type: ignore[no-untyped-def]
+def _source(pods: list[PodSummary]):  # type: ignore[no-untyped-def]  # returns a local async generator fn; annotating it adds noise, not safety
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         if kind == "pods":
             for p in pods:
@@ -72,10 +72,12 @@ def _pod_with_requests(name: str) -> PodSummary:
         node=None,
         cpu_request="200m",
         mem_request="256Mi",
+        cpu_request_cores=0.2,
+        mem_request_bytes=256 * 2**20,
     )
 
 
-async def _until(pilot, predicate, tries: int = 100) -> None:  # type: ignore[no-untyped-def]
+async def _until(pilot, predicate, tries: int = 100) -> None:  # type: ignore[no-untyped-def]  # deterministic wait: poll an observable condition instead of a fixed sleep
     for _ in range(tries):
         if predicate():
             return

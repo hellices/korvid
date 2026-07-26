@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from korvid.k8s.models import GenericSummary, PodSummary, ReplicaSetSummary, summary_for
 
 POD: dict[str, Any] = {
@@ -761,3 +763,36 @@ class TestDisplayPhase:
             )
         )
         assert pod.phase == "SchedulingGated"
+
+
+class TestExactRequestValues:
+    """PodSummary carries exact effective request values (issue #12 review:
+    percent-of-request must not be computed from display-rounded strings)."""
+
+    def test_from_manifest_fills_exact_requests(self) -> None:
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {
+                "containers": [
+                    {
+                        "name": "c",
+                        "resources": {"requests": {"cpu": "150m", "memory": "1500Ki"}},
+                    }
+                ]
+            },
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_request_cores == pytest.approx(0.15)
+        assert pod.mem_request_bytes == 1500 * 2**10
+        assert pod.mem_request == "1Mi"  # display string still rounds
+
+    def test_no_requests_gives_none(self) -> None:
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {"containers": [{"name": "c"}]},
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_request_cores is None
+        assert pod.mem_request_bytes is None

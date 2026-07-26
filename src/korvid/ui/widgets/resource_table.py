@@ -16,8 +16,6 @@ from korvid.k8s.models import (
     ReplicaSetSummary,
     format_cpu,
     format_memory,
-    parse_cpu,
-    parse_memory,
 )
 from korvid.ui.theme import phase_style, ready_style, restarts_style, usage_style
 
@@ -66,16 +64,14 @@ def _restarts_cell(restarts: int) -> Text:
     return Text(str(restarts), style=restarts_style(restarts))
 
 
-def _percent_of_request(usage: float, request_text: str, parse: Callable[[str], float]) -> Text:
-    """Usage as % of the declared request; '-' when no request is declared."""
-    try:
-        request = parse(request_text)
-    except ValueError:
-        request = 0.0
-    if request <= 0:
+def _percent_of_request(usage: float, request: float | None) -> Text:
+    """Usage as % of the exact declared request; '-' when no request is
+    declared. The style is applied to the *rounded* value so the number the
+    user reads and its colour always agree (69.9 renders as 70 - yellow)."""
+    if request is None or request <= 0:
         return Text("-", style="dim")
-    percent = usage / request * 100
-    return Text(str(round(percent)), style=usage_style(percent))
+    displayed = round(usage / request * 100)
+    return Text(str(displayed), style=usage_style(displayed))
 
 
 def _usage_cells(pod: PodSummary, metrics: PodMetrics | None) -> tuple[Text, Text, Text, Text]:
@@ -86,10 +82,11 @@ def _usage_cells(pod: PodSummary, metrics: PodMetrics | None) -> tuple[Text, Tex
         return (dash, dash.copy(), dash.copy(), dash.copy())
     return (
         Text(format_cpu(metrics.cpu_cores)),
-        _percent_of_request(metrics.cpu_cores, pod.cpu_request, parse_cpu),
+        _percent_of_request(metrics.cpu_cores, pod.cpu_request_cores),
         Text(format_memory(metrics.memory_bytes)),
         _percent_of_request(
-            float(metrics.memory_bytes), pod.mem_request, lambda q: float(parse_memory(q))
+            float(metrics.memory_bytes),
+            None if pod.mem_request_bytes is None else float(pod.mem_request_bytes),
         ),
     )
 

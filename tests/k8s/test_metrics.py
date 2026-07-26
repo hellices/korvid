@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -36,7 +37,7 @@ class TestParsePodMetricsList:
         assert metrics[0] == PodMetrics(
             name="web-1",
             namespace="default",
-            cpu_cores=pytest.approx(0.15),  # type: ignore[arg-type]
+            cpu_cores=pytest.approx(0.15),  # type: ignore[arg-type]  # approx compares equal to float in the dataclass __eq__
             memory_bytes=192 * 2**20,
         )
         assert metrics[1].cpu_cores == pytest.approx(1.0)
@@ -190,3 +191,34 @@ async def test_poller_stop_is_idempotent_and_cancels() -> None:
     count = len(calls)
     await asyncio.sleep(0.05)
     assert len(calls) == count  # no polling after stop
+
+
+class TestParseGuards:
+    def test_skips_non_mapping_items_and_metadata(self) -> None:
+        """Review round 1: a null item or non-object metadata must be skipped,
+        not abort the whole poll with AttributeError."""
+        data: dict[str, Any] = {
+            "items": [
+                None,
+                "bogus",
+                {"metadata": None, "containers": []},
+                {"metadata": "nope", "containers": []},
+                {"metadata": {"name": "ok", "namespace": "ns"}, "containers": []},
+            ]
+        }
+        metrics = parse_pod_metrics_list(data)
+        assert [m.name for m in metrics] == ["ok"]
+
+    def test_skips_items_without_namespace(self) -> None:
+        """The lookup key is (namespace, name); an item without a namespace
+        can never join a pod row."""
+        data = {
+            "items": [
+                {"metadata": {"name": "orphan"}, "containers": []},
+                {"metadata": {"name": "ok", "namespace": "ns"}, "containers": []},
+            ]
+        }
+        assert [m.name for m in parse_pod_metrics_list(data)] == ["ok"]
+
+    def test_non_list_items_yields_empty(self) -> None:
+        assert parse_pod_metrics_list({"items": "bogus"}) == []

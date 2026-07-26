@@ -20,6 +20,7 @@ from typing import Any, ClassVar, Literal
 import yaml
 from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
+from textual.css.query import NoMatches
 from textual.events import Key
 from textual.widgets import DataTable, Footer, Static
 
@@ -369,7 +370,11 @@ class KorvidApp(App[None]):
     SPLASH_MIN_SECONDS = 1.2
 
     def _dismiss_splash(self) -> None:
-        splash = self.query_one(SplashLogo)
+        try:
+            splash = self.query_one(SplashLogo)
+            table = self.query_one(ResourceTable)
+        except NoMatches:
+            return  # app is shutting down; a queued render must not crash
         if not splash.display:
             return
         if not self.is_headless:
@@ -378,7 +383,7 @@ class KorvidApp(App[None]):
                 self.set_timer(remaining, self._dismiss_splash)
                 return
         splash.display = False
-        self.query_one(ResourceTable).display = True
+        table.display = True
 
     def on_aliases_updated(self) -> None:
         """Refresh command autocompletion after background resource discovery."""
@@ -411,7 +416,10 @@ class KorvidApp(App[None]):
         """Single choke point: table rows and empty-state always update together."""
         # First store notification: replace the startup splash with real content.
         self._dismiss_splash()
-        table = self.query_one(ResourceTable)
+        try:
+            table = self.query_one(ResourceTable)
+        except NoMatches:
+            return  # shutdown race: a queued render after widgets are removed
         rows = self.store.get(kind, self.current_scope)
         drill_uid = self._drill.parent_uid
         if drill_uid is not None and kind == self._drill.child_kind:

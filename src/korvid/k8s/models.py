@@ -77,13 +77,14 @@ def _quantities(containers: list[dict[str, Any]], bucket: str, key: str) -> list
     ]
 
 
-def _effective_resource(spec: dict[str, Any], bucket: str, key: str) -> str:
-    """Effective pod resource per the scheduler.
+def _effective_value(spec: dict[str, Any], bucket: str, key: str) -> float | int | None:
+    """Effective pod resource per the scheduler, as an exact numeric value.
 
     max(max(classic initContainers), sum(containers) + sum(sidecars)) where
     sidecars are initContainers with restartPolicy: Always (K8s 1.28+): they
     run for the pod's lifetime so they add to the sum, not the init max.
-    Returns '-' when nothing is declared.
+    Returns None when nothing is declared. CPU is cores (float), memory is
+    bytes (int).
     """
     init_containers = spec.get("initContainers") or []
     sidecars = [c for c in init_containers if c.get("restartPolicy") == "Always"]
@@ -91,18 +92,29 @@ def _effective_resource(spec: dict[str, Any], bucket: str, key: str) -> str:
     main = _quantities((spec.get("containers") or []) + sidecars, bucket, key)
     init = _quantities(classic_init, bucket, key)
     if not main and not init:
-        return "-"
+        return None
     if key == "cpu":
-        total = max(
+        return max(
             sum(parse_cpu(v) for v in main),
             max((parse_cpu(v) for v in init), default=0.0),
         )
-        return format_cpu(total)
-    total_mem = max(
+    return max(
         sum(parse_memory(v) for v in main),
         max((parse_memory(v) for v in init), default=0),
     )
-    return format_memory(total_mem)
+
+
+def _format_effective(value: float | int | None, key: str) -> str:
+    """Display string for an effective resource value; '-' when undeclared."""
+    if value is None:
+        return "-"
+    if key == "cpu":
+        return format_cpu(float(value))
+    return format_memory(int(value))
+
+
+def _effective_resource(spec: dict[str, Any], bucket: str, key: str) -> str:
+    return _format_effective(_effective_value(spec, bucket, key), key)
 
 
 def _owner_uids(meta: dict[str, Any]) -> tuple[str, ...]:
@@ -351,6 +363,10 @@ class PodSummary:
     mem_request: str = "-"
     cpu_limit: str = "-"
     mem_limit: str = "-"
+    #: Exact effective requests for ratio math; the display strings above are
+    #: rounded (1500Ki renders as 1Mi) and must never feed a percentage.
+    cpu_request_cores: float | None = None
+    mem_request_bytes: int | None = None
     containers: tuple[str, ...] = ()
     uid: str = ""
     owner_uids: tuple[str, ...] = ()
@@ -363,6 +379,8 @@ class PodSummary:
         statuses: list[dict[str, Any]] = status.get("containerStatuses") or []
         ready_count = sum(1 for s in statuses if s.get("ready"))
         restarts = sum(int(s.get("restartCount", 0)) for s in statuses)
+        cpu_request = _effective_value(spec, "requests", "cpu")
+        mem_request = _effective_value(spec, "requests", "memory")
         return cls(
             name=str(meta.get("name", "")),
             namespace=str(meta.get("namespace", "")),
@@ -371,10 +389,12 @@ class PodSummary:
             restarts=restarts,
             node=spec.get("nodeName"),
             qos=str(status.get("qosClass") or "-"),
-            cpu_request=_effective_resource(spec, "requests", "cpu"),
-            mem_request=_effective_resource(spec, "requests", "memory"),
+            cpu_request=_format_effective(cpu_request, "cpu"),
+            mem_request=_format_effective(mem_request, "memory"),
             cpu_limit=_effective_resource(spec, "limits", "cpu"),
             mem_limit=_effective_resource(spec, "limits", "memory"),
+            cpu_request_cores=None if cpu_request is None else float(cpu_request),
+            mem_request_bytes=None if mem_request is None else int(mem_request),
             containers=tuple(
                 str(c["name"]) for c in (spec.get("containers") or []) if c.get("name")
             ),
