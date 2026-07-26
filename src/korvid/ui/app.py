@@ -6,14 +6,19 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
+import os
+import shlex
 import shutil
 import subprocess
+import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
+from pathlib import Path
 from time import monotonic
 from typing import Any, ClassVar, Literal
 
-from textual.app import App, ComposeResult
+import yaml
+from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.events import Key
 from textual.widgets import DataTable, Footer, Static
@@ -82,6 +87,43 @@ _APPROVAL_TIMEOUT = 120.0
 #: endpoint must never hang a binding handler or an agent turn. On timeout
 #: the check fails open (writes stay approval-gated and audited).
 _PERMISSION_CHECK_TIMEOUT = 10.0
+
+
+def _yaml_equal(a: object, b: object) -> bool:
+    """Type-sensitive structural equality for parsed YAML documents.
+    Python's ``==`` conflates YAML booleans and integers (``True == 1``),
+    and comparing ``yaml.safe_dump`` output is not canonical either: shared
+    nodes are emitted as anchors/aliases, so an aliased-but-equal document
+    would falsely report a change. Compare recursively instead, requiring
+    identical scalar types (including mapping keys)."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict) and isinstance(b, dict):
+        if len(a) != len(b):
+            return False
+        # Fast path for the overwhelmingly common case of string-keyed
+        # mappings: direct lookup is O(n), and str-to-str comparison has
+        # no cross-type conflation. Kubernetes objects can be large (a
+        # ConfigMap may carry thousands of data keys), so the structural
+        # scan below must not run on every comparison.
+        if all(isinstance(k, str) for k in a) and all(isinstance(k, str) for k in b):
+            return all(key in b and _yaml_equal(value, b[key]) for key, value in a.items())
+        # Unusual YAML key types: key lookup would conflate True/1 the same
+        # way == does, so match key/value pairs structurally. Quadratic,
+        # but such mappings are rare and rejected upstream for manifests.
+        b_items = list(b.items())
+        return all(
+            any(
+                _yaml_equal(a_key, b_key) and _yaml_equal(a_value, b_value)
+                for b_key, b_value in b_items
+            )
+            for a_key, a_value in a.items()
+        )
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_yaml_equal(x, y) for x, y in zip(a, b, strict=True))
+    return a == b
+
+
 #: Upper bound on the pre-approval uid lookup: a stalled API server must
 #: never leave an agent tool call (or the debug offer) pending indefinitely.
 #: On timeout the lookup fails open (write proceeds without a precondition,
@@ -156,6 +198,7 @@ class KorvidApp(App[None]):
         Binding("ctrl+d", "delete_resource", "Delete"),
         Binding("r", "rollout_restart", "Restart", show=False),
         Binding("S", "scale_resource", "Scale", show=False),
+        Binding("e", "edit_resource", "Edit", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -190,6 +233,7 @@ class KorvidApp(App[None]):
         check_permission: Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
         | None = None,
         mcp: MCPController | None = None,
+        edit_text: Callable[[str], Awaitable[str | None]] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -203,6 +247,7 @@ class KorvidApp(App[None]):
         self._audit = audit
         self._check_permission = check_permission
         self._mcp = mcp
+        self._edit_text = edit_text
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -1204,6 +1249,7 @@ class KorvidApp(App[None]):
         "scale": ("patch", "scale"),
         "rollout_restart": ("patch", ""),
         "debug": ("patch", "ephemeralcontainers"),
+        "edit": ("update", ""),
     }
 
     @staticmethod
@@ -1262,31 +1308,41 @@ class KorvidApp(App[None]):
         return meta, namespace, name, self._selected_uid(namespace, name)
 
     def _write_context_intact(
-        self, action: str, meta: ResourceMeta, ns: str | None, name: str
+        self,
+        action: str,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        phase: str = "the permission check",
     ) -> bool:
-        """Re-validate after an awaited pre-check, before pushing a dialog:
-        the permission check is an API round-trip, so the user may have opened
-        another screen or moved the selection meanwhile - and keystrokes typed
-        during the await must never land on a confirmation they did not see.
-        Abort (with a notification) unless the base screen is still on top and
-        the same row is still selected."""
+        """Re-validate after an awaited gap (the RBAC round-trip, or an
+        editor session - named by ``phase`` so cancellation messages state
+        the true cause), before pushing a dialog: the user may have opened
+        another screen or moved the selection meanwhile - and keystrokes
+        typed during the await must never land on a confirmation they did
+        not see. Abort (with a notification) unless the base screen is still
+        on top and the same row is still selected."""
         if len(self.screen_stack) > 1:
             self.notify(
                 f"{action} {self._gvr_label(meta)}/{name} cancelled -"
-                " another dialog opened during the permission check",
+                f" another dialog opened during {phase}",
                 severity="warning",
             )
             return False
         kind = self._canonical_kind(self.current_kind)
         current_ns, current_name = self._selected_ns_name()
         if (
-            self.aliases.get(kind) is not meta
+            # Value comparison, not identity: background discovery replaces
+            # alias values with freshly constructed (equal) ResourceMeta
+            # instances, which must not cancel a write on the same row -
+            # the editor round-trip in particular is arbitrarily long.
+            self.aliases.get(kind) != meta
             or current_name != name
             or (meta.namespaced and (current_ns or None) != ns)
         ):
             self.notify(
                 f"{action} {self._gvr_label(meta)}/{name} cancelled -"
-                " the selection changed during the permission check",
+                f" the selection changed during {phase}",
                 severity="warning",
             )
             return False
@@ -1492,6 +1548,196 @@ class KorvidApp(App[None]):
             ),
             _done,
         )
+
+    async def _fetch_manifest_for_edit(
+        self, label: str, meta: ResourceMeta, ns: str | None, name: str
+    ) -> dict[str, Any] | None:
+        """Fetch the manifest for an edit; None (with a notification) aborts.
+        The fetch is another awaited round-trip: a selection change while it
+        was in flight must abort before the editor opens for a stale target,
+        not merely discard the completed edit afterwards."""
+        if self._get_manifest is None:
+            return None
+        try:
+            manifest = await self._get_manifest(self._canonical_kind(self.current_kind), ns, name)
+        except Exception as exc:
+            self.notify(f"edit {label} failed: {exc}", severity="error")
+            return None
+        if not self._write_context_intact("edit", meta, ns, name, phase="the manifest fetch"):
+            return None
+        # managedFields is server-side bookkeeping noise; kubectl edit hides
+        # it too. resourceVersion stays so concurrent modifications 409.
+        metadata = manifest.get("metadata")
+        if isinstance(metadata, dict):
+            metadata.pop("managedFields", None)
+        return manifest
+
+    async def action_edit_resource(self) -> None:
+        """e: open the selected resource's manifest in $EDITOR and PUT the
+        edited version back (kubectl edit parity)."""
+        ops = self._write_ops
+        if ops is None or self._get_manifest is None:
+            self.notify("Edit unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name, uid = target
+        if not await self._precheck_keybinding_write("edit", meta, ns, name):
+            return
+        label = f"{self._gvr_label(meta)}/{name}"
+        manifest = await self._fetch_manifest_for_edit(label, meta, ns, name)
+        if manifest is None:
+            return
+        original_text = yaml.safe_dump(manifest, sort_keys=False)
+        edit = self._edit_text or self._edit_in_external_editor
+        edited = self._parse_edited_manifest(
+            label, manifest, original_text, await edit(original_text)
+        )
+        if edited is None:
+            return
+        # The editor round-trip is arbitrarily long: re-validate that the
+        # same row is still selected before pushing the confirmation.
+        if not self._write_context_intact("edit", meta, ns, name, phase="the editor session"):
+            return
+        detail = self._edit_detail(manifest, edited)
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_write(
+                        "edit",
+                        meta,
+                        ns,
+                        name,
+                        ops.replace_object(meta, ns, name, edited, uid=uid),
+                        detail=detail,
+                    )
+                )
+
+        await self.push_screen(
+            ConfirmScreen(
+                f"Apply edited {label}?",
+                # Issue #21: the approval dialog summarizes the change, not
+                # just the target and verb.
+                f"PUT {label}{self._write_locus(ns)} - {detail}",
+            ),
+            _done,
+        )
+
+    def _parse_edited_manifest(
+        self,
+        label: str,
+        original: dict[str, Any],
+        original_text: str,
+        edited_text: str | None,
+    ) -> dict[str, Any] | None:
+        """Validate the editor output; None (with a notification) aborts the
+        edit. Re-injects the fetched resourceVersion if the user deleted it -
+        an unversioned PUT would silently clobber concurrent changes."""
+        if edited_text is None:
+            self.notify(f"edit {label} cancelled", severity="warning")
+            return None
+        if edited_text == original_text:
+            self.notify(f"edit {label}: no changes", severity="information")
+            return None
+        try:
+            parsed = yaml.safe_load(edited_text)
+        except yaml.YAMLError as exc:
+            self.notify(f"edit {label} aborted: invalid YAML: {exc}", severity="error")
+            return None
+        if not isinstance(parsed, dict):
+            self.notify(f"edit {label} aborted: not a mapping", severity="error")
+            return None
+        if any(not isinstance(key, str) for key in parsed):
+            # YAML legally allows non-string mapping keys, but a manifest
+            # never has them and the change summary sorts keys together.
+            self.notify(f"edit {label} aborted: non-string top-level key", severity="error")
+            return None
+        # Restore the fetched resourceVersion *before* the semantic no-op
+        # comparison: an edit that only deleted it is still "no changes",
+        # and `metadata: null` must not defeat the restore - an unversioned
+        # PUT would silently clobber concurrent changes.
+        original_meta = original.get("metadata")
+        rv = original_meta.get("resourceVersion") if isinstance(original_meta, dict) else None
+        if rv is not None:
+            parsed_meta = parsed.get("metadata")
+            if not isinstance(parsed_meta, dict):
+                parsed_meta = {}
+                parsed["metadata"] = parsed_meta
+            # Not setdefault: a blank `resourceVersion:` loads as None - the
+            # key is present but the PUT would still be unversioned.
+            edited_rv = parsed_meta.get("resourceVersion")
+            if not (isinstance(edited_rv, str) and edited_rv):
+                parsed_meta["resourceVersion"] = rv
+        if _yaml_equal(parsed, original):
+            self.notify(f"edit {label}: no changes", severity="information")
+            return None
+        return parsed
+
+    @staticmethod
+    def _edit_detail(original: dict[str, Any], edited: dict[str, Any]) -> str:
+        """Audit detail: which top-level sections changed. Key presence is
+        checked separately (dict.get returns None for both an absent key and
+        a present null key) and values compare YAML-canonically."""
+        changed = sorted(
+            key
+            for key in set(original) | set(edited)
+            if (key in original) != (key in edited)
+            or not _yaml_equal(original.get(key), edited.get(key))
+        )
+        return "changed: " + ", ".join(changed)
+
+    async def _edit_in_external_editor(self, text: str) -> str | None:
+        """Suspend the TUI and open $VISUAL/$EDITOR (vi fallback) on a temp
+        file; None cancels. Invocation and I/O failures (missing executable,
+        malformed quoting, temp-dir exhaustion, undecodable editor output)
+        abort with a notification instead of an unhandled action error. The
+        blocking call runs in a thread so background tasks keep running
+        while the editor is open."""
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+        try:
+            fd, tmp = tempfile.mkstemp(suffix=".yaml", prefix="korvid-edit-")
+        except OSError as exc:
+            self.notify(f"edit temp file failed: {exc}", severity="error")
+            return None
+        try:
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                argv = shlex.split(editor)
+                if not argv:
+                    # A whitespace-only $VISUAL/$EDITOR passes the fallback
+                    # expression but yields no executable to run.
+                    raise ValueError("empty editor command")
+                argv.append(tmp)
+                with self.suspend():
+                    code = await asyncio.to_thread(subprocess.call, argv)
+            except SuspendNotSupported:
+                # Windows and other non-suspending drivers: cancel with a
+                # notification instead of an unhandled action error.
+                self.notify(
+                    "edit unavailable: this environment does not support"
+                    " suspending the TUI for an external editor",
+                    severity="error",
+                )
+                return None
+            except (OSError, ValueError) as exc:
+                self.notify(f"editor {editor!r} failed: {exc}", severity="error")
+                return None
+            self.refresh()
+            if code != 0:
+                return None
+            try:
+                # Explicit UTF-8: a locale mismatch or binary editor output
+                # raises UnicodeDecodeError (a ValueError, not an OSError).
+                return Path(tmp).read_text(encoding="utf-8")
+            except (OSError, ValueError) as exc:
+                self.notify(f"editor result unreadable: {exc}", severity="error")
+                return None
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
     def _current_replicas(self, ns: str | None, name: str) -> int | None:
         """Desired replicas of the selected row, or None when the summary type

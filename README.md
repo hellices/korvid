@@ -31,6 +31,7 @@ but every one is approval-gated and audited; `--readonly` disables them all.
 | `Ctrl-D` | table | Delete selected resource (confirm dialog; cluster-scoped kinds require typing the name) |
 | `r` | table | Rolling restart of selected deployment / statefulset / daemonset (confirm dialog) |
 | `S` | table | Scale selected deployment / replicaset / statefulset (replica prompt + confirm dialog) |
+| `e` | table | Edit selected resource manifest in `$VISUAL`/`$EDITOR` (kubectl edit style; confirm dialog before the PUT) |
 | `Ctrl-A` | global | Toggle AI agent panel |
 | `q` | global | Quit |
 | `Esc` | log pane | Close pane (or dismiss search / filter bar) |
