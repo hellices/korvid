@@ -29,6 +29,8 @@ from korvid.ui.app import KorvidApp, _yaml_equal
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 
+from .waits import until
+
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
 _NODES_META = ResourceMeta("Node", "nodes", "", "v1", False, ("no",))
@@ -160,14 +162,6 @@ async def _to_view(pilot, view: str) -> None:  # type: ignore[no-untyped-def]  #
     await pilot.pause(0.1)
 
 
-async def _until(pilot, cond, timeout: float = 5.0) -> None:  # type: ignore[no-untyped-def]  # deterministic wait: poll an observable condition instead of a fixed sleep
-    for _ in range(int(timeout / 0.05)):
-        if cond():
-            return
-        await pilot.pause(0.05)
-    raise AssertionError("condition not met within timeout")
-
-
 async def test_ctrl_d_delete_confirmed_executes_and_audits(tmp_path: Path) -> None:
     rec = Recorder()
     audit_path = tmp_path / "audit.jsonl"
@@ -175,9 +169,9 @@ async def test_ctrl_d_delete_confirmed_executes_and_audits(tmp_path: Path) -> No
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("ctrl+d")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
         assert rec.calls == [("delete", "pods", "default", "web-1")]
         lines = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert lines[0]["outcome"] == "intent"  # recorded before the write ran
@@ -228,7 +222,7 @@ async def test_cluster_scoped_delete_requires_typed_name(tmp_path: Path) -> None
         for ch in "worker-1":
             await pilot.press(ch)
         await pilot.press("enter")
-        await _until(pilot, lambda: rec.calls)
+        await until(pilot, lambda: rec.calls)
         assert rec.calls == [("delete", "nodes", None, "worker-1")]
 
 
@@ -239,9 +233,9 @@ async def test_rollout_restart_on_deployment(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await _to_view(pilot, "deployments")
         await pilot.press("r")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(pilot, lambda: rec.calls)
+        await until(pilot, lambda: rec.calls)
         assert rec.calls == [("restart", "deployments", "default", "web")]
 
 
@@ -263,12 +257,12 @@ async def test_scale_flow_prompts_then_confirms(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await _to_view(pilot, "deployments")
         await pilot.press("S")
-        await _until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
         await pilot.press("5")
         await pilot.press("enter")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(pilot, lambda: rec.calls)
+        await until(pilot, lambda: rec.calls)
         assert rec.calls == [("scale", "deployments", "default", "web", 5)]
 
 
@@ -279,9 +273,9 @@ async def test_failed_write_audits_error(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("ctrl+d")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(pilot, lambda: audit_path.exists() and "error" in audit_path.read_text())
+        await until(pilot, lambda: audit_path.exists() and "error" in audit_path.read_text())
         entry = json.loads(audit_path.read_text().splitlines()[-1])
         assert entry["outcome"].startswith("error")
 
@@ -304,9 +298,9 @@ async def test_permission_allowed_proceeds(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("ctrl+d")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(pilot, lambda: rec.calls)
+        await until(pilot, lambda: rec.calls)
         assert rec.calls == [("delete", "pods", "default", "web-1")]
 
 
@@ -320,7 +314,7 @@ async def test_unwritable_audit_blocks_write(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("ctrl+d")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         await pilot.pause(0.3)  # write path must stay blocked; nothing to wait on
         assert rec.calls == []
@@ -335,7 +329,7 @@ async def test_scale_prompt_prefills_current_replicas(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await _to_view(pilot, "deployments")
         await pilot.press("S")
-        await _until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
         # Deployment summaries preserve spec.replicas as `desired`, so the
         # prompt starts prefilled with the current count.
         assert app.screen.query_one(Input).value == "3"
@@ -395,7 +389,7 @@ async def test_y_queued_during_stalled_check_cannot_approve(
         # stalled check predates the dialog, which only exists afterwards.
         stale = events.Key("y", "y")
         await pilot.press("ctrl+d")  # stalls, then fails open into the dialog
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         app.screen.post_message(stale)
         await pilot.pause(0.2)
         assert isinstance(app.screen, ConfirmScreen)  # discarded: still open
@@ -414,9 +408,9 @@ async def test_delete_binds_selected_row_uid(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("ctrl+d")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(pilot, lambda: rec.calls)
+        await until(pilot, lambda: rec.calls)
         assert rec.uids == ["pod-uid-1"]
 
 
@@ -427,12 +421,12 @@ async def test_scale_binds_selected_row_uid(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await _to_view(pilot, "deployments")
         await pilot.press("S")
-        await _until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
         await pilot.press("5")
         await pilot.press("enter")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(pilot, lambda: rec.calls)
+        await until(pilot, lambda: rec.calls)
         assert rec.uids == ["deploy-uid-1"]
 
 
@@ -444,9 +438,9 @@ async def test_conflict_reports_target_changed_since_approval(tmp_path: Path) ->
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("ctrl+d")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(
+        await until(
             pilot,
             lambda: any("changed since it was approved" in n.message for n in app._notifications),
         )
@@ -499,9 +493,9 @@ async def test_e_edit_confirmed_replaces_with_uid(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
     assert len(rec.calls) == 1
     op, plural, ns, name, manifest = rec.calls[0]
     assert (op, plural, ns, name) == ("replace", "pods", "default", "web-1")
@@ -520,7 +514,7 @@ async def test_e_edit_strips_managed_fields_from_editor_text(tmp_path: Path) -> 
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: bool(seen))
+        await until(pilot, lambda: bool(seen))
     assert "managedFields" not in seen[0]
     assert "resourceVersion" in seen[0]
 
@@ -532,7 +526,7 @@ async def test_e_edit_cancelled_editor_makes_no_call(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: any("cancelled" in n.message for n in app._notifications))
+        await until(pilot, lambda: any("cancelled" in n.message for n in app._notifications))
     assert rec.calls == []
 
 
@@ -543,7 +537,7 @@ async def test_e_edit_unchanged_text_is_a_noop(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: any("no changes" in n.message for n in app._notifications))
+        await until(pilot, lambda: any("no changes" in n.message for n in app._notifications))
         assert not isinstance(app.screen, ConfirmScreen)
     assert rec.calls == []
 
@@ -555,7 +549,7 @@ async def test_e_edit_invalid_yaml_aborts(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: any("invalid YAML" in n.message for n in app._notifications))
+        await until(pilot, lambda: any("invalid YAML" in n.message for n in app._notifications))
     assert rec.calls == []
 
 
@@ -566,7 +560,7 @@ async def test_e_edit_non_mapping_yaml_aborts(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: any("not a mapping" in n.message for n in app._notifications))
+        await until(pilot, lambda: any("not a mapping" in n.message for n in app._notifications))
     assert rec.calls == []
 
 
@@ -589,9 +583,9 @@ async def test_e_edit_reinjects_deleted_resource_version(tmp_path: Path) -> None
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
     manifest = rec.calls[0][4]
     assert isinstance(manifest, dict)
     assert manifest["metadata"]["resourceVersion"] == "41"
@@ -606,7 +600,7 @@ async def test_e_edit_readonly_blocked(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: any("Read-only" in n.message for n in app._notifications))
+        await until(pilot, lambda: any("Read-only" in n.message for n in app._notifications))
     assert seen == []
     assert rec.calls == []
 
@@ -617,7 +611,7 @@ async def test_e_edit_without_manifest_source_notifies(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: any("unavailable" in n.message for n in app._notifications))
+        await until(pilot, lambda: any("unavailable" in n.message for n in app._notifications))
     assert rec.calls == []
 
 
@@ -635,7 +629,7 @@ async def test_e_edit_deleting_only_resource_version_is_a_noop(tmp_path: Path) -
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: any("no changes" in n.message for n in app._notifications))
+        await until(pilot, lambda: any("no changes" in n.message for n in app._notifications))
     assert rec.calls == []
 
 
@@ -657,9 +651,9 @@ async def test_e_edit_null_metadata_gets_rebuilt_with_resource_version(tmp_path:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
     manifest = rec.calls[0][4]
     assert isinstance(manifest, dict)
     assert manifest["metadata"] == {"resourceVersion": "41"}
@@ -675,7 +669,7 @@ async def test_external_editor_invocation_failure_notifies_and_cancels(tmp_path:
         with mock.patch.dict(os.environ, {"VISUAL": "bad 'quote", "EDITOR": ""}):
             result = await app._edit_in_external_editor("a: 1\n")
         assert result is None
-        await _until(pilot, lambda: any("editor" in n.message for n in app._notifications))
+        await until(pilot, lambda: any("editor" in n.message for n in app._notifications))
     assert rec.calls == []
 
 
@@ -696,9 +690,9 @@ async def test_e_edit_blank_resource_version_restored(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
     manifest = rec.calls[0][4]
     assert isinstance(manifest, dict)
     assert manifest["metadata"]["resourceVersion"] == "41"
@@ -713,7 +707,7 @@ async def test_e_edit_confirm_dialog_summarizes_changed_sections(tmp_path: Path)
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         operation = str(app.screen.query_one(".confirm-operation").render())
         assert "PUT pods/web-1" in operation
         assert "spec" in operation  # the edited top-level section is named
@@ -738,11 +732,11 @@ async def test_e_edit_scalar_type_change_reaches_approval(tmp_path: Path) -> Non
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         operation = str(app.screen.query_one(".confirm-operation").render())
         assert "spec" in operation  # the type change is named in the summary
         await pilot.press("y")
-        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
     manifest = rec.calls[0][4]
     assert isinstance(manifest, dict)
     assert manifest["spec"]["replicas"] is True
@@ -764,7 +758,7 @@ async def test_e_edit_added_null_section_named_in_summary(tmp_path: Path) -> Non
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         operation = str(app.screen.query_one(".confirm-operation").render())
         assert "status" in operation
         await pilot.press("escape")
@@ -795,9 +789,9 @@ async def test_e_edit_survives_alias_refresh_during_editor(tmp_path: Path) -> No
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+        await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
     assert len(rec.calls) == 1
 
 
@@ -810,7 +804,7 @@ async def test_e_edit_non_string_top_level_key_aborts(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: any("non-string" in n.message for n in app._notifications))
+        await until(pilot, lambda: any("non-string" in n.message for n in app._notifications))
     assert rec.calls == []
 
 
@@ -830,7 +824,7 @@ async def test_e_edit_precheck_uses_update_verb(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(pilot, lambda: bool(calls))
+        await until(pilot, lambda: bool(calls))
     assert calls[0] == ("update", "pods", "", "default", "", "web-1")
 
 
@@ -869,7 +863,7 @@ async def test_e_edit_selection_change_during_editor_aborts(tmp_path: Path) -> N
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(
+        await until(
             pilot,
             lambda: any(
                 "selection changed during the editor session" in n.message
@@ -890,9 +884,7 @@ async def test_external_editor_mkstemp_failure_notifies_and_cancels(tmp_path: Pa
         with mock.patch("tempfile.mkstemp", side_effect=OSError("no space")):
             result = await app._edit_in_external_editor("a: 1\n")
         assert result is None
-        await _until(
-            pilot, lambda: any("temp file failed" in n.message for n in app._notifications)
-        )
+        await until(pilot, lambda: any("temp file failed" in n.message for n in app._notifications))
     assert rec.calls == []
 
 
@@ -918,7 +910,7 @@ async def test_external_editor_undecodable_output_notifies_and_cancels(tmp_path:
             fake_suspend.return_value.__exit__ = mock.MagicMock(return_value=False)
             result = await app._edit_in_external_editor("a: 1\n")
         assert result is None
-        await _until(pilot, lambda: any("unreadable" in n.message for n in app._notifications))
+        await until(pilot, lambda: any("unreadable" in n.message for n in app._notifications))
     assert rec.calls == []
 
 
@@ -953,7 +945,7 @@ async def test_external_editor_whitespace_only_editor_cancels(tmp_path: Path) ->
         with mock.patch.dict(os.environ, {"VISUAL": "   ", "EDITOR": ""}):
             result = await app._edit_in_external_editor("a: 1\n")
         assert result is None
-        await _until(pilot, lambda: any("editor" in n.message for n in app._notifications))
+        await until(pilot, lambda: any("editor" in n.message for n in app._notifications))
     assert rec.calls == []
 
 
@@ -1007,7 +999,7 @@ async def test_e_edit_selection_change_during_fetch_never_opens_editor(tmp_path:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await pilot.press("e")
-        await _until(
+        await until(
             pilot,
             lambda: any(
                 "selection changed during the manifest fetch" in n.message
@@ -1031,7 +1023,7 @@ async def test_external_editor_suspend_not_supported_cancels(tmp_path: Path) -> 
         with mock.patch.dict(os.environ, {"VISUAL": "true", "EDITOR": ""}):
             result = await app._edit_in_external_editor("a: 1\n")
         assert result is None
-        await _until(
+        await until(
             pilot,
             lambda: any("does not support" in n.message for n in app._notifications),
         )

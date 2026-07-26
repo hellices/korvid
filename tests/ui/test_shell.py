@@ -22,6 +22,8 @@ from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv, buil
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.pick_screen import PickScreen
 
+from .waits import until
+
 # ---------------------------------------------------------------------------
 # Pure unit tests: argv builder
 # ---------------------------------------------------------------------------
@@ -349,10 +351,19 @@ async def test_shell_exec_failure_offers_debug_fallback(tmp_path: Path) -> None:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
             await pilot.press("s")
-            await pilot.pause(0.2)
-            assert isinstance(app.screen, ConfirmScreen)
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
             await pilot.press("y")
-            await pilot.pause(0.2)
+
+            # The debug fallback and its audit records are written in a worker
+            # after the dialog closes: wait for the final observable outcome
+            # (the success audit entry) instead of a fixed sleep.
+            def _debug_done() -> bool:
+                if len(calls) < 2 or not audit_path.exists():
+                    return False
+                lines = audit_path.read_text().splitlines()
+                return bool(lines) and json.loads(lines[-1]).get("outcome") == "success"
+
+            await until(pilot, _debug_done)
             assert calls[0] == build_exec_argv("default", "api-1")
             assert calls[1] == build_debug_argv("default", "api-1")
             entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
