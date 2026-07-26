@@ -7,7 +7,9 @@ plain substring · `~fuzzy` · `/regex/` or `re:regex` · `!` negation ·
 
 from __future__ import annotations
 
-from korvid.core.filters import parse_filter
+import time
+
+from korvid.core.filters import _regex_predicate, parse_filter
 
 # ---------------------------------------------------------------------------
 # Plain substring (existing behavior preserved)
@@ -166,6 +168,34 @@ def test_negated_unterminated_regex_is_error_and_ignored() -> None:
     f = parse_filter("!/[")
     assert f.error is not None
     assert f.matches("anything")
+
+
+def test_catastrophic_regex_is_bounded_and_fails_open() -> None:
+    """A backtracking bomb must not freeze the event loop: matching is
+    time-bounded (regex timeout) and the pattern is handled quickly."""
+    f = parse_filter("/(a+)+$/")
+    name = "a" * 64 + "b"
+    start = time.monotonic()
+    f.matches(name)
+    f.matches(name)
+    assert time.monotonic() - start < 2.0
+
+
+def test_regex_predicate_fails_open_and_disables_after_timeout() -> None:
+    """On a regex timeout the row stays visible (fail open) and the
+    predicate disables itself so later rows pay nothing."""
+
+    class Bomb:
+        calls = 0
+
+        def search(self, name: str, timeout: float | None = None) -> None:
+            Bomb.calls += 1
+            raise TimeoutError("regex timed out")
+
+    pred = _regex_predicate(Bomb())  # type: ignore[arg-type]  # test double
+    assert pred("row-1") is True
+    assert pred("row-2") is True
+    assert Bomb.calls == 1
 
 
 # ---------------------------------------------------------------------------

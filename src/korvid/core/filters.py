@@ -17,12 +17,18 @@ sequence of space-separated tokens, AND-combined:
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
+import regex
+
 #: Phases hidden by the `-s` token (pod views only; rows without a phase pass).
 _COMPLETED_PHASES = frozenset({"Succeeded", "Completed"})
+
+#: Per-match wall-clock bound for user regexes. A catastrophic-backtracking
+#: pattern must never freeze the Textual event loop; on timeout the predicate
+#: fails open (row stays visible) and disables itself.
+_REGEX_TIMEOUT_SECONDS = 0.05
 
 _NamePredicate = Callable[[str], bool]
 
@@ -110,6 +116,23 @@ def _parse_label_selector(
     return tuple(pairs), None
 
 
+def _regex_predicate(compiled: regex.Pattern[str]) -> _NamePredicate:
+    """Time-bounded regex match; fails open and disables itself on timeout."""
+    disabled = False
+
+    def match(name: str) -> bool:
+        nonlocal disabled
+        if disabled:
+            return True
+        try:
+            return compiled.search(name, timeout=_REGEX_TIMEOUT_SECONDS) is not None
+        except TimeoutError:
+            disabled = True
+            return True
+
+    return match
+
+
 def _parse_name_token(token: str) -> tuple[_NamePredicate | None, str | None, str]:
     """One name-matching token → (predicate, error, description)."""
     if token.startswith("~"):
@@ -131,10 +154,10 @@ def _parse_name_token(token: str) -> tuple[_NamePredicate | None, str | None, st
         if not pattern:
             return None, "empty regex pattern", ""
         try:
-            compiled = re.compile(pattern)
-        except re.error:
+            compiled = regex.compile(pattern)
+        except regex.error:
             return None, f"invalid regex {pattern!r}", ""
-        return (lambda name: compiled.search(name) is not None), None, f"/{pattern}/"
+        return _regex_predicate(compiled), None, f"/{pattern}/"
     return _substring(token), None, token
 
 
