@@ -1014,3 +1014,44 @@ class TestContainerLimits:
         )
         assert pod.cpu_limit_cores is None
         assert pod.mem_limit_bytes is None
+
+
+def test_pod_summary_carries_labels() -> None:
+    """Labels feed the client-side `-l` filter (issue #44)."""
+    manifest = {
+        "metadata": {
+            "name": "web-1",
+            "namespace": "default",
+            "labels": {"app": "web", "tier": "front"},
+        },
+        "spec": {},
+        "status": {},
+    }
+    pod = PodSummary.from_manifest(manifest)
+    assert dict(pod.labels) == {"app": "web", "tier": "front"}
+
+
+def test_generic_summary_carries_labels() -> None:
+    manifest = {
+        "metadata": {"name": "web", "namespace": "default", "labels": {"app": "web"}},
+        "spec": {},
+    }
+    gs = GenericSummary.from_manifest("Deployment", manifest)
+    assert dict(gs.labels) == {"app": "web"}
+
+
+def test_replicaset_summary_carries_labels() -> None:
+    manifest = {
+        "metadata": {"name": "web-abc", "namespace": "default", "labels": {"app": "web"}},
+        "spec": {"replicas": 1},
+        "status": {},
+    }
+    rs = ReplicaSetSummary.from_manifest("ReplicaSet", manifest)
+    assert dict(rs.labels) == {"app": "web"}
+
+
+def test_summaries_default_to_no_labels() -> None:
+    gs = GenericSummary.from_manifest("ConfigMap", {"metadata": {"name": "cm"}})
+    pod = PodSummary.from_manifest({"metadata": {"name": "p"}, "spec": {}, "status": {}})
+    assert gs.labels == ()
+    assert pod.labels == ()

@@ -36,10 +36,11 @@ from korvid.agent.tools import UIBridge
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
+from korvid.core.filters import ResourceFilter, parse_filter
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.core.secrets import mask_secret_manifest
-from korvid.core.store import ALL_NAMESPACES, ResourceStore
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
@@ -424,6 +425,10 @@ class KorvidApp(App[None]):
         self.current_kind: str = "pods"
         self.current_scope: str = config.namespace or "default"
         self.filter_pattern = ""
+        #: Parsed form of filter_pattern (label selector / regex / fuzzy /
+        #: inverse / hide-completed — issue #44); single matcher shared by
+        #: the table render and the agent's view of "what the user sees".
+        self._resource_filter: ResourceFilter = parse_filter("")
         # Drill-down levels (deploy -> rs -> pods); single source for the
         # breadcrumb line and the owner-uid filter on the current table.
         self._drill = NavigationStack()
@@ -579,6 +584,7 @@ class KorvidApp(App[None]):
         drill_uid = self._drill.parent_uid
         if drill_uid is not None and kind == self._drill.child_kind:
             rows = [r for r in rows if owned_by(r, drill_uid)]
+        rows = self._filtered_rows(rows)
         all_namespaces = self.current_scope == ALL_NAMESPACES
         metrics = None
         if kind == "pods" and self._metrics is not None and self._metrics.available:
@@ -587,7 +593,9 @@ class KorvidApp(App[None]):
             kind,
             rows,
             all_namespaces=all_namespaces,
-            pattern=self.filter_pattern,
+            # Filtering happened upstream (issue #44: labels/regex/fuzzy need
+            # the full summaries, not just names) — no name pattern remains.
+            pattern="",
             metrics=metrics,
         )
         self._refresh_empty_state(kind, table.row_count)
@@ -622,11 +630,30 @@ class KorvidApp(App[None]):
 
     def on_filter_command(self, message: FilterCommand) -> None:
         self.filter_pattern = message.pattern
+        self._resource_filter = parse_filter(message.pattern)
         self.post_message(ResourcesUpdated(self.current_kind))
+        self._refresh_status()
 
     def on_clear_filter(self, message: ClearFilter) -> None:
         self.filter_pattern = ""
+        self._resource_filter = parse_filter("")
         self.post_message(ResourcesUpdated(self.current_kind))
+        self._refresh_status()
+
+    def _filtered_rows(self, rows: list[Summary]) -> list[Summary]:
+        """Apply the active filter the way the table renders it (issue #44)."""
+        flt = self._resource_filter
+        if not flt.active:
+            return rows
+        return [
+            r
+            for r in rows
+            if flt.matches(
+                r.name,
+                labels=dict(getattr(r, "labels", ())),
+                phase=getattr(r, "phase", None),
+            )
+        ]
 
     async def on_navigate_command(self, message: NavigateCommand) -> None:
         # An explicit :view / agent navigate abandons any drill-down context;
@@ -2631,6 +2658,7 @@ class KorvidApp(App[None]):
             label,
             breadcrumb=self._drill.breadcrumb(),
             mcp_label=mcp_label,
+            filter_label=self._resource_filter.describe(),
         )
 
     # ------------------------------------------------------------------
@@ -2819,11 +2847,9 @@ class KorvidApp(App[None]):
         except Exception as exc:
             return f"ERROR: {exc}"
         rows = self.store.get(self.current_kind, self.current_scope)
-        # Report what the user actually sees: apply the same case-insensitive
-        # name filter as ResourceTable.show before counting.
-        if self.filter_pattern:
-            pat = self.filter_pattern.lower()
-            rows = [r for r in rows if pat in r.name.lower()]
+        # Report what the user actually sees: apply the same filter as the
+        # table render (substring/label/regex/… — issue #44) before counting.
+        rows = self._filtered_rows(rows)
         self._mark_agent_action(f"view → {self.current_kind} ({self.current_scope})")
         suffix = " (list may still be loading)" if not rows else ""
         filter_note = f" (filter {self.filter_pattern!r} applied)" if self.filter_pattern else ""
@@ -2956,12 +2982,9 @@ class KorvidApp(App[None]):
         drill_uid = self._drill.parent_uid
         if drill_uid is not None and self.current_kind == self._drill.child_kind:
             rows = [r for r in rows if owned_by(r, drill_uid)]
-        if self.filter_pattern:
-            # drill_down acts on the visible table: apply the same
-            # case-insensitive name filter as ResourceTable.show so the agent
-            # cannot drill into a row the filter is hiding.
-            pat = self.filter_pattern.lower()
-            rows = [r for r in rows if pat in r.name.lower()]
+        # drill_down acts on the visible table: apply the same filter as the
+        # table render so the agent cannot drill into a hidden row.
+        rows = self._filtered_rows(rows)
         matches = [r for r in rows if r.name == name]
         if not matches:
             return f"ERROR: no {canonical} named {name!r} in the current view"

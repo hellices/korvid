@@ -11,7 +11,9 @@ class FilterBar(Input):
 
     def on_mount(self) -> None:
         self.display = False
-        self.placeholder = "filter by name (Enter keep, Esc clear)"
+        self.placeholder = (
+            "name · ~fuzzy · /regex/ · !exclude · -l k=v · -s (Enter keep, Esc clear)"
+        )
 
     def open(self) -> None:
         self.value = ""
