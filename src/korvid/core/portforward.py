@@ -81,8 +81,8 @@ class ForwardRegistry:
         self._popen = popen
         self._records: dict[int, ForwardRecord] = {}
         self._next_id = 1
-        #: Terminated processes awaiting exit, with their kill deadlines.
-        self._reaping: list[tuple[_ForwardProcess, float]] = []
+        #: Terminated processes awaiting exit: (proc, kill deadline, local port).
+        self._reaping: list[tuple[_ForwardProcess, float, int]] = []
 
     def start(self, spec: ForwardSpec) -> ForwardRecord:
         """Spawn `kubectl port-forward` for ``spec`` and track it.
@@ -94,10 +94,7 @@ class ForwardRegistry:
                 fail the bind asynchronously and masquerade as "broken".
         """
         self.refresh()  # a just-died forward must not hold its local port
-        for existing in self._records.values():
-            if existing.status == "alive" and existing.spec.local_port == spec.local_port:
-                msg = f"local port {spec.local_port} already forwarded by #{existing.id}"
-                raise ValueError(msg)
+        self._ensure_port_free(spec.local_port)
         record = ForwardRecord(id=self._next_id, spec=spec, _proc=self._spawn(spec))
         self._next_id += 1
         self._records[record.id] = record
@@ -165,13 +162,42 @@ class ForwardRegistry:
 
         Raises:
             OSError: when the replacement subprocess cannot be spawned.
+            ValueError: when another live forward has since claimed the
+                broken forward's local port.
         """
         record = self._records.get(forward_id)
         if record is None or record.status != "broken":
             return None
+        self._ensure_port_free(record.spec.local_port)
         record._proc = self._spawn(record.spec)
         record.status = "alive"
         return record
+
+    def _ensure_port_free(self, local_port: int) -> None:
+        """Guarantee ``local_port`` is bindable before spawning kubectl.
+
+        A live forward on the port raises immediately — the new child would
+        only lose the bind race and masquerade as a broken target. A stopped
+        child still exiting (SIGTERM grace) may also hold the socket; that
+        one is forced down with SIGKILL (immediate, cannot be ignored) so a
+        stop-then-restart on the same port works without a delayed failure.
+
+        Raises:
+            ValueError: when a live forward already uses ``local_port``.
+        """
+        for existing in self._records.values():
+            if existing.status == "alive" and existing.spec.local_port == local_port:
+                msg = f"local port {local_port} already forwarded by #{existing.id}"
+                raise ValueError(msg)
+        remaining: list[tuple[_ForwardProcess, float, int]] = []
+        for proc, deadline, port in self._reaping:
+            if port == local_port:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+                continue  # exited — no longer holds the port, drop the entry
+            remaining.append((proc, deadline, port))
+        self._reaping = remaining
 
     def stop_all(self) -> list[ForwardRecord]:
         """Terminate every tracked forward (app exit / context teardown).
@@ -195,7 +221,7 @@ class ForwardRegistry:
         # Include earlier ctrl+d stops still awaiting their grace kill — a
         # stubborn forward must not outlive the session just because the
         # user exited before the next refresh() tick.
-        live.extend(proc for proc, _ in self._reaping if proc.poll() is None)
+        live.extend(proc for proc, _, _ in self._reaping if proc.poll() is None)
         self._reaping.clear()
         deadline = monotonic() + _STOP_GRACE_SECONDS
         while any(proc.poll() is None for proc in live):
@@ -215,18 +241,18 @@ class ForwardRegistry:
         if proc is None or proc.poll() is not None:
             return  # already exited (broken) — nothing to signal
         proc.terminate()
-        self._reaping.append((proc, monotonic() + _STOP_GRACE_SECONDS))
+        self._reaping.append((proc, monotonic() + _STOP_GRACE_SECONDS, record.spec.local_port))
 
     def _reap(self) -> None:
         """Advance stopped processes: drop exited ones, kill deadline-breakers."""
-        remaining: list[tuple[_ForwardProcess, float]] = []
-        for proc, deadline in self._reaping:
+        remaining: list[tuple[_ForwardProcess, float, int]] = []
+        for proc, deadline, port in self._reaping:
             if proc.poll() is not None:
                 continue  # exited; poll() reaped it
             if monotonic() > deadline:
                 proc.kill()
             # Keep until poll() confirms the exit so the child is reaped.
-            remaining.append((proc, deadline))
+            remaining.append((proc, deadline, port))
         self._reaping = remaining
 
 

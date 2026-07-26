@@ -343,3 +343,37 @@ def test_start_reuses_local_port_of_exited_forward() -> None:
     record = registry.start(_spec(name="api-2"))
     assert record.status == "alive"
     assert len(procs) == 2
+
+
+def test_start_forces_down_stopping_process_holding_port() -> None:
+    """A stopped-but-stubborn kubectl must not win the bind race on restart."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _StubbornProc(argv) if not procs else _FakeProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    first = registry.start(_spec())
+    registry.stop(first.id)
+    assert procs[0].poll() is None  # SIGTERM ignored — still holds the port
+    record = registry.start(_spec(name="api-2"))
+    assert procs[0].killed
+    assert procs[0].waited
+    assert record.status == "alive"
+    assert len(procs) == 2
+
+
+def test_reattach_rejects_port_claimed_by_live_forward() -> None:
+    """Re-attach must not report success when it would just lose the bind race."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    broken = registry.start(_spec())
+    procs[0].exit(1)
+    registry.refresh()
+    claimer = registry.start(_spec(name="api-2"))
+    with pytest.raises(ValueError, match=f"local port 8080 already forwarded by #{claimer.id}"):
+        registry.reattach(broken.id)
+    assert broken.status == "broken"
+    assert len(procs) == 2

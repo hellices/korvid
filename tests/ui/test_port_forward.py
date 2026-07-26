@@ -852,3 +852,35 @@ async def test_pending_forward_audit_flushed_on_exit(tmp_path: Path) -> None:
         # Exit immediately: no wait for the audit write to land.
     lines = _audit_lines(tmp_path)
     assert lines.count("port-forward-stop") == 1
+
+
+async def test_reattach_port_conflict_shows_clear_error() -> None:
+    """Re-attaching onto a port claimed by a live forward must toast clearly."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    app = make_app([_pod("api-1")], forwards=registry, get_manifest=_pod_manifest)
+    broken = registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    procs[0].returncode = 1
+    registry.refresh()
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-2", local_port=8080, remote_port=80)
+    )
+    notices: list[str] = []
+    async with app.run_test() as pilot:
+        await _wait_rows(app, pilot)
+        await _open_pf(app, pilot)
+        screen = app.screen
+        original = screen.notify
+
+        def _capture(message: str, **kwargs: Any) -> Any:
+            notices.append(message)
+            return original(message, **kwargs)
+
+        screen.notify = _capture  # type: ignore[method-assign]  # test spy
+        await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
+        await pilot.press("r")  # first row is the broken forward
+        await until(pilot, lambda: any("already forwarded" in n for n in notices))
+        assert broken.status == "broken"
+        assert len(procs) == 2  # no doomed kubectl was spawned

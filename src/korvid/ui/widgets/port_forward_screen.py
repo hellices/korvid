@@ -214,7 +214,7 @@ class ForwardListScreen(ModalScreen[None]):
         *,
         on_stop: Callable[[ForwardRecord], None] | None = None,
         on_reattach: Callable[[ForwardRecord], None] | None = None,
-        on_reattach_error: Callable[[ForwardRecord, OSError], None] | None = None,
+        on_reattach_error: Callable[[ForwardRecord, Exception], None] | None = None,
         target_exists: Callable[[ForwardRecord], Awaitable[bool]] | None = None,
     ) -> None:
         super().__init__()
@@ -297,7 +297,9 @@ class ForwardListScreen(ModalScreen[None]):
             return
         try:
             revived = self._registry.reattach(record.id)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # OSError: spawn failed. ValueError: another live forward has
+            # claimed the local port since this one broke.
             self.notify(f"Re-attach failed: {exc}", severity="error")
             if self._on_reattach_error is not None:
                 # The app audits failed re-attaches like failed starts.

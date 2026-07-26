@@ -1500,7 +1500,7 @@ class KorvidApp(App[None]):
             self._audit_forward("port-forward-start", record.spec, outcome="reattached")
             self.notify(f"Re-attached forward localhost:{record.spec.local_port}")
 
-        def _on_reattach_error(record: ForwardRecord, exc: OSError) -> None:
+        def _on_reattach_error(record: ForwardRecord, exc: Exception) -> None:
             self._audit_forward("port-forward-start", record.spec, outcome=f"error: {exc}")
 
         async def _target_exists(record: ForwardRecord) -> bool:
