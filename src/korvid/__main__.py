@@ -16,6 +16,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from korvid.agent.mcp_server import KorvidMCPServer, default_endpoint_path
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentSettings
@@ -32,6 +33,51 @@ from korvid.providers.token_store import TokenStore
 from korvid.ui.app import AppUIBridge, KorvidApp
 
 logger = logging.getLogger(__name__)
+
+
+def _build_mcp_server(
+    config: KorvidConfig,
+    kube: KubeClient,
+    aliases: dict[str, ResourceMeta],
+    ui: UIBridge | None,
+) -> KorvidMCPServer | None:
+    """MCP server for external hosts when enabled; read + UI-drive tools
+    only - write tools stay with the built-in agent until an approval UX
+    for external callers is designed (issue #11 non-goal)."""
+    if not config.mcp_enabled:
+        return None
+    return KorvidMCPServer(
+        ToolExecutor(kube, aliases, ui=ui),
+        READ_TOOLS + UI_TOOLS,
+        port=config.mcp_port,
+        endpoint_path=default_endpoint_path(),
+    )
+
+
+def _start_mcp(
+    config: KorvidConfig,
+    kube: KubeClient,
+    aliases: dict[str, ResourceMeta],
+    ui: UIBridge | None,
+) -> tuple[KorvidMCPServer, asyncio.Task[None]] | None:
+    """Build and launch the MCP server when enabled; pair it with its task
+    so ``_stop_mcp`` can tear both down."""
+    server = _build_mcp_server(config, kube, aliases, ui)
+    if server is None:
+        return None
+    return server, asyncio.create_task(server.run())
+
+
+async def _stop_mcp(server: KorvidMCPServer, task: asyncio.Task[None]) -> None:
+    """Graceful exit first (uvicorn drains connections and removes the
+    endpoint file); a hung shutdown must never block terminal restore."""
+    server.request_shutdown()
+    try:
+        await asyncio.wait_for(task, timeout=5)
+    except Exception:
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
 
 
 async def _shutdown(
@@ -203,10 +249,12 @@ def _build_agent_wiring(
     return agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy
 
 
-def _load_startup_config(readonly: bool) -> KorvidConfig:
+def _load_startup_config(readonly: bool, mcp: bool = False) -> KorvidConfig:
     config = load_config()
     if readonly:
         config = dataclasses.replace(config, readonly=True)
+    if mcp:
+        config = dataclasses.replace(config, mcp_enabled=True)
     # Pin the actual context name so kubectl subprocesses (shell/debug) and the
     # status bar reference this cluster even if current-context changes later.
     resolved_ctx = resolve_context_name(config.kube_context)
@@ -215,8 +263,8 @@ def _load_startup_config(readonly: bool) -> KorvidConfig:
     return config
 
 
-async def _run(readonly: bool = False) -> None:
-    config = _load_startup_config(readonly)
+async def _run(readonly: bool = False, mcp: bool = False) -> None:
+    config = _load_startup_config(readonly, mcp)
     kube = KubeClient()
     await kube.connect(config.kube_context)
     store = ResourceStore()
@@ -274,10 +322,14 @@ async def _run(readonly: bool = False) -> None:
     # (navigate/set_filter/open_logs/open_describe) land in this app.
     ui_proxy.target = AppUIBridge(app)
 
+    mcp_running = _start_mcp(config, kube, aliases, ui_proxy)
+
     discovery_task = asyncio.create_task(_discover_in_background(kube, aliases, app))
     try:
         await app.run_async()
     finally:
+        if mcp_running is not None:
+            await _stop_mcp(*mcp_running)
         await _shutdown(discovery_task, provider_box[0], kube)
 
 
@@ -288,8 +340,14 @@ def main() -> None:
         action="store_true",
         help="Disable all cluster write operations (keybindings and agent tools).",
     )
+    parser.add_argument(
+        "--mcp",
+        action="store_true",
+        help="Expose read + UI-drive tools to external MCP hosts over"
+        " Streamable HTTP on 127.0.0.1 (port from config mcp.port, default 7878).",
+    )
     args = parser.parse_args()
-    asyncio.run(_run(readonly=args.readonly))
+    asyncio.run(_run(readonly=args.readonly, mcp=args.mcp))
 
 
 if __name__ == "__main__":

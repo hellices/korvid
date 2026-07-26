@@ -161,3 +161,27 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
     assert "delete_resource" not in ro_names
     assert "scale_resource" not in ro_names
     assert "rollout_restart" not in ro_names
+
+
+def test_build_mcp_server_disabled_returns_none() -> None:
+    from korvid.__main__ import _build_mcp_server
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    config = KorvidConfig()  # mcp disabled by default
+    assert _build_mcp_server(config, cast("KubeClient", object()), {}, None) is None
+
+
+async def test_build_mcp_server_enabled_exposes_read_and_ui_tools() -> None:
+    """The MCP surface is read + UI-drive: write tools stay with the
+    built-in agent until an approval UX for external callers exists."""
+    from korvid.__main__ import _build_mcp_server
+    from korvid.agent.tools import READ_TOOLS, UI_TOOLS
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    config = KorvidConfig(mcp_enabled=True, mcp_port=1234)
+    server = _build_mcp_server(config, cast("KubeClient", object()), {}, None)
+    assert server is not None
+    names = [t.name for t in await server.list_tools()]
+    assert names == [t["function"]["name"] for t in READ_TOOLS + UI_TOOLS]

@@ -340,3 +340,31 @@ def test_save_agent_config_does_not_clobber_foreign_tmp(tmp_path: Path) -> None:
         api_key_env=None,
     )
     assert foreign.read_text() == "owned by another process"
+
+
+def test_mcp_defaults_off(tmp_path: Path) -> None:
+    cfg = load_config(tmp_path / "missing.yaml")
+    assert cfg.mcp_enabled is False
+    assert cfg.mcp_port == 7878
+
+
+def test_mcp_loaded_from_yaml(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text("mcp:\n  enabled: true\n  port: 9000\n")
+    cfg = load_config(f)
+    assert cfg.mcp_enabled is True
+    assert cfg.mcp_port == 9000
+
+
+def test_mcp_section_tolerates_scalars_and_bad_port(tmp_path: Path) -> None:
+    """User-edited configs can hold scalars where mappings are expected and
+    junk where numbers are expected - fall back to safe defaults."""
+    f = tmp_path / "config.yaml"
+    f.write_text("mcp: yes\n")
+    cfg = load_config(f)
+    assert cfg.mcp_enabled is False
+    assert cfg.mcp_port == 7878
+    f.write_text("mcp:\n  enabled: true\n  port: not-a-port\n")
+    cfg = load_config(f)
+    assert cfg.mcp_enabled is True
+    assert cfg.mcp_port == 7878

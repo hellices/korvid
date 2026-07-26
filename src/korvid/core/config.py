@@ -30,6 +30,8 @@ class KorvidConfig:
     keybindings: dict[str, str] = field(default_factory=dict)
     log_buffer_lines: int = 5000
     readonly: bool = False
+    mcp_enabled: bool = False
+    mcp_port: int = 7878
 
 
 def load_config(path: Path | None = None) -> KorvidConfig:
@@ -55,6 +57,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
             auth_method = "device-login"
         else:
             auth_method = "api_key" if api_key_env else "none"
+    mcp_value = raw.get("mcp")
+    mcp_raw: dict[str, Any] = mcp_value if isinstance(mcp_value, dict) else {}
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
@@ -67,6 +71,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         keybindings=dict(raw.get("keybindings") or {}),
         log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
         readonly=raw.get("readonly") is True,
+        mcp_enabled=mcp_raw.get("enabled") is True,
+        mcp_port=_parse_port(mcp_raw.get("port")),
     )
 
 
@@ -132,6 +138,17 @@ def _atomic_write_text(path: Path, text: str) -> None:
         os_replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _parse_port(value: Any) -> int:
+    """Coerce mcp.port to a valid TCP port; fall back to 7878."""
+    if isinstance(value, bool):  # YAML `true` would silently become port 1
+        return 7878
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return 7878
+    return port if 0 < port < 65536 else 7878
 
 
 def _parse_buffer_lines(value: Any) -> int:
