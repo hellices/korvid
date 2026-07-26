@@ -83,7 +83,6 @@ def detect_provider(nodes: Iterable[Mapping[str, Any]]) -> ProviderInfo:
         node carries a recognizable signal.
     """
     provider: str | None = None
-    distribution: str | None = None
     for node in nodes:
         labels: Mapping[str, Any] = (node.get("metadata") or {}).get("labels") or {}
         for label, (dist, prov) in _MANAGED_LABELS.items():
@@ -96,4 +95,5 @@ def detect_provider(nodes: Iterable[Mapping[str, Any]]) -> ProviderInfo:
                 provider = _PROVIDER_SCHEMES.get(scheme)
     if provider is None:
         return ProviderInfo(UNKNOWN_PROVIDER, None)
-    return ProviderInfo(provider, distribution)
+    # A managed label would have returned above: bare provider, no distribution.
+    return ProviderInfo(provider, None)
