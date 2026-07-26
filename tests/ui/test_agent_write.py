@@ -24,16 +24,10 @@ from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.pick_screen import PickScreen
 
+from .waits import until
+
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
 _ALIASES = {"deployments": _DEPLOY_META, "deploy": _DEPLOY_META}
-
-
-async def _until(pilot, cond, timeout: float = 5.0) -> None:  # type: ignore[no-untyped-def]  # deterministic wait: poll an observable condition instead of a fixed sleep
-    for _ in range(int(timeout / 0.05)):
-        if cond():
-            return
-        await pilot.pause(0.05)
-    raise AssertionError("condition not met within timeout")
 
 
 def _expand_panel(app: KorvidApp) -> None:
@@ -129,7 +123,7 @@ async def test_agent_delete_approved_by_user_key(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert rec.calls == []  # nothing executes before the user's keystroke
         await pilot.press("y")
         result = await task
@@ -153,7 +147,7 @@ async def test_agent_delete_denied_by_user_key(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("n")
         result = await task
         assert "denied" in result.lower() or "declined" in result.lower()
@@ -211,7 +205,7 @@ async def test_agent_scale_approved(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("scale", "deployments", "web", namespace="default", replicas=4)
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         await task
         assert rec.calls == [("scale", "deployments", "default", "web", 4)]
@@ -260,7 +254,7 @@ async def test_stalled_permission_check_times_out_fail_open(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
         # reaching the dialog proves the stalled check timed out fail-open
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         result = await task
         assert result.startswith("approved and executed")
@@ -294,7 +288,11 @@ async def test_agent_write_times_out_as_expired(
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        # On a slow runner the 0.2s window can open AND expire between two
+        # 0.05s polls, so waiting on the ConfirmScreen alone is a race:
+        # accept task completion as the equally-valid observable outcome.
+        # (Dialog surfacing itself is covered by the other tests here.)
+        await until(pilot, lambda: task.done() or isinstance(app.screen, ConfirmScreen))
         result = await task  # no keystroke; the timeout resolves it as expired
         assert "expired" in result.lower()
         assert "declined" not in result.lower()
@@ -316,7 +314,7 @@ async def test_agent_dialog_shows_namespace(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("scale", "deployments", "web", namespace="prod", replicas=2)
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         texts = " ".join(str(s.render()) for s in app.screen.query(Static))
         assert "in namespace prod" in texts
         await pilot.press("n")
@@ -339,7 +337,7 @@ async def test_agent_write_pending_while_panel_collapsed(tmp_path: Path) -> None
         assert not isinstance(app.screen, ConfirmScreen)
         assert rec.calls == []
         _expand_panel(app)
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         result = await task
         assert "executed" in result.lower()
@@ -378,7 +376,7 @@ async def test_agent_write_waits_for_user_modal_to_close(tmp_path: Path) -> None
         await pilot.pause(0.3)  # a user dialog is open: the approval waits
         assert isinstance(app.screen, PickScreen)
         app.pop_screen()
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         result = await task
         assert "executed" in result.lower()
@@ -414,7 +412,7 @@ async def test_agent_write_normalizes_whitespace_name(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "  web  ", namespace="default")
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         result = await task
         assert "deployments.apps/web" in result
@@ -444,7 +442,7 @@ async def test_agent_write_executes_with_exact_validated_meta(tmp_path: Path) ->
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         await task
         assert seen == [_DEPLOY_META]
@@ -465,7 +463,7 @@ async def test_blocked_audit_result_omits_local_path(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         result = await task
         assert "blocked: audit log unavailable" in result
@@ -495,7 +493,7 @@ async def test_write_403_reports_actionable_permission_message(tmp_path: Path) -
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         result = await task
         assert "missing permission: delete deployments" in result
@@ -540,7 +538,7 @@ async def test_agent_write_binds_target_uid_as_precondition(tmp_path: Path) -> N
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         result = await task
         assert "executed" in result
@@ -587,7 +585,7 @@ async def test_agent_uid_lookup_uses_validated_alias(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "Deploy", "web", namespace="default")
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         await task
     assert kinds == ["deploy"]  # the caller's alias, normalized - not "deployments"
