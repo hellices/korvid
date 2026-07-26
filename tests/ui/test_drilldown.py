@@ -9,7 +9,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary, ReplicaSetSummary
 from korvid.ui.app import KorvidApp
-from korvid.ui.messages import NavigateCommand
+from korvid.ui.messages import FilterCommand, NavigateCommand
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
 
@@ -247,7 +247,7 @@ async def test_agent_drill_down_respects_visible_filter() -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await _navigate(pilot, "deployments")
-        app.filter_pattern = "api"
+        app.on_filter_command(FilterCommand("api"))  # the real filter path (#44)
         out = await app.agent_drill_down("web")
         assert out.startswith("ERROR:")
         assert app.current_kind == "deployments"

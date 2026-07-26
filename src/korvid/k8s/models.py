@@ -182,6 +182,14 @@ def _owner_uids(meta: dict[str, Any]) -> tuple[str, ...]:
     return tuple(str(ref["uid"]) for ref in (meta.get("ownerReferences") or []) if ref.get("uid"))
 
 
+def _labels(meta: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """`metadata.labels` as a hashable tuple for frozen summaries (issue #44)."""
+    labels = meta.get("labels")
+    if not isinstance(labels, dict):
+        return ()
+    return tuple(sorted((str(k), str(v)) for k, v in labels.items()))
+
+
 @dataclass(frozen=True)
 class GenericSummary:
     """Minimal summary for any Kubernetes object kind."""
@@ -192,6 +200,8 @@ class GenericSummary:
     created: str  # ISO-8601 timestamp or "" when absent
     uid: str = ""
     owner_uids: tuple[str, ...] = ()
+    #: metadata.labels as sorted pairs; feeds the client-side `-l` filter (#44).
+    labels: tuple[tuple[str, str], ...] = ()
     #: spec.replicas when the kind carries one (Deployment/StatefulSet/...);
     #: None otherwise - 0 must stay distinguishable from "not scalable".
     desired: int | None = None
@@ -211,6 +221,7 @@ class GenericSummary:
             created=str(meta.get("creationTimestamp") or ""),
             uid=str(meta.get("uid") or ""),
             owner_uids=_owner_uids(meta),
+            labels=_labels(meta),
             desired=replicas,
         )
 
@@ -266,6 +277,7 @@ class ReplicaSetSummary(GenericSummary):
             created=str(meta.get("creationTimestamp") or ""),
             uid=str(meta.get("uid") or ""),
             owner_uids=_owner_uids(meta),
+            labels=_labels(meta),
             revision=str(
                 (meta.get("annotations") or {}).get("deployment.kubernetes.io/revision") or "-"
             ),
@@ -590,6 +602,8 @@ class PodSummary:
     containers: tuple[str, ...] = ()
     uid: str = ""
     owner_uids: tuple[str, ...] = ()
+    #: metadata.labels as sorted pairs; feeds the client-side `-l` filter (#44).
+    labels: tuple[tuple[str, str], ...] = ()
     #: Per-container failure details for the ops hint strip (#26); empty when healthy.
     trouble: tuple[ContainerTrouble, ...] = ()
     #: RFC 3339 time the Ready condition last flipped; freshness cutoff for
@@ -630,6 +644,7 @@ class PodSummary:
             ),
             uid=str(meta.get("uid") or ""),
             owner_uids=_owner_uids(meta),
+            labels=_labels(meta),
             trouble=_pod_trouble(status),
             ready_transition_at=_ready_transition_at(status),
         )
