@@ -205,12 +205,14 @@ def _pick_options(app: KorvidApp) -> list[str]:
 
 class _FakeProc:
     """subprocess.Popen stand-in: 'ok' exits 0 immediately; 'hang' raises
-    TimeoutExpired on timed waits until killed (a stuck image pull)."""
+    TimeoutExpired on timed waits until killed (a stuck image pull);
+    'hang-once' survives exactly one poll cycle, then exits 0."""
 
     def __init__(self, argv: list[str], behavior: str) -> None:
         self.argv = argv
         self.behavior = behavior
         self.killed = False
+        self.timed_waits = 0
 
     def wait(self, timeout: float | None = None) -> int:
         if self.killed:
@@ -218,6 +220,9 @@ class _FakeProc:
         if self.behavior == "ok":
             return 0
         if timeout is not None:
+            self.timed_waits += 1
+            if self.behavior == "hang-once" and self.timed_waits > 1:
+                return 0
             raise subprocess.TimeoutExpired(cmd=self.argv, timeout=timeout)
         return 0
 
@@ -793,8 +798,11 @@ async def test_debug_picker_escape_cancels(tmp_path: Path) -> None:
 
 
 def _pull_failure_run(failed_image: str) -> Callable[..., SimpleNamespace]:
-    """subprocess.run fake: shell probe fails (sh missing); pod gets report an
-    ErrImagePull ephemeral container for `failed_image`."""
+    """subprocess.run fake: shell probe fails (sh missing); the first pod get
+    (the pre-attach snapshot) sees no ephemeral containers, later gets report
+    an ErrImagePull ephemeral container for `failed_image` - modelling the
+    entry kubectl debug creates after the snapshot."""
+    empty_json = json.dumps({"status": {"ephemeralContainerStatuses": []}})
     pod_json = json.dumps(
         {
             "status": {
@@ -808,11 +816,14 @@ def _pull_failure_run(failed_image: str) -> Callable[..., SimpleNamespace]:
             }
         }
     )
+    gets = 0
 
     def fake_run(argv: list[str], **kwargs: Any) -> SimpleNamespace:
+        nonlocal gets
         if argv[1] == "exec":
             return SimpleNamespace(returncode=1)  # probe: no sh in the target
-        return SimpleNamespace(returncode=0, stdout=pod_json)
+        gets += 1
+        return SimpleNamespace(returncode=0, stdout=empty_json if gets == 1 else pod_json)
 
     return fake_run
 
@@ -929,6 +940,57 @@ async def test_debug_pull_failure_air_gapped_without_default_notifies_only(
 
             await until(pilot, _failure_notified)
             assert not isinstance(app.screen, ConfirmScreen)  # no busybox retry
+    assert len(debug_calls) == 1
+
+
+async def test_debug_stale_failed_entry_with_same_image_not_blamed(tmp_path: Path) -> None:
+    """A failed ephemeral container from an EARLIER attempt (same image - such
+    entries can never be removed from the pod spec) must not kill a new attach
+    that is pulling fine: pre-existing entries are snapshotted before the
+    attach and ignored while polling."""
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app([_pod("api-1")], audit=AuditLog(audit_path))
+    debug_calls: list[list[str]] = []
+    # The stale entry is present from the very first pod get (the snapshot).
+    stale_json = json.dumps(
+        {
+            "status": {
+                "ephemeralContainerStatuses": [
+                    {
+                        "name": "debugger-old",
+                        "image": DEBUG_IMAGE,
+                        "state": {"waiting": {"reason": "ImagePullBackOff"}},
+                    }
+                ]
+            }
+        }
+    )
+
+    def fake_run(argv: list[str], **kwargs: Any) -> SimpleNamespace:
+        if argv[1] == "exec":
+            return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=0, stdout=stale_json)
+
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        # 'hang-once': the attach survives one poll cycle, then exits cleanly.
+        patch(
+            "korvid.ui.app.subprocess.Popen", side_effect=_fake_popen(debug_calls, ["hang-once"])
+        ),
+        patch("korvid.ui.app.subprocess.call", return_value=1),
+        patch("korvid.ui.app.subprocess.run", side_effect=fake_run),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            await pilot.press("enter")  # busybox (no runtime detected)
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            await pilot.press("y")
+            await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+            assert not isinstance(app.screen, ConfirmScreen)  # no retry dialog
+            assert not any("image pull failed" in n.message for n in app._notifications)
     assert len(debug_calls) == 1
 
 

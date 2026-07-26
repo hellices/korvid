@@ -173,16 +173,34 @@ def recommend_debug_images(
     return options
 
 
-def find_pull_failure(manifest: dict[str, Any], image: str) -> str | None:
+def ephemeral_container_names(manifest: dict[str, Any]) -> frozenset[str]:
+    """Names of ephemeral containers currently present in the pod status.
+
+    Snapshot these before a `kubectl debug` attach so `find_pull_failure`
+    can ignore stale entries from earlier attempts (which can never be
+    removed from the pod spec) even when they used the same image.
+    """
+    status = manifest.get("status") or {}
+    return frozenset(
+        str(entry.get("name") or "") for entry in status.get("ephemeralContainerStatuses") or []
+    )
+
+
+def find_pull_failure(
+    manifest: dict[str, Any], image: str, *, ignore: frozenset[str] = frozenset()
+) -> str | None:
     """Return the pull-failure reason for `image`'s ephemeral container, if any.
 
     Scans `status.ephemeralContainerStatuses` for a waiting state with
     `ErrImagePull`/`ImagePullBackOff` on a container running exactly `image`.
-    Matching on the image keeps older failed ephemeral containers (which can
-    never be removed from the pod spec) from triggering a false fallback.
+    Entries named in `ignore` (pre-existing containers snapshotted before the
+    attach) are skipped, so a stale failure from an earlier attempt with the
+    same image never kills a new attach that is pulling fine.
     """
     status = manifest.get("status") or {}
     for entry in status.get("ephemeralContainerStatuses") or []:
+        if str(entry.get("name") or "") in ignore:
+            continue
         if entry.get("image") != image:
             continue
         waiting = (entry.get("state") or {}).get("waiting") or {}

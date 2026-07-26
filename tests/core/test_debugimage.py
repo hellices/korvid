@@ -7,6 +7,7 @@ from typing import Any
 from korvid.core.debugimage import (
     DebugImageOption,
     detect_runtime,
+    ephemeral_container_names,
     find_pull_failure,
     recommend_debug_images,
 )
@@ -278,3 +279,21 @@ def test_find_pull_failure_matches_image() -> None:
 
 def test_find_pull_failure_no_statuses() -> None:
     assert find_pull_failure({}, "busybox:1.36") is None
+
+
+def test_find_pull_failure_ignores_preexisting_containers() -> None:
+    # A stale failed entry with the SAME image (left over from an earlier
+    # attempt - ephemeral containers cannot be removed) must not be blamed
+    # on the current attach when its name was snapshotted beforehand.
+    manifest = _pod_with_ephemeral_status("busybox:1.36", "ErrImagePull")
+    assert find_pull_failure(manifest, "busybox:1.36", ignore=frozenset({"debugger-abc"})) is None
+    # A new (non-ignored) entry still reports the failure.
+    assert find_pull_failure(manifest, "busybox:1.36", ignore=frozenset({"other"})) == (
+        "ErrImagePull"
+    )
+
+
+def test_ephemeral_container_names() -> None:
+    manifest = _pod_with_ephemeral_status("busybox:1.36", "ErrImagePull")
+    assert ephemeral_container_names(manifest) == frozenset({"debugger-abc"})
+    assert ephemeral_container_names({}) == frozenset()

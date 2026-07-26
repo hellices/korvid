@@ -36,7 +36,12 @@ from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.agent.tools import UIBridge
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
-from korvid.core.debugimage import FALLBACK_IMAGE, find_pull_failure, recommend_debug_images
+from korvid.core.debugimage import (
+    FALLBACK_IMAGE,
+    ephemeral_container_names,
+    find_pull_failure,
+    recommend_debug_images,
+)
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
@@ -1624,6 +1629,10 @@ class KorvidApp(App[None]):
         `(exit_code, pull_failure_reason)`.
         """
         print(f"\x1b[2J\x1b[H\x1b[2m{banner}\x1b[0m", flush=True)
+        # Snapshot ephemeral containers already on the pod: failed entries
+        # from earlier attempts can never be removed from the spec, and one
+        # using the same image must not be blamed on this new attach.
+        pre_existing = ephemeral_container_names(self._pod_status(namespace, name) or {})
         proc = subprocess.Popen(argv)
         deadline = monotonic() + self._PULL_CHECK_DEADLINE
         while True:
@@ -1635,28 +1644,42 @@ class KorvidApp(App[None]):
                 # Pulls that survive the window are treated as slow-but-alive:
                 # stop polling and wait for the interactive session to end.
                 return proc.wait(), None
-            failure = self._check_pull_failure(namespace, name, image)
+            failure = self._check_pull_failure(namespace, name, image, ignore=pre_existing)
             if failure is not None:
                 proc.kill()
                 proc.wait()
                 return 1, failure
 
-    def _check_pull_failure(self, namespace: str, name: str, image: str) -> str | None:
-        """Pull-failure reason for `image`'s ephemeral container, best-effort.
+    def _pod_status(self, namespace: str, name: str) -> dict[str, Any] | None:
+        """Pod manifest via kubectl shell-out, best-effort (None on any error).
 
-        Runs while the TUI is suspended (the async client sits behind the
-        paused event loop), so it shells out to kubectl; any infrastructure
-        error means "no failure detected" and the attach keeps running.
+        Used while the TUI is suspended - the async client sits behind the
+        paused event loop, so the manifest is fetched with a subprocess.
         """
         argv = build_pod_get_argv(namespace, name, context=self.config.kube_context)
         try:
             result = subprocess.run(argv, capture_output=True, timeout=5)
             if result.returncode != 0:
                 return None
-            manifest = json.loads(result.stdout)
+            manifest: dict[str, Any] = json.loads(result.stdout)
         except (subprocess.TimeoutExpired, OSError, ValueError):
             return None
-        return find_pull_failure(manifest, image)
+        return manifest
+
+    def _check_pull_failure(
+        self, namespace: str, name: str, image: str, *, ignore: frozenset[str] = frozenset()
+    ) -> str | None:
+        """Pull-failure reason for `image`'s ephemeral container, best-effort.
+
+        Runs while the TUI is suspended, so it shells out to kubectl; any
+        infrastructure error means "no failure detected" and the attach keeps
+        running. Containers named in `ignore` (pre-existing before the attach)
+        are never blamed.
+        """
+        manifest = self._pod_status(namespace, name)
+        if manifest is None:
+            return None
+        return find_pull_failure(manifest, image, ignore=ignore)
 
     def _offer_pull_retry(
         self,
