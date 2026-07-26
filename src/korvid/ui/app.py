@@ -1174,9 +1174,12 @@ class KorvidApp(App[None]):
         if head == "mcp":
             self._handle_mcp_command(parts[1:])
             return
-        if head == "operators":
+        if head == "operators" and "operators" not in self.aliases:
             # The catalog view only exists where OLM serves PackageManifests;
             # explain the absence instead of a generic unknown-kind error.
+            # Only when the alias is genuinely unavailable: a syntax error on
+            # a discovered view (":operators ns extra") falls through to the
+            # normal unknown-command message.
             # "Not discovered" and not "absent": background discovery may
             # still be running, or may have failed (pods-only fallback) -
             # indistinguishable states from here.

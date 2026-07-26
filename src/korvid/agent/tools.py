@@ -655,18 +655,18 @@ class ToolExecutor:
         cluster's own OLM objects (issue #29: no hardcoded operator
         knowledge; the tool explains itself when OLM is absent)."""
         pkg_meta = resolve_olm_meta(self._aliases, "packagemanifests", PACKAGES_GROUP)
-        if pkg_meta is None:
+        sub_meta = resolve_olm_meta(self._aliases, "subscriptions", OPERATORS_GROUP)
+        if pkg_meta is None and sub_meta is None:
             return (
-                "OLM was not detected: the packages.operators.coreos.com API"
-                " group was not discovered (it may be absent, or discovery"
-                " may still be running), so there is no operator catalog"
-                " to list."
+                "OLM was not detected: neither packages.operators.coreos.com"
+                " nor operators.coreos.com API groups were discovered (OLM"
+                " may be absent, or discovery may still be running), so"
+                " there are no operators to list."
             )
         namespace: str | None = args.get("namespace")
         lines: list[str] = []
         # Installed state first: it is what the user most likely asked
         # about, and a large catalog must not push it past the result cap.
-        sub_meta = resolve_olm_meta(self._aliases, "subscriptions", OPERATORS_GROUP)
         if sub_meta is not None:
             lines.append("INSTALLED (subscriptions):")
             subs = await self._kube.list_objects(sub_meta, namespace)
@@ -679,6 +679,18 @@ class ToolExecutor:
                     f"  csv={getattr(sub, 'installed_csv', '') or '?'}"
                     f"  state={getattr(sub, 'state', '') or '?'}"
                 )
+        else:
+            lines.append(
+                "INSTALLED (subscriptions): unavailable -"
+                " the operators.coreos.com API group was not discovered"
+            )
+        if pkg_meta is None:
+            lines.append(
+                "AVAILABLE (operator catalog): unavailable -"
+                " the packages.operators.coreos.com API group was not"
+                " discovered (the package server may be down or hidden)"
+            )
+            return "\n".join(lines)
         lines.append("AVAILABLE (operator catalog):")
         packages = sorted(await self._kube.list_objects(pkg_meta, None), key=lambda p: p.name)
         # OperatorHub catalogs commonly serve hundreds of packages; cap the

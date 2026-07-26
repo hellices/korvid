@@ -652,3 +652,20 @@ async def test_install_wizard_prefills_default_namespace_with_zero_config(
         )
         ns_input = app.screen.query_one("#install-namespace")
         assert getattr(ns_input, "value", "") == "default"
+
+
+async def test_operators_syntax_error_with_olm_present_is_not_reported_as_absent() -> None:
+    """`:operators ns extra` is a syntax error, not OLM absence: with the
+    alias discovered, the OLM-absence explanation must not fire."""
+    app = make_app({"packagemanifests": [_package("cert-manager")]})
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        for ch in "operators olm extra":
+            await pilot.press(ch if ch != " " else "space")
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: any("Unknown resource or command" in n.message for n in app._notifications),
+            label="generic unknown-command message",
+        )
+        assert not any("OLM not detected" in n.message for n in app._notifications)

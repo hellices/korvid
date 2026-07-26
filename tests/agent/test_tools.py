@@ -749,3 +749,37 @@ async def test_list_operators_installed_first_and_catalog_capped_sorted() -> Non
     assert "pkg-0000" in out  # sorted: lowest names shown
     assert f"pkg-{_MAX_CATALOG_PACKAGES:04d}" not in out  # beyond the cap
     assert "...and 5 more catalog packages" in out
+
+
+async def test_list_operators_reports_installed_when_package_server_missing() -> None:
+    """subscriptions discovered but the package server absent: installed
+    operators are still reported, with an unavailable note for the catalog."""
+    from korvid.k8s.discovery import ResourceMeta
+    from korvid.k8s.models import OLMSubscriptionSummary
+
+    class SubsOnlyKube:
+        async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+            return [
+                OLMSubscriptionSummary(
+                    name="argocd-operator",
+                    namespace="operators",
+                    kind="Subscription",
+                    created="2026-07-26T10:00:00Z",
+                    uid="s1",
+                    channel="alpha",
+                    source="operatorhubio-catalog",
+                    installed_csv="argocd-operator.v0.8.0",
+                    state="AtLatestKnown",
+                )
+            ]
+
+    aliases = {
+        "pods": ResourceMeta("Pod", "pods", "", "v1", True),
+        "subscriptions": ResourceMeta(
+            "Subscription", "subscriptions", "operators.coreos.com", "v1alpha1", True
+        ),
+    }
+    ex = ToolExecutor(SubsOnlyKube(), aliases)  # type: ignore[arg-type]
+    out = await ex.execute("list_operators", {})
+    assert "argocd-operator" in out
+    assert "AVAILABLE (operator catalog): unavailable" in out
