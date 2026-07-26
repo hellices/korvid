@@ -75,12 +75,17 @@ def restarts_style(restarts: int) -> str:
     return "bold red"
 
 
-def usage_style(percent: float | None) -> str:
-    """Rich style for a usage-vs-request percentage; None means not computable."""
+def usage_style(percent: float | None, *, cap_at_warn: bool = False) -> str:
+    """Rich style for a usage percentage; None means not computable.
+
+    With `cap_at_warn` the critical color is capped at yellow - used when the
+    percentage is request-based and no limit exists (issue #50): bursting
+    above a request is expected Burstable behavior, not OOMKill proximity.
+    """
     if percent is None:
         return "dim"
     if percent >= USAGE_CRITICAL_PERCENT:
-        return "bold red"
+        return "yellow" if cap_at_warn else "bold red"
     if percent >= USAGE_WARN_PERCENT:
         return "yellow"
     return "green"

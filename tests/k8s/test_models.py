@@ -801,6 +801,39 @@ class TestExactRequestValues:
         assert pod.cpu_request_cores is None
         assert pod.mem_request_bytes is None
 
+    def test_from_manifest_fills_exact_limits(self) -> None:
+        """Issue #50: severity coloring needs exact limit values too - per
+        container, since the kubelet enforces each limit independently."""
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {
+                "containers": [
+                    {
+                        "name": "c",
+                        "resources": {
+                            "requests": {"cpu": "100m", "memory": "32Mi"},
+                            "limits": {"cpu": "500m", "memory": "200Mi"},
+                        },
+                    }
+                ]
+            },
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        (limit,) = pod.container_limits
+        assert limit.cpu_cores == pytest.approx(0.5)
+        assert limit.mem_bytes == 200 * 2**20
+
+    def test_no_limits_gives_none(self) -> None:
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {"containers": [{"name": "c"}]},
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_limit_cores is None
+        assert pod.mem_limit_bytes is None
+
 
 class TestPodLevelRequests:
     """K8s 1.34+ pod-level resources (spec.resources) take precedence over
@@ -908,3 +941,76 @@ class TestSidecarInitOrdering:
         )
         # init runs alone (500m); steady state is 50m + 100m = 150m
         assert pod.cpu_request_cores == pytest.approx(0.5)
+
+
+class TestContainerLimits:
+    """Review fix (PR #51 r4): per-container limits are enforced
+    independently by the kubelet, so severity must key off per-container
+    ratios - a pod-aggregate sum hides a sidecar sitting at its own limit.
+    The pod-level aggregate fields now carry only spec.resources.limits
+    (K8s 1.34+), which bound the whole pod by definition."""
+
+    @staticmethod
+    def _pod(spec: dict[str, Any]) -> PodSummary:
+        return PodSummary.from_manifest(
+            {"metadata": {"name": "p", "namespace": "ns"}, "spec": spec, "status": {}}
+        )
+
+    def test_per_container_limits_are_captured(self) -> None:
+        pod = self._pod(
+            {
+                "containers": [
+                    {"name": "a", "resources": {"limits": {"cpu": "500m", "memory": "256Mi"}}},
+                    {"name": "b", "resources": {"limits": {"memory": "2Gi"}}},
+                ]
+            }
+        )
+        limits = {c.name: c for c in pod.container_limits}
+        assert limits["a"].cpu_cores == pytest.approx(0.5)
+        assert limits["a"].mem_bytes == 256 * 2**20
+        assert limits["b"].cpu_cores is None
+        assert limits["b"].mem_bytes == 2 * 2**30
+
+    def test_init_containers_are_included(self) -> None:
+        # Classic inits appear in pod metrics while they run; sidecars all
+        # the time - both need their ceilings known.
+        pod = self._pod(
+            {
+                "containers": [{"name": "a"}],
+                "initContainers": [
+                    {
+                        "name": "sc",
+                        "restartPolicy": "Always",
+                        "resources": {"limits": {"memory": "64Mi"}},
+                    },
+                    {"name": "init", "resources": {"limits": {"memory": "128Mi"}}},
+                ],
+            }
+        )
+        limits = {c.name: c for c in pod.container_limits}
+        assert limits["sc"].mem_bytes == 64 * 2**20
+        assert limits["init"].mem_bytes == 128 * 2**20
+        assert limits["a"].mem_bytes is None
+
+    def test_pod_level_limits_fill_the_aggregate_fields(self) -> None:
+        pod = self._pod(
+            {
+                "resources": {"limits": {"cpu": "2", "memory": "1Gi"}},
+                "containers": [{"name": "a"}, {"name": "b"}],
+            }
+        )
+        assert pod.cpu_limit_cores == pytest.approx(2.0)
+        assert pod.mem_limit_bytes == 2**30
+
+    def test_container_limits_never_fill_the_aggregate_fields(self) -> None:
+        # Summed container limits are not a whole-pod ceiling: each is
+        # enforced independently by the kubelet.
+        pod = self._pod(
+            {
+                "containers": [
+                    {"name": "a", "resources": {"limits": {"cpu": "500m", "memory": "256Mi"}}},
+                ]
+            }
+        )
+        assert pod.cpu_limit_cores is None
+        assert pod.mem_limit_bytes is None

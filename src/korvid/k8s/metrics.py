@@ -25,6 +25,16 @@ DEFAULT_INTERVAL = 15.0
 
 
 @dataclass(frozen=True)
+class ContainerUsage:
+    """One container's usage sample - kept alongside the pod total because
+    limits are enforced per container (PR #51 review)."""
+
+    name: str
+    cpu_cores: float
+    memory_bytes: int
+
+
+@dataclass(frozen=True)
 class PodMetrics:
     """Whole-pod usage: the sum over container samples in one PodMetrics item."""
 
@@ -32,6 +42,8 @@ class PodMetrics:
     namespace: str
     cpu_cores: float
     memory_bytes: int
+    #: Per-container breakdown; empty when the item carried no samples.
+    containers: tuple[ContainerUsage, ...] = ()
 
 
 def parse_pod_metrics_list(data: dict[str, Any]) -> list[PodMetrics]:
@@ -61,13 +73,21 @@ def _parse_item(item: dict[str, Any]) -> PodMetrics | None:
         return None
     cpu = 0.0
     memory = 0
+    containers: list[ContainerUsage] = []
     try:
         for container in item.get("containers") or []:
             usage = container.get("usage") or {}
-            if "cpu" in usage:
-                cpu += parse_cpu(str(usage["cpu"]))
-            if "memory" in usage:
-                memory += parse_memory(str(usage["memory"]))
+            c_cpu = parse_cpu(str(usage["cpu"])) if "cpu" in usage else 0.0
+            c_mem = parse_memory(str(usage["memory"])) if "memory" in usage else 0
+            cpu += c_cpu
+            memory += c_mem
+            containers.append(
+                ContainerUsage(
+                    name=str(container.get("name") or ""),
+                    cpu_cores=c_cpu,
+                    memory_bytes=c_mem,
+                )
+            )
     except (ValueError, TypeError, AttributeError):
         logger.debug("skipping malformed pod metrics item %r", name, exc_info=True)
         return None
@@ -76,6 +96,7 @@ def _parse_item(item: dict[str, Any]) -> PodMetrics | None:
         namespace=namespace,
         cpu_cores=cpu,
         memory_bytes=memory,
+        containers=tuple(containers),
     )
 
 
