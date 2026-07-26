@@ -6,6 +6,8 @@ import asyncio
 import dataclasses
 from typing import Any, cast
 
+import pytest
+
 from korvid.__main__ import _close_provider_in_background
 from korvid.agent.tools import UIBridge
 
@@ -363,3 +365,35 @@ async def test_discovery_drops_aliases_shadowing_synthetic_helm_views() -> None:
     assert aliases["helmrevisions"] is HELM_REVISIONS_META
     assert "hr" not in aliases  # Flux's shortname would silently misroute
     assert aliases["pods"] is PODS_META
+
+
+async def test_get_manifest_routes_helm_revision_names_to_specific_revision() -> None:
+    """`d` on a revision row named "web.v3" must fetch exactly that revision;
+    the parsing lives in the _make_get_manifest factory, not the client."""
+    from korvid.__main__ import _make_get_manifest
+    from korvid.k8s.discovery import PODS_META, build_alias_map
+    from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
+
+    calls: list[tuple[str, str, int | None]] = []
+
+    class FakeKube:
+        async def get_helm_release(
+            self, namespace: str, name: str, revision: int | None = None
+        ) -> dict[str, object]:
+            calls.append((namespace, name, revision))
+            return {"name": name, "revision": revision}
+
+    aliases = build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META])
+    get_manifest = _make_get_manifest(FakeKube(), aliases)  # type: ignore[arg-type]
+
+    await get_manifest("helmrevisions", "default", "web.v3")
+    assert calls[-1] == ("default", "web", 3)
+
+    await get_manifest("helmreleases", "default", "web")
+    release_call: tuple[str, str, int | None] = ("default", "web", None)
+    assert calls[-1] == release_call
+
+    with pytest.raises(ValueError, match="revision"):
+        await get_manifest("helmrevisions", "default", "not-a-revision-row")
+    with pytest.raises(ValueError, match="namespace"):
+        await get_manifest("helmreleases", None, "web")

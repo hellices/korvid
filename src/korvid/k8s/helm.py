@@ -48,11 +48,16 @@ def release_uid(namespace: str, name: str) -> str:
 
 
 def _bounded_gunzip(data: bytes) -> bytes:
-    """Gunzip with an output ceiling; oversize raises ValueError (bomb guard)."""
+    """Gunzip with an output ceiling; oversize output and incomplete streams
+    both raise ValueError (bomb guard + truncated-trailer guard)."""
     decompressor = zlib.decompressobj(wbits=31)  # 31 = gzip container
-    out = decompressor.decompress(data, MAX_PAYLOAD_BYTES)
-    if decompressor.unconsumed_tail:
+    # One byte past the limit disambiguates "exactly at the limit" from
+    # "stopped early because there was more".
+    out = decompressor.decompress(data, MAX_PAYLOAD_BYTES + 1)
+    if len(out) > MAX_PAYLOAD_BYTES:
         raise ValueError(f"payload exceeds {MAX_PAYLOAD_BYTES} bytes decompressed")
+    if not decompressor.eof:
+        raise ValueError("payload gzip stream is truncated")
     return out
 
 

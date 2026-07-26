@@ -120,6 +120,16 @@ class TestDecodeRelease:
         with pytest.raises(ValueError, match="payload"):
             decode_release(_secret(data={"release": bad}))
 
+    def test_truncated_gzip_trailer_raises_value_error(self) -> None:
+        """A complete DEFLATE body with a chopped gzip trailer decodes to
+        valid JSON but is not a complete stream - it must take the
+        corrupt-payload fallback, not be silently accepted."""
+        compressed = gzip.compress(json.dumps(_payload()).encode())
+        truncated = compressed[:-4]  # drop half the CRC/size trailer
+        bad = base64.b64encode(base64.b64encode(truncated)).decode()
+        with pytest.raises(ValueError, match="payload"):
+            decode_release(_secret(data={"release": bad}))
+
     def test_corrupt_deflate_stream_raises_value_error(self) -> None:
         """A valid gzip header with a broken DEFLATE body raises zlib.error,
         which must be normalized to ValueError like every other decode
