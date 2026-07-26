@@ -34,6 +34,9 @@ class KorvidConfig:
     readonly: bool = False
     mcp_enabled: bool = False
     mcp_port: int = 7878
+    #: kubectl debug image overrides (issue #52): air-gapped / private registry.
+    debug_default_image: str | None = None
+    debug_images: dict[str, str] = field(default_factory=dict)
 
 
 def load_config(path: Path | None = None) -> KorvidConfig:
@@ -63,6 +66,13 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     mcp_raw: dict[str, Any] = mcp_value if isinstance(mcp_value, dict) else {}
     logs_value = raw.get("logs")
     logs_raw: dict[str, Any] = logs_value if isinstance(logs_value, dict) else {}
+    debug_value = raw.get("debug")
+    debug_raw: dict[str, Any] = debug_value if isinstance(debug_value, dict) else {}
+    images_value = debug_raw.get("images")
+    images_raw: dict[Any, Any] = images_value if isinstance(images_value, dict) else {}
+    debug_images = {
+        str(key): value for key, value in images_raw.items() if isinstance(value, str) and value
+    }
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
@@ -79,6 +89,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         readonly=raw.get("readonly") is True,
         mcp_enabled=mcp_raw.get("enabled") is True,
         mcp_port=_parse_port(mcp_raw.get("port")),
+        debug_default_image=_opt_str(debug_raw.get("default_image")),
+        debug_images=debug_images,
     )
 
 

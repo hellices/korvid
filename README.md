@@ -87,6 +87,37 @@ error state and a notification is raised.  The in-memory ring buffer retains the
 last 5000 lines; when it overflows a one-time banner is written to the pane so you
 know older lines were dropped.
 
+## Debug fallback
+
+When `s` lands in a container without a shell (distroless), korvid offers to
+attach an ephemeral container via `kubectl debug` instead.  The image picker
+is runtime-aware: the target container's image, ports, and env vars are
+matched against known runtime signals (all local heuristics — no network
+calls), and a detected JVM / Python / Node.js / Go runtime leads with the
+matching [KoolKits](https://github.com/lightrun-platform/koolkits) toolkit
+image, followed by `nicolaka/netshoot` for network debugging and
+`busybox:1.36` as the minimal fallback.  A custom image can always be typed
+in.  The chosen image appears in the approval dialog and in the audit log
+entry.
+
+If the chosen image cannot be pulled (`ErrImagePull` / `ImagePullBackOff`
+within the first 30 seconds), the hung attach is killed and a retry with the
+fallback image is offered — the failed ephemeral container entry stays in the
+pod spec (Kubernetes does not allow removing it); the retry attaches an
+additional container.
+
+For air-gapped clusters or private registries, configure the images in
+`~/.config/korvid/config.yaml`; when `debug.images` is set only configured
+images are offered:
+
+```yaml
+debug:
+  default_image: registry.corp.local/tools/busybox:1.36
+  images:
+    jvm: registry.corp.local/tools/debug-jvm:latest
+    python: registry.corp.local/tools/debug-python:latest
+```
+
 ## AI agent
 
 Press `Ctrl-A` to open the agent panel — a chat sidebar that answers questions

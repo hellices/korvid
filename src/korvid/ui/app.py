@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import json
 import logging
 import os
 import shlex
@@ -35,6 +36,7 @@ from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.agent.tools import UIBridge
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
+from korvid.core.debugimage import FALLBACK_IMAGE, find_pull_failure, recommend_debug_images
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
@@ -61,11 +63,17 @@ from korvid.ui.messages import (
     UnknownCommand,
 )
 from korvid.ui.navigation import DrillLevel, NavigationStack
-from korvid.ui.shell import DEBUG_IMAGE, build_debug_argv, build_exec_argv, build_probe_argv
+from korvid.ui.shell import (
+    DEBUG_IMAGE,
+    build_debug_argv,
+    build_exec_argv,
+    build_pod_get_argv,
+    build_probe_argv,
+)
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 from korvid.ui.widgets.command_bar import CommandBar
-from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
+from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt, ReplicasPrompt
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
@@ -1370,18 +1378,24 @@ class KorvidApp(App[None]):
             return
         target = f"{name}/{container}" if container else name
         try:
-            # Bind the offer to this pod incarnation: kubectl debug addresses
-            # the pod by namespace/name only, so without this a same-named
-            # replacement created while the dialog is open would receive the
-            # ephemeral container. _run_debug re-checks the uid just before
-            # executing and aborts on change. 404 -> the pod is already gone.
-            approved_uid = await self._target_uid("pods", namespace, name)
+            # One manifest fetch serves two purposes: binding the offer to
+            # this pod incarnation (kubectl debug addresses the pod by
+            # namespace/name only, so without the uid a same-named
+            # replacement created while the dialogs are open would receive
+            # the ephemeral container - _run_debug re-checks the uid just
+            # before executing) and runtime detection for the image
+            # recommendation (issue #52). 404 -> the pod is already gone.
+            manifest = await self._debug_manifest(namespace, name)
         except ApiStatusError:
             self.notify(
                 f"Debug fallback for {target} not offered - the pod no longer exists.",
                 severity="warning",
             )
             return
+        approved_uid: str | None = None
+        if manifest is not None:
+            raw_uid = (manifest.get("metadata") or {}).get("uid")
+            approved_uid = str(raw_uid) if raw_uid else None
         if len(self.screen_stack) > 1:
             # The probe/RBAC pre-check ran concurrently with user input: never
             # stack the offer over a dialog that opened meanwhile.
@@ -1391,29 +1405,125 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return
+        self._pick_debug_image(namespace, name, container, exit_code, approved_uid, manifest or {})
+
+    def _pick_debug_image(
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        exit_code: int,
+        approved_uid: str | None,
+        manifest: dict[str, Any],
+    ) -> None:
+        """Debug image picker (issue #52): runtime-aware recommendation first,
+        alternatives after, plus a custom-image prompt."""
+        target = f"{name}/{container}" if container else name
+        options = recommend_debug_images(
+            manifest,
+            container,
+            images_cfg=self.config.debug_images or None,
+            default_image=self.config.debug_default_image,
+        )
+        prompts = {f"{opt.image}  ({opt.label})": opt.image for opt in options}
+        custom_choice = "Custom image…"
+
+        def _on_image(choice: str | None) -> None:
+            if choice is None:
+                return
+            if choice == custom_choice:
+
+                def _on_custom(image: str | None) -> None:
+                    if image:
+                        self._confirm_debug(
+                            namespace, name, container, exit_code, approved_uid, image
+                        )
+
+                self.push_screen(ImagePrompt(target), _on_custom)
+                return
+            self._confirm_debug(
+                namespace, name, container, exit_code, approved_uid, prompts[choice]
+            )
+
+        # Choosing an image is read-only: even if input buffered before this
+        # asynchronous picker existed selects an entry, the pod mutation is
+        # still gated by the ConfirmScreen pushed in _confirm_debug, whose
+        # creation-time key cutoff discards such buffered keystrokes.
+        self.push_screen(
+            PickScreen(
+                f"Shell failed in {target} (exit {exit_code}) - choose a debug image."
+                f"\nRecommended: {options[0].image} - {options[0].reason}",
+                [*prompts, custom_choice],
+            ),
+            _on_image,
+        )
+
+    async def _debug_manifest(self, namespace: str, name: str) -> dict[str, Any] | None:
+        """Pod manifest at debug-offer time (uid binding + runtime detection).
+
+        Same semantics as `_target_uid`: raises `ApiStatusError(404)` when the
+        pod is gone; fails open (`None`) when no manifest source is wired or
+        the lookup fails or times out - the debug stays approval-gated and
+        audited, just without a uid precondition or a runtime recommendation.
+        """
+        if self._get_manifest is None:
+            return None
+        try:
+            return await asyncio.wait_for(
+                self._get_manifest("pods", namespace, name), _UID_LOOKUP_TIMEOUT
+            )
+        except ApiStatusError as exc:
+            if exc.status == 404:
+                raise
+            logger.warning(
+                "manifest lookup for %s/%s failed; offering debug without it", namespace, name
+            )
+            return None
+        except TimeoutError:
+            logger.warning(
+                "manifest lookup for %s/%s timed out; offering debug without it", namespace, name
+            )
+            return None
+
+    def _confirm_debug(
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        exit_code: int,
+        approved_uid: str | None,
+        image: str,
+    ) -> None:
+        """Approval gate for the debug fallback with the chosen image.
+
+        ConfirmScreen, not a generic picker: its creation-time key cutoff
+        discards any input buffered before the prompt existed - a queued
+        Enter or y must never start a pod mutation the user has not seen.
+        """
+        target = f"{name}/{container}" if container else name
 
         def _on_choice(confirmed: bool | None) -> None:
             if confirmed:
-                self.run_worker(self._run_debug(namespace, name, container, approved_uid))
+                self.run_worker(self._run_debug(namespace, name, container, approved_uid, image))
 
-        # ConfirmScreen, not a generic picker: this offer appears
-        # asynchronously (after the probe/RBAC round trip), and its
-        # creation-time key cutoff discards any input buffered before the
-        # prompt existed - a queued Enter or Down+Enter must never start a
-        # pod mutation the user has not seen.
         self.push_screen(
             ConfirmScreen(
                 f"Shell failed in {target} (exit {exit_code})",
-                f"kubectl debug: attach a {DEBUG_IMAGE} debug container to pod"
-                f" {name}{self._write_locus(namespace)} - the image likely has no"
-                " sh/bash (distroless). Note: the ephemeral container stays in the"
-                " pod spec until restart.",
+                f"kubectl debug: attach a {image} debug container to pod"
+                f" {name}{self._write_locus(namespace)} - the target image likely"
+                " has no sh/bash (distroless). Note: the ephemeral container stays"
+                " in the pod spec until restart.",
             ),
             _on_choice,
         )
 
     async def _run_debug(
-        self, namespace: str, name: str, container: str | None, approved_uid: str | None
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        approved_uid: str | None,
+        image: str = DEBUG_IMAGE,
     ) -> None:
         """Attach an ephemeral busybox container via kubectl debug. This is a
         pod mutation: blocked in readonly sessions and audited fail-closed
@@ -1432,46 +1542,147 @@ class KorvidApp(App[None]):
         if audit is None:
             self.notify("Writes disabled: no audit log configured", severity="warning")
             return
-        if approved_uid is not None:
-            try:
-                current_uid = await self._target_uid("pods", namespace, name)
-            except ApiStatusError:
-                self.notify(
-                    f"kubectl debug cancelled - pod {name} no longer exists.",
-                    severity="warning",
-                )
-                return
-            if current_uid is not None and current_uid != approved_uid:
-                self.notify(
-                    f"kubectl debug cancelled - pod {name} was replaced since"
-                    " the prompt was shown.",
-                    severity="warning",
-                )
-                return
-        detail = "ephemeral debug container (kubectl debug)"
+        if approved_uid is not None and not await self._debug_uid_unchanged(
+            namespace, name, approved_uid
+        ):
+            return
+        detail = f"ephemeral debug container (kubectl debug, image {image})"
         try:
             await asyncio.to_thread(self._audit_debug, audit, namespace, name, detail, "intent")
         except Exception:
             logger.exception("audit append failed; blocking kubectl debug")
             self.notify("Write blocked: audit log unavailable", severity="error")
             return
-        argv = build_debug_argv(namespace, name, container, context=self.config.kube_context)
+        argv = build_debug_argv(
+            namespace, name, container, context=self.config.kube_context, image=image
+        )
         target = f"{name}/{container}" if container else name
         with self.suspend():
-            exit_code = self._run_interactive(argv, f"korvid debug → {target} (exit to return)")
+            exit_code, pull_failure = self._run_debug_process(
+                argv, f"korvid debug → {target} (exit to return)", namespace, name, image
+            )
         self.refresh()
-        outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
+        if pull_failure is not None:
+            outcome = f"error: image pull failed ({pull_failure})"
+        else:
+            outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
         try:
             await asyncio.to_thread(self._audit_debug, audit, namespace, name, detail, outcome)
         except Exception:
             logger.exception("audit append failed after kubectl debug")
             self.notify("Audit write failed for the executed debug", severity="warning")
+        if pull_failure is not None:
+            self._offer_pull_retry(namespace, name, container, approved_uid, image, pull_failure)
+            return
         if exit_code != 0:
             self.notify(
                 f"kubectl debug exited with status {exit_code}"
                 " — check RBAC (pods/ephemeralcontainers) and cluster version",
                 severity="warning",
             )
+
+    _PULL_CHECK_INTERVAL = 2.5
+    _PULL_CHECK_DEADLINE = 30.0
+
+    async def _debug_uid_unchanged(self, namespace: str, name: str, approved_uid: str) -> bool:
+        """Re-verify the approved pod incarnation just before kubectl debug
+        executes; notifies and returns False when the pod is gone or replaced."""
+        try:
+            current_uid = await self._target_uid("pods", namespace, name)
+        except ApiStatusError:
+            self.notify(
+                f"kubectl debug cancelled - pod {name} no longer exists.",
+                severity="warning",
+            )
+            return False
+        if current_uid is not None and current_uid != approved_uid:
+            self.notify(
+                f"kubectl debug cancelled - pod {name} was replaced since the prompt was shown.",
+                severity="warning",
+            )
+            return False
+        return True
+
+    def _run_debug_process(
+        self, argv: list[str], banner: str, namespace: str, name: str, image: str
+    ) -> tuple[int, str | None]:
+        """Run kubectl debug while watching for image pull failures.
+
+        kubectl debug hangs silently on `ErrImagePull`/`ImagePullBackOff`; for
+        the first `_PULL_CHECK_DEADLINE` seconds the pod's
+        `ephemeralContainerStatuses` are polled and a failing pull kills the
+        attach so the caller can offer a retry with the fallback image instead
+        of leaving the user staring at a hung terminal. Returns
+        `(exit_code, pull_failure_reason)`.
+        """
+        print(f"\x1b[2J\x1b[H\x1b[2m{banner}\x1b[0m", flush=True)
+        proc = subprocess.Popen(argv)
+        deadline = monotonic() + self._PULL_CHECK_DEADLINE
+        while True:
+            try:
+                return proc.wait(timeout=self._PULL_CHECK_INTERVAL), None
+            except subprocess.TimeoutExpired:
+                pass
+            if monotonic() > deadline:
+                # Pulls that survive the window are treated as slow-but-alive:
+                # stop polling and wait for the interactive session to end.
+                return proc.wait(), None
+            failure = self._check_pull_failure(namespace, name, image)
+            if failure is not None:
+                proc.kill()
+                proc.wait()
+                return 1, failure
+
+    def _check_pull_failure(self, namespace: str, name: str, image: str) -> str | None:
+        """Pull-failure reason for `image`'s ephemeral container, best-effort.
+
+        Runs while the TUI is suspended (the async client sits behind the
+        paused event loop), so it shells out to kubectl; any infrastructure
+        error means "no failure detected" and the attach keeps running.
+        """
+        argv = build_pod_get_argv(namespace, name, context=self.config.kube_context)
+        try:
+            result = subprocess.run(argv, capture_output=True, timeout=5)
+            if result.returncode != 0:
+                return None
+            manifest = json.loads(result.stdout)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            return None
+        return find_pull_failure(manifest, image)
+
+    def _offer_pull_retry(
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        approved_uid: str | None,
+        image: str,
+        reason: str,
+    ) -> None:
+        """Offer an immediate retry with the fallback image after a pull failure."""
+        fallback = self.config.debug_default_image or FALLBACK_IMAGE
+        target = f"{name}/{container}" if container else name
+        if fallback == image or len(self.screen_stack) > 1:
+            self.notify(
+                f"kubectl debug: image pull failed for {image} ({reason})",
+                severity="error",
+            )
+            return
+
+        def _on_choice(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(self._run_debug(namespace, name, container, approved_uid, fallback))
+
+        self.push_screen(
+            ConfirmScreen(
+                f"Image pull failed for {image} ({reason})",
+                f"Retry kubectl debug on {target}{self._write_locus(namespace)} with"
+                f" {fallback}? Note: the failed ephemeral container entry cannot be"
+                " removed from the pod spec; the retry attaches an additional"
+                " container.",
+            ),
+            _on_choice,
+        )
 
     @staticmethod
     def _audit_debug(audit: AuditLog, namespace: str, name: str, detail: str, outcome: str) -> None:

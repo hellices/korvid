@@ -21,10 +21,10 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 _DIALOG_CSS = """
-ConfirmScreen, ReplicasPrompt {
+ConfirmScreen, ReplicasPrompt, ImagePrompt {
     align: center middle;
 }
-ConfirmScreen > VerticalScroll, ReplicasPrompt > Vertical {
+ConfirmScreen > VerticalScroll, ReplicasPrompt > Vertical, ImagePrompt > Vertical {
     width: 70;
     height: auto;
     max-height: 80%;
@@ -32,10 +32,10 @@ ConfirmScreen > VerticalScroll, ReplicasPrompt > Vertical {
     padding: 1 2;
     background: $surface;
 }
-ConfirmScreen .confirm-title, ReplicasPrompt .confirm-title {
+ConfirmScreen .confirm-title, ReplicasPrompt .confirm-title, ImagePrompt .confirm-title {
     text-style: bold;
 }
-ConfirmScreen .confirm-hint, ReplicasPrompt .confirm-hint {
+ConfirmScreen .confirm-hint, ReplicasPrompt .confirm-hint, ImagePrompt .confirm-hint {
     color: $text-muted;
 }
 """
@@ -201,6 +201,47 @@ class ReplicasPrompt(ModalScreen[int | None]):
             self.notify("Replicas cannot be negative", severity="warning")
             return
         self.dismiss(replicas)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ImagePrompt(ModalScreen[str | None]):
+    """Collects a custom container image reference for the debug fallback.
+
+    Selecting the image is a read-only choice: the pod mutation itself is
+    still gated by the ConfirmScreen that follows.
+    """
+
+    CSS = _DIALOG_CSS
+
+    BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
+        Binding("escape", "cancel", "Cancel", show=True),
+    ]
+
+    def __init__(self, target: str) -> None:
+        super().__init__()
+        self._target = target
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(
+                f"Custom debug image for {self._target}", classes="confirm-title", markup=False
+            )
+            yield Static("Enter an image reference (Esc cancels)", classes="confirm-hint")
+            yield Input(placeholder="registry.example.com/tools/debug:latest", id="image-input")
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+
+    @on(Input.Submitted, "#image-input")
+    def _submit(self, event: Input.Submitted) -> None:
+        event.stop()
+        image = event.value.strip()
+        if not image:
+            self.notify("Enter an image reference", severity="warning")
+            return
+        self.dismiss(image)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
