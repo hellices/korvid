@@ -19,6 +19,7 @@ class _FakeProc:
         self.returncode: int | None = None
         self.terminated = False
         self.killed = False
+        self.waited = False
 
     def poll(self) -> int | None:
         return self.returncode
@@ -34,6 +35,7 @@ class _FakeProc:
     def wait(self, timeout: float | None = None) -> int:
         if self.returncode is None:
             raise RuntimeError("wait() on a live fake proc")
+        self.waited = True
         return self.returncode
 
     def exit(self, code: int) -> None:
@@ -278,6 +280,7 @@ def test_stop_all_kills_stragglers_after_shared_deadline() -> None:
     assert len(records) == 2
     assert all(p.terminated for p in procs)
     assert all(p.killed for p in procs)
+    assert all(p.waited for p in procs)  # killed children are reaped, no zombies
 
 
 def test_stop_all_returns_stopped_records_for_auditing() -> None:

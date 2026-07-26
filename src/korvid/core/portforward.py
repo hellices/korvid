@@ -196,6 +196,9 @@ class ForwardRegistry:
                 for proc in live:
                     if proc.poll() is None:
                         proc.kill()
+                        # SIGKILL cannot be ignored — this wait is immediate
+                        # and reaps the child so no zombie outlives teardown.
+                        proc.wait()
                 break
             time.sleep(_STOP_POLL_SECONDS)
         return records
