@@ -712,7 +712,8 @@ async def test_list_operators_without_olm_explains() -> None:
     assert "OLM" in out
     # Deliberately avoids asserting the raw API-group string: CodeQL flags
     # domain-like substring checks as URL-sanitization smells.
-    assert "were not discovered" in out
+    assert "neither" in out
+    assert "API groups were discovered" in out
 
 
 async def test_list_operators_installed_first_and_catalog_capped_sorted() -> None:
