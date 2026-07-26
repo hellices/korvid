@@ -101,8 +101,16 @@ def _yaml_equal(a: object, b: object) -> bool:
     if isinstance(a, dict) and isinstance(b, dict):
         if len(a) != len(b):
             return False
-        # Key lookup would conflate True/1 the same way == does, so match
-        # key/value pairs structurally. Quadratic, but manifests are small.
+        # Fast path for the overwhelmingly common case of string-keyed
+        # mappings: direct lookup is O(n), and str-to-str comparison has
+        # no cross-type conflation. Kubernetes objects can be large (a
+        # ConfigMap may carry thousands of data keys), so the structural
+        # scan below must not run on every comparison.
+        if all(isinstance(k, str) for k in a) and all(isinstance(k, str) for k in b):
+            return all(key in b and _yaml_equal(value, b[key]) for key, value in a.items())
+        # Unusual YAML key types: key lookup would conflate True/1 the same
+        # way == does, so match key/value pairs structurally. Quadratic,
+        # but such mappings are rare and rejected upstream for manifests.
         b_items = list(b.items())
         return all(
             any(
@@ -1681,7 +1689,12 @@ class KorvidApp(App[None]):
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     fh.write(text)
-                argv = [*shlex.split(editor), tmp]
+                argv = shlex.split(editor)
+                if not argv:
+                    # A whitespace-only $VISUAL/$EDITOR passes the fallback
+                    # expression but yields no executable to run.
+                    raise ValueError("empty editor command")
+                argv.append(tmp)
                 with self.suspend():
                     code = await asyncio.to_thread(subprocess.call, argv)
             except (OSError, ValueError) as exc:

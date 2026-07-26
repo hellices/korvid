@@ -940,3 +940,32 @@ def test_yaml_equal_is_scalar_type_sensitive() -> None:
 
 def test_yaml_equal_distinguishes_key_types() -> None:
     assert not _yaml_equal({1: "v"}, {True: "v"})
+
+
+async def test_external_editor_whitespace_only_editor_cancels(tmp_path: Path) -> None:
+    """Review round 8 (suppressed): a whitespace-only $VISUAL/$EDITOR passes
+    the fallback expression but shlex.split returns an empty list -
+    subprocess.call([]) would raise IndexError out of the action."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        with mock.patch.dict(os.environ, {"VISUAL": "   ", "EDITOR": ""}):
+            result = await app._edit_in_external_editor("a: 1\n")
+        assert result is None
+        await _until(pilot, lambda: any("editor" in n.message for n in app._notifications))
+    assert rec.calls == []
+
+
+def test_yaml_equal_string_keyed_fast_path_matches_structural_scan() -> None:
+    """Review round 8: string-keyed mappings take a direct-lookup fast path;
+    it must agree with the structural scan used for unusual key types."""
+    big = {f"key-{i}": [i, {"nested": str(i)}] for i in range(500)}
+    assert _yaml_equal(big, copy.deepcopy(big))
+    other = copy.deepcopy(big)
+    other["key-499"][0] = True  # 499 == True is False, but type check matters elsewhere
+    assert not _yaml_equal(big, other)
+    missing = copy.deepcopy(big)
+    del missing["key-0"]
+    missing["key-x"] = [0, {"nested": "0"}]
+    assert not _yaml_equal(big, missing)
