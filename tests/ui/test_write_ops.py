@@ -27,6 +27,7 @@ from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.writes import WriteOps
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
+from korvid.ui.widgets.resource_table import ResourceTable
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
@@ -94,6 +95,8 @@ def make_app(
     permitted: bool | None = None,
     get_manifest: object = None,
     edit_text: object = None,
+    check_calls: list[tuple[str, str, str, str | None, str, str]] | None = None,
+    extra_pods: list[Summary] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -106,7 +109,8 @@ def make_app(
                 restarts=0,
                 node=None,
                 uid="pod-uid-1",
-            )
+            ),
+            *(extra_pods or []),
         ],
         "deployments": [
             GenericSummary(
@@ -131,6 +135,8 @@ def make_app(
         verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
     ) -> bool:
         assert permitted is not None
+        if check_calls is not None:
+            check_calls.append((verb, resource, sub, ns, group, name))
         return permitted
 
     return KorvidApp(
@@ -793,3 +799,82 @@ async def test_e_edit_survives_alias_refresh_during_editor(tmp_path: Path) -> No
         await pilot.press("y")
         await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
     assert len(rec.calls) == 1
+
+
+async def test_e_edit_non_string_top_level_key_aborts(tmp_path: Path) -> None:
+    """Review round 5: a YAML mapping can legally have a non-string top-level
+    key; sorting it against string keys in the summary raised TypeError."""
+    get_manifest, edit_text, _ = _edit_fixtures("1: value\nspec: {}\n")
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: any("non-string" in n.message for n in app._notifications))
+    assert rec.calls == []
+
+
+async def test_e_edit_precheck_uses_update_verb(tmp_path: Path) -> None:
+    """Review round 5: pin the RBAC pre-check arguments for the edit flow."""
+    get_manifest, edit_text, _ = _edit_fixtures(None)
+    rec = Recorder()
+    calls: list[tuple[str, str, str, str | None, str, str]] = []
+    app = make_app(
+        rec,
+        tmp_path / "a.jsonl",
+        permitted=True,
+        get_manifest=get_manifest,
+        edit_text=edit_text,
+        check_calls=calls,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: bool(calls))
+    assert calls[0] == ("update", "pods", "", "default", "", "web-1")
+
+
+async def test_e_edit_selection_change_during_editor_aborts(tmp_path: Path) -> None:
+    """Review round 5: the post-editor revalidation must abort when the user
+    actually moved the selection while the editor was open - no confirmation
+    is pushed and no replace call occurs."""
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return copy.deepcopy(_EDIT_MANIFEST)
+
+    app_holder: list[KorvidApp] = []
+
+    async def edit_text(text: str) -> str | None:
+        app_holder[0].query_one(ResourceTable).move_cursor(row=1)
+        return text.replace("nginx:1", "nginx:2")
+
+    rec = Recorder()
+    other = PodSummary(
+        name="web-2",
+        namespace="default",
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node=None,
+        uid="pod-uid-2",
+    )
+    app = make_app(
+        rec,
+        tmp_path / "a.jsonl",
+        get_manifest=get_manifest,
+        edit_text=edit_text,
+        extra_pods=[other],
+    )
+    app_holder.append(app)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(
+            pilot,
+            lambda: any(
+                "selection changed during the editor session" in n.message
+                for n in app._notifications
+            ),
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+    assert rec.calls == []

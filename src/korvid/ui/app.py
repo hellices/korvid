@@ -1280,18 +1280,24 @@ class KorvidApp(App[None]):
         return meta, namespace, name, self._selected_uid(namespace, name)
 
     def _write_context_intact(
-        self, action: str, meta: ResourceMeta, ns: str | None, name: str
+        self,
+        action: str,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        phase: str = "the permission check",
     ) -> bool:
-        """Re-validate after an awaited pre-check, before pushing a dialog:
-        the permission check is an API round-trip, so the user may have opened
-        another screen or moved the selection meanwhile - and keystrokes typed
-        during the await must never land on a confirmation they did not see.
-        Abort (with a notification) unless the base screen is still on top and
-        the same row is still selected."""
+        """Re-validate after an awaited gap (the RBAC round-trip, or an
+        editor session - named by ``phase`` so cancellation messages state
+        the true cause), before pushing a dialog: the user may have opened
+        another screen or moved the selection meanwhile - and keystrokes
+        typed during the await must never land on a confirmation they did
+        not see. Abort (with a notification) unless the base screen is still
+        on top and the same row is still selected."""
         if len(self.screen_stack) > 1:
             self.notify(
                 f"{action} {self._gvr_label(meta)}/{name} cancelled -"
-                " another dialog opened during the permission check",
+                f" another dialog opened during {phase}",
                 severity="warning",
             )
             return False
@@ -1308,7 +1314,7 @@ class KorvidApp(App[None]):
         ):
             self.notify(
                 f"{action} {self._gvr_label(meta)}/{name} cancelled -"
-                " the selection changed during the permission check",
+                f" the selection changed during {phase}",
                 severity="warning",
             )
             return False
@@ -1548,7 +1554,7 @@ class KorvidApp(App[None]):
             return
         # The editor round-trip is arbitrarily long: re-validate that the
         # same row is still selected before pushing the confirmation.
-        if not self._write_context_intact("edit", meta, ns, name):
+        if not self._write_context_intact("edit", meta, ns, name, phase="the editor session"):
             return
         detail = self._edit_detail(manifest, edited)
 
@@ -1598,6 +1604,11 @@ class KorvidApp(App[None]):
             return None
         if not isinstance(parsed, dict):
             self.notify(f"edit {label} aborted: not a mapping", severity="error")
+            return None
+        if any(not isinstance(key, str) for key in parsed):
+            # YAML legally allows non-string mapping keys, but a manifest
+            # never has them and the change summary sorts keys together.
+            self.notify(f"edit {label} aborted: non-string top-level key", severity="error")
             return None
         # Restore the fetched resourceVersion *before* the semantic no-op
         # comparison: an edit that only deleted it is still "no changes",
