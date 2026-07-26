@@ -1399,7 +1399,10 @@ class KorvidApp(App[None]):
             return  # bars and pickers own Escape while open
         describe_pane = self.query_one(DescribePane)
         if describe_pane.display:
-            describe_pane.hide()
+            # An active pane search (input open or submitted hits) consumes
+            # Escape first; a second Escape closes the pane itself.
+            if not describe_pane.dismiss_search():
+                describe_pane.hide()
             event.stop()
             return
         log_pane = self.query_one(LogPane)

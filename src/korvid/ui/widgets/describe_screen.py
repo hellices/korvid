@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 import yaml
-from rich.console import Group, RenderableType
+from rich.console import Console, Group, RenderableType
 from rich.syntax import Syntax
 from rich.text import Text
 from textual.app import ComposeResult
@@ -87,24 +87,27 @@ class BodySearch:
 
     Mirrors the log pane's inline search semantics: substring match,
     wraparound `n`/`N` navigation, and a "3/17" position counter. Hit
-    indices are display-line indices into the rendered body (YAML lines,
-    then the 3 separator lines, then event lines).
+    indices are source-line indices into the body (YAML lines, then the 3
+    separator lines, then event lines); `display_row` converts them to
+    wrap-aware rendered-row offsets for scrolling.
     """
-
-    #: Lines rendered between the YAML section and the events section
-    #: (blank line, "EVENTS" header, horizontal rule).
-    _SEPARATOR_LINES = 3
 
     def __init__(self) -> None:
         self._yaml_lines: list[str] = []
-        self._event_lines: list[str] = []
+        self._lines: list[str] = []
         self.hits: list[int] = []
         self._idx = 0
 
     def set_body(self, yaml_text: str, events_text: Text) -> None:
         """Load a new body and reset any previous search state."""
         self._yaml_lines = yaml_text.splitlines()
-        self._event_lines = events_text.plain.splitlines()
+        self._lines = [
+            *self._yaml_lines,
+            "",
+            "EVENTS",
+            "─" * 60,
+            *events_text.plain.splitlines(),
+        ]
         self.clear()
 
     def clear(self) -> None:
@@ -119,8 +122,7 @@ class BodySearch:
         if not needle:
             self.hits = []
             return
-        lines = [*self._yaml_lines, "", "EVENTS", "", *self._event_lines]
-        self.hits = [i for i, line in enumerate(lines) if needle in line.lower()]
+        self.hits = [i for i, line in enumerate(self._lines) if needle in line.lower()]
 
     def next(self) -> None:
         """Advance to the next hit, wrapping past the last one."""
@@ -149,6 +151,23 @@ class BodySearch:
     def yaml_highlights(self) -> set[int]:
         """1-based YAML line numbers to highlight (hits in the YAML section)."""
         return {h + 1 for h in self.hits if h < len(self._yaml_lines)}
+
+    def display_row(self, width: int) -> int | None:
+        """Rendered-row offset of the current hit at the given wrap *width*.
+
+        The body renders with word wrap (`Syntax(word_wrap=True)` and event
+        `Text`), so any source line longer than *width* occupies several
+        display rows and shifts everything after it. Scrolling by source-line
+        index would land above the match; this sums the wrapped height of
+        every line before the hit instead.
+        """
+        line = self.current_line
+        if line is None:
+            return None
+        if width <= 0:
+            return line
+        console = Console(width=width)
+        return sum(max(1, len(Text(text).wrap(console, width))) for text in self._lines[:line])
 
 
 def _body_plain(yaml_text: str, events_text: Text) -> str:
@@ -269,9 +288,10 @@ class DescribeScreen(ModalScreen[None]):
 
     def _show_current_hit(self) -> None:
         self.sub_title = self._search.counter
-        line = self._search.current_line
-        if line is not None:
-            self.query_one(VerticalScroll).scroll_to(y=line, animate=False)
+        scroll = self.query_one(VerticalScroll)
+        row = self._search.display_row(width=self.query_one("#describe-body", Static).size.width)
+        if row is not None:
+            scroll.scroll_to(y=row, animate=False)
 
     def _refresh_body(self) -> None:
         yaml_text = _manifest_yaml(self._manifest)
@@ -322,6 +342,8 @@ class DescribePane(Vertical):
         self._base_title = ""
         self._search = BodySearch()
         self._pattern = ""
+        self._yaml_text = ""
+        self._events: list[dict[str, Any]] = []
 
     def compose(self) -> ComposeResult:
         yield Static("", id="describe-pane-title")
@@ -338,6 +360,8 @@ class DescribePane(Vertical):
         self.body_text = _body_plain(yaml_text, events_text)
         self._base_title = title
         self._pattern = ""
+        self._yaml_text = yaml_text
+        self._events = list(events)
         self._search.set_body(yaml_text, events_text)
         self.query_one("#describe-pane-search", Input).display = False
         self._update_title()
@@ -380,24 +404,54 @@ class DescribePane(Vertical):
         self.screen.set_focus(None)
         self._pattern = event.value.strip()
         self._search.run(self._pattern)
+        self._refresh_body()
         self._show_current_hit()
 
-    def on_key(self, event: Key) -> None:
-        """Dismiss the search Input on Escape (before the App closes the pane)."""
+    def dismiss_search(self) -> bool:
+        """Close the search input / clear an active search.
+
+        Returns:
+            True when there was search state to dismiss (the caller should
+            treat Escape as consumed), False when no search was active.
+        """
         search_input = self.query_one("#describe-pane-search", Input)
-        if event.key == "escape" and search_input.display:
-            search_input.display = False
-            self._pattern = ""
-            self._search.clear()
-            self._update_title()
-            self.screen.set_focus(None)
+        if not (search_input.display or self._search.hits or self._pattern):
+            return False
+        search_input.display = False
+        self._pattern = ""
+        self._search.clear()
+        self._refresh_body()
+        self._update_title()
+        self.screen.set_focus(None)
+        return True
+
+    def on_key(self, event: Key) -> None:
+        """Dismiss search on Escape while the input has focus.
+
+        With focus elsewhere (e.g. after submitting), Escape reaches
+        ``App.on_key`` instead, which calls ``dismiss_search()`` before
+        closing the pane.
+        """
+        if event.key == "escape" and self.dismiss_search():
             event.stop()
 
     def _show_current_hit(self) -> None:
         self._update_title()
-        line = self._search.current_line
-        if line is not None:
-            self.query_one(VerticalScroll).scroll_to(y=line, animate=False)
+        row = self._search.display_row(
+            width=self.query_one("#describe-pane-body", Static).size.width
+        )
+        if row is not None:
+            self.query_one(VerticalScroll).scroll_to(y=row, animate=False)
+
+    def _refresh_body(self) -> None:
+        events_text = _render_events(self._events)
+        if self._pattern and self._search.hits:
+            events_text.highlight_words([self._pattern], "reverse", case_sensitive=False)
+        self.query_one("#describe-pane-body", Static).update(
+            _body_renderable(
+                self._yaml_text, events_text, yaml_highlights=self._search.yaml_highlights()
+            )
+        )
 
     def _update_title(self) -> None:
         counter = self._search.counter
