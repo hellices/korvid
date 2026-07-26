@@ -97,6 +97,11 @@ class PreviewOps(WriteOps):
         self.calls.append(("scale", namespace, name, replicas))
 
     async def rollout_restart(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        self.calls.append(("restart", namespace, name, None))
+
+    async def rollout_restart_with_stamp(
         self,
         meta: ResourceMeta,
         namespace: str | None,

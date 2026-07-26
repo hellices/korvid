@@ -764,18 +764,20 @@ async def test_delete_object_sends_uid_precondition() -> None:
         await client.delete_object(_deploy_meta(), "default", "web", uid="abc-123")
     args, kwargs = api.call_api.call_args
     assert args[1] == "DELETE"
-    assert kwargs["body"] == {"preconditions": {"uid": "abc-123"}}
+    assert kwargs["body"] == {
+        "propagationPolicy": "Background",
+        "preconditions": {"uid": "abc-123"},
+    }
     assert kwargs["header_params"]["Content-Type"] == "application/json"
 
 
-async def test_delete_object_without_uid_sends_no_body() -> None:
+async def test_delete_object_without_uid_omits_preconditions() -> None:
     client = KubeClient()
     api = _write_api()
     with patch.object(client, "_api", api):
         await client.delete_object(_deploy_meta(), "default", "web")
     kwargs = api.call_api.call_args[1]
-    assert kwargs["body"] is None
-    assert "Content-Type" not in kwargs["header_params"]
+    assert kwargs["body"] == {"propagationPolicy": "Background"}
 
 
 async def test_scale_object_sends_uid_precondition() -> None:
@@ -909,3 +911,31 @@ async def test_list_pod_metrics_propagates_api_status_error() -> None:
         pytest.raises(ApiStatusError, match="API 404: Not Found"),
     ):
         await client.list_pod_metrics("default")
+
+
+async def test_delete_object_sends_explicit_background_propagation() -> None:
+    """Omitting propagationPolicy lets finalizers/resource defaults pick the
+    policy; the approval dialog promises background cascade, so the request
+    states it explicitly - with and without a uid precondition."""
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.delete_object(_deploy_meta(), "default", "web")
+    kwargs = api.call_api.call_args[1]
+    assert kwargs["body"] == {"propagationPolicy": "Background"}
+    assert kwargs["header_params"]["Content-Type"] == "application/json"
+
+
+async def test_rollout_restart_with_stamp_pins_provided_stamp() -> None:
+    """KubeClient overrides the timestamp-aware hook for exact replay: the
+    stamp shown in the preview is the stamp the write sends."""
+    client = KubeClient()
+    api = _write_api()
+    with patch.object(client, "_api", api):
+        await client.rollout_restart_with_stamp(
+            _deploy_meta(), "default", "web", uid="u-1", restarted_at="2026-07-26T00:00:00+00:00"
+        )
+    kwargs = api.call_api.call_args[1]
+    annotations = kwargs["body"]["spec"]["template"]["metadata"]["annotations"]
+    assert annotations["kubectl.kubernetes.io/restartedAt"] == "2026-07-26T00:00:00+00:00"
+    assert kwargs["body"]["metadata"] == {"uid": "u-1"}

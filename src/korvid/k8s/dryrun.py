@@ -49,6 +49,24 @@ def _leaves(prefix: str, value: Any, sign: str, out: list[str]) -> None:
         out.append(f"{sign} {prefix}: {_fmt(value)}")
 
 
+def _leaf_equal(current: Any, proposed: Any) -> bool:
+    """Equality with JSON scalar-type semantics: Python conflates bool with
+    int (``True == 1``), but a CRD field changed by admission from a boolean
+    to an integer is a real change the preview must show. Recurses into
+    containers so atomically-compared lists get the same treatment."""
+    if isinstance(current, bool) != isinstance(proposed, bool):
+        return False
+    if isinstance(current, list) and isinstance(proposed, list):
+        return len(current) == len(proposed) and all(
+            _leaf_equal(a, b) for a, b in zip(current, proposed, strict=True)
+        )
+    if isinstance(current, dict) and isinstance(proposed, dict):
+        return set(current) == set(proposed) and all(
+            _leaf_equal(value, proposed[key]) for key, value in current.items()
+        )
+    return bool(current == proposed)
+
+
 def _walk(prefix: str, current: Any, proposed: Any, out: list[str]) -> None:
     if prefix in _IGNORED_PATHS:
         return
@@ -62,7 +80,7 @@ def _walk(prefix: str, current: Any, proposed: Any, out: list[str]) -> None:
             else:
                 _walk(path, current[key], proposed[key], out)
         return
-    if current != proposed:
+    if not _leaf_equal(current, proposed):
         # Lists (and type changes) compare atomically: positional list diffs
         # are noisier than helpful in a confirmation dialog.
         out.append(f"~ {prefix}: {_fmt(current)} -> {_fmt(proposed)}")

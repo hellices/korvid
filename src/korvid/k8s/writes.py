@@ -48,6 +48,11 @@ class WriteOps(abc.ABC):
 
     @abc.abstractmethod
     async def rollout_restart(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        """Trigger a rolling restart by patching the pod template."""
+
+    async def rollout_restart_with_stamp(
         self,
         meta: ResourceMeta,
         namespace: str | None,
@@ -56,9 +61,13 @@ class WriteOps(abc.ABC):
         uid: str | None = None,
         restarted_at: str | None = None,
     ) -> None:
-        """Trigger a rolling restart by patching the pod template.
-        ``restarted_at`` is the stamp from :func:`restart_stamp`; passing the
-        same value that the preview used keeps the two requests identical."""
+        """Timestamp-aware restart hook for exact preview replay (issue #19).
+        Non-abstract on purpose: subclasses implementing only the original
+        :meth:`rollout_restart` signature keep working - the default drops
+        the stamp and delegates. Transports that implement
+        :meth:`preview_rollout_restart` should override this so the executed
+        write sends the exact ``restarted_at`` value the preview showed."""
+        await self.rollout_restart(meta, namespace, name, uid=uid)
 
     @abc.abstractmethod
     async def replace_object(

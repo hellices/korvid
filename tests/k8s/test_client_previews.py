@@ -127,7 +127,7 @@ async def test_write_ops_defaults_return_none() -> None:
         async def scale_object(self, meta, namespace, name, replicas, *, uid=None):  # type: ignore[no-untyped-def]  # signature match not under test
             pass
 
-        async def rollout_restart(self, meta, namespace, name, *, uid=None, restarted_at=None):  # type: ignore[no-untyped-def]  # signature match not under test
+        async def rollout_restart(self, meta, namespace, name, *, uid=None):  # type: ignore[no-untyped-def]  # signature match not under test
             pass
 
         async def replace_object(self, meta, namespace, name, manifest, *, uid=None):  # type: ignore[no-untyped-def]  # signature match not under test
@@ -183,7 +183,10 @@ async def test_preview_delete_pins_uid_precondition() -> None:
         lines = await client.preview_delete(_deploy_meta(), "default", "web", uid="u-1")
     assert lines is not None
     _, kwargs = api.call_api.call_args_list[1]
-    assert kwargs["body"] == {"preconditions": {"uid": "u-1"}}
+    assert kwargs["body"] == {
+        "propagationPolicy": "Background",
+        "preconditions": {"uid": "u-1"},
+    }
     assert kwargs["header_params"]["Content-Type"] == "application/json"
 
 
@@ -214,7 +217,7 @@ async def test_preview_and_write_share_caller_provided_restart_stamp() -> None:
         await client.preview_rollout_restart(
             _deploy_meta(), "default", "web", uid="u-1", restarted_at=stamp
         )
-        await client.rollout_restart(
+        await client.rollout_restart_with_stamp(
             _deploy_meta(), "default", "web", uid="u-1", restarted_at=stamp
         )
     preview_body = api.call_api.call_args_list[1][1]["body"]
@@ -222,3 +225,31 @@ async def test_preview_and_write_share_caller_provided_restart_stamp() -> None:
     assert preview_body == write_body
     annotations = write_body["spec"]["template"]["metadata"]["annotations"]
     assert annotations["kubectl.kubernetes.io/restartedAt"] == stamp
+
+
+async def test_stamp_hook_delegates_to_legacy_rollout_restart() -> None:
+    """Compatibility: a WriteOps subclass implementing only the original
+    abstract signature must keep working when approval executes through the
+    timestamp-aware hook - the default hook drops the stamp and delegates."""
+
+    class Legacy(WriteOps):
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        async def delete_object(self, meta, namespace, name, *, uid=None):  # type: ignore[no-untyped-def]  # signature match not under test
+            pass
+
+        async def scale_object(self, meta, namespace, name, replicas, *, uid=None):  # type: ignore[no-untyped-def]  # signature match not under test
+            pass
+
+        async def rollout_restart(self, meta, namespace, name, *, uid=None):  # type: ignore[no-untyped-def]  # signature match not under test
+            self.calls.append(("restart", namespace, name, uid))
+
+        async def replace_object(self, meta, namespace, name, manifest, *, uid=None):  # type: ignore[no-untyped-def]  # signature match not under test
+            pass
+
+    ops = Legacy()
+    await ops.rollout_restart_with_stamp(
+        _deploy_meta(), "default", "web", uid="u-1", restarted_at="stamp"
+    )
+    assert ops.calls == [("restart", "default", "web", "u-1")]

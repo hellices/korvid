@@ -75,3 +75,19 @@ class TestDiffManifests:
         cur = {"metadata": {"labels": {"app": "web"}}}
         new = {"metadata": {"labels": {"app": "web2"}}}
         assert diff_manifests(cur, new) == ['~ metadata.labels.app: "web" -> "web2"']
+
+
+def test_bool_vs_int_is_a_change() -> None:
+    """JSON scalar types are distinct: True is not 1 (Python equality
+    conflates them). An admission change from boolean to integer must show."""
+    assert diff_manifests({"spec": {"flag": True}}, {"spec": {"flag": 1}}) == [
+        "~ spec.flag: true -> 1"
+    ]
+    assert diff_manifests({"spec": {"n": 0}}, {"spec": {"n": False}}) == ["~ spec.n: 0 -> false"]
+
+
+def test_bool_vs_int_inside_list_is_a_change() -> None:
+    """Lists compare atomically, but with JSON type semantics."""
+    assert diff_manifests({"spec": {"xs": [True, 2]}}, {"spec": {"xs": [1, 2]}}) == [
+        "~ spec.xs: [true, 2] -> [1, 2]"
+    ]

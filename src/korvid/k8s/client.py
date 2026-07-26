@@ -358,13 +358,17 @@ class KubeClient(WriteOps):
         return bool((data.get("status") or {}).get("allowed", False))
 
     @staticmethod
-    def _delete_body(uid: str | None) -> dict[str, Any] | None:
-        """DeleteOptions body for a delete. A ``uid`` precondition pins the
-        exact object incarnation being approved. No propagationPolicy is set,
-        so dependents are deleted in the background (the API server default);
-        preview_delete's cascade note describes exactly this - keep the two
-        in sync if delete options are ever added here."""
-        return {"preconditions": {"uid": uid}} if uid else None
+    def _delete_body(uid: str | None) -> dict[str, Any]:
+        """DeleteOptions body for a delete. propagationPolicy is stated
+        explicitly: an omitted policy lets existing finalizers or the
+        resource-specific default pick something else (e.g. orphan), which
+        would contradict the cascade note preview_delete shows the user.
+        A ``uid`` precondition pins the exact object incarnation being
+        approved. Keep preview_delete's note in sync with this body."""
+        body: dict[str, Any] = {"propagationPolicy": "Background"}
+        if uid:
+            body["preconditions"] = {"uid": uid}
+        return body
 
     async def delete_object(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
@@ -373,12 +377,11 @@ class KubeClient(WriteOps):
         incarnation that was approved: if the object was deleted and recreated
         under the same name meanwhile, the API server refuses with 409 instead
         of deleting the replacement. ApiException → ApiStatusError."""
-        body = self._delete_body(uid)
         await self._request_write(
             self._object_path(meta, namespace, name),
             "DELETE",
-            body=body,
-            content_type="application/json" if body else None,
+            body=self._delete_body(uid),
+            content_type="application/json",
         )
 
     @staticmethod
@@ -430,6 +433,12 @@ class KubeClient(WriteOps):
         )
 
     async def rollout_restart(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        """Trigger a rolling restart by patching the pod template."""
+        await self.rollout_restart_with_stamp(meta, namespace, name, uid=uid)
+
+    async def rollout_restart_with_stamp(
         self,
         meta: ResourceMeta,
         namespace: str | None,
@@ -438,7 +447,8 @@ class KubeClient(WriteOps):
         uid: str | None = None,
         restarted_at: str | None = None,
     ) -> None:
-        """Trigger a rolling restart by patching the pod template."""
+        """Restart whose patch body carries the caller-provided stamp, so the
+        approved write is byte-identical to the previewed dry run."""
         await self._request_write(
             self._object_path(meta, namespace, name),
             "PATCH",
@@ -530,13 +540,13 @@ class KubeClient(WriteOps):
         captured ``uid`` precondition rejects a same-named replacement here
         (409 -> None) instead of summarizing the wrong incarnation. A diff is
         meaningless for a removal, so the useful preview is identity plus
-        cascading behaviour (the note mirrors _delete_body: background
-        propagation, the server default). None on any failure."""
+        cascading behaviour (the note mirrors _delete_body: explicit
+        Background propagation). None on any failure."""
         path = self._object_path(meta, namespace, name)
         body = self._delete_body(uid)
         try:
             manifest = await self._request_json(path)
-            await self._dry_run(path, "DELETE", body, "application/json" if body else None)
+            await self._dry_run(path, "DELETE", body, "application/json")
         except Exception:
             logger.debug("delete dry-run preview failed", exc_info=True)
             return None
@@ -546,7 +556,7 @@ class KubeClient(WriteOps):
         return [
             f"- {meta.plural}/{name} (uid {uid}, created {created})",
             "delete accepted by server dry-run;"
-            " dependents are deleted in the background (default propagation)",
+            " dependents are deleted in the background (propagationPolicy: Background)",
         ]
 
     async def replace_object(

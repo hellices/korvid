@@ -1609,7 +1609,7 @@ class KorvidApp(App[None]):
                         meta,
                         ns,
                         name,
-                        ops.rollout_restart(meta, ns, name, uid=uid, restarted_at=stamp),
+                        ops.rollout_restart_with_stamp(meta, ns, name, uid=uid, restarted_at=stamp),
                     )
                 )
 
@@ -2690,7 +2690,9 @@ class KorvidApp(App[None]):
         return (
             meta,
             ns,
-            lambda uid: ops.rollout_restart(meta, ns, name, uid=uid, restarted_at=restarted_at),
+            lambda uid: ops.rollout_restart_with_stamp(
+                meta, ns, name, uid=uid, restarted_at=restarted_at
+            ),
             f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
             f"{self._write_locus(ns)}",
             "requested by agent",

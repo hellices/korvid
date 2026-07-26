@@ -67,13 +67,7 @@ class Recorder(WriteOps):
         self.calls.append(("scale", meta.plural, namespace, name, replicas))
 
     async def rollout_restart(
-        self,
-        meta: ResourceMeta,
-        namespace: str | None,
-        name: str,
-        *,
-        uid: str | None = None,
-        restarted_at: str | None = None,
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> None:
         self.uids.append(uid)
         self.calls.append(("restart", meta.plural, namespace, name))
