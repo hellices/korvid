@@ -178,6 +178,23 @@ class _UIBridgeProxy(UIBridge):
             )
 
 
+#: Upper bound on the pods/resize discovery probe at startup: the TUI must
+#: appear promptly even against a slow or hung apiserver.
+_RESIZE_PROBE_TIMEOUT = 3.0
+
+
+async def _probe_pod_resize(kube: KubeClient) -> bool:
+    """Bounded pods/resize capability probe (issue #27). A probe slower than
+    _RESIZE_PROBE_TIMEOUT answers False - the feature stays off for this
+    session rather than delaying startup (full resource discovery already
+    runs in the background for the same reason)."""
+    try:
+        return await asyncio.wait_for(kube.supports_pod_resize(), _RESIZE_PROBE_TIMEOUT)
+    except TimeoutError:
+        logger.warning("pods/resize discovery timed out; in-place resize disabled")
+        return False
+
+
 def _build_agent_wiring(
     config: KorvidConfig,
     kube: KubeClient,
@@ -338,9 +355,9 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
 
     watch_manager = WatchManager(store, source)
 
-    # One discovery round trip decides both the R keybinding and whether the
-    # agent is offered the resize tool (issue #27).
-    pod_resize_supported = await kube.supports_pod_resize()
+    # One bounded discovery round trip decides both the R keybinding and
+    # whether the agent is offered the resize tool (issue #27).
+    pod_resize_supported = await _probe_pod_resize(kube)
 
     agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy = _build_agent_wiring(
         config, kube, aliases, pod_resize_supported=pod_resize_supported

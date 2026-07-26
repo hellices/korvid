@@ -504,8 +504,13 @@ class KubeClient(WriteOps):
             except Exception:
                 logger.debug("pods/resize discovery failed", exc_info=True)
                 return False
+            # The subresource must both exist and advertise patch: an
+            # aggregated or restricted apiserver may list it without the one
+            # verb resize_pod() needs, and offering the feature there would
+            # make every attempt fail.
             self._pod_resize_supported = any(
-                r.get("name") == "pods/resize" for r in core.get("resources", [])
+                r.get("name") == "pods/resize" and "patch" in (r.get("verbs") or [])
+                for r in core.get("resources", [])
             )
         return self._pod_resize_supported
 

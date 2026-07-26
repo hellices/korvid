@@ -8,24 +8,32 @@ current", never "remove".
 
 from __future__ import annotations
 
-import re
 from typing import ClassVar
 
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
+
+from korvid.k8s.models import parse_quantity
 
 #: Container name paired with its current resources mapping
 #: (``{"requests": {"cpu": "100m", ...}, "limits": {...}}``).
 ContainerResources = tuple[str, dict[str, dict[str, str]]]
 
-#: Kubernetes quantity: plain/decimal number with an optional SI or binary
-#: suffix (`m`, `k`, `M`, ..., `Ki`, `Mi`, ...). Good enough to catch typos
-#: before the apiserver sees them; the server stays the final validator.
-_QUANTITY = re.compile(r"^\d+(\.\d+)?(m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$")
+
+def _valid_quantity(value: str) -> bool:
+    """Non-negative Kubernetes quantity, using the same grammar the rest of
+    the codebase parses with (suffixes like 100n/100u and exponent forms are
+    valid). Catches typos before the apiserver sees them; the server stays
+    the final validator."""
+    try:
+        return parse_quantity(value) >= 0
+    except ValueError:
+        return False
+
 
 _SECTIONS = ("requests", "limits")
 _QUANTITIES = ("cpu", "memory")
@@ -34,7 +42,7 @@ _CSS = """
 ResizePrompt {
     align: center middle;
 }
-ResizePrompt > Vertical {
+ResizePrompt > VerticalScroll {
     width: 76;
     height: auto;
     max-height: 80%;
@@ -87,7 +95,9 @@ class ResizePrompt(ModalScreen["dict[str, dict[str, dict[str, str]]] | None"]):
         self._containers = containers
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        # A multi-container pod can outgrow the dialog height; a scrollable
+        # body keeps every input reachable instead of clipping the overflow.
+        with VerticalScroll():
             yield Static(f"Resize {self._target}", classes="confirm-title", markup=False)
             yield Static(
                 "Edit quantities and press Enter (Esc cancels). "
@@ -121,7 +131,7 @@ class ResizePrompt(ModalScreen["dict[str, dict[str, dict[str, str]]] | None"]):
                     current = resources.get(section, {}).get(quantity, "")
                     if not value or value == current:
                         continue
-                    if not _QUANTITY.match(value):
+                    if not _valid_quantity(value):
                         self.notify(
                             f"{name} {section}.{quantity}: '{value}' is not a "
                             "valid quantity (e.g. 250m, 512Mi)",

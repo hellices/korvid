@@ -292,3 +292,33 @@ async def test_ui_bridge_proxy_serializes_concurrent_callers() -> None:
         proxy.agent_request_write("delete", "pods", "a"),
     )
     assert probe.max_active == 1
+
+
+async def test_pod_resize_probe_is_bounded(monkeypatch: object) -> None:
+    """The foreground discovery probe must not delay TUI startup on a hung
+    apiserver: it times out quickly and answers False (feature stays off)."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+
+    import korvid.__main__ as main_mod
+
+    mp.setattr(main_mod, "_RESIZE_PROBE_TIMEOUT", 0.05)
+
+    class HungKube:
+        async def supports_pod_resize(self) -> bool:
+            await asyncio.sleep(60)
+            return True
+
+    assert await main_mod._probe_pod_resize(cast("Any", HungKube())) is False
+
+
+async def test_pod_resize_probe_passes_through_result() -> None:
+    import korvid.__main__ as main_mod
+
+    class FastKube:
+        async def supports_pod_resize(self) -> bool:
+            return True
+
+    assert await main_mod._probe_pod_resize(cast("Any", FastKube())) is True

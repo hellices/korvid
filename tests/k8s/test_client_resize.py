@@ -128,3 +128,15 @@ async def test_supports_pod_resize_false_on_error_and_not_cached() -> None:
     with patch.object(client, "_api", api):
         # a transient failure must not permanently disable the feature
         assert await client.supports_pod_resize() is True
+
+
+async def test_supports_pod_resize_false_without_patch_verb() -> None:
+    """Discovery may list the subresource without advertising patch (an
+    aggregated or restricted apiserver); resize_pod would then always fail."""
+    client = KubeClient()
+    api = MagicMock()
+    api.call_api = AsyncMock(
+        return_value=_resp({"resources": [{"name": "pods/resize", "verbs": ["get"]}]})
+    )
+    with patch.object(client, "_api", api):
+        assert await client.supports_pod_resize() is False

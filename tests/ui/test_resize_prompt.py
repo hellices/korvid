@@ -114,3 +114,50 @@ async def test_clearing_a_field_keeps_current_value() -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert app.result == {"app": {"limits": {"cpu": "500m"}}}
+
+
+async def test_full_kubernetes_quantity_grammar_accepted() -> None:
+    """Suffixes like 100n/100u and exponent forms (1e3) are valid quantities;
+    the prompt must not reject what the apiserver accepts."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await pilot.pause()
+        app.screen.query_one("#resize-0-requests-cpu", Input).value = "100u"
+        app.screen.query_one("#resize-0-requests-memory", Input).value = "1e3"
+        app.screen.query_one("#resize-0-requests-cpu", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == {"app": {"requests": {"cpu": "100u", "memory": "1e3"}}}
+
+
+async def test_negative_quantity_rejected() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await pilot.pause()
+        app.screen.query_one("#resize-0-requests-cpu", Input).value = "-100m"
+        app.screen.query_one("#resize-0-requests-cpu", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == "unset"
+        assert app.screen is prompt
+
+
+async def test_many_containers_scroll_instead_of_clipping() -> None:
+    """A multi-container pod can exceed the dialog height; every input must
+    stay reachable, so the form body scrolls."""
+    from textual.containers import VerticalScroll
+
+    containers = [(f"c{i}", {"requests": {"cpu": "100m"}}) for i in range(8)]
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = ResizePrompt("pods/web-1 in default", containers=containers)
+
+        def _done(v: object) -> None:
+            app.result = v
+
+        await app.push_screen(prompt, _done)
+        await pilot.pause()
+        assert len(app.screen.query(Input)) == 32
+        assert app.screen.query(VerticalScroll)
