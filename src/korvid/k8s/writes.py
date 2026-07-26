@@ -63,9 +63,9 @@ class WriteOps(abc.ABC):
     ) -> None:
         """Timestamp-aware restart hook for exact preview replay (issue #19).
         Non-abstract on purpose: subclasses implementing only the original
-        :meth:`rollout_restart` signature keep working - the default drops
+        ``rollout_restart`` signature keep working - the default drops
         the stamp and delegates. Transports that implement
-        :meth:`preview_rollout_restart` should override this so the executed
+        ``preview_rollout_restart`` should override this so the executed
         write sends the exact ``restarted_at`` value the preview showed."""
         await self.rollout_restart(meta, namespace, name, uid=uid)
 
@@ -109,8 +109,8 @@ class WriteOps(abc.ABC):
         restarted_at: str | None = None,
     ) -> list[str] | None:
         """Diff lines a ``dryRun=All`` restart would produce; None = no preview.
-        ``uid`` semantics match :meth:`preview_scale`; ``restarted_at`` must be
-        the same stamp the executed write will send (see :func:`restart_stamp`)."""
+        ``uid`` semantics match ``preview_scale``; ``restarted_at`` must be
+        the same stamp the executed write will send (see ``restart_stamp``)."""
         return None
 
     async def preview_delete(
@@ -118,5 +118,5 @@ class WriteOps(abc.ABC):
     ) -> list[str] | None:
         """Object summary + cascade note after a ``dryRun=All`` delete was
         accepted by the server; None = no preview. ``uid`` semantics match
-        :meth:`preview_scale`."""
+        ``preview_scale``."""
         return None

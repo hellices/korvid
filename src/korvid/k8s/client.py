@@ -475,6 +475,19 @@ class KubeClient(WriteOps):
         result: dict[str, Any] = json.loads(raw)
         return result
 
+    @staticmethod
+    def _pin_revision(body: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+        """Bind a dry-run patch to the GET snapshot it will be diffed against:
+        metadata.resourceVersion is an apiserver optimistic-concurrency
+        precondition, so a concurrent update between the two requests turns
+        into a 409 (preview degrades to None) instead of a diff that mixes
+        two revisions the server never evaluated together. Preview-only: the
+        approved write is pinned by uid, not frozen to this revision."""
+        rv = (current.get("metadata") or {}).get("resourceVersion")
+        if rv:
+            body.setdefault("metadata", {})["resourceVersion"] = str(rv)
+        return body
+
     async def preview_scale(
         self,
         meta: ResourceMeta,
@@ -488,15 +501,17 @@ class KubeClient(WriteOps):
         The captured ``uid`` rides along as the same precondition the real
         write carries, so the dry run replays the exact request being
         approved - a same-named replacement fails here (409 -> None) instead
-        of previewing a diff the approved write can never apply.
-        None on any failure: a preview must never block the approval flow."""
+        of previewing a diff the approved write can never apply. The dry run
+        is additionally pinned to the GET snapshot's resourceVersion (see
+        ``_pin_revision``). None on any failure: a preview must never block
+        the approval flow."""
         path = f"{self._object_path(meta, namespace, name)}/scale"
         try:
             current = await self._request_json(path)
             proposed = await self._dry_run(
                 path,
                 "PATCH",
-                self._scale_patch(replicas, uid),
+                self._pin_revision(self._scale_patch(replicas, uid), current),
                 "application/merge-patch+json",
             )
         except Exception:
@@ -514,16 +529,17 @@ class KubeClient(WriteOps):
         restarted_at: str | None = None,
     ) -> list[str] | None:
         """Diff of the object before vs after a dry-run rollout restart.
-        ``uid`` semantics match :meth:`preview_scale`; ``restarted_at`` is the
-        per-approval stamp shared with the executed write. None on any
-        failure: a preview must never block the approval flow."""
+        ``uid`` semantics match ``preview_scale``; ``restarted_at`` is the
+        per-approval stamp shared with the executed write; the dry run is
+        pinned to the GET snapshot's resourceVersion (see ``_pin_revision``).
+        None on any failure: a preview must never block the approval flow."""
         path = self._object_path(meta, namespace, name)
         try:
             current = await self._request_json(path)
             proposed = await self._dry_run(
                 path,
                 "PATCH",
-                self._restart_patch(uid, restarted_at),
+                self._pin_revision(self._restart_patch(uid, restarted_at), current),
                 "application/strategic-merge-patch+json",
             )
         except Exception:
@@ -541,11 +557,16 @@ class KubeClient(WriteOps):
         (409 -> None) instead of summarizing the wrong incarnation. A diff is
         meaningless for a removal, so the useful preview is identity plus
         cascading behaviour (the note mirrors _delete_body: explicit
-        Background propagation). None on any failure."""
+        Background propagation). The dry run is pinned to the GET snapshot
+        via a preconditions.resourceVersion so the summary always describes
+        the revision the server validated. None on any failure."""
         path = self._object_path(meta, namespace, name)
         body = self._delete_body(uid)
         try:
             manifest = await self._request_json(path)
+            rv = (manifest.get("metadata") or {}).get("resourceVersion")
+            if rv:
+                body.setdefault("preconditions", {})["resourceVersion"] = str(rv)
             await self._dry_run(path, "DELETE", body, "application/json")
         except Exception:
             logger.debug("delete dry-run preview failed", exc_info=True)

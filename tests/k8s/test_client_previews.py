@@ -253,3 +253,65 @@ async def test_stamp_hook_delegates_to_legacy_rollout_restart() -> None:
         _deploy_meta(), "default", "web", uid="u-1", restarted_at="stamp"
     )
     assert ops.calls == [("restart", "default", "web", "u-1")]
+
+
+async def test_preview_scale_binds_dry_run_to_get_snapshot() -> None:
+    """The GET snapshot and the dry-run PATCH are bound by the snapshot's
+    resourceVersion (an apiserver optimistic-concurrency precondition): a
+    concurrent update (e.g. an HPA) turns into a 409 and no preview, never a
+    diff that mixes two revisions the server never evaluated together."""
+    client = KubeClient()
+    api = MagicMock()
+    api.call_api = AsyncMock(
+        side_effect=[
+            _resp({"metadata": {"resourceVersion": "42"}, "spec": {"replicas": 3}}),
+            _resp({"metadata": {"resourceVersion": "43"}, "spec": {"replicas": 5}}),
+        ]
+    )
+    with patch.object(client, "_api", api):
+        await client.preview_scale(_deploy_meta(), "default", "web", 5, uid="u-1")
+    body = api.call_api.call_args_list[1][1]["body"]
+    assert body["metadata"] == {"uid": "u-1", "resourceVersion": "42"}
+
+
+async def test_preview_rollout_restart_binds_dry_run_to_get_snapshot() -> None:
+    client = KubeClient()
+    api = MagicMock()
+    current = {"metadata": {"name": "web", "resourceVersion": "7"}, "spec": {}}
+    api.call_api = AsyncMock(side_effect=[_resp(current), _resp(current)])
+    with patch.object(client, "_api", api):
+        await client.preview_rollout_restart(_deploy_meta(), "default", "web", uid="u-1")
+    body = api.call_api.call_args_list[1][1]["body"]
+    assert body["metadata"] == {"uid": "u-1", "resourceVersion": "7"}
+
+
+async def test_preview_conflict_during_dry_run_returns_none() -> None:
+    """A concurrent update between GET and dry-run: the resourceVersion
+    precondition makes the server answer 409 and the preview degrades to
+    None (dialog opens without it) instead of a mixed-revision diff."""
+    client = KubeClient()
+    api = MagicMock()
+    api.call_api = AsyncMock(
+        side_effect=[
+            _resp({"metadata": {"resourceVersion": "42"}, "spec": {"replicas": 3}}),
+            ApiException(status=409, reason="Conflict"),
+        ]
+    )
+    with patch.object(client, "_api", api):
+        assert await client.preview_scale(_deploy_meta(), "default", "web", 5) is None
+
+
+async def test_preview_delete_binds_dry_run_to_get_snapshot() -> None:
+    """The dry-run DELETE is pinned to the fetched revision so the summary
+    always describes the object the server validated."""
+    client = KubeClient()
+    api = MagicMock()
+    manifest = {
+        "metadata": {"name": "web", "uid": "u-1", "creationTimestamp": "t", "resourceVersion": "9"}
+    }
+    api.call_api = AsyncMock(side_effect=[_resp(manifest), _resp({"kind": "Status"})])
+    with patch.object(client, "_api", api):
+        lines = await client.preview_delete(_deploy_meta(), "default", "web", uid="u-1")
+    assert lines is not None
+    body = api.call_api.call_args_list[1][1]["body"]
+    assert body["preconditions"] == {"uid": "u-1", "resourceVersion": "9"}
