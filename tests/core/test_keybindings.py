@@ -4,7 +4,7 @@ and duplicate keys warn instead of crashing."""
 
 from __future__ import annotations
 
-from korvid.core.keybindings import PROTECTED_ACTIONS, plan_keybindings
+from korvid.core.keybindings import PROTECTED_ACTIONS, plan_keybindings, shift_alias_keys
 
 _ACTIONS: dict[str, tuple[str, ...]] = {
     "quit": ("q",),
@@ -77,3 +77,42 @@ def test_non_string_or_blank_key_warns() -> None:
 def test_key_is_stripped() -> None:
     plan = plan_keybindings({"quit": " ctrl+q "}, _ACTIONS)
     assert plan.overrides == {"quit": "ctrl+q"}
+
+
+def test_collision_check_runs_to_fixpoint_when_rejection_restores_defaults() -> None:
+    # bb→3 is rejected (3 is cc's default), which restores bb's default 2 —
+    # so aa→2, accepted in the first pass, must also be rejected.
+    actions = {"aa": ("1",), "bb": ("2",), "cc": ("3",)}
+    plan = plan_keybindings({"aa": "2", "bb": "3"}, actions)
+    assert plan.overrides == {}
+    assert len(plan.warnings) == 2
+
+
+def test_shift_and_uppercase_spellings_collide_with_each_other() -> None:
+    # Terminals deliver shift+a as "A"; both spellings are one physical key.
+    plan = plan_keybindings({"logs": "shift+a"}, _ACTIONS)
+    assert plan.overrides == {}
+    assert any("sort_by_age" in w for w in plan.warnings)
+    plan = plan_keybindings({"quit": "shift+g", "logs": "G"}, _ACTIONS)
+    assert plan.overrides == {"quit": "shift+g"}
+    assert any("duplicate" in w for w in plan.warnings)
+
+
+def test_priority_actions_may_not_take_approval_dialog_keys() -> None:
+    # A priority binding fires before ConfirmScreen's handlers — remapping
+    # one onto y/n/enter/escape would steal the dialog's fixed keys.
+    actions = {**_ACTIONS, "toggle_agent": ("ctrl+a",)}
+    for key in ("y", "n", "enter", "escape"):
+        plan = plan_keybindings({"toggle_agent": key}, actions, {"toggle_agent"})
+        assert plan.overrides == {}
+        assert any("approval" in w for w in plan.warnings)
+    # Non-priority actions may use those keys (they never outrank a dialog).
+    plan = plan_keybindings({"describe": "y"}, actions, {"toggle_agent"})
+    assert plan.overrides == {"describe": "y"}
+
+
+def test_shift_alias_keys_expands_both_spellings() -> None:
+    assert shift_alias_keys("shift+g") == "shift+g,G"
+    assert shift_alias_keys("G") == "shift+g,G"
+    assert shift_alias_keys("ctrl+q") == "ctrl+q"
+    assert shift_alias_keys("g") == "g"

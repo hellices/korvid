@@ -46,7 +46,7 @@ from korvid.core.debugimage import (
 )
 from korvid.core.errors import explain_api_error
 from korvid.core.filters import ResourceFilter, parse_filter
-from korvid.core.keybindings import plan_keybindings
+from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.core.secrets import mask_secret_manifest
@@ -546,15 +546,19 @@ class KorvidApp(App[None]):
 
         Only app bindings carry keymap ids, so the approval dialogs'
         confirm keys are structurally out of reach; `plan_keybindings`
-        additionally rejects their action names with a warning.
+        additionally rejects their action names and blocks priority
+        actions from taking the dialogs' keys. Shifted-letter overrides
+        expand to both spellings (`shift+g,G`) because real terminals
+        deliver Shift+<letter> as the uppercase character.
         """
-        plan = plan_keybindings(self.config.keybindings, self._binding_actions())
+        bindings = [raw if isinstance(raw, Binding) else Binding(*raw) for raw in self.BINDINGS]
+        priority_actions = {binding.action for binding in bindings if binding.priority}
+        plan = plan_keybindings(self.config.keybindings, self._binding_actions(), priority_actions)
         self._keybinding_overrides = plan.overrides
         keymap: dict[str, str] = {}
-        for raw in self.BINDINGS:
-            binding = raw if isinstance(raw, Binding) else Binding(*raw)
+        for binding in bindings:
             if binding.id is not None and binding.action in plan.overrides:
-                keymap[binding.id] = plan.overrides[binding.action]
+                keymap[binding.id] = shift_alias_keys(plan.overrides[binding.action])
         if keymap:
             self.set_keymap(keymap)
         for warning in plan.warnings:

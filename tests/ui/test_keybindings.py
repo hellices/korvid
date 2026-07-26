@@ -102,3 +102,34 @@ def test_readme_documents_every_remappable_action() -> None:
     readme = Path(__file__).parents[2].joinpath("README.md").read_text()
     for action in KorvidApp._binding_actions():
         assert f"`{action}`" in readme, f"README missing keybinding action {action!r}"
+
+
+async def test_shifted_letter_remap_works_via_terminal_uppercase_spelling() -> None:
+    # Real terminals deliver shift+g as "G" — the documented `shift+g`
+    # syntax must still work there, not only under Pilot.
+    pods = [_pod("bb"), _pod("aa")]
+    app = make_app(pods, config=_config({"sort_by_age": "shift+g"}))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+
+        def _sorted_by_age() -> bool:
+            return any(
+                "AGE" in str(c.label) and "▼" in str(c.label) for c in table.columns.values()
+            )
+
+        await pilot.press("G")  # the terminal spelling of shift+g
+        await until(pilot, lambda: _sorted_by_age(), label="G sorts by age")
+
+
+async def test_priority_action_cannot_take_an_approval_dialog_key() -> None:
+    # toggle_agent is a priority binding (fires before any screen); giving
+    # it "y" would steal the approval dialog's confirm keystroke.
+    app = make_app([_pod("web")], config=_config({"toggle_agent": "y"}))
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: any("approval" in n.message for n in app._notifications),
+            label="priority/approval-key warning notified",
+        )
+        assert app._keybinding_overrides == {}

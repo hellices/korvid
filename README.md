@@ -48,9 +48,11 @@ in the dialog; `--readonly` disables them all.
 
 ### Remapping keys
 
-Every key above can be remapped via the `keybindings:` section of
-`~/.config/korvid/config.yaml`, mapping an **action name** to a new key
-(Textual key syntax — `x`, `f1`, `ctrl+q`, `shift+g`):
+App-level actions can be remapped via the `keybindings:` section of
+`~/.config/korvid/config.yaml`, mapping an **action name** from the list
+below to a new key (Textual key syntax — `x`, `f1`, `ctrl+q`, `shift+g`).
+Keys handled outside bindings (`Enter` drill-down, `Esc` close/pop, and the
+dialogs' own keys) are not remappable:
 
 ```yaml
 keybindings:
