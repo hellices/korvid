@@ -36,6 +36,15 @@ but every one is approval-gated and audited; `--readonly` disables them all.
 | `q` | global | Quit |
 | `Esc` | log pane | Close pane (or dismiss search / filter bar) |
 
+## Live metrics
+
+The pods table shows live `CPU` / `MEM` usage and `%CPU/R` / `%MEM/R`
+(usage as a percentage of the declared request) from the `metrics.k8s.io`
+API, polled every 15 seconds while the pods view is on screen.  Percentages
+are colour-coded (green &lt; 70 % &le; yellow &lt; 90 % &le; red).  On clusters
+without metrics-server the columns show `-` and korvid keeps polling, so a
+later install is picked up without a restart.
+
 ## Log viewer
 
 The log pane supports multi-container merge: press `L` to stream logs from every

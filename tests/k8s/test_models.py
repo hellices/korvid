@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from korvid.k8s.models import GenericSummary, PodSummary, ReplicaSetSummary, summary_for
 
 POD: dict[str, Any] = {
@@ -761,3 +763,144 @@ class TestDisplayPhase:
             )
         )
         assert pod.phase == "SchedulingGated"
+
+
+class TestExactRequestValues:
+    """PodSummary carries exact effective request values (issue #12 review:
+    percent-of-request must not be computed from display-rounded strings)."""
+
+    def test_from_manifest_fills_exact_requests(self) -> None:
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {
+                "containers": [
+                    {
+                        "name": "c",
+                        "resources": {"requests": {"cpu": "150m", "memory": "1500Ki"}},
+                    }
+                ]
+            },
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_request_cores == pytest.approx(0.15)
+        assert pod.mem_request_bytes == 1500 * 2**10
+        assert pod.mem_request == "1Mi"  # display string still rounds
+
+    def test_no_requests_gives_none(self) -> None:
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {"containers": [{"name": "c"}]},
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_request_cores is None
+        assert pod.mem_request_bytes is None
+
+
+class TestPodLevelRequests:
+    """K8s 1.34+ pod-level resources (spec.resources) take precedence over
+    the container-derived calculation (issue #12 review round 2)."""
+
+    def test_pod_level_requests_take_precedence(self) -> None:
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {
+                "resources": {"requests": {"cpu": "1", "memory": "2Gi"}},
+                "containers": [
+                    {
+                        "name": "c",
+                        "resources": {"requests": {"cpu": "150m", "memory": "1500Ki"}},
+                    }
+                ],
+            },
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_request_cores == pytest.approx(1.0)
+        assert pod.mem_request_bytes == 2 * 2**30
+        assert pod.cpu_request == "1000m"
+        assert pod.mem_request == "2048Mi"
+
+    def test_pod_level_partial_falls_back_per_resource(self) -> None:
+        """Pod-level sets only CPU: memory still comes from containers."""
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {
+                "resources": {"requests": {"cpu": "2"}},
+                "containers": [
+                    {
+                        "name": "c",
+                        "resources": {
+                            "requests": {"cpu": "150m", "memory": "64Mi"},
+                            "limits": {"memory": "128Mi"},
+                        },
+                    }
+                ],
+            },
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_request_cores == pytest.approx(2.0)
+        assert pod.mem_request_bytes == 64 * 2**20
+        assert pod.mem_limit == "128Mi"
+
+    def test_pod_level_limits_apply_too(self) -> None:
+        obj = {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {
+                "resources": {"limits": {"cpu": "4"}},
+                "containers": [{"name": "c", "resources": {"limits": {"cpu": "500m"}}}],
+            },
+            "status": {},
+        }
+        pod = PodSummary.from_manifest(obj)
+        assert pod.cpu_limit == "4000m"
+
+
+class TestSidecarInitOrdering:
+    """Native sidecars keep running while later classic inits execute, so the
+    init peak is cumulative-prior-sidecar-requests + that init's request
+    (issue #12 review round 3)."""
+
+    def _pod(self, init_containers: list[dict[str, object]]) -> dict[str, object]:
+        return {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {
+                "initContainers": init_containers,
+                "containers": [{"name": "c", "resources": {"requests": {"cpu": "50m"}}}],
+            },
+            "status": {},
+        }
+
+    def test_sidecar_before_init_adds_to_init_peak(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                [
+                    {
+                        "name": "sc",
+                        "restartPolicy": "Always",
+                        "resources": {"requests": {"cpu": "100m"}},
+                    },
+                    {"name": "init", "resources": {"requests": {"cpu": "500m"}}},
+                ]
+            )
+        )
+        # peak: sidecar (100m) still running while init (500m) runs = 600m
+        assert pod.cpu_request_cores == pytest.approx(0.6)
+
+    def test_sidecar_after_init_does_not_add_to_that_init(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                [
+                    {"name": "init", "resources": {"requests": {"cpu": "500m"}}},
+                    {
+                        "name": "sc",
+                        "restartPolicy": "Always",
+                        "resources": {"requests": {"cpu": "100m"}},
+                    },
+                ]
+            )
+        )
+        # init runs alone (500m); steady state is 50m + 100m = 150m
+        assert pod.cpu_request_cores == pytest.approx(0.5)
