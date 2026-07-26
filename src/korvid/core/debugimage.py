@@ -186,22 +186,40 @@ def ephemeral_container_names(manifest: dict[str, Any]) -> frozenset[str]:
     )
 
 
+def _normalize_image_ref(image: str) -> str:
+    """Normalize an image reference the way Kubernetes does before pulling.
+
+    An untagged, digest-less reference gets an implicit `:latest`. Registry
+    ports (`registry:5000/app`) are not tags: only a colon in the last path
+    segment counts. Digested references are left untouched.
+    """
+    if "@" in image:
+        return image
+    last_segment = image.rsplit("/", 1)[-1]
+    if ":" in last_segment:
+        return image
+    return f"{image}:latest"
+
+
 def find_pull_failure(
     manifest: dict[str, Any], image: str, *, ignore: frozenset[str] = frozenset()
 ) -> str | None:
     """Return the pull-failure reason for `image`'s ephemeral container, if any.
 
     Scans `status.ephemeralContainerStatuses` for a waiting state with
-    `ErrImagePull`/`ImagePullBackOff` on a container running exactly `image`.
-    Entries named in `ignore` (pre-existing containers snapshotted before the
-    attach) are skipped, so a stale failure from an earlier attempt with the
-    same image never kills a new attach that is pulling fine.
+    `ErrImagePull`/`ImagePullBackOff` on a container running `image` (compared
+    after `:latest` normalization, since Kubernetes reports untagged references
+    with an explicit `:latest`). Entries named in `ignore` (pre-existing
+    containers snapshotted before the attach) are skipped, so a stale failure
+    from an earlier attempt with the same image never kills a new attach that
+    is pulling fine.
     """
+    wanted = _normalize_image_ref(image)
     status = manifest.get("status") or {}
     for entry in status.get("ephemeralContainerStatuses") or []:
         if str(entry.get("name") or "") in ignore:
             continue
-        if entry.get("image") != image:
+        if _normalize_image_ref(str(entry.get("image") or "")) != wanted:
             continue
         waiting = (entry.get("state") or {}).get("waiting") or {}
         reason = waiting.get("reason")

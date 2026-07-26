@@ -299,6 +299,25 @@ def test_find_pull_failure_ignores_preexisting_containers() -> None:
     )
 
 
+def test_find_pull_failure_untagged_image_matches_implicit_latest() -> None:
+    # Kubernetes normalizes untagged references to `:latest` before pulling,
+    # so the status reports `nicolaka/netshoot:latest` for a `nicolaka/netshoot`
+    # attach - the failure must still be attributed.
+    manifest = _pod_with_ephemeral_status("nicolaka/netshoot:latest", "ErrImagePull")
+    assert find_pull_failure(manifest, "nicolaka/netshoot") == "ErrImagePull"
+
+
+def test_find_pull_failure_registry_port_untagged() -> None:
+    # A registry port contains a colon but is not a tag.
+    manifest = _pod_with_ephemeral_status("registry.local:5000/tools/dbg:latest", "ErrImagePull")
+    assert find_pull_failure(manifest, "registry.local:5000/tools/dbg") == "ErrImagePull"
+
+
+def test_find_pull_failure_different_tags_do_not_match() -> None:
+    manifest = _pod_with_ephemeral_status("busybox:1.35", "ErrImagePull")
+    assert find_pull_failure(manifest, "busybox:1.36") is None
+
+
 def test_ephemeral_container_names() -> None:
     manifest = _pod_with_ephemeral_status("busybox:1.36", "ErrImagePull")
     assert ephemeral_container_names(manifest) == frozenset({"debugger-abc"})
