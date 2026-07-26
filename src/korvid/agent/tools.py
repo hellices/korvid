@@ -287,7 +287,8 @@ UI_TOOLS: list[dict[str, Any]] = [
             "description": (
                 "Drill into a row of the visible table following the ownership "
                 "chain the user sees on screen: a deployment opens its replicaset "
-                "revision history, a replicaset opens its pods. Screen-only."
+                "revision history, a replicaset opens its pods, and a helm "
+                "release opens its revision history. Screen-only."
             ),
             "parameters": {
                 "type": "object",

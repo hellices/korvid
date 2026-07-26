@@ -2947,7 +2947,7 @@ class KorvidApp(App[None]):
         if child is None:
             return (
                 f"ERROR: {canonical} has no drill-down chain - "
-                "drill_down works on deployments and replicasets"
+                "drill_down works on deployments, replicasets, and helm releases"
             )
         rows = self.store.get(self.current_kind, self.current_scope)
         drill_uid = self._drill.parent_uid
