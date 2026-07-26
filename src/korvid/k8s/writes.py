@@ -54,3 +54,26 @@ class WriteOps(abc.ABC):
         uid: str | None = None,
     ) -> None:
         """PUT-replace the whole object with an edited manifest."""
+
+    # -- Dry-run previews (issue #19). Non-abstract on purpose: transports
+    # -- without server-side dryRun support inherit "no preview" and the
+    # -- approval dialog falls back to the synthesized operation string.
+
+    async def preview_scale(
+        self, meta: ResourceMeta, namespace: str | None, name: str, replicas: int
+    ) -> list[str] | None:
+        """Diff lines a ``dryRun=All`` scale would produce; None = no preview."""
+        return None
+
+    async def preview_rollout_restart(
+        self, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> list[str] | None:
+        """Diff lines a ``dryRun=All`` restart would produce; None = no preview."""
+        return None
+
+    async def preview_delete(
+        self, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> list[str] | None:
+        """Object summary + cascade note after a ``dryRun=All`` delete was
+        accepted by the server; None = no preview."""
+        return None
