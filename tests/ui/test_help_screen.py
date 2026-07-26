@@ -243,7 +243,7 @@ async def test_help_lists_commands() -> None:
         assert "Commands" in text
 
 
-async def test_escape_and_q_close_help() -> None:
+async def test_escape_q_and_question_mark_close_help() -> None:
     app = make_app([_pod("myapp")])
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -256,6 +256,11 @@ async def test_escape_and_q_close_help() -> None:
         await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help reopen")
         await pilot.press("q")
         await until(pilot, lambda: not isinstance(app.screen, HelpScreen), label="help closed q")
+
+        await pilot.press("question_mark")
+        await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help reopen 2")
+        await pilot.press("question_mark")
+        await until(pilot, lambda: not isinstance(app.screen, HelpScreen), label="help closed ?")
 
 
 async def test_question_mark_in_filter_input_stays_text() -> None:
