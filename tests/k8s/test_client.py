@@ -854,6 +854,43 @@ async def test_replace_object_pins_uid_precondition() -> None:
     assert "uid" not in manifest["metadata"]
 
 
+async def test_create_object_posts_manifest_on_collection_path() -> None:
+    """OLM install (issue #29) creates a Subscription: POST on the
+    namespaced collection, manifest as the body."""
+    client = KubeClient()
+    api = _write_api()
+    sub_meta = ResourceMeta(
+        "Subscription", "subscriptions", "operators.coreos.com", "v1alpha1", True
+    )
+    manifest = {
+        "apiVersion": "operators.coreos.com/v1alpha1",
+        "kind": "Subscription",
+        "metadata": {"name": "cert-manager", "namespace": "operators"},
+        "spec": {"channel": "stable"},
+    }
+    with patch.object(client, "_api", api):
+        await client.create_object(sub_meta, "operators", manifest)
+    args, kwargs = api.call_api.call_args
+    assert args[0] == "/apis/operators.coreos.com/v1alpha1/namespaces/operators/subscriptions"
+    assert args[1] == "POST"
+    assert kwargs["body"] == manifest
+    assert kwargs["header_params"]["Content-Type"] == "application/json"
+
+
+async def test_create_object_rejects_bad_namespace_segment() -> None:
+    client = KubeClient()
+    api = _write_api()
+    sub_meta = ResourceMeta(
+        "Subscription", "subscriptions", "operators.coreos.com", "v1alpha1", True
+    )
+    with (
+        patch.object(client, "_api", api),
+        pytest.raises(ValueError, match="invalid URL path segment"),
+    ):
+        await client.create_object(sub_meta, "..", {"metadata": {}})
+    api.call_api.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # list_pod_metrics
 # ---------------------------------------------------------------------------

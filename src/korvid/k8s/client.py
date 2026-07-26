@@ -809,6 +809,19 @@ class KubeClient(WriteOps):
             content_type="application/json",
         )
 
+    async def create_object(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        manifest: dict[str, Any],
+    ) -> None:
+        """POST a new object onto the collection (OLM install, issue #29)."""
+        if meta.namespaced and namespace is not None:
+            path = f"{meta.api_base}/namespaces/{_path_segment(namespace)}/{meta.plural}"
+        else:
+            path = f"{meta.api_base}/{meta.plural}"
+        await self._request_write(path, "POST", body=manifest, content_type="application/json")
+
     async def stream_logs(
         self,
         namespace: str,

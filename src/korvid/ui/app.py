@@ -46,6 +46,13 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import PodSummary
+from korvid.k8s.olm import (
+    OPERATORS_GROUP,
+    PACKAGES_GROUP,
+    PackageInstallFacts,
+    build_subscription,
+    package_install_facts,
+)
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.ui.command import command_help
@@ -75,6 +82,7 @@ from korvid.ui.widgets.hint_strip import HintStrip, parse_rfc3339
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
+from korvid.ui.widgets.operator_install import OperatorInstallPrompt
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
@@ -345,6 +353,7 @@ class KorvidApp(App[None]):
         Binding("S", "scale_resource", "Scale", show=False),
         Binding("e", "edit_resource", "Edit", show=False),
         Binding("i", "hint_details", "Hint details", show=False),
+        Binding("I", "operator_install", "Install/Approve", show=False),
     ]
 
     # User-facing keys handled in event handlers rather than BINDINGS:
@@ -1694,6 +1703,8 @@ class KorvidApp(App[None]):
         "debug": ("patch", "ephemeralcontainers"),
         "edit": ("update", ""),
         "resize": ("patch", "resize"),
+        "install": ("create", ""),
+        "approve": ("update", ""),
     }
 
     @staticmethod
@@ -2421,6 +2432,177 @@ class KorvidApp(App[None]):
             ),
             _done,
         )
+
+    async def action_operator_install(self) -> None:
+        """I: on the operator catalog, install the selected package (wizard,
+        then approval with the full Subscription manifest); on InstallPlans,
+        approve a pending manual plan. Everything offered comes from the
+        cluster's own catalog objects - no hardcoded operator knowledge."""
+        if self._write_ops is None:
+            self.notify("Install unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name, uid = target
+        if (meta.group, meta.plural) == (PACKAGES_GROUP, "packagemanifests"):
+            await self._start_operator_install(meta, ns, name)
+        elif (meta.group, meta.plural) == (OPERATORS_GROUP, "installplans"):
+            await self._start_installplan_approve(meta, ns, name, uid)
+        else:
+            self.notify(
+                f"Install/Approve does not apply to {self._gvr_label(meta)}"
+                " (use it on packagemanifests or installplans)",
+                severity="warning",
+            )
+
+    async def _start_operator_install(
+        self, pkg_meta: ResourceMeta, ns: str | None, name: str
+    ) -> None:
+        """Fetch the PackageManifest and open the install wizard."""
+        sub_meta = self.aliases.get("subscriptions")
+        if sub_meta is None or sub_meta.group != OPERATORS_GROUP:
+            self.notify(
+                "Install unavailable: the OLM Subscription API was not discovered",
+                severity="warning",
+            )
+            return
+        if self._get_manifest is None:
+            self.notify("Install unavailable: no manifest source", severity="warning")
+            return
+        try:
+            manifest = await self._get_manifest(pkg_meta.plural, ns, name)
+        except Exception as exc:
+            self.notify(f"Could not fetch the package manifest: {exc}", severity="error")
+            return
+        facts = package_install_facts(manifest)
+        if not self._write_context_intact(
+            "install", pkg_meta, ns, name, phase="the manifest fetch"
+        ):
+            return
+
+        def _on_choices(choices: tuple[str, str, str] | None) -> None:
+            if choices is None:
+                return
+            # The SSAR round trip must not run inside a screen callback:
+            # a worker re-checks, revalidates, then confirms.
+            self.run_worker(self._confirm_operator_install(pkg_meta, sub_meta, ns, facts, choices))
+
+        # The row namespace is where the catalog lives (e.g. "olm"), not
+        # where the user works: prefill the wizard with the active view
+        # namespace instead, blank on the all-namespaces view.
+        view_ns = self.current_namespace
+        default_ns = view_ns if view_ns != ALL_NAMESPACES else ""
+        await self.push_screen(
+            OperatorInstallPrompt(facts, namespace=default_ns),
+            _on_choices,
+        )
+
+    async def _confirm_operator_install(
+        self,
+        pkg_meta: ResourceMeta,
+        sub_meta: ResourceMeta,
+        ns: str | None,
+        facts: PackageInstallFacts,
+        choices: tuple[str, str, str],
+    ) -> None:
+        """Approval dialog for an operator install: the full Subscription
+        manifest is shown before it is created (issue #29 requirement)."""
+        ops = self._write_ops
+        if ops is None:
+            return
+        namespace, channel, approval = choices
+        try:
+            manifest = build_subscription(
+                package=facts.package,
+                namespace=namespace,
+                channel=channel,
+                source=facts.catalog_source,
+                source_namespace=facts.catalog_source_namespace,
+                approval=approval,
+            )
+        except ValueError as exc:
+            # Blank catalog facts (malformed PackageManifest status) land
+            # here; the wizard already validated its own inputs.
+            self.notify(f"install cancelled: {exc}", severity="warning")
+            return
+        if not await self._permitted("install", sub_meta, namespace, facts.package):
+            return
+        if not self._write_context_intact(
+            "install", pkg_meta, ns, facts.package, phase="the install wizard"
+        ):
+            return
+        operation = (
+            f"CREATE subscriptions/{facts.package} in namespace {namespace}\n\n"
+            + yaml.safe_dump(manifest, sort_keys=False)
+        )
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_write(
+                        "install",
+                        sub_meta,
+                        namespace,
+                        facts.package,
+                        ops.create_object(sub_meta, namespace, manifest),
+                        detail=f"channel={channel} approval={approval}"
+                        f" source={facts.catalog_source}",
+                    )
+                )
+
+        await self.push_screen(
+            ConfirmScreen(f"Install operator {facts.package}?", operation), _done
+        )
+
+    async def _start_installplan_approve(
+        self, meta: ResourceMeta, ns: str | None, name: str, uid: str | None
+    ) -> None:
+        """Approve a pending manual InstallPlan: fetch, flip spec.approved,
+        and replace behind the standard approval dialog listing the CSVs the
+        approval unblocks."""
+        ops = self._write_ops
+        if ops is None:
+            return
+        if not await self._precheck_keybinding_write("approve", meta, ns, name):
+            return
+        if self._get_manifest is None:
+            self.notify("Approve unavailable: no manifest source", severity="warning")
+            return
+        try:
+            manifest = await self._get_manifest(meta.plural, ns, name)
+        except Exception as exc:
+            self.notify(f"Could not fetch the install plan: {exc}", severity="error")
+            return
+        spec = manifest.get("spec")
+        spec = spec if isinstance(spec, dict) else {}
+        if spec.get("approved"):
+            self.notify(f"installplans/{name} is already approved", severity="information")
+            return
+        if not self._write_context_intact("approve", meta, ns, name, phase="the manifest fetch"):
+            return
+        updated = dict(manifest)
+        updated["spec"] = {**spec, "approved": True}
+        csvs = ", ".join(str(c) for c in spec.get("clusterServiceVersionNames") or []) or "?"
+        operation = (
+            f"REPLACE installplans/{name} with spec.approved=true"
+            f"{self._write_locus(ns)}\ninstalls: {csvs}"
+        )
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_write(
+                        "approve",
+                        meta,
+                        ns,
+                        name,
+                        ops.replace_object(meta, ns, name, updated, uid=uid),
+                        detail=f"installs: {csvs}",
+                    )
+                )
+
+        await self.push_screen(ConfirmScreen(f"Approve installplans/{name}?", operation), _done)
 
     async def _open_log_pane(
         self,

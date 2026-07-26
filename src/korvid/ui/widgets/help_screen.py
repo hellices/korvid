@@ -49,6 +49,7 @@ _ACTION_GROUPS: dict[str, tuple[str, ...]] = {
     "delete_resource": ("Table",),
     "rollout_restart": ("Table",),
     "resize_pod": ("Table",),
+    "operator_install": ("Table",),
     "scale_resource": ("Table",),
     "edit_resource": ("Table",),
     "hint_details": ("Table",),

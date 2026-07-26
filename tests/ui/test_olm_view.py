@@ -12,9 +12,17 @@ from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
-from korvid.k8s.models import CSVSummary, OLMSubscriptionSummary, PackageManifestSummary
+from korvid.k8s.models import (
+    CSVSummary,
+    GenericSummary,
+    OLMSubscriptionSummary,
+    PackageManifestSummary,
+)
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
+from korvid.k8s.writes import WriteOps
 from korvid.ui.app import KorvidApp
+from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from korvid.ui.widgets.operator_install import OperatorInstallPrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 
 from .waits import until
@@ -84,12 +92,58 @@ def _csv(name: str, phase: str) -> CSVSummary:
     )
 
 
+class Recorder(WriteOps):
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, ...]] = []
+
+    async def delete_object(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        self.calls.append(("delete", meta.plural, namespace, name))
+
+    async def scale_object(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        replicas: int,
+        *,
+        uid: str | None = None,
+    ) -> None:
+        self.calls.append(("scale", meta.plural, namespace, name, replicas))
+
+    async def rollout_restart(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        self.calls.append(("restart", meta.plural, namespace, name))
+
+    async def replace_object(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        manifest: dict[str, Any],
+        *,
+        uid: str | None = None,
+    ) -> None:
+        self.calls.append(("replace", meta.plural, namespace, name, manifest, uid))
+
+    async def create_object(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        manifest: dict[str, Any],
+    ) -> None:
+        self.calls.append(("create", meta.plural, namespace, manifest))
+
+
 def make_app(
     data: dict[str, list[Summary]],
     manifests: dict[str, dict[str, Any]] | None = None,
     audit_path: Path | None = None,
     *,
     olm: bool = True,
+    write_ops: WriteOps | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
 
@@ -113,6 +167,7 @@ def make_app(
         aliases=_aliases(olm=olm),
         get_manifest=get_manifest,
         audit=AuditLog(audit_path) if audit_path is not None else None,
+        write_ops=write_ops,
     )
 
 
@@ -200,3 +255,166 @@ async def test_csv_phase_styling_highlights_failures() -> None:
         assert ok.style == "green"
         assert failed.style == "bold red"
         assert rolling.style == "yellow"
+
+
+def _pkg_manifest(name: str) -> dict[str, Any]:
+    return {
+        "apiVersion": f"{PACKAGES_GROUP}/v1",
+        "kind": "PackageManifest",
+        "metadata": {"name": name, "namespace": "olm"},
+        "status": {
+            "catalogSource": "operatorhubio-catalog",
+            "catalogSourceNamespace": "olm",
+            "defaultChannel": "stable",
+            "channels": [{"name": "candidate"}, {"name": "stable"}],
+        },
+    }
+
+
+def _installplan(name: str, *, approved: bool) -> GenericSummary:
+    return GenericSummary(
+        name=name,
+        namespace="operators",
+        kind="InstallPlan",
+        created="2026-07-26T10:00:00Z",
+        uid=f"ip-{name}",
+    )
+
+
+def _installplan_manifest(name: str, *, approved: bool) -> dict[str, Any]:
+    return {
+        "apiVersion": f"{OPERATORS_GROUP}/v1alpha1",
+        "kind": "InstallPlan",
+        "metadata": {
+            "name": name,
+            "namespace": "operators",
+            "uid": f"ip-{name}",
+            "resourceVersion": "41",
+        },
+        "spec": {
+            "approval": "Manual",
+            "approved": approved,
+            "clusterServiceVersionNames": ["cert-manager.v1.14.4"],
+        },
+    }
+
+
+async def test_install_key_walks_wizard_confirm_and_creates_subscription(
+    tmp_path: Path,
+) -> None:
+    """I on a catalog row: wizard -> full Subscription manifest in the
+    approval dialog -> create_object + fail-closed audit."""
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        {"packagemanifests": [_package("cert-manager")]},
+        manifests={"cert-manager": _pkg_manifest("cert-manager")},
+        audit_path=audit_path,
+        write_ops=rec,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "operators", "packagemanifests")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="package listed")
+        await pilot.press("I")
+        await until(
+            pilot, lambda: isinstance(app.screen, OperatorInstallPrompt), label="wizard open"
+        )
+        await pilot.press("enter")  # accept defaults: operators/stable/Automatic
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirm open")
+        body = app.screen.query_one(".confirm-operation").render()
+        assert "channel: stable" in str(body)  # the manifest is shown in full
+        assert "installPlanApproval: Automatic" in str(body)
+        await pilot.press("y")
+        await until(pilot, lambda: bool(rec.calls), label="create executed")
+        kind, plural, ns, manifest = rec.calls[0]
+        assert (kind, plural, ns) == ("create", "subscriptions", "operators")
+        assert manifest["spec"] == {
+            "name": "cert-manager",
+            "channel": "stable",
+            "source": "operatorhubio-catalog",
+            "sourceNamespace": "olm",
+            "installPlanApproval": "Automatic",
+        }
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="audit recorded",
+        )
+
+
+async def test_install_key_outside_catalog_view_warns(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=rec,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="subscription listed")
+        await pilot.press("I")
+        await until(
+            pilot,
+            lambda: any("does not apply" in str(n.message) for n in app._notifications),
+            label="warned",
+        )
+        assert rec.calls == []
+
+
+async def test_approve_key_on_pending_installplan_replaces_with_approved(
+    tmp_path: Path,
+) -> None:
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        {"installplans": [_installplan("install-abc", approved=False)]},
+        manifests={"install-abc": _installplan_manifest("install-abc", approved=False)},
+        audit_path=audit_path,
+        write_ops=rec,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "installplans", "installplans")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="installplan listed")
+        await pilot.press("I")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirm open")
+        body = str(app.screen.query_one(".confirm-operation").render())
+        assert "cert-manager.v1.14.4" in body  # what the approval unblocks
+        await pilot.press("y")
+        await until(pilot, lambda: bool(rec.calls), label="replace executed")
+        kind, plural, ns, name, manifest, uid = rec.calls[0]
+        assert (kind, plural, ns, name) == ("replace", "installplans", "operators", "install-abc")
+        assert manifest["spec"]["approved"] is True
+        assert uid == "ip-install-abc"
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="audit recorded",
+        )
+
+
+async def test_approve_key_on_already_approved_installplan_notifies(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(
+        {"installplans": [_installplan("install-abc", approved=True)]},
+        manifests={"install-abc": _installplan_manifest("install-abc", approved=True)},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=rec,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "installplans", "installplans")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="installplan listed")
+        await pilot.press("I")
+        await until(
+            pilot,
+            lambda: any("already approved" in str(n.message) for n in app._notifications),
+            label="already-approved notice",
+        )
+        assert rec.calls == []

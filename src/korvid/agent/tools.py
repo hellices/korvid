@@ -14,6 +14,7 @@ from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import parse_quantity
+from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 
 MAX_RESULT_CHARS = 8000
 
@@ -128,6 +129,31 @@ READ_TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["kind", "namespace", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_operators",
+            "description": (
+                "List OLM operators: available packages from the cluster's"
+                " operator catalog plus installed subscriptions with their"
+                " status. Read-only; installing an operator is done by the"
+                " user through the UI. Explains itself when OLM is absent."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": (
+                            "Namespace to scope installed subscriptions to."
+                            " Omit for all namespaces."
+                        ),
+                    },
+                },
+                "required": [],
             },
         },
     },
@@ -547,6 +573,8 @@ class ToolExecutor:
             return await self._get_logs(arguments)
         if name == "get_events":
             return await self._get_events(arguments)
+        if name == "list_operators":
+            return await self._list_operators(arguments)
         raise ValueError(f"unknown tool: {name!r}")
 
     async def _dispatch_ui(self, name: str, args: dict[str, Any]) -> str:
@@ -616,6 +644,41 @@ class ToolExecutor:
         if not summaries:
             return "(none)"
         return "\n".join(f"{s.namespace}/{s.name}  -  age={s.age()}" for s in summaries)
+
+    async def _list_operators(self, args: dict[str, Any]) -> str:
+        """Catalog packages + installed subscriptions, straight from the
+        cluster's own OLM objects (issue #29: no hardcoded operator
+        knowledge; the tool explains itself when OLM is absent)."""
+        pkg_meta = self._aliases.get("packagemanifests")
+        if pkg_meta is None or pkg_meta.group != PACKAGES_GROUP:
+            return (
+                "OLM is not installed: the packages.operators.coreos.com API"
+                " group was not discovered, so there is no operator catalog"
+                " to list."
+            )
+        namespace: str | None = args.get("namespace")
+        lines = ["AVAILABLE (operator catalog):"]
+        for pkg in await self._kube.list_objects(pkg_meta, None):
+            channels = ",".join(getattr(pkg, "channels", ()) or ())
+            lines.append(
+                f"  {pkg.name}  catalog={getattr(pkg, 'catalog', '') or '?'}"
+                f"  default={getattr(pkg, 'default_channel', '') or '?'}"
+                f"  channels={channels or '?'}"
+            )
+        sub_meta = self._aliases.get("subscriptions")
+        if sub_meta is not None and sub_meta.group == OPERATORS_GROUP:
+            lines.append("INSTALLED (subscriptions):")
+            subs = await self._kube.list_objects(sub_meta, namespace)
+            if not subs:
+                lines.append("  (none)")
+            for sub in subs:
+                lines.append(
+                    f"  {sub.namespace}/{sub.name}"
+                    f"  channel={getattr(sub, 'channel', '') or '?'}"
+                    f"  csv={getattr(sub, 'installed_csv', '') or '?'}"
+                    f"  state={getattr(sub, 'state', '') or '?'}"
+                )
+        return "\n".join(lines)
 
     async def _get_resource(self, args: dict[str, Any]) -> str:
         kind = str(args["kind"]).strip().lower()
