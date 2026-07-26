@@ -13,7 +13,10 @@ from korvid.k8s.helm import HelmReleaseSummary, HelmRevisionSummary
 from korvid.k8s.metrics import PodMetrics
 from korvid.k8s.models import (
     ContainerLimits,
+    CSVSummary,
     GenericSummary,
+    OLMSubscriptionSummary,
+    PackageManifestSummary,
     PodSummary,
     ReplicaSetSummary,
     format_cpu,
@@ -47,6 +50,12 @@ _HELM_REV_COLS = ("NAME", "REVISION", "STATUS", "CHART", "APP VERSION", "DESCRIP
 _HELM_REV_COLS_ALL_NS = ("NAMESPACE", *_HELM_REV_COLS)
 _GENERIC_COLS = ("NAME", "AGE")
 _GENERIC_COLS_ALL_NS = ("NAMESPACE", "NAME", "AGE")
+_PKG_COLS = ("NAME", "CATALOG", "DEFAULT CHANNEL", "CHANNELS", "AGE")
+_PKG_COLS_ALL_NS = ("NAMESPACE", *_PKG_COLS)
+_SUB_COLS = ("NAME", "CHANNEL", "SOURCE", "INSTALLED CSV", "STATE", "AGE")
+_SUB_COLS_ALL_NS = ("NAMESPACE", *_SUB_COLS)
+_CSV_COLS = ("NAME", "DISPLAY NAME", "VERSION", "PHASE", "AGE")
+_CSV_COLS_ALL_NS = ("NAMESPACE", *_CSV_COLS)
 
 #: Helm release/revision status colors: steady-state good is green, hard
 #: failure red, history entries dim, anything transitional yellow.
@@ -68,6 +77,31 @@ def _phase_cell(phase: str) -> Text:
 
 def _helm_status_cell(status: str) -> Text:
     return Text(status, style=_HELM_STATUS_STYLE.get(status, "yellow"))
+
+
+_CSV_PHASE_STYLE = {"Succeeded": "green", "Failed": "bold red"}
+
+
+def _csv_phase_cell(phase: str) -> Text:
+    """CSV install phase: Succeeded green, Failed loud, transitional yellow."""
+    return Text(phase, style=_CSV_PHASE_STYLE.get(phase, "yellow"))
+
+
+_COLS_BY_KIND: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "pods": (_POD_COLS, _POD_COLS_ALL_NS),
+    "replicasets": (_RS_COLS, _RS_COLS_ALL_NS),
+    "helmreleases": (_HELM_COLS, _HELM_COLS_ALL_NS),
+    "helmrevisions": (_HELM_REV_COLS, _HELM_REV_COLS_ALL_NS),
+    "packagemanifests": (_PKG_COLS, _PKG_COLS_ALL_NS),
+    "subscriptions": (_SUB_COLS, _SUB_COLS_ALL_NS),
+    "clusterserviceversions": (_CSV_COLS, _CSV_COLS_ALL_NS),
+}
+
+
+def _columns_for(kind: str, *, all_namespaces: bool) -> tuple[str, ...]:
+    """Column headers for *kind*; unknown kinds get the generic NAME/AGE set."""
+    single, all_ns = _COLS_BY_KIND.get(kind, (_GENERIC_COLS, _GENERIC_COLS_ALL_NS))
+    return all_ns if all_namespaces else single
 
 
 def _ready_cell(ready: str) -> Text:
@@ -200,21 +234,24 @@ class ResourceTable(DataTable[str | Text]):
         """Render rows into the table; rebuilds columns when (kind, all_namespaces) changes."""
         if (kind, all_namespaces) != (self._last_kind, self._last_all_namespaces):
             self.clear(columns=True)
-            if kind == "pods":
-                self.add_columns(*(_POD_COLS_ALL_NS if all_namespaces else _POD_COLS))
-            elif kind == "replicasets":
-                self.add_columns(*(_RS_COLS_ALL_NS if all_namespaces else _RS_COLS))
-            elif kind == "helmreleases":
-                self.add_columns(*(_HELM_COLS_ALL_NS if all_namespaces else _HELM_COLS))
-            elif kind == "helmrevisions":
-                self.add_columns(*(_HELM_REV_COLS_ALL_NS if all_namespaces else _HELM_REV_COLS))
-            else:
-                self.add_columns(*(_GENERIC_COLS_ALL_NS if all_namespaces else _GENERIC_COLS))
+            self.add_columns(*_columns_for(kind, all_namespaces=all_namespaces))
             self._last_kind = kind
             self._last_all_namespaces = all_namespaces
         else:
             self.clear()
+        self._render_rows(
+            kind, rows, all_namespaces=all_namespaces, pattern=pattern, metrics=metrics
+        )
 
+    def _render_rows(
+        self,
+        kind: str,
+        rows: list[Summary],
+        *,
+        all_namespaces: bool,
+        pattern: str,
+        metrics: MetricsLookup | None,
+    ) -> None:
         if kind == "pods":
             self._add_pod_rows(
                 rows, all_namespaces=all_namespaces, pattern=pattern, metrics=metrics
@@ -225,6 +262,12 @@ class ResourceTable(DataTable[str | Text]):
             self._add_helm_release_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
         elif kind == "helmrevisions":
             self._add_helm_revision_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
+        elif kind == "packagemanifests":
+            self._add_package_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
+        elif kind == "subscriptions":
+            self._add_subscription_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
+        elif kind == "clusterserviceversions":
+            self._add_csv_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
         else:
             self._add_generic_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
 
@@ -326,6 +369,84 @@ class ResourceTable(DataTable[str | Text]):
             if all_namespaces:
                 cells.insert(0, rev.namespace)
             self.add_row(*cells, key=f"{rev.namespace}/{rev.name}")
+
+    def _add_fallback_rows(
+        self, rows: list[Summary], *, all_namespaces: bool, pattern: str, width: int
+    ) -> None:
+        """NAME + blank middle cells + AGE for rows that reached a typed view
+        without the matching summary class (e.g. a same-plural kind from a
+        different API group) - they render rather than silently disappearing."""
+        for obj in sorted(rows, key=lambda o: (o.namespace, o.name)):
+            if pattern and pattern.lower() not in obj.name.lower():
+                continue
+            age = obj.age() if isinstance(obj, GenericSummary) else ""
+            cells: list[str | Text] = [obj.name, *[""] * (width - 2), age]
+            if all_namespaces:
+                cells.insert(0, obj.namespace)
+            self.add_row(*cells, key=f"{obj.namespace}/{obj.name}")
+
+    def _add_package_rows(self, rows: list[Summary], *, all_namespaces: bool, pattern: str) -> None:
+        packages = [r for r in rows if isinstance(r, PackageManifestSummary)]
+        for pkg in sorted(packages, key=lambda p: (p.namespace, p.name)):
+            if pattern and pattern.lower() not in pkg.name.lower():
+                continue
+            cells: list[str | Text] = [
+                pkg.name,
+                pkg.catalog or "-",
+                pkg.default_channel or "-",
+                ",".join(pkg.channels) or "-",
+                pkg.age(),
+            ]
+            if all_namespaces:
+                cells.insert(0, pkg.namespace)
+            self.add_row(*cells, key=f"{pkg.namespace}/{pkg.name}")
+        fallbacks = [r for r in rows if not isinstance(r, PackageManifestSummary)]
+        self._add_fallback_rows(
+            fallbacks, all_namespaces=all_namespaces, pattern=pattern, width=len(_PKG_COLS)
+        )
+
+    def _add_subscription_rows(
+        self, rows: list[Summary], *, all_namespaces: bool, pattern: str
+    ) -> None:
+        subs = [r for r in rows if isinstance(r, OLMSubscriptionSummary)]
+        for sub in sorted(subs, key=lambda s: (s.namespace, s.name)):
+            if pattern and pattern.lower() not in sub.name.lower():
+                continue
+            cells: list[str | Text] = [
+                sub.name,
+                sub.channel or "-",
+                sub.source or "-",
+                sub.installed_csv or "-",
+                sub.state or "-",
+                sub.age(),
+            ]
+            if all_namespaces:
+                cells.insert(0, sub.namespace)
+            self.add_row(*cells, key=f"{sub.namespace}/{sub.name}")
+        fallbacks = [r for r in rows if not isinstance(r, OLMSubscriptionSummary)]
+        self._add_fallback_rows(
+            fallbacks, all_namespaces=all_namespaces, pattern=pattern, width=len(_SUB_COLS)
+        )
+
+    def _add_csv_rows(self, rows: list[Summary], *, all_namespaces: bool, pattern: str) -> None:
+        csvs = [r for r in rows if isinstance(r, CSVSummary)]
+        for csv in sorted(csvs, key=lambda c: (c.namespace, c.name)):
+            if pattern and pattern.lower() not in csv.name.lower():
+                continue
+            cells: list[str | Text] = [
+                csv.name,
+                csv.display_name or "-",
+                csv.version or "-",
+                _csv_phase_cell(csv.phase),
+                csv.age(),
+            ]
+            if all_namespaces:
+                cells.insert(0, csv.namespace)
+            self.add_row(*cells, key=f"{csv.namespace}/{csv.name}")
+        fallbacks = [r for r in rows if not isinstance(r, CSVSummary)]
+        self._add_fallback_rows(
+            fallbacks, all_namespaces=all_namespaces, pattern=pattern, width=len(_CSV_COLS)
+        )
 
     def _add_generic_rows(self, rows: list[Summary], *, all_namespaces: bool, pattern: str) -> None:
         generics = cast(list[GenericSummary], rows)

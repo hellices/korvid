@@ -101,6 +101,11 @@ async def _discover_in_background(
     reserved = {HELM_RELEASES_META.plural, HELM_REVISIONS_META.plural}
     aliases.update({a: m for a, m in discovered.items() if m.plural not in reserved})
     aliases.update(build_alias_map([HELM_RELEASES_META, HELM_REVISIONS_META]))
+    # Where OLM serves the operator catalog, `:operators` opens it - unless a
+    # real kind (e.g. OLM v1's Operator) already claims that alias.
+    pkg_meta = aliases.get("packagemanifests")
+    if pkg_meta is not None and pkg_meta.group == "packages.operators.coreos.com":
+        aliases.setdefault("operators", pkg_meta)
     app.on_aliases_updated()
 
 

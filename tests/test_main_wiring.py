@@ -397,3 +397,72 @@ async def test_get_manifest_routes_helm_revision_names_to_specific_revision() ->
         await get_manifest("helmrevisions", "default", "not-a-revision-row")
     with pytest.raises(ValueError, match="namespace"):
         await get_manifest("helmreleases", None, "web")
+
+
+async def test_discovery_maps_operators_alias_to_packagemanifests() -> None:
+    """Where OLM serves PackageManifests, `:operators` opens the catalog;
+    the alias must not shadow a real kind that already claimed the name."""
+    from korvid.__main__ import _discover_in_background
+    from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+    from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
+
+    pkg_meta = ResourceMeta(
+        "PackageManifest", "packagemanifests", "packages.operators.coreos.com", "v1", True
+    )
+
+    class FakeKube:
+        async def discover_resources(self) -> list[ResourceMeta]:
+            return [PODS_META, pkg_meta]
+
+    class FakeApp:
+        def on_aliases_updated(self) -> None:
+            pass
+
+    aliases = build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META])
+    await _discover_in_background(FakeKube(), aliases, FakeApp())  # type: ignore[arg-type]
+    assert aliases["operators"] is pkg_meta
+    assert aliases["packagemanifests"] is pkg_meta
+
+
+async def test_discovery_without_olm_has_no_operators_alias() -> None:
+    from korvid.__main__ import _discover_in_background
+    from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+    from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
+
+    class FakeKube:
+        async def discover_resources(self) -> list[ResourceMeta]:
+            return [PODS_META]
+
+    class FakeApp:
+        def on_aliases_updated(self) -> None:
+            pass
+
+    aliases = build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META])
+    await _discover_in_background(FakeKube(), aliases, FakeApp())  # type: ignore[arg-type]
+    assert "operators" not in aliases
+
+
+async def test_discovery_does_not_shadow_a_real_operators_kind() -> None:
+    """OLM v1 (or any CRD) can define a kind whose plural is "operators";
+    that real kind keeps the alias and the convenience mapping backs off."""
+    from korvid.__main__ import _discover_in_background
+    from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+    from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
+
+    operators_meta = ResourceMeta("Operator", "operators", "operators.coreos.com", "v1", False)
+    pkg_meta = ResourceMeta(
+        "PackageManifest", "packagemanifests", "packages.operators.coreos.com", "v1", True
+    )
+
+    class FakeKube:
+        async def discover_resources(self) -> list[ResourceMeta]:
+            return [PODS_META, operators_meta, pkg_meta]
+
+    class FakeApp:
+        def on_aliases_updated(self) -> None:
+            pass
+
+    aliases = build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META])
+    await _discover_in_background(FakeKube(), aliases, FakeApp())  # type: ignore[arg-type]
+    assert aliases["operators"] is operators_meta
+    assert aliases["packagemanifests"] is pkg_meta

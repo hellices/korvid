@@ -3,7 +3,15 @@ from typing import Any
 
 import pytest
 
-from korvid.k8s.models import GenericSummary, PodSummary, ReplicaSetSummary, summary_for
+from korvid.k8s.models import (
+    CSVSummary,
+    GenericSummary,
+    OLMSubscriptionSummary,
+    PackageManifestSummary,
+    PodSummary,
+    ReplicaSetSummary,
+    summary_for,
+)
 
 POD: dict[str, Any] = {
     "metadata": {"name": "checkout-7d9f", "namespace": "prod"},
@@ -1014,3 +1022,85 @@ class TestContainerLimits:
         )
         assert pod.cpu_limit_cores is None
         assert pod.mem_limit_bytes is None
+
+
+# ---------------------------------------------------------------------------
+# OLM summaries (issue #29)
+# ---------------------------------------------------------------------------
+
+
+def _pkg_manifest() -> dict[str, Any]:
+    return {
+        "apiVersion": "packages.operators.coreos.com/v1",
+        "kind": "PackageManifest",
+        "metadata": {
+            "name": "cert-manager",
+            "namespace": "olm",
+            "creationTimestamp": "2026-07-20T00:00:00Z",
+        },
+        "status": {
+            "catalogSource": "operatorhubio-catalog",
+            "defaultChannel": "stable",
+            "channels": [{"name": "candidate"}, {"name": "stable"}],
+        },
+    }
+
+
+def test_summary_for_dispatches_packagemanifest() -> None:
+    summary = summary_for("PackageManifest", _pkg_manifest())
+    assert isinstance(summary, PackageManifestSummary)
+    assert summary.catalog == "operatorhubio-catalog"
+    assert summary.default_channel == "stable"
+    assert summary.channels == ("candidate", "stable")
+
+
+def test_packagemanifest_summary_tolerates_malformed_status() -> None:
+    manifest = _pkg_manifest()
+    manifest["status"] = "oops"
+    summary = summary_for("PackageManifest", manifest)
+    assert isinstance(summary, PackageManifestSummary)
+    assert summary.catalog == ""
+    assert summary.channels == ()
+
+
+def test_summary_for_dispatches_olm_subscription() -> None:
+    manifest = {
+        "apiVersion": "operators.coreos.com/v1alpha1",
+        "kind": "Subscription",
+        "metadata": {"name": "cert-manager", "namespace": "operators"},
+        "spec": {"channel": "stable", "source": "operatorhubio-catalog"},
+        "status": {"installedCSV": "cert-manager.v1.14.4", "state": "AtLatestKnown"},
+    }
+    summary = summary_for("Subscription", manifest)
+    assert isinstance(summary, OLMSubscriptionSummary)
+    assert summary.channel == "stable"
+    assert summary.source == "operatorhubio-catalog"
+    assert summary.installed_csv == "cert-manager.v1.14.4"
+    assert summary.state == "AtLatestKnown"
+
+
+def test_summary_for_leaves_non_olm_subscription_kinds_generic() -> None:
+    """Other API groups also define a Subscription kind (e.g. eventing);
+    only operators.coreos.com objects get the OLM columns."""
+    manifest = {
+        "apiVersion": "messaging.example.com/v1",
+        "kind": "Subscription",
+        "metadata": {"name": "events", "namespace": "prod"},
+    }
+    summary = summary_for("Subscription", manifest)
+    assert not isinstance(summary, OLMSubscriptionSummary)
+
+
+def test_summary_for_dispatches_csv() -> None:
+    manifest = {
+        "apiVersion": "operators.coreos.com/v1alpha1",
+        "kind": "ClusterServiceVersion",
+        "metadata": {"name": "cert-manager.v1.14.4", "namespace": "operators"},
+        "spec": {"version": "1.14.4", "displayName": "cert-manager"},
+        "status": {"phase": "Succeeded"},
+    }
+    summary = summary_for("ClusterServiceVersion", manifest)
+    assert isinstance(summary, CSVSummary)
+    assert summary.version == "1.14.4"
+    assert summary.phase == "Succeeded"
+    assert summary.display_name == "cert-manager"

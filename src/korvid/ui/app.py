@@ -1135,6 +1135,15 @@ class KorvidApp(App[None]):
         if head == "mcp":
             self._handle_mcp_command(parts[1:])
             return
+        if head == "operators":
+            # The catalog view only exists where OLM serves PackageManifests;
+            # explain the absence instead of a generic unknown-kind error.
+            self.notify(
+                "OLM not detected: the packages.operators.coreos.com API group"
+                " is absent in this cluster, so there is no operator catalog",
+                severity="warning",
+            )
+            return
         self.notify(
             f"Unknown resource or command: {message.text}"
             " — not found in this cluster's API (CRD not installed?)",

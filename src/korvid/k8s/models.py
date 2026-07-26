@@ -275,10 +275,97 @@ class ReplicaSetSummary(GenericSummary):
         )
 
 
+def _str_map(value: Any) -> dict[str, Any]:
+    """*value* if it is a mapping, else {} - CRD payloads may mistype nested fields."""
+    return value if isinstance(value, dict) else {}
+
+
+@dataclass(frozen=True)
+class PackageManifestSummary(GenericSummary):
+    """OLM catalog entry (packages.operators.coreos.com, issue #29)."""
+
+    catalog: str = ""
+    default_channel: str = ""
+    channels: tuple[str, ...] = ()
+
+    @classmethod
+    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> PackageManifestSummary:
+        base = GenericSummary.from_manifest(kind, manifest)
+        status = _str_map(manifest.get("status"))
+        return cls(
+            **vars(base),
+            catalog=str(status.get("catalogSource") or ""),
+            default_channel=str(status.get("defaultChannel") or ""),
+            channels=tuple(
+                str(entry["name"])
+                for entry in status.get("channels") or []
+                if isinstance(entry, dict) and entry.get("name")
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class OLMSubscriptionSummary(GenericSummary):
+    """OLM Subscription (operators.coreos.com) - an installed operator."""
+
+    channel: str = ""
+    source: str = ""
+    installed_csv: str = ""
+    state: str = ""
+
+    @classmethod
+    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> OLMSubscriptionSummary:
+        base = GenericSummary.from_manifest(kind, manifest)
+        spec = _str_map(manifest.get("spec"))
+        status = _str_map(manifest.get("status"))
+        return cls(
+            **vars(base),
+            channel=str(spec.get("channel") or ""),
+            source=str(spec.get("source") or ""),
+            installed_csv=str(status.get("installedCSV") or ""),
+            state=str(status.get("state") or ""),
+        )
+
+
+@dataclass(frozen=True)
+class CSVSummary(GenericSummary):
+    """OLM ClusterServiceVersion - one installed operator version."""
+
+    version: str = ""
+    phase: str = ""
+    display_name: str = ""
+
+    @classmethod
+    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> CSVSummary:
+        base = GenericSummary.from_manifest(kind, manifest)
+        spec = _str_map(manifest.get("spec"))
+        status = _str_map(manifest.get("status"))
+        return cls(
+            **vars(base),
+            version=str(spec.get("version") or ""),
+            phase=str(status.get("phase") or ""),
+            display_name=str(spec.get("displayName") or ""),
+        )
+
+
+#: OLM's API group; other groups also define kinds named "Subscription", so
+#: the dispatch below checks the manifest's apiVersion, not just the kind.
+_OLM_GROUP_PREFIX = "operators.coreos.com/"
+_PACKAGES_GROUP_PREFIX = "packages.operators.coreos.com/"
+
+
 def summary_for(kind: str, manifest: dict[str, Any]) -> GenericSummary:
     """Build the richest summary available for *kind* (ReplicaSet gets history fields)."""
     if kind == "ReplicaSet":
         return ReplicaSetSummary.from_manifest(kind, manifest)
+    api_version = str(manifest.get("apiVersion") or "")
+    if kind == "PackageManifest" and api_version.startswith(_PACKAGES_GROUP_PREFIX):
+        return PackageManifestSummary.from_manifest(kind, manifest)
+    if api_version.startswith(_OLM_GROUP_PREFIX):
+        if kind == "Subscription":
+            return OLMSubscriptionSummary.from_manifest(kind, manifest)
+        if kind == "ClusterServiceVersion":
+            return CSVSummary.from_manifest(kind, manifest)
     return GenericSummary.from_manifest(kind, manifest)
 
 
