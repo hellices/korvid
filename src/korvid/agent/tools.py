@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
@@ -11,6 +12,7 @@ import yaml
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.models import parse_quantity
 
 MAX_RESULT_CHARS = 8000
 
@@ -168,6 +170,7 @@ class UIBridge(ABC):
         name: str,
         namespace: str | None = None,
         replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> str:
         """Request an approval-gated cluster write (spec §6.2).
 
@@ -385,14 +388,125 @@ WRITE_TOOLS: list[dict[str, Any]] = [
     },
 ]
 
-WRITE_TOOL_NAMES = frozenset(t["function"]["name"] for t in WRITE_TOOLS)
+#: In-place pod resize (issue #27), kept out of WRITE_TOOLS so the
+#: composition root registers it only when discovery found the pods/resize
+#: subresource (1.35 GA) - the model is never told about a tool the cluster
+#: cannot honor. Dispatch below still recognizes it unconditionally: an
+#: unregistered tool call fails in the UI gate, not with "unknown tool".
+RESIZE_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "resize_pod",
+            "description": (
+                "Request an in-place resize of a running pod's CPU/memory "
+                "requests and limits without recreating the pod (Kubernetes "
+                "1.35+; containers whose resizePolicy is RestartContainer "
+                "are restarted in place). Runs only after the user approves "
+                "the request in the TUI approval dialog."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Pod name."},
+                    "namespace": {"type": "string", "description": "Namespace of the pod."},
+                    "resources": {
+                        "type": "object",
+                        "description": (
+                            "Container name -> {'requests'/'limits' -> "
+                            "{'cpu'/'memory' -> quantity}}. Only the "
+                            "quantities present are changed, e.g. "
+                            '{"app": {"requests": {"cpu": "200m"}}}.'
+                        ),
+                    },
+                },
+                "required": ["name", "namespace", "resources"],
+            },
+        },
+    },
+]
+
+WRITE_TOOL_NAMES = frozenset(t["function"]["name"] for t in WRITE_TOOLS + RESIZE_TOOLS)
 
 #: tool name -> action keyword passed to UIBridge.agent_request_write.
 _WRITE_ACTIONS = {
     "delete_resource": "delete",
     "scale_resource": "scale",
     "rollout_restart": "rollout_restart",
+    "resize_pod": "resize",
 }
+
+
+#: RFC 1123 DNS label: lowercase alphanumerics and hyphens, alphanumeric
+#: endpoints, at most 63 characters - the grammar container names must match.
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+
+
+def _positive_quantity(amount: str) -> bool:
+    """Positive Kubernetes quantity (zero rejected: in a resize it means an
+    accidental request removal, which belongs to a manifest edit)."""
+    try:
+        return parse_quantity(amount) > 0
+    except ValueError:
+        return False
+
+
+def _validated_sections(container: str, sections: Any) -> dict[str, dict[str, str]]:
+    """Validate one container's requests/limits mapping and return it with
+    whitespace-normalized amounts (see `_validated_resources`)."""
+    if not isinstance(sections, dict) or not sections:
+        raise ValueError(f"invalid resources entry for {container!r}: {sections!r}")
+    validated: dict[str, dict[str, str]] = {}
+    for section, quantities in sections.items():
+        if section not in ("requests", "limits"):
+            raise ValueError(f"'resources' sections must be requests/limits, got {section!r}")
+        if not isinstance(quantities, dict) or not quantities:
+            raise ValueError(f"invalid {section!r} for {container!r}: {quantities!r}")
+        validated[section] = {}
+        for quantity, amount in quantities.items():
+            if quantity not in ("cpu", "memory") or not isinstance(amount, str):
+                raise ValueError(f"invalid quantity {quantity!r}={amount!r} for {container!r}")
+            if not _positive_quantity(amount):
+                # Same grammar the prompt enforces: a malformed or
+                # non-positive amount must fail here, not in an approval
+                # dialog for a request the apiserver is guaranteed to
+                # reject (previews deliberately degrade to no preview).
+                raise ValueError(
+                    f"{container}.{section}.{quantity}: {amount!r} is not a "
+                    "positive quantity (e.g. 250m, 512Mi)"
+                )
+            # parse_quantity strips whitespace but the apiserver does not:
+            # a padded amount must be normalized before it is forwarded.
+            validated[section][quantity] = amount.strip()
+    return validated
+
+
+def _validated_resources(value: Any) -> dict[str, dict[str, dict[str, str]]]:
+    """Shape-check a resize 'resources' argument (container -> requests/limits
+    -> quantity) and return a copy with whitespace-normalized amounts. Tool
+    schemas are not runtime validation; a malformed value must fail here,
+    before the user is shown an approval dialog for it."""
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"'resources' must be a non-empty object, got {value!r}")
+    validated: dict[str, dict[str, dict[str, str]]] = {}
+    for container, sections in value.items():
+        if not isinstance(container, str) or not container.strip():
+            raise ValueError(f"container name must be a non-empty string, got {container!r}")
+        # Normalize padded keys the same way amounts are normalized, then
+        # require the DNS label grammar container names must follow - an
+        # invalid name produces a patch the apiserver must reject, and it
+        # has to fail here, not after an approval dialog. Two keys
+        # collapsing to one name must not silently drop a change.
+        key = container.strip()
+        if not _DNS_LABEL_RE.match(key):
+            raise ValueError(
+                f"invalid container name {key!r}: must be a lowercase DNS "
+                "label (alphanumerics and hyphens, at most 63 characters)"
+            )
+        if key in validated:
+            raise ValueError(f"duplicate container {key!r} in 'resources'")
+        validated[key] = _validated_sections(container, sections)
+    return validated
 
 
 class ToolExecutor:
@@ -456,7 +570,8 @@ class ToolExecutor:
         # Tool schemas are not runtime validation: reject wrong-typed values
         # instead of coercing them (str(123) would show the user a target the
         # model never named; int(1.9) an operation it never asked for).
-        kind = args.get("kind")
+        # resize_pod targets pods by definition, so its schema has no 'kind'.
+        kind = "pods" if name == "resize_pod" else args.get("kind")
         target = args.get("name")
         namespace = args.get("namespace")
         if not isinstance(kind, str):
@@ -468,12 +583,16 @@ class ToolExecutor:
         replicas = args.get("replicas")
         if replicas is not None and (isinstance(replicas, bool) or not isinstance(replicas, int)):
             raise ValueError(f"'replicas' must be an integer, got {replicas!r}")
+        resources = args.get("resources")
+        if name == "resize_pod":
+            resources = _validated_resources(resources)
         return await self._ui.agent_request_write(
             _WRITE_ACTIONS[name],
             kind,
             target,
             namespace,
             replicas,
+            resources,
         )
 
     async def _list_resources(self, args: dict[str, Any]) -> str:

@@ -81,6 +81,22 @@ class WriteOps(abc.ABC):
     ) -> None:
         """PUT-replace the whole object with an edited manifest."""
 
+    async def resize_pod(
+        self,
+        namespace: str,
+        name: str,
+        resources: dict[str, dict[str, dict[str, str]]],
+        *,
+        uid: str | None = None,
+    ) -> None:
+        """In-place resize of a running pod via the ``pods/resize``
+        subresource (1.35 GA, issue #27). ``resources`` maps container name
+        to its new ``requests``/``limits`` (omitted quantities are kept).
+        Non-abstract on purpose: transports predating the feature keep
+        working, and the UI offers the action only when discovery says the
+        subresource exists (see ``KubeClient.supports_pod_resize``)."""
+        raise NotImplementedError("this transport does not support pod resize")
+
     # -- Dry-run previews (issue #19). Non-abstract on purpose: transports
     # -- without server-side dryRun support inherit "no preview" and the
     # -- approval dialog falls back to the synthesized operation string.
@@ -119,4 +135,16 @@ class WriteOps(abc.ABC):
         """Object summary + cascade note after a ``dryRun=All`` delete was
         accepted by the server; None = no preview. ``uid`` semantics match
         ``preview_scale``."""
+        return None
+
+    async def preview_resize(
+        self,
+        namespace: str,
+        name: str,
+        resources: dict[str, dict[str, dict[str, str]]],
+        *,
+        uid: str | None = None,
+    ) -> list[str] | None:
+        """Diff lines a ``dryRun=All`` resize would produce; None = no
+        preview. ``uid`` semantics match ``preview_scale``."""
         return None

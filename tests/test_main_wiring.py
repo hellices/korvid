@@ -84,8 +84,9 @@ class _FakeApp(UIBridge):
         name: str,
         namespace: str | None = None,
         replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> str:
-        self.calls.append(f"write:{action}:{kind}/{name}")
+        self.calls.append(f"write:{action}:{kind}/{name}:{resources}")
         return "ok-write"
 
 
@@ -113,13 +114,19 @@ async def test_proxy_forwards_to_target() -> None:
     assert await proxy.agent_open_describe("pods", "p", "ns") == "ok-describe"
     assert await proxy.agent_drill_down("web") == "ok-drill"
     assert await proxy.agent_request_write("delete", "pods", "web-1", "ns") == "ok-write"
+    resources = {"app": {"requests": {"cpu": "200m"}}}
+    assert (
+        await proxy.agent_request_write("resize", "pods", "web-1", "ns", None, resources)
+        == "ok-write"
+    )
     assert app.calls == [
         "navigate:pods:prod",
         "filter:web",
         "logs:ns/p",
         "describe:pods/p",
         "drill:web",
-        "write:delete:pods/web-1",
+        "write:delete:pods/web-1:None",
+        f"write:resize:pods/web-1:{resources}",
     ]
 
 
@@ -161,6 +168,43 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
     assert "delete_resource" not in ro_names
     assert "scale_resource" not in ro_names
     assert "rollout_restart" not in ro_names
+
+
+def test_agent_wiring_gates_resize_tool_on_discovery(monkeypatch: object) -> None:
+    """resize_pod is offered only when the cluster has pods/resize (issue #27),
+    and never in readonly mode."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+    )
+    kube_stub = cast("Any", object())
+
+    runtime, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=True)
+    assert runtime is not None
+    assert "resize_pod" in [t["function"]["name"] for t in runtime._tools]
+
+    gated, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
+    assert gated is not None
+    assert "resize_pod" not in [t["function"]["name"] for t in gated._tools]
+
+    ro, _, _, _, _ = _build_agent_wiring(
+        dataclasses.replace(config, readonly=True), kube_stub, {}, pod_resize_supported=True
+    )
+    assert ro is not None
+    assert "resize_pod" not in [t["function"]["name"] for t in ro._tools]
 
 
 def test_mcp_factory_builds_fresh_servers() -> None:
@@ -224,6 +268,7 @@ class _OverlapProbeBridge(UIBridge):
         name: str,
         namespace: str | None = None,
         replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> str:
         return await self._enter()
 
@@ -247,3 +292,45 @@ async def test_ui_bridge_proxy_serializes_concurrent_callers() -> None:
         proxy.agent_request_write("delete", "pods", "a"),
     )
     assert probe.max_active == 1
+
+
+async def test_pod_resize_probe_is_bounded(monkeypatch: object) -> None:
+    """The foreground discovery probe must not delay TUI startup on a hung
+    apiserver: it times out quickly and answers False (feature stays off)."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+
+    import korvid.__main__ as main_mod
+
+    mp.setattr(main_mod, "_RESIZE_PROBE_TIMEOUT", 0.05)
+
+    class HungKube:
+        async def supports_pod_resize(self) -> bool:
+            await asyncio.sleep(60)
+            return True
+
+    assert await main_mod._probe_pod_resize(cast("Any", HungKube())) is False
+
+
+async def test_pod_resize_probe_passes_through_result() -> None:
+    import korvid.__main__ as main_mod
+
+    class FastKube:
+        async def supports_pod_resize(self) -> bool:
+            return True
+
+    assert await main_mod._probe_pod_resize(cast("Any", FastKube())) is True
+
+
+async def test_pod_resize_probe_skipped_in_readonly() -> None:
+    """A readonly session can never expose either resize entry point, so the
+    probe must not spend a network round trip (or its timeout) on it."""
+    import korvid.__main__ as main_mod
+
+    class ExplodingKube:
+        async def supports_pod_resize(self) -> bool:
+            raise AssertionError("probe must not run in readonly mode")
+
+    assert await main_mod._probe_pod_resize(cast("Any", ExplodingKube()), readonly=True) is False

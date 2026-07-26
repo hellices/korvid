@@ -145,6 +145,10 @@ def test_parse_full_quantity_grammar() -> None:
     assert parse_cpu("0.5") == 0.5
     assert parse_cpu("250m") == 0.25
     assert parse_memory("128Mi") == 128 * 2**20
+    # Bare-point decimals: the Quantity grammar allows <digits>. and .<digits>
+    assert parse_cpu(".5") == 0.5
+    assert parse_cpu("1.") == 1.0
+    assert parse_memory(".5Gi") == 2**29
 
 
 def test_parse_invalid_quantity_raises_value_error() -> None:
