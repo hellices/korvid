@@ -319,6 +319,7 @@ class KorvidApp(App[None]):
         Binding("L", "logs_multi", "Multi-log", show=False),
         ("f", "log_format", "JSON/raw"),
         Binding("w", "log_wrap", "Wrap", show=False),
+        Binding("t", "log_timestamps", "Timestamps", show=False),
         ("p", "log_previous", "Prev logs"),
         ("n", "log_search_next", "Next hit"),
         Binding("shift+n", "log_search_prev", "Prev hit"),
@@ -2569,6 +2570,15 @@ class KorvidApp(App[None]):
         if not log_pane.display:
             return
         log_pane.toggle_wrap()
+        if self._log_buffer is not None:
+            log_pane.replay(self._log_buffer.lines())
+
+    async def action_log_timestamps(self) -> None:
+        """Toggle the timestamp prefix and re-render the buffer (``t`` key)."""
+        log_pane = self.query_one(LogPane)
+        if not log_pane.display:
+            return
+        log_pane.toggle_timestamps()
         if self._log_buffer is not None:
             log_pane.replay(self._log_buffer.lines())
 

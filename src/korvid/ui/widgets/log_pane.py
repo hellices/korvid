@@ -104,6 +104,7 @@ class LogPane(Widget):
         self._log_buffer: LogBuffer | None = None
         self.formatted: bool = True
         self.wrap_lines: bool = False
+        self.show_timestamps: bool = False
         self.display = False
 
     def compose(self) -> ComposeResult:
@@ -244,6 +245,15 @@ class LogPane(Widget):
             self._panel(i).query_one(RichLog).wrap = self.wrap_lines
         self._update_header()
 
+    def toggle_timestamps(self) -> None:
+        """Toggle the kubelet-timestamp prefix; refresh the header tag.
+
+        The caller must ``replay()`` the buffer afterwards so existing lines
+        are re-rendered with (or without) the prefix.
+        """
+        self.show_timestamps = not self.show_timestamps
+        self._update_header()
+
     # ------------------------------------------------------------------
     # Inline search
     # ------------------------------------------------------------------
@@ -302,13 +312,20 @@ class LogPane(Widget):
         if index < 0:
             return
         rich_log = self._panel(index).query_one(RichLog)
-        rich_log.write(format_log_line(line.text, formatted=self.formatted))
+        rendered = format_log_line(line.text, formatted=self.formatted)
+        if self.show_timestamps and line.timestamp is not None:
+            prefixed = Text(line.timestamp.strftime("%H:%M:%S") + " ", style="dim")
+            prefixed.append_text(rendered)
+            rendered = prefixed
+        rich_log.write(rendered)
 
     def _update_header(self) -> None:
         fmt_tag = "[json]" if self.formatted else "[raw]"
         header = f"{self._sources_text} {fmt_tag}"
         if self.wrap_lines:
             header = f"{header} [wrap]"
+        if self.show_timestamps:
+            header = f"{header} [ts]"
         if self._state:
             header = f"{header} \u2014 {self._state}"
         if self._search_counter:

@@ -1161,3 +1161,87 @@ async def test_wrap_persists_across_reopen() -> None:
         await pilot.pause(0.15)
         assert all(rl.wrap is True for rl in _panel_richlogs(app))
         assert "[wrap]" in _header_text(app)
+
+
+# ---------------------------------------------------------------------------
+# Issue #43: timestamps toggle (t)
+# ---------------------------------------------------------------------------
+
+
+class TimestampFakeStream:
+    """Yields one line with a kubelet timestamp, one without, then blocks."""
+
+    async def __call__(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncGenerator[LogLine, None]:
+        yield LogLine(
+            pod=pod,
+            container=container,
+            text="stamped-line",
+            timestamp=datetime(2026, 7, 26, 10, 30, 45, tzinfo=UTC),
+        )
+        yield LogLine(pod=pod, container=container, text="bare-line")
+        if follow:
+            await asyncio.Event().wait()
+
+
+async def test_t_toggles_timestamp_prefix() -> None:
+    """t prefixes lines with HH:MM:SS from the parsed kubelet timestamp."""
+    stream = TimestampFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+
+        assert "10:30:45" not in _richlog_text(app)
+        assert "[ts]" not in _header_text(app)
+
+        await pilot.press("t")
+        await pilot.pause(0.05)
+        text = _richlog_text(app)
+        assert "10:30:45 stamped-line" in text
+        # Lines without a parsed timestamp render unchanged.
+        assert "bare-line" in text
+        assert "10:30:45 bare-line" not in text
+        assert "[ts]" in _header_text(app)
+
+        await pilot.press("t")
+        await pilot.pause(0.05)
+        assert "10:30:45" not in _richlog_text(app)
+        assert "[ts]" not in _header_text(app)
+
+
+async def test_t_closed_no_crash() -> None:
+    """Pressing t with the pane closed is a no-op."""
+    app = make_app([_pod("myapp")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("t")
+        await pilot.pause(0.05)
+        assert app.query_one(LogPane).display is False
+
+
+async def test_timestamps_persist_across_reopen() -> None:
+    """The timestamp setting survives closing and reopening the pane."""
+    stream = TimestampFakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=stream)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+        await pilot.press("t")
+        await pilot.pause(0.05)
+        await pilot.press("l")  # close
+        await pilot.pause(0.1)
+        await pilot.press("l")  # reopen
+        await pilot.pause(0.15)
+        assert "10:30:45 stamped-line" in _richlog_text(app)
+        assert "[ts]" in _header_text(app)
