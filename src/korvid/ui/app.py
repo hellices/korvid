@@ -1298,7 +1298,11 @@ class KorvidApp(App[None]):
         kind = self._canonical_kind(self.current_kind)
         current_ns, current_name = self._selected_ns_name()
         if (
-            self.aliases.get(kind) is not meta
+            # Value comparison, not identity: background discovery replaces
+            # alias values with freshly constructed (equal) ResourceMeta
+            # instances, which must not cancel a write on the same row -
+            # the editor round-trip in particular is arbitrarily long.
+            self.aliases.get(kind) != meta
             or current_name != name
             or (meta.namespaced and (current_ns or None) != ns)
         ):

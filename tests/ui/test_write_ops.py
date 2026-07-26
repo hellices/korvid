@@ -762,3 +762,34 @@ async def test_e_edit_added_null_section_named_in_summary(tmp_path: Path) -> Non
         operation = str(app.screen.query_one(".confirm-operation").render())
         assert "status" in operation
         await pilot.press("escape")
+
+
+async def test_e_edit_survives_alias_refresh_during_editor(tmp_path: Path) -> None:
+    """Review round 4: background discovery replaces alias values with fresh
+    (equal) ResourceMeta instances; identity-based revalidation cancelled an
+    edit of the same selected row when discovery finished mid-editor."""
+    seen: list[str] = []
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return copy.deepcopy(_EDIT_MANIFEST)
+
+    app_holder: list[KorvidApp] = []
+
+    async def edit_text(text: str) -> str | None:
+        seen.append(text)
+        # Simulate discovery completing while the editor is open: the alias
+        # map is updated with equal-valued but distinct instances.
+        app_holder[0].aliases["pods"] = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
+        return text.replace("nginx:1", "nginx:2")
+
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
+    app_holder.append(app)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+    assert len(rec.calls) == 1
