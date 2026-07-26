@@ -11,6 +11,7 @@ be written, the write is blocked) and an outcome record
 from __future__ import annotations
 
 import contextlib
+import getpass
 import json
 import logging
 import os
@@ -120,6 +121,19 @@ def default_audit_path() -> Path:
     return base / "korvid" / "audit.jsonl"
 
 
+def _default_actor() -> str:
+    """The OS user running korvid — audit entries must answer *who*.
+
+    `getpass.getuser()` raises `KeyError`/`ImportError` on Python 3.11/3.12
+    (3.13 normalized all failures to `OSError`); none of them may abort
+    startup, so catch every documented variant.
+    """
+    try:
+        return getpass.getuser()
+    except (OSError, KeyError, ImportError):  # no passwd entry / env hints
+        return "unknown"
+
+
 class AuditLog:
     """JSONL appender; one line per audit event (writes usually emit two:
     intent before the mutation, outcome after - see the module docstring).
@@ -139,7 +153,9 @@ class AuditLog:
 
     ``context`` identifies the kubeconfig context (cluster) the entries
     belong to; without it, writes to identically named objects in different
-    clusters would be indistinguishable.
+    clusters would be indistinguishable. ``actor`` records *who* performed
+    each action (issue #39 requires reveal records to answer who/when/which
+    key); it defaults to the OS user running korvid.
     """
 
     def __init__(
@@ -147,6 +163,7 @@ class AuditLog:
         path: Path,
         *,
         context: str | None = None,
+        actor: str | None = None,
         max_bytes: int = 50 * 1024 * 1024,
         backups: int = 3,
     ) -> None:
@@ -154,6 +171,7 @@ class AuditLog:
             raise ValueError("backups must be >= 1: rotation must never discard audit history")
         self._path = path
         self._context = context
+        self._actor = actor if actor is not None else _default_actor()
         self._max_bytes = max_bytes
         self._backups = backups
         self._lock = threading.Lock()
@@ -193,6 +211,7 @@ class AuditLog:
         entry = {
             "timestamp": datetime.now().astimezone().isoformat(),
             "context": self._context,
+            "actor": self._actor,
             "action": action,
             "kind": kind,
             # kind alone is ambiguous: a custom-group resource can share its
