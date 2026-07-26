@@ -11,6 +11,7 @@ from textual.widgets import DataTable
 from korvid.core.store import Summary
 from korvid.k8s.metrics import PodMetrics
 from korvid.k8s.models import (
+    ContainerLimits,
     GenericSummary,
     PodSummary,
     ReplicaSetSummary,
@@ -64,30 +65,74 @@ def _restarts_cell(restarts: int) -> Text:
     return Text(str(restarts), style=restarts_style(restarts))
 
 
-def _percent_of_request(usage: float, request: float | None, limit: float | None) -> Text:
+#: Ranks usage styles so mixed signals (a limited container near its own
+#: ceiling vs an unlimited one bursting) resolve to the more severe color.
+_STYLE_SEVERITY = {"green": 0, "dim": 0, "yellow": 1, "bold red": 2}
+
+
+def _max_container_pct(
+    metrics: PodMetrics, limits: tuple[ContainerLimits, ...], key: str
+) -> tuple[int | None, bool]:
+    """(max per-container usage/limit percent, every sampled container limited).
+
+    Limits are enforced per container by the kubelet, so the danger signal
+    is the worst individual ratio - a pod-aggregate sum hides a sidecar
+    sitting at its own 100Mi limit next to an idle 900Mi neighbour."""
+    by_name = {c.name: (c.cpu_cores if key == "cpu" else c.mem_bytes) for c in limits}
+    worst: float | None = None
+    all_limited = bool(metrics.containers)
+    for sample in metrics.containers:
+        usage = sample.cpu_cores if key == "cpu" else float(sample.memory_bytes)
+        limit = by_name.get(sample.name)
+        if limit is None or limit <= 0:
+            all_limited = False
+            continue
+        pct = usage / float(limit) * 100
+        worst = pct if worst is None else max(worst, pct)
+    return (None if worst is None else round(worst)), all_limited
+
+
+def _usage_severity(
+    displayed: int,
+    usage: float,
+    pod: PodSummary,
+    metrics: PodMetrics,
+    key: str,
+) -> str:
+    """Style for a usage cell. The number shown is usage-vs-request, but the
+    color answers a different question - proximity to an enforced ceiling
+    (issue #50): pod-level limit first (whole-pod by definition), else the
+    worst per-container ratio; containers without a limit contribute a
+    yellow-capped request-based fallback (burst is expected, never critical).
+    """
+    pod_limit = pod.cpu_limit_cores if key == "cpu" else pod.mem_limit_bytes
+    if pod_limit is not None and pod_limit > 0:
+        return usage_style(round(usage / float(pod_limit) * 100))
+    worst_pct, all_limited = _max_container_pct(metrics, pod.container_limits, key)
+    if worst_pct is None:
+        return usage_style(displayed, cap_at_warn=True)
+    limited = usage_style(worst_pct)
+    if all_limited:
+        return limited
+    fallback = usage_style(displayed, cap_at_warn=True)
+    return max(limited, fallback, key=lambda st: _STYLE_SEVERITY.get(st, 0))
+
+
+def _percent_of_request(
+    usage: float, request: float | None, pod: PodSummary, metrics: PodMetrics, key: str
+) -> Text:
     """Usage as % of the exact declared request; '-' when no request is
     declared. The number and the color deliberately answer different
     questions: the number is usage relative to the *request* (scheduling
-    footprint), the color is severity relative to the *limit* - so 284%R
-    can legitimately render green. Thresholds are applied to rounded
+    footprint), the color is severity relative to enforced *limits* - so
+    284%R can legitimately render green. Thresholds are applied to rounded
     values, never to a value the user cannot see (69.9 rounds to 70 before
     the yellow comparison).
-
-    The severity color keys off proximity to the *limit* when one is
-    declared (issue #50): requests are scheduling guarantees, not caps, so
-    a Burstable pod at 300% of a tiny request may sit far below its limit
-    and be perfectly healthy - while 95% of the limit is OOMKill/throttle
-    territory regardless of the request-based number shown. Without a
-    limit the request-based color is capped at yellow (burst is expected).
     """
     if request is None or request <= 0:
         return Text("-", style="dim")
     displayed = round(usage / request * 100)
-    if limit is not None and limit > 0:
-        style = usage_style(round(usage / limit * 100))
-    else:
-        style = usage_style(displayed, cap_at_warn=True)
-    return Text(str(displayed), style=style)
+    return Text(str(displayed), style=_usage_severity(displayed, usage, pod, metrics, key))
 
 
 def _usage_cells(pod: PodSummary, metrics: PodMetrics | None) -> tuple[Text, Text, Text, Text]:
@@ -98,12 +143,14 @@ def _usage_cells(pod: PodSummary, metrics: PodMetrics | None) -> tuple[Text, Tex
         return (dash, dash.copy(), dash.copy(), dash.copy())
     return (
         Text(format_cpu(metrics.cpu_cores)),
-        _percent_of_request(metrics.cpu_cores, pod.cpu_request_cores, pod.cpu_limit_cores),
+        _percent_of_request(metrics.cpu_cores, pod.cpu_request_cores, pod, metrics, "cpu"),
         Text(format_memory(metrics.memory_bytes)),
         _percent_of_request(
             float(metrics.memory_bytes),
             None if pod.mem_request_bytes is None else float(pod.mem_request_bytes),
-            None if pod.mem_limit_bytes is None else float(pod.mem_limit_bytes),
+            pod,
+            metrics,
+            "memory",
         ),
     )
 

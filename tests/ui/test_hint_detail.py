@@ -60,7 +60,7 @@ def test_detail_shows_warning_events_with_relative_age_and_count() -> None:
     assert "BackOff" in text
     assert "Back-off restarting failed container" in text
     assert "40s ago" in text
-    assert "x123" in text
+    assert "\u00d7123" in text
     assert "image pulled" not in text  # Normal events stay out
 
 

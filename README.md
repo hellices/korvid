@@ -46,10 +46,13 @@ in the dialog; `--readonly` disables them all.
 The pods table shows live `CPU` / `MEM` usage and `%CPU/R` / `%MEM/R`
 (usage as a percentage of the declared request) from the `metrics.k8s.io`
 API, polled every 15 seconds while the pods view is on screen.  The number
-is always relative to the request, but the colour keys off the **limit**:
-running above the request is normal bursting, while approaching the limit
-means OOMKill (memory) or throttling (CPU) territory — green &lt; 70 % of
-limit &le; yellow &lt; 90 % &le; red.  Pods without a limit cap at yellow.
+is always relative to the request, but the colour keys off enforced
+**limits**: running above the request is normal bursting, while a container
+approaching its own limit means OOMKill (memory) or throttling (CPU)
+territory — the worst per-container ratio drives the colour (green &lt; 70 %
+&le; yellow &lt; 90 % &le; red), since the kubelet enforces each container's
+limit independently.  Pod-level limits (K8s 1.34+) bound the whole pod and
+take precedence.  Containers without a limit cap at yellow.
 On clusters without metrics-server the columns show `-` and korvid keeps
 polling, so a later install is picked up without a restart.
 

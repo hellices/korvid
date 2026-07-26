@@ -2,8 +2,8 @@
 
 from rich.text import Text
 
-from korvid.k8s.metrics import PodMetrics
-from korvid.k8s.models import PodSummary
+from korvid.k8s.metrics import ContainerUsage, PodMetrics
+from korvid.k8s.models import ContainerLimits, PodSummary
 from korvid.ui.widgets.resource_table import (
     _phase_cell,
     _ready_cell,
@@ -218,4 +218,105 @@ class TestLimitBasedSeverity:
             memory_bytes=int(200 * 2**20 * 0.899),
         )
         _, _, _, mem_pct = _usage_cells(self._pod(), metrics)
+        assert _style_of(mem_pct) == "bold red"
+
+
+class TestPerContainerSeverity:
+    """Review fix (PR #51 r4): limits are enforced per container - a 100Mi
+    sidecar at 95Mi is at OOM risk even when the pod aggregate looks idle."""
+
+    def _pod(self, container_limits: tuple[ContainerLimits, ...], **kwargs: object) -> PodSummary:
+        defaults: dict[str, object] = {
+            "name": "web-1",
+            "namespace": "default",
+            "phase": "Running",
+            "ready": "1/1",
+            "restarts": 0,
+            "node": "n1",
+            "mem_request_bytes": 100 * 2**20,
+            "container_limits": container_limits,
+        }
+        defaults.update(kwargs)
+        return PodSummary(**defaults)  # type: ignore[arg-type]  # kwargs typed object; fields validated by the dataclass
+
+    def test_sidecar_near_its_own_limit_is_red_despite_idle_aggregate(self) -> None:
+        pod = self._pod(
+            (
+                ContainerLimits(name="app", cpu_cores=None, mem_bytes=900 * 2**20),
+                ContainerLimits(name="sidecar", cpu_cores=None, mem_bytes=100 * 2**20),
+            )
+        )
+        metrics = PodMetrics(
+            name="web-1",
+            namespace="default",
+            cpu_cores=0.0,
+            memory_bytes=100 * 2**20,
+            containers=(
+                ContainerUsage(name="app", cpu_cores=0.0, memory_bytes=5 * 2**20),
+                ContainerUsage(name="sidecar", cpu_cores=0.0, memory_bytes=95 * 2**20),
+            ),
+        )
+        _, _, _, mem_pct = _usage_cells(pod, metrics)
+        assert _style_of(mem_pct) == "bold red"  # sidecar at 95% of its limit
+
+    def test_all_containers_far_below_their_limits_is_green(self) -> None:
+        pod = self._pod(
+            (
+                ContainerLimits(name="app", cpu_cores=None, mem_bytes=900 * 2**20),
+                ContainerLimits(name="sidecar", cpu_cores=None, mem_bytes=200 * 2**20),
+            ),
+            mem_request_bytes=32 * 2**20,
+        )
+        metrics = PodMetrics(
+            name="web-1",
+            namespace="default",
+            cpu_cores=0.0,
+            memory_bytes=100 * 2**20,
+            containers=(
+                ContainerUsage(name="app", cpu_cores=0.0, memory_bytes=50 * 2**20),
+                ContainerUsage(name="sidecar", cpu_cores=0.0, memory_bytes=50 * 2**20),
+            ),
+        )
+        _, _, _, mem_pct = _usage_cells(pod, metrics)
+        assert mem_pct.plain == "312"  # number stays request-based
+        assert _style_of(mem_pct) == "green"
+
+    def test_unlimited_container_bursting_caps_at_yellow(self) -> None:
+        pod = self._pod(
+            (
+                ContainerLimits(name="app", cpu_cores=None, mem_bytes=None),
+                ContainerLimits(name="sidecar", cpu_cores=None, mem_bytes=200 * 2**20),
+            )
+        )
+        metrics = PodMetrics(
+            name="web-1",
+            namespace="default",
+            cpu_cores=0.0,
+            memory_bytes=200 * 2**20,
+            containers=(
+                ContainerUsage(name="app", cpu_cores=0.0, memory_bytes=190 * 2**20),
+                ContainerUsage(name="sidecar", cpu_cores=0.0, memory_bytes=10 * 2**20),
+            ),
+        )
+        _, _, _, mem_pct = _usage_cells(pod, metrics)
+        assert _style_of(mem_pct) == "yellow"  # 200% of request, no ceiling known
+
+    def test_limited_container_red_wins_over_unlimited_yellow(self) -> None:
+        pod = self._pod(
+            (
+                ContainerLimits(name="app", cpu_cores=None, mem_bytes=None),
+                ContainerLimits(name="sidecar", cpu_cores=None, mem_bytes=100 * 2**20),
+            )
+        )
+        metrics = PodMetrics(
+            name="web-1",
+            namespace="default",
+            cpu_cores=0.0,
+            memory_bytes=285 * 2**20,
+            containers=(
+                ContainerUsage(name="app", cpu_cores=0.0, memory_bytes=190 * 2**20),
+                ContainerUsage(name="sidecar", cpu_cores=0.0, memory_bytes=95 * 2**20),
+            ),
+        )
+        _, _, _, mem_pct = _usage_cells(pod, metrics)
         assert _style_of(mem_pct) == "bold red"

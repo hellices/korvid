@@ -98,7 +98,7 @@ def render_hint_detail(
         reason = str(event.get("reason") or "Warning")
         body.append(f"\u25cf {reason}", style="yellow")
         if (count := _event_count(event)) is not None:
-            body.append(f" x{count}", style="dim")
+            body.append(f" \u00d7{count}", style="dim")
         if (age := _event_age(event, now=now)) is not None:
             body.append(f" {age} ago", style="dim")
         if message := str(event.get("message") or "").strip():
