@@ -128,3 +128,23 @@ async def test_long_message_occupies_one_visual_row() -> None:
         # wraps, so the reserved event row stays visible
         assert strip.display is True
         assert strip.region.height == 3  # border-top + 2 content rows
+
+
+async def test_full_hint_fits_within_the_strip() -> None:
+    from textual.app import App, ComposeResult
+
+    class _Harness(App[None]):
+        def compose(self) -> ComposeResult:
+            yield HintStrip()
+
+    trouble = tuple(
+        ContainerTrouble(container=f"c{i}", reason="CrashLoopBackOff") for i in range(3)
+    )
+    app = _Harness()
+    async with app.run_test(size=(80, 24)) as pilot:
+        strip = app.query_one(HintStrip)
+        strip.show_trouble(trouble, event="Back-off restarting failed container")
+        await pilot.pause()
+        # 2 detail rows + "+1 more" + event = 4 content rows, plus border-top:
+        # nothing may be clipped, including the final Warning line
+        assert strip.region.height == 5

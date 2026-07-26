@@ -95,7 +95,9 @@ class HintStrip(Static):
     DEFAULT_CSS = """
     HintStrip {
         height: auto;
-        max-height: 4;
+        /* border-top consumes one layout row; the content can be up to four
+           rows (two details, +N more, newest event), hence 1 + 4. */
+        max-height: 5;
         padding: 0 1;
         background: $surface;
         border-top: solid $warning;
