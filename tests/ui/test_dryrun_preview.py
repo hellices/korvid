@@ -25,6 +25,8 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 
+from .waits import until
+
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
 _ALIASES = {"deployments": _DEPLOY_META}
 
@@ -156,14 +158,6 @@ async def _to_deployments(pilot) -> None:  # type: ignore[no-untyped-def]  # Pil
     await pilot.pause(0.1)
 
 
-async def _until(pilot, cond, timeout: float = 5.0) -> None:  # type: ignore[no-untyped-def]  # deterministic wait: poll an observable condition instead of a fixed sleep
-    for _ in range(int(timeout / 0.05)):
-        if cond():
-            return
-        await pilot.pause(0.05)
-    raise AssertionError("condition not met within timeout")
-
-
 def _preview_render(app: KorvidApp) -> str:
     node = app.screen.query_one(".confirm-preview", Static)
     return str(node.render())
@@ -176,7 +170,7 @@ async def test_delete_dialog_shows_dry_run_preview(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await _to_deployments(pilot)
         await pilot.press("ctrl+d")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert "- deployments/web (uid u1, created t1)" in _preview_render(app)
         assert ops.preview_calls == [("delete", "default", "web", "u-web")]
 
@@ -188,7 +182,7 @@ async def test_restart_dialog_shows_dry_run_preview(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await _to_deployments(pilot)
         await pilot.press("r")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert "restartedAt" in _preview_render(app)
         assert ops.preview_calls[0][:4] == ("restart", "default", "web", "u-web")
         # Exact replay: the stamp shown in the preview is the stamp the
@@ -196,7 +190,7 @@ async def test_restart_dialog_shows_dry_run_preview(tmp_path: Path) -> None:
         stamp = ops.preview_calls[0][4]
         assert stamp
         await pilot.press("y")
-        await _until(pilot, lambda: ops.calls)
+        await until(pilot, lambda: ops.calls)
         assert ops.calls == [("restart", "default", "web", stamp)]
 
 
@@ -207,14 +201,14 @@ async def test_scale_dialog_previews_requested_replicas(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await _to_deployments(pilot)
         await pilot.press("S")
-        await _until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
+        await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
         await pilot.press("5")
         await pilot.press("enter")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert "~ spec.replicas: 3 -> 5" in _preview_render(app)
         assert ops.preview_calls == [("scale", "default", "web", 5, "u-web")]
         await pilot.press("y")
-        await _until(pilot, lambda: ops.calls)
+        await until(pilot, lambda: ops.calls)
         assert ops.calls == [("scale", "default", "web", 5)]
 
 
@@ -225,10 +219,10 @@ async def test_failed_preview_still_opens_dialog(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await _to_deployments(pilot)
         await pilot.press("ctrl+d")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert not app.screen.query(".confirm-preview")
         await pilot.press("y")
-        await _until(pilot, lambda: ops.calls)
+        await until(pilot, lambda: ops.calls)
         assert ops.calls == [("delete", "default", "web")]
 
 
@@ -240,7 +234,7 @@ async def test_slow_preview_times_out_and_opens_dialog(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             await _to_deployments(pilot)
             await pilot.press("ctrl+d")
-            await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
             assert not app.screen.query(".confirm-preview")
 
 
@@ -260,7 +254,7 @@ async def test_no_preview_support_falls_back(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await _to_deployments(pilot)
         await pilot.press("ctrl+d")
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert not app.screen.query(".confirm-preview")
 
 
@@ -273,7 +267,7 @@ async def test_agent_write_dialog_shows_preview(tmp_path: Path) -> None:
         task = asyncio.ensure_future(
             app.agent_request_write("scale", "deployments", "web", namespace="default", replicas=4)
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         assert "~ spec.replicas: 3 -> 4" in _preview_render(app)
         assert ("scale", "default", "web", 4, None) in ops.preview_calls
         await pilot.press("y")
