@@ -76,6 +76,15 @@ class DebugImageOption:
     reason: str
 
 
+def _strip_registry(image: str) -> str:
+    """Drop a syntactic registry component (dot, port, or `localhost` in the
+    first path segment), keeping the repository path, tag, and digest."""
+    head, _, rest = image.partition("/")
+    if rest and ("." in head or ":" in head or head == "localhost"):
+        return rest
+    return image
+
+
 def _find_container(manifest: dict[str, Any], container: str | None) -> dict[str, Any] | None:
     spec = manifest.get("spec") or {}
     containers: list[dict[str, Any]] = spec.get("containers") or []
@@ -102,7 +111,9 @@ def detect_runtime(manifest: dict[str, Any], container: str | None) -> tuple[str
 
     image = str(entry.get("image") or "")
     for runtime, pattern in _IMAGE_PATTERNS:
-        if pattern.search(image):
+        # Match against the repository path only: a registry hostname like
+        # `python.registry.local` must never be taken as a runtime signal.
+        if pattern.search(_strip_registry(image)):
             return (runtime, f"image name {image!r}")
 
     for port_entry in entry.get("ports") or []:

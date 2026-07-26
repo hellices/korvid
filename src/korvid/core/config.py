@@ -72,14 +72,19 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     debug_raw: dict[str, Any] = debug_value if isinstance(debug_value, dict) else {}
     images_value = debug_raw.get("images")
     debug_images: dict[str, str] | None
-    if isinstance(images_value, dict):
+    if "images" not in debug_raw:
+        debug_images = None
+    elif isinstance(images_value, dict):
         debug_images = {
             str(key): value
             for key, value in images_value.items()
             if isinstance(value, str) and value
         }
     else:
-        debug_images = None
+        # A present but non-mapping value is still a restriction attempt:
+        # fail closed to an empty restricted mapping rather than silently
+        # re-enabling public zero-config images.
+        debug_images = {}
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),

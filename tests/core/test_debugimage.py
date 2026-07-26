@@ -100,6 +100,19 @@ def test_detect_runtime_word_boundary_avoids_false_positives() -> None:
     assert detect_runtime(_pod(image="mongo:7"), "app") is None
 
 
+def test_detect_runtime_ignores_registry_hostname() -> None:
+    # A runtime keyword in the registry hostname is not a signal about the
+    # image itself.
+    assert detect_runtime(_pod(image="python.registry.local/team/app@sha256:abcd"), "app") is None
+    assert detect_runtime(_pod(image="go.corp.example:5000/team/app:1"), "app") is None
+
+
+def test_detect_runtime_matches_repository_path_behind_registry() -> None:
+    detected = detect_runtime(_pod(image="registry.local:5000/python:3.12"), "app")
+    assert detected is not None
+    assert detected[0] == "python"
+
+
 # ---------------------------------------------------------------------------
 # detect_runtime: secondary signals (ports, env) for opaque image names
 # ---------------------------------------------------------------------------

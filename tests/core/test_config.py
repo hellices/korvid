@@ -460,6 +460,17 @@ def test_debug_explicit_empty_images_mapping_preserved(tmp_path: Path) -> None:
     assert cfg.debug_images == {}
 
 
+def test_debug_malformed_images_value_fails_closed(tmp_path: Path) -> None:
+    # A present but non-mapping debug.images is still a restriction attempt:
+    # fail closed to an empty restricted mapping instead of silently
+    # re-enabling public zero-config images.
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("debug:\n  images: [jvm, python]\n")
+    assert load_config(cfg_file).debug_images == {}
+    cfg_file.write_text("debug:\n  images: nonsense\n")
+    assert load_config(cfg_file).debug_images == {}
+
+
 def test_debug_non_string_entries_dropped(tmp_path: Path) -> None:
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(
