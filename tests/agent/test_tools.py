@@ -595,3 +595,23 @@ async def test_resize_pod_rejects_container_name_collision_after_normalization()
     )
     assert result.startswith("ERROR:")
     assert bridge.calls == []
+
+
+async def test_resize_pod_rejects_invalid_container_name_grammar() -> None:
+    """Container names are RFC 1123 DNS labels: lowercase alphanumerics and
+    hyphens, alphanumeric endpoints, at most 63 characters. Anything else
+    produces a patch the apiserver must reject - fail before the approval
+    dialog opens."""
+    for container in ("app sidecar", "App", "-app", "app-", "a" * 64):
+        bridge = FakeBridge()
+        executor = ToolExecutor(kube=None, aliases={}, ui=bridge)  # type: ignore[arg-type]
+        result = await executor.execute(
+            "resize_pod",
+            {
+                "name": "web-1",
+                "namespace": "default",
+                "resources": {container: {"requests": {"cpu": "1"}}},
+            },
+        )
+        assert result.startswith("ERROR:")
+        assert bridge.calls == []

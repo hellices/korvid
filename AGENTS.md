@@ -73,6 +73,44 @@ src/korvid/
 
 - Do NOT open a pull request without explicit human instruction.
 - CI must be green: ruff, mypy, pytest (3.11/3.12/3.13), coverage ≥ 80%, tach, deptry.
+- `main` rejects direct pushes (branch ruleset) — always work on a branch and merge via PR.
+
+## Review Loop (validated over 50+ rounds)
+
+For each review round on a PR:
+
+1. Read every comment, including **suppressed low-confidence comments** hidden in the
+   review body's `<details>` block — fix those too, they are usually right.
+2. Fix with TDD: write the failing test first (RED), then the fix (GREEN).
+3. Run the full gate (`make check`) before committing. If the pre-commit
+   ruff-format hook rewrites files on the first attempt, `git add -A` and commit
+   again — never `--amend`, never `--no-verify`.
+4. Reply to each review comment individually, naming the commit and the test added:
+   `gh api repos/OWNER/REPO/pulls/N/comments/{comment_id}/replies -f body=...`
+5. Resolve each addressed thread:
+   `gh api graphql -f query='mutation { resolveReviewThread(input:{threadId:"PRRT_..."}) { thread { isResolved } } }'`
+6. Re-request review:
+   `gh api -X POST repos/OWNER/REPO/pulls/N/requested_reviewers -f 'reviewers[]=copilot-pull-request-reviewer[bot]'`
+7. Poll with GraphQL (`reviewRequests`, `reviews`, `reviewThreads(isResolved:false)`);
+   reviews typically land within 5–10 minutes and may need two waits.
+8. Repeat until a round produces zero new comments. Before merging, verify
+   **every** required check: `gh pr view N --json statusCheckRollup` must be all
+   SUCCESS. Then `gh pr merge N --squash`.
+
+## Testing Gotchas
+
+- Run a single test file without the tach plugin: `uv run pytest -p no:tach <path>`.
+- New `UIBridge` method or parameter? Update every fake in the same change:
+  `tests/agent/test_tools.py::FakeBridge`, `tests/agent/test_write_tools.py` fakes,
+  `tests/test_main_wiring.py::_FakeApp`, the in-app bridge adapter in `ui/app.py`,
+  and `__main__.py`'s bridge proxy.
+- `WriteOps` fakes: keyword-only params must match exactly (e.g. `*, uid: str | None = None`).
+- Never assert on wall-clock timing; use `tests/ui/waits.py::until()` for
+  condition polling in Textual pilots (raw `pilot.pause()` loops are flaky in CI).
+- `ConfirmScreen`'s preview widget is selected by class, not id: `query_one(".confirm-preview")`.
+- ruff C901 counts nested `def`s toward complexity; extract helpers instead of nesting.
+- Textual modals: CSS uses class-name selectors; scrollable bodies are
+  `VerticalScroll` with `height: auto; max-height: 80%`.
 
 ## Security Invariants (from the design doc — never weaken these in code)
 

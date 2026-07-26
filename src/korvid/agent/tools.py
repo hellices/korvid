@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
@@ -436,6 +437,11 @@ _WRITE_ACTIONS = {
 }
 
 
+#: RFC 1123 DNS label: lowercase alphanumerics and hyphens, alphanumeric
+#: endpoints, at most 63 characters - the grammar container names must match.
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+
+
 def _positive_quantity(amount: str) -> bool:
     """Positive Kubernetes quantity (zero rejected: in a resize it means an
     accidental request removal, which belongs to a manifest edit)."""
@@ -486,10 +492,17 @@ def _validated_resources(value: Any) -> dict[str, dict[str, dict[str, str]]]:
     for container, sections in value.items():
         if not isinstance(container, str) or not container.strip():
             raise ValueError(f"container name must be a non-empty string, got {container!r}")
-        # Container names cannot contain whitespace; normalize padded keys
-        # the same way amounts are normalized. Two keys collapsing to one
-        # name must not silently drop a requested change (last-write-wins).
+        # Normalize padded keys the same way amounts are normalized, then
+        # require the DNS label grammar container names must follow - an
+        # invalid name produces a patch the apiserver must reject, and it
+        # has to fail here, not after an approval dialog. Two keys
+        # collapsing to one name must not silently drop a change.
         key = container.strip()
+        if not _DNS_LABEL_RE.match(key):
+            raise ValueError(
+                f"invalid container name {key!r}: must be a lowercase DNS "
+                "label (alphanumerics and hyphens, at most 63 characters)"
+            )
         if key in validated:
             raise ValueError(f"duplicate container {key!r} in 'resources'")
         validated[key] = _validated_sections(container, sections)
