@@ -83,8 +83,10 @@ def package_description(status: dict[str, Any]) -> str:
         desc = _mapping(entry.get("currentCSVDesc"))
         text = str(_mapping(desc.get("annotations")).get("description") or "")
         if not text:
-            text = str(desc.get("description") or "").split("\n", 1)[0]
-        text = text.strip()
+            text = str(desc.get("description") or "")
+        # Either source is catalog-controlled and may be multiline; a table
+        # row must stay one line regardless of which one supplied the text.
+        text = text.split("\n", 1)[0].strip()
         if text:
             if len(text) > MAX_DESCRIPTION_CHARS:
                 # The ellipsis counts against the cap, keeping the bound exact.

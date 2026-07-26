@@ -10,6 +10,7 @@ from korvid.k8s.olm import (
     OPERATORS_GROUP,
     PACKAGES_GROUP,
     build_subscription,
+    package_description,
     package_install_facts,
 )
 
@@ -117,3 +118,20 @@ def test_package_install_facts_tolerates_non_list_channels() -> None:
     )
     assert facts.channels == ()
     assert facts.default_channel == "stable"
+
+
+def test_package_description_annotation_is_normalized_to_one_line() -> None:
+    """A catalog-controlled multiline annotation must not create a tall
+    table row: either description source is reduced to its first line."""
+    status = {
+        "defaultChannel": "stable",
+        "channels": [
+            {
+                "name": "stable",
+                "currentCSVDesc": {
+                    "annotations": {"description": "First line.\nSecond line.\nThird."}
+                },
+            }
+        ],
+    }
+    assert package_description(status) == "First line."

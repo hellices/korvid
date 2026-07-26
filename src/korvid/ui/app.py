@@ -1173,9 +1173,13 @@ class KorvidApp(App[None]):
         if head == "operators":
             # The catalog view only exists where OLM serves PackageManifests;
             # explain the absence instead of a generic unknown-kind error.
+            # "Not discovered" and not "absent": background discovery may
+            # still be running, or may have failed (pods-only fallback) -
+            # indistinguishable states from here.
             self.notify(
                 "OLM not detected: the packages.operators.coreos.com API group"
-                " is absent in this cluster, so there is no operator catalog",
+                " was not discovered, so there is no operator catalog"
+                " (discovery may still be running)",
                 severity="warning",
             )
             return
@@ -1761,6 +1765,21 @@ class KorvidApp(App[None]):
                 uid = str(getattr(obj, "uid", "") or "")
                 return uid or None
         return None
+
+    def _uid_intact_after_fetch(
+        self, manifest: dict[str, Any], ns: str | None, name: str, uid: str | None
+    ) -> bool:
+        """Post-await UID guarantee: after a manifest fetch, both the fetched
+        object and the selected row must still be the incarnation the user
+        acted on. An object deleted and recreated under the same name would
+        otherwise render in the dialog while the write pins the stale UID
+        (guaranteed conflict at best, wrong-object action at worst)."""
+        if not uid:
+            return True
+        fetched_uid = str(manifest.get("metadata", {}).get("uid") or "")
+        if fetched_uid and fetched_uid != uid:
+            return False
+        return self._selected_uid(ns, name) == uid
 
     def _write_target(self) -> tuple[ResourceMeta, str | None, str, str | None] | None:
         """Resolve (meta, namespace, name, uid) of the selected row for a
@@ -2640,21 +2659,15 @@ class KorvidApp(App[None]):
         except Exception as exc:
             self.notify(f"Could not fetch the install plan: {exc}", severity="error")
             return
-        spec = manifest.get("spec")
-        spec = spec if isinstance(spec, dict) else {}
-        approval_mode = str(spec.get("approval") or "")
-        if approval_mode != "Manual":
-            # An Automatic (or malformed) plan is OLM's own to approve;
-            # flipping it manually would race the operator.
+        if not self._uid_intact_after_fetch(manifest, ns, name, uid):
             self.notify(
-                f"installplans/{name} has approval mode"
-                f" {approval_mode or '?'!r} - only pending Manual plans"
-                " can be approved here",
+                f"approve installplans/{name} cancelled -"
+                " the install plan changed during the manifest fetch",
                 severity="warning",
             )
             return
-        if spec.get("approved"):
-            self.notify(f"installplans/{name} is already approved", severity="information")
+        spec = self._approvable_plan_spec(manifest, name)
+        if spec is None:
             return
         if not self._write_context_intact("approve", meta, ns, name, phase="the manifest fetch"):
             return
@@ -2680,6 +2693,26 @@ class KorvidApp(App[None]):
                 )
 
         await self.push_screen(ConfirmScreen(f"Approve installplans/{name}?", operation), _done)
+
+    def _approvable_plan_spec(self, manifest: dict[str, Any], name: str) -> dict[str, Any] | None:
+        """The plan's spec if it is a pending Manual plan, else None (with
+        the reason notified). An Automatic (or malformed) plan is OLM's own
+        to approve; flipping it manually would race the operator."""
+        spec = manifest.get("spec")
+        spec = spec if isinstance(spec, dict) else {}
+        approval_mode = str(spec.get("approval") or "")
+        if approval_mode != "Manual":
+            self.notify(
+                f"installplans/{name} has approval mode"
+                f" {approval_mode or '?'!r} - only pending Manual plans"
+                " can be approved here",
+                severity="warning",
+            )
+            return None
+        if spec.get("approved"):
+            self.notify(f"installplans/{name} is already approved", severity="information")
+            return None
+        return spec
 
     async def _open_log_pane(
         self,

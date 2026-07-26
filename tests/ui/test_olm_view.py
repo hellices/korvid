@@ -595,3 +595,34 @@ async def test_operators_command_honors_explicit_namespace() -> None:
         assert app.current_scope == "olm"
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="catalog listed in olm ns")
+
+
+async def test_approve_cancels_when_installplan_uid_changed_during_fetch(
+    tmp_path: Path,
+) -> None:
+    """A plan deleted and recreated under the same name during the manifest
+    fetch must not reach the dialog: the eventual PUT pins the stale UID and
+    could only fail with a conflict (same guarantee as the install flow)."""
+    rec = Recorder()
+    stale = _installplan_manifest("install-abc", approved=False)
+    stale["metadata"]["uid"] = "ip-recreated"  # fetched incarnation differs
+    app = make_app(
+        {"installplans": [_installplan("install-abc", approved=False)]},
+        manifests={"install-abc": stale},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=rec,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "installplans", "installplans")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="installplan listed")
+        await pilot.press("I")
+        await until(
+            pilot,
+            lambda: any(
+                "changed during the manifest fetch" in n.message for n in app._notifications
+            ),
+            label="approve cancelled",
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert rec.calls == []
