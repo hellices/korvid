@@ -133,7 +133,7 @@ def parse_filter(text: str) -> ResourceFilter:
     so a half-typed expression can never crash the render path.
     """
     predicates: list[_NamePredicate] = []
-    selector: tuple[tuple[str, str | None], ...] = ()
+    selector_pairs: list[tuple[str, str | None]] = []
     hide_completed = False
     error: str | None = None
     parts: list[str] = []
@@ -146,10 +146,11 @@ def parse_filter(text: str) -> ResourceFilter:
             if i + 1 >= len(tokens):
                 error = "label selector missing after -l"
                 break
-            selector, sel_error = _parse_label_selector(tokens[i + 1])
+            pairs, sel_error = _parse_label_selector(tokens[i + 1])
             if sel_error is not None:
                 error = sel_error
             else:
+                selector_pairs.extend(pairs)
                 parts.append(f"-l {tokens[i + 1]}")
             i += 2
             continue
@@ -179,7 +180,7 @@ def parse_filter(text: str) -> ResourceFilter:
         text=text,
         error=error,
         _name_predicates=tuple(predicates),
-        _label_selector=selector,
+        _label_selector=tuple(selector_pairs),
         _hide_completed=hide_completed,
         _parts=tuple(parts),
     )

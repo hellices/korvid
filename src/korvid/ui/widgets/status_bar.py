@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from rich.text import Text
 from textual.widgets import Static
 
 
@@ -17,4 +18,5 @@ class StatusBar(Static):
         trail = f"  {breadcrumb}" if breadcrumb else ""
         mcp = f"  ⇄{mcp_label}" if mcp_label else ""
         flt = f"  ▼{filter_label}" if filter_label else ""
-        self.update(f"ctx:{ctx}  ns:{namespace}  ⚡{agent_label}{mcp}{flt}{trail}")
+        # Text keeps user-entered filter text literal (never Rich markup).
+        self.update(Text(f"ctx:{ctx}  ns:{namespace}  ⚡{agent_label}{mcp}{flt}{trail}"))

@@ -104,6 +104,20 @@ def test_label_selector_without_argument_is_error() -> None:
     assert f.matches("anything")
 
 
+def test_repeated_label_selectors_are_and_combined() -> None:
+    f = parse_filter("-l app=web -l tier=front")
+    assert f.matches("x", labels={"app": "web", "tier": "front"})
+    assert not f.matches("x", labels={"app": "db", "tier": "front"})
+    assert not f.matches("x", labels={"app": "web", "tier": "back"})
+
+
+def test_malformed_later_selector_keeps_earlier_one() -> None:
+    f = parse_filter("-l app=web -l ,")
+    assert f.error is not None
+    assert f.matches("x", labels={"app": "web"})
+    assert not f.matches("x", labels={"app": "db"})
+
+
 # ---------------------------------------------------------------------------
 # Hide completed (-s)
 # ---------------------------------------------------------------------------

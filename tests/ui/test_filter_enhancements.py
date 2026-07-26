@@ -60,11 +60,13 @@ async def test_invalid_regex_shows_error_and_does_not_crash() -> None:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="pods loaded")
         await _apply_filter(pilot, app, "/[unclosed/")
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: "invalid regex" in str(app.query_one(StatusBar).render()),
+            label="error indicator shown",
+        )
         # Broken token is ignored: all rows stay visible, error surfaced inline.
         assert table.row_count == 2
-        status = str(app.query_one(StatusBar).render())
-        assert "invalid regex" in status
 
 
 async def test_inverse_filter_excludes_matches() -> None:
@@ -103,3 +105,17 @@ async def test_status_bar_shows_active_filter_and_clears_on_escape() -> None:
         await pilot.press("escape")
         await until(pilot, lambda: table.row_count == 2, label="filter cleared")
         assert "hide-completed" not in str(app.query_one(StatusBar).render())
+
+
+async def test_status_bar_renders_bracketed_filter_text_literally() -> None:
+    """User-entered filter text must never be interpreted as Rich markup."""
+    app = make_app([_pod("web-1")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pods loaded")
+        await _apply_filter(pilot, app, "[red]web")
+        await until(
+            pilot,
+            lambda: "[red]web" in str(app.query_one(StatusBar).render()),
+            label="bracketed filter shown literally",
+        )
