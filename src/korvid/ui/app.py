@@ -87,6 +87,15 @@ _APPROVAL_TIMEOUT = 120.0
 #: endpoint must never hang a binding handler or an agent turn. On timeout
 #: the check fails open (writes stay approval-gated and audited).
 _PERMISSION_CHECK_TIMEOUT = 10.0
+
+
+def _yaml_equal(a: object, b: object) -> bool:
+    """YAML-canonical equality. Python's ``==`` conflates YAML booleans and
+    integers (``True == 1``), so an edit changing only a scalar's type on an
+    untyped/CRD field would otherwise be discarded as "no changes"."""
+    return yaml.safe_dump(a, sort_keys=True) == yaml.safe_dump(b, sort_keys=True)
+
+
 #: Upper bound on the pre-approval uid lookup: a stalled API server must
 #: never leave an agent tool call (or the debug offer) pending indefinitely.
 #: On timeout the lookup fails open (write proceeds without a precondition,
@@ -1602,16 +1611,21 @@ class KorvidApp(App[None]):
             edited_rv = parsed_meta.get("resourceVersion")
             if not (isinstance(edited_rv, str) and edited_rv):
                 parsed_meta["resourceVersion"] = rv
-        if parsed == original:
+        if _yaml_equal(parsed, original):
             self.notify(f"edit {label}: no changes", severity="information")
             return None
         return parsed
 
     @staticmethod
     def _edit_detail(original: dict[str, Any], edited: dict[str, Any]) -> str:
-        """Audit detail: which top-level sections changed."""
+        """Audit detail: which top-level sections changed. Key presence is
+        checked separately (dict.get returns None for both an absent key and
+        a present null key) and values compare YAML-canonically."""
         changed = sorted(
-            key for key in set(original) | set(edited) if original.get(key) != edited.get(key)
+            key
+            for key in set(original) | set(edited)
+            if (key in original) != (key in edited)
+            or not _yaml_equal(original.get(key), edited.get(key))
         )
         return "changed: " + ", ".join(changed)
 

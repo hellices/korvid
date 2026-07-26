@@ -458,7 +458,7 @@ _EDIT_MANIFEST: dict[str, Any] = {
         "resourceVersion": "41",
         "managedFields": [{"manager": "kubectl"}],
     },
-    "spec": {"containers": [{"name": "app", "image": "nginx:1"}]},
+    "spec": {"replicas": 1, "containers": [{"name": "app", "image": "nginx:1"}]},
 }
 
 
@@ -711,4 +711,54 @@ async def test_e_edit_confirm_dialog_summarizes_changed_sections(tmp_path: Path)
         operation = str(app.screen.query_one(".confirm-operation").render())
         assert "PUT pods/web-1" in operation
         assert "spec" in operation  # the edited top-level section is named
+        await pilot.press("escape")
+
+
+async def test_e_edit_scalar_type_change_reaches_approval(tmp_path: Path) -> None:
+    """Review round 3: Python equality conflates YAML booleans and integers
+    (True == 1), silently discarding an edit that changes only the scalar
+    type of an untyped/CRD field."""
+
+    def flip_type(text: str) -> str:
+        manifest = yaml.safe_load(text)
+        assert manifest["spec"]["replicas"] == 1
+        manifest["spec"]["replicas"] = True
+        return yaml.safe_dump(manifest, sort_keys=False)
+
+    get_manifest, edit_text, _ = _edit_fixtures(flip_type)
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        operation = str(app.screen.query_one(".confirm-operation").render())
+        assert "spec" in operation  # the type change is named in the summary
+        await pilot.press("y")
+        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+    manifest = rec.calls[0][4]
+    assert isinstance(manifest, dict)
+    assert manifest["spec"]["replicas"] is True
+
+
+async def test_e_edit_added_null_section_named_in_summary(tmp_path: Path) -> None:
+    """Review round 3: dict.get returns None for both an absent key and a
+    present null key, so adding `status: null` produced an empty summary."""
+
+    def add_null_status(text: str) -> str:
+        manifest = yaml.safe_load(text)
+        assert "status" not in manifest
+        manifest["status"] = None
+        return yaml.safe_dump(manifest, sort_keys=False)
+
+    get_manifest, edit_text, _ = _edit_fixtures(add_null_status)
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        operation = str(app.screen.query_one(".confirm-operation").render())
+        assert "status" in operation
         await pilot.press("escape")
