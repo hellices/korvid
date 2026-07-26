@@ -163,7 +163,7 @@ class HelpScreen(ModalScreen[None]):
 
     def body_text(self) -> str:
         """Plain-text rendering of the overlay content (also used by tests)."""
-        sections: list[str] = ["korvid — help  (Esc/q to close)", ""]
+        sections: list[str] = ["korvid — help  (Esc/q/? to close)", ""]
         key_width = 10
         for name, entries in self._groups:
             sections.append(name)

@@ -146,6 +146,12 @@ def test_command_help_covers_every_reserved_builtin() -> None:
         assert f":{name}" in joined, f"missing help entry for builtin :{name}"
 
 
+def test_body_text_documents_all_close_keys() -> None:
+    """The header hint lists every key that dismisses the overlay."""
+    screen = HelpScreen(collect_help(_bindings(), []), command_help())
+    assert "Esc/q/? to close" in screen.body_text()
+
+
 # ---------------------------------------------------------------------------
 # Pilot tests
 # ---------------------------------------------------------------------------
