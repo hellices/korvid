@@ -536,3 +536,23 @@ async def test_resize_pod_rejects_blank_container_names() -> None:
         )
         assert result.startswith("ERROR:")
         assert bridge.calls == []
+
+
+async def test_resize_pod_normalizes_padded_amounts() -> None:
+    """parse_quantity strips whitespace for validation, but Kubernetes'
+    quantity parser does not: a padded amount like ' 200m ' must be
+    normalized before it crosses the UI bridge, or the approved resize
+    fails server-side."""
+    bridge = FakeBridge()
+    executor = ToolExecutor(kube=None, aliases={}, ui=bridge)  # type: ignore[arg-type]
+    result = await executor.execute(
+        "resize_pod",
+        {
+            "name": "web-1",
+            "namespace": "default",
+            "resources": {"app": {"requests": {"cpu": " 200m "}}},
+        },
+    )
+    assert not result.startswith("ERROR:")
+    _, kwargs = bridge.calls[-1]
+    assert kwargs["resources"] == {"app": {"requests": {"cpu": "200m"}}}

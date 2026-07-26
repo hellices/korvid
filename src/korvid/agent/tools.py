@@ -445,16 +445,18 @@ def _positive_quantity(amount: str) -> bool:
         return False
 
 
-def _validated_sections(container: str, sections: Any) -> None:
-    """Validate one container's requests/limits mapping (see
-    `_validated_resources`)."""
+def _validated_sections(container: str, sections: Any) -> dict[str, dict[str, str]]:
+    """Validate one container's requests/limits mapping and return it with
+    whitespace-normalized amounts (see `_validated_resources`)."""
     if not isinstance(sections, dict) or not sections:
         raise ValueError(f"invalid resources entry for {container!r}: {sections!r}")
+    validated: dict[str, dict[str, str]] = {}
     for section, quantities in sections.items():
         if section not in ("requests", "limits"):
             raise ValueError(f"'resources' sections must be requests/limits, got {section!r}")
         if not isinstance(quantities, dict) or not quantities:
             raise ValueError(f"invalid {section!r} for {container!r}: {quantities!r}")
+        validated[section] = {}
         for quantity, amount in quantities.items():
             if quantity not in ("cpu", "memory") or not isinstance(amount, str):
                 raise ValueError(f"invalid quantity {quantity!r}={amount!r} for {container!r}")
@@ -467,19 +469,25 @@ def _validated_sections(container: str, sections: Any) -> None:
                     f"{container}.{section}.{quantity}: {amount!r} is not a "
                     "positive quantity (e.g. 250m, 512Mi)"
                 )
+            # parse_quantity strips whitespace but the apiserver does not:
+            # a padded amount must be normalized before it is forwarded.
+            validated[section][quantity] = amount.strip()
+    return validated
 
 
 def _validated_resources(value: Any) -> dict[str, dict[str, dict[str, str]]]:
     """Shape-check a resize 'resources' argument (container -> requests/limits
-    -> quantity). Tool schemas are not runtime validation; a malformed value
-    must fail here, before the user is shown an approval dialog for it."""
+    -> quantity) and return a copy with whitespace-normalized amounts. Tool
+    schemas are not runtime validation; a malformed value must fail here,
+    before the user is shown an approval dialog for it."""
     if not isinstance(value, dict) or not value:
         raise ValueError(f"'resources' must be a non-empty object, got {value!r}")
+    validated: dict[str, dict[str, dict[str, str]]] = {}
     for container, sections in value.items():
         if not isinstance(container, str) or not container.strip():
             raise ValueError(f"container name must be a non-empty string, got {container!r}")
-        _validated_sections(container, sections)
-    return value
+        validated[container] = _validated_sections(container, sections)
+    return validated
 
 
 class ToolExecutor:
