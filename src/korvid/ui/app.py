@@ -472,6 +472,11 @@ class KorvidApp(App[None]):
         command_bar = self.query_one(CommandBar)
         command_bar.known = lambda a: self.aliases[a].plural if a in self.aliases else None
         command_bar.command_words = sorted({*self.aliases, "ns", "namespaces", "q", "quit"})
+        # Seed session-scoped log display settings from config (logs.wrap /
+        # logs.timestamps); the w/t keys toggle them from there.
+        log_pane = self.query_one(LogPane)
+        log_pane.wrap_lines = self.config.log_wrap
+        log_pane.show_timestamps = self.config.log_timestamps
         self._prefetch_namespaces()
 
         # Both callbacks fire from watch tasks on the same loop; post_message is

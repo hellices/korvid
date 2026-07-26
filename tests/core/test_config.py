@@ -378,3 +378,38 @@ def test_mcp_port_rejects_fractional_and_infinite_floats(tmp_path: Path) -> None
         path.write_text(f"mcp:\n  enabled: true\n  port: {raw}\n")
         config = load_config(path)
         assert config.mcp_port == 7878
+
+
+# ---------------------------------------------------------------------------
+# logs section (issue #43): wrap / timestamps display defaults
+# ---------------------------------------------------------------------------
+
+
+def test_log_display_defaults_are_off() -> None:
+    cfg = KorvidConfig()
+    assert cfg.log_wrap is False
+    assert cfg.log_timestamps is False
+
+
+def test_log_display_from_yaml(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("logs:\n  wrap: true\n  timestamps: true\n")
+    cfg = load_config(cfg_file)
+    assert cfg.log_wrap is True
+    assert cfg.log_timestamps is True
+
+
+def test_log_display_non_bool_falls_back(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("logs:\n  wrap: banana\n  timestamps: 1\n")
+    cfg = load_config(cfg_file)
+    assert cfg.log_wrap is False
+    assert cfg.log_timestamps is False
+
+
+def test_logs_scalar_section_tolerated(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("logs: nonsense\n")
+    cfg = load_config(cfg_file)
+    assert cfg.log_wrap is False
+    assert cfg.log_timestamps is False

@@ -1300,3 +1300,32 @@ async def test_ctrl_s_write_failure_notifies_error(monkeypatch: Any, tmp_path: A
 
         errors = [n for n in app._notifications if n.severity == "error"]
         assert any("save" in n.message.lower() for n in errors)
+
+
+async def test_config_seeds_wrap_and_timestamp_defaults() -> None:
+    """logs.wrap / logs.timestamps config defaults apply to the pane."""
+    stream = TimestampFakeStream()
+    store = ResourceStore()
+    pods = [_pod("myapp", containers=("main",))]
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, object]]:
+        for p in pods:
+            yield ("ADDED", p)
+        while True:
+            await asyncio.sleep(0.01)
+
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default", log_wrap=True, log_timestamps=True),
+        store=store,
+        watch_manager=WatchManager(store, source),  # type: ignore[arg-type]
+        stream_logs=stream,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.15)
+        assert all(rl.wrap is True for rl in _panel_richlogs(app))
+        header = _header_text(app)
+        assert "[wrap]" in header
+        assert "[ts]" in header
+        assert "10:30:45 stamped-line" in _richlog_text(app)
