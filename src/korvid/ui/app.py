@@ -1537,6 +1537,7 @@ class KorvidApp(App[None]):
         # same row is still selected before pushing the confirmation.
         if not self._write_context_intact("edit", meta, ns, name):
             return
+        detail = self._edit_detail(manifest, edited)
 
         def _done(confirmed: bool | None) -> None:
             if confirmed:
@@ -1547,14 +1548,16 @@ class KorvidApp(App[None]):
                         ns,
                         name,
                         ops.replace_object(meta, ns, name, edited, uid=uid),
-                        detail=self._edit_detail(manifest, edited),
+                        detail=detail,
                     )
                 )
 
         await self.push_screen(
             ConfirmScreen(
                 f"Apply edited {label}?",
-                f"PUT {label}{self._write_locus(ns)}",
+                # Issue #21: the approval dialog summarizes the change, not
+                # just the target and verb.
+                f"PUT {label}{self._write_locus(ns)} - {detail}",
             ),
             _done,
         )
@@ -1594,7 +1597,11 @@ class KorvidApp(App[None]):
             if not isinstance(parsed_meta, dict):
                 parsed_meta = {}
                 parsed["metadata"] = parsed_meta
-            parsed_meta.setdefault("resourceVersion", rv)
+            # Not setdefault: a blank `resourceVersion:` loads as None - the
+            # key is present but the PUT would still be unversioned.
+            edited_rv = parsed_meta.get("resourceVersion")
+            if not (isinstance(edited_rv, str) and edited_rv):
+                parsed_meta["resourceVersion"] = rv
         if parsed == original:
             self.notify(f"edit {label}: no changes", severity="information")
             return None

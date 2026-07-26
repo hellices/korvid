@@ -671,3 +671,44 @@ async def test_external_editor_invocation_failure_notifies_and_cancels(tmp_path:
         assert result is None
         await _until(pilot, lambda: any("editor" in n.message for n in app._notifications))
     assert rec.calls == []
+
+
+async def test_e_edit_blank_resource_version_restored(tmp_path: Path) -> None:
+    """Review round 2: `resourceVersion:` with a blank value loads as None -
+    the key is present so setdefault would leave the PUT unversioned."""
+
+    def blank_rv(text: str) -> str:
+        manifest = yaml.safe_load(text)
+        manifest["metadata"]["resourceVersion"] = None
+        manifest["spec"]["containers"][0]["image"] = "nginx:2"
+        return yaml.safe_dump(manifest, sort_keys=False)
+
+    get_manifest, edit_text, _ = _edit_fixtures(blank_rv)
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+    manifest = rec.calls[0][4]
+    assert isinstance(manifest, dict)
+    assert manifest["metadata"]["resourceVersion"] == "41"
+
+
+async def test_e_edit_confirm_dialog_summarizes_changed_sections(tmp_path: Path) -> None:
+    """Issue #21: the approval dialog must summarize the change, not just the
+    target and verb."""
+    get_manifest, edit_text, _ = _edit_fixtures(lambda text: text.replace("nginx:1", "nginx:2"))
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        operation = str(app.screen.query_one(".confirm-operation").render())
+        assert "PUT pods/web-1" in operation
+        assert "spec" in operation  # the edited top-level section is named
+        await pilot.press("escape")
