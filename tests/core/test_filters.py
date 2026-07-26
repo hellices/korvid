@@ -130,6 +130,32 @@ def test_dangling_negation_is_error_and_ignored() -> None:
     assert f.matches("anything")
 
 
+def test_option_token_after_dash_l_is_missing_selector_error() -> None:
+    f = parse_filter("-l -s")
+    assert f.error is not None
+    # `-s` is still parsed as its own option, not eaten as a selector.
+    assert not f.matches("job", phase="Succeeded")
+    assert f.matches("web", phase="Running")
+
+
+def test_empty_fuzzy_operand_is_error_and_ignored() -> None:
+    f = parse_filter("~")
+    assert f.error is not None
+    assert f.matches("anything")
+
+
+def test_negated_empty_fuzzy_is_error_and_ignored() -> None:
+    f = parse_filter("!~")
+    assert f.error is not None
+    assert f.matches("anything")
+
+
+def test_negated_empty_regex_is_error_and_ignored() -> None:
+    f = parse_filter("!//")
+    assert f.error is not None
+    assert f.matches("anything")
+
+
 # ---------------------------------------------------------------------------
 # Hide completed (-s)
 # ---------------------------------------------------------------------------

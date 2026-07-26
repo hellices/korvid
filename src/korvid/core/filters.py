@@ -113,6 +113,10 @@ def _parse_label_selector(
 def _parse_name_token(token: str) -> tuple[_NamePredicate | None, str | None, str]:
     """One name-matching token → (predicate, error, description)."""
     if token.startswith("~"):
+        if len(token) == 1:
+            # An empty fuzzy pattern matches every name; negated it would
+            # silently hide every row — reject the half-typed token instead.
+            return None, "missing pattern after '~'", ""
         return _fuzzy(token[1:]), None, f"~{token[1:]}"
     pattern: str | None = None
     if len(token) >= 2 and token.startswith("/") and token.endswith("/"):
@@ -120,6 +124,8 @@ def _parse_name_token(token: str) -> tuple[_NamePredicate | None, str | None, st
     elif token.startswith("re:"):
         pattern = token[3:]
     if pattern is not None:
+        if not pattern:
+            return None, "empty regex pattern", ""
         try:
             compiled = re.compile(pattern)
         except re.error:
@@ -174,9 +180,12 @@ def parse_filter(text: str) -> ResourceFilter:
     while i < len(tokens):
         token = tokens[i]
         if token == "-l":
-            if i + 1 >= len(tokens):
+            if i + 1 >= len(tokens) or tokens[i + 1] in ("-l", "-s"):
+                # A following option token is not a selector — report the
+                # missing argument and let the option parse on its own.
                 error = "label selector missing after -l"
-                break
+                i += 1
+                continue
             pairs, sel_error = _parse_label_selector(tokens[i + 1])
             if sel_error is not None:
                 error = sel_error
