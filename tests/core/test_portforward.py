@@ -476,3 +476,25 @@ def test_reattach_port_check_ignores_peer_that_just_died() -> None:
     procs[1].exit(1)  # dies, but no refresh runs before the re-attach
     revived = registry.reattach(broken.id)
     assert revived is not None
+
+
+def test_reattach_ignores_late_output_from_the_dead_process() -> None:
+    """A dead process's buffered chatter must not mark its replacement alive."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
+    procs[0].exit(1)
+    registry.refresh()
+    assert record.status == "broken"
+    registry.reattach(record.id)
+    assert record.status == "starting"
+    # The dead process's pipe flushes buffered output after the re-attach.
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    procs[0].stdout.feed(None)
+    assert registry.wait_ready(record.id, timeout=0.3) == "starting"
+    assert record.last_output == ""
+    # The replacement's own handshake still resolves normally.
+    procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"

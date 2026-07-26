@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import queue
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -43,6 +44,8 @@ class _FakeProc:
         self.argv = argv
         self.returncode: int | None = None
         self.terminated = False
+        # None = no readiness channel; gated tests swap in a fed stream.
+        self.stdout: Any = None
 
     def poll(self) -> int | None:
         return self.returncode
@@ -924,3 +927,61 @@ async def test_failed_start_reports_error_not_success(tmp_path: Path) -> None:
             assert not any(n.startswith("Forwarding") for n in notices)
             assert registry.forwards() == []
             await until(pilot, lambda: "unable to listen" in _audit_lines(tmp_path))
+
+
+class _GatedStream:
+    """File-like stdout whose lines are fed by the test (None ends the stream)."""
+
+    def __init__(self) -> None:
+        self._lines: queue.Queue[str | None] = queue.Queue()
+
+    def __iter__(self) -> _GatedStream:
+        return self
+
+    def __next__(self) -> str:
+        line = self._lines.get()
+        if line is None:
+            raise StopIteration
+        return line
+
+    def feed(self, line: str | None) -> None:
+        self._lines.put(line)
+
+
+async def test_stop_during_startup_keeps_audit_order(tmp_path: Path) -> None:
+    """Stopping a still-starting forward must not log its stop before its start."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: len(procs) == 1)
+            # kubectl has not confirmed the listener yet — stop it from :pf.
+            await _open_pf(app, pilot)
+            await pilot.press("ctrl+d")
+            await until(pilot, lambda: registry.forwards() == [])
+            procs[0].stdout.feed(None)  # the stopped child exits
+            await until(
+                pilot,
+                lambda: "port-forward-stop" in _audit_lines(tmp_path),
+                label="stop audited",
+            )
+            lines = _audit_lines(tmp_path)
+            assert "port-forward-start" in lines
+            assert lines.index("port-forward-start") < lines.index("port-forward-stop")

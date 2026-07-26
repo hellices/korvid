@@ -138,32 +138,46 @@ class ForwardRegistry:
 
     def _begin_handshake(self, record: ForwardRecord) -> None:
         """Watch the child's output until kubectl confirms the listener."""
-        stream = getattr(record._proc, "stdout", None)
-        if stream is None:
+        proc = record._proc
+        stream = getattr(proc, "stdout", None)
+        if proc is None or stream is None:
             # No readiness channel (injected test doubles) — trust the spawn.
             record.status = "alive"
             return
         record.status = "starting"
-        record._ready = threading.Event()
-        threading.Thread(target=self._watch_output, args=(record, stream), daemon=True).start()
+        ready = threading.Event()
+        record._ready = ready
+        threading.Thread(
+            target=self._watch_output, args=(record, proc, stream, ready), daemon=True
+        ).start()
 
     @staticmethod
-    def _watch_output(record: ForwardRecord, stream: Iterable[str]) -> None:
-        """Reader thread: drain kubectl's output for the child's lifetime."""
-        ready = record._ready
+    def _watch_output(
+        record: ForwardRecord,
+        proc: _ForwardProcess,
+        stream: Iterable[str],
+        ready: threading.Event,
+    ) -> None:
+        """Reader thread: drain the output of one specific child process.
+
+        The watcher is bound to the process generation it was spawned for —
+        after a re-attach swaps in a fresh process, buffered output flushed
+        by the dead one must not mutate the reused record (a late
+        "Forwarding from" line would wrongly mark the replacement alive).
+        """
         try:
             for raw in stream:
+                if record._proc is not proc:
+                    return  # superseded by a re-attach — stale output
                 line = raw.strip()
                 if line:
                     record.last_output = line
                 if record.status == "starting" and line.startswith(_READY_PREFIX):
                     record.status = "alive"
-                    if ready is not None:
-                        ready.set()
+                    ready.set()
         except (OSError, ValueError):  # pipe closed under us mid-read
             pass
-        if ready is not None:
-            ready.set()  # EOF — the child exited (or closed its stdout)
+        ready.set()  # EOF — the child exited (or closed its stdout)
 
     def wait_ready(self, forward_id: int, *, timeout: float) -> str:
         """Block until the forward's handshake resolves (call off the loop).
