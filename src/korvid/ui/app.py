@@ -884,6 +884,8 @@ class KorvidApp(App[None]):
         fresh = self._find_pod_summary(row_key)
         if fresh is None or fresh.uid != summary.uid:
             return  # deleted or recreated mid-fetch
+        if not _pod_needs_hint(fresh):
+            return  # recovered mid-fetch: the strip is gone, details would be noise
         await self.push_screen(
             HintDetailScreen(
                 f"{summary.namespace}/{summary.name}",

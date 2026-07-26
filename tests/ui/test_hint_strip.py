@@ -221,3 +221,14 @@ async def test_full_hint_fits_within_the_strip() -> None:
         # capped at 2 content rows (issue #34) plus border-top:
         # remainder and event fold behind the detail overlay
         assert strip.region.height == 3
+
+
+def test_generic_event_reason_is_not_deduped_by_substring() -> None:
+    """Review fix (PR #51 r2): a short generic event reason (`Failed`) that
+    merely appears inside a trouble reason describes a different failure -
+    only suffix matches (BackOff in CrashLoopBackOff) are the same story."""
+    lines = render_trouble_lines(
+        (ContainerTrouble(container="app", reason="FailedScheduling"),),
+        event="Failed: image pull failed",
+    )
+    assert len(lines) == 2  # kept: FailedScheduling does not end with Failed

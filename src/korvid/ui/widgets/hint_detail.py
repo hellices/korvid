@@ -41,6 +41,7 @@ def _event_age(event: dict[str, Any], *, now: datetime | None) -> str | None:
         or event.get("lastTimestamp")
         or event.get("eventTime")
         or event.get("firstTimestamp")
+        or (event.get("metadata") or {}).get("creationTimestamp")
         or ""
     )
     return relative_age(str(raw), now=now)

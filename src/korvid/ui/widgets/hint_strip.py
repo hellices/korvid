@@ -74,16 +74,15 @@ def _event_repeats_trouble(event: str, trouble: tuple[ContainerTrouble, ...]) ->
     """Whether the Warning event restates a status-derived entry: the BackOff
     event and the CrashLoopBackOff status describe the same failure, and two
     near-identical lines bury the signal (issue #34). True when the event's
-    reason (the part before ':') matches or is contained in a trouble reason
-    after normalization."""
+    reason (the part before ':') matches a trouble reason or is its suffix
+    after normalization. Suffix (not substring) matching: a short generic
+    reason (`Failed`) appearing inside `FailedScheduling` describes a
+    different failure, while `BackOff` ending `CrashLoopBackOff` is the
+    same story."""
     reason = _normalize(event.split(":", 1)[0])
     if not reason:
         return False
-    for entry in trouble:
-        entry_reason = _normalize(entry.reason)
-        if reason == entry_reason or reason in entry_reason:
-            return True
-    return False
+    return any(_normalize(entry.reason).endswith(reason) for entry in trouble)
 
 
 def _trouble_line(entry: ContainerTrouble, *, now: datetime | None = None) -> Text:

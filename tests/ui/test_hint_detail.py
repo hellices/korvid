@@ -102,3 +102,18 @@ def test_detail_marks_events_unavailable_on_fetch_failure() -> None:
     ).plain
     assert "warning events unavailable" in text
     assert "no warning events" not in text
+
+
+def test_event_age_falls_back_to_creation_timestamp() -> None:
+    """Review fix (PR #51 r2): core v1 events may carry only
+    metadata.creationTimestamp - mirror the strip's fallback chain."""
+    events: list[dict[str, Any]] = [
+        {
+            "type": "Warning",
+            "reason": "BackOff",
+            "message": "restarting",
+            "metadata": {"creationTimestamp": "2026-07-26T08:04:20Z"},
+        }
+    ]
+    text = render_hint_detail((), events, now=_NOW).plain
+    assert "40s ago" in text
