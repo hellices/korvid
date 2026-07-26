@@ -105,9 +105,10 @@ class ResourceFilter:
 
 #: Kubernetes label name/value segment: alphanumeric ends, `-_.` inside, ≤63.
 _LABEL_NAME_RE = regex.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$")
-#: Optional DNS-subdomain prefix before `/` in a label key, ≤253.
+#: Optional DNS-subdomain prefix before `/` in a label key: dot-separated
+#: components of ≤63 chars each, ≤253 total.
 _LABEL_PREFIX_RE = regex.compile(
-    r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
 )
 
 

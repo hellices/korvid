@@ -7,9 +7,7 @@ plain substring · `~fuzzy` · `/regex/` or `re:regex` · `!` negation ·
 
 from __future__ import annotations
 
-import time
-
-from korvid.core.filters import _regex_predicate, parse_filter
+from korvid.core.filters import _REGEX_TIMEOUT_SECONDS, _regex_predicate, parse_filter
 
 # ---------------------------------------------------------------------------
 # Plain substring (existing behavior preserved)
@@ -157,6 +155,24 @@ def test_prefixed_label_key_is_accepted() -> None:
     assert not f.matches("x", labels={"app.kubernetes.io/name": "db"})
 
 
+def test_prefix_component_over_63_chars_is_error_and_ignored() -> None:
+    """Each DNS-subdomain prefix component is capped at 63 chars; a longer
+    one can never exist on a Kubernetes object, so it must be reported
+    instead of silently hiding every row."""
+    long_component = "a" * 64
+    f = parse_filter(f"-l {long_component}.example.com/name=web")
+    assert f.error is not None
+    assert f.matches("anything", labels={"app": "web"})
+
+
+def test_prefix_component_of_63_chars_is_accepted() -> None:
+    component = "a" * 63
+    f = parse_filter(f"-l {component}.example.com/name=web")
+    assert f.error is None
+    assert f.matches("pod", labels={f"{component}.example.com/name": "web"})
+    assert not f.matches("pod", labels={"app": "web"})
+
+
 def test_empty_label_value_is_accepted() -> None:
     f = parse_filter("-l app=")
     assert f.matches("x", labels={"app": ""})
@@ -207,15 +223,20 @@ def test_negated_unterminated_regex_is_error_and_ignored() -> None:
     assert f.matches("anything")
 
 
-def test_catastrophic_regex_is_bounded_and_fails_open() -> None:
-    """A backtracking bomb must not freeze the event loop: matching is
-    time-bounded (regex timeout) and the pattern is handled quickly."""
-    f = parse_filter("/(a+)+$/")
-    name = "a" * 64 + "b"
-    start = time.monotonic()
-    f.matches(name)
-    f.matches(name)
-    assert time.monotonic() - start < 2.0
+def test_regex_predicate_passes_timeout_to_search() -> None:
+    """Every user-regex match must be wall-clock bounded: the predicate
+    forwards the module timeout so a backtracking bomb cannot freeze the
+    event loop (timeout handling itself is covered by the tests below)."""
+
+    class Recorder:
+        timeout: float | None = None
+
+        def search(self, name: str, timeout: float | None = None) -> None:
+            Recorder.timeout = timeout
+
+    pred = _regex_predicate(Recorder())  # type: ignore[arg-type]  # test double
+    pred("row-1")
+    assert Recorder.timeout == _REGEX_TIMEOUT_SECONDS
 
 
 def test_regex_predicate_fails_open_and_disables_after_timeout() -> None:

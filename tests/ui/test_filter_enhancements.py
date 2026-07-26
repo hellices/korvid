@@ -121,6 +121,7 @@ async def test_status_bar_renders_bracketed_filter_text_literally() -> None:
             lambda: "[red]web" in str(app.query_one(StatusBar).render()),
             label="bracketed filter shown literally",
         )
+        assert "[red]web" in str(app.query_one(StatusBar).render())
 
 
 async def test_empty_state_renders_bracketed_filter_literally() -> None:
@@ -137,3 +138,4 @@ async def test_empty_state_renders_bracketed_filter_literally() -> None:
             lambda: "/x[0-9]+/" in str(empty.render()),
             label="literal filter in empty state",
         )
+        assert "/x[0-9]+/" in str(empty.render())
