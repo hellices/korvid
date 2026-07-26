@@ -859,7 +859,9 @@ async def test_shell_nonzero_exit_offers_debug_fallback(tmp_path: Path) -> None:
     from types import SimpleNamespace
     from unittest.mock import patch
 
-    from korvid.ui.widgets.confirm_screen import ConfirmScreen
+    from korvid.ui.widgets.pick_screen import PickScreen
+
+    from .waits import until
 
     # The debug fallback mutates the pod spec, so it needs an audit sink.
     app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
@@ -872,8 +874,8 @@ async def test_shell_nonzero_exit_offers_debug_fallback(tmp_path: Path) -> None:
             patch.object(app, "suspend", nullcontext),
         ):
             await pilot.press("s")
-            await pilot.pause(0.2)
-        assert isinstance(app.screen, ConfirmScreen)
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+        assert isinstance(app.screen, PickScreen)  # debug image picker
 
 
 # ---------------------------------------------------------------------------
