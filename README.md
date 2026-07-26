@@ -158,6 +158,21 @@ agent-requested — is recorded in an audit log at
 0600 permissions, size-rotated).  If the audit entry cannot be written, the
 write is blocked.
 
+### Cloud-provider awareness
+
+At startup korvid detects the cluster's cloud provider from
+`node.spec.providerID` prefixes and well-known managed-cluster node labels
+(AKS, EKS, GKE) — no Kubernetes API lists valid cloud annotations, so korvid
+ships **no annotation catalog**; the detected provider is injected into the
+agent's system context instead.  Ask "expose this service publicly" on an AKS
+cluster and the agent proposes Azure-appropriate load balancer annotations
+without you naming the CSP, applied through the same approval-gated write
+flow.  Describing a `Service` or `Ingress` on a detected provider shows a
+one-line footer pointing at the agent (`provider: aks — ask the agent about
+load balancer annotations (ctrl+a)`).  Detection is a bounded, cached,
+best-effort probe: RBAC-limited users (no node list permission), bare-metal,
+and local clusters simply detect as "unknown" and nothing changes.
+
 ### Dry-run previews
 
 Before a delete, scale, resize, or rollout restart dialog opens, korvid replays the

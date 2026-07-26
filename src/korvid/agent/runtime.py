@@ -114,11 +114,17 @@ class AgentRuntime:
         tools: list[dict[str, Any]] | None = None,
         max_iterations: int = 15,
         max_history_chars: int = MAX_HISTORY_CHARS,
+        cluster_context: str | None = None,
     ) -> None:
         self._provider = provider
         self._executor = executor
         self._tools = tools if tools is not None else READ_TOOLS
         prompt = SYSTEM_PROMPT
+        if cluster_context:
+            # Detected-environment note (e.g. cloud provider, issue #30):
+            # placed right after the role statement so provider-specific
+            # requests are grounded before any tool instructions.
+            prompt = f"{prompt} {cluster_context}"
         armed = {t.get("function", {}).get("name") for t in self._tools}
         if armed & UI_TOOL_NAMES:
             prompt = f"{prompt} {UI_DRIVE_PROMPT}"

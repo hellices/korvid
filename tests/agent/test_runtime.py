@@ -357,3 +357,20 @@ def test_system_prompt_redirects_write_requests_to_kubectl() -> None:
     offer the exact kubectl command the user can run."""
     assert "kubectl" in NO_WRITE_PROMPT
     assert "write" in NO_WRITE_PROMPT.lower() or "modify" in NO_WRITE_PROMPT.lower()
+
+
+async def test_cluster_context_appended_to_system_prompt() -> None:
+    """A detected-provider note lands in the system message (issue #30)."""
+    p = ScriptedProvider([[{"type": "text_delta", "text": "hi"}, {"type": "done"}]])
+    rt = AgentRuntime(p, EchoExecutor(), cluster_context="The cluster runs on Azure (AKS).")
+    await collect(rt, "hello")
+    system = p.calls[0][0]
+    assert system["role"] == "system"
+    assert "The cluster runs on Azure (AKS)." in system["content"]
+
+
+async def test_no_cluster_context_leaves_prompt_unchanged() -> None:
+    p = ScriptedProvider([[{"type": "text_delta", "text": "hi"}, {"type": "done"}]])
+    rt = AgentRuntime(p, EchoExecutor())
+    await collect(rt, "hello")
+    assert "cluster runs on" not in p.calls[0][0]["content"]

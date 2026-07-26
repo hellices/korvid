@@ -397,3 +397,76 @@ async def test_get_manifest_routes_helm_revision_names_to_specific_revision() ->
         await get_manifest("helmrevisions", "default", "not-a-revision-row")
     with pytest.raises(ValueError, match="namespace"):
         await get_manifest("helmreleases", None, "web")
+
+
+async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None:
+    """A detected-provider note reaches the runtime's system prompt (issue #30)."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+    )
+    kube_stub = cast("Any", object())
+    note = "This cluster runs on Azure (AKS managed)."
+    runtime, _, rebuild, _, _ = _build_agent_wiring(config, kube_stub, {}, cluster_context=note)
+    assert runtime is not None
+    assert note in runtime._messages[0]["content"]
+
+    from korvid.agent.setup import AgentSettings
+
+    rebuilt = rebuild(
+        AgentSettings(
+            provider="openai",
+            auth_method="api_key",
+            base_url="http://localhost:9999/v1",
+            model="m",
+            api_key_env="KORVID_TEST_KEY",
+        )
+    )
+    assert rebuilt is not None
+    assert note in rebuilt._messages[0]["content"]
+
+
+async def test_cloud_provider_probe_is_bounded(monkeypatch: object) -> None:
+    """Provider detection is a hint: a hung node list answers unknown quickly."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+
+    import korvid.__main__ as main_mod
+    from korvid.k8s.csp import ProviderInfo
+
+    mp.setattr(main_mod, "_RESIZE_PROBE_TIMEOUT", 0.05)
+
+    class HungKube:
+        async def detect_cloud_provider(self) -> ProviderInfo:
+            await asyncio.sleep(60)
+            return ProviderInfo("azure", "aks")
+
+    info = await main_mod._probe_cloud_provider(cast("Any", HungKube()))
+    assert info.provider == "unknown"
+
+
+async def test_cloud_provider_probe_passes_through_result() -> None:
+    import korvid.__main__ as main_mod
+    from korvid.k8s.csp import ProviderInfo
+
+    class FastKube:
+        async def detect_cloud_provider(self) -> ProviderInfo:
+            return ProviderInfo("aws", "eks")
+
+    info = await main_mod._probe_cloud_provider(cast("Any", FastKube()))
+    assert info.display == "eks"
