@@ -25,12 +25,14 @@ ContainerResources = tuple[str, dict[str, dict[str, str]]]
 
 
 def _valid_quantity(value: str) -> bool:
-    """Non-negative Kubernetes quantity, using the same grammar the rest of
-    the codebase parses with (suffixes like 100n/100u and exponent forms are
-    valid). Catches typos before the apiserver sees them; the server stays
-    the final validator."""
+    """Positive Kubernetes quantity, using the same grammar the rest of the
+    codebase parses with (suffixes like 100n/100u and exponent forms are
+    valid). Zero is rejected on purpose: the server would accept it, but in a
+    resize it almost certainly means an accidental request removal - that
+    belongs to a manifest edit, not the R flow. The server stays the final
+    validator for everything else."""
     try:
-        return parse_quantity(value) >= 0
+        return parse_quantity(value) > 0
     except ValueError:
         return False
 
@@ -134,7 +136,7 @@ class ResizePrompt(ModalScreen["dict[str, dict[str, dict[str, str]]] | None"]):
                     if not _valid_quantity(value):
                         self.notify(
                             f"{name} {section}.{quantity}: '{value}' is not a "
-                            "valid quantity (e.g. 250m, 512Mi)",
+                            "positive quantity (e.g. 250m, 512Mi)",
                             severity="warning",
                         )
                         return None

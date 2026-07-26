@@ -161,3 +161,18 @@ async def test_many_containers_scroll_instead_of_clipping() -> None:
         await pilot.pause()
         assert len(app.screen.query(Input)) == 32
         assert app.screen.query(VerticalScroll)
+
+
+async def test_zero_quantity_rejected() -> None:
+    """cpu=0 is server-valid but almost certainly a typo in a resize; the
+    prompt rejects it (removing a request belongs to manifest edit, not R)."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await pilot.pause()
+        app.screen.query_one("#resize-0-requests-cpu", Input).value = "0"
+        app.screen.query_one("#resize-0-requests-cpu", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == "unset"
+        assert app.screen is prompt
