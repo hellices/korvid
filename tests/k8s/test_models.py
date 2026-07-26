@@ -856,3 +856,51 @@ class TestPodLevelRequests:
         }
         pod = PodSummary.from_manifest(obj)
         assert pod.cpu_limit == "4000m"
+
+
+class TestSidecarInitOrdering:
+    """Native sidecars keep running while later classic inits execute, so the
+    init peak is cumulative-prior-sidecar-requests + that init's request
+    (issue #12 review round 3)."""
+
+    def _pod(self, init_containers: list[dict[str, object]]) -> dict[str, object]:
+        return {
+            "metadata": {"name": "p", "namespace": "ns"},
+            "spec": {
+                "initContainers": init_containers,
+                "containers": [{"name": "c", "resources": {"requests": {"cpu": "50m"}}}],
+            },
+            "status": {},
+        }
+
+    def test_sidecar_before_init_adds_to_init_peak(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                [
+                    {
+                        "name": "sc",
+                        "restartPolicy": "Always",
+                        "resources": {"requests": {"cpu": "100m"}},
+                    },
+                    {"name": "init", "resources": {"requests": {"cpu": "500m"}}},
+                ]
+            )
+        )
+        # peak: sidecar (100m) still running while init (500m) runs = 600m
+        assert pod.cpu_request_cores == pytest.approx(0.6)
+
+    def test_sidecar_after_init_does_not_add_to_that_init(self) -> None:
+        pod = PodSummary.from_manifest(
+            self._pod(
+                [
+                    {"name": "init", "resources": {"requests": {"cpu": "500m"}}},
+                    {
+                        "name": "sc",
+                        "restartPolicy": "Always",
+                        "resources": {"requests": {"cpu": "100m"}},
+                    },
+                ]
+            )
+        )
+        # init runs alone (500m); steady state is 50m + 100m = 150m
+        assert pod.cpu_request_cores == pytest.approx(0.5)
