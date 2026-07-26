@@ -613,8 +613,7 @@ async def test_debug_fallback_offered_with_permission(tmp_path: Path) -> None:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
             await pilot.press("s")
-            await pilot.pause(0.3)
-            assert isinstance(app.screen, PickScreen)
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
 
 
 # ---------------------------------------------------------------------------
@@ -921,6 +920,48 @@ async def test_debug_pull_failure_no_retry_when_fallback_is_chosen_image(tmp_pat
             await pilot.press("s")
             await until(pilot, lambda: isinstance(app.screen, PickScreen))
             await pilot.press("enter")  # busybox (no runtime detected)
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            await pilot.press("y")
+
+            def _failure_notified() -> bool:
+                return any("image pull failed" in n.message for n in app._notifications)
+
+            await until(pilot, _failure_notified)
+            assert not isinstance(app.screen, ConfirmScreen)  # no retry dialog
+    assert len(debug_calls) == 1
+
+
+async def test_debug_pull_failure_no_retry_when_fallback_is_equivalent_ref(
+    tmp_path: Path,
+) -> None:
+    """An untagged failed image and a :latest fallback are the same Kubernetes
+    image: retrying would pull the identical image and permanently add another
+    ephemeral container entry - notify only."""
+    app = make_app(
+        [_pod("api-1")],
+        audit=AuditLog(tmp_path / "audit.jsonl"),
+        debug_default_image="nicolaka/netshoot:latest",
+    )
+    debug_calls: list[list[str]] = []
+
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1),
+        patch("korvid.ui.app.subprocess.Popen", side_effect=_fake_popen(debug_calls, ["hang"])),
+        patch("korvid.ui.app.subprocess.run", side_effect=_pull_failure_run("nicolaka/netshoot")),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            for _ in range(len(_pick_options(app)) - 1):
+                await pilot.press("down")
+            await pilot.press("enter")  # Custom image…
+            await until(pilot, lambda: isinstance(app.screen, ImagePrompt))
+            for ch in "nicolaka/netshoot":
+                await pilot.press(ch)
+            await pilot.press("enter")
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
             await pilot.press("y")
 
@@ -1252,6 +1293,9 @@ async def test_debug_not_offered_when_pod_gone(tmp_path: Path) -> None:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
             await pilot.press("s")
-            await pilot.pause(0.2)
+            await until(
+                pilot,
+                lambda: any("no longer exists" in str(n.message) for n in app._notifications),
+            )
             assert not isinstance(app.screen, (PickScreen, ConfirmScreen))
             mock_call.assert_called_once()  # only the failed exec; no debug

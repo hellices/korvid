@@ -141,7 +141,7 @@ def recommend_debug_images(
     options: list[DebugImageOption] = []
 
     def _add(image: str, label: str, reason: str) -> None:
-        if any(existing.image == image for existing in options):
+        if any(same_image_ref(existing.image, image) for existing in options):
             return
         options.append(DebugImageOption(image=image, label=label, reason=reason))
 
@@ -204,6 +204,15 @@ def _normalize_image_ref(image: str) -> str:
     if ":" in last_segment:
         return image
     return f"{image}:latest"
+
+
+def same_image_ref(a: str, b: str) -> bool:
+    """Whether two image references name the same Kubernetes image.
+
+    Compares after the implicit-`:latest` normalization Kubernetes applies
+    before pulling, so `registry/app` and `registry/app:latest` are equal.
+    """
+    return _normalize_image_ref(a) == _normalize_image_ref(b)
 
 
 def find_pull_failure(

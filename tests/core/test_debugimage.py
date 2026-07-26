@@ -10,6 +10,7 @@ from korvid.core.debugimage import (
     ephemeral_container_names,
     find_pull_failure,
     recommend_debug_images,
+    same_image_ref,
 )
 
 
@@ -251,6 +252,25 @@ def test_recommend_options_deduplicate_images() -> None:
     )
     images = [o.image for o in options]
     assert len(images) == len(set(images))
+
+
+def test_recommend_options_deduplicate_equivalent_refs() -> None:
+    # An untagged configured image and its explicit :latest default are the
+    # same Kubernetes image: only one picker row.
+    options = recommend_debug_images(
+        _pod(image="openjdk:17"),
+        "app",
+        images_cfg={"jvm": "registry.corp.local/tools/debug"},
+        default_image="registry.corp.local/tools/debug:latest",
+    )
+    assert [o.image for o in options] == ["registry.corp.local/tools/debug"]
+
+
+def test_same_image_ref() -> None:
+    assert same_image_ref("busybox", "busybox:latest")
+    assert same_image_ref("registry:5000/app", "registry:5000/app:latest")
+    assert not same_image_ref("busybox:1.36", "busybox:latest")
+    assert not same_image_ref("nicolaka/netshoot", "busybox")
 
 
 # ---------------------------------------------------------------------------

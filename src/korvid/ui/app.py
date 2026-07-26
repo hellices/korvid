@@ -41,6 +41,7 @@ from korvid.core.debugimage import (
     ephemeral_container_names,
     find_pull_failure,
     recommend_debug_images,
+    same_image_ref,
 )
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
@@ -1745,7 +1746,10 @@ class KorvidApp(App[None]):
         else:
             fallback = self.config.debug_default_image or FALLBACK_IMAGE
         target = f"{name}/{container}" if container else name
-        if fallback is None or fallback == image or len(self.screen_stack) > 1:
+        # Equivalent references (untagged vs :latest) would retry the very
+        # image that just failed - and each retry permanently adds another
+        # ephemeral container entry to the pod spec.
+        if fallback is None or same_image_ref(fallback, image) or len(self.screen_stack) > 1:
             self.notify(
                 f"kubectl debug: image pull failed for {image} ({reason})",
                 severity="error",
