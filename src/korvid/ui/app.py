@@ -1463,6 +1463,9 @@ class KorvidApp(App[None]):
             self._audit_forward("port-forward-start", record.spec, outcome="reattached")
             self.notify(f"Re-attached forward localhost:{record.spec.local_port}")
 
+        def _on_reattach_error(record: ForwardRecord, exc: OSError) -> None:
+            self._audit_forward("port-forward-start", record.spec, outcome=f"error: {exc}")
+
         async def _target_exists(record: ForwardRecord) -> bool:
             # Only a confirmed 404 blocks the re-attach; when the target
             # cannot be verified (no fetcher, transient errors) it proceeds.
@@ -1482,6 +1485,7 @@ class KorvidApp(App[None]):
                 self._forwards,
                 on_stop=_on_stop,
                 on_reattach=_on_reattach,
+                on_reattach_error=_on_reattach_error,
                 target_exists=_target_exists,
             )
         )

@@ -604,3 +604,38 @@ async def test_forward_audit_failure_does_not_crash_app(tmp_path: Path) -> None:
             await until(pilot, lambda: len(procs) == 1)
             await pilot.pause()
             assert app.is_running  # audit failure logged, app alive
+
+
+async def test_failed_reattach_is_audited_with_error_outcome(tmp_path: Path) -> None:
+    """A re-attach spawn failure must land in the audit log like a failed start."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        if procs:  # first spawn succeeds, the re-attach spawn fails
+            raise OSError("kubectl vanished")
+        proc = _FakeProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    procs[0].returncode = 1
+    async with app.run_test() as pilot:
+        await _wait_rows(app, pilot)
+        await _open_pf(app, pilot)
+        await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
+        await pilot.press("r")
+        await until(
+            pilot,
+            lambda: "error: kubectl vanished" in _audit_lines(tmp_path),
+            label="failed re-attach audited",
+        )
+        assert "port-forward-start" in _audit_lines(tmp_path)

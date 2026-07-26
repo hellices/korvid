@@ -189,12 +189,14 @@ class ForwardListScreen(ModalScreen[None]):
         *,
         on_stop: Callable[[ForwardRecord], None] | None = None,
         on_reattach: Callable[[ForwardRecord], None] | None = None,
+        on_reattach_error: Callable[[ForwardRecord, OSError], None] | None = None,
         target_exists: Callable[[ForwardRecord], Awaitable[bool]] | None = None,
     ) -> None:
         super().__init__()
         self._registry = registry
         self._on_stop = on_stop
         self._on_reattach = on_reattach
+        self._on_reattach_error = on_reattach_error
         self._target_exists = target_exists
         self._ids: list[int] = []
 
@@ -272,6 +274,9 @@ class ForwardListScreen(ModalScreen[None]):
             revived = self._registry.reattach(record.id)
         except OSError as exc:
             self.notify(f"Re-attach failed: {exc}", severity="error")
+            if self._on_reattach_error is not None:
+                # The app audits failed re-attaches like failed starts.
+                self._on_reattach_error(record, exc)
             return
         if revived is not None and self._on_reattach is not None:
             self._on_reattach(revived)
