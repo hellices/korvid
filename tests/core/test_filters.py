@@ -53,6 +53,19 @@ def test_regex_prefix_form() -> None:
     assert not f.matches("mydb-main")
 
 
+def test_regex_is_case_insensitive_like_other_tokens() -> None:
+    f = parse_filter("/WEB-[0-9]+/")
+    assert f.matches("web-12")
+
+
+def test_multiple_broken_tokens_report_all_errors() -> None:
+    f = parse_filter("/[bad/ ~")
+    assert f.error is not None
+    assert "invalid regex" in f.error
+    assert "missing pattern after '~'" in f.error
+    assert f.matches("anything")
+
+
 def test_invalid_regex_sets_error_and_matches_all() -> None:
     f = parse_filter("/[unclosed/")
     assert f.error is not None

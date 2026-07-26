@@ -6,8 +6,9 @@ sequence of space-separated tokens, AND-combined:
 - plain text — case-insensitive substring on the resource name (unchanged
   legacy behavior)
 - `~pattern` — fuzzy subsequence match on the name
-- `/pattern/` or `re:pattern` — regex on the name; an invalid regex sets
-  `error` and the token is ignored (the filter never raises)
+- `/pattern/` or `re:pattern` — case-insensitive regex on the name; an
+  invalid regex sets `error` and the token is ignored (the filter never
+  raises)
 - `!<token>` — negates any of the name forms above
 - `-l key=value[,k2=v2]` — label selector (equality; a bare key tests
   existence), matched client-side against `metadata.labels`
@@ -54,8 +55,9 @@ class ResourceFilter:
     """A parsed filter expression; build with `parse_filter`."""
 
     text: str
-    #: Human-readable parse problem (invalid regex, `-l` without selector);
-    #: broken tokens are ignored so matching never raises.
+    #: Human-readable parse problems (invalid regex, `-l` without selector),
+    #: joined with ' · ' when several tokens are broken; broken tokens are
+    #: ignored so matching never raises.
     error: str | None = None
     _name_predicates: tuple[_NamePredicate, ...] = ()
     _label_selector: tuple[tuple[str, str | None], ...] = ()
@@ -154,7 +156,7 @@ def _parse_name_token(token: str) -> tuple[_NamePredicate | None, str | None, st
         if not pattern:
             return None, "empty regex pattern", ""
         try:
-            compiled = regex.compile(pattern)
+            compiled = regex.compile(pattern, regex.IGNORECASE)
         except regex.error:
             return None, f"invalid regex {pattern!r}", ""
         return _regex_predicate(compiled), None, f"/{pattern}/"
@@ -199,7 +201,7 @@ def parse_filter(text: str) -> ResourceFilter:
     predicates: list[_NamePredicate] = []
     selector_pairs: list[tuple[str, str | None]] = []
     hide_completed = False
-    error: str | None = None
+    errors: list[str] = []
     parts: list[str] = []
 
     tokens = text.split()
@@ -210,12 +212,12 @@ def parse_filter(text: str) -> ResourceFilter:
             if i + 1 >= len(tokens) or tokens[i + 1] in ("-l", "-s"):
                 # A following option token is not a selector — report the
                 # missing argument and let the option parse on its own.
-                error = "label selector missing after -l"
+                errors.append("label selector missing after -l")
                 i += 1
                 continue
             pairs, sel_error = _parse_label_selector(tokens[i + 1])
             if sel_error is not None:
-                error = sel_error
+                errors.append(sel_error)
             else:
                 selector_pairs.extend(pairs)
                 parts.append(f"-l {tokens[i + 1]}")
@@ -228,12 +230,12 @@ def parse_filter(text: str) -> ResourceFilter:
             continue
         tok_error = _add_name_token(token, predicates, parts)
         if tok_error is not None:
-            error = tok_error
+            errors.append(tok_error)
         i += 1
 
     return ResourceFilter(
         text=text,
-        error=error,
+        error=" · ".join(errors) if errors else None,
         _name_predicates=tuple(predicates),
         _label_selector=tuple(selector_pairs),
         _hide_completed=hide_completed,
