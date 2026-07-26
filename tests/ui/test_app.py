@@ -304,7 +304,7 @@ async def test_qos_cells_are_color_coded() -> None:
         styles = {}
         for i in range(table.row_count):
             row = table.get_row_at(i)
-            qos_cell = row[6]
+            qos_cell = row[10]  # after the 4 usage columns (issue #12)
             assert isinstance(qos_cell, Text)
             styles[str(qos_cell)] = qos_cell.style
         assert styles["Guaranteed"] == "green"
@@ -397,8 +397,8 @@ async def test_pods_all_adds_namespace_column() -> None:
         table = app.query_one(ResourceTable)
         assert app.current_scope == ALL_NAMESPACES
         assert table.row_count == 2
-        # Pod view all-ns: 9 columns (NAMESPACE + 8 pod columns)
-        assert len(table.columns) == 9
+        # Pod view all-ns: 13 columns (NAMESPACE + 12 pod columns incl. usage)
+        assert len(table.columns) == 13
 
 
 async def test_zero_key_toggles_all_namespaces() -> None:

@@ -2,16 +2,42 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import cast
 
 from rich.text import Text
 from textual.widgets import DataTable
 
 from korvid.core.store import Summary
-from korvid.k8s.models import GenericSummary, PodSummary, ReplicaSetSummary
-from korvid.ui.theme import phase_style, ready_style, restarts_style
+from korvid.k8s.metrics import PodMetrics
+from korvid.k8s.models import (
+    GenericSummary,
+    PodSummary,
+    ReplicaSetSummary,
+    format_cpu,
+    format_memory,
+    parse_cpu,
+    parse_memory,
+)
+from korvid.ui.theme import phase_style, ready_style, restarts_style, usage_style
 
-_POD_COLS = ("NAME", "READY", "STATUS", "RESTARTS", "CPU R/L", "MEM R/L", "QOS", "NODE")
+#: Looks up live metrics for (namespace, name); None disables the join.
+MetricsLookup = Callable[[str, str], PodMetrics | None]
+
+_POD_COLS = (
+    "NAME",
+    "READY",
+    "STATUS",
+    "RESTARTS",
+    "CPU",
+    "%CPU/R",
+    "MEM",
+    "%MEM/R",
+    "CPU R/L",
+    "MEM R/L",
+    "QOS",
+    "NODE",
+)
 _POD_COLS_ALL_NS = ("NAMESPACE", *_POD_COLS)
 _RS_COLS = ("NAME", "REVISION", "DESIRED", "CURRENT", "READY", "AGE")
 _RS_COLS_ALL_NS = ("NAMESPACE", *_RS_COLS)
@@ -40,6 +66,34 @@ def _restarts_cell(restarts: int) -> Text:
     return Text(str(restarts), style=restarts_style(restarts))
 
 
+def _percent_of_request(usage: float, request_text: str, parse: Callable[[str], float]) -> Text:
+    """Usage as % of the declared request; '-' when no request is declared."""
+    try:
+        request = parse(request_text)
+    except ValueError:
+        request = 0.0
+    if request <= 0:
+        return Text("-", style="dim")
+    percent = usage / request * 100
+    return Text(str(round(percent)), style=usage_style(percent))
+
+
+def _usage_cells(pod: PodSummary, metrics: PodMetrics | None) -> tuple[Text, Text, Text, Text]:
+    """CPU, %CPU/R, MEM, %MEM/R cells; all '-' without metrics (issue #12:
+    graceful degradation when metrics-server is absent)."""
+    if metrics is None:
+        dash = Text("-", style="dim")
+        return (dash, dash.copy(), dash.copy(), dash.copy())
+    return (
+        Text(format_cpu(metrics.cpu_cores)),
+        _percent_of_request(metrics.cpu_cores, pod.cpu_request, parse_cpu),
+        Text(format_memory(metrics.memory_bytes)),
+        _percent_of_request(
+            float(metrics.memory_bytes), pod.mem_request, lambda q: float(parse_memory(q))
+        ),
+    )
+
+
 def _replicaset_sort_key(rs: ReplicaSetSummary) -> tuple[str, int, str]:
     """Rollout-history order: newest revision first within each namespace
     (matching what ``kubectl rollout history`` users expect); replicasets
@@ -57,7 +111,15 @@ class ResourceTable(DataTable[str | Text]):
         self._last_kind = None
         self._last_all_namespaces = None
 
-    def show(self, kind: str, rows: list[Summary], *, all_namespaces: bool, pattern: str) -> None:
+    def show(
+        self,
+        kind: str,
+        rows: list[Summary],
+        *,
+        all_namespaces: bool,
+        pattern: str,
+        metrics: MetricsLookup | None = None,
+    ) -> None:
         """Render rows into the table; rebuilds columns when (kind, all_namespaces) changes."""
         if (kind, all_namespaces) != (self._last_kind, self._last_all_namespaces):
             self.clear(columns=True)
@@ -73,22 +135,33 @@ class ResourceTable(DataTable[str | Text]):
             self.clear()
 
         if kind == "pods":
-            self._add_pod_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
+            self._add_pod_rows(
+                rows, all_namespaces=all_namespaces, pattern=pattern, metrics=metrics
+            )
         elif kind == "replicasets":
             self._add_replicaset_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
         else:
             self._add_generic_rows(rows, all_namespaces=all_namespaces, pattern=pattern)
 
-    def _add_pod_rows(self, rows: list[Summary], *, all_namespaces: bool, pattern: str) -> None:
+    def _add_pod_rows(
+        self,
+        rows: list[Summary],
+        *,
+        all_namespaces: bool,
+        pattern: str,
+        metrics: MetricsLookup | None,
+    ) -> None:
         pods = cast(list[PodSummary], rows)
         for pod in sorted(pods, key=_pod_sort_key):
             if pattern and pattern.lower() not in pod.name.lower():
                 continue
+            usage = metrics(pod.namespace, pod.name) if metrics is not None else None
             cells: list[str | Text] = [
                 pod.name,
                 _ready_cell(pod.ready),
                 _phase_cell(pod.phase),
                 _restarts_cell(pod.restarts),
+                *_usage_cells(pod, usage),
                 f"{pod.cpu_request}/{pod.cpu_limit}",
                 f"{pod.mem_request}/{pod.mem_limit}",
                 Text(pod.qos, style=_QOS_STYLE.get(pod.qos, "dim")),

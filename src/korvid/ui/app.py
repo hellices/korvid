@@ -37,6 +37,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
+from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import PodSummary
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps
@@ -234,6 +235,7 @@ class KorvidApp(App[None]):
         | None = None,
         mcp: MCPController | None = None,
         edit_text: Callable[[str], Awaitable[str | None]] | None = None,
+        metrics: MetricsPoller | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -248,6 +250,7 @@ class KorvidApp(App[None]):
         self._check_permission = check_permission
         self._mcp = mcp
         self._edit_text = edit_text
+        self._metrics = metrics
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -349,6 +352,11 @@ class KorvidApp(App[None]):
 
         self.store.subscribe(_on_store_update)
         self.watch_manager.on_error = _on_watch_error
+        if self._metrics is not None:
+            # Metrics updates reuse the pods render path; the pending guard in
+            # _on_store_update coalesces them with watch events.
+            self._metrics.on_update = lambda: _on_store_update("pods")
+        await self._sync_metrics_poller()
         self._splash_shown_at = monotonic()
         await self.watch_manager.start(self.current_kind, self.current_scope)
         self._refresh_status()
@@ -409,7 +417,16 @@ class KorvidApp(App[None]):
         if drill_uid is not None and kind == self._drill.child_kind:
             rows = [r for r in rows if owned_by(r, drill_uid)]
         all_namespaces = self.current_scope == ALL_NAMESPACES
-        table.show(kind, rows, all_namespaces=all_namespaces, pattern=self.filter_pattern)
+        metrics = None
+        if kind == "pods" and self._metrics is not None and self._metrics.available:
+            metrics = self._metrics.get
+        table.show(
+            kind,
+            rows,
+            all_namespaces=all_namespaces,
+            pattern=self.filter_pattern,
+            metrics=metrics,
+        )
         self._refresh_empty_state(kind, table.row_count)
 
     def on_show_error(self, message: ShowError) -> None:
@@ -481,6 +498,22 @@ class KorvidApp(App[None]):
             self.current_kind = new_kind
             self.current_scope = new_scope
             await self.watch_manager.start(self.current_kind, self.current_scope)
+            await self._sync_metrics_poller()
+
+    async def _sync_metrics_poller(self) -> None:
+        """Poll metrics only while the pods view is on screen, in its scope.
+
+        metrics.k8s.io has no watch support, so this poller is the one
+        recurring request the app makes - stopping it off the pods view
+        keeps background load at zero for other kinds.
+        """
+        if self._metrics is None:
+            return
+        if self.current_kind != "pods":
+            await self._metrics.stop()
+            return
+        namespace = None if self.current_scope == ALL_NAMESPACES else self.current_scope
+        await self._metrics.start(namespace)
 
     async def action_toggle_all_namespaces(self) -> None:
         """Toggle scope between ALL_NAMESPACES and the config-default namespace.
@@ -2674,6 +2707,8 @@ class KorvidApp(App[None]):
             with contextlib.suppress(Exception):
                 await asyncio.gather(*tasks, return_exceptions=True)
         self._log_tasks.clear()
+        if self._metrics is not None:
+            await self._metrics.stop()
         await self.watch_manager.stop_all()
 
 

@@ -34,6 +34,10 @@ _ERROR_MARKERS = (
 # Restart counts above this render bold red instead of yellow.
 RESTARTS_RED_THRESHOLD = 5
 
+# Usage as a % of request: warn/critical thresholds (k9s defaults).
+USAGE_WARN_PERCENT = 70.0
+USAGE_CRITICAL_PERCENT = 90.0
+
 
 def phase_style(phase: str) -> str:
     """Rich style for a pod phase / display status string."""
@@ -69,3 +73,14 @@ def restarts_style(restarts: int) -> str:
     if restarts <= RESTARTS_RED_THRESHOLD:
         return "yellow"
     return "bold red"
+
+
+def usage_style(percent: float | None) -> str:
+    """Rich style for a usage-vs-request percentage; None means not computable."""
+    if percent is None:
+        return "dim"
+    if percent >= USAGE_CRITICAL_PERCENT:
+        return "bold red"
+    if percent >= USAGE_WARN_PERCENT:
+        return "yellow"
+    return "green"
