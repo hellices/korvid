@@ -166,6 +166,30 @@ async def test_sort_is_scoped_per_view_kind() -> None:
         await until(pilot, lambda: _names(table) == ["bb", "aa"], label="pods sort restored")
 
 
+async def test_cpu_mem_sort_is_ignored_outside_pods_view() -> None:
+    """Views without CPU/MEM columns (only pods get metrics) must ignore
+    Shift-C/M instead of silently replacing the order with a name sort
+    while showing no indicator."""
+    deploys: list[Summary] = [
+        _deploy("zz-front", "2026-07-26T08:00:00Z"),
+        _deploy("aa-back", "2026-07-26T11:00:00Z"),
+    ]
+    app = make_app([], extra_data={"deployments": deploys})
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await pilot.press("colon")
+        for ch in "deployments":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await until(pilot, lambda: table.row_count == 2, label="deployments loaded")
+        before = _names(table)
+        await pilot.press("C")
+        await pilot.press("M")
+        await pilot.pause()
+        assert _names(table) == before
+        assert not any("▲" in label or "▼" in label for label in _header_labels(table))
+
+
 async def test_replicaset_fallback_rows_interleave_in_user_sort_order() -> None:
     """With a user sort active, GenericSummary fallback rows must land in
     sorted position, not be appended after every parsed ReplicaSet."""

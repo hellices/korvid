@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from korvid.core.store import Summary
@@ -48,9 +49,16 @@ def _value(row: Summary, column: str, metrics: MetricsLookup | None) -> float | 
     if column == "name":
         return row.name.lower()
     if column == "age":
-        # creationTimestamp is RFC 3339 UTC, so string order is time order.
+        # Parse to an epoch key: RFC 3339 strings are not chronological
+        # lexically once offsets or fractional seconds differ
+        # (`10:00+01:00` sorts after `09:30Z` but is older).
         created = getattr(row, "created", "")
-        return created or None
+        if not created:
+            return None
+        try:
+            return datetime.fromisoformat(created).timestamp()
+        except ValueError:
+            return None  # unparsable timestamps are missing, not comparable
     if metrics is None:
         return None
     usage = metrics(row.namespace, row.name)

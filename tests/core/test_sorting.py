@@ -83,6 +83,23 @@ def test_sort_by_age_compares_timestamps_not_rendered_strings() -> None:
     assert [r.name for r in ordered] == ["old", "young"]
 
 
+def test_sort_by_age_parses_timezone_offsets() -> None:
+    # 10:00+01:00 is 09:00Z — lexically later but chronologically *older*
+    # than 09:30Z, so string comparison would order these wrong.
+    offset = _generic("offset", "2026-07-26T10:00:00+01:00")
+    zulu = _generic("zulu", "2026-07-26T09:30:00Z")
+    ordered = sort_rows([offset, zulu], SortSpec("age", descending=False))
+    assert [r.name for r in ordered] == ["offset", "zulu"]
+
+
+def test_unparsable_created_is_treated_as_missing() -> None:
+    good = _generic("good", "2026-07-26T09:00:00Z")
+    bad = _generic("bad", "not-a-timestamp")
+    for descending in (False, True):
+        ordered = sort_rows([bad, good], SortSpec("age", descending=descending))
+        assert [r.name for r in ordered] == ["good", "bad"]
+
+
 def test_rows_without_created_sort_last_in_both_directions() -> None:
     dated = _generic("dated", "2026-07-26T09:00:00Z")
     undated = _generic("undated", "")

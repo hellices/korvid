@@ -2796,6 +2796,11 @@ class KorvidApp(App[None]):
     def _toggle_sort(self, column: str) -> None:
         """Apply/flip a sort column for the current view kind and re-render."""
         kind = self.current_kind
+        if column in ("cpu", "mem") and kind != "pods":
+            # Only the pods view has CPU/MEM columns and a metrics feed;
+            # elsewhere the keypress would silently discard the current
+            # order while showing no indicator, so ignore it.
+            return
         self._sorts[kind] = toggle_sort(self._sorts.get(kind), column)
         self._render_table(kind)
 
