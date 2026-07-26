@@ -487,8 +487,12 @@ def _validated_resources(value: Any) -> dict[str, dict[str, dict[str, str]]]:
         if not isinstance(container, str) or not container.strip():
             raise ValueError(f"container name must be a non-empty string, got {container!r}")
         # Container names cannot contain whitespace; normalize padded keys
-        # the same way amounts are normalized.
-        validated[container.strip()] = _validated_sections(container, sections)
+        # the same way amounts are normalized. Two keys collapsing to one
+        # name must not silently drop a requested change (last-write-wins).
+        key = container.strip()
+        if key in validated:
+            raise ValueError(f"duplicate container {key!r} in 'resources'")
+        validated[key] = _validated_sections(container, sections)
     return validated
 
 

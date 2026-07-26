@@ -575,3 +575,23 @@ async def test_resize_pod_normalizes_padded_container_names() -> None:
     assert not result.startswith("ERROR:")
     _, kwargs = bridge.calls[-1]
     assert kwargs["resources"] == {"app": {"requests": {"cpu": "200m"}}}
+
+
+async def test_resize_pod_rejects_container_name_collision_after_normalization() -> None:
+    """'app' and ' app ' collapsing to one key must not silently drop one
+    requested set of changes (last-write-wins) - reject the collision."""
+    bridge = FakeBridge()
+    executor = ToolExecutor(kube=None, aliases={}, ui=bridge)  # type: ignore[arg-type]
+    result = await executor.execute(
+        "resize_pod",
+        {
+            "name": "web-1",
+            "namespace": "default",
+            "resources": {
+                "app": {"requests": {"cpu": "200m"}},
+                " app ": {"requests": {"memory": "1Gi"}},
+            },
+        },
+    )
+    assert result.startswith("ERROR:")
+    assert bridge.calls == []

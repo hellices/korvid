@@ -269,3 +269,22 @@ async def test_empty_preview_reports_no_changes() -> None:
         await pilot.pause()
         node = app.screen.query_one(".confirm-preview", Static)
         assert "no changes" in str(node.render())
+
+
+async def test_long_preview_body_is_scrollable() -> None:
+    """A resize on a multi-container pod can produce more preview/operation
+    lines than a short terminal shows; the dialog body must scroll so every
+    requested change stays reviewable before approval."""
+    from textual.containers import VerticalScroll
+
+    app = HostApp()
+    async with app.run_test() as pilot:
+        screen = ConfirmScreen(
+            "Resize pods/web-1",
+            "resize pods/web-1",
+            preview=[f"~ line {i}" for i in range(200)],
+        )
+        await app.push_screen(screen)
+        await pilot.pause()
+        body = screen.query_one(VerticalScroll)
+        assert body.allow_vertical_scroll
