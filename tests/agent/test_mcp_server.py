@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 from pathlib import Path
 from typing import Any
@@ -149,9 +150,9 @@ async def test_streamable_http_roundtrip(tmp_path: Path) -> None:
     task = asyncio.create_task(server.run())
     try:
         port = await asyncio.wait_for(server.wait_started(), timeout=10)
-        info = json.loads(endpoint_file.read_text())
-        assert info["port"] == port
-        assert info["url"] == f"http://127.0.0.1:{port}/mcp"
+        entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
+        assert entry["port"] == port
+        assert entry["url"] == f"http://127.0.0.1:{port}/mcp"
         async with (
             streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write, _),
             ClientSession(read, write) as session,
@@ -356,3 +357,22 @@ async def test_controller_shutdown_survives_cancellation(tmp_path: Path) -> None
     # Ownership retained: teardown can still reach and stop the server.
     assert await asyncio.wait_for(controller.shutdown(), timeout=15) is None
     assert not controller.running
+
+
+async def test_remove_endpoint_preserves_other_live_instances(tmp_path: Path) -> None:
+    """The discovery file is a pid-keyed registry: instance B exiting must
+    drop only its own entry, leaving instance A's record discoverable."""
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    other = {"url": "http://127.0.0.1:9999/mcp", "port": 9999, "pid": 999999}
+    endpoint_file.write_text(json.dumps({"servers": {"999999": other}}))
+    server = make_server(port=0, endpoint_path=endpoint_file)
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        registry = json.loads(endpoint_file.read_text())["servers"]
+        assert registry[str(os.getpid())]["port"] == port
+        assert registry["999999"] == other
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+    assert json.loads(endpoint_file.read_text()) == {"servers": {"999999": other}}

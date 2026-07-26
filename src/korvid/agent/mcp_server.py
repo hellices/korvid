@@ -69,6 +69,25 @@ def _endpoint_lock_path(endpoint_path: Path) -> Path:
     return endpoint_path.with_name(endpoint_path.name + ".lock")
 
 
+def _load_registry(path: Path) -> dict[str, Any] | None:
+    """Parse the discovery registry; None when absent, torn, or when the
+    file holds foreign (non-registry) data that must be left untouched."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("servers"), dict):
+        return data
+    return None
+
+
+def _replace_atomically(path: Path, registry: dict[str, Any]) -> None:
+    """Temp file + rename so readers never observe a torn record."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(registry))
+    tmp.replace(path)
+
+
 class KorvidMCPServer:
     """Streamable HTTP MCP server wrapping the agent tool surface.
 
@@ -203,7 +222,9 @@ class KorvidMCPServer:
                 # Startup lost the race against a pre-run request_shutdown():
                 # the sockets are already gone, nothing to publish.
                 return
-            self._write_endpoint(self._bound_port)
+            # File I/O + interprocess flock may block on a contending korvid
+            # instance - never on the event-loop thread.
+            await asyncio.to_thread(self._write_endpoint, self._bound_port)
             self._started.set()
 
         try:
@@ -227,7 +248,13 @@ class KorvidMCPServer:
                     self._started.set()
                     tg.cancel_scope.cancel()
         finally:
-            self._remove_endpoint()
+            # Same offload as publication: the flock may wait on another
+            # korvid instance.  Shielded + suppressed so a cancellation
+            # arriving mid-cleanup still lets the worker thread finish
+            # (and the original CancelledError, if any, re-raises after
+            # this finally as usual).
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(asyncio.to_thread(self._remove_endpoint))
 
     @staticmethod
     def _actual_port(server: uvicorn.Server) -> int:
@@ -238,49 +265,55 @@ class KorvidMCPServer:
         raise RuntimeError("uvicorn reported started without a bound socket")
 
     def _write_endpoint(self, port: int) -> None:
-        """Publish the endpoint for host auto-discovery (best-effort: the
-        server is useful even when the state dir is not writable).
+        """Publish this instance into the discovery registry (best-effort:
+        the server is useful even when the state dir is not writable).
 
-        Publication and removal are serialized across processes via a
-        sibling lock file, and the record is written atomically (temp file
-        + rename), so concurrent korvid instances never tear or lose each
-        other's records."""
+        The file holds a ``{"servers": {"<pid>": {...}}}`` registry so that
+        concurrent korvid instances each own one entry: publishing merges
+        under a cross-process lock and never erases another live instance's
+        record.  Runs on a worker thread - the lock may block on a
+        contending process."""
         path = self._endpoint_path
         if path is None:
             return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "url": f"http://{_HOST}:{port}/mcp",
-                "port": port,
-                "pid": os.getpid(),
-            }
             with interprocess_lock(_endpoint_lock_path(path)):
-                tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-                tmp.write_text(json.dumps(payload))
-                tmp.replace(path)
+                registry = _load_registry(path)
+                if registry is None:  # absent, torn, or foreign data
+                    registry = {"servers": {}}
+                registry["servers"][str(os.getpid())] = {
+                    "url": f"http://{_HOST}:{port}/mcp",
+                    "port": port,
+                    "pid": os.getpid(),
+                }
+                _replace_atomically(path, registry)
         except OSError:
             logger.warning("could not write MCP endpoint file %s", path)
 
     def _remove_endpoint(self) -> None:
-        """Remove the discovery file, but only if it is still *ours*: another
-        korvid instance may have published a newer record at the same
-        default path, and exiting must not delete that.  The read-check-
-        unlink runs under the same cross-process lock as publication, so a
-        record replaced between the read and the unlink cannot be lost."""
+        """Drop only *our* registry entry on exit: other live instances (and
+        any foreign/non-registry data) are preserved.  The read-modify-write
+        runs under the same cross-process lock as publication, so an entry
+        added between the read and the write cannot be lost.  Runs on a
+        worker thread."""
         path = self._endpoint_path
         if path is None:
             return
         try:
             with interprocess_lock(_endpoint_lock_path(path)):
-                info = json.loads(path.read_text())
-                if (
-                    isinstance(info, dict)
-                    and info.get("pid") == os.getpid()
-                    and info.get("port") == self._bound_port
-                ):
+                registry = _load_registry(path)
+                if registry is None:
+                    return
+                entry = registry["servers"].get(str(os.getpid()))
+                if not isinstance(entry, dict) or entry.get("port") != self._bound_port:
+                    return
+                del registry["servers"][str(os.getpid())]
+                if registry["servers"]:
+                    _replace_atomically(path, registry)
+                else:
                     path.unlink(missing_ok=True)
-        except (OSError, ValueError):
+        except OSError:
             return
 
 
