@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from textual.widgets import Static
+
 from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
@@ -118,4 +120,20 @@ async def test_status_bar_renders_bracketed_filter_text_literally() -> None:
             pilot,
             lambda: "[red]web" in str(app.query_one(StatusBar).render()),
             label="bracketed filter shown literally",
+        )
+
+
+async def test_empty_state_renders_bracketed_filter_literally() -> None:
+    """The no-match message contains user text; it must render literally."""
+    app = make_app([_pod("web-1")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pods loaded")
+        await _apply_filter(pilot, app, "/x[0-9]+/")
+        await until(pilot, lambda: table.row_count == 0, label="all rows filtered")
+        empty = app.query_one("#empty-state", Static)
+        await until(
+            pilot,
+            lambda: "/x[0-9]+/" in str(empty.render()),
+            label="literal filter in empty state",
         )

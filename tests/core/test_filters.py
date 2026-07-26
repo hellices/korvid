@@ -211,6 +211,28 @@ def test_regex_predicate_fails_open_and_disables_after_timeout() -> None:
     assert Bomb.calls == 1
 
 
+def test_negated_regex_timeout_still_fails_open() -> None:
+    """Negation must not invert the timeout fallback into hiding rows."""
+
+    class Bomb:
+        calls = 0
+
+        def search(self, name: str, timeout: float | None = None) -> None:
+            Bomb.calls += 1
+            raise TimeoutError("regex timed out")
+
+    pred = _regex_predicate(Bomb(), negated=True)  # type: ignore[arg-type]  # test double
+    assert pred("row-1") is True
+    assert pred("row-2") is True
+    assert Bomb.calls == 1
+
+
+def test_negated_regex_still_inverts_matches() -> None:
+    f = parse_filter("!/^web-/")
+    assert not f.matches("web-1")
+    assert f.matches("db-1")
+
+
 # ---------------------------------------------------------------------------
 # Hide completed (-s)
 # ---------------------------------------------------------------------------

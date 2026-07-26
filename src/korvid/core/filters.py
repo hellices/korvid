@@ -118,8 +118,12 @@ def _parse_label_selector(
     return tuple(pairs), None
 
 
-def _regex_predicate(compiled: regex.Pattern[str]) -> _NamePredicate:
-    """Time-bounded regex match; fails open and disables itself on timeout."""
+def _regex_predicate(compiled: regex.Pattern[str], negated: bool = False) -> _NamePredicate:
+    """Time-bounded regex match; fails open and disables itself on timeout.
+
+    Negation is applied here (not by an outer wrapper) so the fail-open
+    `True` on timeout is never inverted into hiding rows.
+    """
     disabled = False
 
     def match(name: str) -> bool:
@@ -127,22 +131,26 @@ def _regex_predicate(compiled: regex.Pattern[str]) -> _NamePredicate:
         if disabled:
             return True
         try:
-            return compiled.search(name, timeout=_REGEX_TIMEOUT_SECONDS) is not None
+            found = compiled.search(name, timeout=_REGEX_TIMEOUT_SECONDS) is not None
         except TimeoutError:
             disabled = True
             return True
+        return not found if negated else found
 
     return match
 
 
-def _parse_name_token(token: str) -> tuple[_NamePredicate | None, str | None, str]:
-    """One name-matching token → (predicate, error, description)."""
+def _parse_name_token(token: str, negated: bool) -> tuple[_NamePredicate | None, str | None, str]:
+    """One name-matching token (without its `!`) → (predicate, error, description).
+
+    The returned predicate already includes the negation.
+    """
     if token.startswith("~"):
         if len(token) == 1:
             # An empty fuzzy pattern matches every name; negated it would
             # silently hide every row — reject the half-typed token instead.
             return None, "missing pattern after '~'", ""
-        return _fuzzy(token[1:]), None, f"~{token[1:]}"
+        return _maybe_negate(_fuzzy(token[1:]), negated), None, f"~{token[1:]}"
     pattern: str | None = None
     if token.startswith("/"):
         # Any slash-prefixed token is regex syntax; resource names cannot
@@ -159,8 +167,18 @@ def _parse_name_token(token: str) -> tuple[_NamePredicate | None, str | None, st
             compiled = regex.compile(pattern, regex.IGNORECASE)
         except regex.error:
             return None, f"invalid regex {pattern!r}", ""
-        return _regex_predicate(compiled), None, f"/{pattern}/"
-    return _substring(token), None, token
+        return _regex_predicate(compiled, negated), None, f"/{pattern}/"
+    return _maybe_negate(_substring(token), negated), None, token
+
+
+def _maybe_negate(predicate: _NamePredicate, negated: bool) -> _NamePredicate:
+    if not negated:
+        return predicate
+
+    def negate(name: str) -> bool:
+        return not predicate(name)
+
+    return negate
 
 
 def _add_name_token(
@@ -174,21 +192,13 @@ def _add_name_token(
         # A dangling `!` would negate the match-all empty substring and
         # silently hide every row; surface it as a parse error instead.
         return "missing pattern after '!'"
-    predicate, tok_error, description = _parse_name_token(token[1:] if negated else token)
+    predicate, tok_error, description = _parse_name_token(token[1:] if negated else token, negated)
     if tok_error is not None:
         return tok_error
     if predicate is None:
         return None
-    if negated:
-
-        def negate(name: str, _inner: _NamePredicate = predicate) -> bool:
-            return not _inner(name)
-
-        predicates.append(negate)
-        parts.append(f"!{description}")
-    else:
-        predicates.append(predicate)
-        parts.append(description)
+    predicates.append(predicate)
+    parts.append(f"!{description}" if negated else description)
     return None
 
 

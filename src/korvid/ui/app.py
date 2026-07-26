@@ -19,6 +19,7 @@ from time import monotonic
 from typing import Any, ClassVar, Literal
 
 import yaml
+from rich.text import Text
 from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.coordinate import Coordinate
@@ -3395,7 +3396,8 @@ class KorvidApp(App[None]):
             message = f"No {kind} matching '{self.filter_pattern}' — Esc to clear the filter"
         else:
             message = f"No {kind} in namespace '{self.current_scope}' — :ns <name> to switch"
-        empty.update(message)
+        # Text keeps user-entered filter text literal (never Rich markup).
+        empty.update(Text(message))
         empty.display = True
 
     async def on_unmount(self) -> None:
