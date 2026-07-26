@@ -166,30 +166,29 @@ def _pod_needs_hint(summary: PodSummary) -> bool:
         return True
     if summary.phase not in _ROUTINE_PHASES:
         return True
-    if summary.phase in {"Succeeded", "Completed"}:
-        return False  # a finished pod is 0/N ready by design
+    if summary.phase != "Running":
+        # Routine startup/finish/deletion phases are legitimately not-ready
+        # (Pending 0/1, Completed 0/N, Terminating): no hint, no event fetch.
+        return False
     ready, _, desired = summary.ready.partition("/")
     return bool(desired) and ready != desired
 
 
-def _fresh_warning_line(events: list[dict[str, Any]], summary: PodSummary) -> str | None:
-    """The newest Warning line, unless it predates the captured status.
+def _event_line_fresh(event_ts: datetime | None, summary: PodSummary) -> bool:
+    """Whether a Warning may explain the *current* status.
 
-    An event older than the last termination explains a previous failure,
-    not the one on screen — showing it would mislead.
+    An event older than the last termination explains a previous failure;
+    an undated event cannot be proven fresher than dated status trouble
+    (timestamp fields are optional), so both are suppressed.
     """
-    found = _newest_warning(events)
-    if found is None:
-        return None
-    line, event_ts = found
     terminated_at = [
         ts
         for t in summary.trouble
         if t.finished_at and (ts := parse_rfc3339(t.finished_at)) is not None
     ]
-    if terminated_at and event_ts is not None and event_ts < max(terminated_at):
-        return None
-    return line
+    if not terminated_at:
+        return True
+    return event_ts is not None and event_ts >= max(terminated_at)
 
 
 def _yaml_equal(a: object, b: object) -> bool:
@@ -405,7 +404,7 @@ class KorvidApp(App[None]):
         self._render_pending: set[str] = set()
         # Hint strip event cache: "ns/name" -> (fetched_at, newest warning line
         # or None). Short TTL so a lingering cursor eventually sees new events.
-        self._hint_event_cache: dict[str, tuple[float, str | None]] = {}
+        self._hint_event_cache: dict[str, tuple[float, str | None, datetime | None]] = {}
         self._hint_refresh_timer: Timer | None = None
 
     @property
@@ -699,11 +698,18 @@ class KorvidApp(App[None]):
         # event line of its previous incarnation.
         cache_key = f"{row_key}#{summary.uid}"
         cached = self._hint_event_cache.get(cache_key)
-        if cached is not None and monotonic() - cached[0] < self._HINT_EVENT_TTL:
-            if summary.trouble or cached[1]:
-                strip.show_trouble(summary.trouble, event=cached[1])
+        if cached is not None and (age := monotonic() - cached[0]) < self._HINT_EVENT_TTL:
+            _at, line, event_ts = cached
+            if line is not None and not _event_line_fresh(event_ts, summary):
+                # A newer termination arrived since the line was cached.
+                line = None
+            if summary.trouble or line:
+                strip.show_trouble(summary.trouble, event=line)
             else:
                 strip.clear_hint()
+            # Keep the parked-cursor refresh armed for the entry's remaining
+            # life — switching rows and back must not strand it timerless.
+            self._schedule_hint_refresh(row_key, delay=self._HINT_EVENT_TTL - age)
             return
         if summary.trouble:
             strip.show_trouble(summary.trouble)
@@ -729,7 +735,7 @@ class KorvidApp(App[None]):
             return None
         return None if key is None else str(key.value)
 
-    def _schedule_hint_refresh(self, row_key: str) -> None:
+    def _schedule_hint_refresh(self, row_key: str, *, delay: float | None = None) -> None:
         """Re-evaluate a parked cursor when the cache entry expires; without
         this a cursor that never moves would show the same event forever."""
         if self._hint_refresh_timer is not None:
@@ -740,7 +746,9 @@ class KorvidApp(App[None]):
             if self.current_kind == "pods" and self._cursor_row_key() == row_key:
                 self._show_hint_for_row(row_key)
 
-        self._hint_refresh_timer = self.set_timer(self._HINT_EVENT_TTL, _refresh)
+        self._hint_refresh_timer = self.set_timer(
+            max(0.05, delay if delay is not None else self._HINT_EVENT_TTL), _refresh
+        )
 
     def _find_pod_summary(self, row_key: str) -> PodSummary | None:
         parts = row_key.split("/", 1)
@@ -761,7 +769,11 @@ class KorvidApp(App[None]):
                 summary.namespace, summary.name, uid=summary.uid or None
             )
         except Exception:  # events are decoration; the status-derived hint already shows
-            self._store_hint_event(cache_key, None)
+            self._store_hint_event(cache_key, None, None)
+            # Retry once the TTL passes: a transient API failure must not
+            # hide the hint forever while the cursor stays parked.
+            if self.current_kind == "pods" and self._cursor_row_key() == row_key:
+                self._schedule_hint_refresh(row_key)
             return
         # The snapshot taken at highlight time may be stale after the await:
         # re-read the store and filter/render against the *current* status.
@@ -772,13 +784,14 @@ class KorvidApp(App[None]):
             if self.current_kind == "pods" and self._cursor_row_key() == row_key:
                 self._show_hint_for_row(row_key)
             return
-        line = _fresh_warning_line(events, fresh)
-        self._store_hint_event(cache_key, line)
-        cursor_parked = self.current_kind == "pods" and self._cursor_row_key() == row_key
-        if cursor_parked:
-            self._schedule_hint_refresh(row_key)
-        if not cursor_parked:
+        found = _newest_warning(events)
+        line, event_ts = found if found is not None else (None, None)
+        if line is not None and not _event_line_fresh(event_ts, fresh):
+            line, event_ts = None, None
+        self._store_hint_event(cache_key, line, event_ts)
+        if self.current_kind != "pods" or self._cursor_row_key() != row_key:
             return
+        self._schedule_hint_refresh(row_key)
         if not _pod_needs_hint(fresh):
             self.query_one(HintStrip).clear_hint()
             return
@@ -787,16 +800,21 @@ class KorvidApp(App[None]):
         else:
             self.query_one(HintStrip).clear_hint()
 
-    def _store_hint_event(self, cache_key: str, line: str | None) -> None:
-        """Cache the fetched line; expired entries are swept on every write
-        so the cache cannot grow without bound in a long-running session."""
+    def _store_hint_event(
+        self, cache_key: str, line: str | None, event_ts: datetime | None
+    ) -> None:
+        """Cache the fetched line (with its occurrence time, so cache hits can
+        re-apply freshness); expired entries are swept on every write so the
+        cache cannot grow without bound in a long-running session."""
         now = monotonic()
         expired = [
-            k for k, (at, _) in self._hint_event_cache.items() if now - at >= self._HINT_EVENT_TTL
+            k
+            for k, (at, _line, _ts) in self._hint_event_cache.items()
+            if now - at >= self._HINT_EVENT_TTL
         ]
         for k in expired:
             del self._hint_event_cache[k]
-        self._hint_event_cache[cache_key] = (now, line)
+        self._hint_event_cache[cache_key] = (now, line, event_ts)
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Enter drills down: pods -> containers (k9s convention); kinds with a

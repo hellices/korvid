@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 from korvid.core.config import KorvidConfig
@@ -322,8 +323,10 @@ def test_abnormal_phase_without_trouble_needs_hint() -> None:
     assert _pod_needs_hint(pod("Running")) is False
     assert _pod_needs_hint(pod("Completed", ready="0/1")) is False  # finished: 0/N by design
     assert _pod_needs_hint(pod("Pending")) is False  # routine startup is not trouble
-    assert _pod_needs_hint(pod("Terminating")) is False  # routine deletion
-    assert _pod_needs_hint(pod("ContainerCreating")) is False
+    assert _pod_needs_hint(pod("Pending", ready="0/1")) is False  # startup is 0/N by design
+    assert _pod_needs_hint(pod("Terminating", ready="0/1")) is False  # routine deletion
+    assert _pod_needs_hint(pod("ContainerCreating", ready="0/1")) is False
+    assert _pod_needs_hint(pod("Running", ready="0/1")) is True  # NotReady while Running
 
 
 async def test_recreated_pod_uid_change_mid_fetch_does_not_render_old_hint() -> None:
@@ -366,3 +369,42 @@ async def test_recreated_pod_uid_change_mid_fetch_does_not_render_old_hint() -> 
             pilot, lambda: not app.query_one(HintStrip).display, label="no hint for new uid"
         )
         assert "dead incarnation" not in str(app.query_one(HintStrip).render())
+
+
+def test_undated_event_suppressed_when_status_is_dated() -> None:
+    from korvid.ui.app import _event_line_fresh
+
+    dated = _pod("web-1", (_CRASH,))  # _CRASH has no finished_at
+    crash_dated = ContainerTrouble(
+        container="app",
+        reason="CrashLoopBackOff",
+        finished_at="2026-07-26T08:00:00Z",
+    )
+    pod_dated = _pod("web-1", (crash_dated,))
+    assert _event_line_fresh(None, pod_dated) is False  # undated event, dated status
+    assert _event_line_fresh(None, dated) is True  # no dated status to compare against
+    ts_new = datetime(2026, 7, 26, 9, 0, tzinfo=UTC)
+    ts_old = datetime(2026, 7, 26, 7, 0, tzinfo=UTC)
+    assert _event_line_fresh(ts_new, pod_dated) is True
+    assert _event_line_fresh(ts_old, pod_dated) is False
+
+
+async def test_failed_fetch_is_retried_after_ttl_while_parked() -> None:
+    attempts: list[str] = []
+
+    async def failing(namespace: str, name: str, *, uid: str | None = None) -> list[dict[str, Any]]:
+        attempts.append(name)
+        raise RuntimeError("transient")
+
+    store = ResourceStore()
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, _source([_pod("web-1", (_CRASH,))])),
+        aliases=dict(_DEFAULT_TEST_ALIASES),
+        get_events=_FnFetcher(failing),
+    )
+    app._HINT_EVENT_TTL = 0.1  # shrink the TTL so the retry fits in a test
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: len(attempts) >= 2, label="fetch retried after TTL")
+        assert len(attempts) >= 2
