@@ -791,7 +791,7 @@ async def test_debug_picker_escape_cancels(tmp_path: Path) -> None:
             await pilot.press("s")
             await until(pilot, lambda: isinstance(app.screen, PickScreen))
             await pilot.press("escape")
-            await pilot.pause(0.2)
+            await until(pilot, lambda: not isinstance(app.screen, (PickScreen, ConfirmScreen)))
             assert not isinstance(app.screen, (PickScreen, ConfirmScreen))
             mock_call.assert_called_once()  # only the failed exec
     assert not audit_path.exists() or "debug" not in audit_path.read_text()
@@ -867,6 +867,12 @@ async def test_debug_pull_failure_offers_retry_with_fallback(tmp_path: Path) -> 
             assert "cannot be removed" in screen._operation
             await pilot.press("y")
             await until(pilot, lambda: len(debug_calls) >= 2)
+            # The outcome audit append is asynchronous: wait for the retry's
+            # success entry before leaving the app context.
+            await until(
+                pilot,
+                lambda: audit_path.exists() and '"success"' in audit_path.read_text(),
+            )
     assert "--image=lightruncom/koolkits:jvm" in debug_calls[0]
     assert f"--image={DEBUG_IMAGE}" in debug_calls[1]
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
