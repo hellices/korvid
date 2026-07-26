@@ -6,8 +6,9 @@ through the same :class:`~korvid.agent.tools.ToolExecutor` the built-in
 agent uses - navigation, filters, log panes and describe views happen on
 the screen the user is already watching.
 
-The server binds to loopback only (the MCP spec requires this for local
-servers to prevent DNS-rebinding attacks) and exposes read + UI-drive tools
+The server binds to loopback only and enforces Host/Origin validation
+(DNS-rebinding protection - the MCP spec requires both for local servers)
+and exposes read + UI-drive tools
 exclusively: cluster write tools stay with the built-in agent until an
 approval UX for external callers is designed. On startup the actual
 endpoint is published to a small discovery file (see
@@ -29,6 +30,7 @@ import uvicorn
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.types import Receive, Scope, Send
@@ -41,6 +43,15 @@ logger = logging.getLogger(__name__)
 _HOST = "127.0.0.1"
 
 DEFAULT_MCP_PORT = 7878
+
+#: DNS-rebinding protection: loopback binding alone is not enough - a hostile
+#: webpage can still issue requests to 127.0.0.1, so the transport must also
+#: validate Host and Origin headers (MCP Streamable HTTP requirement).
+_SECURITY_SETTINGS = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=["127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*"],
+    allowed_origins=["http://127.0.0.1:*", "http://localhost:*"],
+)
 
 
 def default_endpoint_path() -> Path:
@@ -70,13 +81,14 @@ class KorvidMCPServer:
     ) -> None:
         self._executor = executor
         self._tools = list(tools)
+        self._tool_names = {t["function"]["name"] for t in self._tools}
         self._port = port
         self._endpoint_path = endpoint_path
         self._started: anyio.Event = anyio.Event()
         self._bound_port: int | None = None
         self._uvicorn: uvicorn.Server | None = None
         self._server: Server[Any, Any] = Server("korvid")
-        self._server.list_tools()(self.list_tools)  # type: ignore[no-untyped-call]
+        self._server.list_tools()(self.list_tools)  # type: ignore[no-untyped-call]  # SDK decorator factory is untyped
         self._server.call_tool()(self.call_tool)
 
     async def list_tools(self) -> list[types.Tool]:
@@ -95,10 +107,19 @@ class KorvidMCPServer:
     ) -> list[types.TextContent]:
         """MCP ``tools/call``: dispatch through the shared executor.
 
+        Discovery is not an authorization boundary - callers choose ``name``
+        freely and the shared :class:`ToolExecutor` also knows the write
+        tools, so anything outside this server's configured surface is
+        rejected *before* dispatch.
+
         ``ToolExecutor.execute`` never raises - failures come back as
         ``"ERROR: ..."`` strings, which is exactly what the MCP host should
         see (same contract as the built-in agent loop).
         """
+        if name not in self._tool_names:
+            return [
+                types.TextContent(type="text", text=f"ERROR: tool not available over MCP: {name}")
+            ]
         result = await self._executor.execute(name, arguments or {})
         return [types.TextContent(type="text", text=result)]
 
@@ -121,7 +142,16 @@ class KorvidMCPServer:
 
     async def run(self) -> None:
         """Serve until cancelled (run as a background task in the app loop)."""
-        manager = StreamableHTTPSessionManager(app=self._server, stateless=True)
+        # json_response=True: our tools are single request/response - no
+        # server->client streaming - and the SDK's SSE path (1.28.x) leaks
+        # its sse_stream_reader on normal completion (ResourceWarning),
+        # while the JSON path cleans up its streams in a finally block.
+        manager = StreamableHTTPSessionManager(
+            app=self._server,
+            stateless=True,
+            json_response=True,
+            security_settings=_SECURITY_SETTINGS,
+        )
 
         async def handle(scope: Scope, receive: Receive, send: Send) -> None:
             await manager.handle_request(scope, receive, send)
@@ -137,7 +167,7 @@ class KorvidMCPServer:
         self._uvicorn = server
         # korvid owns the terminal: uvicorn's SIGINT/SIGTERM capture would
         # fight the TUI for signal handling, so neutralize it.
-        server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign, assignment]
+        server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign, assignment]  # TUI owns signals
 
         async def _publish_when_started() -> None:
             while not server.started:
@@ -149,8 +179,20 @@ class KorvidMCPServer:
         try:
             async with anyio.create_task_group() as tg:
                 tg.start_soon(_publish_when_started)
-                await server.serve()
-                tg.cancel_scope.cancel()
+                try:
+                    await server.serve()
+                except SystemExit:
+                    # uvicorn raises SystemExit when it cannot bind (port in
+                    # use).  Catch it here, before the task group would wrap
+                    # it in a BaseExceptionGroup that escapes the caller's
+                    # shutdown path - the TUI must keep running without MCP.
+                    logger.error(
+                        "MCP server failed to start on %s:%d (port in use?)",
+                        _HOST,
+                        self._port,
+                    )
+                finally:
+                    tg.cancel_scope.cancel()
         finally:
             self._remove_endpoint()
 
@@ -164,7 +206,11 @@ class KorvidMCPServer:
 
     def _write_endpoint(self, port: int) -> None:
         """Publish the endpoint for host auto-discovery (best-effort: the
-        server is useful even when the state dir is not writable)."""
+        server is useful even when the state dir is not writable).
+
+        Written atomically (temp file + rename) so concurrent korvid
+        instances never leave a torn record behind.
+        """
         path = self._endpoint_path
         if path is None:
             return
@@ -175,13 +221,23 @@ class KorvidMCPServer:
                 "port": port,
                 "pid": os.getpid(),
             }
-            path.write_text(json.dumps(payload))
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(payload))
+            tmp.replace(path)
         except OSError:
             logger.warning("could not write MCP endpoint file %s", path)
 
     def _remove_endpoint(self) -> None:
+        """Remove the discovery file, but only if it is still *ours*: another
+        korvid instance may have published a newer record at the same
+        default path, and exiting must not delete that."""
         path = self._endpoint_path
         if path is None:
             return
-        with contextlib.suppress(OSError):
-            path.unlink(missing_ok=True)
+        try:
+            info = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return
+        if info.get("pid") == os.getpid() and info.get("port") == self._bound_port:
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)

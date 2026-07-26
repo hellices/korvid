@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import json
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +19,7 @@ class RecordingExecutor(ToolExecutor):
     """ToolExecutor that records dispatches instead of touching a cluster."""
 
     def __init__(self) -> None:
-        super().__init__(kube=None, aliases={"pods": PODS_META})  # type: ignore[arg-type]
+        super().__init__(kube=None, aliases={"pods": PODS_META})  # type: ignore[arg-type]  # execute() is overridden; kube is never touched
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.result = "ok"
 
@@ -120,20 +120,26 @@ async def test_call_tool_passes_error_text_through() -> None:
     assert content[0].text == "ERROR: boom"
 
 
+async def test_call_tool_rejects_names_outside_configured_surface() -> None:
+    """Discovery is not an authorization boundary: the executor also knows
+    the write tools, so a caller naming `delete_resource` directly must be
+    stopped before dispatch."""
+    executor = RecordingExecutor()
+    server = make_server(executor)
+    for name in ("delete_resource", "scale_resource", "rollout_restart", "nope"):
+        content = await server.call_tool(name, {"kind": "pods", "name": "x"})
+        assert content[0].text == f"ERROR: tool not available over MCP: {name}"
+    assert executor.calls == []
+
+
 # ---------------------------------------------------------------------------
 # HTTP round trip: a real MCP client against the embedded server
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 async def test_streamable_http_roundtrip(tmp_path: Path) -> None:
     """End-to-end: serve on an ephemeral loopback port inside the running
-    loop, connect with the MCP SDK client, list tools and call one.
-
-    The filterwarnings mark suppresses ResourceWarning-derived unraisables
-    from the MCP SDK's own transport internals (anyio memory streams left
-    to the GC during client/session teardown) - an SDK artifact unrelated
-    to the server under test; the socket itself closes cleanly."""
+    loop, connect with the MCP SDK client, list tools and call one."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
@@ -162,10 +168,69 @@ async def test_streamable_http_roundtrip(tmp_path: Path) -> None:
     finally:
         server.request_shutdown()
         await asyncio.wait_for(task, timeout=10)
-        # Collect the SDK's abandoned transport objects NOW so their
-        # ResourceWarning-driven unraisables fire inside this (filtered)
-        # test instead of being attributed to whichever test the GC
-        # happens to run under later.
-        gc.collect()
     # The discovery file must not outlive the server.
     assert not endpoint_file.exists()
+
+
+async def test_hostile_origin_is_rejected() -> None:
+    """DNS-rebinding protection: loopback binding alone does not stop a
+    malicious webpage from reaching 127.0.0.1, so requests carrying a
+    non-loopback Origin must be refused at the transport layer."""
+    import httpx
+
+    executor = RecordingExecutor()
+    server = make_server(executor, port=0)
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "list_resources", "arguments": {"kind": "pods"}},
+        }
+        headers = {
+            "Origin": "http://evil.example",
+            "Accept": "application/json, text/event-stream",
+        }
+        async with httpx.AsyncClient() as client:
+            # POST to /mcp/ directly: Starlette's Mount answers bare /mcp
+            # with a 307 to the slash form, and a browser-driven attack
+            # would follow it (307 preserves method and body).
+            resp = await client.post(f"http://127.0.0.1:{port}/mcp/", json=payload, headers=headers)
+        assert resp.status_code == 403
+        assert executor.calls == []
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_port_in_use_fails_without_raising(tmp_path: Path) -> None:
+    """A bind failure (uvicorn raises SystemExit internally) must not escape
+    run(): the TUI keeps going without MCP instead of crashing its shutdown
+    path with a BaseExceptionGroup."""
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    with socket.socket() as blocker:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        taken = blocker.getsockname()[1]
+        server = make_server(port=taken, endpoint_path=endpoint_file)
+        await asyncio.wait_for(server.run(), timeout=10)  # returns; must not raise
+    # Startup never happened, so no discovery record was published.
+    assert not endpoint_file.exists()
+
+
+async def test_remove_endpoint_spares_foreign_record(tmp_path: Path) -> None:
+    """Exiting must not delete a discovery record published by *another*
+    korvid instance at the same default path."""
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    server = make_server(port=0, endpoint_path=endpoint_file)
+    task = asyncio.create_task(server.run())
+    try:
+        await asyncio.wait_for(server.wait_started(), timeout=10)
+        foreign = {"url": "http://127.0.0.1:9999/mcp", "port": 9999, "pid": 999999}
+        endpoint_file.write_text(json.dumps(foreign))
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+    assert json.loads(endpoint_file.read_text()) == foreign
