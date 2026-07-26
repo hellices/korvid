@@ -850,3 +850,62 @@ async def test_replace_object_pins_uid_precondition() -> None:
     assert body["metadata"]["resourceVersion"] == "41"
     # The caller's manifest is not mutated.
     assert "uid" not in manifest["metadata"]
+
+
+# ---------------------------------------------------------------------------
+# list_pod_metrics
+# ---------------------------------------------------------------------------
+
+
+async def test_list_pod_metrics_namespaced_path() -> None:
+    client = KubeClient()
+    list_resp = {
+        "items": [
+            {
+                "metadata": {"name": "web-1", "namespace": "default"},
+                "containers": [{"usage": {"cpu": "100m", "memory": "128Mi"}}],
+            }
+        ]
+    }
+    request_json_mock = AsyncMock(return_value=list_resp)
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+    ):
+        metrics = await client.list_pod_metrics("default")
+
+    assert [(m.namespace, m.name) for m in metrics] == [("default", "web-1")]
+    assert metrics[0].cpu_cores == pytest.approx(0.1)
+    assert metrics[0].memory_bytes == 128 * 2**20
+    called_path: str = request_json_mock.call_args[0][0]
+    assert called_path == "/apis/metrics.k8s.io/v1beta1/namespaces/default/pods"
+
+
+async def test_list_pod_metrics_cluster_path() -> None:
+    client = KubeClient()
+    request_json_mock = AsyncMock(return_value={"items": []})
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+    ):
+        metrics = await client.list_pod_metrics(None)
+
+    assert metrics == []
+    called_path: str = request_json_mock.call_args[0][0]
+    assert called_path == "/apis/metrics.k8s.io/v1beta1/pods"
+
+
+async def test_list_pod_metrics_propagates_api_status_error() -> None:
+    """404 (metrics-server absent) must surface as ApiStatusError so the
+    poller can degrade gracefully."""
+    client = KubeClient()
+    mock_api = MagicMock()
+    mock_api.call_api = AsyncMock(side_effect=ApiException(status=404, reason="Not Found"))
+
+    with (
+        patch.object(client, "_api", mock_api),
+        pytest.raises(ApiStatusError, match="API 404: Not Found"),
+    ):
+        await client.list_pod_metrics("default")

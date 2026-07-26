@@ -18,6 +18,7 @@ from kubernetes_asyncio import watch as k8s_watch
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
+from korvid.k8s.metrics import PodMetrics, parse_pod_metrics_list
 from korvid.k8s.models import GenericSummary, PodSummary, summary_for
 from korvid.k8s.writes import WriteOps
 
@@ -246,6 +247,18 @@ class KubeClient(WriteOps):
     ) -> dict[str, Any]:
         """Fetch the raw manifest for a single object. ApiException → ApiStatusError."""
         return await self._request_json(self._object_path(meta, namespace, name))
+
+    async def list_pod_metrics(self, namespace: str | None) -> list[PodMetrics]:
+        """Current pod usage from metrics.k8s.io; None lists all namespaces.
+
+        Raises ApiStatusError (404 when metrics-server is not installed,
+        403 without RBAC) so callers can degrade gracefully.
+        """
+        if namespace is not None:
+            path = f"/apis/metrics.k8s.io/v1beta1/namespaces/{_path_segment(namespace)}/pods"
+        else:
+            path = "/apis/metrics.k8s.io/v1beta1/pods"
+        return parse_pod_metrics_list(await self._request_json(path))
 
     @staticmethod
     def _object_path(meta: ResourceMeta, namespace: str | None, name: str) -> str:

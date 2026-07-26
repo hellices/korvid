@@ -1,6 +1,6 @@
 """Semantic color tokens: phase/ready/restarts style mapping."""
 
-from korvid.ui.theme import phase_style, ready_style, restarts_style
+from korvid.ui.theme import phase_style, ready_style, restarts_style, usage_style
 
 
 class TestPhaseStyle:
@@ -89,3 +89,20 @@ class TestInitPhaseStyle:
 
     def test_not_ready_is_yellow(self) -> None:
         assert phase_style("NotReady") == "yellow"
+
+
+class TestUsageStyle:
+    def test_none_dim(self) -> None:
+        assert usage_style(None) == "dim"
+
+    def test_low_green(self) -> None:
+        assert usage_style(0) == "green"
+        assert usage_style(69.9) == "green"
+
+    def test_warn_yellow(self) -> None:
+        assert usage_style(70) == "yellow"
+        assert usage_style(89.9) == "yellow"
+
+    def test_high_bold_red(self) -> None:
+        assert usage_style(90) == "bold red"
+        assert usage_style(250) == "bold red"

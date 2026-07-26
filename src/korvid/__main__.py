@@ -27,6 +27,7 @@ from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.client import KubeClient, resolve_context_name
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+from korvid.k8s.metrics import MetricsPoller
 from korvid.providers.configurator import ProviderConfigurator
 from korvid.providers.registry import create_provider
 from korvid.providers.token_store import TokenStore
@@ -335,6 +336,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         agent_configurator=configurator,
         rebuild_agent=rebuild_agent,
         mcp=mcp_controller,
+        metrics=MetricsPoller(kube.list_pod_metrics),
     )
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.
