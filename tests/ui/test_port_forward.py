@@ -559,3 +559,48 @@ async def test_teardown_audit_failure_does_not_abort_shutdown(tmp_path: Path) ->
     # Shutdown completed despite the audit failure; the forward was stopped.
     assert procs[0].terminated
     assert registry.forwards() == []
+
+
+async def test_reattach_rearms_broken_notification_immediately() -> None:
+    """After re-attach the same forward must be able to notify again on breakage."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    app = make_app([_pod("api-1")], forwards=registry, get_manifest=_pod_manifest)
+    record = registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    procs[0].returncode = 1
+    async with app.run_test() as pilot:
+        await _wait_rows(app, pilot)
+        app._broken_forwards.add(record.id)  # background poll already toasted
+        await _open_pf(app, pilot)
+        await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
+        await pilot.press("r")
+        await until(pilot, lambda: len(procs) == 2)
+        # Re-armed right away — not deferred to the next global poll tick.
+        assert record.id not in app._broken_forwards
+
+
+async def test_forward_audit_failure_does_not_crash_app(tmp_path: Path) -> None:
+    """A failing audit sink must not kill the app on a normal forward start."""
+    procs: list[_FakeProc] = []
+
+    class _FailingAudit(AuditLog):
+        def append(self, **kwargs: Any) -> None:
+            raise OSError("disk full")
+
+    app = make_app(
+        [_pod("api-1")],
+        forwards=_registry(procs),
+        get_manifest=_pod_manifest,
+        audit=_FailingAudit(tmp_path / "audit.log", context="test-ctx"),
+    )
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: len(procs) == 1)
+            await pilot.pause()
+            assert app.is_running  # audit failure logged, app alive

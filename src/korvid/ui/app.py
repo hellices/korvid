@@ -1429,15 +1429,20 @@ class KorvidApp(App[None]):
             return
 
         def _append() -> None:
-            audit.append(
-                action=action,
-                kind=spec.kind,
-                namespace=spec.namespace,
-                name=spec.name,
-                version="v1",
-                detail=f"localhost:{spec.local_port} -> {spec.name}:{spec.remote_port}",
-                outcome=outcome,
-            )
+            try:
+                audit.append(
+                    action=action,
+                    kind=spec.kind,
+                    namespace=spec.namespace,
+                    name=spec.name,
+                    version="v1",
+                    detail=f"localhost:{spec.local_port} -> {spec.name}:{spec.remote_port}",
+                    outcome=outcome,
+                )
+            except OSError as exc:
+                # Best-effort by design (read-only risk profile) — a full disk
+                # must not kill the app via the worker's exit_on_error.
+                logger.warning("forward audit (%s) failed: %s", action, exc)
 
         self.run_worker(_append, thread=True)
 
@@ -1452,6 +1457,9 @@ class KorvidApp(App[None]):
             self.notify(f"Stopped forward localhost:{record.spec.local_port}")
 
         def _on_reattach(record: ForwardRecord) -> None:
+            # Re-arm the broken toast right away: waiting for the next global
+            # poll would silently swallow a breakage of the fresh process.
+            self._broken_forwards.discard(record.id)
             self._audit_forward("port-forward-start", record.spec, outcome="reattached")
             self.notify(f"Re-attached forward localhost:{record.spec.local_port}")
 
