@@ -430,6 +430,7 @@ class TestGetHelmRelease:
         assert detail["revision"] == 2
         assert detail["chart"] == "-"
         assert detail["values"] == {}
+        assert detail["status"] == "deployed"  # label fallback, matching the row
 
     async def test_returns_decoded_metadata_and_values_without_manifest(self) -> None:
         client = KubeClient()

@@ -354,17 +354,22 @@ class KubeClient(WriteOps):
         if not items:
             raise ApiStatusError(404, f"helm release {name!r} not found in {namespace!r}")
         chosen = max(items, key=_rev)
+        labels = (chosen.get("metadata") or {}).get("labels") or {}
         try:
             payload = decode_release(chosen)
         except ValueError:
             # The browser lists this release via the label fallback; describe
             # must degrade the same way, not error where the row still shows.
-            labels = (chosen.get("metadata") or {}).get("labels") or {}
             detail = release_detail({}, name=name, namespace=namespace, revision=_rev(chosen))
             detail["status"] = str(labels.get("status") or "")
             detail["warning"] = "release payload could not be decoded; label-only detail"
             return detail
-        return release_detail(payload, name=name, namespace=namespace, revision=_rev(chosen))
+        detail = release_detail(payload, name=name, namespace=namespace, revision=_rev(chosen))
+        if not detail["status"]:
+            # A payload can decode while ``info`` is missing or malformed;
+            # the row shows the Secret's status label, so describe must too.
+            detail["status"] = str(labels.get("status") or "")
+        return detail
 
     async def list_pod_metrics(self, namespace: str | None) -> list[PodMetrics]:
         """Current pod usage from metrics.k8s.io; None lists all namespaces.
