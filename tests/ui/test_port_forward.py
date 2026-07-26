@@ -985,3 +985,34 @@ async def test_stop_during_startup_keeps_audit_order(tmp_path: Path) -> None:
             lines = _audit_lines(tmp_path)
             assert "port-forward-start" in lines
             assert lines.index("port-forward-start") < lines.index("port-forward-stop")
+
+
+async def test_teardown_during_startup_keeps_audit_order(tmp_path: Path) -> None:
+    """Exiting while a forward is still starting must not orphan its stop audit."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: len(procs) == 1)
+            # Exit while kubectl has not confirmed the listener yet.
+    lines = _audit_lines(tmp_path)
+    assert "port-forward-start" in lines
+    assert "port-forward-stop" in lines
+    assert lines.index("port-forward-start") < lines.index("port-forward-stop")

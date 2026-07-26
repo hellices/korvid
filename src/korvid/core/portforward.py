@@ -234,6 +234,7 @@ class ForwardRegistry:
         if record is None:
             return None
         self._signal_stop(record)
+        self._release_waiters(record)
         return record
 
     def reattach(self, forward_id: int) -> ForwardRecord | None:
@@ -296,6 +297,8 @@ class ForwardRegistry:
         """
         records = list(self._records.values())
         self._records.clear()
+        for record in records:
+            self._release_waiters(record)
         live = [
             record._proc
             for record in records
@@ -327,6 +330,17 @@ class ForwardRegistry:
             return  # already exited (broken) — nothing to signal
         proc.terminate()
         self._reaping.append((proc, monotonic() + _STOP_GRACE_SECONDS, record.spec.local_port))
+
+    @staticmethod
+    def _release_waiters(record: ForwardRecord) -> None:
+        """Wake anyone blocked in wait_ready() for a just-stopped forward.
+
+        Without this, a stop during the handshake would leave the caller
+        waiting out the full readiness timeout on a forward that no longer
+        exists (a fake child never delivers the EOF a real kubectl would).
+        """
+        if record._ready is not None:
+            record._ready.set()
 
     def _reap(self) -> None:
         """Advance stopped processes: drop exited ones, kill deadline-breakers."""

@@ -1449,8 +1449,8 @@ class KorvidApp(App[None]):
         registry = self._forwards
         if registry is None:  # pragma: no cover - callers hold a registry
             return
+        spec = record.spec
         try:
-            spec = record.spec
             status = await asyncio.to_thread(
                 registry.wait_ready, record.id, timeout=_FORWARD_READY_SECONDS
             )
@@ -1479,6 +1479,15 @@ class KorvidApp(App[None]):
                 f"Forwarding localhost:{spec.local_port} → "
                 f"{spec.namespace}/{spec.name}:{spec.remote_port}"
             )
+        except asyncio.CancelledError:
+            # Shutdown cancelled the confirmation mid-handshake — the start
+            # must still reach the log before its teardown stop entry
+            # (enqueue directly: no new workers during shutdown).
+            if self._audit is not None:
+                self._enqueue_forward_audit(
+                    "port-forward-start", spec, outcome="stopped before ready"
+                )
+            raise
         finally:
             self._confirming_forwards.pop(record.id, None)
 
@@ -4029,6 +4038,25 @@ class KorvidApp(App[None]):
         empty.update(Text(message))
         empty.display = True
 
+    async def _teardown_forwards(self, registry: ForwardRegistry) -> None:
+        """Stop every forward at app exit and audit each stop in order.
+
+        Session-scoped by design (issue #38): forwards never outlive the
+        app that started them. stop_all() polls synchronously up to the
+        grace deadline — kept off the closing event loop. It also releases
+        any handshake waiters, so in-flight readiness confirmations resolve
+        promptly; they are awaited before the stops are enqueued so an exit
+        during startup still logs the start entry first (never a stop-only
+        or reversed trail).
+        """
+        records = await asyncio.to_thread(registry.stop_all)
+        for confirm in list(self._confirming_forwards.values()):
+            with contextlib.suppress(Exception):
+                await confirm.wait()
+        for record in records:
+            if self._audit is not None:
+                self._enqueue_forward_audit("port-forward-stop", record.spec, teardown=True)
+
     async def on_unmount(self) -> None:
         # Cancel any active log stream tasks before the event loop shuts down.
         if self._ns_prefetch_task is not None:
@@ -4047,12 +4075,7 @@ class KorvidApp(App[None]):
         if self._metrics is not None:
             await self._metrics.stop()
         if self._forwards is not None:
-            # Session-scoped by design (issue #38): forwards never outlive
-            # the app that started them. stop_all() polls synchronously up
-            # to the grace deadline — keep it off the closing event loop.
-            for record in await asyncio.to_thread(self._forwards.stop_all):
-                if self._audit is not None:
-                    self._enqueue_forward_audit("port-forward-stop", record.spec, teardown=True)
+            await self._teardown_forwards(self._forwards)
         # Flush pending forward audits (e.g. a Ctrl-D pressed right before
         # quit) so no queued entry is lost: let a mid-drain worker finish,
         # then drain the remainder directly — workers won't run past here.
