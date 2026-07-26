@@ -710,6 +710,32 @@ async def test_debug_picker_air_gapped_config_only_configured_images(tmp_path: P
             assert "netshoot" not in joined
 
 
+async def test_debug_picker_air_gapped_without_default_omits_busybox(tmp_path: Path) -> None:
+    """debug.images without debug.default_image must not leak public busybox
+    into the picker - only the configured image plus the custom prompt."""
+    app = make_app(
+        [_pod("api-1")],
+        audit=AuditLog(tmp_path / "audit.jsonl"),
+        get_manifest=_jvm_manifest(),
+        debug_images={"jvm": "registry.corp.local/tools/debug-jvm:latest"},
+    )
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1),
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", return_value=_noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            options = _pick_options(app)
+            assert "registry.corp.local/tools/debug-jvm:latest" in options[0]
+            assert options[-1] == "Custom image…"
+            assert len(options) == 2
+            assert "busybox" not in " ".join(options)
+
+
 async def test_debug_picker_custom_image_prompt(tmp_path: Path) -> None:
     """'Custom image…' opens an input prompt; the typed image reaches the
     approval dialog and the kubectl debug argv."""
@@ -867,6 +893,45 @@ async def test_debug_pull_failure_no_retry_when_fallback_is_chosen_image(tmp_pat
     assert len(debug_calls) == 1
 
 
+async def test_debug_pull_failure_air_gapped_without_default_notifies_only(
+    tmp_path: Path,
+) -> None:
+    """debug.images without debug.default_image: a pull failure must not offer
+    a public busybox retry - error notification only."""
+    app = make_app(
+        [_pod("api-1")],
+        audit=AuditLog(tmp_path / "audit.jsonl"),
+        get_manifest=_jvm_manifest(),
+        debug_images={"jvm": "registry.corp.local/tools/debug-jvm:latest"},
+    )
+    debug_calls: list[list[str]] = []
+
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1),
+        patch("korvid.ui.app.subprocess.Popen", side_effect=_fake_popen(debug_calls, ["hang"])),
+        patch(
+            "korvid.ui.app.subprocess.run",
+            side_effect=_pull_failure_run("registry.corp.local/tools/debug-jvm:latest"),
+        ),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            await pilot.press("enter")  # configured jvm image
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            await pilot.press("y")
+
+            def _failure_notified() -> bool:
+                return any("image pull failed" in n.message for n in app._notifications)
+
+            await until(pilot, _failure_notified)
+            assert not isinstance(app.screen, ConfirmScreen)  # no busybox retry
+    assert len(debug_calls) == 1
+
+
 # ---------------------------------------------------------------------------
 # Debug fallback bound to the approved pod incarnation
 # ---------------------------------------------------------------------------
@@ -911,7 +976,10 @@ async def test_debug_aborts_when_pod_replaced_after_prompt(tmp_path: Path) -> No
             await pilot.press("enter")
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
             await pilot.press("y")
-            await pilot.pause(0.2)
+            await until(
+                pilot,
+                lambda: any("was replaced" in str(n.message) for n in app._notifications),
+            )
     assert [argv[1] for argv in calls] == ["exec"]
     assert debug_calls == []  # the debug never ran
     # No mutation happened, so no debug intent may have been audited either.

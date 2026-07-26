@@ -58,6 +58,8 @@ def test_detect_runtime_python_node_go_image_names() -> None:
         "python:3.12-slim": "python",
         "docker.io/library/node:22-alpine": "nodejs",
         "golang:1.23": "golang",
+        "go:1.23": "golang",
+        "docker.io/library/go:1.23": "golang",
     }
     for image, expected in cases.items():
         detected = detect_runtime(_pod(image=image), "app")
@@ -91,8 +93,9 @@ def test_detect_runtime_defaults_to_first_container() -> None:
 
 
 def test_detect_runtime_word_boundary_avoids_false_positives() -> None:
-    # "gonzo" must not match golang's "go"; "nodeport-tool" must not match node.
+    # "gonzo" must not match golang's "go"; "mongo" ends in "go" but is bounded.
     assert detect_runtime(_pod(image="registry.local/gonzo:1"), "app") is None
+    assert detect_runtime(_pod(image="mongo:7"), "app") is None
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +182,28 @@ def test_recommend_images_config_without_detected_runtime() -> None:
     )
     # Undetected runtime: only the configured default is offered.
     assert [o.image for o in options] == ["registry.corp.local/tools/busybox:1.36"]
+
+
+def test_recommend_images_config_without_default_never_offers_public_fallback() -> None:
+    """debug.images without debug.default_image must not leak busybox from a
+    public registry into an air-gapped picker (issue #52 review)."""
+    options = recommend_debug_images(
+        _pod(image="openjdk:17"),
+        "app",
+        images_cfg={"jvm": "registry.corp.local/tools/debug-jvm:1"},
+    )
+    assert [o.image for o in options] == ["registry.corp.local/tools/debug-jvm:1"]
+
+
+def test_recommend_images_config_without_default_or_match_returns_empty() -> None:
+    """Configured images, no default, no runtime match: nothing to offer —
+    the UI falls back to the custom-image prompt only."""
+    options = recommend_debug_images(
+        _pod(),
+        "app",
+        images_cfg={"jvm": "registry.corp.local/tools/debug-jvm:1"},
+    )
+    assert options == []
 
 
 def test_recommend_default_image_overrides_busybox() -> None:

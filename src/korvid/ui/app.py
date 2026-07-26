@@ -1449,12 +1449,13 @@ class KorvidApp(App[None]):
         # asynchronous picker existed selects an entry, the pod mutation is
         # still gated by the ConfirmScreen pushed in _confirm_debug, whose
         # creation-time key cutoff discards such buffered keystrokes.
+        # Air-gapped configs without a matching mapping produce no options:
+        # the picker then offers only the custom-image prompt.
+        title = f"Shell failed in {target} (exit {exit_code}) - choose a debug image."
+        if options:
+            title += f"\nRecommended: {options[0].image} - {options[0].reason}"
         self.push_screen(
-            PickScreen(
-                f"Shell failed in {target} (exit {exit_code}) - choose a debug image."
-                f"\nRecommended: {options[0].image} - {options[0].reason}",
-                [*prompts, custom_choice],
-            ),
+            PickScreen(title, [*prompts, custom_choice]),
             _on_image,
         )
 
@@ -1482,6 +1483,13 @@ class KorvidApp(App[None]):
         except TimeoutError:
             logger.warning(
                 "manifest lookup for %s/%s timed out; offering debug without it", namespace, name
+            )
+            return None
+        except Exception:
+            # Fail open like _target_uid: an infrastructure error must not
+            # escape the worker and silently swallow the debug offer.
+            logger.exception(
+                "manifest lookup for %s/%s failed; offering debug without it", namespace, name
             )
             return None
 
@@ -1659,10 +1667,17 @@ class KorvidApp(App[None]):
         image: str,
         reason: str,
     ) -> None:
-        """Offer an immediate retry with the fallback image after a pull failure."""
-        fallback = self.config.debug_default_image or FALLBACK_IMAGE
+        """Offer an immediate retry with the fallback image after a pull failure.
+
+        Air-gapped guard: when `debug.images` is configured without a
+        `debug.default_image`, no public busybox is offered - notify only.
+        """
+        if self.config.debug_images and not self.config.debug_default_image:
+            fallback = None
+        else:
+            fallback = self.config.debug_default_image or FALLBACK_IMAGE
         target = f"{name}/{container}" if container else name
-        if fallback == image or len(self.screen_stack) > 1:
+        if fallback is None or fallback == image or len(self.screen_stack) > 1:
             self.notify(
                 f"kubectl debug: image pull failed for {image} ({reason})",
                 severity="error",

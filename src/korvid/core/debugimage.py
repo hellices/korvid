@@ -45,7 +45,7 @@ _IMAGE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("python", re.compile(r"(?:^|[/:._-])(python|pypy)(?:$|[/:._@-])")),
     ("nodejs", re.compile(r"(?:^|[/:._-])(node|nodejs)(?:$|[/:._@-])")),
-    ("golang", re.compile(r"(?:^|[/:._-])(golang)(?:$|[/:._@-])")),
+    ("golang", re.compile(r"(?:^|[/:._-])(golang|go)(?:$|[/:._@-])")),
 )
 
 #: Well-known debug/inspector ports.
@@ -131,7 +131,9 @@ def recommend_debug_images(
     Zero config: a detected runtime leads with its KoolKits toolkit, then
     netshoot for network debugging, then the busybox fallback.  When
     `images_cfg` is set (air-gapped / private registry), only configured
-    images are offered — public registry access is never assumed.
+    images are offered — public registry access is never assumed, so without
+    a configured `default_image` there is no generic fallback entry and the
+    list may be empty (the UI then offers only the custom-image prompt).
     """
     fallback = default_image or FALLBACK_IMAGE
     detected = detect_runtime(manifest, container)
@@ -151,7 +153,8 @@ def recommend_debug_images(
                 _add(
                     configured, f"{runtime} toolkit (configured)", f"detected {runtime} — {signal}"
                 )
-        _add(fallback, "default (configured)", "configured fallback image")
+        if default_image:
+            _add(default_image, "default (configured)", "configured fallback image")
         return options
 
     if detected is not None:
