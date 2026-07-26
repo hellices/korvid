@@ -176,7 +176,7 @@ def make_app(
             namespace="default",
             kube_context=kube_context,
             readonly=readonly,
-            debug_images=debug_images or {},
+            debug_images=debug_images,
             debug_default_image=debug_default_image,
         ),
         store=store,
@@ -741,6 +741,28 @@ async def test_debug_picker_air_gapped_without_default_omits_busybox(tmp_path: P
             assert "busybox" not in " ".join(options)
 
 
+async def test_debug_picker_explicit_empty_images_config_custom_only(tmp_path: Path) -> None:
+    """debug.images configured as an empty mapping is a deliberate
+    restriction: no public images are offered, only the custom prompt."""
+    app = make_app(
+        [_pod("api-1")],
+        audit=AuditLog(tmp_path / "audit.jsonl"),
+        get_manifest=_jvm_manifest(),
+        debug_images={},
+    )
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", return_value=1),
+        patch("korvid.ui.app.subprocess.run", return_value=SimpleNamespace(returncode=1)),
+        patch.object(type(app), "suspend", return_value=_noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            assert _pick_options(app) == ["Custom image…"]
+
+
 async def test_debug_picker_custom_image_prompt(tmp_path: Path) -> None:
     """'Custom image…' opens an input prompt; the typed image reaches the
     approval dialog and the kubectl debug argv."""
@@ -1161,6 +1183,51 @@ async def test_debug_runs_when_pod_uid_unchanged(tmp_path: Path) -> None:
             await until(pilot, lambda: len(debug_calls) >= 1)
     assert [argv[1] for argv in calls] == ["exec"]
     assert debug_calls[0][1] == "debug"
+
+
+async def test_debug_aborts_when_baseline_snapshot_sees_replacement(tmp_path: Path) -> None:
+    """The pre-attach baseline snapshot can block for seconds; if it observes
+    a different pod uid than the approved one, the attach never starts."""
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        [_pod("api-1")],
+        audit=AuditLog(audit_path),
+        get_manifest=_uid_manifests(["uid-original"]),
+    )
+    calls: list[list[str]] = []
+    debug_calls: list[list[str]] = []
+    replaced_pod = json.dumps({"metadata": {"uid": "uid-replacement"}, "status": {}}).encode()
+
+    def fake_run(argv: list[str], **kwargs: Any) -> SimpleNamespace:
+        if argv[1] == "exec":  # shell probe: no usable shell -> debug offered
+            return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=0, stdout=replaced_pod)
+
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", side_effect=_recording_call(calls)),
+        patch("korvid.ui.app.subprocess.Popen", side_effect=_fake_popen(debug_calls)),
+        patch("korvid.ui.app.subprocess.run", side_effect=fake_run),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            await pilot.press("y")
+            await until(
+                pilot,
+                lambda: any("was replaced" in str(n.message) for n in app._notifications),
+            )
+            await until(
+                pilot,
+                lambda: (
+                    audit_path.exists() and "pod replaced before attach" in audit_path.read_text()
+                ),
+            )
+    assert debug_calls == []  # kubectl debug never started
 
 
 async def test_debug_not_offered_when_pod_gone(tmp_path: Path) -> None:

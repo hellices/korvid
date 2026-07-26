@@ -1427,7 +1427,7 @@ class KorvidApp(App[None]):
         options = recommend_debug_images(
             manifest,
             container,
-            images_cfg=self.config.debug_images or None,
+            images_cfg=self.config.debug_images,
             default_image=self.config.debug_default_image,
         )
         prompts = {f"{opt.image}  ({opt.label})": opt.image for opt in options}
@@ -1572,18 +1572,30 @@ class KorvidApp(App[None]):
         target = f"{name}/{container}" if container else name
         with self.suspend():
             exit_code, pull_failure = self._run_debug_process(
-                argv, f"korvid debug → {target} (exit to return)", namespace, name, image
+                argv,
+                f"korvid debug → {target} (exit to return)",
+                namespace,
+                name,
+                image,
+                approved_uid,
             )
         self.refresh()
+        if exit_code is None:
+            # The baseline snapshot saw a different pod incarnation: the
+            # attach never started.
+            await self._audit_debug_outcome(
+                audit, namespace, name, detail, "error: pod replaced before attach"
+            )
+            self.notify(
+                f"kubectl debug cancelled - pod {name} was replaced since the prompt was shown.",
+                severity="warning",
+            )
+            return
         if pull_failure is not None:
             outcome = f"error: image pull failed ({pull_failure})"
         else:
             outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
-        try:
-            await asyncio.to_thread(self._audit_debug, audit, namespace, name, detail, outcome)
-        except Exception:
-            logger.exception("audit append failed after kubectl debug")
-            self.notify("Audit write failed for the executed debug", severity="warning")
+        await self._audit_debug_outcome(audit, namespace, name, detail, outcome)
         if pull_failure is not None:
             self._offer_pull_retry(namespace, name, container, approved_uid, image, pull_failure)
             return
@@ -1593,6 +1605,17 @@ class KorvidApp(App[None]):
                 " — check RBAC (pods/ephemeralcontainers) and cluster version",
                 severity="warning",
             )
+
+    async def _audit_debug_outcome(
+        self, audit: AuditLog, namespace: str, name: str, detail: str, outcome: str
+    ) -> None:
+        """Record how a kubectl debug run ended. Best-effort: the mutation
+        already happened (or was aborted), so a failed append only warns."""
+        try:
+            await asyncio.to_thread(self._audit_debug, audit, namespace, name, detail, outcome)
+        except Exception:
+            logger.exception("audit append failed after kubectl debug")
+            self.notify("Audit write failed for the executed debug", severity="warning")
 
     _PULL_CHECK_INTERVAL = 2.5
     _PULL_CHECK_DEADLINE = 30.0
@@ -1617,8 +1640,14 @@ class KorvidApp(App[None]):
         return True
 
     def _run_debug_process(
-        self, argv: list[str], banner: str, namespace: str, name: str, image: str
-    ) -> tuple[int, str | None]:
+        self,
+        argv: list[str],
+        banner: str,
+        namespace: str,
+        name: str,
+        image: str,
+        approved_uid: str | None,
+    ) -> tuple[int | None, str | None]:
         """Run kubectl debug while watching for image pull failures.
 
         kubectl debug hangs silently on `ErrImagePull`/`ImagePullBackOff`; for
@@ -1626,7 +1655,9 @@ class KorvidApp(App[None]):
         `ephemeralContainerStatuses` are polled and a failing pull kills the
         attach so the caller can offer a retry with the fallback image instead
         of leaving the user staring at a hung terminal. Returns
-        `(exit_code, pull_failure_reason)`.
+        `(exit_code, pull_failure_reason)`; an exit code of `None` means the
+        attach was aborted because the baseline snapshot saw a different pod
+        incarnation than the one approved.
         """
         print(f"\x1b[2J\x1b[H\x1b[2m{banner}\x1b[0m", flush=True)
         # Snapshot ephemeral containers already on the pod: failed entries
@@ -1635,6 +1666,12 @@ class KorvidApp(App[None]):
         # a reliable baseline (snapshot failed) pull monitoring is disabled
         # for this attempt - a plain wait, exactly as before this feature.
         baseline = self._pod_status(namespace, name)
+        if baseline is not None and approved_uid is not None:
+            # The snapshot can block for seconds; don't let it widen the UID
+            # TOCTOU window - re-verify the incarnation it actually saw.
+            baseline_uid = (baseline.get("metadata") or {}).get("uid")
+            if baseline_uid is not None and baseline_uid != approved_uid:
+                return None, None
         proc = subprocess.Popen(argv)
         if baseline is None:
             return proc.wait(), None
@@ -1703,7 +1740,7 @@ class KorvidApp(App[None]):
         Air-gapped guard: when `debug.images` is configured without a
         `debug.default_image`, no public busybox is offered - notify only.
         """
-        if self.config.debug_images and not self.config.debug_default_image:
+        if self.config.debug_images is not None and not self.config.debug_default_image:
             fallback = None
         else:
             fallback = self.config.debug_default_image or FALLBACK_IMAGE

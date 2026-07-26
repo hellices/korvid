@@ -423,7 +423,7 @@ def test_logs_scalar_section_tolerated(tmp_path: Path) -> None:
 def test_debug_defaults() -> None:
     cfg = KorvidConfig()
     assert cfg.debug_default_image is None
-    assert cfg.debug_images == {}
+    assert cfg.debug_images is None  # unconfigured, not "configured empty"
 
 
 def test_debug_from_yaml(tmp_path: Path) -> None:
@@ -448,6 +448,15 @@ def test_debug_scalar_section_tolerated(tmp_path: Path) -> None:
     cfg_file.write_text("debug: nonsense\n")
     cfg = load_config(cfg_file)
     assert cfg.debug_default_image is None
+    assert cfg.debug_images is None
+
+
+def test_debug_explicit_empty_images_mapping_preserved(tmp_path: Path) -> None:
+    # `debug.images: {}` is a deliberate restriction (offer nothing public),
+    # distinct from the key being absent entirely.
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("debug:\n  images: {}\n")
+    cfg = load_config(cfg_file)
     assert cfg.debug_images == {}
 
 

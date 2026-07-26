@@ -28,7 +28,7 @@ KOOLKITS_IMAGES = {
 
 #: What each toolkit brings, for the recommendation reason line.
 _RUNTIME_TOOLS = {
-    "jvm": "jattach, async-profiler, JDK tools (jcmd/jstack/jmap)",
+    "jvm": "async-profiler, JDK tools (jcmd/jstack/jmap)",
     "python": "pyflame-style profilers, pdb tooling, pip",
     "nodejs": "node inspector tooling, npm",
     "golang": "delve, go tool pprof",
@@ -145,7 +145,7 @@ def recommend_debug_images(
             return
         options.append(DebugImageOption(image=image, label=label, reason=reason))
 
-    if images_cfg:
+    if images_cfg is not None:
         if detected is not None:
             runtime, signal = detected
             configured = images_cfg.get(runtime)
@@ -174,16 +174,21 @@ def recommend_debug_images(
 
 
 def ephemeral_container_names(manifest: dict[str, Any]) -> frozenset[str]:
-    """Names of ephemeral containers currently present in the pod status.
+    """Names of ephemeral containers already present on the pod.
 
+    Union of `spec.ephemeralContainers` and `status.ephemeralContainerStatuses`:
+    an entry can exist in the spec before its status appears, and its stale
+    failure status arriving mid-attach must not be blamed on the new attempt.
     Snapshot these before a `kubectl debug` attach so `find_pull_failure`
     can ignore stale entries from earlier attempts (which can never be
     removed from the pod spec) even when they used the same image.
     """
+    spec = manifest.get("spec") or {}
     status = manifest.get("status") or {}
-    return frozenset(
-        str(entry.get("name") or "") for entry in status.get("ephemeralContainerStatuses") or []
+    entries = list(spec.get("ephemeralContainers") or []) + list(
+        status.get("ephemeralContainerStatuses") or []
     )
+    return frozenset(str(entry.get("name") or "") for entry in entries)
 
 
 def _normalize_image_ref(image: str) -> str:

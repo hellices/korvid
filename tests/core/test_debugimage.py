@@ -207,6 +207,19 @@ def test_recommend_images_config_without_default_or_match_returns_empty() -> Non
     assert options == []
 
 
+def test_recommend_explicit_empty_images_config_offers_nothing_public() -> None:
+    """debug.images configured as an empty mapping is a deliberate restriction:
+    never fall back to public koolkits/netshoot/busybox."""
+    assert recommend_debug_images(_pod(image="openjdk:17"), "app", images_cfg={}) == []
+    options = recommend_debug_images(
+        _pod(image="openjdk:17"),
+        "app",
+        images_cfg={},
+        default_image="registry.corp.local/tools/busybox:1.36",
+    )
+    assert [o.image for o in options] == ["registry.corp.local/tools/busybox:1.36"]
+
+
 def test_recommend_default_image_overrides_busybox() -> None:
     options = recommend_debug_images(
         _pod(), "app", default_image="registry.corp.local/busybox:1.36"
@@ -322,3 +335,14 @@ def test_ephemeral_container_names() -> None:
     manifest = _pod_with_ephemeral_status("busybox:1.36", "ErrImagePull")
     assert ephemeral_container_names(manifest) == frozenset({"debugger-abc"})
     assert ephemeral_container_names({}) == frozenset()
+
+
+def test_ephemeral_container_names_includes_spec_entries() -> None:
+    # An entry can exist in spec.ephemeralContainers before its status
+    # appears; the snapshot must cover it so a stale failure status arriving
+    # mid-attach is not blamed on the new attempt.
+    manifest = {
+        "spec": {"ephemeralContainers": [{"name": "debugger-old", "image": "busybox:1.36"}]},
+        "status": {},
+    }
+    assert ephemeral_container_names(manifest) == frozenset({"debugger-old"})
