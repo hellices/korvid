@@ -101,18 +101,29 @@ async def test_shift_c_sorts_by_cpu_missing_metrics_last() -> None:
 
 
 async def test_shift_m_sorts_by_memory() -> None:
-    pods = [_pod("small"), _pod("big")]
-    usage = [_metrics("small", 0.1, 10 * 2**20), _metrics("big", 0.1, 500 * 2**20)]
+    # Alphabetical order (hungry < tiny) opposes memory order so a no-op
+    # M binding cannot pass this by accident.
+    pods = [_pod("tiny"), _pod("hungry")]
+    usage = [_metrics("tiny", 0.1, 10 * 2**20), _metrics("hungry", 0.1, 500 * 2**20)]
     app, _ = make_app_with_metrics(pods, [usage])
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        # Wait for the metrics join before sorting on it.
+        await until(
+            pilot,
+            lambda: any(
+                "500" in str(cell) for i in range(table.row_count) for cell in table.get_row_at(i)
+            ),
+            label="metrics joined",
+        )
         await pilot.press("M")
         await until(
             pilot,
-            lambda: _names(table) == ["big", "small"],
+            lambda: _names(table) == ["hungry", "tiny"],
             label="mem descending",
         )
+        assert any(label.startswith("MEM") and "▼" in label for label in _header_labels(table))
 
 
 async def test_sort_survives_watch_updates() -> None:

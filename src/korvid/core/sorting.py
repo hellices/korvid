@@ -81,7 +81,12 @@ def sort_rows(
         metrics: Live usage lookup; required for `cpu`/`mem` values (rows
             without a sample — or all rows when the lookup is None — are
             treated as missing).
+
+    Raises:
+        ValueError: If `spec.column` is not one of `SORT_COLUMNS`.
     """
+    if spec.column not in SORT_COLUMNS:
+        raise ValueError(f"unsupported sort column {spec.column!r}; expected one of {SORT_COLUMNS}")
     keyed: list[tuple[Any, Summary]] = [(_value(row, spec.column, metrics), row) for row in rows]
     present = [(value, row) for value, row in keyed if value is not None]
     missing = [row for value, row in keyed if value is None]

@@ -4,6 +4,8 @@ missing values sort last deterministically."""
 
 from __future__ import annotations
 
+import pytest
+
 from korvid.core.sorting import SortSpec, sort_rows, toggle_sort
 from korvid.k8s.metrics import PodMetrics
 from korvid.k8s.models import GenericSummary, PodSummary
@@ -162,3 +164,10 @@ def test_ties_break_by_namespace_then_name() -> None:
     ]
     ordered = sort_rows(rows, SortSpec("age", descending=True))
     assert [r.namespace for r in ordered] == ["aa", "zz"]
+
+
+def test_sort_rows_rejects_unknown_column() -> None:
+    # Without validation an unknown column would silently fall through to
+    # the metrics branch and return a plausible but wrong order.
+    with pytest.raises(ValueError, match="unsupported sort column"):
+        sort_rows([_pod("a")], SortSpec("restarts", descending=True))
