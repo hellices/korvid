@@ -904,6 +904,86 @@ async def test_debug_pull_failure_no_retry_when_fallback_is_chosen_image(tmp_pat
     assert len(debug_calls) == 1
 
 
+async def test_debug_pull_monitoring_disabled_without_baseline(tmp_path: Path) -> None:
+    """When the pre-attach snapshot cannot be taken, pull monitoring is
+    disabled for the attempt: without a reliable baseline a stale same-image
+    failure from an earlier attempt could be blamed on this attach."""
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app([_pod("api-1")], audit=AuditLog(audit_path))
+    debug_calls: list[list[str]] = []
+    stale_json = json.dumps(
+        {
+            "status": {
+                "ephemeralContainerStatuses": [
+                    {
+                        "name": "debugger-old",
+                        "image": DEBUG_IMAGE,
+                        "state": {"waiting": {"reason": "ErrImagePull"}},
+                    }
+                ]
+            }
+        }
+    )
+    gets = 0
+
+    def fake_run(argv: list[str], **kwargs: Any) -> SimpleNamespace:
+        nonlocal gets
+        if argv[1] == "exec":
+            return SimpleNamespace(returncode=1)
+        gets += 1
+        if gets == 1:  # the snapshot get fails transiently
+            return SimpleNamespace(returncode=1, stdout=b"")
+        return SimpleNamespace(returncode=0, stdout=stale_json)
+
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.Popen", side_effect=_fake_popen(debug_calls, ["hang"])),
+        patch("korvid.ui.app.subprocess.call", return_value=1),
+        patch("korvid.ui.app.subprocess.run", side_effect=fake_run),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            await pilot.press("y")
+            await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+            assert not any("image pull failed" in n.message for n in app._notifications)
+    assert len(debug_calls) == 1
+
+
+async def test_debug_pull_failure_detected_on_final_poll_at_deadline(tmp_path: Path) -> None:
+    """A pull failure appearing just as the polling window expires must still
+    be detected: the status check runs after every timed wait, before the
+    deadline switches to an unbounded wait."""
+    app = make_app([_pod("api-1")], audit=AuditLog(tmp_path / "audit.jsonl"))
+    debug_calls: list[list[str]] = []
+
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.Popen", side_effect=_fake_popen(debug_calls, ["hang"])),
+        patch("korvid.ui.app.subprocess.call", return_value=1),
+        patch("korvid.ui.app.subprocess.run", side_effect=_pull_failure_run(DEBUG_IMAGE)),
+        # Deadline elapses immediately: the first timed wait is also the last.
+        patch.object(type(app), "_PULL_CHECK_DEADLINE", 0.0),
+        patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, PickScreen))
+            await pilot.press("enter")  # busybox — same as fallback: notify only
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            await pilot.press("y")
+            await until(
+                pilot,
+                lambda: any("image pull failed" in n.message for n in app._notifications),
+            )
+    assert len(debug_calls) == 1
+
+
 async def test_debug_pull_failure_air_gapped_without_default_notifies_only(
     tmp_path: Path,
 ) -> None:

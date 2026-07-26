@@ -1631,24 +1631,32 @@ class KorvidApp(App[None]):
         print(f"\x1b[2J\x1b[H\x1b[2m{banner}\x1b[0m", flush=True)
         # Snapshot ephemeral containers already on the pod: failed entries
         # from earlier attempts can never be removed from the spec, and one
-        # using the same image must not be blamed on this new attach.
-        pre_existing = ephemeral_container_names(self._pod_status(namespace, name) or {})
+        # using the same image must not be blamed on this new attach. Without
+        # a reliable baseline (snapshot failed) pull monitoring is disabled
+        # for this attempt - a plain wait, exactly as before this feature.
+        baseline = self._pod_status(namespace, name)
         proc = subprocess.Popen(argv)
+        if baseline is None:
+            return proc.wait(), None
+        pre_existing = ephemeral_container_names(baseline)
         deadline = monotonic() + self._PULL_CHECK_DEADLINE
         while True:
             try:
                 return proc.wait(timeout=self._PULL_CHECK_INTERVAL), None
             except subprocess.TimeoutExpired:
                 pass
-            if monotonic() > deadline:
-                # Pulls that survive the window are treated as slow-but-alive:
-                # stop polling and wait for the interactive session to end.
-                return proc.wait(), None
+            # Check for a failure after EVERY timed wait - including the one
+            # during which the deadline elapsed - so a pull failure appearing
+            # at the edge of the window is still caught.
             failure = self._check_pull_failure(namespace, name, image, ignore=pre_existing)
             if failure is not None:
                 proc.kill()
                 proc.wait()
                 return 1, failure
+            if monotonic() > deadline:
+                # Pulls that survive the window are treated as slow-but-alive:
+                # stop polling and wait for the interactive session to end.
+                return proc.wait(), None
 
     def _pod_status(self, namespace: str, name: str) -> dict[str, Any] | None:
         """Pod manifest via kubectl shell-out, best-effort (None on any error).
