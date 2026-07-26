@@ -19,6 +19,7 @@ from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from korvid.core.portforward import ForwardRecord, ForwardRegistry
+from korvid.k8s.portforward import FORWARDABLE_KINDS
 
 _CSS = """
 PortForwardScreen {
@@ -151,11 +152,17 @@ _REFRESH_SECONDS = 1.0
 
 
 def forward_row(record: ForwardRecord) -> str:
-    """One list row: id, liveness, and the local -> remote mapping."""
+    """One list row: id, liveness, and the local -> remote mapping.
+
+    The target carries its kind (`pod/` or `service/`) — both kinds may
+    legally share a namespace, name, and port, and ctrl+d / r act on the
+    highlighted row, so the mapping alone must disambiguate them.
+    """
     spec = record.spec
+    prefix = FORWARDABLE_KINDS.get(spec.kind, spec.kind)
     return (
         f"#{record.id}  {record.status:<6}  "
-        f"localhost:{spec.local_port} -> {spec.namespace}/{spec.name}:{spec.remote_port}"
+        f"localhost:{spec.local_port} -> {spec.namespace}/{prefix}/{spec.name}:{spec.remote_port}"
     )
 
 
@@ -249,11 +256,15 @@ class ForwardListScreen(ModalScreen[None]):
             self.notify("Forward is still alive — nothing to re-attach", severity="warning")
             return
         if self._target_exists is not None and not await self._target_exists(record):
-            # A Deployment replaces a dead pod under a new name — re-attaching
-            # to the old name would just fail again.
+            # A Deployment replaces a dead pod under a new name; a Service
+            # keeps its name, so the hint stays kind-appropriate.
+            hint = (
+                "its replacement has a new name; start a fresh forward with shift+f"
+                if record.spec.kind == "pods"
+                else "start a fresh forward with shift+f once it is recreated"
+            )
             self.notify(
-                f"{record.spec.name} no longer exists — its replacement has a new"
-                " name; start a fresh forward with shift+f",
+                f"{record.spec.name} no longer exists — {hint}",
                 severity="warning",
             )
             return

@@ -3911,6 +3911,34 @@ class KorvidApp(App[None]):
         empty.update(Text(message))
         empty.display = True
 
+    async def _audit_teardown_stops(self, records: list[ForwardRecord]) -> None:
+        """Best-effort audit for forwards stopped at session teardown.
+
+        Append failures (full disk, permissions) are logged and skipped: one
+        bad entry must not abort the rest of unmount — the forwards are
+        already stopped, and watch cleanup still has to run.
+        """
+        audit = self._audit
+        if audit is None:
+            return
+        for record in records:
+            spec = record.spec
+            try:
+                await asyncio.to_thread(
+                    audit.append,
+                    action="port-forward-stop",
+                    kind=spec.kind,
+                    namespace=spec.namespace,
+                    name=spec.name,
+                    version="v1",
+                    detail=(
+                        f"localhost:{spec.local_port} -> {spec.name}:{spec.remote_port}"
+                        " (session teardown)"
+                    ),
+                )
+            except OSError as exc:
+                logger.warning("teardown audit for forward #%s failed: %s", record.id, exc)
+
     async def on_unmount(self) -> None:
         # Cancel any active log stream tasks before the event loop shuts down.
         if self._ns_prefetch_task is not None:
@@ -3932,23 +3960,7 @@ class KorvidApp(App[None]):
             # Session-scoped by design (issue #38): forwards never outlive
             # the app that started them. Audit synchronously (to_thread, not
             # run_worker) — workers are already torn down at unmount.
-            audit = self._audit
-            for record in self._forwards.stop_all():
-                if audit is None:
-                    continue
-                spec = record.spec
-                await asyncio.to_thread(
-                    audit.append,
-                    action="port-forward-stop",
-                    kind=spec.kind,
-                    namespace=spec.namespace,
-                    name=spec.name,
-                    version="v1",
-                    detail=(
-                        f"localhost:{spec.local_port} -> {spec.name}:{spec.remote_port}"
-                        " (session teardown)"
-                    ),
-                )
+            await self._audit_teardown_stops(self._forwards.stop_all())
         await self.watch_manager.stop_all()
 
 

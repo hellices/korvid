@@ -312,7 +312,7 @@ async def test_pf_command_lists_active_forwards() -> None:
         assert len(rows) == 1
         assert "alive" in rows[0]
         assert "localhost:8080" in rows[0]
-        assert "default/api-1:80" in rows[0]
+        assert "default/pod/api-1:80" in rows[0]
 
 
 async def test_pf_ctrl_d_stops_forward_and_audits(tmp_path: Path) -> None:
@@ -475,3 +475,87 @@ async def test_pf_reattach_verifies_target_still_exists() -> None:
         await pilot.press("r")
         await until(pilot, lambda: len(procs) == 2)
         assert registry.forwards()[0].status == "alive"
+
+
+def test_forward_row_includes_target_kind() -> None:
+    """Pods and services can share namespace/name/port — the row must disambiguate."""
+    from korvid.core.portforward import ForwardRecord
+    from korvid.ui.widgets.port_forward_screen import forward_row
+
+    pod_row = forward_row(
+        ForwardRecord(
+            id=1,
+            spec=ForwardSpec(
+                kind="pods", namespace="default", name="api", local_port=80, remote_port=80
+            ),
+        )
+    )
+    svc_row = forward_row(
+        ForwardRecord(
+            id=2,
+            spec=ForwardSpec(
+                kind="services", namespace="default", name="api", local_port=80, remote_port=80
+            ),
+        )
+    )
+    assert "pod/api" in pod_row
+    assert "service/api" in svc_row
+
+
+async def test_pf_reattach_gone_message_is_kind_appropriate() -> None:
+    """A deleted Service keeps its name — don't claim its replacement is renamed."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+
+    async def _gone(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        raise ApiStatusError(404, f'{kind} "{name}" not found')
+
+    app = make_app([_pod("api-1")], forwards=registry, get_manifest=_gone)
+    registry.start(
+        ForwardSpec(
+            kind="services", namespace="default", name="web", local_port=8080, remote_port=80
+        )
+    )
+    procs[0].returncode = 1
+    notices: list[str] = []
+    async with app.run_test() as pilot:
+        await _wait_rows(app, pilot)
+        await _open_pf(app, pilot)
+        screen = app.screen
+        original = screen.notify
+
+        def _capture(message: str, **kwargs: Any) -> Any:
+            notices.append(message)
+            return original(message, **kwargs)
+
+        screen.notify = _capture  # type: ignore[method-assign]  # test spy
+        await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
+        await pilot.press("r")
+        await until(pilot, lambda: len(notices) > 0)
+        assert len(procs) == 1
+        assert "replacement has a new" not in notices[0]
+        assert "no longer exists" in notices[0]
+
+
+async def test_teardown_audit_failure_does_not_abort_shutdown(tmp_path: Path) -> None:
+    """A full disk during a teardown audit must not skip the rest of unmount."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+
+    class _FailingAudit(AuditLog):
+        def append(self, **kwargs: Any) -> None:
+            raise OSError("disk full")
+
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        audit=_FailingAudit(tmp_path / "audit.log", context="test-ctx"),
+    )
+    registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+    # Shutdown completed despite the audit failure; the forward was stopped.
+    assert procs[0].terminated
+    assert registry.forwards() == []
