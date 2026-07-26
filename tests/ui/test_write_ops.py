@@ -969,3 +969,50 @@ def test_yaml_equal_string_keyed_fast_path_matches_structural_scan() -> None:
     del missing["key-0"]
     missing["key-x"] = [0, {"nested": "0"}]
     assert not _yaml_equal(big, missing)
+
+
+async def test_e_edit_selection_change_during_fetch_never_opens_editor(tmp_path: Path) -> None:
+    """Review round 9: the manifest GET is an awaited round-trip after the
+    permission revalidation - a selection change while it is in flight must
+    abort before the editor opens, not merely discard the completed edit."""
+    seen: list[str] = []
+    app_holder: list[KorvidApp] = []
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        app_holder[0].query_one(ResourceTable).move_cursor(row=1)
+        return copy.deepcopy(_EDIT_MANIFEST)
+
+    async def edit_text(text: str) -> str | None:
+        seen.append(text)
+        return None
+
+    rec = Recorder()
+    other = PodSummary(
+        name="web-2",
+        namespace="default",
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node=None,
+        uid="pod-uid-2",
+    )
+    app = make_app(
+        rec,
+        tmp_path / "a.jsonl",
+        get_manifest=get_manifest,
+        edit_text=edit_text,
+        extra_pods=[other],
+    )
+    app_holder.append(app)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(
+            pilot,
+            lambda: any(
+                "selection changed during the manifest fetch" in n.message
+                for n in app._notifications
+            ),
+        )
+    assert seen == []  # the editor never opened for the stale target
+    assert rec.calls == []

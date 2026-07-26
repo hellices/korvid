@@ -1549,6 +1549,29 @@ class KorvidApp(App[None]):
             _done,
         )
 
+    async def _fetch_manifest_for_edit(
+        self, label: str, meta: ResourceMeta, ns: str | None, name: str
+    ) -> dict[str, Any] | None:
+        """Fetch the manifest for an edit; None (with a notification) aborts.
+        The fetch is another awaited round-trip: a selection change while it
+        was in flight must abort before the editor opens for a stale target,
+        not merely discard the completed edit afterwards."""
+        if self._get_manifest is None:
+            return None
+        try:
+            manifest = await self._get_manifest(self._canonical_kind(self.current_kind), ns, name)
+        except Exception as exc:
+            self.notify(f"edit {label} failed: {exc}", severity="error")
+            return None
+        if not self._write_context_intact("edit", meta, ns, name, phase="the manifest fetch"):
+            return None
+        # managedFields is server-side bookkeeping noise; kubectl edit hides
+        # it too. resourceVersion stays so concurrent modifications 409.
+        metadata = manifest.get("metadata")
+        if isinstance(metadata, dict):
+            metadata.pop("managedFields", None)
+        return manifest
+
     async def action_edit_resource(self) -> None:
         """e: open the selected resource's manifest in $EDITOR and PUT the
         edited version back (kubectl edit parity)."""
@@ -1563,16 +1586,9 @@ class KorvidApp(App[None]):
         if not await self._precheck_keybinding_write("edit", meta, ns, name):
             return
         label = f"{self._gvr_label(meta)}/{name}"
-        try:
-            manifest = await self._get_manifest(self._canonical_kind(self.current_kind), ns, name)
-        except Exception as exc:
-            self.notify(f"edit {label} failed: {exc}", severity="error")
+        manifest = await self._fetch_manifest_for_edit(label, meta, ns, name)
+        if manifest is None:
             return
-        # managedFields is server-side bookkeeping noise; kubectl edit hides
-        # it too. resourceVersion stays so concurrent modifications 409.
-        metadata = manifest.get("metadata")
-        if isinstance(metadata, dict):
-            metadata.pop("managedFields", None)
         original_text = yaml.safe_dump(manifest, sort_keys=False)
         edit = self._edit_text or self._edit_in_external_editor
         edited = self._parse_edited_manifest(
