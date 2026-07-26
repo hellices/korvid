@@ -191,7 +191,10 @@ def _event_line_fresh(event_ts: datetime | None, summary: PodSummary) -> bool:
     An event older than the last termination or the last Ready-condition
     flip explains a previous failure; an undated event cannot be proven
     fresher than a dated status (timestamp fields are optional). Both are
-    suppressed.
+    suppressed. Since nearly every pod carries a Ready condition, an
+    undated Warning is in practice always suppressed — a deliberate trade:
+    real Warnings virtually always carry a timestamp, and a wrong "cause"
+    is worse than none.
     """
     cutoffs = [
         ts

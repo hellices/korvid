@@ -455,4 +455,6 @@ def test_event_older_than_ready_transition_is_stale_for_event_only_hint() -> Non
     after = datetime(2026, 7, 26, 9, 0, tzinfo=UTC)
     assert _event_line_fresh(before, not_ready) is False  # explains a previous failure
     assert _event_line_fresh(after, not_ready) is True
-    assert _event_line_fresh(None, not_ready) is False  # undated vs dated status
+    # Nearly every pod has a Ready condition, so an undated Warning is in
+    # practice always suppressed: a wrong "cause" is worse than none.
+    assert _event_line_fresh(None, not_ready) is False
