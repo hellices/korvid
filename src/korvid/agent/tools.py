@@ -486,7 +486,9 @@ def _validated_resources(value: Any) -> dict[str, dict[str, dict[str, str]]]:
     for container, sections in value.items():
         if not isinstance(container, str) or not container.strip():
             raise ValueError(f"container name must be a non-empty string, got {container!r}")
-        validated[container] = _validated_sections(container, sections)
+        # Container names cannot contain whitespace; normalize padded keys
+        # the same way amounts are normalized.
+        validated[container.strip()] = _validated_sections(container, sections)
     return validated
 
 

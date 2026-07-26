@@ -556,3 +556,22 @@ async def test_resize_pod_normalizes_padded_amounts() -> None:
     assert not result.startswith("ERROR:")
     _, kwargs = bridge.calls[-1]
     assert kwargs["resources"] == {"app": {"requests": {"cpu": "200m"}}}
+
+
+async def test_resize_pod_normalizes_padded_container_names() -> None:
+    """Kubernetes container names cannot contain spaces: a padded key like
+    ' app ' must be normalized before it crosses the UI bridge, not turned
+    into an approval dialog for a patch guaranteed to fail."""
+    bridge = FakeBridge()
+    executor = ToolExecutor(kube=None, aliases={}, ui=bridge)  # type: ignore[arg-type]
+    result = await executor.execute(
+        "resize_pod",
+        {
+            "name": "web-1",
+            "namespace": "default",
+            "resources": {" app ": {"requests": {"cpu": "200m"}}},
+        },
+    )
+    assert not result.startswith("ERROR:")
+    _, kwargs = bridge.calls[-1]
+    assert kwargs["resources"] == {"app": {"requests": {"cpu": "200m"}}}
