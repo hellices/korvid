@@ -878,3 +878,45 @@ async def test_e_edit_selection_change_during_editor_aborts(tmp_path: Path) -> N
         )
         assert not isinstance(app.screen, ConfirmScreen)
     assert rec.calls == []
+
+
+async def test_external_editor_mkstemp_failure_notifies_and_cancels(tmp_path: Path) -> None:
+    """Review round 6 (suppressed): a full/unavailable temp dir must abort
+    with a notification instead of raising out of the action."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        with mock.patch("tempfile.mkstemp", side_effect=OSError("no space")):
+            result = await app._edit_in_external_editor("a: 1\n")
+        assert result is None
+        await _until(
+            pilot, lambda: any("temp file failed" in n.message for n in app._notifications)
+        )
+    assert rec.calls == []
+
+
+async def test_external_editor_undecodable_output_notifies_and_cancels(tmp_path: Path) -> None:
+    """Review round 6 (suppressed): editor output that is not valid UTF-8
+    raises UnicodeDecodeError (a ValueError, not OSError) - it must land in
+    the cancellation path."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl")
+
+    def write_binary(argv: list[str]) -> int:
+        Path(argv[-1]).write_bytes(b"\xff\xfe\x00broken")
+        return 0
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        with (
+            mock.patch.dict(os.environ, {"VISUAL": "true", "EDITOR": ""}),
+            mock.patch("subprocess.call", side_effect=write_binary),
+            mock.patch.object(type(app), "suspend", mock.MagicMock()) as fake_suspend,
+        ):
+            fake_suspend.return_value.__enter__ = mock.MagicMock(return_value=None)
+            fake_suspend.return_value.__exit__ = mock.MagicMock(return_value=False)
+            result = await app._edit_in_external_editor("a: 1\n")
+        assert result is None
+        await _until(pilot, lambda: any("unreadable" in n.message for n in app._notifications))
+    assert rec.calls == []

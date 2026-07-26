@@ -1646,15 +1646,20 @@ class KorvidApp(App[None]):
 
     async def _edit_in_external_editor(self, text: str) -> str | None:
         """Suspend the TUI and open $VISUAL/$EDITOR (vi fallback) on a temp
-        file; None cancels. Invocation and read failures (missing executable,
-        malformed quoting, unreadable temp file) abort with a notification
-        instead of an unhandled action error. The blocking call runs in a
-        thread so background tasks keep running while the editor is open."""
+        file; None cancels. Invocation and I/O failures (missing executable,
+        malformed quoting, temp-dir exhaustion, undecodable editor output)
+        abort with a notification instead of an unhandled action error. The
+        blocking call runs in a thread so background tasks keep running
+        while the editor is open."""
         editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-        fd, tmp = tempfile.mkstemp(suffix=".yaml", prefix="korvid-edit-")
+        try:
+            fd, tmp = tempfile.mkstemp(suffix=".yaml", prefix="korvid-edit-")
+        except OSError as exc:
+            self.notify(f"edit temp file failed: {exc}", severity="error")
+            return None
         try:
             try:
-                with os.fdopen(fd, "w") as fh:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     fh.write(text)
                 argv = [*shlex.split(editor), tmp]
                 with self.suspend():
@@ -1666,8 +1671,10 @@ class KorvidApp(App[None]):
             if code != 0:
                 return None
             try:
-                return Path(tmp).read_text()
-            except OSError as exc:
+                # Explicit UTF-8: a locale mismatch or binary editor output
+                # raises UnicodeDecodeError (a ValueError, not an OSError).
+                return Path(tmp).read_text(encoding="utf-8")
+            except (OSError, ValueError) as exc:
                 self.notify(f"editor result unreadable: {exc}", severity="error")
                 return None
         finally:
