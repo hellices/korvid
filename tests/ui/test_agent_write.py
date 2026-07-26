@@ -294,7 +294,11 @@ async def test_agent_write_times_out_as_expired(
         task = asyncio.ensure_future(
             app.agent_request_write("delete", "deployments", "web", namespace="default")
         )
-        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        # On a slow runner the 0.2s window can open AND expire between two
+        # 0.05s polls, so waiting on the ConfirmScreen alone is a race:
+        # accept task completion as the equally-valid observable outcome.
+        # (Dialog surfacing itself is covered by the other tests here.)
+        await _until(pilot, lambda: task.done() or isinstance(app.screen, ConfirmScreen))
         result = await task  # no keystroke; the timeout resolves it as expired
         assert "expired" in result.lower()
         assert "declined" not in result.lower()
