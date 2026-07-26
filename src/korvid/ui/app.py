@@ -2485,7 +2485,10 @@ class KorvidApp(App[None]):
             self.notify("Install unavailable: no manifest source", severity="warning")
             return
         try:
-            manifest = await self._get_manifest(pkg_meta.plural, ns, name)
+            # Fetch by the canonical view kind (which may be a group-qualified
+            # alias), as the edit path does: a bare plural would resolve to a
+            # colliding foreign CRD's meta when names overlap.
+            manifest = await self._get_manifest(self._canonical_kind(self.current_kind), ns, name)
         except Exception as exc:
             self.notify(f"Could not fetch the package manifest: {exc}", severity="error")
             return
@@ -2617,7 +2620,9 @@ class KorvidApp(App[None]):
             self.notify("Approve unavailable: no manifest source", severity="warning")
             return
         try:
-            manifest = await self._get_manifest(meta.plural, ns, name)
+            # Canonical view kind, not the bare plural: safe under alias
+            # collisions (see _start_operator_install).
+            manifest = await self._get_manifest(self._canonical_kind(self.current_kind), ns, name)
         except Exception as exc:
             self.notify(f"Could not fetch the install plan: {exc}", severity="error")
             return

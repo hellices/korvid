@@ -145,6 +145,7 @@ def make_app(
     olm: bool = True,
     write_ops: WriteOps | None = None,
     aliases: dict[str, ResourceMeta] | None = None,
+    fetch_log: list[str] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
 
@@ -155,6 +156,8 @@ def make_app(
             await asyncio.sleep(0.01)
 
     async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        if fetch_log is not None:
+            fetch_log.append(kind)
         return (manifests or {}).get(name, {"metadata": {"name": name}})
 
     async def list_namespaces() -> list[str]:
@@ -185,7 +188,6 @@ async def _navigate(pilot, command: str, expect_kind: str) -> None:  # type: ign
 async def test_operators_command_lists_packagemanifests_with_catalog_columns() -> None:
     app = make_app({"packagemanifests": [_package("cert-manager"), _package("argocd-operator")]})
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _navigate(pilot, "operators", "packagemanifests")
         table = app.query_one(ResourceTable)
         labels = [str(col.label) for col in table.columns.values()]
@@ -200,7 +202,6 @@ async def test_operators_command_lists_packagemanifests_with_catalog_columns() -
 async def test_operators_command_without_olm_explains_why() -> None:
     app = make_app({}, olm=False)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await pilot.press("colon")
         for ch in "operators":
             await pilot.press(ch)
@@ -216,7 +217,6 @@ async def test_operators_command_without_olm_explains_why() -> None:
 async def test_subscriptions_view_shows_olm_columns() -> None:
     app = make_app({"subscriptions": [_subscription("cert-manager")]})
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _navigate(pilot, "subscriptions", "subscriptions")
         table = app.query_one(ResourceTable)
         labels = [str(col.label) for col in table.columns.values()]
@@ -240,7 +240,6 @@ async def test_csv_phase_styling_highlights_failures() -> None:
         }
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _navigate(pilot, "csv", "clusterserviceversions")
         table = app.query_one(ResourceTable)
         labels = [str(col.label) for col in table.columns.values()]
@@ -316,7 +315,6 @@ async def test_install_key_walks_wizard_confirm_and_creates_subscription(
         write_ops=rec,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _navigate(pilot, "operators", "packagemanifests")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="package listed")
@@ -355,7 +353,6 @@ async def test_install_key_outside_catalog_view_warns(tmp_path: Path) -> None:
         write_ops=rec,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _navigate(pilot, "subscriptions", "subscriptions")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="subscription listed")
@@ -380,7 +377,6 @@ async def test_approve_key_on_pending_installplan_replaces_with_approved(
         write_ops=rec,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _navigate(pilot, "installplans", "installplans")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="installplan listed")
@@ -410,7 +406,6 @@ async def test_approve_key_on_already_approved_installplan_notifies(tmp_path: Pa
         write_ops=rec,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _navigate(pilot, "installplans", "installplans")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="installplan listed")
@@ -437,7 +432,6 @@ async def test_install_cancelled_when_catalog_row_was_recreated(tmp_path: Path) 
         write_ops=rec,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _navigate(pilot, "operators", "packagemanifests")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="package listed")
@@ -466,7 +460,6 @@ async def test_approve_key_on_automatic_installplan_notifies(tmp_path: Path) -> 
         write_ops=rec,
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _navigate(pilot, "installplans", "installplans")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="installplan listed")
@@ -498,7 +491,6 @@ async def test_foreign_subscriptions_kind_keeps_generic_columns() -> None:
         aliases={"subscriptions": foreign},
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _navigate(pilot, "subscriptions", "subscriptions")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="row listed")
@@ -531,10 +523,35 @@ async def test_group_qualified_alias_navigates_to_olm_not_foreign_crd() -> None:
         aliases={"subscriptions": foreign, qualified: olm_sub},
     )
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _navigate(pilot, qualified, qualified)
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="olm subscription listed")
         headers = [str(col.label) for col in table.columns.values()]
         assert "CHANNEL" in headers  # the OLM typed table, not the generic one
         assert table.get_row_at(0)[0] == "cert-manager"
+
+
+async def test_install_fetches_manifest_by_canonical_view_kind(tmp_path: Path) -> None:
+    """When the OLM catalog lives behind a group-qualified alias (a foreign
+    CRD claimed the bare plural), the install flow must fetch the manifest by
+    the canonical view kind - a bare-plural fetch would hit the foreign CRD."""
+    qualified = f"packagemanifests.{PACKAGES_GROUP}"
+    foreign = ResourceMeta("PackageManifest", "packagemanifests", "vendor.example.com", "v1", True)
+    fetch_log: list[str] = []
+    app = make_app(
+        {qualified: [_package("cert-manager")]},
+        manifests={"cert-manager": _pkg_manifest("cert-manager")},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=Recorder(),
+        aliases={"packagemanifests": foreign, qualified: PKG_META, "subscriptions": SUB_META},
+        fetch_log=fetch_log,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, qualified, qualified)
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="package listed")
+        await pilot.press("I")
+        await until(
+            pilot, lambda: isinstance(app.screen, OperatorInstallPrompt), label="wizard open"
+        )
+        assert fetch_log == [qualified]
