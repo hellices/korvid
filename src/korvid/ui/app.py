@@ -1184,9 +1184,9 @@ class KorvidApp(App[None]):
             # still be running, or may have failed (pods-only fallback) -
             # indistinguishable states from here.
             self.notify(
-                "OLM not detected: the packages.operators.coreos.com API group"
-                " was not discovered, so there is no operator catalog"
-                " (discovery may still be running)",
+                "The operator catalog is unavailable: the"
+                " packages.operators.coreos.com API group was not discovered"
+                " (OLM may be absent, or discovery may still be running)",
                 severity="warning",
             )
             return
@@ -2599,7 +2599,10 @@ class KorvidApp(App[None]):
             # here; the wizard already validated its own inputs.
             self.notify(f"install cancelled: {exc}", severity="warning")
             return
-        if not await self._permitted("install", sub_meta, namespace, facts.package):
+        # Create is authorized against the collection POST before the object
+        # name exists (resourceNames rules cannot grant create), so the SSAR
+        # must omit the name to match the real request.
+        if not await self._permitted("install", sub_meta, namespace, ""):
             return
         if not self._write_context_intact(
             "install", pkg_meta, ns, facts.package, phase="the install wizard"

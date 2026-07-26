@@ -669,3 +669,41 @@ async def test_operators_syntax_error_with_olm_present_is_not_reported_as_absent
             label="generic unknown-command message",
         )
         assert not any("OLM not detected" in n.message for n in app._notifications)
+
+
+async def test_install_permission_precheck_omits_object_name(tmp_path: Path) -> None:
+    """The install SSAR authorizes the collection POST: Kubernetes checks
+    create before the object name exists and resourceNames rules cannot grant
+    create, so the pre-check must omit the name to match the real request."""
+    rec = Recorder()
+    checks: list[tuple[str, str, str]] = []
+    app = make_app(
+        {"packagemanifests": [_package("cert-manager")]},
+        manifests={"cert-manager": _pkg_manifest("cert-manager")},
+        audit_path=tmp_path / "audit.jsonl",
+        write_ops=rec,
+    )
+
+    async def record_check(
+        verb: str,
+        resource: str,
+        subresource: str,
+        namespace: str | None,
+        group: str = "",
+        name: str = "",
+    ) -> bool:
+        checks.append((verb, resource, name))
+        return True
+
+    app._check_permission = record_check
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "operators", "packagemanifests")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="package listed")
+        await pilot.press("I")
+        await until(
+            pilot, lambda: isinstance(app.screen, OperatorInstallPrompt), label="wizard open"
+        )
+        await pilot.press("enter")
+        await until(pilot, lambda: bool(checks), label="permission pre-check ran")
+        assert checks[0] == ("create", "subscriptions", "")
