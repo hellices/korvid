@@ -1583,15 +1583,21 @@ class KorvidApp(App[None]):
         if not isinstance(parsed, dict):
             self.notify(f"edit {label} aborted: not a mapping", severity="error")
             return None
-        if parsed == original:
-            self.notify(f"edit {label}: no changes", severity="information")
-            return None
+        # Restore the fetched resourceVersion *before* the semantic no-op
+        # comparison: an edit that only deleted it is still "no changes",
+        # and `metadata: null` must not defeat the restore - an unversioned
+        # PUT would silently clobber concurrent changes.
         original_meta = original.get("metadata")
         rv = original_meta.get("resourceVersion") if isinstance(original_meta, dict) else None
         if rv is not None:
-            parsed_meta = parsed.setdefault("metadata", {})
-            if isinstance(parsed_meta, dict) and "resourceVersion" not in parsed_meta:
-                parsed_meta["resourceVersion"] = rv
+            parsed_meta = parsed.get("metadata")
+            if not isinstance(parsed_meta, dict):
+                parsed_meta = {}
+                parsed["metadata"] = parsed_meta
+            parsed_meta.setdefault("resourceVersion", rv)
+        if parsed == original:
+            self.notify(f"edit {label}: no changes", severity="information")
+            return None
         return parsed
 
     @staticmethod
@@ -1604,18 +1610,30 @@ class KorvidApp(App[None]):
 
     async def _edit_in_external_editor(self, text: str) -> str | None:
         """Suspend the TUI and open $VISUAL/$EDITOR (vi fallback) on a temp
-        file; None when the editor exits non-zero (treated as cancel)."""
+        file; None cancels. Invocation and read failures (missing executable,
+        malformed quoting, unreadable temp file) abort with a notification
+        instead of an unhandled action error. The blocking call runs in a
+        thread so background tasks keep running while the editor is open."""
         editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
         fd, tmp = tempfile.mkstemp(suffix=".yaml", prefix="korvid-edit-")
         try:
-            with os.fdopen(fd, "w") as fh:
-                fh.write(text)
-            with self.suspend():
-                code = subprocess.call([*shlex.split(editor), tmp])
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(text)
+                argv = [*shlex.split(editor), tmp]
+                with self.suspend():
+                    code = await asyncio.to_thread(subprocess.call, argv)
+            except (OSError, ValueError) as exc:
+                self.notify(f"editor {editor!r} failed: {exc}", severity="error")
+                return None
             self.refresh()
             if code != 0:
                 return None
-            return Path(tmp).read_text()
+            try:
+                return Path(tmp).read_text()
+            except OSError as exc:
+                self.notify(f"editor result unreadable: {exc}", severity="error")
+                return None
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)

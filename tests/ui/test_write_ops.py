@@ -8,11 +8,14 @@ audit log.
 import asyncio
 import copy
 import json
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
+import yaml
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -609,4 +612,62 @@ async def test_e_edit_without_manifest_source_notifies(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await pilot.press("e")
         await _until(pilot, lambda: any("unavailable" in n.message for n in app._notifications))
+    assert rec.calls == []
+
+
+async def test_e_edit_deleting_only_resource_version_is_a_noop(tmp_path: Path) -> None:
+    """Review: restore the version before the semantic comparison, so an edit
+    that only deleted resourceVersion still counts as 'no changes'."""
+
+    def drop_rv_only(text: str) -> str:
+        lines = [ln for ln in text.splitlines() if "resourceVersion" not in ln]
+        return "\n".join(lines) + "\n"
+
+    get_manifest, edit_text, _ = _edit_fixtures(drop_rv_only)
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: any("no changes" in n.message for n in app._notifications))
+    assert rec.calls == []
+
+
+async def test_e_edit_null_metadata_gets_rebuilt_with_resource_version(tmp_path: Path) -> None:
+    """Review: `metadata: null` defeats setdefault - the fetched
+    resourceVersion must still be restored (inside a mapping) so the PUT
+    cannot silently clobber concurrent changes."""
+
+    def null_metadata(text: str) -> str:
+        manifest = yaml.safe_load(text)
+        manifest["metadata"] = None
+        manifest["spec"]["containers"][0]["image"] = "nginx:2"
+        return yaml.safe_dump(manifest, sort_keys=False)
+
+    get_manifest, edit_text, _ = _edit_fixtures(null_metadata)
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+    manifest = rec.calls[0][4]
+    assert isinstance(manifest, dict)
+    assert manifest["metadata"] == {"resourceVersion": "41"}
+
+
+async def test_external_editor_invocation_failure_notifies_and_cancels(tmp_path: Path) -> None:
+    """Review: a broken $EDITOR (malformed quoting / missing executable) must
+    abort with a notification instead of an unhandled action error."""
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        with mock.patch.dict(os.environ, {"VISUAL": "bad 'quote", "EDITOR": ""}):
+            result = await app._edit_in_external_editor("a: 1\n")
+        assert result is None
+        await _until(pilot, lambda: any("editor" in n.message for n in app._notifications))
     assert rec.calls == []
