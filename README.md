@@ -29,6 +29,9 @@ in the dialog; `--readonly` disables them all.
 | `l` | pods table | Open / close log pane for selected pod |
 | `L` | pods table | Merge logs of all currently filtered pods (up to 8) |
 | `f` | log pane | Toggle JSON-formatted / raw display |
+| `w` | log pane | Toggle line wrap |
+| `t` | log pane | Toggle kubelet-timestamp prefix |
+| `Ctrl-S` | log pane | Save the current buffer to `$XDG_DATA_HOME/korvid/logs/` (default `~/.local/share/korvid/logs/`) |
 | `p` | log pane | Reload pane with previous (terminated) container logs |
 | `n` / `N` | log pane | Jump to next / previous search hit |
 | `Ctrl-D` | table | Delete selected resource (confirm dialog; cluster-scoped kinds require typing the name) |
@@ -36,6 +39,7 @@ in the dialog; `--readonly` disables them all.
 | `S` | table | Scale selected deployment / replicaset / statefulset (replica prompt + confirm dialog) |
 | `R` | pods table | In-place resize of pod CPU/memory requests/limits (Kubernetes 1.35+; prompt + confirm dialog) |
 | `e` | table | Edit selected resource manifest in `$VISUAL`/`$EDITOR` (kubectl edit style; confirm dialog before the PUT) |
+| `i` | pods table | Open hint details overlay for a troubled pod (full container trouble + recent Warning events) |
 | `Ctrl-A` | global | Toggle AI agent panel |
 | `q` | global | Quit |
 | `Esc` | log pane | Close pane (or dismiss search / filter bar) |
@@ -44,10 +48,29 @@ in the dialog; `--readonly` disables them all.
 
 The pods table shows live `CPU` / `MEM` usage and `%CPU/R` / `%MEM/R`
 (usage as a percentage of the declared request) from the `metrics.k8s.io`
-API, polled every 15 seconds while the pods view is on screen.  Percentages
-are colour-coded (green &lt; 70 % &le; yellow &lt; 90 % &le; red).  On clusters
-without metrics-server the columns show `-` and korvid keeps polling, so a
-later install is picked up without a restart.
+API, polled every 15 seconds while the pods view is on screen.  The number
+is always relative to the request, but the colour keys off enforced
+**limits**: running above the request is normal bursting, while approaching
+an enforced limit means OOMKill (memory) or throttling (CPU) territory.
+Every applicable ceiling is checked — each container against its own limit
+(the kubelet enforces them independently) and, on K8s 1.34+, the pod
+aggregate against the pod-level limit — and the most severe colour wins
+(green &lt; 70 % &le; yellow &lt; 90 % &le; red).  Only when no limit bounds
+the usage does the colour fall back to the request ratio, capped at yellow
+(bursting without a ceiling is expected, never critical).
+On clusters without metrics-server the columns show `-` and korvid keeps
+polling, so a later install is picked up without a restart.
+
+## Ops hints
+
+When the cursor lands on a troubled pod row (CrashLoopBackOff,
+ImagePullBackOff, failing readiness, …) a hint strip appears under the
+table with up to two concise lines built from the pod's container statuses
+and its freshest Warning event — verbatim API data, no synthesized
+diagnoses.  Anything that does not fit folds behind `+N more (i: details)`;
+press `i` to open a read-only overlay with every troubled container (full
+message, exit code, restart count, last-seen age) and the pod's recent
+Warning events.
 
 ## Log viewer
 

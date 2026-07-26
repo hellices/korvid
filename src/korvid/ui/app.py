@@ -37,6 +37,7 @@ from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.errors import explain_api_error
 from korvid.core.logbuffer import LogBuffer
+from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.core.secrets import mask_secret_manifest
 from korvid.core.store import ALL_NAMESPACES, ResourceStore
 from korvid.core.watch import WatchManager
@@ -67,6 +68,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
+from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.hint_strip import HintStrip, parse_rfc3339
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
@@ -260,6 +262,12 @@ _UID_LOOKUP_TIMEOUT = 10.0
 #: approval flow.
 _PREVIEW_TIMEOUT = 3.0
 
+#: Upper bound on the hint-overlay events fetch (issue #34): the trouble half
+#: comes from the status the app already holds, so a stalled API connection
+#: must not delay the overlay past this - the events are marked unavailable
+#: instead.
+_HINT_EVENTS_TIMEOUT = 3.0
+
 
 class _ReplayFilter:
     """Drops tail lines replayed by the API after a reconnect.
@@ -320,6 +328,9 @@ class KorvidApp(App[None]):
         # not "shift+x"; bind both so the shortcut works outside Pilot tests.
         Binding("L", "logs_multi", "Multi-log", show=False),
         ("f", "log_format", "JSON/raw"),
+        Binding("w", "log_wrap", "Wrap", show=False),
+        Binding("t", "log_timestamps", "Timestamps", show=False),
+        Binding("ctrl+s", "log_save", "Save logs", show=False),
         ("p", "log_previous", "Prev logs"),
         ("n", "log_search_next", "Next hit"),
         Binding("shift+n", "log_search_prev", "Prev hit"),
@@ -330,6 +341,7 @@ class KorvidApp(App[None]):
         Binding("R", "resize_pod", "Resize", show=False),
         Binding("S", "scale_resource", "Scale", show=False),
         Binding("e", "edit_resource", "Edit", show=False),
+        Binding("i", "hint_details", "Hint details", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -470,6 +482,11 @@ class KorvidApp(App[None]):
         command_bar = self.query_one(CommandBar)
         command_bar.known = lambda a: self.aliases[a].plural if a in self.aliases else None
         command_bar.command_words = sorted({*self.aliases, "ns", "namespaces", "q", "quit"})
+        # Seed session-scoped log display settings from config (logs.wrap /
+        # logs.timestamps); the w/t keys toggle them from there.
+        log_pane = self.query_one(LogPane)
+        log_pane.wrap_lines = self.config.log_wrap
+        log_pane.show_timestamps = self.config.log_timestamps
         self._prefetch_namespaces()
 
         # Both callbacks fire from watch tasks on the same loop; post_message is
@@ -850,6 +867,58 @@ class KorvidApp(App[None]):
         for k in expired:
             del self._hint_event_cache[k]
         self._hint_event_cache[cache_key] = (now, line, event_ts)
+
+    def action_hint_details(self) -> None:
+        """Open the read-only detail overlay for the hinted pod row (issue #34):
+        the full trouble list plus recent Warning events - everything the
+        two-line strip folded away."""
+        if self.current_kind != "pods":
+            return
+        row_key = self._cursor_row_key()
+        if row_key is None:
+            return
+        summary = self._find_pod_summary(row_key)
+        if summary is None or not _pod_needs_hint(summary):
+            return
+        self.run_worker(
+            self._open_hint_details(row_key, summary), exclusive=True, group="hint-detail"
+        )
+
+    async def _open_hint_details(self, row_key: str, summary: PodSummary) -> None:
+        """Fetch events best-effort, then push the overlay: the trouble half
+        renders even when the events API fails ("unavailable" is stated, not
+        conflated with "no events"). The context is revalidated after the
+        await - the cursor, view, or screen stack may have changed meanwhile,
+        and stale details for the wrong pod are worse than none."""
+        events: list[dict[str, Any]] = []
+        events_unavailable = False
+        if self._get_events is not None:
+            try:
+                events = await asyncio.wait_for(
+                    self._get_events.fetch(
+                        summary.namespace, summary.name, uid=summary.uid or None
+                    ),
+                    timeout=_HINT_EVENTS_TIMEOUT,
+                )
+            except Exception:  # events are decoration; trouble alone still helps
+                events_unavailable = True
+        if len(self.screen_stack) > 1:  # another dialog opened during the fetch
+            return
+        if self.current_kind != "pods" or self._cursor_row_key() != row_key:
+            return
+        fresh = self._find_pod_summary(row_key)
+        if fresh is None or fresh.uid != summary.uid:
+            return  # deleted or recreated mid-fetch
+        if not _pod_needs_hint(fresh):
+            return  # recovered mid-fetch: the strip is gone, details would be noise
+        await self.push_screen(
+            HintDetailScreen(
+                f"{summary.namespace}/{summary.name}",
+                fresh.trouble,
+                events,
+                events_unavailable=events_unavailable,
+            )
+        )
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Enter drills down: pods -> containers (k9s convention); kinds with a
@@ -2570,12 +2639,45 @@ class KorvidApp(App[None]):
 
     async def action_log_format(self) -> None:
         """Toggle JSON/raw formatting and re-render the buffer (``f`` key)."""
+        self._toggle_log_display(LogPane.toggle_format)
+
+    async def action_log_wrap(self) -> None:
+        """Toggle line wrapping and re-render the buffer (``w`` key)."""
+        self._toggle_log_display(LogPane.toggle_wrap)
+
+    async def action_log_timestamps(self) -> None:
+        """Toggle the timestamp prefix and re-render the buffer (``t`` key)."""
+        self._toggle_log_display(LogPane.toggle_timestamps)
+
+    def _toggle_log_display(self, toggle: Callable[[LogPane], None]) -> None:
+        """Shared path for display toggles: flip the setting, replay the buffer.
+
+        ``LogPane.replay`` restores contextual banners (previous-logs,
+        overflow), so every toggle must funnel through here instead of
+        clearing panels ad hoc.
+        """
         log_pane = self.query_one(LogPane)
         if not log_pane.display:
             return
-        log_pane.toggle_format()
+        toggle(log_pane)
         if self._log_buffer is not None:
             log_pane.replay(self._log_buffer.lines())
+
+    def action_log_save(self) -> None:
+        """Save the current log buffer to a generated file (``ctrl+s``)."""
+        log_pane = self.query_one(LogPane)
+        if not log_pane.display or self._log_buffer is None:
+            return
+        lines = self._log_buffer.lines()
+        if not lines:
+            self.notify("Log buffer is empty — nothing to save", severity="warning")
+            return
+        try:
+            path = export_log_lines(lines, default_log_export_dir())
+        except OSError as exc:
+            self.notify(f"Failed to save logs: {exc}", severity="error")
+            return
+        self.notify(f"Logs saved to {path}")
 
     async def action_log_previous(self) -> None:
         """Re-open the same streams in previous-container-log mode (``p`` key)."""

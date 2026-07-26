@@ -32,7 +32,7 @@ def test_render_crashloop_line_shows_reason_message_and_last_exit() -> None:
     assert "back-off 5m0s restarting failed container" in text
     assert "exit 137 (OOMKilled)" in text
     assert "restarts 12" in text
-    assert "last 5m ago" in text  # relative age, not the raw RFC 3339 timestamp
+    assert "last seen 5m ago" in text  # relative age, not the raw RFC 3339 timestamp
     assert "2026-" not in text
 
 
@@ -60,22 +60,95 @@ def test_render_waiting_without_termination_omits_exit_segment() -> None:
     assert "restarts" not in text  # zero restarts adds no noise
 
 
-def test_render_caps_entries_and_reports_remainder() -> None:
+def test_render_caps_strip_at_two_lines_with_fold_indicator() -> None:
+    """Issue #34: at most 2 concise lines; the rest folds behind the detail
+    overlay, and the fold indicator points at its keybinding."""
     entries = tuple(
         ContainerTrouble(container=f"c{i}", reason="CrashLoopBackOff") for i in range(5)
     )
     lines = render_trouble_lines(entries)
-    assert len(lines) == 3  # capped: 2 detail lines + "+3 more"
-    assert "+3 more" in lines[-1].plain
+    assert len(lines) == 2
+    assert "+4 more" in lines[-1].plain
+    assert "i: details" in lines[-1].plain
 
 
 def test_render_event_line_appended_when_given() -> None:
     lines = render_trouble_lines(
         (ContainerTrouble(container="app", reason="CrashLoopBackOff"),),
-        event="Warning BackOff: restarting failed container app",
+        event="FailedMount: MountVolume.SetUp failed for volume 'config'",
     )
     assert len(lines) == 2
-    assert "Warning BackOff" in lines[-1].plain
+    assert "FailedMount" in lines[-1].plain
+
+
+def test_event_repeating_the_trouble_reason_is_deduplicated() -> None:
+    """Issue #34: the freshest Warning usually restates the status trouble
+    (BackOff event vs CrashLoopBackOff status) - show only one line."""
+    lines = render_trouble_lines(
+        (ContainerTrouble(container="app", reason="CrashLoopBackOff"),),
+        event="BackOff: Back-off restarting failed container app in pod app-abc_ns(uid)",
+    )
+    assert len(lines) == 1
+    assert "CrashLoopBackOff" in lines[0].plain
+
+
+def test_structured_line_strips_pod_and_container_fragments() -> None:
+    """Issue #34: raw messages repeat what the row already shows
+    (container=..., pod=<name>_<ns>(<uid>)) - pure noise in the strip."""
+    entry = ContainerTrouble(
+        container="demo-app",
+        reason="CrashLoopBackOff",
+        message=(
+            "back-off 5m0s restarting failed container=demo-app "
+            "pod=demo-app-bcb546479-ccqnz_app(d534f965-8a3b-4d6e-9f00-1c2d3e4f5a6b)"
+        ),
+        restarts=696,
+    )
+    lines = render_trouble_lines((entry,))
+    text = lines[0].plain
+    assert "pod=" not in text
+    assert "container=" not in text
+    assert "d534f965" not in text
+    assert "back-off 5m0s" in text
+    assert "restarts 696" in text
+
+
+def test_structured_line_leads_with_styled_bullet_and_container() -> None:
+    """Issue #34: visual structure - bullet, container, reason as separate
+    styled segments instead of one flat colored string."""
+    entry = ContainerTrouble(container="demo-app", reason="CrashLoopBackOff")
+    lines = render_trouble_lines((entry,))
+    text = lines[0]
+    assert text.plain.startswith("\u25cf ")
+    styles = [str(span.style) for span in text.spans]
+    assert any("cyan" in s for s in styles)  # container segment
+
+
+def test_second_line_prefers_event_over_fold_when_single_trouble() -> None:
+    """One trouble + a distinct event fills both lines - nothing folded,
+    no indicator noise."""
+    lines = render_trouble_lines(
+        (ContainerTrouble(container="app", reason="CrashLoopBackOff"),),
+        event="FailedMount: MountVolume.SetUp failed",
+    )
+    assert len(lines) == 2
+    assert "i: details" not in lines[0].plain
+    assert "i: details" not in lines[1].plain
+
+
+def test_folded_event_counts_in_fold_indicator() -> None:
+    """Two troubles + a distinct event: the event no longer fits the 2-line
+    budget and must be counted as folded."""
+    lines = render_trouble_lines(
+        (
+            ContainerTrouble(container="app", reason="CrashLoopBackOff"),
+            ContainerTrouble(container="sidecar", reason="ImagePullBackOff"),
+        ),
+        event="FailedMount: MountVolume.SetUp failed",
+    )
+    assert len(lines) == 2
+    assert "+2 more" in lines[-1].plain  # second trouble + the event fold
+    assert "i: details" in lines[-1].plain
 
 
 async def test_hint_strip_widget_shows_and_clears() -> None:
@@ -145,6 +218,17 @@ async def test_full_hint_fits_within_the_strip() -> None:
         strip = app.query_one(HintStrip)
         strip.show_trouble(trouble, event="Back-off restarting failed container")
         await pilot.pause()
-        # 2 detail rows + "+1 more" + event = 4 content rows, plus border-top:
-        # nothing may be clipped, including the final Warning line
-        assert strip.region.height == 5
+        # capped at 2 content rows (issue #34) plus border-top:
+        # remainder and event fold behind the detail overlay
+        assert strip.region.height == 3
+
+
+def test_generic_event_reason_is_not_deduped_by_substring() -> None:
+    """Review fix (PR #51 r2): a short generic event reason (`Failed`) that
+    merely appears inside a trouble reason describes a different failure -
+    only suffix matches (BackOff in CrashLoopBackOff) are the same story."""
+    lines = render_trouble_lines(
+        (ContainerTrouble(container="app", reason="FailedScheduling"),),
+        event="Failed: image pull failed",
+    )
+    assert len(lines) == 2  # kept: FailedScheduling does not end with Failed

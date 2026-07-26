@@ -129,6 +129,42 @@ def _effective_value(spec: dict[str, Any], bucket: str, key: str) -> float | int
     return max(sum(parse_memory(v) for v in main) + int(sidecar_total), int(init_peak))
 
 
+@dataclass(frozen=True)
+class ContainerLimits:
+    """One container's declared limits - the kubelet enforces each limit
+    independently, so severity coloring needs the per-container breakdown,
+    not a pod-aggregate sum (PR #51 review)."""
+
+    name: str
+    cpu_cores: float | None = None
+    mem_bytes: int | None = None
+
+
+def _container_limits(spec: dict[str, Any]) -> tuple[ContainerLimits, ...]:
+    """Limits for every container that may contribute to pod metrics: main
+    containers, sidecars, and classic inits (which appear while running)."""
+    out: list[ContainerLimits] = []
+    for c in list(spec.get("containers") or []) + list(spec.get("initContainers") or []):
+        limits = (c.get("resources") or {}).get("limits") or {}
+        out.append(
+            ContainerLimits(
+                name=str(c.get("name") or ""),
+                cpu_cores=None if "cpu" not in limits else parse_cpu(limits["cpu"]),
+                mem_bytes=None if "memory" not in limits else parse_memory(limits["memory"]),
+            )
+        )
+    return tuple(out)
+
+
+def _pod_level_limit(spec: dict[str, Any], key: str) -> float | int | None:
+    """spec.resources.limits (K8s 1.34+): the only true whole-pod ceiling.
+    Summed container limits are never one - each is enforced independently."""
+    value = ((spec.get("resources") or {}).get("limits") or {}).get(key)
+    if value is None:
+        return None
+    return parse_cpu(value) if key == "cpu" else parse_memory(value)
+
+
 def _format_effective(value: float | int | None, key: str) -> str:
     """Display string for an effective resource value; '-' when undeclared."""
     if value is None:
@@ -538,10 +574,19 @@ class PodSummary:
     mem_request: str = "-"
     cpu_limit: str = "-"
     mem_limit: str = "-"
-    #: Exact effective requests for ratio math; the display strings above are
-    #: rounded (1500Ki renders as 1Mi) and must never feed a percentage.
+    #: Exact effective requests for ratio math; the display strings above
+    #: are rounded (1500Ki renders as 1Mi) and must never feed a percentage.
     cpu_request_cores: float | None = None
     mem_request_bytes: int | None = None
+    #: Pod-level spec.resources.limits (K8s 1.34+) only - the sole true
+    #: whole-pod ceiling. Per-container limits live in `container_limits`;
+    #: they are enforced independently and must never be summed (PR #51).
+    cpu_limit_cores: float | None = None
+    mem_limit_bytes: int | None = None
+    #: Declared limits per container (main + init) for severity coloring
+    #: (issue #50): proximity to a container's own limit is OOMKill/throttle
+    #: territory, over-request is normal burst.
+    container_limits: tuple[ContainerLimits, ...] = ()
     containers: tuple[str, ...] = ()
     uid: str = ""
     owner_uids: tuple[str, ...] = ()
@@ -561,6 +606,8 @@ class PodSummary:
         restarts = sum(int(s.get("restartCount", 0)) for s in statuses)
         cpu_request = _effective_value(spec, "requests", "cpu")
         mem_request = _effective_value(spec, "requests", "memory")
+        cpu_limit = _pod_level_limit(spec, "cpu")
+        mem_limit = _pod_level_limit(spec, "memory")
         return cls(
             name=str(meta.get("name", "")),
             namespace=str(meta.get("namespace", "")),
@@ -575,6 +622,9 @@ class PodSummary:
             mem_limit=_effective_resource(spec, "limits", "memory"),
             cpu_request_cores=None if cpu_request is None else float(cpu_request),
             mem_request_bytes=None if mem_request is None else int(mem_request),
+            cpu_limit_cores=None if cpu_limit is None else float(cpu_limit),
+            mem_limit_bytes=None if mem_limit is None else int(mem_limit),
+            container_limits=_container_limits(spec),
             containers=tuple(
                 str(c["name"]) for c in (spec.get("containers") or []) if c.get("name")
             ),
