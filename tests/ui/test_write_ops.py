@@ -6,9 +6,11 @@ audit log.
 """
 
 import asyncio
+import copy
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -66,6 +68,20 @@ class Recorder(WriteOps):
         self.uids.append(uid)
         self.calls.append(("restart", meta.plural, namespace, name))
 
+    async def replace_object(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        manifest: dict[str, Any],
+        *,
+        uid: str | None = None,
+    ) -> None:
+        if self.fail_status is not None:
+            raise ApiStatusError(self.fail_status, "boom")
+        self.uids.append(uid)
+        self.calls.append(("replace", meta.plural, namespace, name, manifest))
+
 
 def make_app(
     recorder: Recorder,
@@ -73,6 +89,8 @@ def make_app(
     *,
     readonly: bool = False,
     permitted: bool | None = None,
+    get_manifest: object = None,
+    edit_text: object = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -117,6 +135,8 @@ def make_app(
         store=store,
         watch_manager=WatchManager(store, source),
         aliases=dict(_ALIASES),
+        get_manifest=get_manifest,  # type: ignore[arg-type]  # tests pass duck-typed callables
+        edit_text=edit_text,  # type: ignore[arg-type]  # tests pass duck-typed callables
         write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,
@@ -421,3 +441,172 @@ async def test_conflict_reports_target_changed_since_approval(tmp_path: Path) ->
             pilot,
             lambda: any("changed since it was approved" in n.message for n in app._notifications),
         )
+
+
+# Inline edit (issue #21) -------------------------------------------------------
+
+
+_EDIT_MANIFEST: dict[str, Any] = {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+        "name": "web-1",
+        "namespace": "default",
+        "resourceVersion": "41",
+        "managedFields": [{"manager": "kubectl"}],
+    },
+    "spec": {"containers": [{"name": "app", "image": "nginx:1"}]},
+}
+
+
+def _edit_fixtures(
+    edited: str | None | Callable[[str], str],
+) -> tuple[
+    Callable[..., Awaitable[dict[str, Any]]], Callable[[str], Awaitable[str | None]], list[str]
+]:
+    """(get_manifest, edit_text, seen_texts): edit_text records what the
+    'editor' was shown and returns `edited` (or `edited(text)` if callable)."""
+    seen: list[str] = []
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return copy.deepcopy(_EDIT_MANIFEST)
+
+    async def edit_text(text: str) -> str | None:
+        seen.append(text)
+        return edited(text) if callable(edited) else edited
+
+    return get_manifest, edit_text, seen
+
+
+async def test_e_edit_confirmed_replaces_with_uid(tmp_path: Path) -> None:
+    def bump_image(text: str) -> str:
+        assert "nginx:1" in text
+        return text.replace("nginx:1", "nginx:2")
+
+    get_manifest, edit_text, _seen = _edit_fixtures(bump_image)
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+    assert len(rec.calls) == 1
+    op, plural, ns, name, manifest = rec.calls[0]
+    assert (op, plural, ns, name) == ("replace", "pods", "default", "web-1")
+    assert isinstance(manifest, dict)
+    assert manifest["spec"]["containers"][0]["image"] == "nginx:2"
+    assert rec.uids == ["pod-uid-1"]
+    entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+    assert entries[0]["action"] == "edit"
+    assert entries[-1]["outcome"] == "success"
+
+
+async def test_e_edit_strips_managed_fields_from_editor_text(tmp_path: Path) -> None:
+    get_manifest, edit_text, seen = _edit_fixtures(None)
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: bool(seen))
+    assert "managedFields" not in seen[0]
+    assert "resourceVersion" in seen[0]
+
+
+async def test_e_edit_cancelled_editor_makes_no_call(tmp_path: Path) -> None:
+    get_manifest, edit_text, _ = _edit_fixtures(None)
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: any("cancelled" in n.message for n in app._notifications))
+    assert rec.calls == []
+
+
+async def test_e_edit_unchanged_text_is_a_noop(tmp_path: Path) -> None:
+    get_manifest, edit_text, _ = _edit_fixtures(lambda text: text)
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: any("no changes" in n.message for n in app._notifications))
+        assert not isinstance(app.screen, ConfirmScreen)
+    assert rec.calls == []
+
+
+async def test_e_edit_invalid_yaml_aborts(tmp_path: Path) -> None:
+    get_manifest, edit_text, _ = _edit_fixtures("{invalid: [yaml")
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: any("invalid YAML" in n.message for n in app._notifications))
+    assert rec.calls == []
+
+
+async def test_e_edit_non_mapping_yaml_aborts(tmp_path: Path) -> None:
+    get_manifest, edit_text, _ = _edit_fixtures("- just\n- a\n- list\n")
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl", get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: any("not a mapping" in n.message for n in app._notifications))
+    assert rec.calls == []
+
+
+async def test_e_edit_reinjects_deleted_resource_version(tmp_path: Path) -> None:
+    """resourceVersion removed by the user is restored from the fetched
+    manifest: an unversioned PUT would silently clobber concurrent changes."""
+
+    def drop_rv(text: str) -> str:
+        lines = [
+            ln
+            for ln in text.replace("nginx:1", "nginx:2").splitlines()
+            if "resourceVersion" not in ln
+        ]
+        return "\n".join(lines) + "\n"
+
+    get_manifest, edit_text, _ = _edit_fixtures(drop_rv)
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        await _until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
+    manifest = rec.calls[0][4]
+    assert isinstance(manifest, dict)
+    assert manifest["metadata"]["resourceVersion"] == "41"
+
+
+async def test_e_edit_readonly_blocked(tmp_path: Path) -> None:
+    get_manifest, edit_text, seen = _edit_fixtures(None)
+    rec = Recorder()
+    app = make_app(
+        rec, tmp_path / "a.jsonl", readonly=True, get_manifest=get_manifest, edit_text=edit_text
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: any("Read-only" in n.message for n in app._notifications))
+    assert seen == []
+    assert rec.calls == []
+
+
+async def test_e_edit_without_manifest_source_notifies(tmp_path: Path) -> None:
+    rec = Recorder()
+    app = make_app(rec, tmp_path / "a.jsonl")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await _until(pilot, lambda: any("unavailable" in n.message for n in app._notifications))
+    assert rec.calls == []

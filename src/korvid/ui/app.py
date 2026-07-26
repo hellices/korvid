@@ -6,13 +6,18 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
+import os
+import shlex
 import shutil
 import subprocess
+import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
+from pathlib import Path
 from time import monotonic
 from typing import Any, ClassVar, Literal
 
+import yaml
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.events import Key
@@ -156,6 +161,7 @@ class KorvidApp(App[None]):
         Binding("ctrl+d", "delete_resource", "Delete"),
         Binding("r", "rollout_restart", "Restart", show=False),
         Binding("S", "scale_resource", "Scale", show=False),
+        Binding("e", "edit_resource", "Edit", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -190,6 +196,7 @@ class KorvidApp(App[None]):
         check_permission: Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
         | None = None,
         mcp: MCPController | None = None,
+        edit_text: Callable[[str], Awaitable[str | None]] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -203,6 +210,7 @@ class KorvidApp(App[None]):
         self._audit = audit
         self._check_permission = check_permission
         self._mcp = mcp
+        self._edit_text = edit_text
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -1204,6 +1212,7 @@ class KorvidApp(App[None]):
         "scale": ("patch", "scale"),
         "rollout_restart": ("patch", ""),
         "debug": ("patch", "ephemeralcontainers"),
+        "edit": ("update", ""),
     }
 
     @staticmethod
@@ -1492,6 +1501,124 @@ class KorvidApp(App[None]):
             ),
             _done,
         )
+
+    async def action_edit_resource(self) -> None:
+        """e: open the selected resource's manifest in $EDITOR and PUT the
+        edited version back (kubectl edit parity)."""
+        ops = self._write_ops
+        if ops is None or self._get_manifest is None:
+            self.notify("Edit unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name, uid = target
+        if not await self._precheck_keybinding_write("edit", meta, ns, name):
+            return
+        label = f"{self._gvr_label(meta)}/{name}"
+        try:
+            manifest = await self._get_manifest(self._canonical_kind(self.current_kind), ns, name)
+        except Exception as exc:
+            self.notify(f"edit {label} failed: {exc}", severity="error")
+            return
+        # managedFields is server-side bookkeeping noise; kubectl edit hides
+        # it too. resourceVersion stays so concurrent modifications 409.
+        metadata = manifest.get("metadata")
+        if isinstance(metadata, dict):
+            metadata.pop("managedFields", None)
+        original_text = yaml.safe_dump(manifest, sort_keys=False)
+        edit = self._edit_text or self._edit_in_external_editor
+        edited = self._parse_edited_manifest(
+            label, manifest, original_text, await edit(original_text)
+        )
+        if edited is None:
+            return
+        # The editor round-trip is arbitrarily long: re-validate that the
+        # same row is still selected before pushing the confirmation.
+        if not self._write_context_intact("edit", meta, ns, name):
+            return
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_write(
+                        "edit",
+                        meta,
+                        ns,
+                        name,
+                        ops.replace_object(meta, ns, name, edited, uid=uid),
+                        detail=self._edit_detail(manifest, edited),
+                    )
+                )
+
+        await self.push_screen(
+            ConfirmScreen(
+                f"Apply edited {label}?",
+                f"PUT {label}{self._write_locus(ns)}",
+            ),
+            _done,
+        )
+
+    def _parse_edited_manifest(
+        self,
+        label: str,
+        original: dict[str, Any],
+        original_text: str,
+        edited_text: str | None,
+    ) -> dict[str, Any] | None:
+        """Validate the editor output; None (with a notification) aborts the
+        edit. Re-injects the fetched resourceVersion if the user deleted it -
+        an unversioned PUT would silently clobber concurrent changes."""
+        if edited_text is None:
+            self.notify(f"edit {label} cancelled", severity="warning")
+            return None
+        if edited_text == original_text:
+            self.notify(f"edit {label}: no changes", severity="information")
+            return None
+        try:
+            parsed = yaml.safe_load(edited_text)
+        except yaml.YAMLError as exc:
+            self.notify(f"edit {label} aborted: invalid YAML: {exc}", severity="error")
+            return None
+        if not isinstance(parsed, dict):
+            self.notify(f"edit {label} aborted: not a mapping", severity="error")
+            return None
+        if parsed == original:
+            self.notify(f"edit {label}: no changes", severity="information")
+            return None
+        original_meta = original.get("metadata")
+        rv = original_meta.get("resourceVersion") if isinstance(original_meta, dict) else None
+        if rv is not None:
+            parsed_meta = parsed.setdefault("metadata", {})
+            if isinstance(parsed_meta, dict) and "resourceVersion" not in parsed_meta:
+                parsed_meta["resourceVersion"] = rv
+        return parsed
+
+    @staticmethod
+    def _edit_detail(original: dict[str, Any], edited: dict[str, Any]) -> str:
+        """Audit detail: which top-level sections changed."""
+        changed = sorted(
+            key for key in set(original) | set(edited) if original.get(key) != edited.get(key)
+        )
+        return "changed: " + ", ".join(changed)
+
+    async def _edit_in_external_editor(self, text: str) -> str | None:
+        """Suspend the TUI and open $VISUAL/$EDITOR (vi fallback) on a temp
+        file; None when the editor exits non-zero (treated as cancel)."""
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+        fd, tmp = tempfile.mkstemp(suffix=".yaml", prefix="korvid-edit-")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(text)
+            with self.suspend():
+                code = subprocess.call([*shlex.split(editor), tmp])
+            self.refresh()
+            if code != 0:
+                return None
+            return Path(tmp).read_text()
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
     def _current_replicas(self, ns: str | None, name: str) -> int | None:
         """Desired replicas of the selected row, or None when the summary type

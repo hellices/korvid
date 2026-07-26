@@ -71,6 +71,18 @@ class Recorder(WriteOps):
         self.uids.append(uid)
         self.calls.append(("restart", meta.plural, namespace, name))
 
+    async def replace_object(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        manifest: dict[str, Any],
+        *,
+        uid: str | None = None,
+    ) -> None:
+        self.uids.append(uid)
+        self.calls.append(("replace", meta.plural, namespace, name, manifest))
+
 
 def make_app(
     recorder: Recorder,

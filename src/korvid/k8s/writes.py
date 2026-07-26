@@ -11,6 +11,7 @@ the object was deleted and recreated under the same name meanwhile.
 from __future__ import annotations
 
 import abc
+from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
 
@@ -41,3 +42,15 @@ class WriteOps(abc.ABC):
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> None:
         """Trigger a rolling restart by patching the pod template."""
+
+    @abc.abstractmethod
+    async def replace_object(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        manifest: dict[str, Any],
+        *,
+        uid: str | None = None,
+    ) -> None:
+        """PUT-replace the whole object with an edited manifest."""

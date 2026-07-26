@@ -822,3 +822,31 @@ async def test_delete_object_rejects_dot_name() -> None:
         with pytest.raises(ValueError, match="invalid URL path segment"):
             await client.delete_object(_deploy_meta(), "..", "web")
     api.call_api.assert_not_called()
+
+
+async def test_replace_object_puts_manifest_on_object_path() -> None:
+    client = KubeClient()
+    api = _write_api()
+    manifest = {"apiVersion": "apps/v1", "kind": "Deployment", "spec": {"replicas": 2}}
+    with patch.object(client, "_api", api):
+        await client.replace_object(_deploy_meta(), "default", "web", manifest)
+    args, kwargs = api.call_api.call_args
+    assert args[0] == "/apis/apps/v1/namespaces/default/deployments/web"
+    assert args[1] == "PUT"
+    assert kwargs["body"] == manifest
+    assert kwargs["header_params"]["Content-Type"] == "application/json"
+
+
+async def test_replace_object_pins_uid_precondition() -> None:
+    """The uid is injected into metadata: the apiserver answers 409 when the
+    live object is a different incarnation than the one that was approved."""
+    client = KubeClient()
+    api = _write_api()
+    manifest = {"metadata": {"name": "web", "resourceVersion": "41"}, "spec": {}}
+    with patch.object(client, "_api", api):
+        await client.replace_object(_deploy_meta(), "default", "web", manifest, uid="abc-123")
+    body = api.call_api.call_args.kwargs["body"]
+    assert body["metadata"]["uid"] == "abc-123"
+    assert body["metadata"]["resourceVersion"] == "41"
+    # The caller's manifest is not mutated.
+    assert "uid" not in manifest["metadata"]
