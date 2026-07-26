@@ -24,6 +24,7 @@ in the dialog; `--readonly` disables them all.
 | `/` | log pane | Open inline log search |
 | `Enter` | table | Drill down: pods → containers; deploy → replicasets (history) → pods; helm release → revisions |
 | `Esc` | table | Pop one drill-down level |
+| `Shift-N/A/C/M` | table | Sort by name / age / CPU / MEM (repeat flips ▲/▼; sorts on data, not rendered strings) |
 | `0` | global | Toggle all-namespaces view |
 | `d` | table | Describe selected resource (manifest + events) |
 | `s` | pods table | Shell into selected pod (`kubectl exec`; offers `kubectl debug` fallback for distroless images) |

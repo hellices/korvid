@@ -397,8 +397,8 @@ async def test_pods_all_adds_namespace_column() -> None:
         table = app.query_one(ResourceTable)
         assert app.current_scope == ALL_NAMESPACES
         assert table.row_count == 2
-        # Pod view all-ns: 13 columns (NAMESPACE + 12 pod columns incl. usage)
-        assert len(table.columns) == 13
+        # Pod view all-ns: 14 columns (NAMESPACE + 13 pod columns incl. usage + AGE)
+        assert len(table.columns) == 14
 
 
 async def test_zero_key_toggles_all_namespaces() -> None:
