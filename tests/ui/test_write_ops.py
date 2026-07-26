@@ -25,7 +25,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.writes import WriteOps
-from korvid.ui.app import KorvidApp
+from korvid.ui.app import KorvidApp, _yaml_equal
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 
@@ -920,3 +920,23 @@ async def test_external_editor_undecodable_output_notifies_and_cancels(tmp_path:
         assert result is None
         await _until(pilot, lambda: any("unreadable" in n.message for n in app._notifications))
     assert rec.calls == []
+
+
+def test_yaml_equal_ignores_shared_nodes() -> None:
+    """Review round 7: safe_dump emits anchors for shared nodes, so dump-text
+    comparison reported aliased-but-equal documents as changed."""
+    shared = {"a": 1}
+    aliased = {"spec": shared, "status": shared}
+    plain = {"spec": {"a": 1}, "status": {"a": 1}}
+    assert _yaml_equal(aliased, plain)
+
+
+def test_yaml_equal_is_scalar_type_sensitive() -> None:
+    assert not _yaml_equal({"x": 1}, {"x": True})
+    assert not _yaml_equal({"x": True}, {"x": 1})
+    assert not _yaml_equal([1], [1.0])
+    assert _yaml_equal({"x": [1, {"y": "z"}]}, {"x": [1, {"y": "z"}]})
+
+
+def test_yaml_equal_distinguishes_key_types() -> None:
+    assert not _yaml_equal({1: "v"}, {True: "v"})

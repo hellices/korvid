@@ -90,10 +90,30 @@ _PERMISSION_CHECK_TIMEOUT = 10.0
 
 
 def _yaml_equal(a: object, b: object) -> bool:
-    """YAML-canonical equality. Python's ``==`` conflates YAML booleans and
-    integers (``True == 1``), so an edit changing only a scalar's type on an
-    untyped/CRD field would otherwise be discarded as "no changes"."""
-    return yaml.safe_dump(a, sort_keys=True) == yaml.safe_dump(b, sort_keys=True)
+    """Type-sensitive structural equality for parsed YAML documents.
+    Python's ``==`` conflates YAML booleans and integers (``True == 1``),
+    and comparing ``yaml.safe_dump`` output is not canonical either: shared
+    nodes are emitted as anchors/aliases, so an aliased-but-equal document
+    would falsely report a change. Compare recursively instead, requiring
+    identical scalar types (including mapping keys)."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict) and isinstance(b, dict):
+        if len(a) != len(b):
+            return False
+        # Key lookup would conflate True/1 the same way == does, so match
+        # key/value pairs structurally. Quadratic, but manifests are small.
+        b_items = list(b.items())
+        return all(
+            any(
+                _yaml_equal(a_key, b_key) and _yaml_equal(a_value, b_value)
+                for b_key, b_value in b_items
+            )
+            for a_key, a_value in a.items()
+        )
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_yaml_equal(x, y) for x, y in zip(a, b, strict=True))
+    return a == b
 
 
 #: Upper bound on the pre-approval uid lookup: a stalled API server must
