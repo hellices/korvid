@@ -73,16 +73,22 @@ def render_hint_detail(
     trouble: tuple[Any, ...],
     events: list[dict[str, Any]],
     *,
+    events_unavailable: bool = False,
     now: datetime | None = None,
 ) -> Text:
     """Full, uncapped detail body: every trouble entry verbatim, then the
-    pod's Warning events (reason, occurrence count, relative age, message)."""
+    pod's Warning events (reason, occurrence count, relative age, message).
+    `events_unavailable` marks a failed fetch - "unavailable" and "known to
+    be absent" must not read the same."""
     body = Text()
     for entry in trouble:
         _append_trouble_block(body, entry, now=now)
     if trouble:
         body.append("\n")
     body.append("WARNING EVENTS\n", style="bold")
+    if events_unavailable:
+        body.append("<warning events unavailable - fetch failed>", style="yellow")
+        return body
     warnings = [e for e in events if e.get("type") == "Warning"]
     if not warnings:
         body.append("<no warning events>", style="dim")
@@ -134,11 +140,14 @@ class HintDetailScreen(ModalScreen[None]):
         title: str,
         trouble: tuple[Any, ...],
         events: list[dict[str, Any]],
+        *,
+        events_unavailable: bool = False,
     ) -> None:
         super().__init__()
         self._title = title
         self._trouble = trouble
         self._events = events
+        self._events_unavailable = events_unavailable
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="hint-detail-frame"):
@@ -146,7 +155,9 @@ class HintDetailScreen(ModalScreen[None]):
             # markup=False: trouble/event text is cluster-controlled and may
             # contain bracketed sequences Rich would misinterpret as styles.
             yield Static(
-                render_hint_detail(self._trouble, self._events),
+                render_hint_detail(
+                    self._trouble, self._events, events_unavailable=self._events_unavailable
+                ),
                 id="hint-detail-body",
                 markup=False,
             )

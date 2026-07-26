@@ -939,3 +939,81 @@ class TestSidecarInitOrdering:
         )
         # init runs alone (500m); steady state is 50m + 100m = 150m
         assert pod.cpu_request_cores == pytest.approx(0.5)
+
+
+class TestColoringLimitCompleteness:
+    """Review fix (PR #51): the coloring limit must be a true pod ceiling.
+    A partial sum (one limited container + one unlimited) is not one - usage
+    from the unlimited container could push styling past a fictitious cap."""
+
+    @staticmethod
+    def _pod(spec: dict[str, Any]) -> PodSummary:
+        return PodSummary.from_manifest(
+            {"metadata": {"name": "p", "namespace": "ns"}, "spec": spec, "status": {}}
+        )
+
+    def test_partial_container_limits_give_no_coloring_limit(self) -> None:
+        pod = self._pod(
+            {
+                "containers": [
+                    {"name": "a", "resources": {"limits": {"cpu": "500m", "memory": "256Mi"}}},
+                    {"name": "b", "resources": {"limits": {"memory": "2Gi"}}},
+                ]
+            }
+        )
+        assert pod.cpu_limit_cores is None  # container b has no CPU ceiling
+        assert pod.mem_limit_bytes == (256 + 2048) * 2**20  # both bounded
+
+    def test_unlimited_sidecar_gives_no_coloring_limit(self) -> None:
+        pod = self._pod(
+            {
+                "containers": [
+                    {"name": "a", "resources": {"limits": {"memory": "256Mi"}}},
+                ],
+                "initContainers": [
+                    {"name": "sc", "restartPolicy": "Always"},
+                ],
+            }
+        )
+        assert pod.mem_limit_bytes is None  # running sidecar has no ceiling
+
+    def test_limited_sidecar_adds_to_the_ceiling(self) -> None:
+        pod = self._pod(
+            {
+                "containers": [
+                    {"name": "a", "resources": {"limits": {"memory": "256Mi"}}},
+                ],
+                "initContainers": [
+                    {
+                        "name": "sc",
+                        "restartPolicy": "Always",
+                        "resources": {"limits": {"memory": "64Mi"}},
+                    },
+                ],
+            }
+        )
+        assert pod.mem_limit_bytes == (256 + 64) * 2**20
+
+    def test_classic_init_without_limit_is_irrelevant(self) -> None:
+        # A finished classic init contributes no runtime usage: it must not
+        # veto the ceiling of the running containers.
+        pod = self._pod(
+            {
+                "containers": [
+                    {"name": "a", "resources": {"limits": {"memory": "256Mi"}}},
+                ],
+                "initContainers": [{"name": "init"}],
+            }
+        )
+        assert pod.mem_limit_bytes == 256 * 2**20
+
+    def test_pod_level_limit_is_a_true_ceiling(self) -> None:
+        # spec.resources.limits (K8s 1.34+) caps the whole pod regardless of
+        # per-container declarations.
+        pod = self._pod(
+            {
+                "resources": {"limits": {"memory": "1Gi"}},
+                "containers": [{"name": "a"}, {"name": "b"}],
+            }
+        )
+        assert pod.mem_limit_bytes == 2**30

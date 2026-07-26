@@ -858,23 +858,39 @@ class KorvidApp(App[None]):
         summary = self._find_pod_summary(row_key)
         if summary is None or not _pod_needs_hint(summary):
             return
-        self.run_worker(self._open_hint_details(summary), exclusive=True, group="hint-detail")
+        self.run_worker(
+            self._open_hint_details(row_key, summary), exclusive=True, group="hint-detail"
+        )
 
-    async def _open_hint_details(self, summary: PodSummary) -> None:
+    async def _open_hint_details(self, row_key: str, summary: PodSummary) -> None:
         """Fetch events best-effort, then push the overlay: the trouble half
-        renders even when the events API fails or is unavailable."""
+        renders even when the events API fails ("unavailable" is stated, not
+        conflated with "no events"). The context is revalidated after the
+        await - the cursor, view, or screen stack may have changed meanwhile,
+        and stale details for the wrong pod are worse than none."""
         events: list[dict[str, Any]] = []
+        events_unavailable = False
         if self._get_events is not None:
             try:
                 events = await self._get_events.fetch(
                     summary.namespace, summary.name, uid=summary.uid or None
                 )
             except Exception:  # events are decoration; trouble alone still helps
-                events = []
-        if isinstance(self.screen, HintDetailScreen):  # rapid double-press
+                events_unavailable = True
+        if len(self.screen_stack) > 1:  # another dialog opened during the fetch
             return
+        if self.current_kind != "pods" or self._cursor_row_key() != row_key:
+            return
+        fresh = self._find_pod_summary(row_key)
+        if fresh is None or fresh.uid != summary.uid:
+            return  # deleted or recreated mid-fetch
         await self.push_screen(
-            HintDetailScreen(f"{summary.namespace}/{summary.name}", summary.trouble, events)
+            HintDetailScreen(
+                f"{summary.namespace}/{summary.name}",
+                fresh.trouble,
+                events,
+                events_unavailable=events_unavailable,
+            )
         )
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:

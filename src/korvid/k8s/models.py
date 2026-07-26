@@ -129,6 +129,32 @@ def _effective_value(spec: dict[str, Any], bucket: str, key: str) -> float | int
     return max(sum(parse_memory(v) for v in main) + int(sidecar_total), int(init_peak))
 
 
+def _complete_limit(spec: dict[str, Any], key: str) -> float | int | None:
+    """The pod's true runtime ceiling for coloring, or None when it has none.
+
+    Unlike `_effective_value` (scheduler math, tolerates partial sums), a
+    coloring limit must bound *every* running container: pod metrics
+    aggregate main containers and sidecars, so one unlimited container
+    makes any partial sum a fictitious cap. Pod-level limits (K8s 1.34+)
+    bound the whole pod by definition. Finished classic init containers
+    contribute no runtime usage and are ignored.
+    """
+    pod_level = ((spec.get("resources") or {}).get("limits") or {}).get(key)
+    if pod_level is not None:
+        return parse_cpu(pod_level) if key == "cpu" else parse_memory(pod_level)
+    running = list(spec.get("containers") or []) + [
+        c for c in (spec.get("initContainers") or []) if c.get("restartPolicy") == "Always"
+    ]
+    if not running:
+        return None
+    quantities = _quantities(running, "limits", key)
+    if len(quantities) != len(running):
+        return None  # at least one running container has no ceiling
+    if key == "cpu":
+        return sum(parse_cpu(q) for q in quantities)
+    return sum(parse_memory(q) for q in quantities)
+
+
 def _format_effective(value: float | int | None, key: str) -> str:
     """Display string for an effective resource value; '-' when undeclared."""
     if value is None:
@@ -565,8 +591,8 @@ class PodSummary:
         restarts = sum(int(s.get("restartCount", 0)) for s in statuses)
         cpu_request = _effective_value(spec, "requests", "cpu")
         mem_request = _effective_value(spec, "requests", "memory")
-        cpu_limit = _effective_value(spec, "limits", "cpu")
-        mem_limit = _effective_value(spec, "limits", "memory")
+        cpu_limit = _complete_limit(spec, "cpu")
+        mem_limit = _complete_limit(spec, "memory")
         return cls(
             name=str(meta.get("name", "")),
             namespace=str(meta.get("namespace", "")),

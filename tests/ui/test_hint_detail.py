@@ -91,3 +91,14 @@ async def test_screen_dismisses_on_escape_and_i() -> None:
         await pilot.press("i")
         await pilot.pause()
         assert not isinstance(app.screen, HintDetailScreen)
+
+
+def test_detail_marks_events_unavailable_on_fetch_failure() -> None:
+    text = render_hint_detail(
+        (ContainerTrouble(container="app", reason="CrashLoopBackOff"),),
+        [],
+        events_unavailable=True,
+        now=_NOW,
+    ).plain
+    assert "warning events unavailable" in text
+    assert "no warning events" not in text
