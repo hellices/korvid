@@ -16,6 +16,7 @@ from textual.widgets import Input, Static
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
+from korvid.core.transfer import TransferSpec
 from korvid.k8s.models import PodSummary
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
@@ -248,6 +249,67 @@ async def test_download_blocked_without_audit_log(tmp_path: Path) -> None:
             label="blocked toast",
         )
     assert opener.calls == []
+
+
+class _ExplodingAudit(AuditLog):
+    """AuditLog whose persistence always fails."""
+
+    def append(self, **kwargs: Any) -> None:
+        raise OSError("disk full")
+
+
+async def test_download_blocked_when_audit_append_fails(tmp_path: Path) -> None:
+    # Fail-closed invariant: a configured audit log that cannot persist the
+    # intent must block the transfer before any exec session is opened.
+    opener = FakeExecOpener([b"\x01" + tar_bytes("f", b"x"), b"\x03" + SUCCESS])
+    audit = _ExplodingAudit(tmp_path / "audit.jsonl", context="test")
+    app = make_app([_pod("api-1")], open_pod_exec=opener, audit=audit)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="rows")
+        await pilot.press("ctrl+t")
+        await until(pilot, lambda: isinstance(app.screen, TransferScreen), label="dialog")
+        _dialog(app).query_one("#transfer-remote", Input).value = "/f"
+        _dialog(app).query_one("#transfer-local", Input).value = str(tmp_path / "f")
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: any("audit log unavailable" in str(n.message) for n in app._notifications),
+            label="blocked toast",
+        )
+    assert opener.calls == []
+    assert not (tmp_path / "f").exists()
+
+
+async def test_second_transfer_refused_while_one_in_flight(tmp_path: Path) -> None:
+    # `_transfer_task` is a single slot, so a second worker must be refused
+    # for the whole lifecycle of the first (launch through outcome audit) —
+    # otherwise escape could cancel the wrong stream.
+    opener = FakeExecOpener([b"\x01" + b"partial"], stall=True)
+    app = make_app(
+        [_pod("api-1")],
+        open_pod_exec=opener,
+        audit=AuditLog(tmp_path / "audit.jsonl", context="test"),
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="rows")
+        await pilot.press("ctrl+t")
+        await until(pilot, lambda: isinstance(app.screen, TransferScreen), label="dialog")
+        _dialog(app).query_one("#transfer-remote", Input).value = "/big.bin"
+        _dialog(app).query_one("#transfer-local", Input).value = str(tmp_path / "big.bin")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, TransferProgressScreen), label="progress")
+        # The keybinding path refuses immediately…
+        app.action_transfer()
+        # …and so does a worker launched directly into the pre-modal window.
+        spec = TransferSpec("download", "/other.bin", str(tmp_path / "other.bin"))
+        await app._run_transfer("default", "api-1", "app", spec, None)
+        await until(
+            pilot,
+            lambda: sum("already in progress" in str(n.message) for n in app._notifications) == 2,
+            label="refusal toasts",
+        )
+        await pilot.press("escape")  # release the stalled stream
+    assert len(opener.calls) == 1
 
 
 async def test_download_failure_notifies_and_audits_error(tmp_path: Path) -> None:

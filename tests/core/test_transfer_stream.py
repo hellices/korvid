@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
 import json
 import tarfile
 import tempfile
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from korvid.core.transfer import TransferError, download, upload
+from korvid.core.transfer import TransferError, _await_thread, download, upload
 
 SUCCESS = json.dumps({"metadata": {}, "status": "Success"}).encode()
 NOT_FOUND = json.dumps(
@@ -226,3 +228,28 @@ class TestUpload:
         src.write_bytes(b"x")
         with pytest.raises(TransferError, match="without reporting an outcome"):
             await upload(FakeExec(FakeWs([])), src, "/tmp/f")
+
+
+class TestAwaitThread:
+    async def test_cancellation_waits_for_the_thread(self) -> None:
+        # A worker thread cannot be interrupted: cancelling the awaiting task
+        # must not return until the thread has finished, or the caller's
+        # cleanup (unlinking the tar the thread has open) would race it.
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def work() -> None:
+            started.set()
+            release.wait(timeout=5)
+            finished.set()
+
+        task = asyncio.ensure_future(_await_thread(work))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), "cancellation must be deferred until the thread ends"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set()

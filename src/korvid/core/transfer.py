@@ -10,6 +10,7 @@ tar argv builders, spec validation, and local tar packing/extraction.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import posixpath
@@ -19,7 +20,9 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
+
+_T = TypeVar("_T")
 
 #: Bytes copied per read while extracting a downloaded archive, and per
 #: stdin frame while uploading.
@@ -266,6 +269,23 @@ class _FrameSink:
         return "\n".join(p for p in parts if p)
 
 
+async def _await_thread(func: Callable[..., _T], /, *args: Any) -> _T:
+    """Run ``func`` in a worker thread, surviving caller cancellation.
+
+    A thread cannot be interrupted: when the awaiting task is cancelled the
+    thread keeps running, and a caller's cleanup (unlinking the tar file the
+    thread still has open) would race it. Cancellation is therefore deferred
+    until the thread has actually finished.
+    """
+    inner = asyncio.ensure_future(asyncio.to_thread(func, *args))
+    try:
+        return await asyncio.shield(inner)
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception):
+            await inner
+        raise
+
+
 async def download(
     open_exec: OpenExec,
     remote_path: str,
@@ -310,7 +330,7 @@ async def download(
             raise TransferError(
                 sink.error_message(f"no data received for {remote_path} — does the file exist?")
             )
-        return await asyncio.to_thread(extract_single_file, spool_path, local_path)
+        return await _await_thread(extract_single_file, spool_path, local_path)
     finally:
         spool_path.unlink(missing_ok=True)
 
@@ -338,7 +358,7 @@ async def upload(
     os.close(fd)
     archive_path = Path(archive_name)
     try:
-        size = await asyncio.to_thread(pack_file, local_path, arcname, archive_path)
+        size = await _await_thread(pack_file, local_path, arcname, archive_path)
         async with open_exec(upload_command(remote_path), True) as ws:
             sink = _FrameSink()
 

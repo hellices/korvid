@@ -475,6 +475,10 @@ class KorvidApp(App[None]):
         #: the in-flight transfer stream; the progress screen's escape
         #: cancels it (never the surrounding worker).
         self._transfer_task: asyncio.Task[int] | None = None
+        #: True from transfer-worker launch through the outcome audit; a
+        #: single task slot only works with one transfer at a time, so a
+        #: second launch is refused for its whole lifecycle (issue #47).
+        self._transfer_in_flight = False
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -1501,6 +1505,9 @@ class KorvidApp(App[None]):
         if self._open_pod_exec is None:
             self.notify("File transfer unavailable (no cluster connection)", severity="warning")
             return
+        if self._transfer_in_flight:
+            self.notify("A transfer is already in progress", severity="warning")
+            return
 
         table = self.query_one(ResourceTable)
         if table.row_count == 0:
@@ -1577,6 +1584,30 @@ class KorvidApp(App[None]):
         self.run_worker(self._run_transfer(namespace, name, container, spec, uid))
 
     async def _run_transfer(
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        spec: TransferSpec,
+        uid: str | None,
+    ) -> None:
+        """Serialize transfers, then audit (fail-closed), stream, audit outcome.
+
+        The guard spans the whole lifecycle — uid re-check, intent audit,
+        stream, outcome audit — because `_transfer_task` is a single slot: a
+        concurrently launched worker would overwrite it and escape could
+        cancel the wrong stream.
+        """
+        if self._transfer_in_flight:
+            self.notify("A transfer is already in progress", severity="warning")
+            return
+        self._transfer_in_flight = True
+        try:
+            await self._run_transfer_guarded(namespace, name, container, spec, uid)
+        finally:
+            self._transfer_in_flight = False
+
+    async def _run_transfer_guarded(
         self,
         namespace: str,
         name: str,
