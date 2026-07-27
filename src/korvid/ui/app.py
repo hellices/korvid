@@ -1610,10 +1610,15 @@ class KorvidApp(App[None]):
         """Cursor movement drives the ops hint strip (pods view only)."""
         if not isinstance(event.data_table, ResourceTable):
             return
-        if self.current_kind != "pods" or event.row_key is None:
-            self.query_one(HintStrip).clear_hint()
-            return
-        self._show_hint_for_row(str(event.row_key.value))
+        try:
+            if self.current_kind != "pods" or event.row_key is None:
+                self.query_one(HintStrip).clear_hint()
+                return
+            self._show_hint_for_row(str(event.row_key.value))
+        except NoMatches:
+            # A highlight event dispatched during shutdown/teardown can
+            # arrive after the strip is unmounted; nothing to render then.
+            pass
 
     def _show_hint_for_row(self, row_key: str) -> None:
         """Render the hint for one pod row: cached event line when fresh,
