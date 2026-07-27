@@ -3597,7 +3597,7 @@ class KorvidApp(App[None]):
         resolved = self._node_target("node shell")
         if resolved is None:
             return
-        ops, _meta, name, _uid = resolved
+        ops, _meta, name, uid = resolved
         if shutil.which("kubectl") is None:
             self.notify("kubectl not found on PATH — node shell requires kubectl", severity="error")
             return
@@ -3621,7 +3621,7 @@ class KorvidApp(App[None]):
 
         def _on_choice(confirmed: bool | None) -> None:
             if confirmed:
-                self.run_worker(self._run_node_shell(ops, name, shell_ns, image))
+                self.run_worker(self._run_node_shell(ops, name, shell_ns, image, uid))
 
         self.push_screen(
             ConfirmScreen(
@@ -3634,18 +3634,24 @@ class KorvidApp(App[None]):
             _on_choice,
         )
 
-    async def _run_node_shell(self, ops: WriteOps, node: str, namespace: str, image: str) -> None:
+    async def _run_node_shell(
+        self, ops: WriteOps, node: str, namespace: str, image: str, approved_uid: str | None
+    ) -> None:
         """Run the approved node shell, then delete the debugger pod.
 
         A cluster write (pod creation via kubectl): the intent record must
         persist before the subprocess starts, or the shell is blocked.
-        kubectl names the pod itself, so the debugger pods in the shell
-        namespace are snapshotted before launch and only ones that appear
-        afterwards are cleaned up (a same-node debugger another operator
-        started stays untouched).
+        kubectl addresses the node by name only, so the approved node
+        incarnation is re-verified just before launching (like the pod debug
+        path). kubectl names the pod itself, so the debugger pods in the
+        shell namespace are snapshotted before launch and only ones that
+        appear afterwards are cleaned up (a same-node debugger another
+        operator started stays untouched).
         """
         audit = self._audit
         if audit is None:  # _node_target already refused; defensive re-check
+            return
+        if approved_uid is not None and not await self._node_uid_unchanged(node, approved_uid):
             return
         detail = f"privileged node shell (kubectl debug node, image {image}, namespace {namespace})"
         try:
@@ -3675,6 +3681,26 @@ class KorvidApp(App[None]):
                 " node_shell.namespace to a namespace that allows them",
                 severity="warning",
             )
+
+    async def _node_uid_unchanged(self, name: str, approved_uid: str) -> bool:
+        """Re-verify the approved node incarnation just before the shell
+        launches; notifies and returns False when the node is gone or was
+        replaced under the same name while the dialog was open."""
+        try:
+            current_uid = await self._target_uid("nodes", None, name)
+        except ApiStatusError:
+            self.notify(
+                f"node shell cancelled - node {name} no longer exists.",
+                severity="warning",
+            )
+            return False
+        if current_uid is not None and current_uid != approved_uid:
+            self.notify(
+                f"node shell cancelled - node {name} was replaced since the prompt was shown.",
+                severity="warning",
+            )
+            return False
+        return True
 
     async def _list_node_debugger_pods(self, namespace: str, node: str) -> dict[str, str] | None:
         """Names (→ uid) of kubectl node-debugger pods for *node* in the
@@ -3711,6 +3737,16 @@ class KorvidApp(App[None]):
         self, ops: WriteOps, namespace: str, node: str, before: dict[str, str] | None
     ) -> str:
         """Delete debugger pods the shell created; returns the audit note."""
+        if before is None:
+            # Without the pre-launch snapshot every matching pod would look
+            # new, and cleanup could delete a debugger another operator
+            # started before this shell: skip instead of guessing.
+            self.notify(
+                f"Cleanup skipped (pre-launch pod listing failed) — check {namespace}"
+                f" for leftover node-debugger pods for {node}",
+                severity="warning",
+            )
+            return "cleanup skipped: pre-launch pod listing failed"
         after = await self._list_node_debugger_pods(namespace, node)
         if after is None:
             self.notify(
@@ -3719,7 +3755,7 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return "cleanup skipped: pod listing failed"
-        known = set(before or {})
+        known = set(before)
         new = {name: uid for name, uid in after.items() if name not in known}
         if not new:
             return "cleanup: no debug pod found"

@@ -107,6 +107,10 @@ def build_node_debug_argv(
     kubectl creates a `node-debugger-…` pod pinned to the node with the
     host filesystem mounted at `/host` (issue #46). The namespace is always
     pinned explicitly so korvid knows where to clean the pod up afterwards.
+    `--profile=sysadmin` (kubectl 1.27+) makes the pod actually privileged —
+    the default profile mounts the host filesystem but denies the privileged
+    security context the approval dialog states, so tools like
+    `chroot /host` would fail.
     """
     return [
         "kubectl",
@@ -117,6 +121,7 @@ def build_node_debug_argv(
         namespace,
         f"node/{node}",
         f"--image={image}",
+        "--profile=sysadmin",
         "--",
         "sh",
         "-c",

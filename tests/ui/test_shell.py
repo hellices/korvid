@@ -1356,6 +1356,9 @@ def test_build_node_debug_argv_defaults() -> None:
     assert argv[:2] == ["kubectl", "debug"]
     assert "node/worker-1" in argv
     assert f"--image={DEBUG_IMAGE}" in argv
+    # the approval dialog promises a privileged pod; the default profile
+    # is not privileged, so sysadmin must be requested explicitly
+    assert "--profile=sysadmin" in argv
     ns_idx = argv.index("-n")
     assert argv[ns_idx + 1] == "default"
     # every kubectl flag must precede the `--` command separator

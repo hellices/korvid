@@ -8,7 +8,7 @@ fail-closed like every other write.
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,6 +64,7 @@ def make_app(
     permitted: bool | None = None,
     node_shell_image: str | None = None,
     node_shell_namespace: str | None = None,
+    get_manifest: Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -98,6 +99,7 @@ def make_app(
         write_ops=recorder,
         audit=None if audit_path is None else AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,
+        get_manifest=get_manifest,
     )
 
 
@@ -197,7 +199,11 @@ async def test_confirmed_node_shell_runs_kubectl_debug_node_and_audits(tmp_path:
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
             await pilot.press("y")
             await until(pilot, lambda: call_records, label="kubectl debug ran")
-            await pilot.pause(0.2)
+
+            def _outcome_written() -> bool:
+                return audit_path.is_file() and '"success' in audit_path.read_text()
+
+            await until(pilot, _outcome_written, label="outcome audit record")
     assert call_records == [build_node_debug_argv("worker-1", "default")]
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     ours = [e for e in entries if e["action"] == "node-shell"]
@@ -230,7 +236,8 @@ async def test_node_shell_cleans_up_new_debugger_pod(tmp_path: Path) -> None:
 async def test_node_shell_pre_existing_debugger_pod_not_deleted(tmp_path: Path) -> None:
     """A debugger pod that existed before the shell (another operator's) survives."""
     rec = DeleteRecorder()
-    app = make_app(rec, tmp_path / "audit.jsonl")
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
     old = ("node-debugger-worker-1-old11", "old-uid", "worker-1")
     run_fake, _ = _listing_run([_pods_json(old), _pods_json(old)])
     with _node_shell_env(run_fake) as call_records:
@@ -241,7 +248,11 @@ async def test_node_shell_pre_existing_debugger_pod_not_deleted(tmp_path: Path) 
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
             await pilot.press("y")
             await until(pilot, lambda: call_records, label="kubectl debug ran")
-            await pilot.pause(0.3)
+
+            def _outcome_written() -> bool:
+                return audit_path.is_file() and "no debug pod found" in audit_path.read_text()
+
+            await until(pilot, _outcome_written, label="outcome audit record")
     assert rec.deletes == []
 
 
@@ -360,7 +371,7 @@ async def test_node_shell_custom_image_and_namespace_from_config(tmp_path: Path)
             assert "debug-ns" in screen._operation
             await pilot.press("y")
             await until(pilot, lambda: call_records, label="kubectl debug ran")
-            await pilot.pause(0.2)
+            await until(pilot, lambda: len(run_calls) >= 2, label="cleanup listing ran")
     assert call_records == [
         build_node_debug_argv("worker-1", "debug-ns", image="registry.local/toolkit:1")
     ]
@@ -393,3 +404,67 @@ async def test_node_shell_listing_failure_skips_cleanup_with_warning(tmp_path: P
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     last = [e for e in entries if e["action"] == "node-shell"][-1]
     assert "cleanup skipped" in last["outcome"]
+
+
+async def test_node_shell_before_listing_failure_skips_cleanup(tmp_path: Path) -> None:
+    """A failed pre-launch snapshot must never let cleanup guess: deleting
+    every matching pod could take out another operator's debugger."""
+    rec = DeleteRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    calls: list[int] = []
+
+    def run_fake(argv, **kwargs):  # type: ignore[no-untyped-def]  # test helper
+        calls.append(1)
+        if len(calls) == 1:  # pre-launch listing fails
+            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"boom")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_pods_json(("node-debugger-worker-1-abcde", "dbg-uid", "worker-1")),
+            stderr=b"",
+        )
+
+    with _node_shell_env(run_fake) as _calls:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await pilot.press("y")
+
+            def _warned() -> bool:
+                return any("Cleanup skipped" in n.message for n in app._notifications)
+
+            await until(pilot, _warned, label="cleanup-skipped warning")
+    assert rec.deletes == []
+    entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+    last = [e for e in entries if e["action"] == "node-shell"][-1]
+    assert "cleanup skipped: pre-launch pod listing failed" in last["outcome"]
+
+
+async def test_node_shell_aborts_when_node_replaced_after_prompt(tmp_path: Path) -> None:
+    """The approval is bound to the node incarnation on screen: a node
+    deleted and recreated under the same name while the dialog was open must
+    not receive the privileged shell."""
+    rec = DeleteRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return {"metadata": {"uid": "replacement-uid"}}
+
+    app = make_app(rec, audit_path, get_manifest=get_manifest)
+    run_fake, _ = _listing_run([_pods_json()])
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await pilot.press("y")
+
+            def _cancelled() -> bool:
+                return any("was replaced" in n.message for n in app._notifications)
+
+            await until(pilot, _cancelled, label="replacement cancel notification")
+    assert call_records == []
+    assert not audit_path.is_file() or "intent" not in audit_path.read_text()
