@@ -5,10 +5,15 @@ boundaries, punctuation, and whitespace, then lowercased, and a keyword
 matches when its concatenated tokens equal the concatenation of some
 contiguous run of answer tokens. "OOM-killed", "OOMKilled", "oomkilled"
 and "oom killed" therefore all count as the same mention, while
-"unhealthy" never matches "healthy". Matching is mention-based: a negated
-mention ("this is not an image pull problem") still counts, so
-`must_not_mention` keywords must be ones a correct answer would never
-bring up.
+"unhealthy" never matches "healthy".
+
+Polarity differs by assertion kind. `must_mention` requires a *positive*
+claim: a match whose preceding tokens contain a negator ("the pod is not
+healthy") does not satisfy the group — otherwise every healthy negative
+control would credit its own over-diagnosis. `must_not_mention` stays
+mention-based: a negated mention ("this is not an image pull problem")
+still counts, so those keywords must be ones a correct answer would
+never bring up.
 
 Evidence assertions match raw substrings of full tool results — tool
 output is machine-formatted, so exactness is the point there — and the
@@ -65,9 +70,49 @@ def _tokens(text: str) -> list[str]:
 def _mentions(keyword: str, answer_tokens: list[str]) -> bool:
     """True when the keyword's concatenated tokens equal the concatenation
     of some contiguous run of answer tokens (exact-boundary matching)."""
+    return bool(_match_starts(keyword, answer_tokens))
+
+
+#: Tokens that flip the polarity of a nearby claim. Contraction stems
+#: (isn't → "isn" + "t") are included because tokenization splits them.
+_NEGATORS = frozenset(
+    {
+        "not",
+        "no",
+        "never",
+        "none",
+        "nothing",
+        "neither",
+        "nor",
+        "without",
+        "cannot",
+        "isn",
+        "aren",
+        "wasn",
+        "weren",
+        "don",
+        "doesn",
+        "didn",
+        "hasn",
+        "haven",
+        "hadn",
+        "won",
+        "wouldn",
+        "couldn",
+        "shouldn",
+    }
+)
+
+#: How many tokens before a match to scan for a negator.
+_NEGATION_WINDOW = 3
+
+
+def _match_starts(keyword: str, answer_tokens: list[str]) -> list[int]:
+    """Start indices of every token run matching the keyword."""
     target = "".join(_tokens(keyword))
     if not target:
-        return False
+        return []
+    starts: list[int] = []
     for start in range(len(answer_tokens)):
         run = ""
         for token in answer_tokens[start:]:
@@ -75,8 +120,20 @@ def _mentions(keyword: str, answer_tokens: list[str]) -> bool:
             if len(run) >= len(target):
                 break
         if run == target:
-            return True
-    return False
+            starts.append(start)
+    return starts
+
+
+def _mentions_positively(keyword: str, answer_tokens: list[str]) -> bool:
+    """True when some match of the keyword is *not* preceded by a negator
+    within the negation window — "the pod is not healthy" must not satisfy
+    a required "healthy" claim (negative controls catch over-diagnosis)."""
+    return any(
+        not any(
+            token in _NEGATORS for token in answer_tokens[max(0, start - _NEGATION_WINDOW) : start]
+        )
+        for start in _match_starts(keyword, answer_tokens)
+    )
 
 
 def _canonical_args(args: dict[str, Any]) -> dict[str, str]:
@@ -108,7 +165,7 @@ def grade(scenario: Scenario, answer: str, records: list[ToolRecord]) -> GradeRe
     missing_mentions = tuple(
         group
         for group in scenario.must_mention
-        if not any(_mentions(alt, answer_tokens) for alt in group)
+        if not any(_mentions_positively(alt, answer_tokens) for alt in group)
     )
     forbidden_mentions = tuple(
         # One violation per group: alternates are spellings of the same

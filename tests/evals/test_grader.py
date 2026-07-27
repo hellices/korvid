@@ -174,3 +174,62 @@ def test_grade_negative_control_scenario() -> None:
     result = grade(scenario, "Everything looks healthy; no action needed.", [])
     assert result.diagnosis_success
     assert result.evidence_fetched  # nothing was required
+
+
+def test_grade_required_mention_must_be_a_positive_claim() -> None:
+    """Negative controls exist to catch over-diagnosis: 'the pod is not
+    healthy' must not satisfy a required 'healthy' claim."""
+    scenario = _scenario(
+        root_cause="none",
+        must_mention=(("healthy", "no issues"),),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    result = grade(scenario, "The pod is not healthy — something is wrong.", [])
+    assert not result.diagnosis_success
+    assert result.missing_mentions == (("healthy", "no issues"),)
+
+
+def test_grade_required_mention_rejects_contraction_negations() -> None:
+    scenario = _scenario(
+        root_cause="none",
+        must_mention=(("healthy",),),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    result = grade(scenario, "This pod isn't healthy.", [])
+    assert not result.diagnosis_success
+
+
+def test_grade_required_mention_counts_a_separate_positive_match() -> None:
+    scenario = _scenario(
+        root_cause="none",
+        must_mention=(("healthy",),),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    answer = "The restarts were not healthy signs at first, but the pod is healthy now."
+    result = grade(scenario, answer, [])
+    assert result.diagnosis_success
+
+
+def test_grade_required_mention_keywords_may_start_with_a_negator() -> None:
+    """Keywords like 'no issues' or 'not set' negate themselves by design;
+    the negation window only scans tokens *before* the match."""
+    scenario = _scenario(
+        root_cause="none",
+        must_mention=(("no issues",),),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    result = grade(scenario, "There are no issues with this pod.", [])
+    assert result.diagnosis_success
+
+
+def test_grade_forbidden_mentions_still_count_when_negated() -> None:
+    """must_not_mention stays mention-based: bringing up the misdiagnosis
+    at all fails the run, even in negation."""
+    answer = "OOMKilled, exit 137 — this is not an image pull problem."
+    result = grade(_scenario(), answer, [_record()])
+    assert not result.diagnosis_success
+    assert result.forbidden_mentions == ("image pull",)

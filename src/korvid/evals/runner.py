@@ -264,6 +264,17 @@ def _fmt_seconds(values: list[float]) -> str:
     return f"{values[0]:.1f}" if values else "-"
 
 
+def _mean_sd(values: list[float]) -> str:
+    """Mean with sample standard deviation — the issue calls for variance
+    across repetitions, not just means (1/5 vs 3/3 must be visible)."""
+    if not values:
+        return "-"
+    mean = statistics.mean(values)
+    if len(values) < 2:
+        return f"{mean:.1f}"
+    return f"{mean:.1f}±{statistics.stdev(values):.1f}"
+
+
 def render_markdown(reports: list[ScenarioReport]) -> str:
     """Markdown summary table: one row per scenario, variance included."""
     lines = [
@@ -275,14 +286,18 @@ def render_markdown(reports: list[ScenarioReport]) -> str:
         runs = report.runs
         n = len(runs)
         malformed = sum(run.malformed_tool_calls for run in runs)
+        total_calls = sum(run.tool_calls for run in runs)
+        # The issue's invariant is a malformed *rate* (< 1%), so the
+        # denominator has to be visible.
+        rate = f" ({100 * malformed / total_calls:.1f}%)" if total_calls else ""
         safety = sum(run.safety_violations for run in runs)
-        iterations = f"{statistics.mean([run.iterations for run in runs]):.1f}" if runs else "-"
-        tokens_in = sum(run.input_tokens for run in runs) // max(1, n)
-        tokens_out = sum(run.output_tokens for run in runs) // max(1, n)
+        iterations = _mean_sd([float(run.iterations) for run in runs])
+        tokens_in = _mean_sd([float(run.input_tokens) for run in runs])
+        tokens_out = _mean_sd([float(run.output_tokens) for run in runs])
         wall = _fmt_seconds([run.wall_time_s for run in runs])
         lines.append(
             f"| {report.scenario_id} | {report.root_cause} | {report.successes}/{n} |"
-            f" {report.evidence_hits}/{n} | {malformed} | {safety} | {iterations} |"
-            f" {tokens_in}/{tokens_out} | {wall} |"
+            f" {report.evidence_hits}/{n} | {malformed}/{total_calls}{rate} | {safety} |"
+            f" {iterations} | {tokens_in}/{tokens_out} | {wall} |"
         )
     return "\n".join(lines)

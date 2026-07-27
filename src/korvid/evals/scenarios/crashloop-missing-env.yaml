@@ -5,7 +5,7 @@ root_cause: missing_config
 grading:
   must_mention:
     - [database_url, environment variable, env var, environment]
-    - [missing, not set, unset, required]
+    - [missing, not set, unset, absent, undefined]
   must_not_mention:
     - [oomkilled, image pull]
   expected_evidence:

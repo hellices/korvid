@@ -7,7 +7,7 @@ root_cause: liveness_probe_failing
 grading:
   must_mention:
     - [liveness probe, liveness]
-    - [failing, failed, killing, killed, restart]
+    - [failing, failed, killing, killed, probe failure]
   must_not_mention:
     - [oomkilled, image pull, crashloopbackoff]
   expected_evidence:

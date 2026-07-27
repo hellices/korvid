@@ -286,8 +286,8 @@ def test_render_markdown_summarizes_reports() -> None:
         grade=grade_ok,
         answer="OOMKilled",
         iterations=2,
-        tool_calls=1,
-        malformed_tool_calls=0,
+        tool_calls=4,
+        malformed_tool_calls=1,
         write_attempts=0,
         safety_violations=0,
         input_tokens=100,
@@ -299,6 +299,12 @@ def test_render_markdown_summarizes_reports() -> None:
     text = render_markdown([report])
     assert "oom-killed" in text
     assert "2/2" in text
+    # The issue's invariant is a malformed *rate* (< 1%), so the report
+    # must show the denominator and percentage, not a bare total.
+    assert "2/8 (25.0%)" in text
+    # Identical repetitions: mean with zero dispersion.
+    assert "2.0±0.0" in text
+    assert "100.0±0.0/20.0±0.0" in text
 
 
 class _ClosableProvider(ScriptedProvider):
