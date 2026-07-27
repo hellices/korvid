@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 from textual.widgets import Input
 
 from korvid.core.audit import AuditLog
@@ -1430,17 +1431,70 @@ async def test_quit_during_spawn_still_audits_the_start_first(tmp_path: Path) ->
     )
     with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
         async with app.run_test() as pilot:
+            # Release the spawn only once teardown has begun — deterministic,
+            # unlike a timer that could fire before shutdown on a slow runner.
+            original_teardown = app._teardown_forwards
+
+            async def _teardown_and_release(reg: ForwardRegistry) -> None:
+                gate.set()
+                await original_teardown(reg)
+
+            app._teardown_forwards = _teardown_and_release  # type: ignore[assignment]  # test hook
             await _wait_rows(app, pilot)
             await pilot.press("F")
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
             await pilot.press("enter")
             await until(pilot, lambda: spawn_started.is_set(), label="spawn in flight")
-            # Release the spawn only once teardown is already waiting on it.
-            threading.Timer(0.2, gate.set).start()
     lines = _audit_lines(tmp_path)
     assert "port-forward-start" in lines, "the start never reached the audit log"
     if "port-forward-stop" in lines:
         assert lines.index("port-forward-start") < lines.index("port-forward-stop")
+
+
+async def test_cancelled_retargeted_reattach_audits_the_workload(tmp_path: Path) -> None:
+    """A re-attach cancelled mid-spawn ran (or would run) kubectl against the
+    retargeted workload — its cancellation audit must record that GVR, not
+    the vanished pod's."""
+    gate = threading.Event()
+    spawn_started = threading.Event()
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        if procs:  # gate only the replacement spawn
+            spawn_started.set()
+            gate.wait(5.0)
+        proc = _FakeProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app([_pod("api-1")], forwards=registry, audit=_audit_log(tmp_path))
+    record = registry.start(
+        ForwardSpec(
+            kind="pods",
+            namespace="default",
+            name="api-1",
+            local_port=8080,
+            remote_port=80,
+            workload="deployments/api",
+        )
+    )
+    procs[0].returncode = 1
+    registry.refresh()
+    async with app.run_test() as pilot:
+        task = asyncio.create_task(app._spawn_reattach(registry, record, retarget=True))
+        await until(pilot, lambda: spawn_started.is_set(), label="re-attach mid-spawn")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        gate.set()
+        await app._drain_forward_audits()
+        cancelled = next(
+            line for line in _audit_lines(tmp_path).splitlines() if "stopped before ready" in line
+        )
+        assert '"kind": "deployments"' in cancelled
+        assert '"name": "api"' in cancelled
+        assert '"group": "apps"' in cancelled
 
 
 async def test_teardown_during_reattach_window_keeps_audit_order(tmp_path: Path) -> None:

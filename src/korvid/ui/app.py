@@ -1576,7 +1576,10 @@ class KorvidApp(App[None]):
         always reaches the audit log before any stop entry.
         """
         done = asyncio.Event()
-        self._reattaching_forwards[done] = record.spec
+        # The in-flight kubectl targets the retargeted spec — tracking and
+        # the cancellation audit must name that GVR, not the vanished pod.
+        attempted = (record.spec.retargeted() if retarget else None) or record.spec
+        self._reattaching_forwards[done] = attempted
         try:
             revived = await asyncio.to_thread(
                 functools.partial(registry.reattach, record.id, retarget=retarget)
@@ -1588,7 +1591,7 @@ class KorvidApp(App[None]):
             # teardown stop entries (enqueue directly: no new workers now).
             if self._audit is not None:
                 self._enqueue_forward_audit(
-                    "port-forward-start", record.spec, outcome="stopped before ready"
+                    "port-forward-start", attempted, outcome="stopped before ready"
                 )
             raise
         finally:
