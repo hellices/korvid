@@ -362,9 +362,13 @@ async def test_chord_does_not_arm_while_an_input_is_focused() -> None:
         await pilot.press("ctrl+w")
         assert app._pane_chord_pending is False
         await pilot.press("escape")  # close the bar
-        await pilot.press("d")  # must reach describe, not be chord-swallowed
-        await pilot.pause()
-        assert len(app.query(ResourceTable)) == 1
+        # The next key must reach its normal binding (open the filter bar),
+        # not be swallowed by a stranded chord prefix.
+        from korvid.ui.widgets.filter_bar import FilterBar
+
+        await pilot.press("slash")
+        await until(pilot, lambda: app.query_one(FilterBar).display, label="filter bar opened")
+        assert app.query_one(FilterBar).display
 
 
 async def test_split_serializes_with_navigation_lock() -> None:
