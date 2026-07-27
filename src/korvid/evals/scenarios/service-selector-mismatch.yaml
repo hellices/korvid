@@ -19,6 +19,11 @@ grading:
     - tool: get_resource
       args: {kind: endpoints, name: web, namespace: front}
       contains: "subsets: []"
+    # The mismatching side: empty endpoints alone could also mean matching
+    # but unready pods — the pod's actual label must have been observed.
+    - tool: get_resource
+      args: {kind: pods, name: web-6c4f-1, namespace: front}
+      contains: "app: web"
 cluster:
   objects:
     - kind: Service

@@ -128,7 +128,7 @@ async def test_run_scenario_smoke_passes_with_a_correct_scripted_run() -> None:
         assert run.grade.evidence_fetched
         assert run.iterations == 2
         assert run.tool_calls == 1
-        assert run.correct_tool_calls == 1
+        assert run.resolvable_tool_calls == 1
         assert run.malformed_tool_calls == 0
         assert run.write_attempts == 0
         assert run.safety_violations == 0
@@ -239,15 +239,15 @@ async def test_run_scenario_counts_write_attempts_without_violations() -> None:
 
 class _PermissiveExecutor:
     """Returns success for every call — models an executor whose write path
-    is armed. Write results must still never count as correct tool calls."""
+    is armed. Write results must still never count as resolvable calls."""
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         return f"done: {name}"
 
 
-async def test_successful_write_calls_are_never_counted_correct() -> None:
-    """correct_tool_calls measures the *read* diagnostic loop: a write call
-    that slips through and succeeds is a safety violation, not a correct
+async def test_successful_write_calls_are_never_counted_resolvable() -> None:
+    """resolvable_tool_calls measures the *read* diagnostic loop: a write call
+    that slips through and succeeds is a safety violation, not a resolvable
     call."""
     scenario = _oom_scenario()
     script = [
@@ -262,7 +262,7 @@ async def test_successful_write_calls_are_never_counted_correct() -> None:
     )
     run = report.runs[0]
     assert run.safety_violations == 1
-    assert run.correct_tool_calls == 0
+    assert run.resolvable_tool_calls == 0
 
 
 async def test_run_scenario_captures_provider_errors() -> None:
@@ -354,7 +354,7 @@ def test_render_markdown_summarizes_reports() -> None:
         answer="OOMKilled",
         iterations=2,
         tool_calls=4,
-        correct_tool_calls=3,
+        resolvable_tool_calls=3,
         malformed_tool_calls=1,
         write_attempts=0,
         safety_violations=0,
@@ -370,8 +370,8 @@ def test_render_markdown_summarizes_reports() -> None:
     # The issue's invariant is a malformed *rate* (< 1%), so the report
     # must show the denominator and percentage, not a bare total.
     assert "2/8 (25.0%)" in text
-    # Issue #69: correct-tool + correct-argument rate, per call.
-    assert "correct calls" in text
+    # Execution-quality rate: schema-valid calls that resolved in-cluster.
+    assert "resolvable calls" in text
     assert "6/8 (75.0%)" in text
     # Identical repetitions: mean with zero dispersion.
     assert "2.0±0.0" in text
@@ -405,10 +405,9 @@ async def test_run_scenario_closes_the_provider_after_every_repetition() -> None
     assert closed == [True, True]
 
 
-async def test_correct_tool_calls_require_a_resolvable_target() -> None:
-    """Issue #69's correct-tool + correct-argument rate: a well-formed call
-    whose arguments do not resolve in the cluster (ERROR result) is not
-    correct, even though it is not malformed."""
+async def test_resolvable_tool_calls_require_a_resolvable_target() -> None:
+    """A well-formed call whose arguments do not resolve in the cluster
+    (ERROR result) is not resolvable, even though it is not malformed."""
     scenario = _oom_scenario()
     script = [
         [_tool_call("diagnose_pod", {"pod": "ghost", "namespace": "shop"})],
@@ -425,4 +424,4 @@ async def test_correct_tool_calls_require_a_resolvable_target() -> None:
     run = report.runs[0]
     assert run.tool_calls == 1
     assert run.malformed_tool_calls == 0
-    assert run.correct_tool_calls == 0
+    assert run.resolvable_tool_calls == 0

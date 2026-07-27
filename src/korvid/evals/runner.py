@@ -79,9 +79,11 @@ class RunMetrics:
     answer: str
     iterations: int
     tool_calls: int
-    #: Correct-tool + correct-argument calls (issue #69): schema-valid AND
-    #: resolved against the cluster without an ERROR result.
-    correct_tool_calls: int
+    #: Read calls that were schema-valid AND resolved against the cluster
+    #: without an ERROR result. Measures execution quality, not diagnostic
+    #: relevance — issue #69's correct-tool + correct-argument requirement
+    #: against ground truth is graded per run by ``expected_evidence``.
+    resolvable_tool_calls: int
     #: Bad-JSON arguments or unknown tool names.
     malformed_tool_calls: int
     #: Write-tool calls attempted (they must all fail in an eval session).
@@ -230,12 +232,11 @@ async def _drive_turn(
     # run's spend — and unlike TurnComplete (never emitted on a provider
     # error) they include tokens paid for before a mid-turn failure.
     in_tokens, out_tokens = runtime.total_tokens
-    # Correct-tool + correct-argument rate (issue #69): a call counts as
-    # correct only when it is an offered *read* tool (a write call is a
-    # policy failure regardless of outcome), is schema-valid, AND its
+    # A call is resolvable when it is an offered *read* tool (a write call
+    # is a policy failure regardless of outcome), is schema-valid, AND its
     # arguments resolved in the cluster (the executor returns 'ERROR: ...'
-    # otherwise).
-    correct_calls = sum(
+    # otherwise). Diagnostic relevance is graded via expected_evidence.
+    resolvable_calls = sum(
         1
         for record in executor.records
         if record.name in _READ_REQUIRED
@@ -247,7 +248,7 @@ async def _drive_turn(
         answer=tally.answer,
         iterations=provider.completions,
         tool_calls=tally.tool_calls,
-        correct_tool_calls=correct_calls,
+        resolvable_tool_calls=resolvable_calls,
         malformed_tool_calls=tally.malformed,
         write_attempts=tally.write_attempts,
         safety_violations=tally.safety_violations,
@@ -292,7 +293,7 @@ def _mean_sd(values: list[float]) -> str:
 def render_markdown(reports: list[ScenarioReport]) -> str:
     """Markdown summary table: one row per scenario, variance included."""
     lines = [
-        "| scenario | root cause | success | evidence | correct calls | malformed | safety | "
+        "| scenario | root cause | success | evidence | resolvable calls | malformed | safety | "
         "iterations | tokens in/out | wall s |",
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
@@ -300,12 +301,12 @@ def render_markdown(reports: list[ScenarioReport]) -> str:
         runs = report.runs
         n = len(runs)
         malformed = sum(run.malformed_tool_calls for run in runs)
-        correct = sum(run.correct_tool_calls for run in runs)
+        resolvable = sum(run.resolvable_tool_calls for run in runs)
         total_calls = sum(run.tool_calls for run in runs)
         # The issue's invariant is a malformed *rate* (< 1%), so the
         # denominator has to be visible.
         rate = f" ({100 * malformed / total_calls:.1f}%)" if total_calls else ""
-        correct_rate = f" ({100 * correct / total_calls:.1f}%)" if total_calls else ""
+        resolvable_rate = f" ({100 * resolvable / total_calls:.1f}%)" if total_calls else ""
         safety = sum(run.safety_violations for run in runs)
         iterations = _mean_sd([float(run.iterations) for run in runs])
         tokens_in = _mean_sd([float(run.input_tokens) for run in runs])
@@ -313,7 +314,7 @@ def render_markdown(reports: list[ScenarioReport]) -> str:
         wall = _fmt_seconds([run.wall_time_s for run in runs])
         lines.append(
             f"| {report.scenario_id} | {report.root_cause} | {report.successes}/{n} |"
-            f" {report.evidence_hits}/{n} | {correct}/{total_calls}{correct_rate} |"
+            f" {report.evidence_hits}/{n} | {resolvable}/{total_calls}{resolvable_rate} |"
             f" {malformed}/{total_calls}{rate} | {safety} |"
             f" {iterations} | {tokens_in}/{tokens_out} | {wall} |"
         )

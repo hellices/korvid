@@ -250,7 +250,11 @@ class AgentRuntime:
                     yield event
             except Exception as exc:
                 # Tokens spent in earlier iterations (and the partial stream)
-                # are real cost — account for them before bailing out.
+                # are real cost — account for them before bailing out. A
+                # stream that died before its usage event still produced
+                # text, so apply the same estimate as the normal path.
+                if not state.has_usage:
+                    state.out_tok = len(state.text) // 4
                 self._total_in += turn_in + state.in_tok
                 self._total_out += turn_out + state.out_tok
                 if usage_missing or not state.has_usage:

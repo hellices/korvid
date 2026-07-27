@@ -10,6 +10,7 @@ grading:
     - [failing, failed, killing, killed, probe failure]
   must_not_mention:
     - [image pull, crashloopbackoff]
+    - [oomkilled, oom killed, oom]
   expected_evidence:
     - tool: diagnose_pod
       args: {pod: gateway-1, namespace: front}

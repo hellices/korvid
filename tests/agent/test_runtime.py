@@ -225,6 +225,29 @@ async def test_provider_error_still_accounts_usage() -> None:
     assert runtime.total_tokens == (40, 7)
 
 
+async def test_provider_error_estimates_streamed_text_without_usage() -> None:
+    """A stream that dies after emitting text but before its usage event
+    still cost output tokens — the exception path must apply the same
+    estimate as the normal path, not record zero."""
+
+    class DiesMidStream(ScriptedProvider):
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "text_delta", "text": "x" * 40}
+            raise RuntimeError("connection dropped")
+
+    runtime = AgentRuntime(DiesMidStream([]), EchoExecutor())
+    events = await collect(runtime, "q")
+    assert any(isinstance(e, AgentError) for e in events)
+    assert runtime.total_tokens == (0, 10)
+    assert runtime.usage_estimated is True
+
+
 async def test_usage_estimated_is_sticky() -> None:
     no_usage: list[dict[str, Any]] = [{"type": "text_delta", "text": "hi"}, {"type": "done"}]
     with_usage: list[dict[str, Any]] = [
