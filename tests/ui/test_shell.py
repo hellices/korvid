@@ -28,6 +28,7 @@ from korvid.ui.shell import (
 )
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt
 from korvid.ui.widgets.pick_screen import PickScreen
+from korvid.ui.widgets.resource_table import ResourceTable
 
 from .waits import until
 
@@ -466,7 +467,7 @@ async def test_debug_fallback_not_offered_over_open_dialog(tmp_path: Path) -> No
         await pilot.pause(0.1)
         blocker = PickScreen("unrelated dialog", ["a", "b"])
         await app.push_screen(blocker)
-        await app._offer_debug_fallback("default", "api-1", None, 127)
+        await app._offer_debug_fallback("default", "api-1", None, 127, app._ctx_epoch)
         await pilot.pause(0.1)
         assert app.screen is blocker  # nothing stacked on top
 
@@ -1475,7 +1476,11 @@ async def test_shell_picker_cancelled_when_context_switched_while_open() -> None
         patch.object(type(app), "suspend", return_value=_noop_cm()),
     ):
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await until(
+                pilot,
+                lambda: app.query_one(ResourceTable).row_count > 0,
+                label="pod row visible",
+            )
             await pilot.press("s")
             await until(
                 pilot,

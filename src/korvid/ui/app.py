@@ -1327,7 +1327,7 @@ class KorvidApp(App[None]):
     async def _switch_context_locked(self, name: str) -> None:
         """The body of `_switch_context_flow`; runs with the claim held."""
         old = self.config.kube_context
-        if name == old:
+        if await self._is_ctx_noop(name, old):
             self.notify(f"Already on context {name}")
             return
         if not await self._ctx_switch_guards_pass(name):
@@ -1402,6 +1402,16 @@ class KorvidApp(App[None]):
             return None
         return True
 
+    async def _is_ctx_noop(self, name: str, old: str | None) -> bool:
+        """True when *name* is already the active context — explicitly, or as
+        the kubeconfig's active context for sessions started without
+        -c/--context (old stays None there for the recovery path)."""
+        effective = old
+        if effective is None and self._list_contexts is not None:
+            with contextlib.suppress(Exception):
+                _, effective = await asyncio.to_thread(self._list_contexts)
+        return name == effective
+
     def _ctx_switch_blocker(self) -> str | None:
         """Why a switch cannot proceed right now, or None when it can."""
         if self._agent_task is not None and not self._agent_task.done():
@@ -1412,6 +1422,14 @@ class KorvidApp(App[None]):
             )
         if len(self.screen_stack) > 1:
             return "Close open dialogs before switching contexts"
+        try:
+            # The inline namespace picker is not a screen: its old-cluster
+            # options would survive teardown and a later selection would
+            # navigate the new cluster to a namespace picked from the old.
+            if self.query_one(NamespacePicker).display:
+                return "Close the namespace picker before switching contexts"
+        except NoMatches:  # widget tree not composed (shutdown/startup)
+            pass
         return None
 
     async def _ctx_switch_guards_pass(self, name: str) -> bool:
@@ -1929,25 +1947,19 @@ class KorvidApp(App[None]):
         if self._get_manifest is None:
             self.notify("Describe unavailable", severity="warning")
             return
-
-        table = self.query_one(ResourceTable)
-        if table.row_count == 0:
-            self.notify("No resource selected", severity="warning")
+        if self._ctx_switching:
+            # The fetch would race the client swap and could render either
+            # cluster's manifest — refuse up front.
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
             return
+        epoch = self._ctx_epoch
 
-        # cursor_row is the index; ordered_rows gives us Row objects with .key
-        row_index = table.cursor_row
-        ordered = table.ordered_rows
-        if row_index >= len(ordered):
-            self.notify("No resource selected", severity="warning")
+        namespace, name = self._selected_ns_name()
+        if namespace is None or name is None:
             return
-
-        row_key = str(ordered[row_index].key.value)  # "namespace/name"
-        parts = row_key.split("/", 1)
-        if len(parts) != 2:
-            self.notify("Cannot determine resource from selection", severity="warning")
-            return
-        namespace, name = parts[0], parts[1]
         ns: str | None = namespace if namespace else None
 
         try:
@@ -1971,6 +1983,15 @@ class KorvidApp(App[None]):
                 msg = explain_api_error(exc.status, exc.reason, "events", namespace)
                 self.notify(msg, severity="warning")
 
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The fetches awaited through a context switch: the manifest (or
+            # a mixed manifest/events pair) describes the old cluster and
+            # must not be pushed over the new session.
+            self.notify(
+                f"describe {name} cancelled - the kube context changed during the fetch",
+                severity="warning",
+            )
+            return
         title = f"{self.current_kind}/{namespace}/{name}"
         if manifest.get("kind") == "Secret":
             # Secrets get the dedicated masked viewer (spec §5 #9): values
@@ -3052,6 +3073,7 @@ class KorvidApp(App[None]):
 
     def _run_shell(self, namespace: str, name: str, container: str | None) -> None:
         """Run kubectl exec; offer the kubectl debug fallback only if sh is missing."""
+        epoch = self._ctx_epoch
         argv = build_exec_argv(namespace, name, container, context=self.config.kube_context)
         target = f"{name}/{container}" if container else name
         with self.suspend():
@@ -3076,19 +3098,21 @@ class KorvidApp(App[None]):
                 shell_exists = False  # inconclusive — keep offering the fallback
             if shell_exists:
                 return
-            self.call_from_thread(self._schedule_debug_offer, namespace, name, container, exit_code)
+            self.call_from_thread(
+                self._schedule_debug_offer, namespace, name, container, exit_code, epoch
+            )
 
         self.run_worker(_probe_and_maybe_offer, thread=True)
 
     def _schedule_debug_offer(
-        self, namespace: str, name: str, container: str | None, exit_code: int
+        self, namespace: str, name: str, container: str | None, exit_code: int, epoch: int
     ) -> None:
         """Sync shim for call_from_thread: the offer itself is async because
         it awaits the RBAC pre-check."""
-        self.run_worker(self._offer_debug_fallback(namespace, name, container, exit_code))
+        self.run_worker(self._offer_debug_fallback(namespace, name, container, exit_code, epoch))
 
     async def _offer_debug_fallback(
-        self, namespace: str, name: str, container: str | None, exit_code: int
+        self, namespace: str, name: str, container: str | None, exit_code: int, epoch: int
     ) -> None:
         """Ask whether to attach a kubectl debug container after a failed shell."""
         if self.config.readonly or self._audit is None:
@@ -3129,6 +3153,15 @@ class KorvidApp(App[None]):
         if manifest is not None:
             raw_uid = (manifest.get("metadata") or {}).get("uid")
             approved_uid = str(raw_uid) if raw_uid else None
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The probe/RBAC/manifest awaits crossed a context switch: the
+            # offer describes an old-cluster pod while kubectl debug would
+            # now target the new context.
+            self.notify(
+                f"Debug fallback for {target} cancelled - the kube context changed",
+                severity="warning",
+            )
+            return
         if len(self.screen_stack) > 1:
             # The probe/RBAC pre-check ran concurrently with user input: never
             # stack the offer over a dialog that opened meanwhile.
@@ -3138,7 +3171,9 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return
-        self._pick_debug_image(namespace, name, container, exit_code, approved_uid, manifest or {})
+        self._pick_debug_image(
+            namespace, name, container, exit_code, approved_uid, manifest or {}, epoch
+        )
 
     def _pick_debug_image(
         self,
@@ -3148,6 +3183,7 @@ class KorvidApp(App[None]):
         exit_code: int,
         approved_uid: str | None,
         manifest: dict[str, Any],
+        epoch: int,
     ) -> None:
         """Debug image picker (issue #52): runtime-aware recommendation first,
         alternatives after, plus a custom-image prompt."""
@@ -3169,13 +3205,13 @@ class KorvidApp(App[None]):
                 def _on_custom(image: str | None) -> None:
                     if image:
                         self._confirm_debug(
-                            namespace, name, container, exit_code, approved_uid, image
+                            namespace, name, container, exit_code, approved_uid, image, epoch
                         )
 
                 self.push_screen(ImagePrompt(target), _on_custom)
                 return
             self._confirm_debug(
-                namespace, name, container, exit_code, approved_uid, prompts[choice]
+                namespace, name, container, exit_code, approved_uid, prompts[choice], epoch
             )
 
         # Choosing an image is read-only: even if input buffered before this
@@ -3234,6 +3270,7 @@ class KorvidApp(App[None]):
         exit_code: int,
         approved_uid: str | None,
         image: str,
+        epoch: int,
     ) -> None:
         """Approval gate for the debug fallback with the chosen image.
 
@@ -3244,8 +3281,18 @@ class KorvidApp(App[None]):
         target = f"{name}/{container}" if container else name
 
         def _on_choice(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(self._run_debug(namespace, name, container, approved_uid, image))
+            if not confirmed:
+                return
+            if self._ctx_switching or epoch != self._ctx_epoch:
+                # The image picker / approval stayed open across a context
+                # switch: kubectl debug would mutate a same-named pod on the
+                # new cluster (the uid re-check fails open without a uid).
+                self.notify(
+                    f"Debug fallback for {target} cancelled - the kube context changed",
+                    severity="warning",
+                )
+                return
+            self.run_worker(self._run_debug(namespace, name, container, approved_uid, image))
 
         self.push_screen(
             ConfirmScreen(

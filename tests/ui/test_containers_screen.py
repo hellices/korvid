@@ -15,6 +15,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
+from korvid.ui.widgets.resource_table import ResourceTable
 
 from .waits import until
 
@@ -231,7 +232,11 @@ async def test_containers_screen_pick_cancelled_when_context_switched() -> None:
         patch.object(type(app), "suspend", side_effect=lambda *a: _noop_cm()),
     ):
         async with app.run_test() as pilot:
-            await pilot.pause(0.1)
+            await until(
+                pilot,
+                lambda: app.query_one(ResourceTable).row_count > 0,
+                label="pod row visible",
+            )
             await pilot.press("enter")
             await until(
                 pilot,

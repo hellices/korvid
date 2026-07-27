@@ -798,3 +798,88 @@ async def test_transfer_cancelled_when_context_switched_while_dialog_open() -> N
             label="transfer epoch refusal",
         )
         assert app._transfer_task is None
+
+
+async def test_describe_cancelled_when_context_switches_during_fetch() -> None:
+    """A describe whose manifest fetch straddles a completed :ctx switch must
+    not render the old cluster's manifest (issue #36 review round 14)."""
+    env = _CtxEnv()
+    app = env.app
+
+    async def fake_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        app._ctx_epoch += 1  # a switch completed while the fetch was in flight
+        return {"metadata": {"name": name, "uid": "u1"}}
+
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        app._get_manifest = fake_manifest
+        await app.action_describe()
+        await until(
+            pilot,
+            lambda: any(
+                "cancelled - the kube context changed during the fetch" in n.message
+                for n in app._notifications
+            ),
+            label="describe epoch refusal",
+        )
+        assert len(app.screen_stack) == 1
+
+
+async def test_switch_to_kubeconfig_active_context_is_noop() -> None:
+    """Sessions started without -c run on the kubeconfig's active context:
+    `:ctx <that-name>` is a friendly no-op, not a probe/teardown cycle
+    (issue #36 review round 14)."""
+    import dataclasses
+
+    env = _CtxEnv()
+    app = env.app
+    app.config = dataclasses.replace(app.config, kube_context=None)
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        app.post_message(SwitchContextCommand("ctx-a"))
+        await until(
+            pilot,
+            lambda: any("Already on context ctx-a" in n.message for n in app._notifications),
+            label="no-op notification",
+        )
+        assert env.probe_calls == []
+        assert env.switch_calls == []
+
+
+async def test_switch_refused_while_namespace_picker_open() -> None:
+    """The namespace picker is an inline widget (not on the screen stack):
+    the blocker must still catch it (issue #36 review round 14)."""
+    from korvid.ui.widgets.namespace_picker import NamespacePicker
+
+    env = _CtxEnv()
+    app = env.app
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        app.query_one(NamespacePicker).display = True
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: any("Close the namespace picker" in n.message for n in app._notifications),
+            label="picker blocker notification",
+        )
+        assert env.switch_calls == []
+
+
+async def test_debug_fallback_cancelled_when_context_switched(tmp_path: Path) -> None:
+    """A debug offer whose RBAC/manifest pre-checks straddle a completed
+    :ctx switch must not open pickers for an old-cluster pod - kubectl debug
+    mutates the pod spec (issue #36 review round 14)."""
+    env = _CtxEnv(audit_path=tmp_path / "audit.jsonl")
+    app = env.app
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        await app._offer_debug_fallback("default", "pod-a", None, 1, app._ctx_epoch - 1)
+        await until(
+            pilot,
+            lambda: any(
+                "Debug fallback for pod-a cancelled - the kube context changed" in n.message
+                for n in app._notifications
+            ),
+            label="debug fallback epoch refusal",
+        )
+        assert len(app.screen_stack) == 1
