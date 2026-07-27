@@ -25,7 +25,7 @@ _BUILTIN_COMMAND_HELP: tuple[tuple[str, str], ...] = (
     (":pf", "List port-forwards (Ctrl-D stop, r re-attach)"),
     (":sort [column]", "Sort by a column (custom too); no argument clears"),
 )
-_RESERVED_BUILTINS = {"ai", "agent", "model", "mcp", "pf"}
+_RESERVED_BUILTINS = {"ai", "agent", "model", "mcp", "pf", "sort"}
 
 
 def command_help() -> list[tuple[str, str]]:
@@ -66,8 +66,10 @@ def parse_command(
         return ShowNamespacePicker()
     if head in _NS_KEYWORDS and len(rest) == 1:
         return NavigateCommand(view=None, namespace=rest[0])
-    if head == "sort" and len(rest) <= 1:
-        return SortCommand(rest[0] if rest else None)
+    if head == "sort":
+        # Reserved builtin: a malformed :sort must never consult resource
+        # aliases and turn into navigation on a cluster with a `sort` kind.
+        return SortCommand(rest[0] if rest else None) if len(rest) <= 1 else UnknownCommand(text)
     if head in _RESERVED_BUILTINS:
         return UnknownCommand(text)
     plural = known(head)

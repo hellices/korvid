@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 
 from korvid.k8s.columns import SOURCES, CustomColumn, parse_jsonpath
+from korvid.k8s.helm import SYNTHETIC_VIEW_KINDS
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "korvid" / "config.yaml"
 
@@ -335,12 +336,24 @@ def _parse_views(value: Any) -> tuple[dict[str, ViewConfig], list[str]]:
     for kind, view_raw in value.items():
         if not isinstance(view_raw, dict):
             continue
+        if str(kind) in SYNTHETIC_VIEW_KINDS:
+            # Synthetic helm views are adapted from backing Secrets — there
+            # is no manifest to evaluate custom columns against.
+            warnings.append(f"views.{kind}: synthetic view kinds don't support custom columns")
+            continue
         columns: list[CustomColumn] = []
+        seen: set[str] = set()
         raw_columns = view_raw.get("columns")
         for entry in raw_columns if isinstance(raw_columns, list) else []:
             column, warning = _parse_column(str(kind), entry)
             if column is not None:
-                columns.append(column)
+                # Case-insensitive duplicate names would make headers
+                # ambiguous and later columns unreachable for :sort.
+                if column.name.lower() in seen:
+                    warnings.append(f"views.{kind}.{column.name}: duplicate column name")
+                else:
+                    seen.add(column.name.lower())
+                    columns.append(column)
             if warning is not None:
                 warnings.append(warning)
         if columns:

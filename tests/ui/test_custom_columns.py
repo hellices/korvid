@@ -152,3 +152,44 @@ async def test_config_warnings_notified_at_startup() -> None:
             lambda: any("views.pods.BAD" in n.message for n in app._notifications),
             label="config warning notified",
         )
+
+
+async def test_replace_view_ignores_hidden_builtin_sort_keys() -> None:
+    """With replace: true, AGE/CPU/MEM are not rendered — their key actions
+    must not silently reorder rows by an invisible field (PR #78 review)."""
+    view = ViewConfig(columns=(_TEAM,), replace=True)
+    config = _views_config("pods", view)
+    pods = [
+        replace(_pod("young"), created="2026-07-27T00:00:00Z", custom=("z",)),
+        replace(_pod("old"), created="2026-07-01T00:00:00Z", custom=("a",)),
+    ]
+    app = make_app(pods, config=config)
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods rendered")
+        before = [_row(table, i)[0] for i in range(table.row_count)]
+        await pilot.press("A")  # sort_by_age — AGE column is hidden
+        await until(pilot, lambda: True, label="settle")
+        assert [_row(table, i)[0] for i in range(table.row_count)] == before
+        assert all("▲" not in label for label in _header_labels(table))
+        assert all("▼" not in label for label in _header_labels(table))
+
+
+async def test_replace_view_sort_command_rejects_hidden_builtin() -> None:
+    view = ViewConfig(columns=(_TEAM,), replace=True)
+    config = _views_config("pods", view)
+    app = make_app([replace(_pod("a"), custom=("x",))], config=config)
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod rendered")
+        await pilot.press("colon")
+        for ch in "sort age":
+            await pilot.press(*(["space"] if ch == " " else [ch]))
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: any("age" in n.message for n in app._notifications),
+            label="hidden builtin rejected",
+        )
+        # name stays sortable: NAME is an identity column replace keeps.
+        assert not any("'name'" in n.message for n in app._notifications)

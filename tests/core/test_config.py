@@ -718,3 +718,41 @@ def test_views_absent_means_empty(tmp_path: Path) -> None:
     config = load_config(cfg)
     assert config.views == {}
     assert config.warnings == ()
+
+
+def test_views_duplicate_column_names_case_insensitive_dropped(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods:
+    columns:
+      - name: TEAM
+        label: team
+      - name: team
+        annotation: team
+"""
+    )
+    config = load_config(cfg)
+    assert [c.name for c in config.views["pods"].columns] == ["TEAM"]
+    assert any("duplicate" in w for w in config.warnings)
+
+
+def test_views_synthetic_helm_kinds_rejected_with_warning(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  helmreleases:
+    columns:
+      - name: TEAM
+        label: team
+  helmrevisions:
+    columns:
+      - name: TEAM
+        label: team
+"""
+    )
+    config = load_config(cfg)
+    assert config.views == {}
+    assert len(config.warnings) == 2
