@@ -341,7 +341,10 @@ async def test_node_shell_create_failure_warns_about_policy(tmp_path: Path) -> N
     app = make_app(rec, audit_path)
     run_fake, _ = _kubectl_run(
         create_result=SimpleNamespace(
-            returncode=1, stdout=b"", stderr=b"pods is forbidden: violates PodSecurity"
+            returncode=1,
+            stdout=b"",
+            stderr=b'Error from server (Forbidden): pods "node-debugger-worker-1-abcde"'
+            b" is forbidden: violates PodSecurity",
         )
     )
     with _node_shell_env(run_fake) as call_records:
@@ -697,3 +700,12 @@ async def test_ambiguous_create_failure_keeps_namespace_hint(tmp_path: Path) -> 
             return any("may still have been created" in n.message for n in app._notifications)
 
         await until(pilot, _hinted, label="ambiguous-create namespace hint")
+
+        # A bare "forbidden" substring (pod/image name, quoted inside an
+        # unrelated error) must not be mistaken for an admission rejection.
+        failure = SimpleNamespace(
+            returncode=1, stdout=b"", stderr=b'error: watch of pod "forbidden-checker" failed'
+        )
+        with patch("korvid.ui.app.subprocess.run", return_value=failure):
+            outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
+        assert outcome == "error: pod creation failed; cleanup skipped: check namespace default"

@@ -265,12 +265,16 @@ def _looks_like_admission_rejection(stderr: str) -> bool:
     """True when kubectl stderr clearly shows the API server refused the
     create — only then is it safe to state that no pod was committed.
 
-    Matches the stable phrases of the two refusal shapes: RBAC/PodSecurity
-    forbids (`Error from server (Forbidden): ... is forbidden: ...`) and
-    admission webhooks (`admission webhook ... denied the request`).
+    Matches the stable phrases of the two refusal shapes: API-server
+    refusals (`Error from server (Forbidden): ... is forbidden: ...`) and
+    admission webhooks (`admission webhook ... denied the request`). The
+    match is deliberately tight — a false positive here suppresses the
+    cleanup hint and can strand a privileged pod, so a bare `forbidden`
+    substring (which could appear in a pod or image name, or quoted inside
+    an unrelated server error) is not enough.
     """
     lowered = stderr.lower()
-    return "forbidden" in lowered or "denied the request" in lowered
+    return "error from server (forbidden)" in lowered or "denied the request" in lowered
 
 
 def _yaml_equal(a: object, b: object) -> bool:
