@@ -1,9 +1,10 @@
 """Pure helpers for pod file transfer (issue #47).
 
-The transfer itself rides the exec API as a tar stream (see
-``korvid.k8s.transfer``); everything here is side-effect-light plumbing that
-can be unit-tested without a cluster: the tar argv builders, spec validation,
-and local tar packing/extraction.
+The transfer itself rides the exec API as a tar stream — the websocket
+session is opened by `KubeClient.open_pod_exec` in `korvid.k8s.client` and
+injected here as an `OpenExec` callable. Everything else in this module is
+side-effect-light plumbing that can be unit-tested without a cluster: the
+tar argv builders, spec validation, and local tar packing/extraction.
 """
 
 from __future__ import annotations

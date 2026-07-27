@@ -26,7 +26,7 @@ from tests.ui.waits import until
 SUCCESS = json.dumps({"metadata": {}, "status": "Success"}).encode()
 
 
-def _pod(name: str, containers: tuple[str, ...] = ("app",)) -> PodSummary:
+def _pod(name: str, containers: tuple[str, ...] = ("app",), uid: str = "") -> PodSummary:
     return PodSummary(
         name=name,
         namespace="default",
@@ -36,6 +36,7 @@ def _pod(name: str, containers: tuple[str, ...] = ("app",)) -> PodSummary:
         node=None,
         qos="-",
         containers=containers,
+        uid=uid,
     )
 
 
@@ -312,6 +313,104 @@ async def test_upload_requires_approval_then_transfers(tmp_path: Path) -> None:
     entries = audit_entries(audit_path)
     assert entries[0]["action"] == "transfer_upload"
     assert [e["outcome"] for e in entries] == ["intent", "success"]
+
+
+async def test_upload_blocked_when_pod_replaced_after_approval(tmp_path: Path) -> None:
+    """TOCTOU guard: approval binds to the pod *incarnation* (uid), and the uid
+    is re-verified just before the exec — a same-named replacement created
+    while the dialogs were open must never receive the bytes."""
+    src = tmp_path / "f"
+    src.write_bytes(b"x")
+    opener = FakeExecOpener()
+    audit_path = tmp_path / "audit.jsonl"
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return {"metadata": {"uid": "uid-replacement"}}
+
+    app = make_app(
+        [_pod("api-1", uid="uid-approved")],
+        open_pod_exec=opener,
+        audit=AuditLog(audit_path, context="test"),
+        get_manifest=get_manifest,
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="rows")
+        await pilot.press("ctrl+t")
+        await until(pilot, lambda: isinstance(app.screen, TransferScreen), label="dialog")
+        _dialog(app).select_upload()
+        _dialog(app).query_one("#transfer-remote", Input).value = "/tmp/f"
+        _dialog(app).query_one("#transfer-local", Input).value = str(src)
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any("replaced" in str(n.message) for n in app._notifications),
+            label="replaced toast",
+        )
+    assert opener.calls == []
+    assert audit_entries(audit_path) == []
+
+
+async def test_download_blocked_when_pod_replaced(tmp_path: Path) -> None:
+    opener = FakeExecOpener()
+    audit_path = tmp_path / "audit.jsonl"
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return {"metadata": {"uid": "uid-replacement"}}
+
+    app = make_app(
+        [_pod("api-1", uid="uid-approved")],
+        open_pod_exec=opener,
+        audit=AuditLog(audit_path, context="test"),
+        get_manifest=get_manifest,
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="rows")
+        await pilot.press("ctrl+t")
+        await until(pilot, lambda: isinstance(app.screen, TransferScreen), label="dialog")
+        _dialog(app).query_one("#transfer-remote", Input).value = "/var/log/app.log"
+        _dialog(app).query_one("#transfer-local", Input).value = str(tmp_path / "app.log")
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: any("replaced" in str(n.message) for n in app._notifications),
+            label="replaced toast",
+        )
+    assert opener.calls == []
+    assert audit_entries(audit_path) == []
+
+
+async def test_upload_proceeds_when_uid_unchanged(tmp_path: Path) -> None:
+    src = tmp_path / "f"
+    src.write_bytes(b"x")
+    opener = FakeExecOpener()
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return {"metadata": {"uid": "uid-approved"}}
+
+    app = make_app(
+        [_pod("api-1", uid="uid-approved")],
+        open_pod_exec=opener,
+        audit=AuditLog(tmp_path / "audit.jsonl", context="test"),
+        get_manifest=get_manifest,
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="rows")
+        await pilot.press("ctrl+t")
+        await until(pilot, lambda: isinstance(app.screen, TransferScreen), label="dialog")
+        _dialog(app).select_upload()
+        _dialog(app).query_one("#transfer-remote", Input).value = "/tmp/f"
+        _dialog(app).query_one("#transfer-local", Input).value = str(src)
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any("uploaded" in str(n.message).lower() for n in app._notifications),
+            label="success toast",
+        )
+    assert len(opener.calls) == 1
 
 
 async def test_upload_denied_approval_does_not_transfer(tmp_path: Path) -> None:

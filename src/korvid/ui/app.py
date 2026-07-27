@@ -88,6 +88,7 @@ from korvid.ui.messages import (
     ResourcesUpdated,
     ShowError,
     ShowNamespacePicker,
+    TransferCancelRequested,
     UnknownCommand,
 )
 from korvid.ui.navigation import DrillLevel, NavigationStack
@@ -1517,28 +1518,41 @@ class KorvidApp(App[None]):
             return
         namespace, name = parts[0], parts[1]
 
-        containers = self._get_pod_containers(namespace, name)
+        summary = self._find_pod(namespace, name)
+        containers = summary.containers if summary is not None else ()
+        # Bind the transfer to this pod *incarnation*: the exec API addresses
+        # the pod by namespace/name only, so the uid is re-verified in
+        # _run_transfer right before streaming (a same-named replacement
+        # created while the dialogs are open must never receive the bytes).
+        uid = (summary.uid or None) if summary is not None else None
         if len(containers) > 1:
 
             def _on_pick(container: str | None) -> None:
                 if container is not None:
-                    self._open_transfer_dialog(namespace, name, container)
+                    self._open_transfer_dialog(namespace, name, container, uid)
 
             self.push_screen(PickScreen(f"Container in {name}:", list(containers)), _on_pick)
             return
-        self._open_transfer_dialog(namespace, name, containers[0] if containers else None)
+        self._open_transfer_dialog(namespace, name, containers[0] if containers else None, uid)
 
-    def _open_transfer_dialog(self, namespace: str, name: str, container: str | None) -> None:
+    def _open_transfer_dialog(
+        self, namespace: str, name: str, container: str | None, uid: str | None
+    ) -> None:
         target = f"{namespace}/{name}" + (f" ({container})" if container else "")
 
         def _on_spec(spec: TransferSpec | None) -> None:
             if spec is not None:
-                self._start_transfer(namespace, name, container, spec)
+                self._start_transfer(namespace, name, container, spec, uid)
 
         self.push_screen(TransferScreen(target), _on_spec)
 
     def _start_transfer(
-        self, namespace: str, name: str, container: str | None, spec: TransferSpec
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        spec: TransferSpec,
+        uid: str | None,
     ) -> None:
         """Gate then launch: uploads write into the container filesystem, so
         they are blocked in read-only mode and pass the approval dialog."""
@@ -1549,7 +1563,7 @@ class KorvidApp(App[None]):
 
             def _approved(approved: bool | None) -> None:
                 if approved:
-                    self.run_worker(self._run_transfer(namespace, name, container, spec))
+                    self.run_worker(self._run_transfer(namespace, name, container, spec, uid))
 
             self.push_screen(
                 ConfirmScreen(
@@ -1560,20 +1574,28 @@ class KorvidApp(App[None]):
                 _approved,
             )
             return
-        self.run_worker(self._run_transfer(namespace, name, container, spec))
+        self.run_worker(self._run_transfer(namespace, name, container, spec, uid))
 
     async def _run_transfer(
-        self, namespace: str, name: str, container: str | None, spec: TransferSpec
+        self,
+        namespace: str,
+        name: str,
+        container: str | None,
+        spec: TransferSpec,
+        uid: str | None,
     ) -> None:
         """Audit (fail-closed), stream with progress, audit the outcome."""
         open_pod_exec = self._open_pod_exec
         audit = self._audit
-        if open_pod_exec is None:
+        if open_pod_exec is None or audit is None:
+            if audit is None:
+                # Fail-closed for downloads too: the transfer *event* is the
+                # audit requirement (issue #47), not just the write direction.
+                self.notify("Transfer blocked: no audit log configured", severity="error")
             return
-        if audit is None:
-            # Fail-closed for downloads too: the transfer *event* is the
-            # audit requirement (issue #47), not just the write direction.
-            self.notify("Transfer blocked: no audit log configured", severity="error")
+        if uid is not None and not await self._pod_uid_unchanged(
+            namespace, name, uid, action="Transfer"
+        ):
             return
         action = f"transfer_{spec.direction}"
         detail = f"container={container or '-'} remote={spec.remote_path} local={spec.local_path}"
@@ -1591,24 +1613,10 @@ class KorvidApp(App[None]):
         progress_screen = TransferProgressScreen(f"{arrow}  {namespace}/{name}:{spec.remote_path}")
         await self.push_screen(progress_screen)
         try:
-            count = await self._stream_transfer(
+            outcome, extra = await self._transfer_outcome(
                 open_pod_exec, namespace, name, container, spec, progress_screen
             )
-        except asyncio.CancelledError:
-            outcome = "cancelled"
-            self.notify("Transfer cancelled")
-        except TransferError as exc:
-            outcome = f"error: {exc}"
-            self.notify(f"Transfer failed: {exc}", severity="error")
-        except Exception as exc:  # transport errors from aiohttp/OS surface untyped
-            logger.exception("transfer failed")
-            outcome = f"error: {exc}"
-            self.notify(f"Transfer failed: {exc}", severity="error")
-        else:
-            outcome = "success"
-            detail += f" bytes={count}"
-            verb = "downloaded" if downloading else "uploaded"
-            self.notify(f"{verb} {count:,} bytes ({spec.remote_path})")
+            detail += extra
         finally:
             if self.screen is progress_screen:
                 self.pop_screen()
@@ -1619,6 +1627,34 @@ class KorvidApp(App[None]):
         except Exception:
             logger.exception("audit append failed after transfer")
             self.notify("Audit write failed for the executed transfer", severity="warning")
+
+    async def _transfer_outcome(
+        self,
+        open_pod_exec: Callable[..., contextlib.AbstractAsyncContextManager[Any]],
+        namespace: str,
+        name: str,
+        container: str | None,
+        spec: TransferSpec,
+        progress_screen: TransferProgressScreen,
+    ) -> tuple[str, str]:
+        """Stream and notify; returns (audit outcome, extra audit detail)."""
+        try:
+            count = await self._stream_transfer(
+                open_pod_exec, namespace, name, container, spec, progress_screen
+            )
+        except asyncio.CancelledError:
+            self.notify("Transfer cancelled")
+            return "cancelled", ""
+        except TransferError as exc:
+            self.notify(f"Transfer failed: {exc}", severity="error")
+            return f"error: {exc}", ""
+        except Exception as exc:  # transport errors from aiohttp/OS surface untyped
+            logger.exception("transfer failed")
+            self.notify(f"Transfer failed: {exc}", severity="error")
+            return f"error: {exc}", ""
+        verb = "downloaded" if spec.direction == "download" else "uploaded"
+        self.notify(f"{verb} {count:,} bytes ({spec.remote_path})")
+        return "success", f" bytes={count}"
 
     async def _stream_transfer(
         self,
@@ -1656,9 +1692,7 @@ class KorvidApp(App[None]):
         finally:
             self._transfer_task = None
 
-    def on_transfer_progress_screen_cancel_requested(
-        self, message: TransferProgressScreen.CancelRequested
-    ) -> None:
+    def on_transfer_cancel_requested(self, message: TransferCancelRequested) -> None:
         message.stop()
         if self._transfer_task is not None:
             self._transfer_task.cancel()
@@ -1911,8 +1945,8 @@ class KorvidApp(App[None]):
         if audit is None:
             self.notify("Writes disabled: no audit log configured", severity="warning")
             return
-        if approved_uid is not None and not await self._debug_uid_unchanged(
-            namespace, name, approved_uid
+        if approved_uid is not None and not await self._pod_uid_unchanged(
+            namespace, name, approved_uid, action="kubectl debug"
         ):
             return
         detail = f"ephemeral debug container (kubectl debug, image {image})"
@@ -1976,20 +2010,22 @@ class KorvidApp(App[None]):
     _PULL_CHECK_INTERVAL = 2.5
     _PULL_CHECK_DEADLINE = 30.0
 
-    async def _debug_uid_unchanged(self, namespace: str, name: str, approved_uid: str) -> bool:
-        """Re-verify the approved pod incarnation just before kubectl debug
+    async def _pod_uid_unchanged(
+        self, namespace: str, name: str, approved_uid: str, *, action: str
+    ) -> bool:
+        """Re-verify the approved pod incarnation just before `action`
         executes; notifies and returns False when the pod is gone or replaced."""
         try:
             current_uid = await self._target_uid("pods", namespace, name)
         except ApiStatusError:
             self.notify(
-                f"kubectl debug cancelled - pod {name} no longer exists.",
+                f"{action} cancelled - pod {name} no longer exists.",
                 severity="warning",
             )
             return False
         if current_uid is not None and current_uid != approved_uid:
             self.notify(
-                f"kubectl debug cancelled - pod {name} was replaced since the prompt was shown.",
+                f"{action} cancelled - pod {name} was replaced since the prompt was shown.",
                 severity="warning",
             )
             return False
@@ -2330,10 +2366,15 @@ class KorvidApp(App[None]):
 
     def _get_pod_containers(self, namespace: str, name: str) -> tuple[str, ...]:
         """Return container names for pod from the store, or empty tuple if not found."""
+        summary = self._find_pod(namespace, name)
+        return summary.containers if summary is not None else ()
+
+    def _find_pod(self, namespace: str, name: str) -> PodSummary | None:
+        """The store's PodSummary for the selection, or None once it is gone."""
         for obj in self.store.get(self.current_kind, self.current_scope):
             if obj.namespace == namespace and obj.name == name and isinstance(obj, PodSummary):
-                return obj.containers
-        return ()
+                return obj
+        return None
 
     # -- Write operations (issue #16): every path goes through a ConfirmScreen
     # -- confirmed only by a user keystroke; executed writes are audited.

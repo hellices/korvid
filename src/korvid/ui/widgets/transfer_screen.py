@@ -13,11 +13,11 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Input, RadioButton, RadioSet, Static
 
 from korvid.core.transfer import TransferSpec, default_local_path, validate_spec
+from korvid.ui.messages import TransferCancelRequested
 
 _DIALOG_CSS = """
 TransferScreen, TransferProgressScreen {
@@ -134,9 +134,6 @@ class TransferProgressScreen(ModalScreen[None]):
         Binding("escape", "cancel", "Cancel transfer", show=True),
     ]
 
-    class CancelRequested(Message):
-        """Posted (bubbling to the app) when the user hits escape."""
-
     def __init__(self, description: str) -> None:
         super().__init__()
         self._description = description
@@ -155,7 +152,7 @@ class TransferProgressScreen(ModalScreen[None]):
     def action_cancel(self) -> None:
         self._cancelling = True
         self.query_one("#transfer-progress", Static).update("cancelling…")
-        self.post_message(self.CancelRequested())
+        self.post_message(TransferCancelRequested())
 
     def on_key(self, event: events.Key) -> None:
         # Swallow everything else: the transfer owns the app until it ends.
