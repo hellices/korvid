@@ -309,6 +309,10 @@ def _parse_column(kind: str, entry: Any) -> tuple[CustomColumn | None, str | Non
     name = _opt_str(entry.get("name"))
     if name is None:
         return None, f"views.{kind}: a column is missing its `name`"
+    if len(name.split()) != 1:
+        # :sort splits its input on whitespace — a multi-word name could
+        # never be addressed by the command it promises.
+        return None, f"views.{kind}: column name {name!r} must be a single token"
     declared = [source for source in SOURCES if _opt_str(entry.get(source)) is not None]
     if len(declared) != 1:
         return None, (
@@ -341,6 +345,8 @@ def _collect_columns(kind: str, raw_columns: Any) -> tuple[list[CustomColumn], l
     columns: list[CustomColumn] = []
     warnings: list[str] = []
     seen: set[str] = set()
+    if raw_columns is not None and not isinstance(raw_columns, list):
+        return [], [f"views.{kind}.columns must be a list of column mappings"]
     for entry in raw_columns if isinstance(raw_columns, list) else []:
         column, warning = _parse_column(kind, entry)
         if warning is not None:

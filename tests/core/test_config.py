@@ -774,3 +774,35 @@ views:
     config = load_config(cfg)
     assert [c.name for c in config.views["pods"].columns] == ["TEAM"]
     assert any("built-in" in w for w in config.warnings)
+
+
+def test_views_whitespace_column_name_dropped_with_warning(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods:
+    columns:
+      - name: APP VERSION
+        label: version
+      - name: TEAM
+        label: team
+"""
+    )
+    config = load_config(cfg)
+    assert [c.name for c in config.views["pods"].columns] == ["TEAM"]
+    assert any("single token" in w for w in config.warnings)
+
+
+def test_views_non_list_columns_warned(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods:
+    columns: {name: TEAM, label: team}
+"""
+    )
+    config = load_config(cfg)
+    assert "pods" not in config.views
+    assert any("must be a list" in w for w in config.warnings)
