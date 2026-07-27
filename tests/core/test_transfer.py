@@ -133,7 +133,16 @@ class TestCommands:
 class TestDefaultLocalPath:
     def test_uses_downloads_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / "Downloads").mkdir()
         assert default_local_path("/var/log/app.log") == str(tmp_path / "Downloads" / "app.log")
+
+    def test_falls_back_to_home_without_downloads_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Not every home has ~/Downloads; the default must still pass
+        # validate_spec (parent exists), so fall back to the home directory.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert default_local_path("/var/log/app.log") == str(tmp_path / "app.log")
 
 
 class TestPackExtract:

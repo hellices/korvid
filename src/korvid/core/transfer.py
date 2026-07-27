@@ -140,9 +140,15 @@ def upload_command(remote_path: str) -> list[str]:
 
 
 def default_local_path(remote_path: str) -> str:
-    """Default download destination: ``~/Downloads/<basename>``."""
+    """Default download destination: ``~/Downloads/<basename>``.
+
+    Falls back to ``~/<basename>`` when the ``Downloads`` directory does not
+    exist, so the default always survives ``validate_spec``'s parent check.
+    """
     base = posixpath.basename(remote_path.rstrip("/")) or "download"
-    return str(Path("~/Downloads").expanduser() / base)
+    downloads = Path("~/Downloads").expanduser()
+    directory = downloads if downloads.is_dir() else Path("~").expanduser()
+    return str(directory / base)
 
 
 def pack_file(local_path: Path, arcname: str, archive_path: Path) -> int:
@@ -326,8 +332,12 @@ async def upload(
     byte count.
     """
     arcname = posixpath.basename(remote_path)
-    with tempfile.NamedTemporaryFile(suffix=".tar") as archive:
-        archive_path = Path(archive.name)
+    # mkstemp + close: pack_file reopens the path by name, which a
+    # still-open NamedTemporaryFile handle would forbid on Windows.
+    fd, archive_name = tempfile.mkstemp(suffix=".tar")
+    os.close(fd)
+    archive_path = Path(archive_name)
+    try:
         size = await asyncio.to_thread(pack_file, local_path, arcname, archive_path)
         async with open_exec(upload_command(remote_path), True) as ws:
             sink = _FrameSink()
@@ -365,6 +375,8 @@ async def upload(
                         "upload sent, but the connection closed without reporting an outcome"
                     )
                 )
+    finally:
+        archive_path.unlink(missing_ok=True)
     return size
 
 

@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import tarfile
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -175,6 +176,23 @@ class TestUpload:
             extracted = tf.extractfile(member)
             assert extracted is not None
             assert extracted.read() == b"echo hi\n"
+
+    async def test_spool_archive_removed_even_on_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The spool must be created with a *closed* handle (pack_file reopens
+        # it by name — an open NamedTemporaryFile forbids that on Windows)
+        # and unlinked afterwards, success or not.
+        spool_dir = tmp_path / "spool"
+        spool_dir.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(spool_dir))
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        await upload(FakeExec(FakeWs([b"\x03" + SUCCESS])), src, "/tmp/f")
+        assert list(spool_dir.iterdir()) == []
+        with pytest.raises(TransferError, match="executable file not found"):
+            await upload(FakeExec(FakeWs([b"\x03" + NOT_FOUND])), src, "/tmp/f")
+        assert list(spool_dir.iterdir()) == []
 
     async def test_error_channel_failure_raises(self, tmp_path: Path) -> None:
         src = tmp_path / "f"
