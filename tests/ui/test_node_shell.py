@@ -588,3 +588,68 @@ async def test_node_shell_cancelled_worker_still_deletes_pod(tmp_path: Path) -> 
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     last = [e for e in entries if e["action"] == "node-shell"][-1]
     assert last["outcome"].startswith("error: interrupted; cleanup: deleted")
+
+
+async def test_node_shell_create_without_uid_aborts(tmp_path: Path) -> None:
+    """A create response missing the uid must be treated as unidentifiable:
+    without it the cleanup delete would lose its uid precondition and could
+    remove a same-name replacement pod."""
+    rec = DeleteRecorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    run_fake, _ = _kubectl_run(
+        create_result=SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"metadata": {"name": DBG_POD}}).encode(),
+            stderr=b"",
+        )
+    )
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await pilot.press("y")
+
+            def _warned() -> bool:
+                return any("uid" in n.message for n in app._notifications)
+
+            await until(pilot, _warned, label="missing-uid warning")
+    assert call_records == []
+    assert rec.deletes == []
+
+
+async def test_node_shell_cancelled_during_create_still_deletes_pod(tmp_path: Path) -> None:
+    """Cancelling the worker while the detached create is in flight must not
+    leak the pod kubectl creates moments later: the create is settled and,
+    when it yields a pod identity, finalized before the cancellation
+    propagates."""
+    rec = DeleteRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    create_entered = asyncio.Event()
+    release = threading.Event()
+    loop_box: list[asyncio.AbstractEventLoop] = []
+
+    def run_fake(argv, **kwargs):  # type: ignore[no-untyped-def]  # test helper
+        assert "debug" in argv  # wait/attach must never run
+        loop_box[0].call_soon_threadsafe(create_entered.set)
+        release.wait(timeout=10)
+        return SimpleNamespace(returncode=0, stdout=_pod_json(), stderr=b"")
+
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test():
+            loop_box.append(asyncio.get_running_loop())
+            task = asyncio.ensure_future(
+                app._run_node_shell(rec, "worker-1", "default", DEBUG_IMAGE, None)
+            )
+            await asyncio.wait_for(create_entered.wait(), timeout=5)
+            task.cancel()
+            release.set()
+            await asyncio.wait([task])
+            assert task.cancelled()
+    assert call_records == []  # never attached
+    assert rec.deletes == [("pods", "default", DBG_POD, DBG_UID)]
+    entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+    last = [e for e in entries if e["action"] == "node-shell"][-1]
+    assert last["outcome"].startswith("error: interrupted; cleanup: deleted")

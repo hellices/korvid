@@ -3658,12 +3658,31 @@ class KorvidApp(App[None]):
             logger.exception("audit append failed; blocking node shell")
             self.notify("Write blocked: audit log unavailable", severity="error")
             return
-        created = await self._create_node_debug_pod(node, namespace, image)
+        # The create itself is shielded + settled: cancelling an
+        # asyncio.to_thread await does not stop the kubectl subprocess, so a
+        # cancellation here could otherwise leak a pod that was created
+        # moments later with no finalizer installed.
+        create_task = asyncio.ensure_future(self._create_node_debug_pod(node, namespace, image))
+        try:
+            created = await asyncio.shield(create_task)
+        except asyncio.CancelledError:
+            created = await create_task
+            if isinstance(created, str):
+                await self._audit_create_failure(audit, node, detail, created)
+            else:
+                await self._finalize_node_shell(
+                    ops,
+                    audit,
+                    node,
+                    namespace,
+                    created[0],
+                    created[1],
+                    detail,
+                    "error: interrupted",
+                )
+            raise
         if isinstance(created, str):  # creation failed or pod unidentifiable
-            try:
-                await asyncio.to_thread(self._audit_node_shell, audit, node, detail, created)
-            except Exception:
-                logger.exception("audit append failed after node shell create failure")
+            await self._audit_create_failure(audit, node, detail, created)
             return
         pod_name, pod_uid = created
         # Everything after a successful create runs under a finalizer:
@@ -3705,6 +3724,18 @@ class KorvidApp(App[None]):
                 await finalize
                 raise
 
+    async def _audit_create_failure(
+        self, audit: AuditLog, node: str, detail: str, outcome: str
+    ) -> None:
+        """Persist a failed/unidentifiable create outcome; surfaced on
+        failure because the outcome may record a skipped cleanup the user
+        must act on."""
+        try:
+            await asyncio.to_thread(self._audit_node_shell, audit, node, detail, outcome)
+        except Exception:
+            logger.exception("audit append failed after node shell create failure")
+            self.notify("Audit write failed for the node shell attempt", severity="warning")
+
     async def _finalize_node_shell(
         self,
         ops: WriteOps,
@@ -3712,7 +3743,7 @@ class KorvidApp(App[None]):
         node: str,
         namespace: str,
         pod_name: str,
-        pod_uid: str | None,
+        pod_uid: str,
         detail: str,
         outcome: str,
     ) -> None:
@@ -3731,7 +3762,7 @@ class KorvidApp(App[None]):
 
     async def _create_node_debug_pod(
         self, node: str, namespace: str, image: str
-    ) -> tuple[str, str | None] | str:
+    ) -> tuple[str, str] | str:
         """Create the node-debugger pod detached; returns (name, uid).
 
         On failure returns the audit outcome string instead — distinct per
@@ -3783,7 +3814,19 @@ class KorvidApp(App[None]):
                 f" cleanup skipped: check namespace {namespace}"
             )
         uid = (item_meta or {}).get("uid")
-        return pod_name, str(uid) if uid else None
+        if not isinstance(uid, str) or not uid:
+            # Without the uid the cleanup delete would lose its precondition
+            # and could remove a same-name replacement pod: refuse.
+            self.notify(
+                f"kubectl did not report the created pod's uid — check {namespace}"
+                " for leftover node-debugger pods",
+                severity="error",
+            )
+            return (
+                "error: created pod could not be identified;"
+                f" cleanup skipped: check namespace {namespace}"
+            )
+        return pod_name, uid
 
     async def _run_kubectl_ok(self, argv: list[str], timeout: float) -> bool:
         """Run a non-interactive kubectl helper; True on exit 0."""
@@ -3817,7 +3860,7 @@ class KorvidApp(App[None]):
         return True
 
     async def _delete_node_debug_pod(
-        self, ops: WriteOps, namespace: str, pod_name: str, pod_uid: str | None
+        self, ops: WriteOps, namespace: str, pod_name: str, pod_uid: str
     ) -> str:
         """Delete exactly the debugger pod this session created (uid
         precondition), returning the audit note."""
@@ -3829,7 +3872,7 @@ class KorvidApp(App[None]):
             )
             return f"cleanup failed for: {pod_name}"
         try:
-            await ops.delete_object(pods_meta, namespace, pod_name, uid=pod_uid or None)
+            await ops.delete_object(pods_meta, namespace, pod_name, uid=pod_uid)
         except Exception:
             logger.exception("node-debugger pod deletion failed")
             self.notify(
