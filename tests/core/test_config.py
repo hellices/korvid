@@ -954,3 +954,59 @@ def test_save_agent_config_writes_full_explicitly(tmp_path: Path) -> None:
     )
     assert load_config(p).agent_profile == "full"
     assert "profile: full" in p.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Protected contexts (issue #83)
+# ---------------------------------------------------------------------------
+
+
+def test_protected_contexts_default_empty(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("namespace: default\n")
+    config = load_config(cfg_file)
+    assert config.protected_contexts == ()
+    assert config.agent_disable_in_protected is False
+
+
+def test_protected_contexts_parsed(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("protected_contexts:\n  - prod-*\n  - staging-eu\n")
+    config = load_config(cfg_file)
+    assert config.protected_contexts == ("prod-*", "staging-eu")
+
+
+def test_protected_contexts_non_list_ignored(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("protected_contexts: prod\n")
+    config = load_config(cfg_file)
+    assert config.protected_contexts == ()
+
+
+def test_protected_contexts_non_string_entries_dropped(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("protected_contexts:\n  - prod-*\n  - 42\n  - ''\n")
+    config = load_config(cfg_file)
+    assert config.protected_contexts == ("prod-*",)
+
+
+def test_agent_disable_in_protected_parsed(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("agent:\n  provider: ollama\n  disable_in_protected: true\n")
+    config = load_config(cfg_file)
+    assert config.agent_disable_in_protected is True
+
+
+def test_context_is_protected_glob_match() -> None:
+    from korvid.core.config import context_is_protected
+
+    assert context_is_protected("prod-us-east", ("prod-*",)) is True
+    assert context_is_protected("staging", ("prod-*",)) is False
+    assert context_is_protected("prod", ("prod",)) is True
+
+
+def test_context_is_protected_none_or_empty() -> None:
+    from korvid.core.config import context_is_protected
+
+    assert context_is_protected(None, ("prod-*",)) is False
+    assert context_is_protected("prod-a", ()) is False

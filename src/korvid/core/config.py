@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from math import isfinite
 from os import chmod as os_chmod
 from os import fdopen as os_fdopen
@@ -62,6 +63,13 @@ class KorvidConfig:
     log_wrap: bool = False
     log_timestamps: bool = False
     readonly: bool = False
+    #: Contexts (kubeconfig names or fnmatch globs, issue #83) where every
+    #: write demands typing the context name and the status bar shows a red
+    #: protected marker. Re-evaluated on every `:ctx` switch.
+    protected_contexts: tuple[str, ...] = ()
+    #: `agent.disable_in_protected` (issue #83): refuse agent prompts entirely
+    #: while a protected context is active.
+    agent_disable_in_protected: bool = False
     mcp_enabled: bool = False
     mcp_port: int = 7878
     #: kubectl debug image overrides (issue #52): air-gapped / private registry.
@@ -157,6 +165,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         log_wrap=logs_raw.get("wrap") is True,
         log_timestamps=logs_raw.get("timestamps") is True,
         readonly=raw.get("readonly") is True,
+        protected_contexts=_parse_protected_contexts(raw.get("protected_contexts")),
+        agent_disable_in_protected=agent_raw.get("disable_in_protected") is True,
         mcp_enabled=mcp_raw.get("enabled") is True,
         mcp_port=_parse_port(mcp_raw.get("port")),
         debug_default_image=_opt_str(debug_raw.get("default_image")),
@@ -341,6 +351,25 @@ def _parse_namespaces(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(item for item in value if isinstance(item, str) and item)
+
+
+def _parse_protected_contexts(value: Any) -> tuple[str, ...]:
+    """`protected_contexts:` list (issue #83): non-empty string globs only."""
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and item)
+
+
+def context_is_protected(context: str | None, patterns: tuple[str, ...]) -> bool:
+    """Whether *context* matches any protected-context pattern (issue #83).
+
+    Patterns are `fnmatch` globs (e.g. `prod-*`) or literal context names.
+    An unresolvable context name (None) is never treated as protected — the
+    marker exists to make known-dangerous clusters loud, not to guess.
+    """
+    if context is None:
+        return False
+    return any(fnmatchcase(context, pattern) for pattern in patterns)
 
 
 def _parse_column(kind: str, entry: Any) -> tuple[CustomColumn | None, str | None]:

@@ -388,6 +388,9 @@ class ContextSwitchResult:
     #: startup HelmCLI pins --kube-context, so keeping it across a switch
     #: would send approval-gated helm writes to the OLD cluster.
     helm: HelmCLI | None = None
+    #: The new context's name when it matches `protected_contexts` (issue
+    #: #83), None otherwise — the marker is re-derived on every switch.
+    protected_context: str | None = None
 
 
 _WriteParams = ParamSpec("_WriteParams")
@@ -635,6 +638,7 @@ class KorvidApp(App[None]):
         pod_resize_supported: bool = False,
         forwards: ForwardRegistry | None = None,
         provider_hint: str | None = None,
+        protected_context: str | None = None,
         open_pod_exec: Callable[..., contextlib.AbstractAsyncContextManager[Any]] | None = None,
         fallback_namespaces: tuple[str, ...] = (),
         list_contexts: Callable[[], tuple[list[str], str | None]] | None = None,
@@ -732,6 +736,10 @@ class KorvidApp(App[None]):
         #: detected cloud provider short name ("aks", "aws", ...) or None;
         #: drives the Service/Ingress describe footer (issue #30).
         self._provider_hint = provider_hint
+        #: Active context's name when it matches `protected_contexts` (issue
+        #: #83); None otherwise. Drives the red status marker, the extra
+        #: type-the-context-name confirm layer, and the optional agent block.
+        self._protected_context = protected_context
         #: KubeClient.open_pod_exec, bound at composition; None means no
         #: cluster connection, so file transfer (issue #47) is unavailable.
         self._open_pod_exec = open_pod_exec
@@ -1598,6 +1606,14 @@ class KorvidApp(App[None]):
         )
         self._pod_resize_supported = result.pod_resize_supported
         self._provider_hint = result.provider_hint
+        self._protected_context = result.protected_context
+        if result.protected_context is not None:
+            self.notify(
+                f"Context {result.protected_context!r} is protected — writes"
+                " require typing the context name",
+                severity="warning",
+                timeout=10,
+            )
         self._fallback_namespaces = result.fallback_namespaces
         self.watch_manager.set_fallback_namespaces(result.fallback_namespaces)
         if self._audit is not None:
@@ -2988,7 +3004,7 @@ class KorvidApp(App[None]):
                 self.run_worker(self._run_transfer(namespace, name, container, spec, uid))
 
             self.push_screen(
-                ConfirmScreen(
+                self._confirm_screen(
                     f"Upload file to {namespace}/{name}",
                     f"{spec.local_path} → {container or 'pod'}:{spec.remote_path}\n"
                     "This writes into the container filesystem.",
@@ -3390,7 +3406,7 @@ class KorvidApp(App[None]):
             self.run_worker(self._run_debug(namespace, name, container, approved_uid, image))
 
         self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Shell failed in {target} (exit {exit_code})",
                 f"kubectl debug: attach a {image} debug container to pod"
                 f" {name}{self._write_locus(namespace)} - the target image likely"
@@ -3650,7 +3666,7 @@ class KorvidApp(App[None]):
                 self.run_worker(self._run_debug(namespace, name, container, approved_uid, fallback))
 
         self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Image pull failed for {image} ({reason})",
                 f"Retry kubectl debug on {target}{self._write_locus(namespace)} with"
                 f" {fallback}? Note: the failed ephemeral container entry cannot be"
@@ -4214,7 +4230,7 @@ class KorvidApp(App[None]):
                 )
 
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Delete {self._gvr_label(meta)}/{name}?",
                 operation,
                 require_name=require,
@@ -4270,7 +4286,7 @@ class KorvidApp(App[None]):
                 )
 
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Rollout restart {self._gvr_label(meta)}/{name}?",
                 f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
                 f"{self._write_locus(ns)}",
@@ -4356,7 +4372,7 @@ class KorvidApp(App[None]):
                 )
 
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Apply edited {label}?",
                 # Issue #21: the approval dialog summarizes the change, not
                 # just the target and verb.
@@ -4555,7 +4571,7 @@ class KorvidApp(App[None]):
 
         shown = "?" if current is None else current
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Scale {self._gvr_label(meta)}/{name}?",
                 f"PATCH {self._gvr_label(meta)}/{name}/scale: replicas {shown} -> {replicas}"
                 f"{self._write_locus(ns)}",
@@ -4689,7 +4705,7 @@ class KorvidApp(App[None]):
                 )
 
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Resize pods/{name}?",
                 f"PATCH pods/{name}/resize: {summary}{self._write_locus(ns)}",
                 preview=preview,
@@ -4769,7 +4785,7 @@ class KorvidApp(App[None]):
                 )
 
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"{action.capitalize()} nodes/{name}?",
                 f"PATCH nodes/{name} spec.unschedulable={flag}",
                 preview=preview,
@@ -4830,7 +4846,7 @@ class KorvidApp(App[None]):
         blocked_now = sum(1 for t in plan.targets if t.pdb_blocked is not None)
         note = f"; {blocked_now} currently PDB-blocked" if blocked_now else ""
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Drain nodes/{name}?",
                 f"Cordon nodes/{name}, then attempt eviction of {len(plan.targets)} pods"
                 f" via the Eviction API{note}"
@@ -5112,7 +5128,7 @@ class KorvidApp(App[None]):
                 self.run_worker(self._run_node_shell(ops, name, shell_ns, image, uid))
 
         self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Node shell on {name}",
                 f"kubectl debug node/{name}: creates a privileged debug pod"
                 f" (image {image}) in namespace {shell_ns} with the node's"
@@ -5649,7 +5665,7 @@ class KorvidApp(App[None]):
             )
 
         await self.push_screen(
-            ConfirmScreen(f"Install operator {facts.package}?", operation), _done
+            self._confirm_screen(f"Install operator {facts.package}?", operation), _done
         )
 
     async def _start_installplan_approve(
@@ -5709,7 +5725,9 @@ class KorvidApp(App[None]):
                     )
                 )
 
-        await self.push_screen(ConfirmScreen(f"Approve installplans/{name}?", operation), _done)
+        await self.push_screen(
+            self._confirm_screen(f"Approve installplans/{name}?", operation), _done
+        )
 
     def _approvable_plan_spec(self, manifest: dict[str, Any], name: str) -> dict[str, Any] | None:
         """The plan's spec if it is a pending Manual plan, else None (with
@@ -5922,7 +5940,7 @@ class KorvidApp(App[None]):
 
         title = f"{'Upgrade' if upgrade else 'Install'} {choices.release}?"
         await self.push_screen(
-            ConfirmScreen(title, operation, preview=preview, preview_title=preview_title),
+            self._confirm_screen(title, operation, preview=preview, preview_title=preview_title),
             _done,
         )
 
@@ -6083,7 +6101,7 @@ class KorvidApp(App[None]):
             )
 
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Rollback {row.release} to revision {row.revision}?",
                 operation,
                 preview=preview,
@@ -6386,6 +6404,8 @@ class KorvidApp(App[None]):
         # create_provider may return None (unknown provider, missing base_url/
         # model) while agent_enabled is still true in config.
         label = "AI on" if self._agent_runtime is not None else "AI off"
+        if self._agent_runtime is not None and self._agent_blocked_in_protected():
+            label = "AI blocked"
         mcp_label = self._mcp.status() if self._mcp is not None else ""
         self.query_one(StatusBar).update_status(
             self.config.kube_context,
@@ -6395,6 +6415,34 @@ class KorvidApp(App[None]):
             mcp_label=mcp_label,
             filter_label=self._resource_filter.describe(),
             progress_label=self._drain_progress,
+            protected=self._protected_context is not None,
+        )
+
+    def _agent_blocked_in_protected(self) -> bool:
+        """`agent.disable_in_protected` (issue #83): agent turns are refused
+        entirely while a protected context is active."""
+        return self._protected_context is not None and self.config.agent_disable_in_protected
+
+    def _confirm_screen(
+        self,
+        title: str,
+        operation: str,
+        *,
+        require_name: str | None = None,
+        preview: list[str] | None = None,
+        preview_title: str = "server dry-run preview:",
+    ) -> ConfirmScreen:
+        """Build every write-approval dialog through one place so the
+        protected-context layer (issue #83) can never be forgotten: while a
+        protected context is active, all confirms carry the red banner and
+        demand a typed name instead of `y`."""
+        return ConfirmScreen(
+            title,
+            operation,
+            require_name=require_name,
+            preview=preview,
+            preview_title=preview_title,
+            protected_context=self._protected_context,
         )
 
     # ------------------------------------------------------------------
@@ -6586,6 +6634,15 @@ class KorvidApp(App[None]):
         panel.query_one("#agent-input").focus()
 
     def on_agent_prompt_submitted(self, message: AgentPromptSubmitted) -> None:
+        if self._agent_blocked_in_protected():
+            # agent.disable_in_protected (issue #83): in protected contexts
+            # the agent must not run at all, not merely gate its writes.
+            self.notify(
+                f"Agent is disabled in protected context {self._protected_context!r}"
+                " (agent.disable_in_protected)",
+                severity="warning",
+            )
+            return
         if self._ctx_switching:
             # A turn started now would run during teardown/retarget and could
             # act on the new cluster with the old cluster's screen context.
@@ -7176,7 +7233,7 @@ class KorvidApp(App[None]):
             if not fut.done():
                 fut.set_result(bool(confirmed))
 
-        screen = ConfirmScreen(title, operation, require_name=require_name, preview=preview)
+        screen = self._confirm_screen(title, operation, require_name=require_name, preview=preview)
         await self.push_screen(screen, _done)
         # Recheck after mounting: surfacing the dialog (or push_screen itself)
         # can consume the last of the budget, and a fixed minimum here would
