@@ -107,10 +107,11 @@ def troubled_containers(pod: dict[str, Any]) -> list[str]:
 
     Waiting states, non-zero terminations, and any restarts qualify — a
     container that crashed and recovered still logged why it crashed.
-    Completed containers (exit 0) are healthy even after earlier restarts.
+    Completed init containers (exit 0) are healthy: earlier restarts are
+    part of normal retry-until-success, unlike a regular container's.
     """
     names: list[str] = []
-    for _prefix, cs in _container_statuses(pod):
+    for prefix, cs in _container_statuses(pod):
         name = cs.get("name")
         if not isinstance(name, str) or not name:
             continue
@@ -118,9 +119,10 @@ def troubled_containers(pod: dict[str, Any]) -> list[str]:
         restarts = cs.get("restartCount") or 0
         waiting = isinstance(state.get("waiting"), dict)
         terminated = state.get("terminated")
-        if isinstance(terminated, dict) and terminated.get("exitCode") == 0:
-            continue  # Completed — earlier restarts no longer matter, it succeeded
-        failed_exit = isinstance(terminated, dict)
+        completed = isinstance(terminated, dict) and terminated.get("exitCode") == 0
+        if prefix == "init " and completed:
+            continue  # a Completed init container succeeded — retries were routine
+        failed_exit = isinstance(terminated, dict) and not completed
         if waiting or failed_exit or restarts > 0:
             names.append(name)
     return names

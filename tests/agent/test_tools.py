@@ -1154,6 +1154,27 @@ async def test_diagnose_pod_budgets_each_container_block_keeping_headers() -> No
     assert out.count("…") >= 3  # each over-budget block elides visibly
 
 
+async def test_diagnose_pod_marks_pvcs_beyond_the_fetch_cap() -> None:
+    """Storage evidence must not present a capped fetch as the full set —
+    claim six could be the Pending one."""
+    kube = FakeDiagnoseKube()
+    pod = kube.objects[("pods", "api-1")]
+    pod["spec"]["volumes"] = [
+        {"name": f"v{i}", "persistentVolumeClaim": {"claimName": f"claim-{i}"}} for i in range(7)
+    ]
+    for i in range(7):
+        kube.objects[("persistentvolumeclaims", f"claim-{i}")] = {
+            "metadata": {"name": f"claim-{i}"},
+            "status": {"phase": "Bound"},
+        }
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "pvc claim-4: Bound" in out
+    assert "pvc claim-5" not in out  # not fetched — and not silently omitted either
+    assert "(2 more claims not fetched: claim-5, claim-6)" in out
+
+
 async def test_diagnose_pod_works_with_pod_only_aliases() -> None:
     """Before background API discovery lands, the alias table holds only
     pods — the built-in ReplicaSet/Node/PVC lookups must still work via

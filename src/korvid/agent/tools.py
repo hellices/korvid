@@ -827,6 +827,8 @@ class ToolExecutor:
     _DIAGNOSE_LOG_TAIL = 200
     #: Troubled containers whose logs are excerpted; more are named only.
     _DIAGNOSE_MAX_LOG_CONTAINERS = 3
+    #: Mounted PVCs whose phase is fetched; more are named only.
+    _DIAGNOSE_MAX_PVCS = 5
     #: Per-line clamp — event/condition messages and log lines are
     #: cluster-controlled and unbounded.
     _DIAGNOSE_LINE_CLAMP = 240
@@ -886,13 +888,17 @@ class ToolExecutor:
                 lines.append(f"node {node_name}: unavailable ({exc})")
         pvc_meta = self._meta_for_kind_name("PersistentVolumeClaim")
         if pvc_meta is not None:
-            for claim in pvc_names(pod)[:5]:
+            claims = pvc_names(pod)
+            for claim in claims[: self._DIAGNOSE_MAX_PVCS]:
                 try:
                     pvc = await self._kube.get_object(pvc_meta, namespace, claim)
                     phase = (pvc.get("status") or {}).get("phase") or "?"
                     lines.append(f"pvc {claim}: {phase}")
                 except Exception as exc:
                     lines.append(f"pvc {claim}: unavailable ({exc})")
+            omitted = claims[self._DIAGNOSE_MAX_PVCS :]
+            if omitted:
+                lines.append(f"({len(omitted)} more claims not fetched: {', '.join(omitted)})")
         return lines
 
     async def _diagnose_events(self, namespace: str, name: str, pod: dict[str, Any]) -> list[str]:

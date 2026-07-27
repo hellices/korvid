@@ -202,6 +202,35 @@ def test_troubled_containers_skip_a_completed_init_container_despite_restarts() 
     assert troubled_containers(pod) == []
 
 
+def test_troubled_containers_include_a_completed_regular_container_with_restarts() -> None:
+    """The Completed exception is for init containers only — a regular
+    container that exited 0 after prior restarts still crashed before,
+    and that evidence lives in its previous logs."""
+    pod = _crashloop_pod()
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": "worker",
+            "ready": False,
+            "restartCount": 3,
+            "state": {"terminated": {"exitCode": 0, "reason": "Completed"}},
+        }
+    ]
+    assert troubled_containers(pod) == ["worker"]
+
+
+def test_troubled_containers_skip_a_completed_regular_container_without_restarts() -> None:
+    pod = _crashloop_pod()
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": "worker",
+            "ready": False,
+            "restartCount": 0,
+            "state": {"terminated": {"exitCode": 0, "reason": "Completed"}},
+        }
+    ]
+    assert troubled_containers(pod) == []
+
+
 def test_restarted_containers_lists_names_with_restarts() -> None:
     pod = _crashloop_pod()
     pod["status"]["initContainerStatuses"] = [
