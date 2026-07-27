@@ -10,8 +10,8 @@ tar argv builders, spec validation, and local tar packing/extraction.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
+import logging
 import os
 import posixpath
 import tarfile
@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar
 
 _T = TypeVar("_T")
+
+logger = logging.getLogger(__name__)
 
 #: Bytes copied per read while extracting a downloaded archive, and per
 #: stdin frame while uploading.
@@ -301,8 +303,11 @@ async def _await_thread(func: Callable[..., _T], /, *args: Any) -> _T:
     try:
         return await asyncio.shield(inner)
     except asyncio.CancelledError:
-        with contextlib.suppress(Exception):
+        try:
             await inner
+        except Exception:
+            # Cancellation wins, but keep the thread's own failure findable.
+            logger.debug("thread work failed while awaiting cancellation", exc_info=True)
         raise
 
 
