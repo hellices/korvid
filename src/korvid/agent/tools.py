@@ -14,8 +14,14 @@ from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import parse_quantity
+from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
 
 MAX_RESULT_CHARS = 8000
+
+#: OperatorHub catalogs commonly serve hundreds of packages; keep the
+#: catalog listing well under the shared result cap so the installed
+#: section is never sacrificed to it.
+_MAX_CATALOG_PACKAGES = 60
 
 _TRUNCATION_SUFFIX = "\n… [truncated — narrow the query]"
 
@@ -128,6 +134,31 @@ READ_TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["kind", "namespace", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_operators",
+            "description": (
+                "List OLM operators: available packages from the cluster's"
+                " operator catalog plus installed subscriptions with their"
+                " status. Read-only; installing an operator is done by the"
+                " user through the UI. Explains itself when OLM is absent."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": (
+                            "Namespace to scope installed subscriptions to."
+                            " Omit for all namespaces."
+                        ),
+                    },
+                },
+                "required": [],
             },
         },
     },
@@ -551,6 +582,8 @@ class ToolExecutor:
             return await self._get_logs(arguments)
         if name == "get_events":
             return await self._get_events(arguments)
+        if name == "list_operators":
+            return await self._list_operators(arguments)
         raise ValueError(f"unknown tool: {name!r}")
 
     async def _dispatch_ui(self, name: str, args: dict[str, Any]) -> str:
@@ -620,6 +653,63 @@ class ToolExecutor:
         if not summaries:
             return "(none)"
         return "\n".join(f"{s.namespace}/{s.name}  -  age={s.age()}" for s in summaries)
+
+    async def _list_operators(self, args: dict[str, Any]) -> str:
+        """Catalog packages + installed subscriptions, straight from the
+        cluster's own OLM objects (issue #29: no hardcoded operator
+        knowledge; the tool explains itself when OLM is absent)."""
+        pkg_meta = resolve_olm_meta(self._aliases, "packagemanifests", PACKAGES_GROUP)
+        sub_meta = resolve_olm_meta(self._aliases, "subscriptions", OPERATORS_GROUP)
+        if pkg_meta is None and sub_meta is None:
+            return (
+                "OLM was not detected: neither packages.operators.coreos.com"
+                " nor operators.coreos.com API groups were discovered (OLM"
+                " may be absent, or discovery may still be running), so"
+                " there are no operators to list."
+            )
+        namespace: str | None = args.get("namespace")
+        lines: list[str] = []
+        # Installed state first: it is what the user most likely asked
+        # about, and a large catalog must not push it past the result cap.
+        if sub_meta is not None:
+            lines.append("INSTALLED (subscriptions):")
+            subs = await self._kube.list_objects(sub_meta, namespace)
+            if not subs:
+                lines.append("  (none)")
+            for sub in sorted(subs, key=lambda s: (s.namespace, s.name)):
+                lines.append(
+                    f"  {sub.namespace}/{sub.name}"
+                    f"  channel={getattr(sub, 'channel', '') or '?'}"
+                    f"  csv={getattr(sub, 'installed_csv', '') or '?'}"
+                    f"  state={getattr(sub, 'state', '') or '?'}"
+                )
+        else:
+            lines.append(
+                "INSTALLED (subscriptions): unavailable -"
+                " the operators.coreos.com API group was not discovered"
+            )
+        if pkg_meta is None:
+            lines.append(
+                "AVAILABLE (operator catalog): unavailable -"
+                " the packages.operators.coreos.com API group was not"
+                " discovered (the package server may be down or hidden)"
+            )
+            return "\n".join(lines)
+        lines.append("AVAILABLE (operator catalog):")
+        packages = sorted(await self._kube.list_objects(pkg_meta, None), key=lambda p: p.name)
+        # OperatorHub catalogs commonly serve hundreds of packages; cap the
+        # listing so the tool result stays within the shared result budget.
+        shown = packages[:_MAX_CATALOG_PACKAGES]
+        for pkg in shown:
+            channels = ",".join(getattr(pkg, "channels", ()) or ())
+            lines.append(
+                f"  {pkg.name}  catalog={getattr(pkg, 'catalog', '') or '?'}"
+                f"  default={getattr(pkg, 'default_channel', '') or '?'}"
+                f"  channels={channels or '?'}"
+            )
+        if len(packages) > len(shown):
+            lines.append(f"  ...and {len(packages) - len(shown)} more catalog packages")
+        return "\n".join(lines)
 
     async def _get_resource(self, args: dict[str, Any]) -> str:
         kind = str(args["kind"]).strip().lower()
