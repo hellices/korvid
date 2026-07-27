@@ -454,6 +454,9 @@ class KorvidApp(App[None]):
         #: for such a record is serialized behind the confirmation so the
         #: start entry always reaches the log first.
         self._confirming_forwards: dict[int, Worker[None]] = {}
+        #: stops deferred behind a pending confirmation, keyed by forward id;
+        #: teardown flushes leftovers so a cancelled worker can't lose them.
+        self._deferred_stop_audits: dict[int, ForwardSpec] = {}
         #: pods/resize subresource discovered on the connected cluster
         #: (1.35 GA); gates the R keybinding and the resize agent tool.
         self._pod_resize_supported = pod_resize_supported
@@ -1395,14 +1398,17 @@ class KorvidApp(App[None]):
         if ns is None or name is None:
             return
         kind = self.current_kind
-        ports: list[int] = []
-        if self._get_manifest is not None:
-            try:
-                manifest = await self._get_manifest(kind, ns, name)
-            except Exception as exc:  # prefill is a convenience — dialog works without it
-                logger.debug("manifest fetch for port prefill failed: %s", exc)
-            else:
-                ports = candidate_remote_ports(kind, manifest)
+        ports, manifest_ok = await self._forward_prefill_ports(kind, ns, name)
+        if kind == "services" and manifest_ok and not ports:
+            # A fetched Service with no TCP ports can never be forwarded —
+            # kubectl port-forward is TCP-only. (A failed fetch still opens
+            # the dialog: the port list is a convenience, not the source of
+            # truth, and kubectl gives the authoritative error.)
+            self.notify(
+                f"{name} declares no TCP ports — kubectl port-forward is TCP-only",
+                severity="error",
+            )
+            return
 
         def _on_result(result: tuple[int, int] | None) -> None:
             if result is not None:
@@ -1412,6 +1418,24 @@ class KorvidApp(App[None]):
             PortForwardScreen(f"{kind}/{ns}/{name}", ports, restrict_remote=kind == "services"),
             _on_result,
         )
+
+    async def _forward_prefill_ports(
+        self, kind: str, namespace: str, name: str
+    ) -> tuple[list[int], bool]:
+        """Declared TCP ports for the forward dialog, plus fetch success.
+
+        The success flag lets the caller tell "no TCP ports declared"
+        (reject a Service up front) apart from "manifest unavailable"
+        (open the dialog unrestricted — kubectl has the final say).
+        """
+        if self._get_manifest is None:
+            return [], False
+        try:
+            manifest = await self._get_manifest(kind, namespace, name)
+        except Exception as exc:  # prefill is a convenience — dialog works without it
+            logger.debug("manifest fetch for port prefill failed: %s", exc)
+            return [], False
+        return candidate_remote_ports(kind, manifest), True
 
     def _start_forward(
         self, kind: str, namespace: str, name: str, *, local_port: int, remote_port: int
@@ -1491,11 +1515,18 @@ class KorvidApp(App[None]):
         finally:
             self._confirming_forwards.pop(record.id, None)
 
-    async def _audit_stop_after_confirm(self, pending: Worker[None], record: ForwardRecord) -> None:
-        """Audit a stop only after the record's start confirmation resolved."""
+    async def _audit_stop_after_confirm(self, pending: Worker[None], forward_id: int) -> None:
+        """Audit a stop only after the record's start confirmation resolved.
+
+        The spec lives in `_deferred_stop_audits` (popped here on success) so
+        that a shutdown cancelling this worker cannot lose the entry —
+        teardown flushes whatever is left after the confirmations settle.
+        """
         with contextlib.suppress(Exception):  # a cancelled confirm still frees the stop
             await pending.wait()
-        self._audit_forward("port-forward-stop", record.spec)
+        spec = self._deferred_stop_audits.pop(forward_id, None)
+        if spec is not None:
+            self._audit_forward("port-forward-stop", spec)
 
     def _audit_forward(self, action: str, spec: ForwardSpec, *, outcome: str = "success") -> None:
         """Queue a forward audit entry; a single worker drains in FIFO order."""
@@ -1564,7 +1595,8 @@ class KorvidApp(App[None]):
                 # The start entry is only enqueued once the readiness
                 # confirmation resolves — queue this stop behind it so the
                 # log never shows a stop before its start.
-                self.run_worker(self._audit_stop_after_confirm(pending, record))
+                self._deferred_stop_audits[record.id] = record.spec
+                self.run_worker(self._audit_stop_after_confirm(pending, record.id))
             self.notify(f"Stopped forward localhost:{record.spec.local_port}")
 
         def _on_reattach(record: ForwardRecord) -> None:
@@ -4053,6 +4085,13 @@ class KorvidApp(App[None]):
         for confirm in list(self._confirming_forwards.values()):
             with contextlib.suppress(Exception):
                 await confirm.wait()
+        # User stops whose deferred audit worker never got to run (shutdown
+        # cancels workers): their start entries are enqueued by now, so
+        # flushing here keeps the order — user stops, then teardown stops.
+        for spec in self._deferred_stop_audits.values():
+            if self._audit is not None:
+                self._enqueue_forward_audit("port-forward-stop", spec)
+        self._deferred_stop_audits.clear()
         for record in records:
             if self._audit is not None:
                 self._enqueue_forward_audit("port-forward-stop", record.spec, teardown=True)

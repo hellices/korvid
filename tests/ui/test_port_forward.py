@@ -1016,3 +1016,68 @@ async def test_teardown_during_startup_keeps_audit_order(tmp_path: Path) -> None
     assert "port-forward-start" in lines
     assert "port-forward-stop" in lines
     assert lines.index("port-forward-start") < lines.index("port-forward-stop")
+
+
+async def test_udp_only_service_is_rejected_up_front() -> None:
+    """A Service with no TCP ports cannot be forwarded — kubectl is TCP-only."""
+    procs: list[_FakeProc] = []
+
+    async def svc_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        return {"spec": {"ports": [{"port": 53, "protocol": "UDP"}]}}
+
+    app = make_app(
+        [],
+        forwards=_registry(procs),
+        extra_data={"services": [_svc("dns")]},
+        get_manifest=svc_manifest,
+    )
+    notices: list[str] = []
+    original_notify = app.notify
+
+    def _spy(message: str, **kwargs: Any) -> None:
+        notices.append(message)
+        original_notify(message, **kwargs)
+
+    app.notify = _spy  # type: ignore[method-assign]  # test spy
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await app.on_navigate_command(NavigateCommand("services", None))
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: any("TCP" in note for note in notices))
+            assert not isinstance(app.screen, PortForwardScreen)
+            assert procs == []
+
+
+async def test_stop_during_startup_survives_immediate_exit(tmp_path: Path) -> None:
+    """Ctrl-D on a starting forward, then instant quit — both audits must land."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: len(procs) == 1)
+            await _open_pf(app, pilot)
+            await pilot.press("ctrl+d")
+            # Exit right away — no waiting for workers to settle.
+    lines = _audit_lines(tmp_path)
+    assert "port-forward-start" in lines
+    assert "port-forward-stop" in lines
+    assert lines.index("port-forward-start") < lines.index("port-forward-stop")

@@ -356,7 +356,11 @@ class ForwardRegistry:
 
 
 def candidate_remote_ports(kind: str, manifest: dict[str, Any]) -> list[int]:
-    """Declared ports of a pod or service manifest, for dialog prefill.
+    """Declared TCP ports of a pod or service manifest, for dialog prefill.
+
+    `kubectl port-forward` speaks TCP only, so UDP/SCTP declarations are
+    skipped — offering one would prefill a port that is guaranteed to fail.
+    An absent ``protocol`` defaults to TCP, matching the Kubernetes API.
 
     Best-effort over a cluster-supplied document: anything malformed is
     skipped, never raised — an empty result just means the user types the
@@ -377,7 +381,9 @@ def candidate_remote_ports(kind: str, manifest: dict[str, Any]) -> list[int]:
         port_key = "containerPort"
     ports: list[int] = []
     for entry in entries if isinstance(entries, list) else []:
-        port = entry.get(port_key) if isinstance(entry, dict) else None
+        if not isinstance(entry, dict) or entry.get("protocol", "TCP") != "TCP":
+            continue
+        port = entry.get(port_key)
         if (
             isinstance(port, int)
             and not isinstance(port, bool)  # bool is an int subclass

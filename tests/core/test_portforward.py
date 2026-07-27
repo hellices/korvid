@@ -498,3 +498,33 @@ def test_reattach_ignores_late_output_from_the_dead_process() -> None:
     # The replacement's own handshake still resolves normally.
     procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
     assert registry.wait_ready(record.id, timeout=2.0) == "alive"
+
+
+def test_candidate_ports_skip_non_tcp_protocols() -> None:
+    """kubectl port-forward is TCP-only — UDP/SCTP declarations are unusable."""
+    svc = {
+        "spec": {
+            "ports": [
+                {"port": 53, "protocol": "UDP"},
+                {"port": 80, "protocol": "TCP"},
+                {"port": 132, "protocol": "SCTP"},
+                {"port": 443},  # no protocol declared — defaults to TCP
+            ]
+        }
+    }
+    assert candidate_remote_ports("services", svc) == [80, 443]
+    pod = {
+        "spec": {
+            "containers": [
+                {
+                    "name": "app",
+                    "ports": [
+                        {"containerPort": 53, "protocol": "UDP"},
+                        {"containerPort": 8080, "protocol": "TCP"},
+                        {"containerPort": 9090},
+                    ],
+                }
+            ]
+        }
+    }
+    assert candidate_remote_ports("pods", pod) == [8080, 9090]

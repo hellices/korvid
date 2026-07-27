@@ -2,8 +2,10 @@
 
 Forwards run as kubectl subprocesses rather than through the async client:
 `kubernetes.aio` has no portforward support in the ws client used here, and a
-subprocess gives free reconnection semantics identical to what users already
-get from a hand-run `kubectl port-forward`.
+subprocess behaves exactly like the hand-run `kubectl port-forward` users
+already know — including exiting when its target disappears. That exit is a
+feature, not a gap: the registry's liveness tracking and one-key re-attach
+(issue #38) are built around detecting it.
 
 ``context`` pins the kubeconfig context korvid connected with (same rationale
 as `korvid.ui.shell`): without it kubectl reads ``current-context`` at
