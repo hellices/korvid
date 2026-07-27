@@ -1794,10 +1794,13 @@ class KorvidApp(App[None]):
         registry.refresh()
         for record in registry.forwards():
             if record.status == "broken" and record.id not in self._broken_forwards:
-                if record.id in self._current_confirmations:
-                    # A readiness confirmation is about to report this exact
-                    # failure with its specific error — the generic breakage
-                    # toast must not double it.
+                if record.id in self._current_confirmations or self._launching_forwards:
+                    # A readiness confirmation — tracked, or still being
+                    # installed by an in-flight launch — is about to report
+                    # this exact failure with its specific error; the generic
+                    # breakage toast must not double it. Leaving the id out
+                    # of the armed set only defers an unrelated breakage's
+                    # toast to the next poll tick.
                     continue
                 self._broken_forwards.add(record.id)
                 self.notify(

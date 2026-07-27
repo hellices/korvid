@@ -475,6 +475,11 @@ class ForwardRegistry:
         # validation and the pop/signal, where it used to get its fresh
         # process signalled down as the failed generation.
         with self._ops:
+            if self._records.get(forward_id) is not record:
+                # A stop (or teardown) unlisted the record between the
+                # lock-free lookup and this lock — that deliberate outcome
+                # stands; reporting a failed start would misdescribe it.
+                return None
             with record._lock:
                 if generation is not None and record._generation != generation:
                     return None

@@ -6,6 +6,7 @@ import asyncio
 import io
 import queue
 import threading
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -688,6 +689,63 @@ async def test_poll_stays_quiet_while_a_confirmation_reports_the_failure(tmp_pat
             # kubectl dies silently while the readiness confirmation still waits.
             procs[0].returncode = 1
             app._poll_forwards()  # marks it broken and wakes the waiter
+            await until(
+                pilot,
+                lambda: any("failed to start" in n for n in notices),
+                label="specific failed-start toast",
+            )
+            assert not any("target gone?" in n for n in notices)
+            procs[0].stdout.feed(None)  # release the reader thread
+
+
+async def test_poll_stays_quiet_while_a_launch_is_still_in_flight(tmp_path: Path) -> None:
+    """A record published by registry.start() before the launch coroutine
+    resumes is still owned by that launch — the poll must not toast its
+    breakage generically nor retain it in the armed set."""
+    procs: list[_FakeProc] = []
+    release = threading.Event()
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        release.wait(2.0)  # hold the spawn until the test lines up the race
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    notices: list[str] = []
+    original = app.notify
+
+    def _capture(message: str, **kwargs: Any) -> Any:
+        notices.append(message)
+        return original(message, **kwargs)
+
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            app.notify = _capture  # type: ignore[method-assign]  # test spy
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")
+            release.set()
+            # Busy-wait without yielding: the spawn thread publishes the
+            # record, but the launch coroutine cannot resume while this
+            # coroutine holds the event loop — the exact window at issue.
+            deadline = time.monotonic() + 2.0
+            while not registry.forwards() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            record = registry.forwards()[0]
+            assert record.id not in app._current_confirmations  # still launching
+            procs[0].returncode = 1  # kubectl died before the coroutine resumed
+            app._poll_forwards()
+            assert not any("target gone?" in n for n in notices)
+            assert record.id not in app._broken_forwards
             await until(
                 pilot,
                 lambda: any("failed to start" in n for n in notices),

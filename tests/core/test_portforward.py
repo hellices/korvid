@@ -893,6 +893,34 @@ def test_fail_start_racing_a_reattach_spares_the_replacement() -> None:
     procs[1].stdout.feed(None)  # release the replacement's reader thread
 
 
+def test_fail_start_racing_a_stop_defers_to_the_stop() -> None:
+    """An abort whose record was stopped between its lock-free lookup and its
+    lock acquisition must report nothing — the deliberate stop's outcome
+    stands, not a spurious failed-start report."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    stops: list[int] = []
+
+    class _StopAmbushDict(dict[int, ForwardRecord]):
+        """Interleaves a stop right after fail_start's lock-free lookup."""
+
+        def get(  # type: ignore[override]  # test seam
+            self, key: int, default: ForwardRecord | None = None
+        ) -> ForwardRecord | None:
+            found = super().get(key, default)
+            if not stops and found is not None:
+                stops.append(key)
+                registry.stop(key)
+            return found
+
+    registry._records = _StopAmbushDict(registry._records)
+    assert registry.fail_start(record.id, keep=False) is None
+    assert stops == [record.id]
+    assert record.status == "starting"  # the abort never mutated the stopped record
+    procs[0].stdout.feed(None)  # release the reader thread
+
+
 def test_start_racing_teardown_never_leaks_a_child() -> None:
     """A spawn that lands after stop_all() is put down, not silently orphaned."""
     procs: list[_FakeProc] = []
