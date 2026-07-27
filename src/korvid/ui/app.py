@@ -3666,7 +3666,18 @@ class KorvidApp(App[None]):
         try:
             created = await asyncio.shield(create_task)
         except asyncio.CancelledError:
-            created = await create_task
+            try:
+                created = await create_task
+            except asyncio.CancelledError:
+                # The create task itself was cancelled outright (e.g. loop
+                # shutdown cancels every task, bypassing the shield): nothing
+                # to settle, but a pod may still appear — leave a trace.
+                logger.warning(
+                    "node shell create cancelled outright; cleanup skipped -"
+                    " check namespace %s for leftover node-debugger pods",
+                    namespace,
+                )
+                raise
             if isinstance(created, str):
                 await self._audit_create_failure(audit, node, detail, created)
             else:
