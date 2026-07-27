@@ -186,7 +186,16 @@ def test_ctx_is_reserved_never_navigates() -> None:
     from korvid.ui.messages import ShowContextPicker
 
     assert isinstance(parse_command("ctx", known_with_ctx), ShowContextPicker)
-    assert isinstance(parse_command("ctx a b", known_with_ctx), UnknownCommand)
+
+
+def test_ctx_accepts_names_with_spaces() -> None:
+    """Kubeconfig context names are arbitrary strings: the whole remainder
+    after :ctx is the name, so `dev west` is switchable directly."""
+    from korvid.ui.messages import SwitchContextCommand
+
+    msg = parse_command("ctx dev west", _known)
+    assert isinstance(msg, SwitchContextCommand)
+    assert msg.name == "dev west"
 
 
 def test_command_help_lists_ctx() -> None:

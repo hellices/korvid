@@ -243,6 +243,21 @@ async def _probe_cloud_provider(kube: KubeClient) -> ProviderInfo:
         return detect_provider([])
 
 
+def _compose_agent_tools(readonly: bool, pod_resize_supported: bool) -> list[dict[str, Any]]:
+    """Tool set for the current cluster's capabilities.
+
+    In readonly mode the model is never even told write tools exist, and
+    ``resize_pod`` is offered only when discovery found pods/resize (1.35
+    GA) — the model is never told about a tool the cluster cannot honor.
+    """
+    tools = READ_TOOLS + UI_TOOLS
+    if not readonly:
+        tools = tools + WRITE_TOOLS
+        if pod_resize_supported:
+            tools = tools + RESIZE_TOOLS
+    return tools
+
+
 def _build_agent_wiring(
     config: KorvidConfig,
     kube: KubeClient,
@@ -254,20 +269,14 @@ def _build_agent_wiring(
     AgentRuntime | None,
     ProviderConfigurator,
     Callable[[AgentSettings], AgentRuntime | None],
+    Callable[[AgentRuntime | None, bool, str | None], None],
     list[LLMProvider | None],
     _UIBridgeProxy,
 ]:
     """Build the initial agent runtime plus the :ai wizard's configurator/rebuild hooks."""
     token_store = TokenStore()
     ui_proxy = _UIBridgeProxy()
-    agent_tools = READ_TOOLS + UI_TOOLS
-    if not config.readonly:
-        # In readonly mode the model is never even told write tools exist.
-        agent_tools = agent_tools + WRITE_TOOLS
-        if pod_resize_supported:
-            # Offered only when discovery found pods/resize (1.35 GA): the
-            # model is never told about a tool the cluster cannot honor.
-            agent_tools = agent_tools + RESIZE_TOOLS
+    agent_tools = _compose_agent_tools(config.readonly, pod_resize_supported)
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
     ollama_options = OllamaOptions(
         num_ctx=config.agent_ollama_num_ctx,
@@ -299,6 +308,11 @@ def _build_agent_wiring(
 
     # Mutable holder so rebuild_agent/_shutdown always see the live provider.
     provider_box: list[LLMProvider | None] = [provider]
+    # Per-cluster agent inputs: a `:ctx` switch replaces both, so a wizard
+    # rebuild after the switch must not resurrect the old cluster's prompt
+    # note or capability-gated tool set.
+    tools_box: list[list[dict[str, Any]]] = [agent_tools]
+    note_box: list[str | None] = [cluster_context]
 
     def persist(settings: AgentSettings) -> None:
         save_agent_config(
@@ -337,11 +351,29 @@ def _build_agent_wiring(
         return AgentRuntime(
             new_provider,
             ToolExecutor(kube, aliases, ui=ui_proxy),
-            tools=agent_tools,
-            cluster_context=cluster_context,
+            tools=tools_box[0],
+            cluster_context=note_box[0],
         )
 
-    return agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy
+    def retarget_agent(
+        runtime: AgentRuntime | None,
+        pod_resize_supported: bool,
+        cluster_context: str | None,
+    ) -> None:
+        """Re-arm the agent for a new cluster (issue #36, `:ctx`).
+
+        Recomposes the tool set with the new cluster's capabilities and
+        updates the live runtime's system prompt in place — conversation
+        history survives the switch, but later turns must describe the new
+        environment, not the one the runtime was built against.
+        """
+        tools = _compose_agent_tools(config.readonly, pod_resize_supported)
+        tools_box[0] = tools
+        note_box[0] = cluster_context
+        if runtime is not None:
+            runtime.retarget(tools=tools, cluster_context=cluster_context)
+
+    return agent_runtime, configurator, rebuild_agent, retarget_agent, provider_box, ui_proxy
 
 
 def _load_startup_config(readonly: bool, mcp: bool = False) -> KorvidConfig:
@@ -410,6 +442,7 @@ def _make_switch_context(
     aliases: dict[str, ResourceMeta],
     app_box: list[KorvidApp],
     discovery_box: list[asyncio.Task[None]],
+    retarget_agent: Callable[[AgentRuntime | None, bool, str | None], None],
 ) -> Callable[[str | None], Awaitable[ContextSwitchResult]]:
     """Build the `:ctx` retarget closure (issue #36).
 
@@ -433,6 +466,14 @@ def _make_switch_context(
         discovery_box[:] = [asyncio.create_task(_discover_in_background(kube, aliases, app_box[0]))]
         pod_resize_supported = await _probe_pod_resize(kube, readonly=config.readonly)
         provider_info = await _probe_cloud_provider(kube)
+        # The surviving conversation must be re-armed for this cluster: new
+        # provider note in the system prompt, resize tool gated by the new
+        # cluster's capability (issue #36 review).
+        retarget_agent(
+            app_box[0].agent_runtime if app_box else None,
+            pod_resize_supported,
+            cluster_context_note(provider_info),
+        )
         return ContextSwitchResult(
             pod_resize_supported=pod_resize_supported,
             provider_hint=provider_info.display if provider_info.known else None,
@@ -551,12 +592,14 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
     # the agent system prompt and the Service/Ingress describe footer.
     provider_info = await _probe_cloud_provider(kube)
 
-    agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy = _build_agent_wiring(
-        config,
-        kube,
-        aliases,
-        pod_resize_supported=pod_resize_supported,
-        cluster_context=cluster_context_note(provider_info),
+    agent_runtime, configurator, rebuild_agent, retarget_agent, provider_box, ui_proxy = (
+        _build_agent_wiring(
+            config,
+            kube,
+            aliases,
+            pod_resize_supported=pod_resize_supported,
+            cluster_context=cluster_context_note(provider_info),
+        )
     )
 
     mcp_controller = MCPController(_make_mcp_factory(config, kube, aliases, ui_proxy))
@@ -592,7 +635,9 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         open_pod_exec=kube.open_pod_exec,
         list_contexts=list_context_names,
         probe_context=kube.probe_context,
-        switch_context=_make_switch_context(config, kube, aliases, app_box, discovery_box),
+        switch_context=_make_switch_context(
+            config, kube, aliases, app_box, discovery_box, retarget_agent
+        ),
     )
     app_box.append(app)
     # Late-bind the UI bridge: from here on the agent's UI-control tools

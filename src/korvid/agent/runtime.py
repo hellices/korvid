@@ -103,6 +103,31 @@ class _StreamState:
     has_usage: bool = False
 
 
+def _compose_system_prompt(tools: list[dict[str, Any]], cluster_context: str | None) -> str:
+    """System prompt for the armed tool set and detected environment.
+
+    Shared by ``__init__`` and ``retarget`` so a runtime that survives a
+    `:ctx` switch describes the *new* cluster and tool set, not the one it
+    was built against.
+    """
+    prompt = SYSTEM_PROMPT
+    if cluster_context:
+        # Detected-environment note (e.g. cloud provider, issue #30):
+        # placed right after the role statement so provider-specific
+        # requests are grounded before any tool instructions.
+        prompt = f"{prompt} {cluster_context}"
+    armed = {t.get("function", {}).get("name") for t in tools}
+    if armed & UI_TOOL_NAMES:
+        prompt = f"{prompt} {UI_DRIVE_PROMPT}"
+    armed_writes = sorted(armed & WRITE_TOOL_NAMES)
+    if armed_writes:
+        names = ", ".join(armed_writes)
+        prompt = f"{prompt} You can request cluster writes with {names}. {WRITE_PROMPT}"
+    else:
+        prompt = f"{prompt} {NO_WRITE_PROMPT}"
+    return prompt
+
+
 class AgentRuntime:
     """Drives the provider + tools loop, emitting typed AgentEvent objects."""
 
@@ -119,27 +144,27 @@ class AgentRuntime:
         self._provider = provider
         self._executor = executor
         self._tools = tools if tools is not None else READ_TOOLS
-        prompt = SYSTEM_PROMPT
-        if cluster_context:
-            # Detected-environment note (e.g. cloud provider, issue #30):
-            # placed right after the role statement so provider-specific
-            # requests are grounded before any tool instructions.
-            prompt = f"{prompt} {cluster_context}"
-        armed = {t.get("function", {}).get("name") for t in self._tools}
-        if armed & UI_TOOL_NAMES:
-            prompt = f"{prompt} {UI_DRIVE_PROMPT}"
-        armed_writes = sorted(armed & WRITE_TOOL_NAMES)
-        if armed_writes:
-            names = ", ".join(armed_writes)
-            prompt = f"{prompt} You can request cluster writes with {names}. {WRITE_PROMPT}"
-        else:
-            prompt = f"{prompt} {NO_WRITE_PROMPT}"
+        prompt = _compose_system_prompt(self._tools, cluster_context)
         self._max_iterations = max_iterations
         self._max_history_chars = max_history_chars
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
         self._total_in = 0
         self._total_out = 0
         self._estimated = False
+
+    def retarget(self, *, tools: list[dict[str, Any]], cluster_context: str | None) -> None:
+        """Re-arm the runtime for a new cluster (issue #36, `:ctx`).
+
+        Conversation history survives — the system prompt is recomposed in
+        place so later turns describe the new environment (cloud provider
+        note) and the new capability-gated tool set (e.g. ``resize_pod``),
+        instead of the cluster the runtime was originally built against.
+        """
+        self._tools = tools
+        self._messages[0] = {
+            "role": "system",
+            "content": _compose_system_prompt(tools, cluster_context),
+        }
 
     @property
     def total_tokens(self) -> tuple[int, int]:

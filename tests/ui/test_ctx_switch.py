@@ -334,3 +334,43 @@ async def test_picker_maps_display_labels_to_raw_names() -> None:
             lambda: env.probe_calls == ["ctx-a (current)"],
             label="raw context name probed",
         )
+
+
+async def test_switch_refused_while_cluster_write_in_flight() -> None:
+    """An approved write worker (e.g. drain) holds the cluster: switching
+    mid-flight could land the tail of the write on the wrong cluster."""
+    env = _CtxEnv()
+    app = env.app
+    async with app.run_test() as pilot:
+        app._active_cluster_writes = 1
+        try:
+            app.post_message(SwitchContextCommand("ctx-b"))
+            await until(
+                pilot,
+                lambda: any("write is in progress" in n.message for n in app._notifications),
+                label="write-in-progress refusal",
+            )
+            assert env.probe_calls == []
+        finally:
+            app._active_cluster_writes = 0
+
+
+async def test_keybinding_write_refused_while_switching() -> None:
+    """The mirror guard: once a switch claims the session, new keybinding
+    writes are refused instead of racing the teardown/retarget."""
+    env = _CtxEnv()
+    app = env.app
+    async with app.run_test() as pilot:
+        app._ctx_switching = True
+        try:
+            ok = await app._precheck_keybinding_write("delete", _PODS_META, "default", "pod-a")
+            assert ok is False
+            await until(
+                pilot,
+                lambda: any(
+                    "context switch is in progress" in n.message for n in app._notifications
+                ),
+                label="switch-in-progress refusal",
+            )
+        finally:
+            app._ctx_switching = False

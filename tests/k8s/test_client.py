@@ -1417,6 +1417,21 @@ class TestProbeContext:
             await kube.probe_context("ctx-b")
         assert probe_apis[0].closed is True
 
+    async def test_timeout_covers_credential_loading(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The probe deadline bounds kubeconfig/credential loading too — an
+        exec credential plugin that stalls must not hang the switch forever."""
+        import asyncio
+
+        async def stalling_load(**kwargs: Any) -> None:
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(k8s_config, "load_kube_config", stalling_load)
+        monkeypatch.setattr(client_mod, "_PROBE_TIMEOUT", 0.05)
+
+        kube = KubeClient()
+        with pytest.raises(TimeoutError):
+            await kube.probe_context("ctx-slow-creds")
+
     async def test_unknown_context_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from kubernetes_asyncio.config import ConfigException
 

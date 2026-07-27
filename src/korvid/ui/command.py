@@ -78,7 +78,9 @@ def _parse_builtin(
     if head in _CTX_KEYWORDS:
         if not rest:
             return ShowContextPicker()
-        return SwitchContextCommand(rest[0]) if len(rest) == 1 else UnknownCommand(text)
+        # Context names are arbitrary strings (spaces included): the whole
+        # remainder is the name; unknown names are validated at switch time.
+        return SwitchContextCommand(text.strip().split(None, 1)[1])
     if head == "sort":
         return SortCommand(rest[0] if rest else None) if len(rest) <= 1 else UnknownCommand(text)
     if head in _RESERVED_BUILTINS:

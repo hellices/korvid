@@ -195,26 +195,33 @@ class KubeClient(WriteOps):
         credentials. Expired or missing credentials therefore fail here,
         and the live connection is untouched either way — which is what
         lets a failed `:ctx` switch leave the old context fully usable.
+
+        The timeout bounds the whole probe, including credential loading:
+        ``load_kube_config`` may invoke an exec credential plugin, and a
+        stalled plugin must not hang the switch forever.
         """
-        probe_configuration = k8s_client.Configuration()
-        await k8s_config.load_kube_config(
-            context=context,
-            client_configuration=probe_configuration,
-            persist_config=False,
-        )
-        api = k8s_client.ApiClient(probe_configuration)
-        try:
-            review = k8s_client.V1SelfSubjectAccessReview(
-                spec=k8s_client.V1SelfSubjectAccessReviewSpec(
-                    resource_attributes=k8s_client.V1ResourceAttributes(verb="get", resource="pods")
+
+        async def _probe() -> None:
+            probe_configuration = k8s_client.Configuration()
+            await k8s_config.load_kube_config(
+                context=context,
+                client_configuration=probe_configuration,
+                persist_config=False,
+            )
+            api = k8s_client.ApiClient(probe_configuration)
+            try:
+                review = k8s_client.V1SelfSubjectAccessReview(
+                    spec=k8s_client.V1SelfSubjectAccessReviewSpec(
+                        resource_attributes=k8s_client.V1ResourceAttributes(
+                            verb="get", resource="pods"
+                        )
+                    )
                 )
-            )
-            await asyncio.wait_for(
-                k8s_client.AuthorizationV1Api(api).create_self_subject_access_review(review),
-                timeout=_PROBE_TIMEOUT,
-            )
-        finally:
-            await api.close()
+                await k8s_client.AuthorizationV1Api(api).create_self_subject_access_review(review)
+            finally:
+                await api.close()
+
+        await asyncio.wait_for(_probe(), timeout=_PROBE_TIMEOUT)
 
     async def switch_context(self, context: str | None) -> None:
         """Retarget the live connection at *context* (issue #36).

@@ -278,9 +278,10 @@ node_shell:
 `:ctx` opens a picker of kubeconfig contexts (current one marked);
 `:ctx <name>` switches directly, with tab completion. Before anything is
 torn down, korvid probes the target context — loads its credentials in
-isolation and calls the version endpoint — so a context with expired
-credentials or an unreachable API server fails with an error toast while
-you stay connected to the current cluster. Only after the probe succeeds
+isolation and issues an authenticated self-access review — so a context
+with expired credentials or an unreachable API server fails with an error
+toast while you stay connected to the current cluster. Only after the
+probe succeeds
 does korvid stop watches, port-forwards, log streams and metrics polling,
 clear cached state, and retarget everything (resource discovery, capability
 probes like pod-resize support, cloud-provider hints, audit log context)

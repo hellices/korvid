@@ -152,7 +152,7 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
         agent_api_key_env="KORVID_TEST_KEY",
     )
     kube_stub = cast("Any", object())  # wiring never touches kube before a tool call
-    runtime, _, _, _, proxy = _build_agent_wiring(config, kube_stub, {})
+    runtime, _, _, _, _, proxy = _build_agent_wiring(config, kube_stub, {})
     assert runtime is not None
     names = [t["function"]["name"] for t in runtime._tools]
     assert "navigate" in names
@@ -162,7 +162,7 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
     assert executor._ui is proxy
 
     # readonly strips every write tool: the model is never told they exist.
-    ro_runtime, _, _, _, _ = _build_agent_wiring(
+    ro_runtime, _, _, _, _, _ = _build_agent_wiring(
         dataclasses.replace(config, readonly=True), kube_stub, {}
     )
     assert ro_runtime is not None
@@ -194,15 +194,15 @@ def test_agent_wiring_gates_resize_tool_on_discovery(monkeypatch: object) -> Non
     )
     kube_stub = cast("Any", object())
 
-    runtime, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=True)
+    runtime, _, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=True)
     assert runtime is not None
     assert "resize_pod" in [t["function"]["name"] for t in runtime._tools]
 
-    gated, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
+    gated, _, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
     assert gated is not None
     assert "resize_pod" not in [t["function"]["name"] for t in gated._tools]
 
-    ro, _, _, _, _ = _build_agent_wiring(
+    ro, _, _, _, _, _ = _build_agent_wiring(
         dataclasses.replace(config, readonly=True), kube_stub, {}, pod_resize_supported=True
     )
     assert ro is not None
@@ -420,7 +420,9 @@ async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None
     )
     kube_stub = cast("Any", object())
     note = "This cluster runs on Azure (AKS managed)."
-    runtime, _, rebuild, _, _ = _build_agent_wiring(config, kube_stub, {}, cluster_context=note)
+    runtime, _, rebuild, retarget, _, _ = _build_agent_wiring(
+        config, kube_stub, {}, cluster_context=note
+    )
     assert runtime is not None
     assert note in runtime._messages[0]["content"]
 
@@ -437,6 +439,26 @@ async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None
     )
     assert rebuilt is not None
     assert note in rebuilt._messages[0]["content"]
+
+    # `:ctx` switch (issue #36): the live runtime is re-armed in place and
+    # any later wizard rebuild uses the new cluster's note and tool set.
+    new_note = "This cluster runs on AWS (EKS managed)."
+    retarget(rebuilt, True, new_note)
+    assert new_note in rebuilt._messages[0]["content"]
+    assert note not in rebuilt._messages[0]["content"]
+    assert "resize_pod" in [t["function"]["name"] for t in rebuilt._tools]
+    rebuilt_after = rebuild(
+        AgentSettings(
+            provider="openai",
+            auth_method="api_key",
+            base_url="http://localhost:9999/v1",
+            model="m",
+            api_key_env="KORVID_TEST_KEY",
+        )
+    )
+    assert rebuilt_after is not None
+    assert new_note in rebuilt_after._messages[0]["content"]
+    assert "resize_pod" in [t["function"]["name"] for t in rebuilt_after._tools]
 
 
 async def test_cloud_provider_probe_is_bounded(monkeypatch: object) -> None:

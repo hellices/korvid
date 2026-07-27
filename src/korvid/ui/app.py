@@ -15,11 +15,11 @@ import subprocess
 import tempfile
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar
 
 import yaml
 from rich.text import Text
@@ -367,6 +367,37 @@ class ContextSwitchResult:
     context_namespace: str | None
 
 
+_WriteParams = ParamSpec("_WriteParams")
+_WriteResult = TypeVar("_WriteResult")
+
+
+def _tracks_cluster_write(
+    method: Callable[Concatenate[KorvidApp, _WriteParams], Awaitable[_WriteResult]],
+) -> Callable[Concatenate[KorvidApp, _WriteParams], Coroutine[Any, Any, _WriteResult]]:
+    """Count in-flight cluster mutations on the app (issue #36).
+
+    An approved write worker is neither an open dialog nor the agent task,
+    so `:ctx` switching checks this counter: a mutation approved for one
+    cluster must never execute against another after a mid-flight retarget.
+    """
+
+    async def wrapper(
+        self: KorvidApp, /, *args: _WriteParams.args, **kwargs: _WriteParams.kwargs
+    ) -> _WriteResult:
+        self._active_cluster_writes += 1
+        try:
+            return await method(self, *args, **kwargs)
+        finally:
+            self._active_cluster_writes -= 1
+
+    # Not functools.wraps: its _Wrapped return type keeps the explicit
+    # 'self' arg and fails the plain-Callable return annotation under
+    # mypy --strict; worker/log names only need these two attributes.
+    wrapper.__name__ = method.__name__
+    wrapper.__qualname__ = method.__qualname__
+    return wrapper
+
+
 class _ReplayFilter:
     """Drops tail lines replayed by the API after a reconnect.
 
@@ -537,6 +568,7 @@ class KorvidApp(App[None]):
         #: True while a context switch is tearing down / retargeting;
         #: refuses concurrent switches.
         self._ctx_switching = False
+        self._active_cluster_writes = 0
         #: One-shot notice injected into the agent's next screen context
         #: after a switch, so a running conversation learns the cluster
         #: changed under it.
@@ -675,6 +707,12 @@ class KorvidApp(App[None]):
         # or None). Short TTL so a lingering cursor eventually sees new events.
         self._hint_event_cache: dict[str, tuple[float, str | None, datetime | None]] = {}
         self._hint_refresh_timer: Timer | None = None
+
+    @property
+    def agent_runtime(self) -> AgentRuntime | None:
+        """The live runtime — the :ai wizard may have replaced the initial
+        one, so per-cluster retargeting (issue #36) must read it here."""
+        return self._agent_runtime
 
     @property
     def current_namespace(self) -> str:
@@ -1222,6 +1260,10 @@ class KorvidApp(App[None]):
         """Why a switch cannot proceed right now, or None when it can."""
         if self._agent_task is not None and not self._agent_task.done():
             return "Agent is busy — wait for the current turn to finish before switching contexts"
+        if self._active_cluster_writes:
+            return (
+                "A cluster write is in progress — wait for it to finish before switching contexts"
+            )
         if len(self.screen_stack) > 1:
             return "Close open dialogs before switching contexts"
         return None
@@ -1257,6 +1299,13 @@ class KorvidApp(App[None]):
         """
         await self._close_log_pane()
         self.query_one(DescribePane).hide()
+        # An old-cluster namespace prefetch still in flight could land after
+        # the new cluster's and overwrite its completions — cancel it first.
+        if self._ns_prefetch_task is not None:
+            self._ns_prefetch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._ns_prefetch_task
+            self._ns_prefetch_task = None
         if self._metrics is not None:
             await self._metrics.stop()
         await self.watch_manager.stop_all()
@@ -2572,6 +2621,7 @@ class KorvidApp(App[None]):
             return
         self.run_worker(self._run_transfer(namespace, name, container, spec, uid))
 
+    @_tracks_cluster_write
     async def _run_transfer(
         self,
         namespace: str,
@@ -2947,6 +2997,7 @@ class KorvidApp(App[None]):
             _on_choice,
         )
 
+    @_tracks_cluster_write
     async def _run_debug(
         self,
         namespace: str,
@@ -3557,6 +3608,14 @@ class KorvidApp(App[None]):
         """RBAC pre-check plus post-await re-validation for binding handlers:
         the check is an API round trip, so confirm the screen and selection
         are unchanged before any dialog is pushed."""
+        if self._ctx_switching:
+            # The write would race the teardown/retarget and could execute
+            # against whichever cluster wins — refuse up front.
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
+            return False
         if not await self._permitted(action, meta, ns, name):
             return False
         return self._write_context_intact(action, meta, ns, name)
@@ -3620,6 +3679,7 @@ class KorvidApp(App[None]):
             )
         )
 
+    @_tracks_cluster_write
     async def _run_write(
         self,
         action: str,
@@ -4415,6 +4475,7 @@ class KorvidApp(App[None]):
             return None
         return fresh.targets
 
+    @_tracks_cluster_write
     async def _run_drain(
         self,
         ops: WriteOps,
@@ -4590,6 +4651,7 @@ class KorvidApp(App[None]):
             _on_choice,
         )
 
+    @_tracks_cluster_write
     async def _run_node_shell(
         self, ops: WriteOps, node: str, namespace: str, image: str, approved_uid: str | None
     ) -> None:
@@ -6319,6 +6381,8 @@ class KorvidApp(App[None]):
         # Cancel any active log stream tasks before the event loop shuts down.
         if self._ns_prefetch_task is not None:
             self._ns_prefetch_task.cancel()
+        if self._ctx_prefetch_task is not None:
+            self._ctx_prefetch_task.cancel()
         if self._agent_task is not None:
             self._agent_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
