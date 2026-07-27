@@ -641,3 +641,19 @@ async def test_small_profile_applies_the_iteration_budget() -> None:
         repetitions=1,
     )
     assert full.runs[0].iterations > SMALL_MAX_ITERATIONS
+
+
+async def test_evidence_grading_sees_only_the_model_visible_capped_result() -> None:
+    """The small profile caps tool results at the runtime; evidence located
+    past the cap must not count as fetched — the model never received it."""
+    from korvid.evals.runner import _RecordingExecutor
+
+    class TailEvidenceExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "x" * 3_500 + "OOMKilled"
+
+    recording = _RecordingExecutor(TailEvidenceExecutor(), max_result_chars=3_000)
+    returned = await recording.execute("diagnose_pod", {"pod": "checkout-1"})
+    assert "OOMKilled" not in returned
+    assert recording.records[0].result == returned
+    assert "OOMKilled" not in recording.records[0].result

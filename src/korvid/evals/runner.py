@@ -23,7 +23,7 @@ from korvid.agent.events import (
 )
 from korvid.agent.profiles import AgentProfile, build_profile
 from korvid.agent.runtime import AgentRuntime
-from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES
+from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES, cap_result
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Scenario
 
@@ -46,14 +46,23 @@ def _eval_tools(profile: AgentProfile) -> list[dict[str, Any]]:
 
 class _RecordingExecutor:
     """Wraps the real executor to keep full tool results for evidence grading
-    (the runtime's ToolCallFinished summary is truncated to 120 chars)."""
+    (the runtime's ToolCallFinished summary is truncated to 120 chars).
 
-    def __init__(self, executor: Any) -> None:
+    The profile's per-result cap is applied *before* recording: grading must
+    only credit evidence the model could actually have seen, so the recorded
+    content matches what reaches the conversation. `cap_result` is
+    idempotent, so the runtime re-applying the same cap changes nothing.
+    """
+
+    def __init__(self, executor: Any, max_result_chars: int | None = None) -> None:
         self._executor = executor
+        self._max_result_chars = max_result_chars
         self.records: list[ToolRecord] = []
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         result: str = await self._executor.execute(name, arguments)
+        if self._max_result_chars is not None:
+            result = cap_result(result, self._max_result_chars)
         self.records.append(ToolRecord(name=name, arguments=dict(arguments), result=result))
         return result
 
@@ -238,8 +247,8 @@ async def _drive_turn(
     profile_name: str = "full",
 ) -> RunMetrics:
     provider = _CountingProvider(raw_provider)
-    executor = _RecordingExecutor(raw_executor)
     profile = build_profile(profile_name, readonly=False, resize_supported=True)
+    executor = _RecordingExecutor(raw_executor, max_result_chars=profile.max_result_chars)
     runtime = AgentRuntime(
         provider,
         executor,
