@@ -446,7 +446,9 @@ def _make_get_manifest(
 
 async def _run(readonly: bool = False, mcp: bool = False) -> None:
     config = _load_startup_config(readonly, mcp)
-    kube = KubeClient()
+    # Custom columns (issue #45) are extracted from raw manifests inside the
+    # client — the manifests are discarded once summaries are built.
+    kube = KubeClient(custom_columns={kind: view.columns for kind, view in config.views.items()})
     await kube.connect(config.kube_context)
     store = ResourceStore()
 

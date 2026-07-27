@@ -15,7 +15,19 @@ from typing import Any
 
 import yaml
 
+from korvid.k8s.columns import SOURCES, CustomColumn, parse_jsonpath
+
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "korvid" / "config.yaml"
+
+
+@dataclass(frozen=True)
+class ViewConfig:
+    """Custom columns for one resource kind (issue #45)."""
+
+    columns: tuple[CustomColumn, ...]
+    #: True replaces the kind's default columns (NAME/NAMESPACE always stay);
+    #: False appends after them.
+    replace: bool = False
 
 
 @dataclass(frozen=True)
@@ -50,6 +62,12 @@ class KorvidConfig:
     #: a deliberate restriction (only default/custom images are offered).
     debug_default_image: str | None = None
     debug_images: dict[str, str] | None = None
+    #: Custom table columns per resource kind (issue #45), keyed by the
+    #: plural kind name as used in `:` navigation (e.g. "pods").
+    views: dict[str, ViewConfig] = field(default_factory=dict)
+    #: Human-readable config problems (e.g. an invalid custom column) that
+    #: the UI surfaces once at startup instead of crashing or hiding them.
+    warnings: tuple[str, ...] = ()
 
 
 def load_config(path: Path | None = None) -> KorvidConfig:
@@ -98,6 +116,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         # fail closed to an empty restricted mapping rather than silently
         # re-enabling public zero-config images.
         debug_images = {}
+    views, view_warnings = _parse_views(raw.get("views"))
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
@@ -122,6 +141,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         mcp_port=_parse_port(mcp_raw.get("port")),
         debug_default_image=_opt_str(debug_raw.get("default_image")),
         debug_images=debug_images,
+        views=views,
+        warnings=tuple(view_warnings),
     )
 
 
@@ -278,3 +299,52 @@ def _parse_namespaces(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(item for item in value if isinstance(item, str) and item)
+
+
+def _parse_column(kind: str, entry: Any) -> tuple[CustomColumn | None, str | None]:
+    """(column, warning) for one `views.<kind>.columns` item; at most one is set."""
+    if not isinstance(entry, dict):
+        return None, f"views.{kind}: column entries must be mappings"
+    name = _opt_str(entry.get("name"))
+    if name is None:
+        return None, f"views.{kind}: a column is missing its `name`"
+    declared = [source for source in SOURCES if _opt_str(entry.get(source)) is not None]
+    if len(declared) != 1:
+        return None, (
+            f"views.{kind}.{name}: declare exactly one of "
+            f"{', '.join(SOURCES)} (got {len(declared)})"
+        )
+    source = declared[0]
+    expr = str(entry[source])
+    if source == "jsonpath":
+        try:
+            parse_jsonpath(expr)
+        except ValueError as exc:
+            return None, f"views.{kind}.{name}: {exc}"
+    return CustomColumn(name, source, expr), None
+
+
+def _parse_views(value: Any) -> tuple[dict[str, ViewConfig], list[str]]:
+    """`views:` custom columns (issue #45): invalid columns are dropped with
+    a warning instead of failing the whole config — a typo in one column
+    must not take the TUI down."""
+    if not isinstance(value, dict):
+        return {}, []
+    views: dict[str, ViewConfig] = {}
+    warnings: list[str] = []
+    for kind, view_raw in value.items():
+        if not isinstance(view_raw, dict):
+            continue
+        columns: list[CustomColumn] = []
+        raw_columns = view_raw.get("columns")
+        for entry in raw_columns if isinstance(raw_columns, list) else []:
+            column, warning = _parse_column(str(kind), entry)
+            if column is not None:
+                columns.append(column)
+            if warning is not None:
+                warnings.append(warning)
+        if columns:
+            views[str(kind)] = ViewConfig(
+                columns=tuple(columns), replace=view_raw.get("replace") is True
+            )
+    return views, warnings

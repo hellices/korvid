@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime
 from typing import Any, cast
@@ -17,6 +18,7 @@ from kubernetes_asyncio import config as k8s_config
 from kubernetes_asyncio import watch as k8s_watch
 from kubernetes_asyncio.stream import WsApiClient
 
+from korvid.k8s.columns import CustomColumn, evaluate_all
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan, build_drain_plan
@@ -117,14 +119,36 @@ def resolve_context_namespace(
 class KubeClient(WriteOps):
     """Thin wrapper over kubernetes_asyncio; returns typed summaries."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self, custom_columns: Mapping[str, tuple[CustomColumn, ...]] | None = None
+    ) -> None:
         self._api: k8s_client.ApiClient | None = None
         self._core_v1: k8s_client.CoreV1Api | None = None
         self._ssar_warned = False
+        #: User-configured extra table columns (issue #45), keyed by plural
+        #: kind; values are extracted from the raw manifest at summary time
+        #: (the manifest is discarded afterwards).
+        self._custom_columns: Mapping[str, tuple[CustomColumn, ...]] = custom_columns or {}
         #: pods/resize discovery result; None until the first successful check.
         self._pod_resize_supported: bool | None = None
         #: cloud provider detection result; None until the first lookup.
         self._provider_info: ProviderInfo | None = None
+
+    def _pod_summary(self, manifest: dict[str, Any]) -> PodSummary:
+        """PodSummary + configured custom column values (issue #45)."""
+        summary = PodSummary.from_manifest(manifest)
+        columns = self._custom_columns.get("pods")
+        if not columns:
+            return summary
+        return dataclasses.replace(summary, custom=evaluate_all(columns, manifest))
+
+    def _object_summary(self, meta: ResourceMeta, manifest: dict[str, Any]) -> GenericSummary:
+        """summary_for + configured custom column values (issue #45)."""
+        summary = summary_for(meta.kind, manifest)
+        columns = self._custom_columns.get(meta.plural)
+        if not columns:
+            return summary
+        return dataclasses.replace(summary, custom=evaluate_all(columns, manifest))
 
     async def connect(self, context: str | None = None) -> None:
         await k8s_config.load_kube_config(context=context)
@@ -226,7 +250,7 @@ class KubeClient(WriteOps):
             data = await _to_dict(resp)
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
-        return [PodSummary.from_manifest(item) for item in data.get("items", [])]
+        return [self._pod_summary(item) for item in data.get("items", [])]
 
     async def watch_pods(self, namespace: str | None) -> AsyncIterator[tuple[str, PodSummary]]:
         """LIST then watch pods; namespace=None watches cluster-wide."""
@@ -255,7 +279,7 @@ class KubeClient(WriteOps):
 
         resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
         for item in data.get("items", []):
-            yield ("ADDED", PodSummary.from_manifest(item))
+            yield ("ADDED", self._pod_summary(item))
 
         watch_kwargs: dict[str, Any] = {}
         if resource_version is not None:
@@ -269,7 +293,7 @@ class KubeClient(WriteOps):
                 async for event in stream:
                     yield (
                         str(event["type"]),
-                        PodSummary.from_manifest(event["raw_object"]),
+                        self._pod_summary(event["raw_object"]),
                     )
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
@@ -284,7 +308,7 @@ class KubeClient(WriteOps):
 
         resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
         for item in data.get("items", []):
-            yield ("ADDED", PodSummary.from_manifest(item))
+            yield ("ADDED", self._pod_summary(item))
 
         watch_kwargs: dict[str, Any] = {}
         if resource_version is not None:
@@ -297,7 +321,7 @@ class KubeClient(WriteOps):
                 async for event in stream:
                     yield (
                         str(event["type"]),
-                        PodSummary.from_manifest(event["raw_object"]),
+                        self._pod_summary(event["raw_object"]),
                     )
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
@@ -325,7 +349,7 @@ class KubeClient(WriteOps):
 
         resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
         for item in data.get("items", []):
-            yield ("ADDED", summary_for(meta.kind, item))
+            yield ("ADDED", self._object_summary(meta, item))
 
         # Watch phase -------------------------------------------------------
         watch_kwargs: dict[str, Any] = {}
@@ -340,7 +364,7 @@ class KubeClient(WriteOps):
                 async for event in stream:
                     yield (
                         str(event["type"]),
-                        summary_for(meta.kind, event["raw_object"]),
+                        self._object_summary(meta, event["raw_object"]),
                     )
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
@@ -358,7 +382,7 @@ class KubeClient(WriteOps):
         else:
             list_path = f"{meta.api_base}/{meta.plural}"
         data = await self._request_json(list_path)
-        return [summary_for(meta.kind, item) for item in data.get("items", [])]
+        return [self._object_summary(meta, item) for item in data.get("items", [])]
 
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str

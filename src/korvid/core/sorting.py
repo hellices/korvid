@@ -41,7 +41,21 @@ def toggle_sort(current: SortSpec | None, column: str) -> SortSpec:
     """
     if current is not None and current.column == column:
         return SortSpec(column, not current.descending)
-    return SortSpec(column, column != "name")
+    # "Newest / hungriest first" for the metric-like builtins; name and
+    # custom string columns start ascending.
+    return SortSpec(column, column in ("age", "cpu", "mem"))
+
+
+#: Custom column values that mean "no comparable value" (issue #45).
+_CUSTOM_MISSING = {"<none>", "<err>"}
+
+
+def _custom_value(row: Summary, index: int) -> str | None:
+    """The row's custom column string at *index*, or None when missing."""
+    values: tuple[str, ...] = getattr(row, "custom", ())
+    if index >= len(values) or values[index] in _CUSTOM_MISSING:
+        return None
+    return values[index].lower()
 
 
 def _value(row: Summary, column: str, metrics: MetricsLookup | None) -> float | str | None:
@@ -72,6 +86,7 @@ def sort_rows(
     spec: SortSpec,
     *,
     metrics: MetricsLookup | None = None,
+    custom_columns: Sequence[str] = (),
 ) -> list[Summary]:
     """Rows reordered by the spec; missing values always sort last.
 
@@ -81,13 +96,22 @@ def sort_rows(
         metrics: Live usage lookup; required for `cpu`/`mem` values (rows
             without a sample — or all rows when the lookup is None — are
             treated as missing).
+        custom_columns: Names of the view's user-configured columns (issue
+            #45), in declared order; matching sorts compare the row's
+            `custom` strings case-insensitively.
 
     Raises:
-        ValueError: If `spec.column` is not one of `SORT_COLUMNS`.
+        ValueError: If `spec.column` is neither in `SORT_COLUMNS` nor in
+            `custom_columns`.
     """
-    if spec.column not in SORT_COLUMNS:
+    keyed: list[tuple[Any, Summary]]
+    if spec.column in custom_columns:
+        index = list(custom_columns).index(spec.column)
+        keyed = [(_custom_value(row, index), row) for row in rows]
+    elif spec.column in SORT_COLUMNS:
+        keyed = [(_value(row, spec.column, metrics), row) for row in rows]
+    else:
         raise ValueError(f"unsupported sort column {spec.column!r}; expected one of {SORT_COLUMNS}")
-    keyed: list[tuple[Any, Summary]] = [(_value(row, spec.column, metrics), row) for row in rows]
     present = [(value, row) for value, row in keyed if value is not None]
     missing = [row for value, row in keyed if value is None]
     # Two stable passes keep the (namespace, name) tie-break ascending even

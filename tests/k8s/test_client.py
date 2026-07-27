@@ -1183,3 +1183,79 @@ def test_resolve_context_namespace_unresolvable_returns_none(tmp_path: Path) -> 
     from korvid.k8s.client import resolve_context_namespace
 
     assert resolve_context_namespace(None, config_file=str(tmp_path / "missing")) is None
+
+
+# ---------------------------------------------------------------------------
+# custom columns (issue #45)
+# ---------------------------------------------------------------------------
+
+
+def _labeled_generic(name: str, team: str) -> dict[str, Any]:
+    manifest = _generic(name)
+    manifest["metadata"]["labels"] = {"team": team}
+    return manifest
+
+
+async def test_list_objects_fills_custom_column_values() -> None:
+    from korvid.k8s.columns import CustomColumn
+
+    client = KubeClient(custom_columns={"deployments": (CustomColumn("TEAM", "label", "team"),)})
+    list_resp = {"items": [_labeled_generic("dep-a", "payments")]}
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+    ):
+        summaries = await client.list_objects(_deploy_meta(), "default")
+    assert summaries[0].custom == ("payments",)
+
+
+async def test_watch_objects_fills_custom_column_values() -> None:
+    from korvid.k8s.columns import CustomColumn
+
+    client = KubeClient(custom_columns={"deployments": (CustomColumn("TEAM", "label", "team"),)})
+    list_resp = {
+        "metadata": {"resourceVersion": "7"},
+        "items": [_labeled_generic("dep-a", "payments")],
+    }
+    watch_events = [{"type": "MODIFIED", "raw_object": _labeled_generic("dep-a", "billing")}]
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch(watch_events)),
+    ):
+        seen = [
+            summary.custom async for _, summary in client.watch_objects(_deploy_meta(), "default")
+        ]
+    assert seen == [("payments",), ("billing",)]
+
+
+async def test_watch_pods_fills_custom_column_values() -> None:
+    from korvid.k8s.columns import CustomColumn
+
+    client = KubeClient(custom_columns={"pods": (CustomColumn("TEAM", "label", "team"),)})
+    pod = _pod("api-1")
+    pod["metadata"]["labels"] = {"team": "payments"}
+    fake_v1 = AsyncMock()
+    fake_v1.list_namespaced_pod.return_value = {
+        "metadata": {"resourceVersion": "5"},
+        "items": [pod],
+    }
+    with (
+        patch.object(client, "_core_v1", fake_v1),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=_FakeWatch([])),
+    ):
+        seen = [summary.custom async for _, summary in client.watch_pods("default")]
+    assert seen == [("payments",)]
+
+
+async def test_kinds_without_configured_columns_keep_empty_custom() -> None:
+    from korvid.k8s.columns import CustomColumn
+
+    client = KubeClient(custom_columns={"services": (CustomColumn("TEAM", "label", "team"),)})
+    list_resp = {"items": [_labeled_generic("dep-a", "payments")]}
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+    ):
+        summaries = await client.list_objects(_deploy_meta(), "default")
+    assert summaries[0].custom == ()

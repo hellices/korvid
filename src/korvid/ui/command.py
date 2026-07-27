@@ -10,6 +10,7 @@ from korvid.ui.messages import (
     NavigateCommand,
     QuitCommand,
     ShowNamespacePicker,
+    SortCommand,
     UnknownCommand,
 )
 
@@ -22,6 +23,7 @@ _BUILTIN_COMMAND_HELP: tuple[tuple[str, str], ...] = (
     (":model [name]", "Show or switch the agent model"),
     (":mcp [on|off]", "Show MCP tool state, or toggle it live"),
     (":pf", "List port-forwards (Ctrl-D stop, r re-attach)"),
+    (":sort [column]", "Sort by a column (custom too); no argument clears"),
 )
 _RESERVED_BUILTINS = {"ai", "agent", "model", "mcp", "pf"}
 
@@ -46,7 +48,14 @@ def command_help() -> list[tuple[str, str]]:
 def parse_command(
     text: str,
     known: Callable[[str], str | None],
-) -> NavigateCommand | FilterCommand | QuitCommand | ShowNamespacePicker | UnknownCommand:
+) -> (
+    NavigateCommand
+    | FilterCommand
+    | QuitCommand
+    | ShowNamespacePicker
+    | SortCommand
+    | UnknownCommand
+):
     parts = text.strip().split()
     if not parts:
         return UnknownCommand(text)
@@ -57,6 +66,8 @@ def parse_command(
         return ShowNamespacePicker()
     if head in _NS_KEYWORDS and len(rest) == 1:
         return NavigateCommand(view=None, namespace=rest[0])
+    if head == "sort" and len(rest) <= 1:
+        return SortCommand(rest[0] if rest else None)
     if head in _RESERVED_BUILTINS:
         return UnknownCommand(text)
     plural = known(head)
