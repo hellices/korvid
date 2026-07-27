@@ -611,3 +611,25 @@ async def test_closing_log_owner_pane_closes_log_stream() -> None:
         await pilot.press("ctrl+w", "q")  # close pane 2 (the owner)
         await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="single pane")
         assert not app.query_one(LogPane).display
+
+
+async def test_sorting_applies_to_focused_pane_only() -> None:
+    """`:sort` is view state: it must reorder only the focused pane and
+    leave the other pane's order alone (a shared per-kind sort would also
+    rebuild - and reset the cursor of - the other pane)."""
+    app = make_app([_pod("b-2"), _pod("a-1"), _pod("c-3")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)
+        second = app.query_one("#pane-1", ResourceTable)
+        await until(pilot, lambda: second.row_count == 3, label="clone rendered")
+        first = app.query_one("#pane-0", ResourceTable)
+        before = [first.get_row_at(i)[0] for i in range(3)]
+        await _type_command(pilot, "sort name")
+        await until(
+            pilot,
+            lambda: second.get_row_at(0)[0] == "a-1",
+            label="focused pane sorted ascending",
+        )
+        assert [first.get_row_at(i)[0] for i in range(3)] == before
+        assert app._panes[0].sorts == {}  # pane 1 carries no sort state

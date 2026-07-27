@@ -469,6 +469,9 @@ class PaneState:
         self.filter_pattern = ""
         self.resource_filter: ResourceFilter = parse_filter("")
         self.drill = NavigationStack()
+        #: Per-kind sort state - view state like the filter, so it belongs
+        #: to the pane: sorting one pane must not reorder the other.
+        self.sorts: dict[str, SortSpec] = {}
 
     def clone(self, table_id: str) -> PaneState:
         """A split starts as a clone of the focused view: same kind, scope,
@@ -477,6 +480,7 @@ class PaneState:
         pane.filter_pattern = self.filter_pattern
         pane.resource_filter = parse_filter(self.filter_pattern)
         pane.drill = self.drill.copy()
+        pane.sorts = dict(self.sorts)
         return pane
 
 
@@ -737,8 +741,7 @@ class KorvidApp(App[None]):
         self._keybinding_overrides: dict[str, str] = {}
         #: Active sort per view kind (issue #37): the choice survives watch
         #: updates (every render re-applies it) and switching views restores
-        #: each kind's own sort.
-        self._sorts: dict[str, SortSpec] = {}
+        #: each kind's own sort. Lives in PaneState (see `_sorts` property).
         self._log_tasks: set[asyncio.Task[None]] = set()
         self._log_buffer: LogBuffer | None = None
         self._log_error: bool = False
@@ -803,6 +806,11 @@ class KorvidApp(App[None]):
     @_resource_filter.setter
     def _resource_filter(self, value: ResourceFilter) -> None:
         self._pane.resource_filter = value
+
+    @property
+    def _sorts(self) -> dict[str, SortSpec]:
+        """Per-kind sort state of the focused pane (view state, issue #37)."""
+        return self._pane.sorts
 
     @property
     def _drill(self) -> NavigationStack:
@@ -1036,7 +1044,7 @@ class KorvidApp(App[None]):
             pattern="",
             metrics=metrics,
             group=meta.group if meta is not None else "",
-            sort=self._sorts.get(kind),
+            sort=pane.sorts.get(kind),
             view=self.config.views.get(plural),
         )
         if empty_state:
@@ -6074,7 +6082,7 @@ class KorvidApp(App[None]):
             # column would reorder rows with no indicator, so ignore it.
             return
         self._sorts[kind] = toggle_sort(self._sorts.get(kind), column)
-        self._render_table(kind)
+        self._render_table(kind, only=self._pane)
 
     def action_sort_by_age(self) -> None:
         self._toggle_sort("age")
@@ -6090,7 +6098,7 @@ class KorvidApp(App[None]):
         kind = self.current_kind
         if message.column is None:
             self._sorts.pop(kind, None)
-            self._render_table(kind)
+            self._render_table(kind, only=self._pane)
             return
         requested = message.column
         view = self._view_for(kind)
@@ -6108,7 +6116,7 @@ class KorvidApp(App[None]):
             )
             return
         self._sorts[kind] = toggle_sort(self._sorts.get(kind), matched)
-        self._render_table(kind)
+        self._render_table(kind, only=self._pane)
 
     # ------------------------------------------------------------------
     # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,
