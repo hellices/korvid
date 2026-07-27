@@ -38,6 +38,7 @@ from korvid.k8s.client import KubeClient, resolve_context_name, resolve_context_
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
+from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.providers.configurator import ProviderConfigurator
@@ -385,6 +386,14 @@ async def _teardown(
             await leftover
 
 
+def _build_helm(config: KorvidConfig) -> HelmCLI | None:
+    """Wrap a detected helm binary, or None so the UI gates helm actions off."""
+    binary = find_helm()
+    if binary is None:
+        return None
+    return HelmCLI(binary, kube_context=config.kube_context)
+
+
 def _fallback_namespaces(config: KorvidConfig) -> tuple[str, ...]:
     """Namespaces an RBAC-limited user can fall back to (issue #49), deduped
     in priority order: explicit `namespaces:` config, the kubeconfig
@@ -538,6 +547,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         forwards=ForwardRegistry(context=config.kube_context),
         provider_hint=provider_info.display if provider_info.known else None,
         open_pod_exec=kube.open_pod_exec,
+        helm=_build_helm(config),
     )
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.
