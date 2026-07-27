@@ -237,6 +237,9 @@ class GenericSummary:
     #: spec.replicas when the kind carries one (Deployment/StatefulSet/...);
     #: None otherwise - 0 must stay distinguishable from "not scalable".
     desired: int | None = None
+    #: User-configured custom column values (issue #45), in the declared
+    #: column order; filled by the client from the raw manifest.
+    custom: tuple[str, ...] = ()
 
     @classmethod
     def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> GenericSummary:
@@ -707,6 +710,9 @@ class PodSummary:
     #: metadata.creationTimestamp (RFC 3339 UTC) or "" when absent; feeds
     #: the AGE column and age sorting (issue #37).
     created: str = ""
+    #: User-configured custom column values (issue #45), in the declared
+    #: column order; filled by the client from the raw manifest.
+    custom: tuple[str, ...] = ()
 
     def age(self, now: datetime | None = None) -> str:
         """Return k9s-style age string ("5m", "3h", "2d"); "-" when created is empty."""

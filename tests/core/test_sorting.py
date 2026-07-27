@@ -171,3 +171,64 @@ def test_sort_rows_rejects_unknown_column() -> None:
     # the metrics branch and return a plausible but wrong order.
     with pytest.raises(ValueError, match="unsupported sort column"):
         sort_rows([_pod("a")], SortSpec("restarts", descending=True))
+
+
+# ---------------------------------------------------------------------------
+# custom columns (issue #45): string sorts on summary.custom values
+# ---------------------------------------------------------------------------
+
+
+def _custom_pod(name: str, values: tuple[str, ...]) -> PodSummary:
+    return PodSummary(
+        name=name,
+        namespace="default",
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node="n1",
+        custom=values,
+    )
+
+
+def test_sort_by_custom_column_compares_strings_case_insensitively() -> None:
+    rows = [
+        _custom_pod("a", ("Payments",)),
+        _custom_pod("b", ("billing",)),
+        _custom_pod("c", ("core",)),
+    ]
+    spec = SortSpec("TEAM", descending=False)
+    ordered = sort_rows(rows, spec, custom_columns=("TEAM",))
+    assert [r.name for r in ordered] == ["b", "c", "a"]
+
+
+def test_sort_by_second_custom_column_uses_its_index() -> None:
+    rows = [
+        _custom_pod("a", ("x", "2.0")),
+        _custom_pod("b", ("y", "1.0")),
+    ]
+    spec = SortSpec("VERSION", descending=False)
+    ordered = sort_rows(rows, spec, custom_columns=("TEAM", "VERSION"))
+    assert [r.name for r in ordered] == ["b", "a"]
+
+
+def test_custom_sort_missing_and_placeholder_values_sort_last() -> None:
+    rows = [
+        _custom_pod("a", ("<none>",)),
+        _custom_pod("b", ("billing",)),
+        _custom_pod("c", ()),  # summary predates the column config
+        _custom_pod("d", ("<err>",)),
+    ]
+    spec = SortSpec("TEAM", descending=True)
+    ordered = sort_rows(rows, spec, custom_columns=("TEAM",))
+    assert ordered[0].name == "b"
+    assert {r.name for r in ordered[1:]} == {"a", "c", "d"}
+
+
+def test_unknown_column_still_raises_with_custom_columns_present() -> None:
+    with pytest.raises(ValueError, match="unsupported sort column"):
+        sort_rows([], SortSpec("NOPE", descending=False), custom_columns=("TEAM",))
+
+
+def test_first_toggle_custom_column_is_ascending() -> None:
+    spec = toggle_sort(None, "TEAM")
+    assert spec == SortSpec("TEAM", descending=False)

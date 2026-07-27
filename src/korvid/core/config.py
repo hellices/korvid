@@ -15,7 +15,20 @@ from typing import Any
 
 import yaml
 
+from korvid.k8s.columns import SOURCES, CustomColumn, parse_jsonpath
+from korvid.k8s.helm import SYNTHETIC_VIEW_KINDS
+
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "korvid" / "config.yaml"
+
+
+@dataclass(frozen=True)
+class ViewConfig:
+    """Custom columns for one resource kind (issue #45)."""
+
+    columns: tuple[CustomColumn, ...]
+    #: True replaces the kind's default columns (NAME/NAMESPACE always stay);
+    #: False appends after them.
+    replace: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,6 +68,12 @@ class KorvidConfig:
     #: (clusters whose default namespace blocks privileged pods via PSA).
     node_shell_image: str | None = None
     node_shell_namespace: str | None = None
+    #: Custom table columns per resource kind (issue #45), keyed by the
+    #: plural kind name as used in `:` navigation (e.g. "pods").
+    views: dict[str, ViewConfig] = field(default_factory=dict)
+    #: Human-readable config problems (e.g. an invalid custom column) that
+    #: the UI surfaces once at startup instead of crashing or hiding them.
+    warnings: tuple[str, ...] = ()
 
 
 def load_config(path: Path | None = None) -> KorvidConfig:
@@ -105,6 +124,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         # fail closed to an empty restricted mapping rather than silently
         # re-enabling public zero-config images.
         debug_images = {}
+    views, view_warnings = _parse_views(raw.get("views"))
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
@@ -131,6 +151,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         debug_images=debug_images,
         node_shell_image=_opt_str(node_shell_raw.get("image")),
         node_shell_namespace=_opt_str(node_shell_raw.get("namespace")),
+        views=views,
+        warnings=tuple(view_warnings),
     )
 
 
@@ -287,3 +309,101 @@ def _parse_namespaces(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(item for item in value if isinstance(item, str) and item)
+
+
+def _parse_column(kind: str, entry: Any) -> tuple[CustomColumn | None, str | None]:
+    """(column, warning) for one `views.<kind>.columns` item; at most one is set."""
+    if not isinstance(entry, dict):
+        return None, f"views.{kind}: column entries must be mappings"
+    name = _opt_str(entry.get("name"))
+    if name is None:
+        return None, f"views.{kind}: a column is missing its `name`"
+    if len(name.split()) != 1:
+        # :sort splits its input on whitespace — a multi-word name could
+        # never be addressed by the command it promises.
+        return None, f"views.{kind}: column name {name!r} must be a single token"
+    declared = [source for source in SOURCES if _opt_str(entry.get(source)) is not None]
+    if len(declared) != 1:
+        return None, (
+            f"views.{kind}.{name}: declare exactly one of "
+            f"{', '.join(SOURCES)} (got {len(declared)})"
+        )
+    source = declared[0]
+    expr = str(entry[source])
+    if source == "jsonpath":
+        try:
+            parse_jsonpath(expr)
+        except ValueError as exc:
+            return None, f"views.{kind}.{name}: {exc}"
+    return CustomColumn(name, source, expr), None
+
+
+#: Custom column names that would collide with identity/sortable built-in
+#: headers: `:sort CPU` would hit the builtin branch first (never the custom
+#: column) and the sort arrow would decorate two identical headers.
+_RESERVED_COLUMN_NAMES = frozenset({"name", "namespace", "age", "cpu", "mem"})
+
+
+def _collect_columns(kind: str, raw_columns: Any) -> tuple[list[CustomColumn], list[str]]:
+    """Valid, uniquely-named columns for one view; problems become warnings.
+
+    Case-insensitive duplicates and names shadowing built-in headers are
+    dropped: both would make headers ambiguous and later columns
+    unreachable for `:sort`.
+    """
+    columns: list[CustomColumn] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    if raw_columns is not None and not isinstance(raw_columns, list):
+        return [], [f"views.{kind}.columns must be a list of column mappings"]
+    for entry in raw_columns if isinstance(raw_columns, list) else []:
+        column, warning = _parse_column(kind, entry)
+        if warning is not None:
+            warnings.append(warning)
+        if column is None:
+            continue
+        if column.name.lower() in _RESERVED_COLUMN_NAMES:
+            warnings.append(f"views.{kind}.{column.name}: collides with a built-in column")
+        elif column.name.lower() in seen:
+            warnings.append(f"views.{kind}.{column.name}: duplicate column name")
+        else:
+            seen.add(column.name.lower())
+            columns.append(column)
+    return columns, warnings
+
+
+def _parse_views(value: Any) -> tuple[dict[str, ViewConfig], list[str]]:
+    """`views:` custom columns (issue #45): invalid columns are dropped with
+    a warning instead of failing the whole config — a typo in one column
+    must not take the TUI down."""
+    if value is None:
+        return {}, []
+    if not isinstance(value, dict):
+        return {}, ["views: must be a mapping of kind names to view definitions"]
+    views: dict[str, ViewConfig] = {}
+    warnings: list[str] = []
+    for kind, view_raw in value.items():
+        if not isinstance(view_raw, dict):
+            warnings.append(f"views.{kind}: a view definition must be a mapping")
+            continue
+        if str(kind) in SYNTHETIC_VIEW_KINDS:
+            # Synthetic helm views are adapted from backing Secrets — there
+            # is no manifest to evaluate custom columns against.
+            warnings.append(f"views.{kind}: synthetic view kinds don't support custom columns")
+            continue
+        if str(kind) == "secrets":
+            # Security invariant: Secret values only ever render through the
+            # masking pipeline — custom columns evaluate raw manifests
+            # (including last-applied-configuration), so the kind is banned.
+            warnings.append(
+                "views.secrets: Secret values only render through the masking "
+                "pipeline — custom columns are not supported"
+            )
+            continue
+        columns, column_warnings = _collect_columns(str(kind), view_raw.get("columns"))
+        warnings.extend(column_warnings)
+        if columns:
+            views[str(kind)] = ViewConfig(
+                columns=tuple(columns), replace=view_raw.get("replace") is True
+            )
+    return views, warnings
