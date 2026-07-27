@@ -92,7 +92,10 @@ def _tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _good_script() -> list[list[dict[str, Any]]]:
     return [
-        [_tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"})],
+        [
+            _tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"}),
+            {"type": "usage", "input_tokens": 40, "output_tokens": 5},
+        ],
         [
             {
                 "type": "text_delta",
@@ -101,7 +104,7 @@ def _good_script() -> list[list[dict[str, Any]]]:
                     " CrashLoopBackOff — raise its memory limit."
                 ),
             },
-            {"type": "usage", "input_tokens": 100, "output_tokens": 20},
+            {"type": "usage", "input_tokens": 60, "output_tokens": 15},
         ],
     ]
 
@@ -134,6 +137,7 @@ async def test_run_scenario_smoke_passes_with_a_correct_scripted_run() -> None:
         assert run.safety_violations == 0
         assert run.input_tokens == 100
         assert run.output_tokens == 20
+        assert run.tokens_estimated is False
         assert run.wall_time_s >= 0
         assert run.error is None
 
@@ -360,6 +364,7 @@ def test_render_markdown_summarizes_reports() -> None:
         safety_violations=0,
         input_tokens=100,
         output_tokens=20,
+        tokens_estimated=False,
         wall_time_s=0.5,
         error=None,
     )
@@ -373,9 +378,11 @@ def test_render_markdown_summarizes_reports() -> None:
     # Execution-quality rate: schema-valid calls that resolved in-cluster.
     assert "resolvable calls" in text
     assert "6/8 (75.0%)" in text
-    # Identical repetitions: mean with zero dispersion.
+    # Identical repetitions: mean with zero dispersion. Exact usage: no
+    # estimate marker.
     assert "2.0±0.0" in text
     assert "100.0±0.0/20.0±0.0" in text
+    assert "~100.0" not in text
 
 
 class _ClosableProvider(ScriptedProvider):
@@ -392,7 +399,7 @@ class _ClosableProvider(ScriptedProvider):
 
 async def test_run_scenario_closes_the_provider_after_every_repetition() -> None:
     """Live providers own an httpx client; leaking one per repetition
-    across a 12-scenario x 3-rep run would leak dozens of clients."""
+    across a full pack x 3-rep run would leak dozens of clients."""
     scenario = _oom_scenario()
     closed: list[bool] = []
     report = await run_scenario(
@@ -425,3 +432,41 @@ async def test_resolvable_tool_calls_require_a_resolvable_target() -> None:
     assert run.tool_calls == 1
     assert run.malformed_tool_calls == 0
     assert run.resolvable_tool_calls == 0
+
+
+async def test_runs_without_provider_usage_are_marked_estimated() -> None:
+    """A provider that never emits usage events yields heuristic token
+    totals; the run must carry that provenance."""
+    scenario = _oom_scenario()
+    script = [[{"type": "text_delta", "text": "OOMKilled, exit 137."}]]
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    assert report.runs[0].tokens_estimated is True
+
+
+def test_render_markdown_marks_estimated_token_totals() -> None:
+    from korvid.evals.grader import GradeResult
+    from korvid.evals.runner import RunMetrics
+
+    run = RunMetrics(
+        grade=GradeResult(True, True, (), (), ()),
+        answer="OOMKilled",
+        iterations=1,
+        tool_calls=1,
+        resolvable_tool_calls=1,
+        malformed_tool_calls=0,
+        write_attempts=0,
+        safety_violations=0,
+        input_tokens=0,
+        output_tokens=5,
+        tokens_estimated=True,
+        wall_time_s=0.5,
+        error=None,
+    )
+    report = ScenarioReport(scenario_id="oom-killed", root_cause="oom_killed", runs=[run])
+    text = render_markdown([report])
+    assert "~0.0/5.0" in text

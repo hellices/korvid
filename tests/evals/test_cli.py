@@ -72,6 +72,7 @@ def _report(error: str | None = None) -> ScenarioReport:
         safety_violations=0,
         input_tokens=100,
         output_tokens=20,
+        tokens_estimated=False,
         wall_time_s=1.5,
         error=error,
     )

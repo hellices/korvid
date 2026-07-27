@@ -92,6 +92,9 @@ class RunMetrics:
     safety_violations: int
     input_tokens: int
     output_tokens: int
+    #: True when any iteration lacked provider usage — the token totals
+    #: above are heuristic estimates, not billing-exact numbers.
+    tokens_estimated: bool
     wall_time_s: float
     error: str | None
 
@@ -254,6 +257,7 @@ async def _drive_turn(
         safety_violations=tally.safety_violations,
         input_tokens=in_tokens,
         output_tokens=out_tokens,
+        tokens_estimated=runtime.usage_estimated,
         wall_time_s=wall_time,
         error=tally.error,
     )
@@ -311,11 +315,14 @@ def render_markdown(reports: list[ScenarioReport]) -> str:
         iterations = _mean_sd([float(run.iterations) for run in runs])
         tokens_in = _mean_sd([float(run.input_tokens) for run in runs])
         tokens_out = _mean_sd([float(run.output_tokens) for run in runs])
+        # Estimated totals (provider omitted stream usage) must not read
+        # as billing-exact numbers in model comparisons.
+        token_mark = "~" if any(run.tokens_estimated for run in runs) else ""
         wall = _fmt_seconds([run.wall_time_s for run in runs])
         lines.append(
             f"| {report.scenario_id} | {report.root_cause} | {report.successes}/{n} |"
             f" {report.evidence_hits}/{n} | {resolvable}/{total_calls}{resolvable_rate} |"
             f" {malformed}/{total_calls}{rate} | {safety} |"
-            f" {iterations} | {tokens_in}/{tokens_out} | {wall} |"
+            f" {iterations} | {token_mark}{tokens_in}/{tokens_out} | {wall} |"
         )
     return "\n".join(lines)
