@@ -149,6 +149,9 @@ class ForwardRegistry:
             closed = self._closed
             if not closed:
                 record = ForwardRecord(id=self._next_id, spec=spec, _proc=proc)
+                # Prepared before publication: nothing may observe the
+                # dataclass default ``alive`` on an unconfirmed process.
+                self._prepare_handshake(record)
                 self._next_id += 1
                 self._records[record.id] = record
         if closed:
@@ -157,7 +160,7 @@ class ForwardRegistry:
             self._discard_spawn(proc)
             msg = "port-forward registry is shut down"
             raise ValueError(msg)
-        self._begin_handshake(record)
+        self._start_watcher(record)
         return record
 
     def _spawn(self, spec: ForwardSpec) -> _ForwardProcess:
@@ -181,17 +184,30 @@ class ForwardRegistry:
         )
         return proc
 
-    def _begin_handshake(self, record: ForwardRecord) -> None:
-        """Watch the child's output until kubectl confirms the listener."""
+    def _prepare_handshake(self, record: ForwardRecord) -> None:
+        """Install the readiness state before the record becomes observable.
+
+        Publishing first and downgrading to ``starting`` afterwards would
+        let a concurrent poll read an unconfirmed process as ``alive`` —
+        and, on a re-attach, a record still reading ``broken`` after the
+        swap would be a reclaim target for a concurrent same-port start.
+        """
         proc = record._proc
-        stream = getattr(proc, "stdout", None)
-        if proc is None or stream is None:
+        if proc is None or getattr(proc, "stdout", None) is None:
             # No readiness channel (injected test doubles) — trust the spawn.
             record.status = "alive"
+            record._ready = None
             return
         record.status = "starting"
-        ready = threading.Event()
-        record._ready = ready
+        record._ready = threading.Event()
+
+    def _start_watcher(self, record: ForwardRecord) -> None:
+        """Start the reader thread for a prepared record (outside the locks)."""
+        proc = record._proc
+        stream = getattr(proc, "stdout", None)
+        ready = record._ready
+        if proc is None or stream is None or ready is None:
+            return
         threading.Thread(
             target=self._watch_output, args=(record, proc, stream, ready), daemon=True
         ).start()
@@ -305,6 +321,19 @@ class ForwardRegistry:
         """The tracked forward with ``forward_id``, or None."""
         return self._records.get(forward_id)
 
+    def generation(self, forward_id: int) -> int | None:
+        """The forward's current process generation (each re-attach bumps it).
+
+        Snapshot this before `wait_ready()` and hand it to `fail_start()`:
+        a timed-out handshake then can never tear down a replacement
+        process that was re-attached while the caller was waiting.
+        """
+        record = self._records.get(forward_id)
+        if record is None:
+            return None
+        with record._lock:
+            return record._generation
+
     def stop(self, forward_id: int) -> ForwardRecord | None:
         """Signal one forward to exit and forget it; None when the id is unknown.
 
@@ -368,6 +397,11 @@ class ForwardRegistry:
                     record.last_output = ""
                     record._generation += 1
                     superseded = record._ready
+                    # The starting state swaps in atomically with the
+                    # process: a record left ``broken`` here would be a
+                    # reclaim target for a concurrent same-port start, which
+                    # would signal the fresh replacement down.
+                    self._prepare_handshake(record)
         if not adopted:
             self._discard_spawn(replacement)
             return None
@@ -379,12 +413,14 @@ class ForwardRegistry:
             # Invariant: wait_ready() captures record._ready once on entry,
             # so setting the old event here can never spuriously wake a
             # waiter of the replacement generation — those only ever block
-            # on the fresh event _begin_handshake() installs below.
+            # on the fresh event _prepare_handshake() installed above.
             superseded.set()
-        self._begin_handshake(record)
+        self._start_watcher(record)
         return record
 
-    def fail_start(self, forward_id: int, *, keep: bool = True) -> ForwardRecord | None:
+    def fail_start(
+        self, forward_id: int, *, keep: bool = True, generation: int | None = None
+    ) -> ForwardRecord | None:
         """Abort a forward whose readiness handshake never resolved.
 
         Covers both unconfirmed outcomes: a child silent-but-running after
@@ -397,12 +433,17 @@ class ForwardRegistry:
 
         Returns None without touching anything when the forward confirmed
         its listener in the meantime (``alive``) — the caller's timeout
-        snapshot lost that race and must treat the forward as ready.
+        snapshot lost that race and must treat the forward as ready — or
+        when ``generation`` (snapshot from `generation()` before waiting)
+        no longer matches: the timed-out handshake belongs to a superseded
+        process and must not tear down the re-attached replacement.
         """
         record = self._records.get(forward_id)
         if record is None:
             return None
         with record._lock:
+            if generation is not None and record._generation != generation:
+                return None
             # Check and transition atomically: the reader thread flips
             # ``starting`` to ``alive`` under the same lock, so a forward
             # confirmed at the last instant cannot be torn down here.

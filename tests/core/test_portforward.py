@@ -539,6 +539,55 @@ def test_start_is_not_alive_until_kubectl_reports_ready() -> None:
     assert registry.wait_ready(record.id, timeout=2.0) == "alive"
 
 
+def test_record_is_never_published_as_alive_before_its_handshake() -> None:
+    """The status must be ``starting`` at registration, not downgraded after.
+
+    A record inserted with the dataclass default ``alive`` and flipped to
+    ``starting`` afterwards would let a concurrent `:pf` poll observe an
+    unconfirmed kubectl as a success.
+    """
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    published: list[str] = []
+
+    class _SpyRecords(dict[int, ForwardRecord]):
+        def __setitem__(self, key: int, value: ForwardRecord) -> None:
+            published.append(value.status)
+            super().__setitem__(key, value)
+
+    registry._records = _SpyRecords()
+    registry.start(_spec())
+    assert published == ["starting"]
+    procs[0].stdout.feed(None)  # release the reader thread
+
+
+def test_reattach_publishes_the_replacement_already_starting() -> None:
+    """The swap must install the ``starting`` state atomically.
+
+    A replacement published while the record still reads ``broken`` is a
+    reclaim target for a concurrent same-port start — which would signal
+    the fresh process down.
+    """
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    procs[0].stdout.feed(None)
+    procs[0].exit(1)
+    registry.refresh()
+    assert record.status == "broken"
+    observed: list[str] = []
+    original = registry._start_watcher
+
+    def _spy(rec: ForwardRecord) -> None:
+        observed.append(rec.status)
+        original(rec)
+
+    registry._start_watcher = _spy  # type: ignore[assignment]  # test spy
+    assert registry.reattach(record.id) is record
+    assert observed == ["starting"]
+    procs[1].stdout.feed(None)  # release the reader thread
+
+
 def test_wait_ready_reports_failed_start_with_kubectl_detail() -> None:
     """An exit before the ready line is a failed start, with kubectl's words."""
     procs: list[_FakeProc] = []
@@ -719,6 +768,35 @@ def test_fail_start_keep_false_yields_to_a_confirmed_forward() -> None:
     assert registry.get(record.id) is record  # still listed, still alive
     assert not procs[0].terminated
     procs[0].stdout.feed(None)
+
+
+def test_fail_start_from_a_superseded_generation_leaves_the_replacement_alone() -> None:
+    """A stale confirmation's abort must not tear down the re-attached process."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    record = registry.start(_spec())
+    stale_generation = registry.generation(record.id)
+    procs[0].exit(1)
+    registry.refresh()
+    assert record.status == "broken"
+    assert registry.reattach(record.id) is record  # bumps the generation
+    assert record.status == "alive"
+    assert registry.fail_start(record.id, generation=stale_generation) is None
+    assert record.status == "alive"  # the replacement was left untouched
+    assert not procs[1].terminated
+
+
+def test_fail_start_with_the_current_generation_still_aborts() -> None:
+    """The generation guard rejects only stale callers, not the real timeout."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    assert registry.wait_ready(record.id, timeout=0.05) == "starting"
+    generation = registry.generation(record.id)
+    assert registry.fail_start(record.id, generation=generation) is record
+    assert record.status == "broken"
+    assert procs[0].terminated
+    procs[0].stdout.feed(None)  # release the reader thread
 
 
 def test_start_racing_teardown_never_leaks_a_child() -> None:

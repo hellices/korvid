@@ -1531,6 +1531,9 @@ class KorvidApp(App[None]):
         spec = record.spec
         worker = get_current_worker()
         try:
+            # Snapshot before waiting: a re-attach during the wait bumps the
+            # generation, and the abort below must never hit the replacement.
+            generation = registry.generation(record.id)
             status = await asyncio.to_thread(
                 registry.wait_ready, record.id, timeout=_FORWARD_READY_SECONDS
             )
@@ -1552,7 +1555,9 @@ class KorvidApp(App[None]):
                 self._audit_forward("port-forward-start", spec, outcome="stopped before ready")
                 return
             if status != "alive":
-                self._report_failed_forward_start(registry, record, status, reattached=reattached)
+                self._report_failed_forward_start(
+                    registry, record, status, reattached=reattached, generation=generation
+                )
                 return
             self._report_forward_ready(record, reattached=reattached)
         except asyncio.CancelledError:
@@ -1614,6 +1619,7 @@ class KorvidApp(App[None]):
         status: str,
         *,
         reattached: bool,
+        generation: int | None = None,
     ) -> None:
         """Handle a readiness handshake that did not end in ``alive``.
 
@@ -1624,12 +1630,14 @@ class KorvidApp(App[None]):
         already verified this confirmation is the record's current one.
 
         ``status`` is only a timeout snapshot: the abort itself is the
-        registry's atomic compare-and-transition, and when that yields to a
-        readiness line that landed after the snapshot, the confirmed forward
-        is reported as the success it is instead of being torn down.
+        registry's atomic compare-and-transition (generation-guarded, so a
+        re-attach that raced the snapshot keeps its replacement), and when
+        that yields to a readiness line that landed after the snapshot, the
+        confirmed forward is reported as the success it is instead of being
+        torn down.
         """
         spec = record.spec
-        if registry.fail_start(record.id, keep=reattached) is None:
+        if registry.fail_start(record.id, keep=reattached, generation=generation) is None:
             # The handshake resolved between the wait snapshot and the abort.
             if registry.get(record.id) is record and record.status == "alive":
                 self._report_forward_ready(record, reattached=reattached)
