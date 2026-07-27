@@ -65,11 +65,22 @@ def make_app(
     node_shell_image: str | None = None,
     node_shell_namespace: str | None = None,
     get_manifest: Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None = None,
+    audit_log: AuditLog | None = None,
+    extra_nodes: tuple[str, ...] = (),
+    permission_gate: asyncio.Event | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
         "nodes": [
-            GenericSummary(name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1")
+            GenericSummary(
+                name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
+            ),
+            *(
+                GenericSummary(
+                    name=extra, namespace="", kind="Node", created="", uid=f"uid-{extra}"
+                )
+                for extra in extra_nodes
+            ),
         ],
         "pods": [],
     }
@@ -83,6 +94,8 @@ def make_app(
     async def check_permission(
         verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
     ) -> bool:
+        if permission_gate is not None:
+            await permission_gate.wait()
         assert permitted is not None
         return permitted
 
@@ -97,7 +110,9 @@ def make_app(
         watch_manager=WatchManager(store, source),
         aliases=dict(_ALIASES),
         write_ops=recorder,
-        audit=None if audit_path is None else AuditLog(audit_path),
+        audit=audit_log
+        if audit_log is not None
+        else (None if audit_path is None else AuditLog(audit_path)),
         check_permission=None if permitted is None else check_permission,
         get_manifest=get_manifest,
     )
@@ -468,3 +483,64 @@ async def test_node_shell_aborts_when_node_replaced_after_prompt(tmp_path: Path)
             await until(pilot, _cancelled, label="replacement cancel notification")
     assert call_records == []
     assert not audit_path.is_file() or "intent" not in audit_path.read_text()
+
+
+class _ExplodingAudit(AuditLog):
+    """AuditLog whose persistence always fails."""
+
+    def append(self, **kwargs: Any) -> None:
+        raise OSError("disk full")
+
+
+async def test_node_shell_blocked_when_audit_append_fails(tmp_path: Path) -> None:
+    """Fail-closed invariant: if the intent record cannot persist, the
+    privileged kubectl debug subprocess must never start."""
+    rec = DeleteRecorder()
+    app = make_app(rec, None, audit_log=_ExplodingAudit(tmp_path / "audit.jsonl", context="test"))
+    run_fake, _ = _listing_run([_pods_json()])
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await pilot.press("y")
+
+            def _blocked() -> bool:
+                return any("Write blocked" in n.message for n in app._notifications)
+
+            await until(pilot, _blocked, label="write-blocked notification")
+    assert call_records == []
+    assert rec.deletes == []
+
+
+async def test_node_shell_cancelled_when_selection_moves_during_rbac_check(
+    tmp_path: Path,
+) -> None:
+    """The approval must stay bound to the row that initiated it: moving the
+    cursor while the SSAR pre-check is in flight cancels the offer."""
+    rec = DeleteRecorder()
+    gate = asyncio.Event()
+    app = make_app(
+        rec,
+        tmp_path / "audit.jsonl",
+        permitted=True,
+        permission_gate=gate,
+        extra_nodes=("worker-2",),
+    )
+    run_fake, _ = _listing_run([_pods_json()])
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await pilot.pause(0.1)  # flow is now parked on the gated SSAR
+            await pilot.press("down")  # move to worker-2
+            gate.set()
+
+            def _cancelled() -> bool:
+                return any("selection changed" in n.message for n in app._notifications)
+
+            await until(pilot, _cancelled, label="selection-changed cancel")
+            assert not isinstance(app.screen, ConfirmScreen)
+    assert call_records == []

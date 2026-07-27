@@ -3597,7 +3597,7 @@ class KorvidApp(App[None]):
         resolved = self._node_target("node shell")
         if resolved is None:
             return
-        ops, _meta, name, uid = resolved
+        ops, meta, name, uid = resolved
         if shutil.which("kubectl") is None:
             self.notify("kubectl not found on PATH — node shell requires kubectl", severity="error")
             return
@@ -3609,14 +3609,10 @@ class KorvidApp(App[None]):
             logger.warning("pods alias missing; skipping node-shell RBAC pre-check (fail-open)")
         elif not await self._permitted("node-shell", pods_meta, shell_ns, ""):
             return
-        if len(self.screen_stack) > 1:
-            # The RBAC pre-check ran concurrently with user input: never
-            # stack the approval over a dialog that opened meanwhile.
-            self.notify(
-                f"Node shell for {name} not offered - another dialog is open."
-                " Close it and press 's' again to retry.",
-                severity="warning",
-            )
+        if not self._write_context_intact("node shell", meta, None, name):
+            # The RBAC round-trip ran concurrently with user input: the
+            # approval must stay bound to the selection that initiated it,
+            # and never stack over a dialog that opened meanwhile.
             return
 
         def _on_choice(confirmed: bool | None) -> None:
