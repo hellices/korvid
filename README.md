@@ -159,7 +159,7 @@ know older lines were dropped.
 `Ctrl-T` on a pod opens a transfer dialog (multi-container pods show a
 container picker first): pick a direction, the remote path in the container,
 and a local path — leaving the local path empty on a download saves to
-`~/Downloads/<name>`.
+`~/Downloads/<name>`, or to `~/<name>` when no `Downloads` directory exists.
 
 Transfers ride the exec API as a tar stream, so there is no dependency on a
 `kubectl` binary — but the container must have `tar` (the server's error is

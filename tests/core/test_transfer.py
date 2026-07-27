@@ -107,6 +107,14 @@ class TestValidateSpec:
         spec = TransferSpec("download", "/tmp/x", "~/x.log")
         assert validate_spec(spec) is None
 
+    def test_unknown_user_tilde_is_a_validation_error(self) -> None:
+        # Path.expanduser raises RuntimeError for an unknown user; that must
+        # surface as a validation message, not escape the submit handler.
+        spec = TransferSpec("download", "/tmp/x", "~korvid_no_such_user_x9/f")
+        error = validate_spec(spec)
+        assert error is not None
+        assert "cannot expand local path" in error
+
 
 class TestCommands:
     def test_download_command_splits_dir_and_base(self) -> None:

@@ -89,7 +89,12 @@ def validate_spec(spec: TransferSpec) -> str | None:
         return remote_error
     if not spec.local_path.strip():
         return "local path is required"
-    local = Path(spec.local_path).expanduser()
+    try:
+        local = Path(spec.local_path).expanduser()
+    except RuntimeError:
+        # e.g. "~no_such_user/f": expansion failure must surface as a
+        # validation toast, not an exception out of the dialog handler.
+        return f"cannot expand local path: {spec.local_path}"
     if spec.direction == "upload":
         if not local.exists():
             return f"local file not found: {local}"

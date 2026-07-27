@@ -65,15 +65,9 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
-    def __init__(
-        self,
-        target: str,
-        *,
-        default_download_dir: str = "~/Downloads",
-    ) -> None:
+    def __init__(self, target: str) -> None:
         super().__init__()
         self._target = target
-        self._default_download_dir = default_download_dir
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -86,7 +80,9 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
                 id="transfer-remote",
             )
             yield Input(
-                placeholder=f"local path (empty = {self._default_download_dir}/<name>)",
+                # Mirrors default_local_path: ~/Downloads when present,
+                # the home directory otherwise.
+                placeholder="local path (empty = ~/Downloads/<name>, or ~/<name>)",
                 id="transfer-local",
             )
             yield Static("Enter = start    Esc = cancel", classes="transfer-hint", markup=False)
