@@ -96,17 +96,22 @@ def build_debug_argv(
     ]
 
 
-def build_node_debug_argv(
+def build_node_debug_create_argv(
     node: str,
     namespace: str,
     context: str | None = None,
     image: str = DEBUG_IMAGE,
 ) -> list[str]:
-    """Return argv for `kubectl debug node/<node>` opening a node shell.
+    """Return argv creating (without attaching) the node-debugger pod as JSON.
 
-    kubectl creates a `node-debugger-…` pod pinned to the node with the
-    host filesystem mounted at `/host` (issue #46). The namespace is always
-    pinned explicitly so korvid knows where to clean the pod up afterwards.
+    `kubectl debug node/<node>` creates a `node-debugger-…` pod pinned to
+    the node with the host filesystem mounted at `/host` (issue #46).
+    `--attach=false -o json` prints the created pod, so korvid learns the
+    exact name and uid of *its own* pod — cleanup then deletes precisely
+    that pod (uid precondition) instead of diffing namespace listings,
+    which could catch a debugger another operator started meanwhile.
+    The namespace is always pinned explicitly. `-it` keeps stdin open and
+    allocates a TTY on the container for the later `kubectl attach`.
     `--profile=sysadmin` (kubectl 1.27+) makes the pod actually privileged —
     the default profile mounts the host filesystem but denies the privileged
     security context the approval dialog states, so tools like
@@ -117,6 +122,9 @@ def build_node_debug_argv(
         "debug",
         *_context_args(context),
         "-it",
+        "--attach=false",
+        "-o",
+        "json",
         "-n",
         namespace,
         f"node/{node}",
@@ -129,18 +137,36 @@ def build_node_debug_argv(
     ]
 
 
-def build_pod_list_argv(namespace: str, context: str | None = None) -> list[str]:
-    """Return argv listing a namespace's pods as JSON, used to find the
-    `node-debugger-…` pod a node shell created so it can be deleted."""
+def build_pod_wait_argv(
+    namespace: str,
+    pod: str,
+    context: str | None = None,
+    timeout: str = "60s",
+) -> list[str]:
+    """Return argv waiting for the debugger pod to become Ready, so the
+    interactive attach doesn't race the container start."""
     return [
         "kubectl",
-        "get",
-        "pods",
+        "wait",
         *_context_args(context),
         "-n",
         namespace,
-        "-o",
-        "json",
+        f"pod/{pod}",
+        "--for=condition=Ready",
+        f"--timeout={timeout}",
+    ]
+
+
+def build_pod_attach_argv(namespace: str, pod: str, context: str | None = None) -> list[str]:
+    """Return argv attaching interactively to the node-debugger pod's shell."""
+    return [
+        "kubectl",
+        "attach",
+        *_context_args(context),
+        "-it",
+        "-n",
+        namespace,
+        pod,
     ]
 
 

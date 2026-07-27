@@ -23,7 +23,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary
 from korvid.k8s.writes import WriteOps
 from korvid.ui.app import KorvidApp
-from korvid.ui.shell import DEBUG_IMAGE, build_node_debug_argv
+from korvid.ui.shell import DEBUG_IMAGE, build_node_debug_create_argv, build_pod_attach_argv
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 
@@ -134,26 +134,26 @@ async def _to_nodes(pilot) -> None:  # type: ignore[no-untyped-def]  # Pilot's a
     await until(pilot, _node_row_rendered, label="nodes view rendered")
 
 
-def _pods_json(*entries: tuple[str, str, str]) -> str:
-    """kubectl get pods -o json payload: (name, uid, nodeName) items."""
-    return json.dumps(
-        {
-            "items": [
-                {"metadata": {"name": name, "uid": uid}, "spec": {"nodeName": node}}
-                for name, uid, node in entries
-            ]
-        }
-    )
+DBG_POD = "node-debugger-worker-1-abcde"
+DBG_UID = "dbg-uid"
 
 
-def _listing_run(payloads: list[str]):  # type: ignore[no-untyped-def]  # test helper
-    """subprocess.run fake consuming one JSON payload per call."""
+def _pod_json(name: str = DBG_POD, uid: str = DBG_UID) -> bytes:
+    """`kubectl debug --attach=false -o json` output: the created pod."""
+    return json.dumps({"metadata": {"name": name, "uid": uid}}).encode()
+
+
+def _kubectl_run(create_result: Any = None, wait_rc: int = 0):  # type: ignore[no-untyped-def]  # test helper
+    """subprocess.run fake serving the detached create and the Ready wait."""
     calls: list[list[str]] = []
 
     def run(argv, **kwargs):  # type: ignore[no-untyped-def]  # test helper
         calls.append(list(argv))
-        stdout = payloads[min(len(calls) - 1, len(payloads) - 1)]
-        return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
+        if "debug" in argv:
+            if create_result is not None:
+                return create_result
+            return SimpleNamespace(returncode=0, stdout=_pod_json(), stderr=b"")
+        return SimpleNamespace(returncode=wait_rc, stdout=b"", stderr=b"")
 
     return run, calls
 
@@ -165,9 +165,9 @@ def _noop_cm() -> Any:
 
 @contextmanager
 def _node_shell_env(run_fake, call_exit: int = 0):  # type: ignore[no-untyped-def]  # test helper
-    """Patch kubectl discovery, the interactive call, pod listings, and
-    suspend (headless drivers raise SuspendNotSupported); yields the list of
-    interactive kubectl invocations."""
+    """Patch kubectl discovery, the interactive attach, the create/wait
+    subprocesses, and suspend (headless drivers raise SuspendNotSupported);
+    yields the list of interactive kubectl invocations."""
     call_records: list[list[str]] = []
 
     def fake_call(argv):  # type: ignore[no-untyped-def]  # test helper
@@ -186,7 +186,7 @@ def _node_shell_env(run_fake, call_exit: int = 0):  # type: ignore[no-untyped-de
 async def test_s_on_nodes_view_opens_privileged_approval_dialog(tmp_path: Path) -> None:
     rec = DeleteRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
-    run_fake, _ = _listing_run([_pods_json()])
+    run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
@@ -204,11 +204,11 @@ async def test_s_on_nodes_view_opens_privileged_approval_dialog(tmp_path: Path) 
     assert call_records == []
 
 
-async def test_confirmed_node_shell_runs_kubectl_debug_node_and_audits(tmp_path: Path) -> None:
+async def test_confirmed_node_shell_creates_waits_attaches_and_audits(tmp_path: Path) -> None:
     rec = DeleteRecorder()
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
-    run_fake, _ = _listing_run([_pods_json()])
+    run_fake, run_calls = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
@@ -216,13 +216,16 @@ async def test_confirmed_node_shell_runs_kubectl_debug_node_and_audits(tmp_path:
             await pilot.press("s")
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
             await pilot.press("y")
-            await until(pilot, lambda: call_records, label="kubectl debug ran")
+            await until(pilot, lambda: call_records, label="kubectl attach ran")
 
             def _outcome_written() -> bool:
                 return audit_path.is_file() and '"success' in audit_path.read_text()
 
             await until(pilot, _outcome_written, label="outcome audit record")
-    assert call_records == [build_node_debug_argv("worker-1", "default")]
+    assert run_calls[0] == build_node_debug_create_argv("worker-1", "default")
+    assert run_calls[1][:2] == ["kubectl", "wait"]
+    assert f"pod/{DBG_POD}" in run_calls[1]
+    assert call_records == [build_pod_attach_argv("default", DBG_POD)]
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     ours = [e for e in entries if e["action"] == "node-shell"]
     assert ours[0]["outcome"] == "intent"
@@ -231,15 +234,13 @@ async def test_confirmed_node_shell_runs_kubectl_debug_node_and_audits(tmp_path:
     assert ours[-1]["outcome"].startswith("success")
 
 
-async def test_node_shell_cleans_up_new_debugger_pod(tmp_path: Path) -> None:
+async def test_node_shell_deletes_exactly_its_own_pod(tmp_path: Path) -> None:
+    """The pod created by this invocation (name+uid from the detached
+    create) is the only thing deleted — never a namespace-wide guess that
+    could catch another operator's debugger."""
     rec = DeleteRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
-    run_fake, _ = _listing_run(
-        [
-            _pods_json(),  # before: nothing
-            _pods_json(("node-debugger-worker-1-abcde", "dbg-uid", "worker-1")),
-        ]
-    )
+    run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as _calls:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
@@ -248,42 +249,14 @@ async def test_node_shell_cleans_up_new_debugger_pod(tmp_path: Path) -> None:
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
             await pilot.press("y")
             await until(pilot, lambda: rec.deletes, label="cleanup delete")
-    assert rec.deletes == [("pods", "default", "node-debugger-worker-1-abcde", "dbg-uid")]
-
-
-async def test_node_shell_pre_existing_debugger_pod_not_deleted(tmp_path: Path) -> None:
-    """A debugger pod that existed before the shell (another operator's) survives."""
-    rec = DeleteRecorder()
-    audit_path = tmp_path / "audit.jsonl"
-    app = make_app(rec, audit_path)
-    old = ("node-debugger-worker-1-old11", "old-uid", "worker-1")
-    run_fake, _ = _listing_run([_pods_json(old), _pods_json(old)])
-    with _node_shell_env(run_fake) as call_records:
-        async with app.run_test() as pilot:
-            await pilot.pause(0.1)
-            await _to_nodes(pilot)
-            await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
-            await pilot.press("y")
-            await until(pilot, lambda: call_records, label="kubectl debug ran")
-
-            def _outcome_written() -> bool:
-                return audit_path.is_file() and "no debug pod found" in audit_path.read_text()
-
-            await until(pilot, _outcome_written, label="outcome audit record")
-    assert rec.deletes == []
+    assert rec.deletes == [("pods", "default", DBG_POD, DBG_UID)]
 
 
 async def test_node_shell_cleanup_failure_warns_and_audits(tmp_path: Path) -> None:
     rec = DeleteRecorder(delete_error=RuntimeError("forbidden"))
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
-    run_fake, _ = _listing_run(
-        [
-            _pods_json(),
-            _pods_json(("node-debugger-worker-1-abcde", "dbg-uid", "worker-1")),
-        ]
-    )
+    run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as _calls:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
@@ -293,18 +266,18 @@ async def test_node_shell_cleanup_failure_warns_and_audits(tmp_path: Path) -> No
             await pilot.press("y")
 
             def _warned() -> bool:
-                return any("node-debugger-worker-1-abcde" in n.message for n in app._notifications)
+                return any(DBG_POD in n.message for n in app._notifications)
 
             await until(pilot, _warned, label="cleanup failure notification")
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     last = [e for e in entries if e["action"] == "node-shell"][-1]
-    assert "cleanup failed" in last["outcome"]
+    assert f"cleanup failed for: {DBG_POD}" in last["outcome"]
 
 
 async def test_node_shell_refused_in_readonly(tmp_path: Path) -> None:
     rec = DeleteRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl", readonly=True)
-    run_fake, _ = _listing_run([_pods_json()])
+    run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
@@ -322,7 +295,7 @@ async def test_node_shell_refused_in_readonly(tmp_path: Path) -> None:
 async def test_node_shell_refused_without_audit(tmp_path: Path) -> None:
     rec = DeleteRecorder()
     app = make_app(rec, None)
-    run_fake, _ = _listing_run([_pods_json()])
+    run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
@@ -340,7 +313,7 @@ async def test_node_shell_refused_without_audit(tmp_path: Path) -> None:
 async def test_node_shell_rbac_denied_not_offered(tmp_path: Path) -> None:
     rec = DeleteRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl", permitted=False)
-    run_fake, _ = _listing_run([_pods_json()])
+    run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
@@ -357,12 +330,18 @@ async def test_node_shell_rbac_denied_not_offered(tmp_path: Path) -> None:
     assert call_records == []
 
 
-async def test_node_shell_nonzero_exit_warns_about_policy(tmp_path: Path) -> None:
+async def test_node_shell_create_failure_warns_about_policy(tmp_path: Path) -> None:
+    """PodSecurity admission refusals surface at pod creation: the hint
+    points at node_shell.namespace, nothing attaches, nothing is deleted."""
     rec = DeleteRecorder()
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
-    run_fake, _ = _listing_run([_pods_json()])
-    with _node_shell_env(run_fake, call_exit=1) as _calls:
+    run_fake, _ = _kubectl_run(
+        create_result=SimpleNamespace(
+            returncode=1, stdout=b"", stderr=b"pods is forbidden: violates PodSecurity"
+        )
+    )
+    with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
             await _to_nodes(pilot)
@@ -374,9 +353,54 @@ async def test_node_shell_nonzero_exit_warns_about_policy(tmp_path: Path) -> Non
                 return any("PodSecurity" in n.message for n in app._notifications)
 
             await until(pilot, _warned, label="policy hint notification")
+    assert call_records == []
+    assert rec.deletes == []
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     last = [e for e in entries if e["action"] == "node-shell"][-1]
-    assert last["outcome"].startswith("error: exit 1")
+    assert last["outcome"] == "error: pod creation failed"
+
+
+async def test_node_shell_unidentifiable_create_output_aborts(tmp_path: Path) -> None:
+    """If kubectl succeeds but the created pod cannot be identified, korvid
+    must not attach or guess at cleanup."""
+    rec = DeleteRecorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    run_fake, _ = _kubectl_run(
+        create_result=SimpleNamespace(returncode=0, stdout=b"not json", stderr=b"")
+    )
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await pilot.press("y")
+
+            def _warned() -> bool:
+                return any("did not report" in n.message for n in app._notifications)
+
+            await until(pilot, _warned, label="unidentifiable-pod warning")
+    assert call_records == []
+    assert rec.deletes == []
+
+
+async def test_node_shell_wait_failure_warns_but_still_cleans_up(tmp_path: Path) -> None:
+    """A pod that never becomes Ready still gets the attach attempt (the
+    error is visible in the terminal) and is still deleted afterwards."""
+    rec = DeleteRecorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    run_fake, _ = _kubectl_run(wait_rc=1)
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await pilot.press("y")
+            await until(pilot, lambda: rec.deletes, label="cleanup delete")
+            assert any("did not become Ready" in n.message for n in app._notifications)
+    assert call_records == [build_pod_attach_argv("default", DBG_POD)]
+    assert rec.deletes == [("pods", "default", DBG_POD, DBG_UID)]
 
 
 async def test_node_shell_custom_image_and_namespace_from_config(tmp_path: Path) -> None:
@@ -387,7 +411,7 @@ async def test_node_shell_custom_image_and_namespace_from_config(tmp_path: Path)
         node_shell_image="registry.local/toolkit:1",
         node_shell_namespace="debug-ns",
     )
-    run_fake, run_calls = _listing_run([_pods_json()])
+    run_fake, run_calls = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
@@ -399,81 +423,13 @@ async def test_node_shell_custom_image_and_namespace_from_config(tmp_path: Path)
             assert "registry.local/toolkit:1" in screen._operation
             assert "debug-ns" in screen._operation
             await pilot.press("y")
-            await until(pilot, lambda: call_records, label="kubectl debug ran")
-            await until(pilot, lambda: len(run_calls) >= 2, label="cleanup listing ran")
-    assert call_records == [
-        build_node_debug_argv("worker-1", "debug-ns", image="registry.local/toolkit:1")
-    ]
-    assert all("-n" in argv and argv[argv.index("-n") + 1] == "debug-ns" for argv in run_calls)
-
-
-async def test_node_shell_listing_failure_skips_cleanup_with_warning(tmp_path: Path) -> None:
-    """If the post-shell pod listing fails, nothing is deleted and the user
-    is told to check for leftover debug pods."""
-    rec = DeleteRecorder()
-    audit_path = tmp_path / "audit.jsonl"
-    app = make_app(rec, audit_path)
-
-    listing_calls: list[int] = []
-
-    def failing_run(argv, **kwargs):  # type: ignore[no-untyped-def]  # test helper
-        listing_calls.append(1)
-        if len(listing_calls) == 1:  # pre-launch snapshot succeeds (empty)
-            return SimpleNamespace(returncode=0, stdout=_pods_json(), stderr=b"")
-        return SimpleNamespace(returncode=1, stdout=b"", stderr=b"boom")
-
-    with _node_shell_env(failing_run) as _calls:
-        async with app.run_test() as pilot:
-            await pilot.pause(0.1)
-            await _to_nodes(pilot)
-            await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
-            await pilot.press("y")
-
-            def _warned() -> bool:
-                return any("node-debugger" in n.message for n in app._notifications)
-
-            await until(pilot, _warned, label="leftover-pod warning")
-    assert rec.deletes == []
-    entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
-    last = [e for e in entries if e["action"] == "node-shell"][-1]
-    assert "cleanup skipped: pod listing failed" in last["outcome"]
-
-
-async def test_node_shell_before_listing_failure_skips_cleanup(tmp_path: Path) -> None:
-    """A failed pre-launch snapshot must never let cleanup guess: deleting
-    every matching pod could take out another operator's debugger."""
-    rec = DeleteRecorder()
-    audit_path = tmp_path / "audit.jsonl"
-    app = make_app(rec, audit_path)
-    calls: list[int] = []
-
-    def run_fake(argv, **kwargs):  # type: ignore[no-untyped-def]  # test helper
-        calls.append(1)
-        if len(calls) == 1:  # pre-launch listing fails
-            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"boom")
-        return SimpleNamespace(
-            returncode=0,
-            stdout=_pods_json(("node-debugger-worker-1-abcde", "dbg-uid", "worker-1")),
-            stderr=b"",
-        )
-
-    with _node_shell_env(run_fake) as _calls:
-        async with app.run_test() as pilot:
-            await pilot.pause(0.1)
-            await _to_nodes(pilot)
-            await pilot.press("s")
-            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
-            await pilot.press("y")
-
-            def _warned() -> bool:
-                return any("Cleanup skipped" in n.message for n in app._notifications)
-
-            await until(pilot, _warned, label="cleanup-skipped warning")
-    assert rec.deletes == []
-    entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
-    last = [e for e in entries if e["action"] == "node-shell"][-1]
-    assert "cleanup skipped: pre-launch pod listing failed" in last["outcome"]
+            await until(pilot, lambda: call_records, label="kubectl attach ran")
+            await until(pilot, lambda: rec.deletes, label="cleanup delete")
+    assert run_calls[0] == build_node_debug_create_argv(
+        "worker-1", "debug-ns", image="registry.local/toolkit:1"
+    )
+    assert call_records == [build_pod_attach_argv("debug-ns", DBG_POD)]
+    assert rec.deletes == [("pods", "debug-ns", DBG_POD, DBG_UID)]
 
 
 async def test_node_shell_aborts_when_node_replaced_after_prompt(tmp_path: Path) -> None:
@@ -487,7 +443,7 @@ async def test_node_shell_aborts_when_node_replaced_after_prompt(tmp_path: Path)
         return {"metadata": {"uid": "replacement-uid"}}
 
     app = make_app(rec, audit_path, get_manifest=get_manifest)
-    run_fake, _ = _listing_run([_pods_json()])
+    run_fake, run_calls = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
@@ -501,6 +457,7 @@ async def test_node_shell_aborts_when_node_replaced_after_prompt(tmp_path: Path)
 
             await until(pilot, _cancelled, label="replacement cancel notification")
     assert call_records == []
+    assert not any("debug" in argv for argv in run_calls)
     assert not audit_path.is_file() or "intent" not in audit_path.read_text()
 
 
@@ -513,10 +470,10 @@ class _ExplodingAudit(AuditLog):
 
 async def test_node_shell_blocked_when_audit_append_fails(tmp_path: Path) -> None:
     """Fail-closed invariant: if the intent record cannot persist, the
-    privileged kubectl debug subprocess must never start."""
+    debugger pod must never be created."""
     rec = DeleteRecorder()
     app = make_app(rec, None, audit_log=_ExplodingAudit(tmp_path / "audit.jsonl", context="test"))
-    run_fake, _ = _listing_run([_pods_json()])
+    run_fake, run_calls = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
@@ -530,6 +487,7 @@ async def test_node_shell_blocked_when_audit_append_fails(tmp_path: Path) -> Non
 
             await until(pilot, _blocked, label="write-blocked notification")
     assert call_records == []
+    assert not any("debug" in argv for argv in run_calls)
     assert rec.deletes == []
 
 
@@ -549,7 +507,7 @@ async def test_node_shell_cancelled_when_selection_moves_during_rbac_check(
         permission_started=started,
         extra_nodes=("worker-2",),
     )
-    run_fake, _ = _listing_run([_pods_json()])
+    run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
@@ -567,16 +525,13 @@ async def test_node_shell_cancelled_when_selection_moves_during_rbac_check(
     assert call_records == []
 
 
-async def test_node_shell_nonzero_exit_with_created_pod_has_no_policy_hint(
-    tmp_path: Path,
-) -> None:
-    """A debugger pod that did appear means the shell ran: a non-zero exit is
-    then the user's own shell status (exit 1, Ctrl-C), not admission refusal."""
+async def test_node_shell_nonzero_attach_exit_has_no_policy_hint(tmp_path: Path) -> None:
+    """A created pod means the shell ran: a non-zero attach exit is the
+    user's own shell status (exit 1, Ctrl-C), not admission refusal."""
     rec = DeleteRecorder()
-    app = make_app(rec, tmp_path / "audit.jsonl")
-    run_fake, _ = _listing_run(
-        [_pods_json(), _pods_json(("node-debugger-worker-1-abcde", "dbg-uid", "worker-1"))]
-    )
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    run_fake, _ = _kubectl_run()
     with _node_shell_env(run_fake, call_exit=1) as call_records:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
@@ -587,3 +542,6 @@ async def test_node_shell_nonzero_exit_with_created_pod_has_no_policy_hint(
             await until(pilot, lambda: rec.deletes, label="debug pod cleanup")
     assert call_records != []
     assert not any("PodSecurity" in n.message for n in app._notifications)
+    entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+    last = [e for e in entries if e["action"] == "node-shell"][-1]
+    assert last["outcome"].startswith("error: exit 1")

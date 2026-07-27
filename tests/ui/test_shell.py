@@ -1349,16 +1349,20 @@ async def test_debug_not_offered_when_pod_gone(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_node_debug_argv_defaults() -> None:
-    from korvid.ui.shell import build_node_debug_argv
+def test_build_node_debug_create_argv_defaults() -> None:
+    from korvid.ui.shell import build_node_debug_create_argv
 
-    argv = build_node_debug_argv("worker-1", "default")
+    argv = build_node_debug_create_argv("worker-1", "default")
     assert argv[:2] == ["kubectl", "debug"]
     assert "node/worker-1" in argv
     assert f"--image={DEBUG_IMAGE}" in argv
     # the approval dialog promises a privileged pod; the default profile
     # is not privileged, so sysadmin must be requested explicitly
     assert "--profile=sysadmin" in argv
+    # detached create with JSON output: korvid must learn the exact pod
+    # name/uid it created so cleanup never touches another operator's pod
+    assert "--attach=false" in argv
+    assert argv[argv.index("-o") + 1] == "json"
     ns_idx = argv.index("-n")
     assert argv[ns_idx + 1] == "default"
     # every kubectl flag must precede the `--` command separator
@@ -1366,10 +1370,10 @@ def test_build_node_debug_argv_defaults() -> None:
     assert dd > argv.index("node/worker-1")
 
 
-def test_build_node_debug_argv_custom_image_and_context() -> None:
-    from korvid.ui.shell import build_node_debug_argv
+def test_build_node_debug_create_argv_custom_image_and_context() -> None:
+    from korvid.ui.shell import build_node_debug_create_argv
 
-    argv = build_node_debug_argv(
+    argv = build_node_debug_create_argv(
         "worker-1", "debug-ns", context="prod", image="registry.local/toolkit:1"
     )
     idx = argv.index("--context")
@@ -1380,17 +1384,32 @@ def test_build_node_debug_argv_custom_image_and_context() -> None:
     assert argv[ns_idx + 1] == "debug-ns"
 
 
-def test_build_pod_list_argv() -> None:
-    from korvid.ui.shell import build_pod_list_argv
+def test_build_pod_wait_argv() -> None:
+    from korvid.ui.shell import build_pod_wait_argv
 
-    assert build_pod_list_argv("debug-ns") == [
+    assert build_pod_wait_argv("debug-ns", "node-debugger-x") == [
         "kubectl",
-        "get",
-        "pods",
+        "wait",
         "-n",
         "debug-ns",
-        "-o",
-        "json",
+        "pod/node-debugger-x",
+        "--for=condition=Ready",
+        "--timeout=60s",
     ]
-    argv = build_pod_list_argv("debug-ns", context="prod")
+    argv = build_pod_wait_argv("debug-ns", "node-debugger-x", context="prod")
+    assert argv[argv.index("--context") + 1] == "prod"
+
+
+def test_build_pod_attach_argv() -> None:
+    from korvid.ui.shell import build_pod_attach_argv
+
+    assert build_pod_attach_argv("debug-ns", "node-debugger-x") == [
+        "kubectl",
+        "attach",
+        "-it",
+        "-n",
+        "debug-ns",
+        "node-debugger-x",
+    ]
+    argv = build_pod_attach_argv("debug-ns", "node-debugger-x", context="prod")
     assert argv[argv.index("--context") + 1] == "prod"
