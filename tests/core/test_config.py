@@ -479,3 +479,59 @@ def test_debug_non_string_entries_dropped(tmp_path: Path) -> None:
     cfg = load_config(cfg_file)
     assert cfg.debug_default_image is None
     assert cfg.debug_images == {"python": "img:1"}
+
+
+def test_ollama_defaults_when_unconfigured(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_ctx == 16384
+    assert cfg.agent_ollama_temperature == 0.0
+    assert cfg.agent_ollama_seed is None
+    assert cfg.agent_ollama_think is False
+    assert cfg.agent_ollama_keep_alive is None
+
+
+def test_ollama_options_parsed(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "agent:\n  provider: ollama\n  ollama:\n"
+        "    num_ctx: 32768\n    temperature: 0.7\n    seed: 42\n"
+        "    think: true\n    keep_alive: 10m\n"
+    )
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_ctx == 32768
+    assert cfg.agent_ollama_temperature == 0.7
+    assert cfg.agent_ollama_seed == 42
+    assert cfg.agent_ollama_think is True
+    assert cfg.agent_ollama_keep_alive == "10m"
+
+
+def test_ollama_invalid_values_fall_back(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "agent:\n  provider: ollama\n  ollama:\n"
+        "    num_ctx: -5\n    temperature: hot\n    seed: [1]\n"
+        "    think: yes please\n    keep_alive: {}\n"
+    )
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_ctx == 16384
+    assert cfg.agent_ollama_temperature == 0.0
+    assert cfg.agent_ollama_seed is None
+    assert cfg.agent_ollama_think is False
+    assert cfg.agent_ollama_keep_alive is None
+
+
+def test_ollama_keep_alive_accepts_integer_seconds(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  ollama:\n    keep_alive: 300\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_keep_alive == 300
+
+
+def test_ollama_non_mapping_section_is_ignored(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  ollama: not-a-mapping\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_ctx == 16384
+    assert cfg.agent_ollama_think is False

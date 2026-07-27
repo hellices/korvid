@@ -14,6 +14,7 @@ from korvid.agent.credentials import CredentialSource
 from korvid.agent.provider import LLMProvider
 from korvid.providers.entra import EntraCredentialSource
 from korvid.providers.github_copilot import COPILOT_CHAT_BASE_URL, CopilotCredentialSource
+from korvid.providers.ollama import OllamaOptions, OllamaProvider
 from korvid.providers.openai_compat import OpenAICompatProvider
 from korvid.providers.static_creds import StaticHeaderSource
 
@@ -23,7 +24,6 @@ _OPENAI_COMPAT_ALIASES = frozenset(
     {
         "openai-compat",
         "openai",
-        "ollama",
         "azure",
         "vllm",
         "github",  # GitHub Models (models.github.ai) — OpenAI-compatible
@@ -42,6 +42,7 @@ def create_provider(
     model: str | None,
     api_key_env: str | None,
     oauth_token: str | None = None,
+    ollama: OllamaOptions | None = None,
 ) -> LLMProvider | None:
     """Build an LLM provider from neutral values, or None when unconfigured/misconfigured."""
     if not enabled:
@@ -50,26 +51,10 @@ def create_provider(
     # strings are meaningful — anything else falls to the unknown branch.
     name = provider.lower() if isinstance(provider, str) else ""
     if name == "github-copilot":
-        # Copilot only supports device-login; a stored OAuth token must not be
-        # consumed under a mistyped or explicitly different auth method.
-        if auth_method not in (None, "device-login"):
-            logger.warning(
-                "github-copilot requires auth method 'device-login', got %r — agent disabled",
-                auth_method,
-            )
-            return None
-        if not model:
-            logger.warning("github-copilot missing model — agent disabled")
-            return None
-        if not oauth_token:
-            logger.warning("github-copilot: not logged in — run :ai in the TUI")
-            return None
-        return OpenAICompatProvider(
-            base_url=base_url or COPILOT_CHAT_BASE_URL,
-            model=model,
-            credentials=CopilotCredentialSource(oauth_token),
+        return _create_github_copilot(
+            auth_method=auth_method, base_url=base_url, model=model, oauth_token=oauth_token
         )
-    if name not in _OPENAI_COMPAT_ALIASES:
+    if name not in _OPENAI_COMPAT_ALIASES and name != "ollama":
         logger.warning("unknown agent provider %r — agent disabled", provider)
         return None
     if not base_url or not model:
@@ -80,10 +65,47 @@ def create_provider(
     except _AuthMisconfigured as exc:
         logger.warning("%s — agent disabled", exc)
         return None
+    if name == "ollama":
+        # Native /api/chat adapter (issue #72). The OpenAI-compat shim path
+        # stays available via `provider: openai-compat` with an Ollama URL.
+        return OllamaProvider(
+            base_url=base_url,
+            model=model,
+            credentials=credentials,
+            options=ollama or OllamaOptions(),
+        )
     return OpenAICompatProvider(
         base_url=base_url,
         model=model,
         credentials=credentials,
+    )
+
+
+def _create_github_copilot(
+    *,
+    auth_method: str | None,
+    base_url: str | None,
+    model: str | None,
+    oauth_token: str | None,
+) -> LLMProvider | None:
+    # Copilot only supports device-login; a stored OAuth token must not be
+    # consumed under a mistyped or explicitly different auth method.
+    if auth_method not in (None, "device-login"):
+        logger.warning(
+            "github-copilot requires auth method 'device-login', got %r — agent disabled",
+            auth_method,
+        )
+        return None
+    if not model:
+        logger.warning("github-copilot missing model — agent disabled")
+        return None
+    if not oauth_token:
+        logger.warning("github-copilot: not logged in — run :ai in the TUI")
+        return None
+    return OpenAICompatProvider(
+        base_url=base_url or COPILOT_CHAT_BASE_URL,
+        model=model,
+        credentials=CopilotCredentialSource(oauth_token),
     )
 
 

@@ -1,0 +1,233 @@
+"""Native Ollama provider — POST /api/chat with NDJSON streaming (issue #72).
+
+Unlike the OpenAI-compatibility shim, the native API accepts per-request
+`options.num_ctx` (the shim silently truncates at the VRAM-based default),
+a `think` toggle for reasoning models, `keep_alive` passthrough, and returns
+tool-call arguments as structured objects instead of string fragments.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+
+from korvid.agent.credentials import CredentialSource
+from korvid.agent.provider import LLMProvider
+from korvid.providers.openai_compat import ProviderError
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class OllamaOptions:
+    """Per-request tuning for the native Ollama API (config: `agent.ollama.*`).
+
+    Defaults favor tool dispatch on small local models: a 16k context
+    (the server-side default can be as low as 4k), near-greedy decoding
+    (the OpenAI shim forces temperature 1.0 when unset), and no reasoning
+    tokens (thinking output can dwarf the response on R1-style models).
+    """
+
+    num_ctx: int = 16384
+    temperature: float = 0.0
+    seed: int | None = None
+    think: bool = False
+    keep_alive: str | int | None = None
+
+
+def normalize_base_url(base_url: str) -> str:
+    """Native API root from a configured base URL.
+
+    Shim-era configs point at `http://host:11434/v1`; the native endpoints
+    live at the server root, so a trailing `/v1` is stripped for
+    back-compat when `provider: ollama` routes natively.
+    """
+    base = base_url.rstrip("/")
+    return base.removesuffix("/v1")
+
+
+class OllamaProvider(LLMProvider):
+    """LLMProvider adapter for Ollama's native `/api/chat` endpoint."""
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        credentials: CredentialSource | None = None,
+        client: httpx.AsyncClient | None = None,
+        *,
+        options: OllamaOptions | None = None,
+    ) -> None:
+        self._base_url = normalize_base_url(base_url)
+        self._model = model
+        self._credentials = credentials
+        self._client = client  # injected or lazily created on first call
+        self._owns_client = client is None
+        self._options = options or OllamaOptions()
+
+    @property
+    def name(self) -> str:
+        return self._model
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(60.0, connect=10.0),
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the lazily created HTTP client and credentials (injected clients stay open)."""
+        try:
+            if self._owns_client and self._client is not None:
+                await self._client.aclose()
+                self._client = None
+        finally:
+            if self._credentials is not None:
+                await self._credentials.aclose()
+
+    async def _headers(self) -> dict[str, str]:
+        if self._credentials is not None:
+            return await self._credentials.headers()
+        return {}
+
+    def _payload(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        opts = self._options
+        request_options: dict[str, Any] = {
+            "num_ctx": opts.num_ctx,
+            "temperature": opts.temperature,
+        }
+        if opts.seed is not None:
+            request_options["seed"] = opts.seed
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": _to_ollama_messages(messages),
+            "stream": True,
+            "think": opts.think,
+            "options": request_options,
+        }
+        if opts.keep_alive is not None:
+            payload["keep_alive"] = opts.keep_alive
+        if tools:
+            payload["tools"] = tools
+        return payload
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield completion events as an async generator."""
+        client = self._get_client()
+        tool_calls: list[dict[str, str]] = []
+        usage: dict[str, int] | None = None
+
+        async with client.stream(
+            "POST",
+            f"{self._base_url}/api/chat",
+            json=self._payload(messages, tools),
+            headers=await self._headers(),
+        ) as resp:
+            if resp.status_code >= 300:
+                await resp.aread()
+                raise ProviderError(f"Upstream returned HTTP {resp.status_code}: {resp.text}")
+
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                chunk: dict[str, Any] = json.loads(line)
+                message: dict[str, Any] = chunk.get("message") or {}
+                # message.thinking is intentionally dropped: reasoning tokens
+                # are not part of the answer the runtime should render.
+                content: str | None = message.get("content")
+                if content:
+                    yield {"type": "text_delta", "text": content}
+                _collect_tool_calls(message, tool_calls)
+                if chunk.get("done"):
+                    usage = _usage_from_chunk(chunk)
+
+        for call in tool_calls:
+            yield {"type": "tool_call", **call}
+
+        if usage is not None:
+            yield {"type": "usage", **usage}
+
+        yield {"type": "done"}
+
+
+def _collect_tool_calls(message: dict[str, Any], acc: list[dict[str, str]]) -> None:
+    """Fold native tool calls into acc, serializing object arguments exactly once.
+
+    The native API has no call ids; sequential `call_N` ids are generated so
+    the runtime's id-based tool-result correlation keeps working.
+    """
+    for call in message.get("tool_calls") or []:
+        fn: dict[str, Any] = call.get("function") or {}
+        arguments = fn.get("arguments")
+        acc.append(
+            {
+                "id": f"call_{len(acc)}",
+                "name": str(fn.get("name", "")),
+                "arguments": json.dumps(arguments if isinstance(arguments, dict) else {}),
+            }
+        )
+
+
+def _usage_from_chunk(chunk: dict[str, Any]) -> dict[str, int] | None:
+    """Map prompt_eval_count/eval_count to the runtime's usage event.
+
+    Emitted only when both counts are present — defaulting a missing count
+    to 0 would make an incomplete report look exact (the runtime treats any
+    usage event as authoritative).
+    """
+    if "prompt_eval_count" not in chunk or "eval_count" not in chunk:
+        return None
+    return {
+        "input_tokens": int(chunk["prompt_eval_count"]),
+        "output_tokens": int(chunk["eval_count"]),
+    }
+
+
+def _to_ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert runtime history (OpenAI-shaped) for the native API.
+
+    The runtime stores assistant tool-call arguments as JSON strings; the
+    native API requires objects, so they are parsed back. Arguments were
+    serialized by this provider (or validated upstream), so a parse failure
+    is defensive only and degrades to an empty object.
+    """
+    converted: list[dict[str, Any]] = []
+    for message in messages:
+        calls = message.get("tool_calls")
+        if not calls:
+            converted.append(message)
+            continue
+        new_calls = [
+            {**call, "function": {**fn, "arguments": _parse_arguments(fn.get("arguments"))}}
+            for call in calls
+            for fn in [call.get("function") or {}]
+        ]
+        converted.append({**message, "tool_calls": new_calls})
+    return converted
+
+
+def _parse_arguments(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else None
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    logger.debug("unparsable tool-call arguments dropped: %r", raw)
+    return {}

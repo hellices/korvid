@@ -28,14 +28,14 @@ _DEFAULTS: dict[str, tuple[str, str, str]] = {
     "github-copilot": ("device-login", "", "gpt-4o"),
     "openai-compat": ("api_key", "https://api.openai.com/v1", "gpt-4o-mini"),
     "azure": ("", "", ""),
-    "ollama": ("none", "http://localhost:11434/v1", "llama3"),
+    "ollama": ("none", "http://localhost:11434", "llama3"),
 }
 
 _PROVIDER_LABELS: dict[str, str] = {
     "github-copilot": "github-copilot — sign in with GitHub (no API key)",
     "openai-compat": "openai-compat — OpenAI-compatible API (API key)",
     "azure": "azure — Azure OpenAI (Entra ID or API key)",
-    "ollama": "ollama — local models (no auth)",
+    "ollama": "ollama — local models, native API (no auth)",
 }
 
 

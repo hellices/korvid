@@ -14,6 +14,7 @@ from korvid.providers.github_copilot import (
     DeviceCodePrompt,
     GitHubDeviceFlow,
 )
+from korvid.providers.ollama import normalize_base_url
 from korvid.providers.registry import build_credentials, create_provider
 from korvid.providers.token_store import TokenStore
 
@@ -72,6 +73,8 @@ class ProviderConfigurator(AgentConfigurator):
         try:
             if settings.provider == "github-copilot":
                 return await self._list_copilot_models()
+            if settings.provider == "ollama":
+                return await self._list_ollama_models(settings)
             return await self._list_openai_compat_models(settings)
         except Exception:  # model listing is best-effort — never break the wizard
             logger.debug("model listing failed", exc_info=True)
@@ -118,6 +121,25 @@ class ProviderConfigurator(AgentConfigurator):
             return []
         data = resp.json().get("data", [])
         return sorted({str(m["id"]) for m in data if isinstance(m, dict) and "id" in m})
+
+    async def _list_ollama_models(self, settings: AgentSettings) -> list[str]:
+        """Native model listing via /api/tags (the native API has no /models)."""
+        if not settings.base_url:
+            return []
+        creds = build_credentials(settings.provider, settings.auth_method, settings.api_key_env)
+        try:
+            headers = await creds.headers() if creds is not None else {}
+            async with self._http_client_factory() as client:
+                resp = await client.get(
+                    f"{normalize_base_url(settings.base_url)}/api/tags", headers=headers
+                )
+        finally:
+            if creds is not None:
+                await creds.aclose()
+        if resp.status_code != 200:
+            return []
+        models = resp.json().get("models", [])
+        return sorted({str(m["name"]) for m in models if isinstance(m, dict) and "name" in m})
 
     async def test(self, settings: AgentSettings) -> str:
         oauth = self._store.load("github-oauth")
