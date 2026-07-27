@@ -142,7 +142,7 @@ class _BudgetTracker:
         pods with a 500 regardless of budget (kubectl drain fails the same
         way)."""
         metadata = pod.get("metadata") or {}
-        if str((pod.get("status") or {}).get("phase", "")) in _TERMINAL_PHASES:
+        if _pdb_exempt(pod):
             return None
         namespace = str(metadata.get("namespace", ""))
         labels = {str(k): str(v) for k, v in (metadata.get("labels") or {}).items()}
@@ -173,6 +173,17 @@ class _BudgetTracker:
                 return pdb_name
             self._remaining[id(pdb)] -= 1
         return None
+
+
+def _pdb_exempt(pod: dict[str, Any]) -> bool:
+    """Pods the Eviction API disrupts without PDB admission: terminal
+    (Succeeded/Failed) and Pending pods are not counted as disruptions,
+    and a pod already carrying ``metadata.deletionTimestamp`` is being
+    deleted anyway - none of these block or consume the budget."""
+    phase = str((pod.get("status") or {}).get("phase", ""))
+    if phase in _TERMINAL_PHASES or phase == "Pending":
+        return True
+    return (pod.get("metadata") or {}).get("deletionTimestamp") is not None
 
 
 def _status_is_stale(pdb: dict[str, Any]) -> bool:

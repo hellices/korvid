@@ -322,3 +322,24 @@ def test_notin_expression_matches_pod_missing_the_key() -> None:
     )
     plan = build_drain_plan([_pod("web-1", labels={"app": "web"})], [pdb])
     assert plan.targets[0].pdb_blocked == "no-frontend-pdb"
+
+
+def test_pending_pod_is_exempt_from_pdb_accounting() -> None:
+    """The Eviction API disrupts Pending pods without PDB admission."""
+    pdb = _pdb("web-pdb", match_labels={"app": "web"}, disruptions_allowed=1)
+    pods = [
+        _pod("pending-1", labels={"app": "web"}, phase="Pending"),
+        _ready(_pod("web-1", labels={"app": "web"})),
+    ]
+    plan = build_drain_plan(pods, [pdb])
+    blocked = {t.name: t.pdb_blocked for t in plan.targets}
+    # The Pending pod passes for free; the allowance is left for web-1.
+    assert blocked == {"pending-1": None, "web-1": None}
+
+
+def test_pod_already_terminating_is_exempt_from_pdb_accounting() -> None:
+    pdb = _pdb("web-pdb", match_labels={"app": "web"}, disruptions_allowed=0)
+    doomed = _pod("doomed-1", labels={"app": "web"})
+    doomed["metadata"]["deletionTimestamp"] = "2026-07-27T00:00:00Z"
+    plan = build_drain_plan([doomed], [pdb])
+    assert plan.targets[0].pdb_blocked is None

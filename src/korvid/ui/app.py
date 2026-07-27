@@ -2939,6 +2939,16 @@ class KorvidApp(App[None]):
         if resolved is None:
             return
         ops, meta, name, uid = resolved
+        worker = self._drain_worker
+        if worker is not None and worker.is_running and name == self._drain_node:
+            # Uncordoning (or re-cordoning) mid-drain would let new pods
+            # schedule behind the drain's back; the drain owns the node's
+            # schedulable state until it finishes or is cancelled.
+            self.notify(
+                f"nodes/{name} is being drained - cancel the drain first",
+                severity="warning",
+            )
+            return
         if not await self._precheck_keybinding_write(action, meta, None, name):
             return
         preview = await self._dry_run_preview(ops.preview_cordon(name, unschedulable, uid=uid))

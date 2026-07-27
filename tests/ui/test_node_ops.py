@@ -594,3 +594,31 @@ async def test_drain_waits_for_evicted_pods_to_disappear(tmp_path: Path) -> None
         entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert entries[-1]["outcome"] == "success"
         assert "not yet terminated" not in entries[-1]["detail"]
+
+
+async def test_uncordon_is_refused_while_node_is_being_drained(tmp_path: Path) -> None:
+    """Uncordoning mid-drain would let new pods schedule behind the
+    drain's back - the key is rejected until the drain ends."""
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = NodeRecorder(plan=plan)
+    rec.release_evictions.clear()  # hold the eviction so the drain stays active
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        await _confirm_typed(pilot, "worker-1")
+        await until(pilot, lambda: rec.evict_started.is_set(), label="eviction in flight")
+        await pilot.press("u")
+        await pilot.pause(0.2)
+        # No uncordon dialog opened and no schedulable write was issued.
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert not any(call[:3] == ("cordon", "worker-1", False) for call in rec.calls)
+        rec.release_evictions.set()
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "evicted 1" in audit_path.read_text(),
+            label="drain finished",
+        )
