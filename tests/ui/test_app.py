@@ -916,7 +916,7 @@ async def test_list_seed_coalesces_table_renders() -> None:
     renders: list[str] = []
     original = app._render_table
 
-    def counting_render(kind: str) -> None:
+    def counting_render(kind: str, *, only: object = None) -> None:
         renders.append(kind)
         original(kind)
 

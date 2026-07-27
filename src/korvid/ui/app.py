@@ -982,14 +982,20 @@ class KorvidApp(App[None]):
 
         self._ns_prefetch_task = asyncio.create_task(_fetch())
 
-    def _render_table(self, kind: str) -> None:
+    def _render_table(self, kind: str, *, only: PaneState | None = None) -> None:
         """Single choke point: every pane showing `kind` re-renders, and the
         empty-state stays in step (single-pane only - a split has its own
-        per-pane content as guidance)."""
+        per-pane content as guidance).
+
+        `only` restricts the render to the initiating pane: view-state
+        changes (filter, navigation) must not repaint the other pane -
+        `show()` clears and rebuilds, resetting its cursor/scroll. Store
+        and metrics updates fan out to every pane (data really changed).
+        """
         # First store notification: replace the startup splash with real content.
         self._dismiss_splash()
         for pane in self._panes:
-            if pane.kind != kind:
+            if pane.kind != kind or (only is not None and pane is not only):
                 continue
             try:
                 table = self.query_one(f"#{pane.table_id}", ResourceTable)
@@ -1075,13 +1081,13 @@ class KorvidApp(App[None]):
     def on_filter_command(self, message: FilterCommand) -> None:
         self.filter_pattern = message.pattern
         self._resource_filter = parse_filter(message.pattern)
-        self.post_message(ResourcesUpdated(self.current_kind))
+        self._render_table(self.current_kind, only=self._pane)
         self._refresh_status()
 
     def on_clear_filter(self, message: ClearFilter) -> None:
         self.filter_pattern = ""
         self._resource_filter = parse_filter("")
-        self.post_message(ResourcesUpdated(self.current_kind))
+        self._render_table(self.current_kind, only=self._pane)
         self._refresh_status()
 
     def _filtered_rows(
@@ -1148,7 +1154,7 @@ class KorvidApp(App[None]):
             if drill_op is not None:
                 drill_op()
             await self._navigate_locked(pane, view, self._default_scope_for(view, namespace))
-        self.post_message(ResourcesUpdated(pane.kind))
+        self._render_table(pane.kind, only=pane)
         self._refresh_status()
 
     async def _navigate_locked(
@@ -1595,7 +1601,7 @@ class KorvidApp(App[None]):
             except BaseException:
                 pane.drill.pop()
                 raise
-        self.post_message(ResourcesUpdated(pane.kind))
+        self._render_table(pane.kind, only=pane)
         self._refresh_status()
         return None
 
@@ -1609,7 +1615,7 @@ class KorvidApp(App[None]):
             if popped is None:
                 return False
             await self._navigate_locked(pane, popped.parent_kind, None)
-        self.post_message(ResourcesUpdated(pane.kind))
+        self._render_table(pane.kind, only=pane)
         self._refresh_status()
         return True
 
@@ -3255,7 +3261,12 @@ class KorvidApp(App[None]):
             self._focused_pane = 1
             # start() is idempotent - the clone usually shares the source's watch.
             await self.watch_manager.start(pane.kind, pane.scope)
-        self._render_table(pane.kind)
+        # A single-pane empty-state overlay must not linger over the split;
+        # each pane's own content is the guidance now.
+        self.query_one("#empty-state", Static).display = False
+        # Render only the new pane: the source is already current, and a
+        # repaint would reset its cursor/scroll.
+        self._render_table(pane.kind, only=pane)
         table.focus()
         self._refresh_status()
 
@@ -3283,8 +3294,12 @@ class KorvidApp(App[None]):
             self.query_one(f"#{remaining.table_id}", ResourceTable).remove_class("split-pane")
             await self._sync_metrics_poller()
         # No repaint: `show()` clears and re-adds rows, which would reset the
-        # survivor's cursor/scroll; its table is already current.
-        self._focused_table().focus()
+        # survivor's cursor/scroll; its table is already current. The
+        # single-pane empty-state does need a refresh (an empty survivor
+        # must show guidance, and a stale overlay must clear).
+        table = self._focused_table()
+        self._refresh_empty_state(remaining.kind, table.row_count)
+        table.focus()
         self._refresh_status()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:

@@ -390,3 +390,64 @@ async def test_split_serializes_with_navigation_lock() -> None:
         second = app.query(ResourceTable).last()
         await until(pilot, lambda: second.row_count == 1, label="clone rendered")
         await pilot.pause()
+
+
+async def test_filtering_one_pane_does_not_reset_other_panes_cursor() -> None:
+    """A view-state change (filter) in one pane must not repaint the other
+    pane showing the same kind - `show()` clears and rebuilds, which would
+    reset its cursor/scroll."""
+    app = make_app([_pod("api-1"), _pod("api-2"), _pod("api-3")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)
+        second = app.query_one("#pane-1", ResourceTable)
+        await until(pilot, lambda: second.row_count == 3, label="clone rendered")
+        await pilot.press("down")  # cursor to row 1 in the focused clone
+        assert second.cursor_row == 1
+        await pilot.press("ctrl+w", "w")  # focus pane 1
+        await pilot.press("slash")
+        for ch in "api":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert second.cursor_row == 1  # pane 2 untouched by pane 1's filter
+
+
+async def test_split_hides_single_pane_empty_state() -> None:
+    """The single-pane empty-state overlay must not linger over a split."""
+    from textual.widgets import Static
+
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await pilot.press("slash")
+        for ch in "zzz":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        empty = app.query_one("#empty-state", Static)
+        await until(pilot, lambda: empty.display, label="empty state shown")
+        await _split(app, pilot)
+        assert not empty.display
+
+
+async def test_close_restores_empty_state_for_empty_survivor() -> None:
+    """Closing back to a single empty pane must show the usual guidance,
+    not a silent blank table."""
+    from textual.widgets import Static
+
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)
+        await pilot.press("slash")  # filter the focused clone to zero rows
+        for ch in "zzz":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        second = app.query_one("#pane-1", ResourceTable)
+        await until(pilot, lambda: second.row_count == 0, label="clone filtered empty")
+        await pilot.press("ctrl+w", "w")  # focus pane 1
+        await pilot.press("ctrl+w", "q")  # close pane 1; empty clone survives
+        await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="single pane")
+        empty = app.query_one("#empty-state", Static)
+        await until(pilot, lambda: empty.display, label="empty-state guidance restored")
+        assert "zzz" in str(empty.render())
