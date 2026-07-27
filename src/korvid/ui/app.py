@@ -1142,14 +1142,21 @@ class KorvidApp(App[None]):
             return
         self.query_one(CommandBar).context_words = names
         current = self.config.kube_context
-        options = [f"{n}{self._CURRENT_CTX_SUFFIX}" if n == current else n for n in names]
+        # Explicit display->name mapping: decoding the label (suffix strip)
+        # would corrupt a real context whose name ends in " (current)".
+        labels: dict[str, str] = {}
+        for n in names:
+            label = f"{n}{self._CURRENT_CTX_SUFFIX}" if n == current else n
+            if label != n and (label in names or label in labels):
+                label = n  # marker collides with another context's name
+            labels[label] = n
 
         def _on_pick(choice: str | None) -> None:
             if choice is None:
                 return
-            self.post_message(SwitchContextCommand(choice.removesuffix(self._CURRENT_CTX_SUFFIX)))
+            self.post_message(SwitchContextCommand(labels.get(choice, choice)))
 
-        self.push_screen(PickScreen("Switch context:", options), _on_pick)
+        self.push_screen(PickScreen("Switch context:", list(labels)), _on_pick)
 
     async def _switch_context_flow(self, name: str) -> None:
         """Orchestrate a context switch: guards, auth probe, teardown, swap.
@@ -1162,33 +1169,48 @@ class KorvidApp(App[None]):
         if self._probe_context is None or self._switch_context is None:
             self.notify("Context switching unavailable in this build", severity="warning")
             return
+        # Claim before the first await: two queued SwitchContextCommands
+        # must not both pass the guards and race the teardown.
+        if self._ctx_switching:
+            self.notify("A context switch is already in progress", severity="warning")
+            return
+        self._ctx_switching = True
+        try:
+            await self._switch_context_locked(name)
+        finally:
+            self._ctx_switching = False
+
+    async def _switch_context_locked(self, name: str) -> None:
+        """The body of `_switch_context_flow`; runs with the claim held."""
         old = self.config.kube_context
         if name == old:
             self.notify(f"Already on context {name}")
             return
         if not await self._ctx_switch_guards_pass(name):
             return
-        self._ctx_switching = True
         try:
-            try:
-                await self._probe_context(name)
-            except Exception as exc:
-                self.notify(
-                    f"Cannot switch to context {name!r}: {self._describe_ctx_error(exc)}"
-                    f" — staying on {old or 'the current context'}",
-                    severity="error",
-                    timeout=10,
-                )
+            await self._probe_context(name)  # type: ignore[misc]  # guarded by caller
+        except Exception as exc:
+            self.notify(
+                f"Cannot switch to context {name!r}: {self._describe_ctx_error(exc)}"
+                f" — staying on {old or 'the current context'}",
+                severity="error",
+                timeout=10,
+            )
+            return
+        async with self._nav_lock:
+            # The probe awaited network I/O — an agent turn or a dialog may
+            # have started meanwhile; re-check before anything is torn down.
+            blocker = self._ctx_switch_blocker()
+            if blocker is not None:
+                self.notify(blocker, severity="warning")
                 return
-            async with self._nav_lock:
-                await self._teardown_for_context_switch()
-                applied = await self._retarget_context(name, old)
-                if applied is None:
-                    return
-                await self.watch_manager.start(self.current_kind, self.current_scope)
-                await self._sync_metrics_poller()
-        finally:
-            self._ctx_switching = False
+            await self._teardown_for_context_switch()
+            applied = await self._retarget_context(name, old)
+            if applied is None:
+                return
+            await self.watch_manager.start(self.current_kind, self.current_scope)
+            await self._sync_metrics_poller()
         self.post_message(ResourcesUpdated(self.current_kind))
         self._refresh_status()
         self._prefetch_namespaces()
@@ -1196,19 +1218,19 @@ class KorvidApp(App[None]):
         if applied == name:
             self.notify(f"Switched to context {name} (ns: {self.current_scope})")
 
+    def _ctx_switch_blocker(self) -> str | None:
+        """Why a switch cannot proceed right now, or None when it can."""
+        if self._agent_task is not None and not self._agent_task.done():
+            return "Agent is busy — wait for the current turn to finish before switching contexts"
+        if len(self.screen_stack) > 1:
+            return "Close open dialogs before switching contexts"
+        return None
+
     async def _ctx_switch_guards_pass(self, name: str) -> bool:
         """Pre-probe refusals; each states why the switch cannot start now."""
-        if self._ctx_switching:
-            self.notify("A context switch is already in progress", severity="warning")
-            return False
-        if self._agent_task is not None and not self._agent_task.done():
-            self.notify(
-                "Agent is busy — wait for the current turn to finish before switching contexts",
-                severity="warning",
-            )
-            return False
-        if len(self.screen_stack) > 1:
-            self.notify("Close open dialogs before switching contexts", severity="warning")
+        blocker = self._ctx_switch_blocker()
+        if blocker is not None:
+            self.notify(blocker, severity="warning")
             return False
         if self._list_contexts is not None:
             names, _ = await asyncio.to_thread(self._list_contexts)
@@ -1239,9 +1261,20 @@ class KorvidApp(App[None]):
             await self._metrics.stop()
         await self.watch_manager.stop_all()
         if self._forwards is not None:
-            stopped = self._forwards.stop_all()
+            # Same quiesce-stop-audit sequence as app exit: in-flight
+            # launches land first, stop_all runs off-loop (it polls up to
+            # the grace deadline), and every stop is enqueued for audit.
+            stopped = await self._teardown_forwards(self._forwards)
             if stopped:
                 self.notify(f"Stopped {len(stopped)} port-forward(s) targeting the old cluster")
+        # Old-cluster audit entries resolve their context only at append();
+        # flush them before _apply_context_switch re-points the audit log,
+        # or they would be written as belonging to the new cluster.
+        worker = self._forward_audit_worker
+        if worker is not None and not worker.is_finished:
+            with contextlib.suppress(Exception):
+                await worker.wait()
+        await self._drain_forward_audits()
         self._drill.clear()
         self.store.clear_all()
         self._hint_event_cache.clear()
@@ -1291,7 +1324,10 @@ class KorvidApp(App[None]):
         if self._audit is not None:
             self._audit.set_context(name)
         if self._forwards is not None:
-            self._forwards.set_context(name)
+            # Reopen the registry that _teardown_forwards latched closed;
+            # forwards started from now on target the new cluster.
+            self._forwards.retarget(name)
+            self._forwards_closing = False
         self.current_kind = "pods"
         self.current_scope = result.context_namespace or self.config.namespace or "default"
         if name != old:
@@ -6240,8 +6276,8 @@ class KorvidApp(App[None]):
         empty.update(Text(message))
         empty.display = True
 
-    async def _teardown_forwards(self, registry: ForwardRegistry) -> None:
-        """Stop every forward at app exit and audit each stop in order.
+    async def _teardown_forwards(self, registry: ForwardRegistry) -> list[ForwardRecord]:
+        """Stop every forward (app exit / `:ctx` switch), auditing in order.
 
         Session-scoped by design (issue #38): forwards never outlive the
         app that started them. stop_all() polls synchronously up to the
@@ -6250,6 +6286,9 @@ class KorvidApp(App[None]):
         promptly; they are awaited before the stops are enqueued so an exit
         during startup still logs the start entry first (never a stop-only
         or reversed trail).
+
+        Returns:
+            The stopped records, so a context switch can report the count.
         """
         self._forwards_closing = True
         # Launches and re-attaches whose spawn is still off-loop must land
@@ -6274,6 +6313,7 @@ class KorvidApp(App[None]):
         for record in records:
             if self._audit is not None:
                 self._enqueue_forward_audit("port-forward-stop", record.spec, teardown=True)
+        return records
 
     async def on_unmount(self) -> None:
         # Cancel any active log stream tasks before the event loop shuts down.

@@ -1363,16 +1363,19 @@ class TestProbeContext:
             probe_apis.append(api)
             return api
 
-        class FakeVersionApi:
+        reviews: list[Any] = []
+
+        class FakeAuthzApi:
             def __init__(self, api: Any) -> None:
                 self._api = api
 
-            async def get_code(self) -> Any:
-                return {"gitVersion": "v1.30.0"}
+            async def create_self_subject_access_review(self, body: Any) -> Any:
+                reviews.append(body)
+                return body
 
         monkeypatch.setattr(k8s_config, "load_kube_config", fake_load)
         monkeypatch.setattr(k8s_client, "ApiClient", fake_api)
-        monkeypatch.setattr(k8s_client, "VersionApi", FakeVersionApi)
+        monkeypatch.setattr(k8s_client, "AuthorizationV1Api", FakeAuthzApi)
 
         kube = KubeClient()
         await kube.probe_context("ctx-b")
@@ -1398,16 +1401,16 @@ class TestProbeContext:
             probe_apis.append(api)
             return api
 
-        class FakeVersionApi:
+        class FakeAuthzApi:
             def __init__(self, api: Any) -> None:
                 pass
 
-            async def get_code(self) -> Any:
+            async def create_self_subject_access_review(self, body: Any) -> Any:
                 raise k8s_client.exceptions.ApiException(status=401, reason="Unauthorized")
 
         monkeypatch.setattr(k8s_config, "load_kube_config", fake_load)
         monkeypatch.setattr(k8s_client, "ApiClient", fake_api)
-        monkeypatch.setattr(k8s_client, "VersionApi", FakeVersionApi)
+        monkeypatch.setattr(k8s_client, "AuthorizationV1Api", FakeAuthzApi)
 
         kube = KubeClient()
         with pytest.raises(k8s_client.exceptions.ApiException, match="Unauthorized"):

@@ -188,11 +188,13 @@ class KubeClient(WriteOps):
         """Validate that *context* resolves and authenticates (issue #36).
 
         Loads the kubeconfig into a private ``Configuration`` (never
-        persisted, never the global default) and calls the version endpoint
-        — reachable by any authenticated principal via ``system:discovery``,
-        so RBAC-limited users still pass. Raises on any failure; the live
-        connection is untouched either way, which is what lets a failed
-        `:ctx` switch leave the old context fully usable.
+        persisted, never the global default) and creates a
+        SelfSubjectAccessReview — granted to every authenticated principal
+        via ``system:basic-user`` but *not* to ``system:anonymous``, unlike
+        `/version` which ``system:public-info-viewer`` serves without
+        credentials. Expired or missing credentials therefore fail here,
+        and the live connection is untouched either way — which is what
+        lets a failed `:ctx` switch leave the old context fully usable.
         """
         probe_configuration = k8s_client.Configuration()
         await k8s_config.load_kube_config(
@@ -202,7 +204,15 @@ class KubeClient(WriteOps):
         )
         api = k8s_client.ApiClient(probe_configuration)
         try:
-            await asyncio.wait_for(k8s_client.VersionApi(api).get_code(), timeout=_PROBE_TIMEOUT)
+            review = k8s_client.V1SelfSubjectAccessReview(
+                spec=k8s_client.V1SelfSubjectAccessReviewSpec(
+                    resource_attributes=k8s_client.V1ResourceAttributes(verb="get", resource="pods")
+                )
+            )
+            await asyncio.wait_for(
+                k8s_client.AuthorizationV1Api(api).create_self_subject_access_review(review),
+                timeout=_PROBE_TIMEOUT,
+            )
         finally:
             await api.close()
 

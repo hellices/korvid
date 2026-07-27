@@ -310,3 +310,27 @@ async def test_switch_failure_after_probe_restores_old_context() -> None:
             lambda: app.config.kube_context == "ctx-a",
             label="old context restored",
         )
+
+
+async def test_picker_maps_display_labels_to_raw_names() -> None:
+    """A context literally named "ctx-a (current)" must survive selection
+    intact: the current-marker is a display label, never an encoding to
+    decode, so its collision with a real name drops the marker instead."""
+    env = _CtxEnv(contexts=("ctx-a", "ctx-a (current)"))
+    app = env.app
+    async with app.run_test() as pilot:
+        app.post_message(ShowContextPicker())
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, PickScreen),
+            label="context picker open",
+        )
+        picker = app.screen
+        assert isinstance(picker, PickScreen)
+        assert list(picker._options) == ["ctx-a", "ctx-a (current)"]
+        picker.dismiss("ctx-a (current)")
+        await until(
+            pilot,
+            lambda: env.probe_calls == ["ctx-a (current)"],
+            label="raw context name probed",
+        )
