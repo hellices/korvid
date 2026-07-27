@@ -156,3 +156,78 @@ async def test_escape_dismisses_with_none() -> None:
         await pilot.press("escape")
         await until(pilot, lambda: app.result != "unset", label="prompt dismissed")
         assert app.result is None
+
+
+async def test_dotted_release_name_is_accepted() -> None:
+    """Release names are DNS-1123 subdomains: dots are legal (`team.web`),
+    so upgrades of such releases must not be rejected by local validation."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await _opened(app, pilot)
+        app.screen.query_one("#helm-release", Input).value = "team.web"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.result, HelmReleaseChoices)
+        assert app.result.release == "team.web"
+
+
+async def test_overlong_release_name_blocks_submit() -> None:
+    """Helm caps release names at 53 characters."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await _opened(app, pilot)
+        app.screen.query_one("#helm-release", Input).value = "a" * 54
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == "unset"
+        assert app.screen is prompt
+
+
+async def test_release_name_at_53_chars_is_accepted() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await _opened(app, pilot)
+        app.screen.query_one("#helm-release", Input).value = "a" * 53
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.result, HelmReleaseChoices)
+
+
+async def test_dotted_namespace_blocks_submit() -> None:
+    """Namespaces are DNS-1123 labels: unlike release names, no dots."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await _opened(app, pilot)
+        app.screen.query_one("#helm-namespace", Input).value = "team.web"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == "unset"
+        assert app.screen is prompt
+
+
+async def test_overlong_namespace_blocks_submit() -> None:
+    """Namespaces cap at 63 characters (DNS-1123 label limit)."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await _opened(app, pilot)
+        app.screen.query_one("#helm-namespace", Input).value = "n" * 64
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == "unset"
+        assert app.screen is prompt
+
+
+async def test_namespace_at_63_chars_is_accepted() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await _opened(app, pilot)
+        app.screen.query_one("#helm-namespace", Input).value = "n" * 63
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.result, HelmReleaseChoices)

@@ -173,10 +173,13 @@ When a `helm` binary is on `PATH`, the browser gains write actions
 | `u` | `:helm` | Upgrade the selected release — same wizard, pinned to that release |
 | `r` | revision drill-down | Roll back the release to the selected revision |
 
-Every action shows a preview before the confirmation dialog: install and
-upgrade run `--dry-run`, and when the
+Install and upgrade always show a preview before the confirmation
+dialog: install and upgrade run `--dry-run`, and when the
 [helm-diff](https://github.com/databus23/helm-diff) plugin is installed,
 upgrade and rollback show a real diff against the live release instead.
+Rollback has a preview **only** with the plugin — without it the
+confirmation dialog states the release and target revision but shows no
+manifest diff.
 Nothing executes until you approve the exact command in the confirmation
 dialog, and every run is audit-logged like any other write — no audit
 log, no writes.  Values entered through `$EDITOR` are passed via a

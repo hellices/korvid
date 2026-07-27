@@ -27,9 +27,14 @@ from korvid.ui.widgets.confirm_screen import FreshKeysInput
 #: values handling offered by the wizard, in display order (default first).
 VALUES_MODES: tuple[str, str] = ("chart defaults", "edit in $EDITOR")
 
-#: helm release names and namespaces must be DNS-1123-compatible; reject
-#: locally with a message instead of a cryptic server failure after approval.
-_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+#: helm release names are DNS-1123 subdomains (dots allowed) capped at 53
+#: characters; namespaces are DNS-1123 labels capped at 63. Reject locally
+#: with a message instead of a cryptic server failure after approval.
+_LABEL = r"[a-z0-9]([-a-z0-9]*[a-z0-9])?"
+_RELEASE_RE = re.compile(rf"^{_LABEL}(\.{_LABEL})*$")
+_RELEASE_MAX = 53
+_NAMESPACE_RE = re.compile(rf"^{_LABEL}$")
+_NAMESPACE_MAX = 63
 
 _CSS = """
 HelmInstallPrompt {
@@ -174,15 +179,16 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
         release = self.query_one("#helm-release", Input).value.strip()
         version = self.query_one("#helm-version", Input).value.strip()
         namespace = self.query_one("#helm-namespace", Input).value.strip()
-        if not _NAME_RE.match(release):
+        if len(release) > _RELEASE_MAX or not _RELEASE_RE.match(release):
             self.notify(
-                f"invalid release name {release!r} (lowercase letters, digits, '-')",
+                f"invalid release name {release!r} "
+                f"(DNS-1123 subdomain, at most {_RELEASE_MAX} chars)",
                 severity="warning",
             )
             return None
-        if not _NAME_RE.match(namespace):
+        if len(namespace) > _NAMESPACE_MAX or not _NAMESPACE_RE.match(namespace):
             self.notify(
-                f"invalid namespace {namespace!r} (lowercase letters, digits, '-')",
+                f"invalid namespace {namespace!r} (DNS-1123 label, at most {_NAMESPACE_MAX} chars)",
                 severity="warning",
             )
             return None

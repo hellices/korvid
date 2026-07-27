@@ -57,6 +57,13 @@ async def _execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
         proc.kill()
         await proc.wait()
         raise HelmError(f"helm timed out after {timeout:.0f}s") from None
+    except asyncio.CancelledError:
+        # Callers cancel previews (wait_for) and superseded searches
+        # (exclusive workers): helm must not outlive the request - its temp
+        # values file is deleted the moment the caller unwinds.
+        proc.kill()
+        await proc.wait()
+        raise
     return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 

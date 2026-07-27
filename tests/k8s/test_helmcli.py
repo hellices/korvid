@@ -250,3 +250,40 @@ async def test_find_helm_uses_path_lookup() -> None:
     which.assert_called_once_with("helm")
     with mock.patch("korvid.k8s.helmcli.shutil.which", return_value=None):
         assert find_helm() is None
+
+
+async def test_execute_kills_the_subprocess_on_cancellation() -> None:
+    """UI previews wrap `_execute` in `wait_for` and exclusive workers cancel
+    in-flight searches: cancellation must kill and reap helm, not leave it
+    running after its temp values file is gone."""
+    import asyncio
+
+    from korvid.k8s.helmcli import _execute
+
+    class HungProc:
+        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.killed = False
+            self.reaped = False
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.Event().wait()  # hang until cancelled
+            raise AssertionError("unreachable")
+
+        def kill(self) -> None:
+            self.killed = True
+
+        async def wait(self) -> int:
+            self.reaped = True
+            return -9
+
+    proc = HungProc()
+    with mock.patch("korvid.k8s.helmcli.asyncio.create_subprocess_exec", return_value=proc):
+        task = asyncio.ensure_future(_execute(["helm", "version"], timeout=30.0))
+        await asyncio.sleep(0)  # let the task reach communicate()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert proc.killed
+    assert proc.reaped

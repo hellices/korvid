@@ -491,13 +491,17 @@ class KorvidApp(App[None]):
     # Enter drills down via `on_data_table_row_selected`, Escape closes
     # panes / pops a drill level via `on_key`.  Listed here so the help
     # overlay (`?`) renders them alongside the real bindings.
-    HANDLER_KEY_HELP: ClassVar[tuple[tuple[str, str, str], ...]] = (
-        ("Table", "enter", "Drill down (pods → containers, deploy → rs → pods)"),
-        ("Table", "escape", "Pop one drill-down level"),
-        ("Logs", "escape", "Close pane (or dismiss search)"),
-        ("Helm", "i", "Install a chart (helm view; needs helm on PATH)"),
-        ("Helm", "u", "Upgrade the selected release (helm view)"),
-        ("Helm", "r", "Rollback to the selected revision (drill-down)"),
+    #: user-facing keys handled in event handlers or via dispatch rather than
+    #: dedicated bindings: (help group, default key, description, action id).
+    #: A non-empty action id ties the row to a remappable binding so the help
+    #: overlay shows the effective key (issue #35), not the default.
+    HANDLER_KEY_HELP: ClassVar[tuple[tuple[str, str, str, str], ...]] = (
+        ("Table", "enter", "Drill down (pods → containers, deploy → rs → pods)", ""),
+        ("Table", "escape", "Pop one drill-down level", ""),
+        ("Logs", "escape", "Close pane (or dismiss search)", ""),
+        ("Helm", "i", "Install a chart (helm view; needs helm on PATH)", "hint_details"),
+        ("Helm", "u", "Upgrade the selected release (helm view)", "uncordon_node"),
+        ("Helm", "r", "Rollback to the selected revision (drill-down)", "rollout_restart"),
     )
 
     DEFAULT_CSS = """
@@ -901,11 +905,16 @@ class KorvidApp(App[None]):
 
     def action_help(self) -> None:
         """Open the help overlay generated from the live binding lists (issue #41)."""
+        overrides = self._keybinding_overrides
+        handler_keys = [
+            (group, overrides.get(action, key) if action else key, description)
+            for group, key, description, action in self.HANDLER_KEY_HELP
+        ]
         groups = collect_help(
             list(self.BINDINGS),
             list(DescribeScreen.BINDINGS),
-            handler_keys=self.HANDLER_KEY_HELP,
-            overrides=self._keybinding_overrides,
+            handler_keys=handler_keys,
+            overrides=overrides,
         )
         self.push_screen(HelpScreen(groups, command_help()))
 
@@ -4624,7 +4633,8 @@ class KorvidApp(App[None]):
         return hits
 
     async def _helm_install_flow(self) -> None:
-        """`i` on the helm view: chart picker -> wizard -> dry-run preview ->
+        """Install (the `hint_details` key on the helm view): chart picker ->
+        wizard -> dry-run preview ->
         approval -> audited `helm install`."""
         helm = self._helm_gate()
         if helm is None:
@@ -4637,7 +4647,8 @@ class KorvidApp(App[None]):
         self._helm_pick_chart(hits, release=None, namespace=self._helm_view_namespace())
 
     async def _helm_upgrade_flow(self) -> None:
-        """`u` on a release row: the same wizard with the release name and
+        """Upgrade (the `uncordon_node` key on a release row): the same
+        wizard with the release name and
         namespace fixed to the selected row's facts."""
         helm = self._helm_gate()
         if helm is None:
@@ -4820,7 +4831,8 @@ class KorvidApp(App[None]):
             return None
 
     async def _helm_rollback_flow(self) -> None:
-        """`r` on a revision row of the drill-down: approval-gated, audited
+        """Rollback (the `rollout_restart` key on a revision row of the
+        drill-down): approval-gated, audited
         `helm rollback` to that revision."""
         helm = self._helm_gate()
         if helm is None:
