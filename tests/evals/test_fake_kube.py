@@ -110,6 +110,27 @@ async def test_get_object_returns_the_manifest() -> None:
     assert manifest["metadata"]["uid"] == "u1"
 
 
+async def test_get_object_returns_a_fresh_copy_per_call() -> None:
+    """The real client deserializes a fresh response per call; a caller
+    mutating the returned manifest (ToolExecutor strips managedFields)
+    must not change what later calls observe."""
+    kube = _kube()
+    first = await kube.get_object(_pods_meta(), "shop", "api-1")
+    first["metadata"].pop("uid")
+    first["status"]["phase"] = "Failed"
+    second = await kube.get_object(_pods_meta(), "shop", "api-1")
+    assert second["metadata"]["uid"] == "u1"
+    assert second["status"]["phase"] == "Running"
+
+
+async def test_list_events_for_returns_fresh_copies_per_call() -> None:
+    kube = _kube()
+    first = await kube.list_events_for("shop", "api-1", kind="Pod")
+    first[0]["message"] = "mutated"
+    second = await kube.list_events_for("shop", "api-1", kind="Pod")
+    assert second[0]["message"] == "restarting failed container"
+
+
 async def test_get_object_for_cluster_scoped_kind_ignores_namespace() -> None:
     node = await _kube().get_object(builtin_aliases()["nodes"], None, "node-a")
     assert node["kind"] == "Node"

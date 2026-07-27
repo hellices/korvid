@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -111,7 +112,10 @@ class FakeKubeClient(ReadOps):
         for manifest in self._objects:
             metadata = manifest.get("metadata") or {}
             if self._matches(manifest, meta, namespace) and str(metadata.get("name")) == name:
-                return manifest
+                # The real client deserializes a fresh response per call;
+                # callers may mutate the result (ToolExecutor strips
+                # managedFields) without affecting later reads.
+                return deepcopy(manifest)
         raise ApiStatusError(404, f"{meta.plural} {namespace or ''}/{name} not found")
 
     async def list_events_for(
@@ -131,7 +135,7 @@ class FakeKubeClient(ReadOps):
                 and str(involved.get("namespace") or "") == namespace
                 and (uid is None or str(involved.get("uid") or "") == uid)
             ):
-                matched.append(event)
+                matched.append(deepcopy(event))
         return matched
 
     def _resolve_container(self, namespace: str, pod: str, container: str) -> str:
