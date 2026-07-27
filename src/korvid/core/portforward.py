@@ -208,9 +208,13 @@ class ForwardRegistry:
         record = self._records.get(forward_id)
         if record is None:
             return "broken"
-        if record._ready is None or record.status == "alive":
+        # Snapshot the event for this invocation: a concurrent re-attach swaps
+        # record._ready, and re-reading it would strand a superseded waiter on
+        # the replacement generation's event for the full timeout.
+        ready = record._ready
+        if ready is None or record.status == "alive":
             return record.status
-        record._ready.wait(timeout)
+        ready.wait(timeout)
         if record.status == "alive":
             return "alive"
         if record.status == "broken":
@@ -229,12 +233,16 @@ class ForwardRegistry:
         """
         self._reap()
         for record in self._records.values():
-            proc = record._proc
-            if record.status != "broken" and proc is not None and proc.poll() is not None:
+            # Same lock discipline as the reader thread and fail_start():
+            # status transitions stay serialized against the handshake.
+            with record._lock:
+                proc = record._proc
+                if record.status == "broken" or proc is None or proc.poll() is None:
+                    continue
                 record.status = "broken"
-                # A handshake blocked on this now-dead child must fail now,
-                # not after its full timeout — a wedged pipe never EOFs.
-                self._release_waiters(record)
+            # A handshake blocked on this now-dead child must fail now,
+            # not after its full timeout — a wedged pipe never EOFs.
+            self._release_waiters(record)
 
     def forwards(self) -> list[ForwardRecord]:
         """Tracked forwards in start order."""
@@ -299,12 +307,13 @@ class ForwardRegistry:
     def fail_start(self, forward_id: int) -> ForwardRecord | None:
         """Abort a forward whose readiness handshake never resolved.
 
-        For a child that is silent but still running after the caller's wait
-        window: it never confirmed its listener, and liveness polling could
-        not correct a false success later (it only detects exits). The child
-        is signalled to exit (grace-escalated like stop()) and the record
-        flips to ``broken`` — it stays listed so `:pf` shows the failure and
-        offers a re-attach. No-op unless the forward is still ``starting``.
+        Covers both unconfirmed outcomes: a child silent-but-running after
+        the caller's wait window, and one already marked ``broken`` by its
+        stream closing while the process may still run and hold the local
+        port. Either way the child is signalled to exit (grace-escalated
+        like stop()) and the record is ``broken`` — it stays listed so `:pf`
+        shows the failure and offers a re-attach. No-op once the forward
+        confirmed its listener (``alive``).
         """
         record = self._records.get(forward_id)
         if record is None:
@@ -313,7 +322,7 @@ class ForwardRegistry:
             # Check and transition atomically: the reader thread flips
             # ``starting`` to ``alive`` under the same lock, so a forward
             # confirmed at the last instant cannot be torn down here.
-            if record.status != "starting":
+            if record.status == "alive":
                 return None
             record.status = "broken"
         self._signal_stop(record)
@@ -330,7 +339,10 @@ class ForwardRegistry:
         stop-then-restart on the same port works without a delayed failure.
 
         Raises:
-            ValueError: when a live forward already uses ``local_port``.
+            ValueError: when a live forward already uses ``local_port``, or
+                a previously stopped child holding it cannot be reaped in
+                time — the spawn fails cleanly instead of blocking the
+                caller (the UI event loop) indefinitely.
         """
         for existing in self._records.values():
             if existing.status != "broken" and existing.spec.local_port == local_port:
@@ -341,7 +353,14 @@ class ForwardRegistry:
             if port == local_port:
                 if proc.poll() is None:
                     proc.kill()
-                    proc.wait()
+                    try:
+                        proc.wait(timeout=_STOP_GRACE_SECONDS)
+                    except subprocess.TimeoutExpired as exc:
+                        # Even SIGKILL cannot reap a child stuck in the
+                        # kernel. Keep tracking it and fail this spawn
+                        # bounded rather than freezing the caller.
+                        msg = f"local port {local_port} is still being released — try again"
+                        raise ValueError(msg) from exc
                 continue  # exited — no longer holds the port, drop the entry
             remaining.append((proc, deadline, port))
         self._reaping = remaining

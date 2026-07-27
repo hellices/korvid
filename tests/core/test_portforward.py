@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import subprocess
 import threading
 import time
 from time import monotonic
@@ -556,7 +557,7 @@ def test_fail_start_aborts_silent_child_but_keeps_it_listed() -> None:
 
 
 def test_fail_start_leaves_resolved_forwards_alone() -> None:
-    """Only a still-``starting`` forward can be aborted by fail_start()."""
+    """A confirmed (``alive``) forward can never be aborted by fail_start()."""
     procs: list[_FakeProc] = []
     registry = _piped_registry(procs)
     record = registry.start(_spec())
@@ -567,6 +568,46 @@ def test_fail_start_leaves_resolved_forwards_alone() -> None:
     assert not procs[0].terminated
     assert registry.fail_start(999) is None
     procs[0].stdout.feed(None)
+
+
+def test_fail_start_stops_a_child_that_eofed_but_still_runs() -> None:
+    """EOF fails the start while the child may still run and hold the port."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    procs[0].stdout.feed("error: unable to listen\n")
+    # Stream closes while poll() still reports the child as running.
+    procs[0].stdout.feed(None)
+    assert registry.wait_ready(record.id, timeout=2.0) == "broken"
+    failed = registry.fail_start(record.id)
+    assert failed is record
+    assert procs[0].terminated, "the lingering child was never signalled down"
+    # Stays listed so :pf can show the failure and offer a re-attach.
+    assert registry.get(record.id) is record
+
+
+def test_start_gives_up_on_port_holder_that_cannot_be_reaped() -> None:
+    """A kill-immune child must fail the new spawn, not block the caller."""
+    procs: list[_FakeProc] = []
+
+    class _WedgedProc(_StubbornProc):
+        def kill(self) -> None:
+            self.killed = True  # SIGKILL sent; the child is stuck in the kernel
+
+        def wait(self, timeout: float | None = None) -> int:
+            raise subprocess.TimeoutExpired(cmd=self.argv, timeout=timeout or 0.0)
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _WedgedProc(argv) if not procs else _FakeProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    first = registry.start(_spec())
+    registry.stop(first.id)
+    with pytest.raises(ValueError, match="still being released"):
+        registry.start(_spec(name="api-2"))
+    assert procs[0].killed
 
 
 class _SignallingEvent(threading.Event):
