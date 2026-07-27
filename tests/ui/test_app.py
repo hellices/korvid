@@ -1084,3 +1084,46 @@ async def test_toggle_all_namespaces_allowed_proceeds() -> None:
             lambda: app.current_scope == ALL_NAMESPACES,
             label="scope toggled to all namespaces",
         )
+
+
+async def test_toggle_all_namespaces_denied_for_helm_view_probes_secrets() -> None:
+    """The helm browser views are synthetic but back onto a cluster-wide
+    Secret LIST: the all-namespaces guard must probe `secrets`, not skip the
+    check just because the view has no API endpoint of its own."""
+    from korvid.k8s.helm import HELM_RELEASES_META
+
+    from .waits import until
+
+    store = ResourceStore()
+    checked: list[tuple[str, str]] = []
+
+    async def deny_list(
+        verb: str, resource: str, subresource: str, ns: str | None, group: str, name: str
+    ) -> bool:
+        checked.append((resource, group))
+        return False
+
+    aliases = dict(_DEFAULT_TEST_ALIASES)
+    aliases["helmreleases"] = HELM_RELEASES_META
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, fake_source([_pod("api-1")])),
+        aliases=aliases,
+        check_permission=deny_list,
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count, label="table seeded")
+        await pilot.press("colon")
+        for ch in "helmreleases":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "helmreleases", label="helm view opened")
+        await pilot.press("0")
+        await until(
+            pilot,
+            lambda: any("forbidden" in n.message.lower() for n in app._notifications),
+            label="denial notice shown",
+        )
+        assert app.current_scope == "default"
+        assert ("secrets", "") in checked

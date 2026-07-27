@@ -983,11 +983,17 @@ class KorvidApp(App[None]):
         if self._check_permission is None or self._fallback_namespaces:
             return True
         meta = self.aliases.get(self.current_kind)
-        if meta is None or meta.synthetic:
-            return True  # no API endpoint of its own to probe
+        if meta is None:
+            return True  # unknown kind: the watch reports its own error
+        if meta.synthetic:
+            if meta.backing is None:
+                return True  # nothing to probe
+            plural, group = meta.backing  # e.g. helm views LIST Secrets
+        else:
+            plural, group = meta.plural, meta.group
         try:
             allowed = await asyncio.wait_for(
-                self._check_permission("list", meta.plural, "", None, meta.group, ""),
+                self._check_permission("list", plural, "", None, group, ""),
                 timeout=_PERMISSION_CHECK_TIMEOUT,
             )
         except Exception:
@@ -995,7 +1001,7 @@ class KorvidApp(App[None]):
             return True
         if not allowed:
             self.notify(
-                f"Cluster-wide {meta.plural} list forbidden — staying in"
+                f"Cluster-wide {plural} list forbidden — staying in"
                 f" {self.current_scope!r}. Add `namespaces:` to config.yaml for"
                 " a multi-namespace view within your RBAC grants.",
                 severity="warning",
