@@ -1,6 +1,12 @@
 from korvid.core.store import ALL_NAMESPACES
 from korvid.ui.command import parse_command
-from korvid.ui.messages import NavigateCommand, QuitCommand, ShowNamespacePicker, UnknownCommand
+from korvid.ui.messages import (
+    NavigateCommand,
+    QuitCommand,
+    ShowNamespacePicker,
+    SortCommand,
+    UnknownCommand,
+)
 
 # ---------------------------------------------------------------------------
 # Shared fixture: fake `known` callable
@@ -122,3 +128,28 @@ def test_builtin_names_reserved_over_resource_aliases() -> None:
         msg = parse_command(text, crd_known)
         assert isinstance(msg, UnknownCommand)
         assert msg.text == text
+
+
+# ---------------------------------------------------------------------------
+# :sort (issue #45)
+# ---------------------------------------------------------------------------
+
+
+def test_sort_with_column_parses() -> None:
+    msg = parse_command("sort TEAM", _known)
+    assert isinstance(msg, SortCommand)
+    assert msg.column == "TEAM"
+
+
+def test_bare_sort_clears() -> None:
+    msg = parse_command("sort", _known)
+    assert isinstance(msg, SortCommand)
+    assert msg.column is None
+
+
+def test_sort_extra_args_is_unknown_even_with_sort_alias() -> None:
+    # A cluster exposing a `sort` resource alias must not turn a malformed
+    # :sort into navigation — sort is a reserved builtin.
+    known = {"sort": "sorts", **_KNOWN}.get
+    msg = parse_command("sort TEAM extra", known)
+    assert isinstance(msg, UnknownCommand)

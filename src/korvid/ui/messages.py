@@ -79,6 +79,16 @@ class UnknownCommand(Message):
         super().__init__()
 
 
+class SortCommand(Message):
+    """`:sort <column>` — sort the current view; None clears the sort (issue #45)."""
+
+    column: str | None
+
+    def __init__(self, column: str | None) -> None:
+        super().__init__()
+        self.column = column
+
+
 class AgentPromptSubmitted(Message):
     """Posted by AgentPanel when the user submits a non-empty prompt."""
 
