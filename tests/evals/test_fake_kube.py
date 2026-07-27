@@ -303,3 +303,50 @@ async def test_rebasing_accepts_fractional_seconds_and_explicit_offsets() -> Non
         assert raw.endswith("Z"), raw
         parsed = datetime.fromisoformat(raw)
         assert abs((parsed - expected).total_seconds()) < 60
+
+
+async def test_rebasing_handles_datetimes_parsed_from_unquoted_yaml() -> None:
+    """`yaml.safe_load` turns unquoted RFC 3339 values into `datetime`
+    objects; they must be rebased like strings (not left anchored to 2026)
+    and serialized back to UTC strings so manifests stay JSON-shaped."""
+    from datetime import UTC, datetime, timedelta
+
+    scenario = _scenario(
+        objects=(),
+        events=(
+            {
+                "type": "Warning",
+                "reason": "BackOff",
+                "message": "restarting failed container",
+                # tz-aware, as safe_load yields for a trailing Z.
+                "lastTimestamp": datetime(2026, 7, 27, 7, 20, 0, tzinfo=UTC),
+                "involvedObject": {
+                    "kind": "Pod",
+                    "name": "api-1",
+                    "namespace": "shop",
+                    "uid": "u1",
+                },
+            },
+            {
+                "type": "Warning",
+                "reason": "Unhealthy",
+                "message": "probe failed",
+                # naive, as safe_load yields when no offset is written.
+                "lastTimestamp": datetime(2026, 7, 27, 7, 20, 0),
+                "involvedObject": {
+                    "kind": "Pod",
+                    "name": "api-1",
+                    "namespace": "shop",
+                    "uid": "u1",
+                },
+            },
+        ),
+    )
+    events = await FakeKubeClient(scenario).list_events_for("shop", "api-1", kind="Pod")
+    expected = datetime.now(UTC) - timedelta(minutes=40)  # both authored 40m before now
+    for event in events:
+        raw = event["lastTimestamp"]
+        assert isinstance(raw, str)
+        assert raw.endswith("Z"), raw
+        parsed = datetime.fromisoformat(raw)
+        assert abs((parsed - expected).total_seconds()) < 60

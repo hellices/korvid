@@ -33,11 +33,17 @@ _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-
 
 
 def _rebase(value: Any, delta: timedelta) -> Any:
-    """Deep-copy `value`, shifting every RFC 3339 timestamp string by `delta`
-    and normalizing the shifted instant to UTC."""
+    """Deep-copy `value`, shifting every RFC 3339 timestamp by `delta` and
+    normalizing the shifted instant to a UTC string. Handles both timestamp
+    strings and the `datetime` objects `yaml.safe_load` produces for
+    unquoted RFC 3339 values (naive ones are read as UTC, the timezone
+    fixtures are authored against)."""
     if isinstance(value, str) and _TIMESTAMP.match(value):
         shifted = (datetime.fromisoformat(value) + delta).astimezone(UTC)
         return shifted.isoformat().replace("+00:00", "Z")
+    if isinstance(value, datetime):
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return ((aware + delta).astimezone(UTC)).isoformat().replace("+00:00", "Z")
     if isinstance(value, dict):
         return {key: _rebase(item, delta) for key, item in value.items()}
     if isinstance(value, list | tuple):
