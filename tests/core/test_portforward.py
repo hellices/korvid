@@ -578,14 +578,79 @@ def test_reattach_publishes_the_replacement_already_starting() -> None:
     observed: list[str] = []
     original = registry._start_watcher
 
-    def _spy(rec: ForwardRecord) -> None:
+    def _spy(rec: ForwardRecord, *args: Any) -> None:
         observed.append(rec.status)
-        original(rec)
+        original(rec, *args)
 
     registry._start_watcher = _spy  # type: ignore[assignment]  # test spy
     assert registry.reattach(record.id) is record
     assert observed == ["starting"]
     procs[1].stdout.feed(None)  # release the reader thread
+
+
+def test_refresh_wakes_only_the_generation_it_marked_broken() -> None:
+    """The waiter release must target the event snapshotted with the broken
+    transition — a re-attach landing in between installs the replacement's
+    fresh event, and waking that one fails a valid replacement early."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    procs[0].returncode = 1  # died silently — refresh() will mark it broken
+    original = registry._release_waiters
+
+    def _ambush(arg: Any) -> None:
+        if len(procs) == 1:
+            # A re-attach lands between the broken transition and the wake.
+            registry.reattach(record.id)
+        original(arg)
+
+    registry._release_waiters = _ambush  # type: ignore[assignment]  # test spy
+    registry.refresh()
+    assert record._proc is procs[1]  # the re-attach adopted its replacement
+    assert record._ready is not None
+    assert not record._ready.is_set()  # the replacement's handshake still pends
+    procs[0].stdout.feed(None)
+    procs[1].stdout.feed(None)
+
+
+def test_delayed_initial_watcher_stays_bound_to_its_own_generation() -> None:
+    """A start whose watcher launch is delayed past a re-attach must read its
+    own (dead) child's stream — a second reader on the replacement's stream
+    could split its readiness line and EOF, breaking a valid forward."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    watched: list[Any] = []
+    original_watch = registry._watch_output
+
+    def _spy_watch(record: ForwardRecord, proc: Any, stream: Any, ready: Any) -> None:
+        watched.append(stream)
+        original_watch(record, proc, stream, ready)
+
+    registry._watch_output = _spy_watch  # type: ignore[method-assign]  # test spy
+    original_start = registry._start_watcher
+
+    def _delayed(rec: ForwardRecord, *args: Any) -> None:
+        if len(procs) == 1:
+            # The initial child dies and a re-attach adopts a replacement
+            # before the initial start's thread resumes launching here.
+            procs[0].returncode = 1
+            registry.reattach(rec.id)
+        original_start(rec, *args)
+
+    registry._start_watcher = _delayed  # type: ignore[assignment]  # test spy
+    record = registry.start(_spec())
+    deadline = monotonic() + 2.0
+    while len(watched) < 2 and monotonic() < deadline:
+        time.sleep(0.01)
+    # One reader per generation, each on its own stream — never two on the
+    # replacement's.
+    assert {id(stream) for stream in watched} == {
+        id(procs[0].stdout),
+        id(procs[1].stdout),
+    }
+    assert registry.get(record.id) is record
+    procs[0].stdout.feed(None)
+    procs[1].stdout.feed(None)
 
 
 def test_wait_ready_reports_failed_start_with_kubectl_detail() -> None:

@@ -51,6 +51,11 @@ class _ForwardProcess(Protocol):
     def wait(self, timeout: float | None = None) -> int: ...
 
 
+# One generation's watcher inputs, captured by _prepare_handshake() while the
+# record cannot change: (process, its stdout stream, its readiness event).
+_WatcherBinding = tuple[_ForwardProcess, Iterable[str], threading.Event]
+
+
 @dataclass(frozen=True)
 class ForwardSpec:
     """What to forward: everything needed to (re)build the kubectl argv."""
@@ -151,7 +156,7 @@ class ForwardRegistry:
                 record = ForwardRecord(id=self._next_id, spec=spec, _proc=proc)
                 # Prepared before publication: nothing may observe the
                 # dataclass default ``alive`` on an unconfirmed process.
-                self._prepare_handshake(record)
+                binding = self._prepare_handshake(record)
                 self._next_id += 1
                 self._records[record.id] = record
         if closed:
@@ -160,7 +165,7 @@ class ForwardRegistry:
             self._discard_spawn(proc)
             msg = "port-forward registry is shut down"
             raise ValueError(msg)
-        self._start_watcher(record)
+        self._start_watcher(record, binding)
         return record
 
     def _spawn(self, spec: ForwardSpec) -> _ForwardProcess:
@@ -184,30 +189,45 @@ class ForwardRegistry:
         )
         return proc
 
-    def _prepare_handshake(self, record: ForwardRecord) -> None:
+    def _prepare_handshake(self, record: ForwardRecord) -> _WatcherBinding | None:
         """Install the readiness state before the record becomes observable.
 
         Publishing first and downgrading to ``starting`` afterwards would
         let a concurrent poll read an unconfirmed process as ``alive`` —
         and, on a re-attach, a record still reading ``broken`` after the
         swap would be a reclaim target for a concurrent same-port start.
+
+        Returns:
+            The exact process/stream/event binding to hand to
+            `_start_watcher()`, or None when there is no readiness channel.
+            The caller must pass this binding on rather than re-reading the
+            record: by launch time a concurrent re-attach may already have
+            swapped a replacement in.
         """
         proc = record._proc
-        if proc is None or getattr(proc, "stdout", None) is None:
+        stream = getattr(proc, "stdout", None)
+        if proc is None or stream is None:
             # No readiness channel (injected test doubles) — trust the spawn.
             record.status = "alive"
             record._ready = None
-            return
+            return None
         record.status = "starting"
-        record._ready = threading.Event()
+        ready = threading.Event()
+        record._ready = ready
+        return (proc, stream, ready)
 
-    def _start_watcher(self, record: ForwardRecord) -> None:
-        """Start the reader thread for a prepared record (outside the locks)."""
-        proc = record._proc
-        stream = getattr(proc, "stdout", None)
-        ready = record._ready
-        if proc is None or stream is None or ready is None:
+    def _start_watcher(self, record: ForwardRecord, binding: _WatcherBinding | None) -> None:
+        """Start the reader thread for a prepared generation (outside the locks).
+
+        ``binding`` is what `_prepare_handshake()` captured for this
+        generation. The record's mutable fields are deliberately not re-read
+        here: a re-attach may have swapped in a replacement since, and a
+        second reader on the replacement's stream could split its readiness
+        line and EOF — marking a valid forward ``broken``.
+        """
+        if binding is None:
             return
+        proc, stream, ready = binding
         threading.Thread(
             target=self._watch_output, args=(record, proc, stream, ready), daemon=True
         ).start()
@@ -308,9 +328,14 @@ class ForwardRegistry:
                 if record.status == "broken" or proc is None or proc.poll() is None:
                     continue
                 record.status = "broken"
+                # Snapshot with the transition: a concurrent re-attach may
+                # install the replacement's fresh event the instant this
+                # lock is released, and waking that one would fail a valid
+                # replacement's handshake early.
+                ready = record._ready
             # A handshake blocked on this now-dead child must fail now,
             # not after its full timeout — a wedged pipe never EOFs.
-            self._release_waiters(record)
+            self._release_waiters(ready)
 
     def forwards(self) -> list[ForwardRecord]:
         """Tracked forwards in start order."""
@@ -345,8 +370,10 @@ class ForwardRegistry:
             record = self._records.pop(forward_id, None)
         if record is None:
             return None
+        with record._lock:
+            ready = record._ready
         self._signal_stop(record)
-        self._release_waiters(record)
+        self._release_waiters(ready)
         return record
 
     def reattach(self, forward_id: int) -> ForwardRecord | None:
@@ -382,6 +409,7 @@ class ForwardRegistry:
             if not spawned:
                 self._release_claim(record.spec.local_port)
         superseded: threading.Event | None = None
+        binding: _WatcherBinding | None = None
         # Adopt under the ops lock: a stop or teardown that won the race
         # while the spawn was in flight must not have its outcome undone by
         # this thread publishing a fresh process afterwards.
@@ -401,7 +429,7 @@ class ForwardRegistry:
                     # process: a record left ``broken`` here would be a
                     # reclaim target for a concurrent same-port start, which
                     # would signal the fresh replacement down.
-                    self._prepare_handshake(record)
+                    binding = self._prepare_handshake(record)
         if not adopted:
             self._discard_spawn(replacement)
             return None
@@ -415,7 +443,7 @@ class ForwardRegistry:
             # waiter of the replacement generation — those only ever block
             # on the fresh event _prepare_handshake() installed above.
             superseded.set()
-        self._start_watcher(record)
+        self._start_watcher(record, binding)
         return record
 
     def fail_start(
@@ -464,8 +492,7 @@ class ForwardRegistry:
             if not keep:
                 self._records.pop(forward_id, None)
             self._signal_proc(proc, record.spec.local_port)
-        if ready is not None:
-            ready.set()
+        self._release_waiters(ready)
         return record
 
     def _ensure_port_free(self, local_port: int) -> None:
@@ -555,7 +582,7 @@ class ForwardRegistry:
             reaping = self._reaping
             self._reaping = []
         for record in records:
-            self._release_waiters(record)
+            self._release_waiters(record._ready)
         live = [
             record._proc
             for record in records
@@ -610,15 +637,18 @@ class ForwardRegistry:
             proc.wait(timeout=_STOP_GRACE_SECONDS)
 
     @staticmethod
-    def _release_waiters(record: ForwardRecord) -> None:
-        """Wake anyone blocked in wait_ready() for a just-stopped forward.
+    def _release_waiters(ready: threading.Event | None) -> None:
+        """Wake anyone blocked in wait_ready() on this generation's event.
 
         Without this, a stop during the handshake would leave the caller
         waiting out the full readiness timeout on a forward that no longer
         exists (a fake child never delivers the EOF a real kubectl would).
+        Takes the snapshotted event, never the record: re-reading the
+        record's mutable ``_ready`` could pick up (and spuriously wake) a
+        replacement generation swapped in by a concurrent re-attach.
         """
-        if record._ready is not None:
-            record._ready.set()
+        if ready is not None:
+            ready.set()
 
     def _reap(self) -> None:
         """Advance stopped processes: drop exited ones, kill deadline-breakers."""
