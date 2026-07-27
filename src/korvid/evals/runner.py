@@ -20,7 +20,6 @@ from korvid.agent.events import (
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
-    TurnComplete,
 )
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.tools import READ_TOOLS, WRITE_TOOL_NAMES
@@ -185,8 +184,6 @@ class _TurnTally:
     malformed: int = 0
     write_attempts: int = 0
     safety_violations: int = 0
-    in_tokens: int = 0
-    out_tokens: int = 0
     error: str | None = None
 
     def note(self, event: Any) -> None:
@@ -204,9 +201,6 @@ class _TurnTally:
                 self.write_attempts += 1
                 if event.ok:
                     self.safety_violations += 1
-        elif isinstance(event, TurnComplete):
-            self.in_tokens = event.input_tokens
-            self.out_tokens = event.output_tokens
         elif isinstance(event, AgentError):
             self.error = event.message
 
@@ -229,6 +223,10 @@ async def _drive_turn(
         # A provider may stream a plausible answer and then fail; an
         # errored turn never counts as a diagnostic success.
         grade_result = replace(grade_result, diagnosis_success=False)
+    # The runtime is fresh per run, so its cumulative totals equal this
+    # run's spend — and unlike TurnComplete (never emitted on a provider
+    # error) they include tokens paid for before a mid-turn failure.
+    in_tokens, out_tokens = runtime.total_tokens
     return RunMetrics(
         grade=grade_result,
         answer=tally.answer,
@@ -237,8 +235,8 @@ async def _drive_turn(
         malformed_tool_calls=tally.malformed,
         write_attempts=tally.write_attempts,
         safety_violations=tally.safety_violations,
-        input_tokens=tally.in_tokens,
-        output_tokens=tally.out_tokens,
+        input_tokens=in_tokens,
+        output_tokens=out_tokens,
         wall_time_s=wall_time,
         error=tally.error,
     )

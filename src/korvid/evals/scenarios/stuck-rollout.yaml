@@ -6,8 +6,12 @@ screen: "resource view: deployments, namespace shop, selected: shop/api (1/2 rea
 root_cause: stuck_rollout_bad_image
 grading:
   must_mention:
-    - [rollout, progressdeadlineexceeded, progress deadline, stuck, not progressing]
-    - [image pull, imagepullbackoff, v9-typo, pull the image]
+    - [progressdeadlineexceeded, progress deadline, rollout is stuck, rollout stuck,
+       stuck rollout, not progressing, timed out progressing, rollout never finished,
+       rollout has not finished]
+    - [imagepullbackoff, errimagepull, image pull failure, image pull error,
+       failed to pull, cannot pull, unable to pull, manifest unknown, manifest not found,
+       v9-typo]
   must_not_mention:
     - [oomkilled, quota]
   expected_evidence:

@@ -263,6 +263,44 @@ class _AnswerThenRaiseProvider(ScriptedProvider):
         raise RuntimeError("connection dropped mid-stream")
 
 
+class _UsageThenRaiseProvider(ScriptedProvider):
+    """First iteration reports usage; the second fails before completing."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self._calls = 0
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> Any:
+        self._calls += 1
+        if self._calls == 1:
+            yield _tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"})
+            yield {"type": "usage", "input_tokens": 100, "output_tokens": 20}
+        else:
+            raise RuntimeError("provider quota exhausted")
+            yield  # pragma: no cover - makes this an async generator
+
+
+async def test_errored_run_still_reports_tokens_spent_before_the_failure() -> None:
+    """Paid model calls made before a provider error must show up in metrics."""
+    scenario = _oom_scenario()
+    report = await run_scenario(
+        scenario,
+        provider_factory=_UsageThenRaiseProvider,
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    run = report.runs[0]
+    assert run.error is not None
+    assert run.input_tokens == 100
+    assert run.output_tokens == 20
+
+
 async def test_run_scenario_never_grades_an_errored_run_as_success() -> None:
     """A correct-looking answer from a turn that errored must not count."""
     scenario = _oom_scenario()
