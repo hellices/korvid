@@ -562,3 +562,36 @@ def test_ollama_negative_seed_falls_back(tmp_path: Path) -> None:
     p.write_text("agent:\n  provider: ollama\n  ollama:\n    seed: -1\n")
     cfg = load_config(p)
     assert cfg.agent_ollama_seed is None
+
+
+# ---------------------------------------------------------------------------
+# namespaces: fallback namespace list for RBAC-limited users (issue #49)
+# ---------------------------------------------------------------------------
+
+
+def test_namespaces_list_parsed(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("namespaces:\n  - team-a\n  - team-b\n")
+    cfg = load_config(p)
+    assert cfg.namespaces == ("team-a", "team-b")
+
+
+def test_namespaces_default_empty(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("namespace: default\n")
+    cfg = load_config(p)
+    assert cfg.namespaces == ()
+
+
+def test_namespaces_non_list_ignored(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("namespaces: oops\n")
+    cfg = load_config(p)
+    assert cfg.namespaces == ()
+
+
+def test_namespaces_non_string_entries_skipped(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text('namespaces:\n  - team-a\n  - 5\n  - ""\n  - null\n')
+    cfg = load_config(p)
+    assert cfg.namespaces == ("team-a",)

@@ -34,7 +34,7 @@ from korvid.core.config import DEFAULT_CONFIG_PATH, KorvidConfig, load_config, s
 from korvid.core.portforward import ForwardRegistry
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
-from korvid.k8s.client import KubeClient, resolve_context_name
+from korvid.k8s.client import KubeClient, resolve_context_name, resolve_context_namespace
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
@@ -377,6 +377,18 @@ async def _teardown(
             await leftover
 
 
+def _fallback_namespaces(config: KorvidConfig) -> tuple[str, ...]:
+    """Namespaces an RBAC-limited user can fall back to (issue #49), deduped
+    in priority order: explicit `namespaces:` config, the kubeconfig
+    context's namespace, korvid's default namespace."""
+    candidates = [
+        *config.namespaces,
+        resolve_context_namespace(config.kube_context),
+        config.namespace,
+    ]
+    return tuple(dict.fromkeys(ns for ns in candidates if ns))
+
+
 def _make_watch_source(
     kube: KubeClient, aliases: dict[str, ResourceMeta]
 ) -> Callable[[str, str], AsyncIterator[tuple[str, Summary]]]:
@@ -456,7 +468,12 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
 
     get_events = KubeEventsFetcher()
 
-    watch_manager = WatchManager(store, source)
+    # RBAC-limited fallback namespaces (issue #49): the config list plus the
+    # kubeconfig context's namespace and korvid's default namespace, deduped
+    # in priority order. Feeds the picker and the per-namespace watch fanout.
+    fallback_namespaces = _fallback_namespaces(config)
+
+    watch_manager = WatchManager(store, source, fallback_namespaces=fallback_namespaces)
 
     # One bounded discovery round trip decides both the R keybinding and
     # whether the agent is offered the resize tool (issue #27).
@@ -481,6 +498,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         store=store,
         watch_manager=watch_manager,
         list_namespaces=kube.list_namespaces,
+        fallback_namespaces=fallback_namespaces,
         aliases=aliases,
         get_manifest=get_manifest,
         get_events=get_events,

@@ -477,12 +477,16 @@ class KorvidApp(App[None]):
         forwards: ForwardRegistry | None = None,
         provider_hint: str | None = None,
         open_pod_exec: Callable[..., contextlib.AbstractAsyncContextManager[Any]] | None = None,
+        fallback_namespaces: tuple[str, ...] = (),
     ) -> None:
         super().__init__()
         self.config = config
         self.store = store
         self.watch_manager = watch_manager
         self._list_namespaces = list_namespaces
+        #: RBAC-limited fallback (issue #49): configured/kubeconfig namespaces
+        #: offered when cluster-wide namespace listing is forbidden.
+        self._fallback_namespaces = fallback_namespaces
         self._get_manifest = get_manifest
         self._get_events = get_events
         self._stream_logs = stream_logs
@@ -714,8 +718,14 @@ class KorvidApp(App[None]):
         def _on_watch_error(detail: str) -> None:
             self.post_message(ShowError("Watch failed", detail))
 
+        def _on_watch_notice(detail: str) -> None:
+            # Informational (issue #49): e.g. per-namespace fallback engaged.
+            # Watch tasks run on the app's event loop, so notify is safe here.
+            self.notify(detail, severity="warning")
+
         self.store.subscribe(_on_store_update)
         self.watch_manager.on_error = _on_watch_error
+        self.watch_manager.on_notice = _on_watch_notice
         if self._metrics is not None:
             # Metrics updates reuse the pods render path; the pending guard in
             # _on_store_update coalesces them with watch events.
@@ -959,8 +969,38 @@ class KorvidApp(App[None]):
         if self.current_scope == ALL_NAMESPACES:
             new_scope = self.config.namespace or "default"
         else:
+            if not await self._cluster_list_permitted():
+                return  # notified inside; stay in the current namespace
             new_scope = ALL_NAMESPACES
         await self.on_navigate_command(NavigateCommand(None, new_scope))
+
+    async def _cluster_list_permitted(self) -> bool:
+        """All-namespaces guard (issue #49): without fallback namespaces a
+        forbidden cluster-wide LIST would only loop error cards — SSAR-check
+        first and stay put with an inline notice instead. Fanout-capable
+        setups (fallback namespaces configured) and SSAR failures pass
+        through (fail-open; the watch reports real errors on its own)."""
+        if self._check_permission is None or self._fallback_namespaces:
+            return True
+        meta = self.aliases.get(self.current_kind)
+        if meta is None or meta.synthetic:
+            return True  # no API endpoint of its own to probe
+        try:
+            allowed = await asyncio.wait_for(
+                self._check_permission("list", meta.plural, "", None, meta.group, ""),
+                timeout=_PERMISSION_CHECK_TIMEOUT,
+            )
+        except Exception:
+            logger.debug("cluster-wide list pre-check failed; allowing", exc_info=True)
+            return True
+        if not allowed:
+            self.notify(
+                f"Cluster-wide {meta.plural} list forbidden — staying in"
+                f" {self.current_scope!r}. Add `namespaces:` to config.yaml for"
+                " a multi-namespace view within your RBAC grants.",
+                severity="warning",
+            )
+        return allowed
 
     async def on_show_namespace_picker(self, message: ShowNamespacePicker) -> None:
         if self._list_namespaces is None:
@@ -969,8 +1009,7 @@ class KorvidApp(App[None]):
         try:
             namespaces = await self._list_namespaces()
         except ApiStatusError as exc:  # API failures get the actionable mapping (§5-5)
-            msg = explain_api_error(exc.status, exc.reason, "namespaces", None)
-            self.notify(msg, title="Failed to list namespaces", severity="error")
+            self._handle_namespace_list_error(exc)
             return
         except Exception as exc:  # surface any other listing failure to the user
             self.notify(str(exc), title="Failed to list namespaces", severity="error")
@@ -980,6 +1019,25 @@ class KorvidApp(App[None]):
             return
         self.query_one(CommandBar).namespace_words = namespaces
         self.query_one(NamespacePicker).open(namespaces)
+
+    def _handle_namespace_list_error(self, exc: ApiStatusError) -> None:
+        """RBAC-limited fallback for the picker (issue #49): a forbidden
+        cluster-wide LIST opens the picker with the configured/kubeconfig
+        namespaces; with none configured, point at `:ns <name>` free-text
+        entry instead of an error dead-end."""
+        if exc.status == 403 and self._fallback_namespaces:
+            self.notify(
+                "Cluster-wide namespace list forbidden — showing configured namespaces",
+                severity="warning",
+            )
+            fallback = list(self._fallback_namespaces)
+            self.query_one(CommandBar).namespace_words = fallback
+            self.query_one(NamespacePicker).open(fallback)
+            return
+        msg = explain_api_error(exc.status, exc.reason, "namespaces", None)
+        if exc.status == 403:
+            msg += " Switch directly with `:ns <name>` or add `namespaces:` to config.yaml."
+        self.notify(msg, title="Failed to list namespaces", severity="error")
 
     def on_quit_command(self, message: QuitCommand) -> None:
         self.exit()

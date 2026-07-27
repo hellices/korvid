@@ -54,6 +54,21 @@ class ResourceStore:
         self._data.pop((kind, scope), None)
         self._notify(kind)
 
+    def clear_namespace(self, kind: str, scope: str, namespace: str) -> None:
+        """Remove one namespace's objects from a (kind, scope) bucket.
+
+        The per-namespace watch fallback (issue #49) re-LISTs a single
+        namespace on reconnect; purging only its slice keeps the other
+        namespaces' rows in the shared ALL_NAMESPACES bucket.
+        """
+        bucket = self._data.get((kind, scope))
+        if bucket is None:
+            return
+        prefix = f"{namespace}/"
+        for key in [k for k in bucket if k.startswith(prefix)]:
+            del bucket[key]
+        self._notify(kind)
+
     def subscribe(self, callback: Callable[[str], None]) -> None:
         self._subscribers.append(callback)
 

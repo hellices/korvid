@@ -92,6 +92,28 @@ def resolve_context_name(context: str | None = None, config_file: str | None = N
     return str(name) if name else None
 
 
+def resolve_context_namespace(
+    context: str | None = None, config_file: str | None = None
+) -> str | None:
+    """Return the kubeconfig context's default namespace, or None if unset.
+
+    RBAC-limited fallback (issue #49): when cluster-wide `list namespaces` is
+    forbidden, the context's own namespace is the one namespace the user
+    demonstrably works in — seed the picker/watch fallback with it.
+    """
+    try:
+        contexts, active = k8s_config.list_kube_config_contexts(config_file=config_file)
+    except Exception:
+        return None
+    entry: Any = active
+    if context:
+        entry = next((c for c in contexts if c.get("name") == context), None)
+    if not entry:
+        return None
+    namespace = (entry.get("context") or {}).get("namespace")
+    return str(namespace) if namespace else None
+
+
 class KubeClient(WriteOps):
     """Thin wrapper over kubernetes_asyncio; returns typed summaries."""
 

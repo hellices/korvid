@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Callable
 
-from korvid.core.store import ResourceStore, Summary
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
@@ -268,3 +268,158 @@ async def test_same_kind_different_scope_independent_watches() -> None:
     assert ("pods", "default") in mgr.active
     assert ("pods", "*") in mgr.active
     await mgr.stop_all()
+
+
+# ---------------------------------------------------------------------------
+# Per-namespace fallback when cluster-scope watch is forbidden (issue #49)
+# ---------------------------------------------------------------------------
+
+
+def _ns_pod(name: str, ns: str) -> PodSummary:
+    return PodSummary(name=name, namespace=ns, phase="Running", ready="1/1", restarts=0, node=None)
+
+
+async def test_all_ns_403_falls_back_to_per_namespace_watches() -> None:
+    """403 on the cluster-scope watch fans out to the configured namespaces;
+    events from every namespace land in the ALL_NAMESPACES bucket."""
+    store = ResourceStore()
+    notices: list[str] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        if scope == ALL_NAMESPACES:
+            raise ApiStatusError(403, "Forbidden")
+        yield ("ADDED", _ns_pod(f"p-{scope}", scope))
+        while True:
+            await asyncio.sleep(0.01)
+
+    mgr = WatchManager(store, source, fallback_namespaces=("team-a", "team-b"), retry_delay=0)
+    mgr.on_notice = notices.append
+    await mgr.start("pods", ALL_NAMESPACES)
+    await asyncio.sleep(0.1)
+    names = {(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)}
+    assert names == {("team-a", "p-team-a"), ("team-b", "p-team-b")}
+    # The fanout keeps running under the original (kind, ALL) key.
+    assert mgr.active == {("pods", ALL_NAMESPACES)}
+    assert notices
+    assert "team-a" in notices[0]
+    await mgr.stop_all()
+
+
+async def test_all_ns_403_without_fallback_keeps_error_path() -> None:
+    """No configured namespaces -> the existing retry-then-report path stands."""
+    store = ResourceStore()
+    errors: list[str] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        raise ApiStatusError(403, "Forbidden")
+        yield ("", _ns_pod("", ""))  # pragma: no cover - async generator typing aid
+
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=2)
+    await mgr.start("pods", ALL_NAMESPACES)
+    await asyncio.sleep(0.05)
+    assert mgr.active == set()
+    assert errors
+
+
+async def test_fanout_single_namespace_failure_is_isolated() -> None:
+    """One forbidden namespace must not kill the other namespace watches."""
+    store = ResourceStore()
+    errors: list[str] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        if scope == ALL_NAMESPACES or scope == "team-b":
+            raise ApiStatusError(403, "Forbidden")
+        yield ("ADDED", _ns_pod(f"p-{scope}", scope))
+        while True:
+            await asyncio.sleep(0.01)
+
+    mgr = WatchManager(
+        store,
+        source,
+        on_error=errors.append,
+        fallback_namespaces=("team-a", "team-b"),
+        retry_delay=0,
+        max_retries=2,
+    )
+    await mgr.start("pods", ALL_NAMESPACES)
+    await asyncio.sleep(0.1)
+    names = {(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)}
+    assert names == {("team-a", "p-team-a")}
+    assert errors
+    assert any("team-b" in e for e in errors)
+    assert mgr.active == {("pods", ALL_NAMESPACES)}  # team-a stream still alive
+    await mgr.stop_all()
+
+
+async def test_namespaced_scope_403_never_fans_out() -> None:
+    """The fallback applies to the cluster scope only: a forbidden single
+    namespace is a real error, not a fanout trigger."""
+    store = ResourceStore()
+    errors: list[str] = []
+    scopes_seen: list[str] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        scopes_seen.append(scope)
+        raise ApiStatusError(403, "Forbidden")
+        yield ("", _ns_pod("", ""))  # pragma: no cover - async generator typing aid
+
+    mgr = WatchManager(
+        store,
+        source,
+        on_error=errors.append,
+        fallback_namespaces=("team-a",),
+        retry_delay=0,
+        max_retries=2,
+    )
+    await mgr.start("pods", "secret-ns")
+    await asyncio.sleep(0.05)
+    assert errors
+    assert set(scopes_seen) == {"secret-ns"}
+
+
+async def test_fanout_reconnect_purges_only_its_namespace() -> None:
+    """A namespace stream that ends re-LISTs on reconnect; the purge must not
+    drop the other namespaces' rows from the shared ALL bucket."""
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        if scope == ALL_NAMESPACES:
+            raise ApiStatusError(403, "Forbidden")
+        yield ("ADDED", _ns_pod(f"p-{scope}", scope))
+        if scope == "team-a":
+            return  # stream ends normally -> reconnect + re-LIST
+        while True:
+            await asyncio.sleep(0.01)
+
+    mgr = WatchManager(store, source, fallback_namespaces=("team-a", "team-b"), retry_delay=0.01)
+    await mgr.start("pods", ALL_NAMESPACES)
+    await asyncio.sleep(0.15)
+    names = {(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)}
+    assert names == {("team-a", "p-team-a"), ("team-b", "p-team-b")}
+    await mgr.stop_all()
+
+
+async def test_non_403_error_on_all_scope_does_not_fan_out() -> None:
+    """Only a Forbidden answer proves an RBAC boundary; network flakes and
+    server errors keep the normal retry path."""
+    store = ResourceStore()
+    errors: list[str] = []
+    scopes_seen: list[str] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        scopes_seen.append(scope)
+        raise ApiStatusError(500, "Internal Server Error")
+        yield ("", _ns_pod("", ""))  # pragma: no cover - async generator typing aid
+
+    mgr = WatchManager(
+        store,
+        source,
+        on_error=errors.append,
+        fallback_namespaces=("team-a",),
+        retry_delay=0,
+        max_retries=2,
+    )
+    await mgr.start("pods", ALL_NAMESPACES)
+    await asyncio.sleep(0.05)
+    assert errors
+    assert set(scopes_seen) == {ALL_NAMESPACES}

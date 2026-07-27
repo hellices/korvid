@@ -4,6 +4,11 @@ Streams that end normally (k8s API servers close watches periodically)
 reconnect forever. Streams that raise retry up to max_retries consecutive
 failures, then the task is removed from `active` and on_error is notified —
 watch tasks never die silently.
+
+RBAC-limited fallback (issue #49): when the cluster-scope watch answers 403
+and fallback namespaces are configured, the task fans out into one watch per
+namespace, all feeding the shared ALL_NAMESPACES bucket — instead of an error
+dead-end for users without cluster-wide list permissions.
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 
 from korvid.core.errors import explain_api_error
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -31,12 +36,16 @@ class WatchManager:
         on_error: Callable[[str], None] | None = None,
         retry_delay: float = 1.0,
         max_retries: int = 5,
+        fallback_namespaces: Sequence[str] = (),
     ) -> None:
         self._store = store
         self._source = watch_source
         self.on_error = on_error  # public: the UI wires this after construction
+        #: Public like on_error: informational messages (e.g. fanout engaged).
+        self.on_notice: Callable[[str], None] | None = None
         self._retry_delay = retry_delay
         self._max_retries = max_retries
+        self._fallback_namespaces = tuple(fallback_namespaces)
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
 
     @property
@@ -62,6 +71,61 @@ class WatchManager:
             await self.stop(kind, scope)
 
     async def _run(self, kind: str, scope: str) -> None:
+        exc = await self._watch_loop(kind, scope, scope, bail_out=self._is_rbac_fanout_case(scope))
+        if exc is not None:
+            if self._is_rbac_fanout_case(scope)(exc):
+                await self._fan_out(kind)
+            else:
+                self._report(kind, scope, exc)
+        self._tasks.pop((kind, scope), None)
+
+    def _is_rbac_fanout_case(self, scope: str) -> Callable[[Exception], bool]:
+        """Fanout applies only when a Forbidden answer proves an RBAC boundary
+        on the cluster scope and there are namespaces to fall back to. Network
+        flakes / server errors keep the normal retry path."""
+
+        def check(exc: Exception) -> bool:
+            return (
+                scope == ALL_NAMESPACES
+                and bool(self._fallback_namespaces)
+                and isinstance(exc, ApiStatusError)
+                and exc.status == 403
+            )
+
+        return check
+
+    async def _fan_out(self, kind: str) -> None:
+        """Run one watch per fallback namespace, all feeding the ALL bucket.
+
+        Each namespace loop swallows its own permanent failure (reported via
+        on_error) so one forbidden namespace never kills the siblings; only
+        cancellation propagates, tearing all of them down together.
+        """
+        names = ", ".join(self._fallback_namespaces)
+        logger.info("cluster-wide %s watch forbidden; per-namespace fallback: %s", kind, names)
+        if self.on_notice is not None:
+            self.on_notice(f"Cluster-wide {kind} watch forbidden — watching namespaces: {names}")
+        await asyncio.gather(*(self._watch_namespace(kind, ns) for ns in self._fallback_namespaces))
+
+    async def _watch_namespace(self, kind: str, namespace: str) -> None:
+        exc = await self._watch_loop(kind, namespace, ALL_NAMESPACES)
+        if exc is not None:
+            self._report(kind, namespace, exc)
+
+    async def _watch_loop(
+        self,
+        kind: str,
+        watch_scope: str,
+        store_scope: str,
+        *,
+        bail_out: Callable[[Exception], bool] | None = None,
+    ) -> Exception | None:
+        """Retry loop for one stream; returns the exception that ended it.
+
+        Ends immediately when *bail_out* matches (a deterministic 403 gains
+        nothing from retries), else after max_retries consecutive failures.
+        Loops forever while the stream is healthy.
+        """
         failures = 0
         first_connection = True
         while True:
@@ -69,35 +133,46 @@ class WatchManager:
                 # Reconnect = fresh re-LIST by the source. Purge the store first:
                 # pods deleted during the outage never get a DELETED event and
                 # would otherwise linger forever. The re-LIST re-seeds immediately.
-                self._store.clear(kind, scope)
+                self._purge(kind, watch_scope, store_scope)
             first_connection = False
             try:
-                async for event_type, obj in self._source(kind, scope):
+                async for event_type, obj in self._source(kind, watch_scope):
                     # A connection that delivers events is healthy — reset the
                     # failure streak so hours-long streams don't inherit old failures.
                     failures = 0
-                    self._store.apply_event(kind, scope, event_type, obj)
+                    self._store.apply_event(kind, store_scope, event_type, obj)
                 # Stream ended normally (server-side watch timeout) -> reconnect.
                 failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # report + retry, never die silently
+                if bail_out is not None and bail_out(exc):
+                    return exc
                 failures += 1
                 logger.exception(
                     "watch %s/%s attempt %d/%d failed",
                     kind,
-                    scope,
+                    watch_scope,
                     failures,
                     self._max_retries,
                 )
                 if failures >= self._max_retries:
-                    if self.on_error is not None:
-                        ns_for_explain = None if scope == ALL_NAMESPACES else scope
-                        if isinstance(exc, ApiStatusError):
-                            msg = explain_api_error(exc.status, exc.reason, kind, ns_for_explain)
-                        else:
-                            msg = f"watch {kind}/{scope} failed: {exc}"
-                        self.on_error(msg)
-                    break
+                    return exc
             await asyncio.sleep(self._retry_delay)
-        self._tasks.pop((kind, scope), None)
+
+    def _purge(self, kind: str, watch_scope: str, store_scope: str) -> None:
+        """Fanout streams share the ALL bucket: purge only their namespace slice."""
+        if watch_scope != store_scope:
+            self._store.clear_namespace(kind, store_scope, watch_scope)
+        else:
+            self._store.clear(kind, store_scope)
+
+    def _report(self, kind: str, scope: str, exc: Exception) -> None:
+        if self.on_error is None:
+            return
+        ns_for_explain = None if scope == ALL_NAMESPACES else scope
+        if isinstance(exc, ApiStatusError):
+            msg = explain_api_error(exc.status, exc.reason, kind, ns_for_explain)
+        else:
+            msg = f"watch {kind}/{scope} failed: {exc}"
+        self.on_error(msg)
