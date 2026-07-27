@@ -90,7 +90,10 @@ def test_exit_code_is_zero_for_a_clean_evaluation() -> None:
     assert exit_code([_report()]) == 0
 
 
-def test_exit_code_is_nonzero_when_any_run_errored() -> None:
+def test_exit_code_is_nonzero_when_any_run_errored(capsys: pytest.CaptureFixture[str]) -> None:
     """A failed evaluation (e.g. unreachable endpoint) must be
-    distinguishable from a completed one to calling scripts."""
+    distinguishable from a completed one, and the underlying reason must
+    surface on stderr (the markdown report only carries aggregate counts)."""
     assert exit_code([_report(), _report(error="connection refused")]) == 1
+    stderr = capsys.readouterr().err
+    assert "oom-killed: connection refused" in stderr

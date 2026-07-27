@@ -5,6 +5,7 @@ root_cause: none
 grading:
   must_mention:
     - [healthy, no issues, no problems, looks fine, running normally, working as expected, fully available]
+    - [available, ready, rolled out, up to date]
   expected_evidence:
     - tool: get_resource
       args: {kind: deployments, name: checkout, namespace: shop}

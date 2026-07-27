@@ -33,6 +33,7 @@ _BUILTIN_METAS: tuple[ResourceMeta, ...] = (
     ResourceMeta("ResourceQuota", "resourcequotas", "", "v1", True, ("quota",)),
     ResourceMeta("Namespace", "namespaces", "", "v1", False, ("ns",)),
     ResourceMeta("ConfigMap", "configmaps", "", "v1", True, ("cm",)),
+    ResourceMeta("Secret", "secrets", "", "v1", True),
     ResourceMeta("Event", "events", "", "v1", True, ("ev",)),
 )
 

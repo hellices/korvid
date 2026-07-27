@@ -8,6 +8,7 @@ grading:
   must_mention:
     - [healthy, no issues, no problems, looks fine, running normally,
        working as expected, nothing wrong]
+    - [endpoints, endpoint]
   expected_evidence:
     - tool: get_resource
       args: {kind: endpoints, name: search, namespace: front}

@@ -136,10 +136,17 @@ async def _run_all(
 
 def exit_code(reports: list[ScenarioReport]) -> int:
     """Nonzero when any run errored — an unreachable or misconfigured
-    endpoint must not look like a completed evaluation to calling scripts."""
-    errored = sum(1 for report in reports for run in report.runs if run.error is not None)
+    endpoint must not look like a completed evaluation to calling scripts.
+    The underlying reasons go to stderr because the markdown report only
+    carries aggregate counts."""
+    errored = 0
+    for report in reports:
+        for run in report.runs:
+            if run.error is not None:
+                errored += 1
+                print(f"error: {report.scenario_id}: {run.error}", file=sys.stderr)
     if errored:
-        print(f"{errored} run(s) errored — see the report above.", file=sys.stderr)
+        print(f"{errored} run(s) errored.", file=sys.stderr)
         return 1
     return 0
 
