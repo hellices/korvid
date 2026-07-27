@@ -447,3 +447,25 @@ async def test_picker_marks_kubeconfig_default_when_no_explicit_context() -> Non
         assert isinstance(picker, PickScreen)
         prompts = list(picker._options)
         assert any("ctx-a" in p and "current" in p for p in prompts)
+
+
+async def test_mcp_restart_status_surfaces_after_switch() -> None:
+    """When the embedded MCP server was quiesced for the swap, the restart
+    outcome on the new cluster is surfaced to the operator."""
+    env = _CtxEnv(
+        result=ContextSwitchResult(
+            pod_resize_supported=False,
+            provider_hint=None,
+            fallback_namespaces=(),
+            context_namespace=None,
+            mcp_status="MCP on :4321",
+        )
+    )
+    app = env.app
+    async with app.run_test() as pilot:
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: any("MCP on :4321" in n.message for n in app._notifications),
+            label="mcp restart notification",
+        )

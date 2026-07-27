@@ -443,6 +443,7 @@ def _make_switch_context(
     app_box: list[KorvidApp],
     discovery_box: list[asyncio.Task[None]],
     retarget_agent: Callable[[AgentRuntime | None, bool, str | None], None],
+    mcp: MCPController,
 ) -> Callable[[str | None], Awaitable[ContextSwitchResult]]:
     """Build the `:ctx` retarget closure (issue #36).
 
@@ -455,6 +456,13 @@ def _make_switch_context(
     """
 
     async def switch_context(name: str | None) -> ContextSwitchResult:
+        # External MCP callers share this client and alias map: quiesce the
+        # server before the swap (in-flight tool calls drain against the old
+        # cluster) and restart it once the new cluster is fully retargeted,
+        # so no request can observe mixed-context state.
+        mcp_was_running = mcp.running
+        if mcp_was_running:
+            await mcp.stop()
         # switch_context closes the old ApiClient — the background discovery
         # task still issues requests on it, so quiesce it (and reseed the
         # alias map it mutates) before the connection is torn down.
@@ -477,11 +485,16 @@ def _make_switch_context(
             pod_resize_supported,
             cluster_context_note(provider_info),
         )
+        mcp_status: str | None = None
+        if mcp_was_running:
+            # Resume on the same endpoint, now serving the new cluster.
+            mcp_status = await mcp.start()
         return ContextSwitchResult(
             pod_resize_supported=pod_resize_supported,
             provider_hint=provider_info.display if provider_info.known else None,
             fallback_namespaces=_fallback_namespaces(config, name),
             context_namespace=resolve_context_namespace(name),
+            mcp_status=mcp_status,
         )
 
     return switch_context
@@ -639,7 +652,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         list_contexts=list_context_names,
         probe_context=kube.probe_context,
         switch_context=_make_switch_context(
-            config, kube, aliases, app_box, discovery_box, retarget_agent
+            config, kube, aliases, app_box, discovery_box, retarget_agent, mcp_controller
         ),
     )
     app_box.append(app)

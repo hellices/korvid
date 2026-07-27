@@ -365,6 +365,9 @@ class ContextSwitchResult:
     provider_hint: str | None
     fallback_namespaces: tuple[str, ...]
     context_namespace: str | None
+    #: Status line from restarting the embedded MCP server on the new
+    #: cluster (None when MCP was not running when the switch began).
+    mcp_status: str | None = None
 
 
 _WriteParams = ParamSpec("_WriteParams")
@@ -1392,6 +1395,10 @@ class KorvidApp(App[None]):
             self._forwards_closing = False
         self.current_kind = "pods"
         self.current_scope = result.context_namespace or self.config.namespace or "default"
+        if result.mcp_status is not None:
+            # The embedded MCP server was quiesced for the swap and restarted
+            # against the new cluster — surface how that went.
+            self.notify(result.mcp_status)
         if name != old:
             self._ctx_switch_note = (
                 f"kube context switched from {old or '(default)'} to {name};"

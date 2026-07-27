@@ -627,6 +627,20 @@ async def test_ctx_switch_quiesces_discovery_before_swapping_connection() -> Non
     old_task = asyncio.create_task(_old_discovery())
     await asyncio.sleep(0)  # let it start so cancellation unwinds it
 
+    class FakeMCP:
+        def __init__(self, *, running: bool) -> None:
+            self.running = running
+
+        async def stop(self) -> str:
+            self.running = False
+            events.append("mcp-stopped")
+            return "MCP off"
+
+        async def start(self) -> str:
+            self.running = True
+            events.append("mcp-started")
+            return "MCP on :4321"
+
     aliases: dict[str, Any] = {"stale-crd": object()}
     discovery_box: list[asyncio.Task[None]] = [old_task]
     switch = _make_switch_context(
@@ -636,13 +650,22 @@ async def test_ctx_switch_quiesces_discovery_before_swapping_connection() -> Non
         cast("Any", [SimpleNamespace(agent_runtime=None)]),  # app_box
         discovery_box,
         lambda runtime, resize, note: None,
+        cast("Any", FakeMCP(running=True)),
     )
     try:
-        await switch("ctx-b")
+        result = await switch("ctx-b")
     finally:
         discovery_box[0].cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await discovery_box[0]
 
-    assert events == ["discovery-cancelled", "connection-swapped"]
+    # The MCP server is quiesced first (in-flight tool calls drain against
+    # the old cluster) and resumed only after the connection is retargeted.
+    assert events == [
+        "mcp-stopped",
+        "discovery-cancelled",
+        "connection-swapped",
+        "mcp-started",
+    ]
     assert "stale-crd" not in aliases  # reseeded before the swap
+    assert result.mcp_status == "MCP on :4321"
