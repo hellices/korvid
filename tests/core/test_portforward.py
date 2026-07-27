@@ -759,6 +759,68 @@ def test_reattach_racing_teardown_never_leaks_a_child() -> None:
     assert registry.forwards() == []
 
 
+def test_concurrent_starts_cannot_claim_the_same_port() -> None:
+    """The port check and registration are atomic — the losing start fails fast."""
+    procs: list[_FakeProc] = []
+    loser: list[ValueError] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        procs.append(proc)
+        if len(procs) == 1:
+            # A second start on the same port interleaves while this spawn
+            # is still in flight — it must fail fast on the claimed port,
+            # not spawn a doomed child that loses the bind race later.
+            try:
+                registry.start(_spec(name="api-2"))
+            except ValueError as exc:
+                loser.append(exc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    record = registry.start(_spec())
+    assert record.status == "alive"
+    assert len(procs) == 1, "the losing start spawned a child anyway"
+    assert loser, "the losing start did not fail fast"
+    assert "8080" in str(loser[0])
+
+
+def test_failed_spawn_releases_the_port_claim() -> None:
+    """A spawn that raises must not leave its port permanently claimed."""
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        raise OSError("kubectl vanished")
+
+    registry = ForwardRegistry(popen=_popen)
+    with pytest.raises(OSError, match="kubectl vanished"):
+        registry.start(_spec())
+    procs: list[_FakeProc] = []
+
+    def _popen_ok(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry._popen = _popen_ok
+    assert registry.start(_spec()).status == "alive"  # port claim was released
+
+
+def test_wait_ready_tells_a_stale_waiter_it_was_superseded() -> None:
+    """A waiter woken by a re-attach must not read the replacement's fate as its own."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    record = registry.start(_spec())
+    procs[0].exit(1)
+    registry.refresh()
+    assert record.status == "broken"
+    waiter, results = _blocked_waiter(registry, record)
+    assert registry.reattach(record.id) is record
+    waiter.join(timeout=5.0)
+    # The replacement is already "alive" here — but that is *its* status,
+    # not the superseded generation's, and must not be reported as such.
+    assert results == ["superseded"]
+
+
 def test_start_gives_up_on_port_holder_that_cannot_be_reaped() -> None:
     """A kill-immune child must fail the new spawn, not block the caller."""
     procs: list[_FakeProc] = []
@@ -853,6 +915,8 @@ def test_reattach_releases_the_previous_generations_waiter() -> None:
     assert registry.reattach(record.id) is record
     waiter.join(timeout=5.0)
     assert not waiter.is_alive(), "superseded waiter still blocked after re-attach"
-    assert results == ["starting"]  # the replacement generation, still unconfirmed
+    # And it learns it was superseded — the replacement's own unconfirmed
+    # "starting" state is not this generation's to report.
+    assert results == ["superseded"]
     procs[0].stdout.feed(None)
     procs[1].stdout.feed(None)

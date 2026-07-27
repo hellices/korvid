@@ -1490,11 +1490,14 @@ class KorvidApp(App[None]):
             status = await asyncio.to_thread(
                 registry.wait_ready, record.id, timeout=_FORWARD_READY_SECONDS
             )
-            if self._current_confirmation(record.id) is not worker:
-                # A re-attach superseded this confirmation while it waited:
-                # the record was re-armed in place, so ``status`` may describe
-                # the replacement process — nothing observed here may be
-                # toasted or audited as this generation's result.
+            if status == "superseded" or self._current_confirmation(record.id) is not worker:
+                # A re-attach superseded this confirmation: the record was
+                # re-armed in place, so ``status`` (and everything on the
+                # record) may describe the replacement process — nothing
+                # observed here may be toasted, audited, or failed as this
+                # generation's result. The registry reports the supersession
+                # itself because the woken waiter can resume before the
+                # re-attach publishes the replacement's confirmation token.
                 self._audit_forward("port-forward-start", spec, outcome="superseded by re-attach")
                 return
             if registry.get(record.id) is None:

@@ -1233,6 +1233,48 @@ async def test_last_instant_confirmation_wins_over_the_timeout(tmp_path: Path) -
         procs[0].stdout.feed(None)  # release the reader thread
 
 
+async def test_superseded_wait_result_never_fails_the_replacement(tmp_path: Path) -> None:
+    """A stale waiter woken mid-re-attach must not tear down the replacement.
+
+    The woken confirmation can resume before the re-attach publishes the
+    replacement's confirmation token — the registry's ``superseded`` result
+    is what stops it from acting on the replacement's state.
+    """
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    record = registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    async with app.run_test() as pilot:
+        await _wait_rows(app, pilot)
+        # Simulate the stale generation's wake: the re-attach already swapped
+        # the process, but its confirmation token is not published yet.
+        with patch.object(registry, "wait_ready", return_value="superseded"):
+            app._track_confirmation(record)
+            await until(
+                pilot,
+                lambda: "superseded by re-attach" in _audit_lines(tmp_path),
+                label="supersession audited",
+            )
+        assert registry.get(record.id) is record  # replacement left untouched
+        assert record.status == "starting"
+        assert not procs[0].terminated
+        procs[0].stdout.feed(None)  # release the reader thread
+
+
 async def test_superseded_confirmation_never_reports_success(tmp_path: Path) -> None:
     """A confirmation replaced by a re-attach must not claim the new process."""
     procs: list[_FakeProc] = []

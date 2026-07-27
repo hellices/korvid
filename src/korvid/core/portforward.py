@@ -76,6 +76,9 @@ class ForwardRecord:
     _ready: threading.Event | None = field(default=None, repr=False)
     #: Serializes reader-thread mutations against re-attach process swaps.
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    #: Bumped by every re-attach process swap: lets a stale wait_ready()
+    #: waiter detect that the record now describes a replacement process.
+    _generation: int = field(default=0, repr=False)
 
 
 class ForwardRegistry:
@@ -107,6 +110,11 @@ class ForwardRegistry:
         #: Set (permanently) by stop_all(): a spawn that lands afterwards is
         #: discarded instead of registered, so no child outlives teardown.
         self._closed = False
+        #: Ports with a spawn in flight: claimed atomically with the free
+        #: check in _ensure_port_free(), released once the forward is
+        #: registered (or the start failed) — two concurrent starts can
+        #: never both pass the check and race for the same bind.
+        self._claimed_ports: set[int] = set()
 
     def start(self, spec: ForwardSpec) -> ForwardRecord:
         """Spawn `kubectl port-forward` for ``spec`` and track it.
@@ -119,9 +127,14 @@ class ForwardRegistry:
                 or the registry has been shut down by stop_all().
         """
         self.refresh()  # a just-died forward must not hold its local port
-        self._ensure_port_free(spec.local_port)
-        proc = self._spawn(spec)
+        self._ensure_port_free(spec.local_port)  # claims the port on success
+        try:
+            proc = self._spawn(spec)
+        except OSError:
+            self._release_claim(spec.local_port)
+            raise
         with self._ops:
+            self._claimed_ports.discard(spec.local_port)
             closed = self._closed
             if not closed:
                 record = ForwardRecord(id=self._next_id, spec=spec, _proc=proc)
@@ -219,7 +232,10 @@ class ForwardRegistry:
         Returns:
             The resulting status: ``alive`` when kubectl confirmed the
             listener, ``broken`` when the child exited before that (the
-            record keeps kubectl's last words in ``last_output``), or
+            record keeps kubectl's last words in ``last_output``),
+            ``superseded`` when a re-attach swapped the watched process out
+            from under this waiter — the record's state now describes the
+            replacement and must not be applied to this generation — or
             ``starting`` when the child is silent but still running after
             ``timeout`` — the caller decides whether to keep waiting or to
             abort the unconfirmed forward via `fail_start()` / `stop()`.
@@ -227,22 +243,26 @@ class ForwardRegistry:
         record = self._records.get(forward_id)
         if record is None:
             return "broken"
-        # Snapshot the event for this invocation: a concurrent re-attach swaps
-        # record._ready, and re-reading it would strand a superseded waiter on
-        # the replacement generation's event for the full timeout.
-        ready = record._ready
-        if ready is None or record.status == "alive":
-            return record.status
+        # Snapshot the event and generation for this invocation: a concurrent
+        # re-attach swaps both, and re-reading them would strand a superseded
+        # waiter on the replacement generation's event for the full timeout.
+        with record._lock:
+            ready = record._ready
+            generation = record._generation
+            status = record.status
+        if ready is None or status == "alive":
+            return status
         ready.wait(timeout)
-        if record.status == "alive":
-            return "alive"
-        if record.status == "broken":
-            return "broken"
-        proc = record._proc
-        if proc is not None and proc.poll() is not None:
-            record.status = "broken"
-            return "broken"
-        return "starting"
+        with record._lock:
+            if record._generation != generation:
+                return "superseded"
+            if record.status in ("alive", "broken"):
+                return record.status
+            proc = record._proc
+            if proc is not None and proc.poll() is not None:
+                record.status = "broken"
+                return "broken"
+            return "starting"
 
     def refresh(self) -> None:
         """Poll every tracked process; exited ones become ``broken``.
@@ -311,13 +331,18 @@ class ForwardRegistry:
         # by EOF may still have its child running and holding the local port
         # (poll() can lag the stream closing) — it is signalled and reaped
         # there instead of being orphaned by the process swap below.
-        self._ensure_port_free(record.spec.local_port)
-        replacement = self._spawn(record.spec)
+        self._ensure_port_free(record.spec.local_port)  # claims the port on success
+        try:
+            replacement = self._spawn(record.spec)
+        except OSError:
+            self._release_claim(record.spec.local_port)
+            raise
         superseded: threading.Event | None = None
         # Adopt under the ops lock: a stop or teardown that won the race
         # while the spawn was in flight must not have its outcome undone by
         # this thread publishing a fresh process afterwards.
         with self._ops:
+            self._claimed_ports.discard(record.spec.local_port)
             adopted = not self._closed and self._records.get(forward_id) is record
             if adopted:
                 # Swap under the record lock: a stale watcher that already
@@ -326,6 +351,7 @@ class ForwardRegistry:
                 with record._lock:
                     record._proc = replacement
                     record.last_output = ""
+                    record._generation += 1
                     superseded = record._ready
         if not adopted:
             self._discard_spawn(replacement)
@@ -387,14 +413,23 @@ class ForwardRegistry:
         status before poll() observes the exit) — it is signalled down and
         handed to the same reap pass instead of keeping the port.
 
+        On success the port is left claimed (atomically with the checks) so
+        a concurrent start cannot pass the same check before this spawn
+        registers; the caller releases the claim once the forward is
+        registered or the start failed.
+
         Raises:
-            ValueError: when a live forward already uses ``local_port``, or
-                a previously stopped child holding it cannot be reaped in
-                time — the spawn fails cleanly instead of blocking the
-                caller (the UI event loop) indefinitely.
+            ValueError: when a live forward already uses ``local_port``,
+                another start is already claiming it, or a previously
+                stopped child holding it cannot be reaped in time — the
+                spawn fails cleanly instead of blocking the caller
+                indefinitely.
         """
         holders: list[tuple[_ForwardProcess, float, int]] = []
         with self._ops:
+            if local_port in self._claimed_ports:
+                msg = f"local port {local_port} is already being claimed by another start"
+                raise ValueError(msg)
             for existing in list(self._records.values()):
                 if existing.spec.local_port != local_port:
                     continue
@@ -412,6 +447,7 @@ class ForwardRegistry:
             for entry in self._reaping:
                 (holders if entry[2] == local_port else remaining).append(entry)
             self._reaping = remaining
+            self._claimed_ports.add(local_port)
         # Blocking waits happen outside the ops lock so refresh()/stop() on
         # the event loop are never stalled behind a stuck port reclaim.
         for index, (proc, _deadline, _port) in enumerate(holders):
@@ -426,8 +462,14 @@ class ForwardRegistry:
                 # rather than freezing the caller.
                 with self._ops:
                     self._reaping.extend(holders[index:])
+                    self._claimed_ports.discard(local_port)
                 msg = f"local port {local_port} is still being released — try again"
                 raise ValueError(msg) from exc
+
+    def _release_claim(self, local_port: int) -> None:
+        """Release a port claim after a failed spawn (never registered)."""
+        with self._ops:
+            self._claimed_ports.discard(local_port)
 
     def stop_all(self) -> list[ForwardRecord]:
         """Terminate every tracked forward (app exit / context teardown).
