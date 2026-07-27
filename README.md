@@ -212,7 +212,7 @@ debug:
 ## Node shell
 
 `s` on the nodes view opens a debug shell on the selected node via
-`kubectl debug node/<name> --profile=sysadmin` (kubectl 1.27+).  Because that
+`kubectl debug node/<name> --profile=sysadmin` (kubectl 1.30+).  Because that
 creates a privileged pod with the node's filesystem mounted at `/host`, it
 always passes the approval gate with the privilege escalation stated
 explicitly, and the whole action is audit-logged fail-closed like every other

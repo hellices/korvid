@@ -112,7 +112,7 @@ def build_node_debug_create_argv(
     which could catch a debugger another operator started meanwhile.
     The namespace is always pinned explicitly. `-it` keeps stdin open and
     allocates a TTY on the container for the later `kubectl attach`.
-    `--profile=sysadmin` (kubectl 1.27+) makes the pod actually privileged —
+    `--profile=sysadmin` (kubectl 1.30+) makes the pod actually privileged —
     the default profile mounts the host filesystem but denies the privileged
     security context the approval dialog states, so tools like
     `chroot /host` would fail.

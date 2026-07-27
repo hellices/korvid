@@ -201,7 +201,7 @@ async def test_s_on_nodes_view_opens_privileged_approval_dialog(tmp_path: Path) 
             assert DEBUG_IMAGE in screen._operation
             assert "host" in body
             assert "--profile=sysadmin" in body
-            assert "kubectl 1.27+" in screen._operation
+            assert "kubectl 1.30+" in screen._operation
             await pilot.press("escape")
             await pilot.pause(0.1)
     assert call_records == []
