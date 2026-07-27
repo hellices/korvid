@@ -1221,6 +1221,10 @@ async def test_forward_audit_entries_keep_event_order(tmp_path: Path) -> None:
             # Only now may the start entry hit the disk.
             release_start.set()
             await until(pilot, lambda: _audit_lines(tmp_path).count("port-forward") >= 2)
+            # Entries are popped only after the append lands — exit while a
+            # written entry is still queued and the unmount flush would
+            # duplicate it (a rare duplicate beats a lost record, by design).
+            await until(pilot, lambda: not app._forward_audit_queue, label="audit queue drained")
     events = [line for line in _audit_lines(tmp_path).splitlines() if "port-forward" in line]
     assert len(events) == 2
     assert "port-forward-start" in events[0]
