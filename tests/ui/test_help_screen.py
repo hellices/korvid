@@ -119,9 +119,12 @@ def test_app_handler_key_help_uses_known_groups() -> None:
     from korvid.ui.widgets.help_screen import _GROUP_ORDER
 
     assert KorvidApp.HANDLER_KEY_HELP, "expected handler-key help metadata"
-    for group, key, description in KorvidApp.HANDLER_KEY_HELP:
+    for group, key, description, action in KorvidApp.HANDLER_KEY_HELP:
         assert group in _GROUP_ORDER, f"unknown group {group!r} for key {key!r}"
         assert description
+        if action:
+            binding_ids = {b.id for b in KorvidApp.BINDINGS if isinstance(b, Binding)}
+            assert action in binding_ids, f"unknown action {action!r} for key {key!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +230,7 @@ async def test_help_lists_handler_keys() -> None:
         await pilot.press("question_mark")
         await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help open")
         text = _help_text(app)
-        for _, _, description in KorvidApp.HANDLER_KEY_HELP:
+        for _, _, description, _ in KorvidApp.HANDLER_KEY_HELP:
             assert description in text
         assert "Drill down" in text
         assert "Enter" in text

@@ -29,7 +29,7 @@ _KEY_NAMES = {
 }
 
 # Display order of the binding groups in the overlay.
-_GROUP_ORDER = ("Global", "Table", "Logs", "Describe", "Agent")
+_GROUP_ORDER = ("Global", "Table", "Helm", "Logs", "Describe", "Agent")
 
 # Context(s) where each app action's key is actually pressed.  Key names and
 # descriptions are still generated from the live Binding objects; only the
