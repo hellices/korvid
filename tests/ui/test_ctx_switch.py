@@ -230,7 +230,11 @@ async def test_switch_refused_while_dialog_open() -> None:
     app = env.app
     async with app.run_test() as pilot:
         app.push_screen(PickScreen("pick:", ["x"]))
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, PickScreen),
+            label="pick screen open",
+        )
         app.post_message(SwitchContextCommand("ctx-b"))
         await until(
             pilot,
