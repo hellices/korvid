@@ -3625,8 +3625,9 @@ class KorvidApp(App[None]):
                 f"Node shell on {name}",
                 f"kubectl debug node/{name}: creates a privileged debug pod"
                 f" (image {image}) in namespace {shell_ns} with the node's"
-                " filesystem mounted at /host. The pod is deleted when the"
-                " shell exits. This action is audit-logged.",
+                " filesystem mounted at /host (uses --profile=sysadmin;"
+                " requires kubectl 1.27+). The pod is deleted when the shell"
+                " exits. This action is audit-logged.",
             ),
             _on_choice,
         )
