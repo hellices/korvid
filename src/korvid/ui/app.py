@@ -1395,7 +1395,8 @@ class KorvidApp(App[None]):
             if mcp_restart and self._mcp is not None:
                 # Resume on the same endpoint, now serving whichever context
                 # was actually applied (target, or the restored old one).
-                self.notify(await self._mcp.start())
+                msg = await self._mcp.start()
+                self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
             await self.watch_manager.start(self.current_kind, self.current_scope)
             await self._sync_metrics_poller()
         self.post_message(ResourcesUpdated(self.current_kind))

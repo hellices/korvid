@@ -971,3 +971,29 @@ async def test_mcp_toggle_queued_before_switch_rechecks_inside_lock() -> None:
         finally:
             app._ctx_switching = False
         assert "mcp-started" not in mcp.events
+
+
+async def test_failed_mcp_restart_after_switch_notifies_as_error() -> None:
+    """MCPController.start() reports failures as "ERROR ..." strings: the
+    post-switch restart must surface those with error severity, matching
+    the :mcp on path (issue #36 review round 22)."""
+    env = _CtxEnv()
+    app = env.app
+    mcp = _FakeMCP()
+
+    async def failing_start() -> str:
+        return "ERROR MCP failed to bind :4321"
+
+    mcp.start = failing_start  # type: ignore[method-assign]
+    app._mcp = cast("Any", mcp)
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: any(
+                n.severity == "error" and "ERROR MCP failed" in n.message
+                for n in app._notifications
+            ),
+            label="mcp restart error severity",
+        )
