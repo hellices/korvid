@@ -587,9 +587,10 @@ async def test_drain_waits_for_evicted_pods_to_disappear(tmp_path: Path) -> None
             lambda: audit_path.exists() and "success" in audit_path.read_text(),
             label="drain finished",
         )
-        # The verification poll ran after the evictions (recheck plan + wait plan).
+        # The verification poll ran after the evictions: initial preview,
+        # post-cordon recheck, then at least one termination-wait poll.
         plan_calls = [call for call in rec.calls if call[0] == "plan"]
-        assert len(plan_calls) >= 2
+        assert len(plan_calls) >= 3
         entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert entries[-1]["outcome"] == "success"
         assert "not yet terminated" not in entries[-1]["detail"]

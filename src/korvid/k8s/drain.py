@@ -100,6 +100,8 @@ def _expression_matches(expr: dict[str, Any], labels: dict[str, str]) -> bool:
     if operator == "In":
         return labels.get(key) in values
     if operator == "NotIn":
+        # apimachinery semantics: a pod *without* the key matches NotIn
+        # (labels.Requirement.Matches returns true when the key is absent).
         return labels.get(key) not in values
     if operator == "Exists":
         return key in labels

@@ -311,3 +311,14 @@ def test_up_to_date_pdb_status_is_trusted() -> None:
     pdb["status"]["observedGeneration"] = 3
     plan = build_drain_plan([_pod("web-1", labels={"app": "web"})], [pdb])
     assert plan.targets[0].pdb_blocked is None
+
+
+def test_notin_expression_matches_pod_missing_the_key() -> None:
+    """apimachinery labels.Requirement semantics: NotIn matches objects
+    that do not carry the key at all (kubectl behaves the same way)."""
+    pdb = _pdb(
+        "no-frontend-pdb",
+        match_expressions=[{"key": "tier", "operator": "NotIn", "values": ["frontend"]}],
+    )
+    plan = build_drain_plan([_pod("web-1", labels={"app": "web"})], [pdb])
+    assert plan.targets[0].pdb_blocked == "no-frontend-pdb"
