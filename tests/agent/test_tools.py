@@ -25,7 +25,14 @@ def make_executor(kube: Any) -> ToolExecutor:
 
 def test_read_tools_schema_names() -> None:
     names = [t["function"]["name"] for t in READ_TOOLS]
-    assert names == ["list_resources", "get_resource", "get_logs", "get_events", "list_operators"]
+    assert names == [
+        "list_resources",
+        "get_resource",
+        "get_logs",
+        "get_events",
+        "list_operators",
+        "diagnose_pod",
+    ]
 
 
 def test_read_tools_all_have_type_function() -> None:
@@ -793,3 +800,250 @@ async def test_list_operators_reports_installed_when_package_server_missing() ->
     out = await ex.execute("list_operators", {})
     assert "argocd-operator" in out
     assert "AVAILABLE (operator catalog): unavailable" in out
+
+
+# --- diagnose_pod (issue #70) ------------------------------------------------
+
+
+def _diagnose_aliases() -> dict[str, Any]:
+    from korvid.k8s.discovery import ResourceMeta
+
+    return {
+        "pods": PODS_META,
+        "pod": PODS_META,
+        "replicasets": ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True),
+        "deployments": ResourceMeta("Deployment", "deployments", "apps", "v1", True),
+        "nodes": ResourceMeta("Node", "nodes", "", "v1", False),
+        "persistentvolumeclaims": ResourceMeta(
+            "PersistentVolumeClaim", "persistentvolumeclaims", "", "v1", True
+        ),
+    }
+
+
+class FakeDiagnoseKube:
+    """Scripted cluster for the compound tool: pod, owners, node, PVC, events, logs."""
+
+    def __init__(self) -> None:
+        self.objects: dict[tuple[str, str], dict[str, Any]] = {
+            ("pods", "api-1"): {
+                "kind": "Pod",
+                "metadata": {
+                    "name": "api-1",
+                    "namespace": "default",
+                    "uid": "pod-uid",
+                    "creationTimestamp": "2026-07-27T06:00:00Z",
+                    "ownerReferences": [
+                        {"kind": "ReplicaSet", "name": "api-6f", "controller": True}
+                    ],
+                },
+                "spec": {
+                    "nodeName": "node-a",
+                    "containers": [{"name": "app"}],
+                    "volumes": [
+                        {"name": "data", "persistentVolumeClaim": {"claimName": "data-claim"}}
+                    ],
+                },
+                "status": {
+                    "phase": "Running",
+                    "conditions": [
+                        {"type": "Ready", "status": "False", "reason": "ContainersNotReady"}
+                    ],
+                    "containerStatuses": [
+                        {
+                            "name": "app",
+                            "ready": False,
+                            "restartCount": 7,
+                            "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+                            "lastState": {"terminated": {"exitCode": 1, "reason": "Error"}},
+                        }
+                    ],
+                },
+            },
+            ("replicasets", "api-6f"): {
+                "kind": "ReplicaSet",
+                "metadata": {
+                    "name": "api-6f",
+                    "ownerReferences": [{"kind": "Deployment", "name": "api", "controller": True}],
+                },
+            },
+            ("nodes", "node-a"): {
+                "metadata": {"name": "node-a"},
+                "status": {
+                    "conditions": [
+                        {"type": "Ready", "status": "True"},
+                        {"type": "MemoryPressure", "status": "True"},
+                    ]
+                },
+            },
+            ("persistentvolumeclaims", "data-claim"): {
+                "metadata": {"name": "data-claim"},
+                "status": {"phase": "Bound"},
+            },
+        }
+        self.events: list[dict[str, Any]] = [
+            {
+                "type": "Warning",
+                "reason": "BackOff",
+                "message": "restarting failed container",
+                "count": 9,
+                "lastTimestamp": "2026-07-27T06:20:00Z",
+            }
+        ]
+        self.log_lines: list[str] = [
+            *(f"serving request {i}" for i in range(40)),
+            "ERROR: db connection refused",
+            *(f"retrying {i}" for i in range(20)),
+        ]
+        self.log_calls: list[dict[str, Any]] = []
+
+    async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        obj = self.objects.get((meta.plural, name))
+        if obj is None:
+            raise ApiStatusError(404, "NotFound")
+        return obj
+
+    async def list_events_for(
+        self, namespace: str, name: str, *, kind: str | None = None, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self.events
+
+    async def stream_logs(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> Any:
+        self.log_calls.append({"pod": pod, "container": container, "tail_lines": tail_lines})
+        for text in self.log_lines:
+            yield LogLine(pod=pod, container=container, text=text)
+
+
+def _diagnose_executor(kube: Any) -> ToolExecutor:
+    return ToolExecutor(kube, _diagnose_aliases())
+
+
+async def test_diagnose_pod_reports_all_sections_in_evidence_order() -> None:
+    kube = FakeDiagnoseKube()
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert not out.startswith("ERROR:")
+    # Identity and owner chain up front.
+    assert "pod default/api-1" in out
+    assert "phase=Running" in out
+    assert "owner: Deployment api (via ReplicaSet api-6f)" in out
+    # Related context.
+    assert "node node-a" in out
+    assert "MemoryPressure=True" in out
+    assert "pvc data-claim: Bound" in out
+    # Evidence.
+    assert "CrashLoopBackOff" in out
+    assert "restarts=7" in out
+    assert "BackOff (9x" in out
+    assert "ERROR: db connection refused" in out
+    # Primacy/recency ordering: identity first, log evidence last.
+    assert out.index("phase=Running") < out.index("BackOff (9x")
+    assert out.index("BackOff (9x") < out.index("ERROR: db connection refused")
+
+
+async def test_diagnose_pod_fetches_logs_only_for_troubled_containers() -> None:
+    kube = FakeDiagnoseKube()
+    _ = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert [c["container"] for c in kube.log_calls] == ["app"]
+
+
+async def test_diagnose_pod_healthy_pod_skips_log_fetches() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("pods", "api-1")]["status"]["containerStatuses"] = [
+        {
+            "name": "app",
+            "ready": True,
+            "restartCount": 0,
+            "state": {"running": {"startedAt": "2026-07-27T06:01:00Z"}},
+        }
+    ]
+    kube.objects[("pods", "api-1")]["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    kube.events = []
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert kube.log_calls == []
+    assert "no troubled containers" in out
+
+
+async def test_diagnose_pod_missing_pod_is_an_error() -> None:
+    kube = FakeDiagnoseKube()
+    del kube.objects[("pods", "api-1")]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert out.startswith("ERROR:")
+
+
+async def test_diagnose_pod_sub_fetch_failures_do_not_kill_the_report() -> None:
+    """Owner, node, PVC, events, and logs are all best-effort evidence."""
+
+    class FlakyKube(FakeDiagnoseKube):
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            if meta.plural != "pods":
+                raise RuntimeError("api hiccup")
+            return await super().get_object(meta, namespace, name)
+
+        async def list_events_for(self, *a: Any, **k: Any) -> list[dict[str, Any]]:
+            raise RuntimeError("events down")
+
+    out = await _diagnose_executor(FlakyKube()).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert not out.startswith("ERROR:")
+    assert "phase=Running" in out
+    assert "unavailable" in out  # the failed sections say so instead of vanishing
+    assert "ERROR: db connection refused" in out  # log evidence still present
+
+
+async def test_diagnose_pod_report_stays_under_the_ingest_cap() -> None:
+    kube = FakeDiagnoseKube()
+    kube.log_lines = [f"noise {i} " + "x" * 80 for i in range(1000)]
+    kube.log_lines[500] = "ERROR: the one that matters"
+    kube.events = [
+        {
+            "type": "Warning",
+            "reason": f"Reason{i}",
+            "message": f"message {i} " + "y" * 60,
+            "count": 1,
+            "lastTimestamp": f"2026-07-27T06:{i % 60:02d}:00Z",
+        }
+        for i in range(100)
+    ]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert len(out) < MAX_RESULT_CHARS
+    assert "truncated" not in out  # under the cap by construction, not by chopping
+    assert "ERROR: the one that matters" in out
+
+
+async def test_diagnose_pod_owner_chain_stops_at_a_direct_workload() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("pods", "api-1")]["metadata"]["ownerReferences"] = [
+        {"kind": "StatefulSet", "name": "db", "controller": True}
+    ]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "owner: StatefulSet db" in out
+    assert "via" not in out
+
+
+async def test_diagnose_pod_without_owner_reports_standalone() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("pods", "api-1")]["metadata"].pop("ownerReferences")
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "owner: none (standalone pod)" in out

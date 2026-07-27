@@ -9,6 +9,17 @@ from typing import Any
 
 import yaml
 
+from korvid.agent.diagnose import (
+    condition_lines,
+    container_state_lines,
+    identity_lines,
+    log_excerpt,
+    node_condition_line,
+    pvc_names,
+    troubled_containers,
+    warning_event_lines,
+)
+from korvid.core.portforward import controller_owner
 from korvid.core.secrets import mask_secret_manifest
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
@@ -159,6 +170,36 @@ READ_TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "diagnose_pod",
+            "description": (
+                "Compound diagnostic for a broken pod: one call gathers the"
+                " pod's identity and owner chain, per-container states"
+                " (waiting reasons, exit codes, restart counts), failing"
+                " conditions, recent Warning events, node and PVC context,"
+                " and a targeted log excerpt from each troubled container."
+                " Prefer this over chaining"
+                " get_resource/get_events/get_logs when investigating why a"
+                " pod is failing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pod": {
+                        "type": "string",
+                        "description": "Pod name.",
+                    },
+                    "namespace": {
+                        "type": "string",
+                        "description": "Kubernetes namespace the pod lives in.",
+                    },
+                },
+                "required": ["pod", "namespace"],
             },
         },
     },
@@ -584,6 +625,8 @@ class ToolExecutor:
             return await self._get_events(arguments)
         if name == "list_operators":
             return await self._list_operators(arguments)
+        if name == "diagnose_pod":
+            return await self._diagnose_pod(arguments)
         raise ValueError(f"unknown tool: {name!r}")
 
     async def _dispatch_ui(self, name: str, args: dict[str, Any]) -> str:
@@ -778,6 +821,124 @@ class ToolExecutor:
             message = str(ev.get("message") or "")
             parts.append(f"{ev_type} {reason} ({count}x): {message}")
         return "\n".join(parts)
+
+    #: Log lines fetched per troubled container before excerpting.
+    _DIAGNOSE_LOG_TAIL = 200
+    #: Troubled containers whose logs are excerpted; more are named only.
+    _DIAGNOSE_MAX_LOG_CONTAINERS = 3
+
+    def _meta_for_kind_name(self, kind_name: str) -> ResourceMeta | None:
+        """Discovery metadata for an API kind name (e.g. ``"ReplicaSet"``)."""
+        return next(
+            (m for m in self._aliases.values() if m.kind == kind_name and not m.synthetic),
+            None,
+        )
+
+    async def _diagnose_owner_chain(self, namespace: str, pod: dict[str, Any]) -> str:
+        """``Deployment api (via ReplicaSet api-6f)`` — best-effort, never raises."""
+        owner = controller_owner(pod)
+        if owner is None:
+            return "owner: none (standalone pod)"
+        kind_name, name = owner
+        if kind_name != "ReplicaSet":
+            return f"owner: {kind_name} {name}"
+        # One more hop: a ReplicaSet is usually a Deployment's generation.
+        meta = self._meta_for_kind_name(kind_name)
+        if meta is None:
+            return f"owner: {kind_name} {name}"
+        try:
+            parent = controller_owner(await self._kube.get_object(meta, namespace, name))
+        except Exception:  # the chase is a convenience; the direct owner stands
+            parent = None
+        if parent is None:
+            return f"owner: {kind_name} {name}"
+        return f"owner: {parent[0]} {parent[1]} (via {kind_name} {name})"
+
+    async def _diagnose_related(self, namespace: str, pod: dict[str, Any]) -> list[str]:
+        """Node condition summary and PVC phases — cheap context, best-effort."""
+        lines: list[str] = []
+        node_name = (pod.get("spec") or {}).get("nodeName")
+        node_meta = self._meta_for_kind_name("Node")
+        if node_name and node_meta is not None:
+            try:
+                node = await self._kube.get_object(node_meta, None, str(node_name))
+                lines.append(node_condition_line(node))
+            except Exception as exc:
+                lines.append(f"node {node_name}: unavailable ({exc})")
+        pvc_meta = self._meta_for_kind_name("PersistentVolumeClaim")
+        if pvc_meta is not None:
+            for claim in pvc_names(pod)[:5]:
+                try:
+                    pvc = await self._kube.get_object(pvc_meta, namespace, claim)
+                    phase = (pvc.get("status") or {}).get("phase") or "?"
+                    lines.append(f"pvc {claim}: {phase}")
+                except Exception as exc:
+                    lines.append(f"pvc {claim}: unavailable ({exc})")
+        return lines
+
+    async def _diagnose_events(self, namespace: str, name: str, pod: dict[str, Any]) -> list[str]:
+        raw_uid = (pod.get("metadata") or {}).get("uid")
+        try:
+            events = await self._kube.list_events_for(
+                namespace, name, kind="Pod", uid=str(raw_uid) if raw_uid else None
+            )
+        except Exception as exc:
+            return [f"unavailable ({exc})"]
+        return warning_event_lines(events) or ["(no warning events)"]
+
+    async def _diagnose_logs(self, namespace: str, name: str, pod: dict[str, Any]) -> list[str]:
+        """Targeted excerpt per troubled container — the report's final section."""
+        troubled = troubled_containers(pod)
+        if not troubled:
+            return ["(no troubled containers — logs skipped)"]
+        lines: list[str] = []
+        for container in troubled[: self._DIAGNOSE_MAX_LOG_CONTAINERS]:
+            lines.append(f"[{container}]")
+            try:
+                tail: list[str] = []
+                async for log_line in self._kube.stream_logs(
+                    namespace, name, container, follow=False, tail_lines=self._DIAGNOSE_LOG_TAIL
+                ):
+                    tail.append(log_line.text)
+                lines.append(log_excerpt(tail) if tail else "(no log output)")
+            except Exception as exc:
+                lines.append(f"unavailable ({exc})")
+        skipped = troubled[self._DIAGNOSE_MAX_LOG_CONTAINERS :]
+        if skipped:
+            lines.append(f"(also troubled, logs not fetched: {', '.join(skipped)})")
+        return lines
+
+    async def _diagnose_pod(self, args: dict[str, Any]) -> str:
+        """Compound read-only diagnosis (issue #70).
+
+        Evidence gathering is deterministic code; the model only interprets.
+        Only the pod fetch may fail the tool — every other section degrades
+        to an ``unavailable`` line. Ordered for primacy/recency: identity
+        first, the most diagnostic evidence (events, then logs) last.
+        """
+        name = str(args["pod"])
+        namespace = str(args["namespace"])
+        pods_meta = self._api_meta("pods")
+        pod = await self._kube.get_object(pods_meta, namespace, name)
+        sections: list[tuple[str, list[str]]] = [
+            (
+                f"IDENTITY — pod {namespace}/{name}",
+                [*identity_lines(pod), await self._diagnose_owner_chain(namespace, pod)],
+            ),
+            ("RELATED", await self._diagnose_related(namespace, pod) or ["(none)"]),
+            ("CONDITIONS (failing first)", condition_lines(pod) or ["(none reported)"]),
+            ("CONTAINERS", container_state_lines(pod) or ["(no container statuses)"]),
+            (
+                "WARNING EVENTS (newest first)",
+                await self._diagnose_events(namespace, name, pod),
+            ),
+            ("LOG EXCERPTS (troubled containers)", await self._diagnose_logs(namespace, name, pod)),
+        ]
+        report: list[str] = []
+        for title, lines in sections:
+            report.append(title)
+            report.extend(f"  {line}" for line in lines)
+        return "\n".join(report)
 
 
 def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:

@@ -142,7 +142,7 @@ An in-house tool-use loop (max iterations default 15, configurable):
 
 | Tool group | Examples | Gate |
 |---|---|---|
-| k8s read | `list_resources`, `get_resource`, `get_logs`, `get_events`, `top_pods`, `explain_rbac` | None (RBAC applies) |
+| k8s read | `list_resources`, `get_resource`, `get_logs`, `get_events`, `diagnose_pod`, `top_pods`, `explain_rbac` | None (RBAC applies) |
 | k8s write | `apply`, `delete`, `scale`, `rollout_restart`, `cordon` | **Approval required** — command/diff preview dialog |
 | debug | `launch_debug_session` (configures image/target/profile), `suggest_debug_commands` | **Approval required** (pod spec mutation) |
 | UI control | `navigate`, `set_filter`, `open_logs`, `split_pane`, `highlight_resource` | None (screen-only changes, visually marked) |
