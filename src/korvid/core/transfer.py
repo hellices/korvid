@@ -174,7 +174,12 @@ def pack_file(local_path: Path, arcname: str, archive_path: Path) -> int:
 
 
 def extract_single_file(archive_path: Path, dest: Path) -> int:
-    """Extract the first regular-file member of ``archive_path`` into ``dest``.
+    """Extract the sole regular-file member of ``archive_path`` into ``dest``.
+
+    ``download_command`` archives exactly one file, so anything else means
+    the remote path was not the requested single file: a directory would
+    make the remote tar recursively emit the whole tree, and silently
+    extracting its first child would report the wrong file as a success.
 
     Member names are never used as filesystem paths — the bytes are streamed
     straight into the caller-chosen ``dest`` — so hostile names like
@@ -184,31 +189,41 @@ def extract_single_file(archive_path: Path, dest: Path) -> int:
     never truncate or partially overwrite an existing destination.
 
     Returns the number of bytes written; raises ValueError when the archive
-    contains no regular file.
+    does not contain exactly one regular file.
     """
     with tarfile.open(archive_path) as tf:
-        for member in tf:
-            if not member.isfile():
-                continue
-            src = tf.extractfile(member)
-            if src is None:  # pragma: no cover - isfile() guarantees a stream
-                continue
-            fd, staging_name = tempfile.mkstemp(
-                dir=dest.parent, prefix=f".{dest.name}.", suffix=".extract"
+        members = iter(tf)
+        member = next(members, None)
+        if member is None:
+            raise ValueError("archive contains no file")
+        if not member.isfile():
+            raise ValueError(
+                f"remote path is not a regular file ({member.name!r}) — "
+                "directories cannot be transferred"
             )
-            staging = Path(staging_name)
-            try:
-                written = 0
-                with src, os.fdopen(fd, "wb") as out:
-                    while chunk := src.read(_COPY_CHUNK):
-                        out.write(chunk)
-                        written += len(chunk)
-                os.replace(staging, dest)
-            except BaseException:
-                staging.unlink(missing_ok=True)
-                raise
-            return written
-    raise ValueError("archive contains no file")
+        src = tf.extractfile(member)
+        if src is None:  # pragma: no cover - isfile() guarantees a stream
+            raise ValueError("archive contains no file")
+        fd, staging_name = tempfile.mkstemp(
+            dir=dest.parent, prefix=f".{dest.name}.", suffix=".extract"
+        )
+        staging = Path(staging_name)
+        try:
+            written = 0
+            with src, os.fdopen(fd, "wb") as out:
+                while chunk := src.read(_COPY_CHUNK):
+                    out.write(chunk)
+                    written += len(chunk)
+            if next(members, None) is not None:
+                raise ValueError(
+                    "archive contains more than one member — "
+                    "the remote path must name a single file"
+                )
+            os.replace(staging, dest)
+        except BaseException:
+            staging.unlink(missing_ok=True)
+            raise
+        return written
 
 
 def _as_bytes(data: object) -> bytes:

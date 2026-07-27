@@ -196,9 +196,10 @@ class TestPackExtract:
         assert written == len(payload)
         assert dest.read_bytes() == payload
 
-    def test_extract_ignores_directory_members(self, tmp_path: Path) -> None:
-        # tar cf on the server side may include a leading directory entry;
-        # extraction must pick the first regular file.
+    def test_extract_rejects_directory_archive(self, tmp_path: Path) -> None:
+        # A remote path naming a directory makes the remote tar emit the
+        # directory and all children recursively; silently extracting the
+        # first child would report the wrong file as a success.
         archive = tmp_path / "in.tar"
         inner = tmp_path / "f.txt"
         inner.write_bytes(b"hello")
@@ -206,8 +207,25 @@ class TestPackExtract:
             tf.add(str(tmp_path), arcname="dir", recursive=False)
             tf.add(str(inner), arcname="dir/f.txt")
         dest = tmp_path / "out.txt"
-        assert extract_single_file(archive, dest) == 5
-        assert dest.read_bytes() == b"hello"
+        with pytest.raises(ValueError, match="not a regular file"):
+            extract_single_file(archive, dest)
+        assert not dest.exists()
+
+    def test_extract_rejects_multi_member_archive(self, tmp_path: Path) -> None:
+        # tar cf of a single file yields exactly one member; anything more
+        # means the remote path was not the single file that was requested.
+        archive = tmp_path / "in.tar"
+        first = tmp_path / "a.txt"
+        first.write_bytes(b"aa")
+        second = tmp_path / "b.txt"
+        second.write_bytes(b"bb")
+        with tarfile.open(archive, "w") as tf:
+            tf.add(str(first), arcname="a.txt")
+            tf.add(str(second), arcname="b.txt")
+        dest = tmp_path / "out.txt"
+        with pytest.raises(ValueError, match="single file"):
+            extract_single_file(archive, dest)
+        assert not dest.exists()
 
     def test_extract_empty_archive_raises(self, tmp_path: Path) -> None:
         archive = tmp_path / "empty.tar"
