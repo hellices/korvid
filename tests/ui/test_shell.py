@@ -294,7 +294,7 @@ async def test_shell_non_pods_kind_warning() -> None:
             await pilot.press("s")
             await pilot.pause(0.1)
             notifications = [n.message for n in app._notifications]
-            assert any("Shell is only available for pods" in m for m in notifications)
+            assert any("Shell is available for pods and nodes" in m for m in notifications)
             mock_call.assert_not_called()
 
 
@@ -1342,3 +1342,52 @@ async def test_debug_not_offered_when_pod_gone(tmp_path: Path) -> None:
             )
             assert not isinstance(app.screen, (PickScreen, ConfirmScreen))
             mock_call.assert_called_once()  # only the failed exec; no debug
+
+
+# ---------------------------------------------------------------------------
+# Node shell argv builders (issue #46)
+# ---------------------------------------------------------------------------
+
+
+def test_build_node_debug_argv_defaults() -> None:
+    from korvid.ui.shell import build_node_debug_argv
+
+    argv = build_node_debug_argv("worker-1", "default")
+    assert argv[:2] == ["kubectl", "debug"]
+    assert "node/worker-1" in argv
+    assert f"--image={DEBUG_IMAGE}" in argv
+    ns_idx = argv.index("-n")
+    assert argv[ns_idx + 1] == "default"
+    # every kubectl flag must precede the `--` command separator
+    dd = argv.index("--")
+    assert dd > argv.index("node/worker-1")
+
+
+def test_build_node_debug_argv_custom_image_and_context() -> None:
+    from korvid.ui.shell import build_node_debug_argv
+
+    argv = build_node_debug_argv(
+        "worker-1", "debug-ns", context="prod", image="registry.local/toolkit:1"
+    )
+    idx = argv.index("--context")
+    assert argv[idx + 1] == "prod"
+    assert idx < argv.index("--")
+    assert "--image=registry.local/toolkit:1" in argv
+    ns_idx = argv.index("-n")
+    assert argv[ns_idx + 1] == "debug-ns"
+
+
+def test_build_pod_list_argv() -> None:
+    from korvid.ui.shell import build_pod_list_argv
+
+    assert build_pod_list_argv("debug-ns") == [
+        "kubectl",
+        "get",
+        "pods",
+        "-n",
+        "debug-ns",
+        "-o",
+        "json",
+    ]
+    argv = build_pod_list_argv("debug-ns", context="prod")
+    assert argv[argv.index("--context") + 1] == "prod"

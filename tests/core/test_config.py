@@ -479,3 +479,33 @@ def test_debug_non_string_entries_dropped(tmp_path: Path) -> None:
     cfg = load_config(cfg_file)
     assert cfg.debug_default_image is None
     assert cfg.debug_images == {"python": "img:1"}
+
+
+def test_node_shell_defaults() -> None:
+    cfg = KorvidConfig()
+    assert cfg.node_shell_image is None
+    assert cfg.node_shell_namespace is None
+
+
+def test_node_shell_from_yaml(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text("node_shell:\n  image: registry.local/toolkit:1\n  namespace: debug-ns\n")
+    cfg = load_config(f)
+    assert cfg.node_shell_image == "registry.local/toolkit:1"
+    assert cfg.node_shell_namespace == "debug-ns"
+
+
+def test_node_shell_scalar_section_tolerated(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text("node_shell: yes\n")
+    cfg = load_config(f)
+    assert cfg.node_shell_image is None
+    assert cfg.node_shell_namespace is None
+
+
+def test_node_shell_non_string_values_ignored(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text("node_shell:\n  image: 3\n  namespace: ''\n")
+    cfg = load_config(f)
+    assert cfg.node_shell_image is None
+    assert cfg.node_shell_namespace is None

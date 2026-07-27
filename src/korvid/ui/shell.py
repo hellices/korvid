@@ -96,6 +96,49 @@ def build_debug_argv(
     ]
 
 
+def build_node_debug_argv(
+    node: str,
+    namespace: str,
+    context: str | None = None,
+    image: str = DEBUG_IMAGE,
+) -> list[str]:
+    """Return argv for `kubectl debug node/<node>` opening a node shell.
+
+    kubectl creates a `node-debugger-…` pod pinned to the node with the
+    host filesystem mounted at `/host` (issue #46). The namespace is always
+    pinned explicitly so korvid knows where to clean the pod up afterwards.
+    """
+    return [
+        "kubectl",
+        "debug",
+        *_context_args(context),
+        "-it",
+        "-n",
+        namespace,
+        f"node/{node}",
+        f"--image={image}",
+        "--",
+        "sh",
+        "-c",
+        "command -v bash >/dev/null 2>&1 && exec bash || exec sh",
+    ]
+
+
+def build_pod_list_argv(namespace: str, context: str | None = None) -> list[str]:
+    """Return argv listing a namespace's pods as JSON, used to find the
+    `node-debugger-…` pod a node shell created so it can be deleted."""
+    return [
+        "kubectl",
+        "get",
+        "pods",
+        *_context_args(context),
+        "-n",
+        namespace,
+        "-o",
+        "json",
+    ]
+
+
 def build_pod_get_argv(namespace: str, pod: str, context: str | None = None) -> list[str]:
     """Return argv fetching a pod's JSON, used to poll ephemeralContainerStatuses.
 

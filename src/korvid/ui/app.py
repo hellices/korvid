@@ -98,7 +98,9 @@ from korvid.ui.shell import (
     DEBUG_IMAGE,
     build_debug_argv,
     build_exec_argv,
+    build_node_debug_argv,
     build_pod_get_argv,
+    build_pod_list_argv,
     build_probe_argv,
 )
 from korvid.ui.widgets.agent_panel import AgentPanel
@@ -1457,10 +1459,17 @@ class KorvidApp(App[None]):
 
         Multi-container pods show a container picker first; if exec fails
         (typically a distroless image without sh/bash) a `kubectl debug`
-        ephemeral-container fallback is offered.
+        ephemeral-container fallback is offered. On the nodes view the same
+        key opens a node shell via `kubectl debug node/` behind an approval
+        dialog (issue #46).
         """
-        if self.current_kind != "pods":
-            self.notify("Shell is only available for pods", severity="warning")
+        kind = self._canonical_kind(self.current_kind)
+        meta = self.aliases.get(kind)
+        if meta is not None and (meta.group, meta.plural) == ("", "nodes"):
+            self.run_worker(self._node_shell_flow())
+            return
+        if kind != "pods":
+            self.notify("Shell is available for pods and nodes", severity="warning")
             return
 
         table = self.query_one(ResourceTable)
@@ -2463,6 +2472,9 @@ class KorvidApp(App[None]):
         "cordon": ("patch", ""),
         "uncordon": ("patch", ""),
         "drain": ("patch", ""),
+        # Node shell creates a privileged debug pod in the shell namespace
+        # (kubectl debug node/, issue #46); the pre-check runs against pods.
+        "node-shell": ("create", ""),
     }
 
     @staticmethod
@@ -3571,6 +3583,181 @@ class KorvidApp(App[None]):
                 return len(keys)
             self._set_drain_progress(f"drain {name}: waiting for {len(keys)} pods to terminate")
             await asyncio.sleep(self._drain_wait_poll)
+
+    # -- Node shell (issue #46): privileged debug shell via kubectl debug node/
+
+    async def _node_shell_flow(self) -> None:
+        """`s` on the nodes view: approval-gated `kubectl debug node/` shell.
+
+        The shell runs in a `node-debugger-…` pod with the node's filesystem
+        mounted at `/host` — a privilege escalation, so it always passes the
+        approval gate with that stated explicitly, is audit-logged
+        fail-closed, and the debug pod is deleted when the shell exits.
+        """
+        resolved = self._node_target("node shell")
+        if resolved is None:
+            return
+        ops, _meta, name, _uid = resolved
+        if shutil.which("kubectl") is None:
+            self.notify("kubectl not found on PATH — node shell requires kubectl", severity="error")
+            return
+        image = self.config.node_shell_image or DEBUG_IMAGE
+        shell_ns = self.config.node_shell_namespace or "default"
+        pods_meta = self.aliases.get("pods")
+        if pods_meta is None:
+            # Fail-open like the pod-debug pre-check, but never silently.
+            logger.warning("pods alias missing; skipping node-shell RBAC pre-check (fail-open)")
+        elif not await self._permitted("node-shell", pods_meta, shell_ns, ""):
+            return
+        if len(self.screen_stack) > 1:
+            # The RBAC pre-check ran concurrently with user input: never
+            # stack the approval over a dialog that opened meanwhile.
+            self.notify(
+                f"Node shell for {name} not offered - another dialog is open."
+                " Close it and press 's' again to retry.",
+                severity="warning",
+            )
+            return
+
+        def _on_choice(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(self._run_node_shell(ops, name, shell_ns, image))
+
+        self.push_screen(
+            ConfirmScreen(
+                f"Node shell on {name}",
+                f"kubectl debug node/{name}: creates a privileged debug pod"
+                f" (image {image}) in namespace {shell_ns} with the node's"
+                " filesystem mounted at /host. The pod is deleted when the"
+                " shell exits. This action is audit-logged.",
+            ),
+            _on_choice,
+        )
+
+    async def _run_node_shell(self, ops: WriteOps, node: str, namespace: str, image: str) -> None:
+        """Run the approved node shell, then delete the debugger pod.
+
+        A cluster write (pod creation via kubectl): the intent record must
+        persist before the subprocess starts, or the shell is blocked.
+        kubectl names the pod itself, so the debugger pods in the shell
+        namespace are snapshotted before launch and only ones that appear
+        afterwards are cleaned up (a same-node debugger another operator
+        started stays untouched).
+        """
+        audit = self._audit
+        if audit is None:  # _node_target already refused; defensive re-check
+            return
+        detail = f"privileged node shell (kubectl debug node, image {image}, namespace {namespace})"
+        try:
+            await asyncio.to_thread(self._audit_node_shell, audit, node, detail, "intent")
+        except Exception:
+            logger.exception("audit append failed; blocking node shell")
+            self.notify("Write blocked: audit log unavailable", severity="error")
+            return
+        before = await self._list_node_debugger_pods(namespace, node)
+        argv = build_node_debug_argv(node, namespace, context=self.config.kube_context, image=image)
+        with self.suspend():
+            exit_code = self._run_interactive(argv, f"korvid node shell → {node} (exit to return)")
+        self.refresh()
+        cleanup = await self._cleanup_node_debug_pods(ops, namespace, node, before)
+        outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
+        try:
+            await asyncio.to_thread(
+                self._audit_node_shell, audit, node, detail, f"{outcome}; {cleanup}"
+            )
+        except Exception:
+            logger.exception("audit append failed after node shell")
+            self.notify("Audit write failed for the executed node shell", severity="warning")
+        if exit_code != 0:
+            self.notify(
+                f"kubectl debug node exited with status {exit_code} — the cluster"
+                " may refuse privileged pods (PodSecurity admission); try setting"
+                " node_shell.namespace to a namespace that allows them",
+                severity="warning",
+            )
+
+    async def _list_node_debugger_pods(self, namespace: str, node: str) -> dict[str, str] | None:
+        """Names (→ uid) of kubectl node-debugger pods for *node* in the
+        shell namespace, or None when the listing failed. Shells out like the
+        pull-failure watch so the read works even in kubectl-only sessions."""
+        argv = build_pod_list_argv(namespace, context=self.config.kube_context)
+        try:
+            proc = await asyncio.to_thread(subprocess.run, argv, capture_output=True, timeout=15)
+        except (subprocess.TimeoutExpired, OSError):
+            logger.warning("node-debugger pod listing failed", exc_info=True)
+            return None
+        if proc.returncode != 0:
+            return None
+        try:
+            payload = json.loads(proc.stdout)
+        except ValueError:
+            return None
+        pods: dict[str, str] = {}
+        items = payload.get("items") if isinstance(payload, dict) else None
+        for item in items if isinstance(items, list) else []:
+            item_meta = item.get("metadata") or {}
+            pod_name = item_meta.get("name")
+            # Matching on nodeName (which kubectl debug pins at creation)
+            # rather than the name suffix: node names can be mangled in the
+            # generated pod name, but the spec field is exact.
+            if not isinstance(pod_name, str) or not pod_name.startswith("node-debugger-"):
+                continue
+            if (item.get("spec") or {}).get("nodeName") != node:
+                continue
+            pods[pod_name] = str(item_meta.get("uid") or "")
+        return pods
+
+    async def _cleanup_node_debug_pods(
+        self, ops: WriteOps, namespace: str, node: str, before: dict[str, str] | None
+    ) -> str:
+        """Delete debugger pods the shell created; returns the audit note."""
+        after = await self._list_node_debugger_pods(namespace, node)
+        if after is None:
+            self.notify(
+                f"Could not list pods in {namespace} for cleanup — check the"
+                f" namespace for leftover node-debugger pods for {node}",
+                severity="warning",
+            )
+            return "cleanup skipped: pod listing failed"
+        known = set(before or {})
+        new = {name: uid for name, uid in after.items() if name not in known}
+        if not new:
+            return "cleanup: no debug pod found"
+        pods_meta = self.aliases.get("pods")
+        if pods_meta is None:
+            self.notify(
+                f"Cannot delete debug pod(s) {', '.join(sorted(new))} — remove them manually",
+                severity="warning",
+            )
+            return f"cleanup failed for: {', '.join(sorted(new))}"
+        failed: list[str] = []
+        for pod_name, uid in new.items():
+            try:
+                await ops.delete_object(pods_meta, namespace, pod_name, uid=uid or None)
+            except Exception:
+                logger.exception("node-debugger pod deletion failed")
+                failed.append(pod_name)
+        if failed:
+            self.notify(
+                f"Failed to delete debug pod(s): {', '.join(sorted(failed))}"
+                f" in {namespace} — remove them manually",
+                severity="warning",
+            )
+            return f"cleanup failed for: {', '.join(sorted(failed))}"
+        return f"cleanup: deleted {len(new)} debug pod(s)"
+
+    @staticmethod
+    def _audit_node_shell(audit: AuditLog, node: str, detail: str, outcome: str) -> None:
+        audit.append(
+            action="node-shell",
+            kind="nodes",
+            group="",  # nodes are core/v1
+            version="v1",
+            namespace=None,
+            name=node,
+            detail=detail,
+            outcome=outcome,
+        )
 
     async def action_operator_install(self) -> None:
         """I: on the operator catalog, install the selected package (wizard,

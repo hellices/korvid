@@ -39,6 +39,11 @@ class KorvidConfig:
     #: a deliberate restriction (only default/custom images are offered).
     debug_default_image: str | None = None
     debug_images: dict[str, str] | None = None
+    #: node shell overrides (issue #46): the `kubectl debug node/` image
+    #: (air-gapped clusters) and the namespace the debug pod is created in
+    #: (clusters whose default namespace blocks privileged pods via PSA).
+    node_shell_image: str | None = None
+    node_shell_namespace: str | None = None
 
 
 def load_config(path: Path | None = None) -> KorvidConfig:
@@ -70,6 +75,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     logs_raw: dict[str, Any] = logs_value if isinstance(logs_value, dict) else {}
     debug_value = raw.get("debug")
     debug_raw: dict[str, Any] = debug_value if isinstance(debug_value, dict) else {}
+    node_shell_value = raw.get("node_shell")
+    node_shell_raw: dict[str, Any] = node_shell_value if isinstance(node_shell_value, dict) else {}
     images_value = debug_raw.get("images")
     debug_images: dict[str, str] | None
     if "images" not in debug_raw:
@@ -103,6 +110,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         mcp_port=_parse_port(mcp_raw.get("port")),
         debug_default_image=_opt_str(debug_raw.get("default_image")),
         debug_images=debug_images,
+        node_shell_image=_opt_str(node_shell_raw.get("image")),
+        node_shell_namespace=_opt_str(node_shell_raw.get("namespace")),
     )
 
 

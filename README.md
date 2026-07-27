@@ -29,6 +29,7 @@ PDB-aware impact plan; `--readonly` disables them all.
 | `0` | global | Toggle all-namespaces view |
 | `d` | table | Describe selected resource (manifest + events) |
 | `s` | pods table | Shell into selected pod (`kubectl exec`; offers `kubectl debug` fallback for distroless images) |
+| `s` | nodes table | Node shell (`kubectl debug node/`; approval dialog — privileged pod with the host filesystem at `/host`, deleted on exit) |
 | `l` | pods table | Open / close log pane for selected pod |
 | `L` | pods table | Merge logs of all currently filtered pods (up to 8) |
 | `f` | log pane | Toggle JSON-formatted / raw display |
@@ -206,6 +207,26 @@ debug:
   images:
     jvm: registry.corp.local/tools/debug-jvm:latest
     python: registry.corp.local/tools/debug-python:latest
+```
+
+## Node shell
+
+`s` on the nodes view opens a debug shell on the selected node via
+`kubectl debug node/<name>`.  Because that creates a privileged pod with the
+node's filesystem mounted at `/host`, it always passes the approval gate with
+the privilege escalation stated explicitly, and the whole action is
+audit-logged fail-closed like every other write.  The `node-debugger-…` pod
+kubectl creates is deleted automatically when the shell exits (a warning
+tells you where to look if the cleanup fails).
+
+The image and the namespace the debug pod is created in are configurable —
+useful for air-gapped clusters and for clusters whose `default` namespace
+blocks privileged pods via PodSecurity admission:
+
+```yaml
+node_shell:
+  image: registry.corp.local/tools/busybox:1.36
+  namespace: node-debug
 ```
 
 ## AI agent
