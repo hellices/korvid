@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,7 +31,7 @@ from textual.events import Key
 from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Static
 from textual.widgets.data_table import CellDoesNotExist
-from textual.worker import Worker
+from textual.worker import Worker, get_current_worker
 
 from korvid.agent.events import AgentError
 from korvid.agent.mcp_server import MCPController
@@ -50,6 +52,13 @@ from korvid.core.filters import ResourceFilter, parse_filter
 from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
+from korvid.core.portforward import (
+    ForwardRecord,
+    ForwardRegistry,
+    ForwardSpec,
+    candidate_remote_ports,
+    controller_owner,
+)
 from korvid.core.secrets import mask_secret_manifest
 from korvid.core.sorting import SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -78,6 +87,7 @@ from korvid.k8s.olm import (
     package_install_facts,
     resolve_olm_meta,
 )
+from korvid.k8s.portforward import FORWARDABLE_KINDS, forward_target_gvr
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.ui.command import command_help
@@ -116,6 +126,7 @@ from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
 from korvid.ui.widgets.pick_screen import PickScreen
+from korvid.ui.widgets.port_forward_screen import ForwardListScreen, PortForwardScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.secret_screen import SecretScreen
@@ -129,6 +140,13 @@ _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
 }
 
 logger = logging.getLogger(__name__)
+
+#: How often the app polls the forward registry for dead kubectl processes.
+_FORWARD_POLL_SECONDS = 2.0
+
+#: How long to wait for kubectl's readiness line before the start is failed
+#: explicitly — the silent child is terminated, never assumed to be ready.
+_FORWARD_READY_SECONDS = 5.0
 
 _MAX_MULTI_STREAM_PODS = 8
 # ``l`` accumulates side-by-side pod logs; beyond 4 pods each panel gets too
@@ -400,6 +418,9 @@ class KorvidApp(App[None]):
         Binding("e", "edit_resource", "Edit", show=False, id="edit_resource"),
         Binding("i", "hint_details", "Hint details", show=False, id="hint_details"),
         Binding("I", "operator_install", "Install/Approve", show=False, id="operator_install"),
+        # Real terminals deliver Shift+F as "F" (see shift+l above).
+        Binding("shift+f", "port_forward", "Port-forward", show=False, id="port_forward"),
+        Binding("F", "port_forward", "Port-forward", show=False, id="port_forward--alt"),
         # Node ops (issue #40): cordon / uncordon / drain, nodes view only.
         Binding("c", "cordon_node", "Cordon", show=False, id="cordon_node"),
         Binding("u", "uncordon_node", "Uncordon", show=False, id="uncordon_node"),
@@ -453,6 +474,7 @@ class KorvidApp(App[None]):
         edit_text: Callable[[str], Awaitable[str | None]] | None = None,
         metrics: MetricsPoller | None = None,
         pod_resize_supported: bool = False,
+        forwards: ForwardRegistry | None = None,
         provider_hint: str | None = None,
         open_pod_exec: Callable[..., contextlib.AbstractAsyncContextManager[Any]] | None = None,
     ) -> None:
@@ -470,6 +492,41 @@ class KorvidApp(App[None]):
         self._mcp = mcp
         self._edit_text = edit_text
         self._metrics = metrics
+        self._forwards = forwards
+        self._broken_forwards: set[int] = set()
+        #: FIFO of pending forward audit entries; a single drainer preserves
+        #: event order (start before stop) that per-entry workers would not.
+        self._forward_audit_queue: deque[dict[str, Any]] = deque()
+        self._forward_audit_worker: Worker[None] | None = None
+        #: forward id -> its in-flight readiness confirmations, oldest first
+        #: (a re-attach may add a new generation while a superseded one is
+        #: still waiting; the last entry is the current generation). A stop
+        #: audit for such a record is serialized behind every outstanding
+        #: confirmation so each start entry always reaches the log first.
+        self._confirming_forwards: dict[int, list[Worker[None]]] = {}
+        #: forward id -> the current-generation confirmation worker. An
+        #: explicit token, not the pending list's tail: a finished current
+        #: generation removes its token, and a still-pending superseded
+        #: worker must never be promoted back to "current" by that.
+        self._current_confirmations: dict[int, Worker[None]] = {}
+        #: launches whose registry.start() may still be off-loop, keyed by
+        #: their spec. Teardown awaits them (and stop audits / poll toasts
+        #: for the same local port defer behind them) so a quit, stop, or
+        #: poll landing between the registry publishing a record and the
+        #: launch coroutine resuming can never audit a stop before its start
+        #: or double-report the launch's failure.
+        self._launching_forwards: dict[Worker[None], ForwardSpec] = {}
+        #: re-attaches whose registry.reattach() may still be off-loop,
+        #: keyed by their spec — same contract as _launching_forwards; the
+        #: event resolves when the re-attach coroutine has landed its
+        #: tracking (or its audit fallback).
+        self._reattaching_forwards: dict[asyncio.Event, ForwardSpec] = {}
+        #: set by _teardown_forwards: audits enqueue directly (the teardown
+        #: flush drains them) since no new workers may spawn mid-shutdown.
+        self._forwards_closing = False
+        #: stops deferred behind a pending confirmation, keyed by forward id;
+        #: teardown flushes leftovers so a cancelled worker can't lose them.
+        self._deferred_stop_audits: dict[int, ForwardSpec] = {}
         #: pods/resize subresource discovered on the connected cluster
         #: (1.35 GA); gates the R keybinding and the resize agent tool.
         self._pod_resize_supported = pod_resize_supported
@@ -634,6 +691,10 @@ class KorvidApp(App[None]):
         log_pane = self.query_one(LogPane)
         log_pane.wrap_lines = self.config.log_wrap
         log_pane.show_timestamps = self.config.log_timestamps
+        if self._forwards is not None:
+            # Liveness is the point of tracked forwards (issue #38): a toast
+            # must fire when one breaks even while :pf is closed.
+            self.set_interval(_FORWARD_POLL_SECONDS, self._poll_forwards)
         self._prefetch_namespaces()
 
         # Both callbacks fire from watch tasks on the same loop; post_message is
@@ -1324,6 +1385,9 @@ class KorvidApp(App[None]):
         if head == "mcp":
             self._handle_mcp_command(parts[1:])
             return
+        if head == "pf":
+            self._open_forward_list()
+            return
         if head == "operators" and "operators" not in self.aliases:
             # The catalog view only exists where OLM serves PackageManifests;
             # explain the absence instead of a generic unknown-kind error.
@@ -1502,6 +1566,548 @@ class KorvidApp(App[None]):
             return
 
         self._run_shell(namespace, name, containers[0] if containers else None)
+
+    async def action_port_forward(self) -> None:
+        """Open the port-forward dialog for the selected pod or service (shift+f)."""
+        if self.current_kind not in FORWARDABLE_KINDS:
+            self.notify("Port-forward is only available for pods and services", severity="warning")
+            return
+        if self._forwards is None:
+            self.notify("Port-forward unavailable in this build", severity="warning")
+            return
+        if shutil.which("kubectl") is None:
+            self.notify(
+                "kubectl not found on PATH — port-forward requires kubectl", severity="error"
+            )
+            return
+        ns, name = self._selected_ns_name()
+        if ns is None or name is None:
+            return
+        kind = self.current_kind
+        ports, manifest_ok = await self._forward_prefill_ports(kind, ns, name)
+        if kind == "services" and manifest_ok and not ports:
+            # A fetched Service with no TCP ports can never be forwarded —
+            # kubectl port-forward is TCP-only. (A failed fetch still opens
+            # the dialog: the port list is a convenience, not the source of
+            # truth, and kubectl gives the authoritative error.)
+            self.notify(
+                f"{name} declares no TCP ports — kubectl port-forward is TCP-only",
+                severity="error",
+            )
+            return
+
+        def _on_result(result: tuple[int, int] | None) -> None:
+            if result is not None:
+                self.run_worker(
+                    self._start_forward(kind, ns, name, local_port=result[0], remote_port=result[1])
+                )
+
+        await self.push_screen(
+            PortForwardScreen(f"{kind}/{ns}/{name}", ports, restrict_remote=kind == "services"),
+            _on_result,
+        )
+
+    async def _forward_prefill_ports(
+        self, kind: str, namespace: str, name: str
+    ) -> tuple[list[int], bool]:
+        """Declared TCP ports for the forward dialog, plus fetch success.
+
+        The success flag lets the caller tell "no TCP ports declared"
+        (reject a Service up front) apart from "manifest unavailable"
+        (open the dialog unrestricted — kubectl has the final say).
+        """
+        if self._get_manifest is None:
+            return [], False
+        try:
+            manifest = await self._get_manifest(kind, namespace, name)
+        except Exception as exc:  # prefill is a convenience — dialog works without it
+            logger.debug("manifest fetch for port prefill failed: %s", exc)
+            return [], False
+        return candidate_remote_ports(kind, manifest), True
+
+    #: Pod controller kinds a re-attach can follow, mapped to their plural.
+    #: ReplicaSets are chased one level up so the forward survives rollouts,
+    #: not just single pod replacements.
+    _WORKLOAD_PLURALS: ClassVar[dict[str, str]] = {
+        "Deployment": "deployments",
+        "ReplicaSet": "replicasets",
+        "ReplicationController": "replicationcontrollers",
+        "StatefulSet": "statefulsets",
+        "DaemonSet": "daemonsets",
+        "Job": "jobs",
+    }
+
+    async def _resolve_forward_workload(self, namespace: str, name: str) -> str | None:
+        """The pod's owning workload as ``"<plural>/<name>"``, best effort.
+
+        Captured when a forward starts so a later re-attach can follow the
+        pod to its replacement (issue #38). ReplicaSets are resolved to their
+        Deployment when they have one. Any failure yields None — the forward
+        still works, only the follow-the-workload re-attach is unavailable.
+        """
+        if self._get_manifest is None:
+            return None
+        try:
+            owner = controller_owner(await self._get_manifest("pods", namespace, name))
+        except Exception as exc:  # a convenience — never blocks the forward
+            logger.debug("workload resolution for port-forward failed: %s", exc)
+            return None
+        if owner is not None and owner[0] == "ReplicaSet":
+            # A failed chase (e.g. discovery has not learned replicasets yet)
+            # keeps the ReplicaSet as the fallback target — the parent lookup
+            # improves the target to a Deployment, it is not required.
+            try:
+                parent = controller_owner(
+                    await self._get_manifest("replicasets", namespace, owner[1])
+                )
+            except Exception as exc:
+                logger.debug("deployment lookup failed; keeping replicaset owner: %s", exc)
+                parent = None
+            if parent is not None and parent[0] == "Deployment":
+                owner = parent
+        if owner is None:
+            return None
+        plural = self._WORKLOAD_PLURALS.get(owner[0])
+        return f"{plural}/{owner[1]}" if plural is not None else None
+
+    async def _start_forward(
+        self, kind: str, namespace: str, name: str, *, local_port: int, remote_port: int
+    ) -> None:
+        """Spawn a forward from the registry, audit it, and confirm to the user."""
+        registry = self._forwards
+        if registry is None:  # pragma: no cover - action guard already checked
+            return
+        workload = await self._resolve_forward_workload(namespace, name) if kind == "pods" else None
+        spec = ForwardSpec(
+            kind=kind,
+            namespace=namespace,
+            name=name,
+            local_port=local_port,
+            remote_port=remote_port,
+            workload=workload,
+        )
+        worker = get_current_worker()
+        self._launching_forwards[worker] = spec
+        try:
+            # Off the event loop: reclaiming the local port may block briefly
+            # on reaping a previously stopped child that ignored SIGTERM.
+            record = await asyncio.to_thread(registry.start, spec)
+        except (OSError, ValueError) as exc:
+            # OSError: spawn failed (kubectl missing). ValueError: local
+            # port collision detected up front by the registry, or a spawn
+            # that lost the race against teardown (registry shut down).
+            if not self._forwards_closing:
+                self.notify(f"Port-forward failed to start: {exc}", severity="error")
+            self._audit_forward_shutdown_safe("port-forward-start", spec, outcome=f"error: {exc}")
+            return
+        except asyncio.CancelledError:
+            # Shutdown cancelled the launch mid-spawn — the start must still
+            # reach the log before any teardown stop entry (enqueue
+            # directly: no new workers during shutdown).
+            if self._audit is not None:
+                self._enqueue_forward_audit(
+                    "port-forward-start", spec, outcome="stopped before ready"
+                )
+            raise
+        finally:
+            self._launching_forwards.pop(worker, None)
+        if self._forwards_closing or registry.get(record.id) is None:
+            # A quit or stop won the race between the registry publishing
+            # the record and this coroutine resuming: no confirmation may
+            # spawn (shutdown) or would ever resolve (record gone) — audit
+            # the start here so its stop entry never reaches the log first.
+            self._audit_forward_shutdown_safe(
+                "port-forward-start", spec, outcome="stopped before ready"
+            )
+            return
+        # Popen returning only proves the child exists — success is reported
+        # after kubectl confirms the listener (or fails the bind/RBAC check).
+        self._track_confirmation(record)
+
+    async def _spawn_reattach(
+        self, registry: ForwardRegistry, record: ForwardRecord, *, retarget: bool = False
+    ) -> ForwardRecord | None:
+        """Re-attach off-loop while teardown (and stops) can see and await it.
+
+        With ``retarget`` the replacement follows the spec's recorded owning
+        workload instead of the vanished pod (issue #38).
+
+        Mirrors `_start_forward`'s tracking: between the registry adopting
+        the replacement in its thread and this coroutine resuming, a quit or
+        stop must defer behind this event so the replacement's start entry
+        always reaches the audit log before any stop entry.
+        """
+        done = asyncio.Event()
+        # The in-flight kubectl targets the retargeted spec — tracking and
+        # the cancellation audit must name that GVR, not the vanished pod.
+        attempted = (record.spec.retargeted() if retarget else None) or record.spec
+        self._reattaching_forwards[done] = attempted
+        try:
+            revived = await asyncio.to_thread(
+                functools.partial(registry.reattach, record.id, retarget=retarget)
+            )
+        except asyncio.CancelledError:
+            # Shutdown cancelled the re-attach mid-spawn. The registry only
+            # adopts a replacement while it is still open, so if one was (or
+            # will be) adopted, its start must reach the log before the
+            # teardown stop entries (enqueue directly: no new workers now).
+            if self._audit is not None:
+                self._enqueue_forward_audit(
+                    "port-forward-start", attempted, outcome="stopped before ready"
+                )
+            raise
+        finally:
+            self._reattaching_forwards.pop(done, None)
+            done.set()
+        if revived is None:
+            # Never adopted (broken no more, stopped, or torn down mid-spawn)
+            # — no replacement started, so there is nothing to report.
+            return None
+        if self._forwards_closing or registry.get(revived.id) is None:
+            # A quit or stop won the race between the adoption and this
+            # coroutine resuming: no confirmation may spawn (shutdown) or
+            # would ever resolve (record gone) — audit the start here so its
+            # stop entry never reaches the log first.
+            self._audit_forward_shutdown_safe(
+                "port-forward-start", revived.spec, outcome="stopped before ready"
+            )
+            return revived
+        # Re-arm the broken toast right away: waiting for the next global
+        # poll would silently swallow a breakage of the fresh process.
+        self._broken_forwards.discard(revived.id)
+        # Same readiness handshake as a fresh start (issue #38 review).
+        self._track_confirmation(revived, reattached=True)
+        return revived
+
+    def _audit_forward_shutdown_safe(self, action: str, spec: ForwardSpec, *, outcome: str) -> None:
+        """Audit a forward event without spawning workers once teardown began.
+
+        The teardown flush drains directly-enqueued entries, so nothing is
+        lost — outside of teardown this is a plain `_audit_forward` call.
+        """
+        if not self._forwards_closing:
+            self._audit_forward(action, spec, outcome=outcome)
+            return
+        if self._audit is not None:
+            self._enqueue_forward_audit(action, spec, outcome=outcome)
+
+    async def _confirm_forward(self, record: ForwardRecord, *, reattached: bool = False) -> None:
+        """Toast and audit a forward start only once kubectl signals ready.
+
+        An exit before the ready line is a failed start: the record is
+        dropped (fresh starts only — a failed re-attach stays listed as
+        broken for another try) and kubectl's last words become the error.
+        """
+        registry = self._forwards
+        if registry is None:  # pragma: no cover - callers hold a registry
+            return
+        spec = record.spec
+        worker = get_current_worker()
+        try:
+            # Snapshot before waiting: a re-attach during the wait bumps the
+            # generation, and the abort below must never hit the replacement.
+            generation = registry.generation(record.id)
+            status = await asyncio.to_thread(
+                registry.wait_ready, record.id, timeout=_FORWARD_READY_SECONDS
+            )
+            if status == "superseded" or self._current_confirmation(record.id) is not worker:
+                # A re-attach superseded this confirmation: the record was
+                # re-armed in place, so ``status`` (and everything on the
+                # record) may describe the replacement process — nothing
+                # observed here may be toasted, audited, or failed as this
+                # generation's result. The registry reports the supersession
+                # itself because the woken waiter can resume before the
+                # re-attach publishes the replacement's confirmation token.
+                self._audit_forward("port-forward-start", spec, outcome="superseded by re-attach")
+                return
+            if registry.get(record.id) is None:
+                # The user stopped the still-starting forward from :pf. Its
+                # deferred stop entry is queued behind this confirmation, so
+                # the start still reaches the audit log first — and a
+                # "failed to start" toast would be wrong for a deliberate stop.
+                self._audit_forward("port-forward-start", spec, outcome="stopped before ready")
+                return
+            if status != "alive":
+                self._report_failed_forward_start(
+                    registry, record, status, reattached=reattached, generation=generation
+                )
+                return
+            self._report_forward_ready(record, reattached=reattached)
+        except asyncio.CancelledError:
+            # Shutdown cancelled the confirmation mid-handshake — the start
+            # must still reach the log before its teardown stop entry
+            # (enqueue directly: no new workers during shutdown).
+            if self._audit is not None:
+                self._enqueue_forward_audit(
+                    "port-forward-start", spec, outcome="stopped before ready"
+                )
+            raise
+        finally:
+            # Drop only this generation's entry, and only once its start
+            # audit is enqueued (above) — stops defer behind every
+            # outstanding confirmation, so a superseded generation must stay
+            # tracked until its entry cannot land after a stop anymore.
+            self._untrack_confirmation(record.id, worker)
+
+    def _untrack_confirmation(self, forward_id: int, worker: Worker[None]) -> None:
+        """Remove one finished confirmation generation from the tracking maps."""
+        entries = self._confirming_forwards.get(forward_id)
+        if entries is not None:
+            with contextlib.suppress(ValueError):
+                entries.remove(worker)
+            if not entries:
+                del self._confirming_forwards[forward_id]
+        # Only the current generation clears its own token — a superseded
+        # worker leaving must not disturb the replacement's marker.
+        if self._current_confirmations.get(forward_id) is worker:
+            del self._current_confirmations[forward_id]
+
+    def _track_confirmation(self, record: ForwardRecord, *, reattached: bool = False) -> None:
+        """Spawn a readiness confirmation and register it as the current one."""
+        worker = self.run_worker(self._confirm_forward(record, reattached=reattached))
+        self._confirming_forwards.setdefault(record.id, []).append(worker)
+        self._current_confirmations[record.id] = worker
+
+    def _current_confirmation(self, forward_id: int) -> Worker[None] | None:
+        """The forward's current-generation confirmation worker, if any."""
+        return self._current_confirmations.get(forward_id)
+
+    def _report_forward_ready(self, record: ForwardRecord, *, reattached: bool) -> None:
+        """Toast and audit a confirmed forward (fresh start or re-attach)."""
+        spec = record.spec
+        if reattached:
+            self._audit_forward("port-forward-start", spec, outcome="reattached")
+            self.notify(f"Re-attached forward localhost:{spec.local_port}")
+            return
+        self._audit_forward("port-forward-start", spec)
+        self.notify(
+            f"Forwarding localhost:{spec.local_port} → "
+            f"{spec.namespace}/{spec.name}:{spec.remote_port}"
+        )
+
+    def _report_failed_forward_start(
+        self,
+        registry: ForwardRegistry,
+        record: ForwardRecord,
+        status: str,
+        *,
+        reattached: bool,
+        generation: int | None = None,
+    ) -> None:
+        """Handle a readiness handshake that did not end in ``alive``.
+
+        A ``starting`` result means kubectl stayed silent through the wait
+        window: readiness was never confirmed and liveness polling could not
+        correct a false success later (it only detects exits), so the forward
+        is failed explicitly instead of reported ready on a guess. The caller
+        already verified this confirmation is the record's current one.
+
+        ``status`` is only a timeout snapshot: the abort itself is the
+        registry's atomic compare-and-transition, whose returned outcome says
+        exactly what happened — a readiness line that landed after the
+        snapshot (``alive``) is reported as the success it is, a re-attach
+        that raced the snapshot (``superseded``) keeps its replacement and
+        only audits the supersession, and a stop that unlisted the record
+        (``gone``) stands as the deliberate outcome it was.
+        """
+        spec = record.spec
+        outcome = registry.fail_start(record.id, keep=reattached, generation=generation)
+        if outcome == "alive":
+            # The handshake resolved between the wait snapshot and the abort.
+            self._report_forward_ready(record, reattached=reattached)
+            return
+        if outcome == "superseded":
+            # A re-attach adopted a replacement while this confirmation timed
+            # out — the replacement reports its own fate; this generation
+            # only records that it was superseded.
+            self._audit_forward("port-forward-start", spec, outcome="superseded by re-attach")
+            return
+        if outcome == "gone":  # stopped from :pf (or torn down) in the same window
+            self._audit_forward("port-forward-start", spec, outcome="stopped before ready")
+            return
+        if status == "starting":
+            detail = f"kubectl did not confirm the forward within {_FORWARD_READY_SECONDS:g}s"
+        else:
+            detail = record.last_output or "kubectl exited before the forward was ready"
+        if reattached:
+            # A failed re-attach stays listed as broken for another try. Mark
+            # the breakage as already reported: the specific error toasted
+            # below must not be followed by the poll's generic broken toast.
+            self._broken_forwards.add(record.id)
+        self.notify(f"Port-forward failed to start: {detail}", severity="error")
+        self._audit_forward("port-forward-start", spec, outcome=f"error: {detail}")
+
+    async def _audit_stop_after_confirm(
+        self, pending: list[Worker[None] | asyncio.Event], forward_id: int
+    ) -> None:
+        """Audit a stop only after every outstanding confirmation resolved.
+
+        A superseded generation may still be waiting alongside the current
+        one — each enqueues its own start entry, so the stop must defer
+        behind all of them (in-flight launches and re-attaches included).
+        The spec lives in `_deferred_stop_audits`
+        (popped here on success) so that a shutdown cancelling this worker
+        cannot lose the entry — teardown flushes whatever is left after the
+        confirmations settle.
+        """
+        for confirm in pending:
+            with contextlib.suppress(Exception):  # a cancelled confirm still frees the stop
+                await confirm.wait()
+        spec = self._deferred_stop_audits.pop(forward_id, None)
+        if spec is not None:
+            self._audit_forward("port-forward-stop", spec)
+
+    def _audit_forward(self, action: str, spec: ForwardSpec, *, outcome: str = "success") -> None:
+        """Queue a forward audit entry; a single worker drains in FIFO order."""
+        if self._audit is None:
+            # Forwards are read-only risk profile (issue #38): they stay
+            # usable without an audit sink, unlike cluster writes.
+            return
+        self._enqueue_forward_audit(action, spec, outcome=outcome)
+        worker = self._forward_audit_worker
+        if worker is None or worker.is_finished:
+            self._forward_audit_worker = self.run_worker(self._drain_forward_audits())
+
+    def _enqueue_forward_audit(
+        self, action: str, spec: ForwardSpec, *, outcome: str = "success", teardown: bool = False
+    ) -> None:
+        detail = f"localhost:{spec.local_port} -> {spec.name}:{spec.remote_port}"
+        if teardown:
+            detail += " (session teardown)"
+        # Full GVR: a retargeted forward runs against an apps/batch workload,
+        # and the audit schema disambiguates kinds by group (core/audit.py).
+        group, version = forward_target_gvr(spec.kind)
+        self._forward_audit_queue.append(
+            {
+                "action": action,
+                "kind": spec.kind,
+                "namespace": spec.namespace,
+                "name": spec.name,
+                "group": group,
+                "version": version,
+                "detail": detail,
+                "outcome": outcome,
+            }
+        )
+
+    async def _drain_forward_audits(self) -> None:
+        """Write queued forward audit entries strictly in enqueue order.
+
+        All queue operations happen on the event loop (single consumer), so
+        a quick start → Ctrl-D can never land in the log reversed. Entries
+        are popped only after the append so a cancelled drain leaves them
+        for the unmount flush — a rare duplicate beats a lost record.
+        Append failures are best-effort by design (read-only risk profile):
+        a full disk must not kill the app or block the forward.
+        """
+        audit = self._audit
+        if audit is None:
+            return
+        while self._forward_audit_queue:
+            entry = self._forward_audit_queue[0]
+            try:
+                await asyncio.to_thread(audit.append, **entry)
+            except OSError as exc:
+                logger.warning("forward audit (%s) failed: %s", entry["action"], exc)
+            self._forward_audit_queue.popleft()
+
+    def _open_forward_list(self) -> None:
+        """`:pf` — the active-forwards screen with stop / re-attach keys."""
+        if self._forwards is None:
+            self.notify("Port-forward unavailable in this build", severity="warning")
+            return
+        registry = self._forwards
+
+        def _on_stop(record: ForwardRecord) -> None:
+            # A stopped broken forward will never poll alive again — drop its
+            # id so the broken set does not grow for the session's lifetime.
+            self._broken_forwards.discard(record.id)
+            # In-flight launches and re-attaches on this record's local port
+            # count as pending too: a stop landing in the window between the
+            # registry publishing (or adopting) a record and its coroutine
+            # resuming has no confirmation to defer behind yet. Other ports'
+            # launches are unrelated and must not delay this stop's entry.
+            port = record.spec.local_port
+            pending: list[Worker[None] | asyncio.Event] = [
+                *(w for w, spec in self._launching_forwards.items() if spec.local_port == port),
+                *(e for e, spec in self._reattaching_forwards.items() if spec.local_port == port),
+                *self._confirming_forwards.get(record.id, ()),
+            ]
+            if not pending:
+                self._audit_forward("port-forward-stop", record.spec)
+            else:
+                # Start entries are only enqueued as the readiness
+                # confirmations resolve — queue this stop behind all of them
+                # so the log never shows a stop before any of its starts.
+                self._deferred_stop_audits[record.id] = record.spec
+                self.run_worker(self._audit_stop_after_confirm(pending, record.id))
+            self.notify(f"Stopped forward localhost:{record.spec.local_port}")
+
+        def _on_reattach_error(spec: ForwardSpec, exc: Exception) -> None:
+            self._audit_forward("port-forward-start", spec, outcome=f"error: {exc}")
+
+        async def _reattach(record: ForwardRecord, retarget: bool) -> ForwardRecord | None:
+            return await self._spawn_reattach(registry, record, retarget=retarget)
+
+        async def _target_exists(record: ForwardRecord) -> bool:
+            # Only a confirmed 404 blocks the re-attach; when the target
+            # cannot be verified (no fetcher, transport or transient errors)
+            # it fails open and lets kubectl report the truth.
+            if self._get_manifest is None:
+                return True
+            spec = record.spec
+            try:
+                await self._get_manifest(spec.kind, spec.namespace, spec.name)
+            except ApiStatusError as exc:
+                return exc.status != 404
+            except Exception as exc:  # verification is best-effort by design
+                logger.debug("re-attach target check failed: %s", exc)
+                return True
+            return True
+
+        self.push_screen(
+            ForwardListScreen(
+                self._forwards,
+                on_stop=_on_stop,
+                reattach=_reattach,
+                on_reattach_error=_on_reattach_error,
+                target_exists=_target_exists,
+            )
+        )
+
+    def _poll_forwards(self) -> None:
+        """Flag newly broken forwards with a toast (once per breakage)."""
+        registry = self._forwards
+        if registry is None:  # pragma: no cover - interval only set when present
+            return
+        registry.refresh()
+        launching_ports = {
+            spec.local_port
+            for spec in (*self._launching_forwards.values(), *self._reattaching_forwards.values())
+        }
+        for record in registry.forwards():
+            if record.status == "broken" and record.id not in self._broken_forwards:
+                if (
+                    record.id in self._current_confirmations
+                    or record.spec.local_port in launching_ports
+                ):
+                    # A readiness confirmation — tracked, or still being
+                    # installed by an in-flight launch or re-attach on this
+                    # record's local port — is about to report this exact
+                    # failure with its specific error; the generic breakage
+                    # toast must not double it. Other ports' launches are
+                    # unrelated and never defer this record's toast.
+                    continue
+                self._broken_forwards.add(record.id)
+                self.notify(
+                    f"Port-forward localhost:{record.spec.local_port} ->"
+                    f" {record.spec.namespace}/{record.spec.name} broken"
+                    " (target gone?) — :pf to re-attach",
+                    severity="warning",
+                )
+            elif record.status == "alive":
+                # Re-attached: arm the toast again for the next breakage.
+                self._broken_forwards.discard(record.id)
 
     @staticmethod
     def _run_interactive(argv: list[str], banner: str) -> int:
@@ -4858,6 +5464,41 @@ class KorvidApp(App[None]):
         empty.update(Text(message))
         empty.display = True
 
+    async def _teardown_forwards(self, registry: ForwardRegistry) -> None:
+        """Stop every forward at app exit and audit each stop in order.
+
+        Session-scoped by design (issue #38): forwards never outlive the
+        app that started them. stop_all() polls synchronously up to the
+        grace deadline — kept off the closing event loop. It also releases
+        any handshake waiters, so in-flight readiness confirmations resolve
+        promptly; they are awaited before the stops are enqueued so an exit
+        during startup still logs the start entry first (never a stop-only
+        or reversed trail).
+        """
+        self._forwards_closing = True
+        # Launches and re-attaches whose spawn is still off-loop must land
+        # (and enqueue their start entries) before any stop below is recorded.
+        for launch in list(self._launching_forwards):
+            with contextlib.suppress(Exception):
+                await launch.wait()
+        for done in list(self._reattaching_forwards):
+            with contextlib.suppress(Exception):
+                await done.wait()
+        records = await asyncio.to_thread(registry.stop_all)
+        for confirm in [w for workers in self._confirming_forwards.values() for w in workers]:
+            with contextlib.suppress(Exception):
+                await confirm.wait()
+        # User stops whose deferred audit worker never got to run (shutdown
+        # cancels workers): their start entries are enqueued by now, so
+        # flushing here keeps the order — user stops, then teardown stops.
+        for spec in self._deferred_stop_audits.values():
+            if self._audit is not None:
+                self._enqueue_forward_audit("port-forward-stop", spec)
+        self._deferred_stop_audits.clear()
+        for record in records:
+            if self._audit is not None:
+                self._enqueue_forward_audit("port-forward-stop", record.spec, teardown=True)
+
     async def on_unmount(self) -> None:
         # Cancel any active log stream tasks before the event loop shuts down.
         if self._ns_prefetch_task is not None:
@@ -4875,6 +5516,16 @@ class KorvidApp(App[None]):
         self._log_tasks.clear()
         if self._metrics is not None:
             await self._metrics.stop()
+        if self._forwards is not None:
+            await self._teardown_forwards(self._forwards)
+        # Flush pending forward audits (e.g. a Ctrl-D pressed right before
+        # quit) so no queued entry is lost: let a mid-drain worker finish,
+        # then drain the remainder directly — workers won't run past here.
+        worker = self._forward_audit_worker
+        if worker is not None and not worker.is_finished:
+            with contextlib.suppress(Exception):
+                await worker.wait()
+        await self._drain_forward_audits()
         await self.watch_manager.stop_all()
 
 
