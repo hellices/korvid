@@ -16,6 +16,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+from korvid.agent.context import cluster_context_note
 from korvid.agent.mcp_server import KorvidMCPServer, MCPController, default_endpoint_path
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
@@ -33,6 +34,7 @@ from korvid.core.config import DEFAULT_CONFIG_PATH, KorvidConfig, load_config, s
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.client import KubeClient, resolve_context_name
+from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.metrics import MetricsPoller
@@ -222,12 +224,24 @@ async def _probe_pod_resize(kube: KubeClient, *, readonly: bool = False) -> bool
         return False
 
 
+async def _probe_cloud_provider(kube: KubeClient) -> ProviderInfo:
+    """Bounded cloud-provider detection at startup (issue #30). Detection is a
+    hint — a slow or unresponsive node list answers "unknown" rather than
+    delaying the TUI (same policy as the resize probe)."""
+    try:
+        return await asyncio.wait_for(kube.detect_cloud_provider(), _RESIZE_PROBE_TIMEOUT)
+    except TimeoutError:
+        logger.warning("cloud provider detection timed out; provider unknown")
+        return detect_provider([])
+
+
 def _build_agent_wiring(
     config: KorvidConfig,
     kube: KubeClient,
     aliases: dict[str, ResourceMeta],
     *,
     pod_resize_supported: bool = False,
+    cluster_context: str | None = None,
 ) -> tuple[
     AgentRuntime | None,
     ProviderConfigurator,
@@ -257,7 +271,12 @@ def _build_agent_wiring(
         oauth_token=oauth,
     )
     agent_runtime = (
-        AgentRuntime(provider, ToolExecutor(kube, aliases, ui=ui_proxy), tools=agent_tools)
+        AgentRuntime(
+            provider,
+            ToolExecutor(kube, aliases, ui=ui_proxy),
+            tools=agent_tools,
+            cluster_context=cluster_context,
+        )
         if provider
         else None
     )
@@ -296,7 +315,10 @@ def _build_agent_wiring(
         if new_provider is None:
             return None
         return AgentRuntime(
-            new_provider, ToolExecutor(kube, aliases, ui=ui_proxy), tools=agent_tools
+            new_provider,
+            ToolExecutor(kube, aliases, ui=ui_proxy),
+            tools=agent_tools,
+            cluster_context=cluster_context,
         )
 
     return agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy
@@ -426,8 +448,16 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
     # whether the agent is offered the resize tool (issue #27).
     pod_resize_supported = await _probe_pod_resize(kube, readonly=config.readonly)
 
+    # Detect the cloud provider once per connection (issue #30): it grounds
+    # the agent system prompt and the Service/Ingress describe footer.
+    provider_info = await _probe_cloud_provider(kube)
+
     agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy = _build_agent_wiring(
-        config, kube, aliases, pod_resize_supported=pod_resize_supported
+        config,
+        kube,
+        aliases,
+        pod_resize_supported=pod_resize_supported,
+        cluster_context=cluster_context_note(provider_info),
     )
 
     mcp_controller = MCPController(_make_mcp_factory(config, kube, aliases, ui_proxy))
@@ -451,6 +481,8 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         mcp=mcp_controller,
         metrics=MetricsPoller(kube.list_pod_metrics),
         pod_resize_supported=pod_resize_supported,
+        provider_hint=provider_info.display if provider_info.known else None,
+        open_pod_exec=kube.open_pod_exec,
     )
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.

@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 from textual.binding import Binding
 
@@ -70,7 +71,10 @@ def make_app(
     extra_data: dict[str, list[Summary]] | None = None,
     aliases: dict[str, ResourceMeta] | None = None,
     audit: AuditLog | None = None,
+    provider_hint: str | None = None,
     config: KorvidConfig | None = None,
+    open_pod_exec: Any | None = None,
+    get_manifest: Any | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -93,6 +97,9 @@ def make_app(
         list_namespaces=list_namespaces,
         aliases=aliases if aliases is not None else dict(_DEFAULT_TEST_ALIASES),
         audit=audit,
+        provider_hint=provider_hint,
+        open_pod_exec=open_pod_exec,
+        get_manifest=get_manifest,
     )
 
 

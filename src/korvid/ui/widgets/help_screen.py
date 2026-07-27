@@ -56,6 +56,7 @@ _ACTION_GROUPS: dict[str, tuple[str, ...]] = {
     "scale_resource": ("Table",),
     "edit_resource": ("Table",),
     "hint_details": ("Table",),
+    "transfer": ("Table",),
     # Column sorting (issue #37); shift+n doubles as sort-by-name via
     # log_search_prev's no-pane fallback.
     "sort_by_age": ("Table",),

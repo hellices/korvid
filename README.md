@@ -46,6 +46,7 @@ PDB-aware impact plan; `--readonly` disables them all.
 | `Shift-D` | nodes table | Drain the selected node — PDB-aware impact preview (evictions, PDB-blocked pods, skipped DaemonSet/mirror pods, emptyDir warnings), typed-name confirm, live progress; press again to cancel mid-drain (node stays cordoned) |
 | `e` | table | Edit selected resource manifest in `$VISUAL`/`$EDITOR` (kubectl edit style; confirm dialog before the PUT) |
 | `i` | pods table | Open hint details overlay for a troubled pod (full container trouble + recent Warning events) |
+| `Ctrl-T` | pods table | Transfer a file to/from the selected container (exec tar stream; upload needs approval) |
 | `Ctrl-A` | global | Toggle AI agent panel |
 | `q` | global | Quit |
 | `Esc` | log pane | Close pane (or dismiss search / filter bar) |
@@ -70,7 +71,7 @@ Action names: `quit`, `help`, `open_command`, `open_filter`,
 `log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
 `sort_by_mem`, `toggle_agent`, `delete_resource`, `rollout_restart`,
 `resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
-`cordon_node`, `uncordon_node`, `drain_node`.
+`cordon_node`, `uncordon_node`, `drain_node`, `transfer`.
 
 Unknown actions, duplicate keys, and keys that shadow another action's
 default produce a startup warning and are skipped — never a crash. The
@@ -156,6 +157,26 @@ error state and a notification is raised.  The in-memory ring buffer retains the
 last 5000 lines; when it overflows a one-time banner is written to the pane so you
 know older lines were dropped.
 
+## File transfer
+
+`Ctrl-T` on a pod opens a transfer dialog (multi-container pods show a
+container picker first): pick a direction, the remote path in the container,
+and a local path — leaving the local path empty on a download saves to
+`~/Downloads/<name>`, or to `~/<name>` when no `Downloads` directory exists.
+
+Transfers ride the exec API as a tar stream, so there is no dependency on a
+`kubectl` binary — but the container must have `tar` (the server's error is
+shown verbatim when it doesn't, e.g. distroless images). A progress modal
+shows the byte count as the stream advances; `Esc` cancels the transfer, and
+a cancelled or failed download never leaves a half-written local file.
+
+Uploads write into the container filesystem, so they are blocked in
+read-only mode and pass the same approval dialog as every other write.
+Both directions are audit-logged fail-closed (pod, container, paths,
+direction, byte count): if the audit entry cannot be written, the transfer
+does not run. Recursive directory sync is out of scope, and the agent has no
+transfer tool — transfers are always user-driven.
+
 ## Debug fallback
 
 When `s` lands in a container without a shell (distroless), korvid offers to
@@ -212,6 +233,21 @@ agent-requested — is recorded in an audit log at
 `~/.local/state/korvid/audit.jsonl` when `XDG_STATE_HOME` is unset;
 0600 permissions, size-rotated).  If the audit entry cannot be written, the
 write is blocked.
+
+### Cloud-provider awareness
+
+At startup korvid detects the cluster's cloud provider from
+`node.spec.providerID` prefixes and well-known managed-cluster node labels
+(AKS, EKS, GKE) — no Kubernetes API lists valid cloud annotations, so korvid
+ships **no annotation catalog**; the detected provider is injected into the
+agent's system context instead.  Ask "expose this service publicly" on an AKS
+cluster and the agent proposes Azure-appropriate load balancer annotations
+without you naming the CSP, applied through the same approval-gated write
+flow.  Describing a `Service` or `Ingress` on a detected provider shows a
+one-line footer pointing at the agent (`provider: aks — ask the agent about
+load balancer annotations (ctrl+a)`).  Detection is a bounded, cached,
+best-effort probe: RBAC-limited users (no node list permission), bare-metal,
+and local clusters simply detect as "unknown" and nothing changes.
 
 ### Dry-run previews
 
