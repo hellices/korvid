@@ -4515,10 +4515,17 @@ class KorvidApp(App[None]):
             logger.warning("node-debugger pod creation failed: %s", stderr)
             if _looks_like_admission_rejection(stderr):
                 # The API server refused the create: nothing was committed.
-                self.notify(
-                    f"Could not create the debugger pod: {stderr}"
+                # The namespace remediation only applies when PodSecurity
+                # did the refusing — an RBAC forbid or an unrelated webhook
+                # denial would make that hint actionably wrong.
+                hint = (
                     " — the cluster refuses privileged pods (PodSecurity admission);"
-                    " try setting node_shell.namespace to a namespace that allows them",
+                    " try setting node_shell.namespace to a namespace that allows them"
+                    if "podsecurity" in stderr.lower()
+                    else ""
+                )
+                self.notify(
+                    f"Could not create the debugger pod: {stderr}{hint}",
                     severity="error",
                 )
                 return "error: pod creation rejected"

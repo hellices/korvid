@@ -741,3 +741,31 @@ async def test_attach_launch_failure_still_deletes_pod_and_audits(tmp_path: Path
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     ours = [e for e in entries if e["action"] == "node-shell"]
     assert ours[-1]["outcome"].startswith("error: attach could not be launched")
+
+
+async def test_non_psa_rejection_omits_namespace_remediation(tmp_path: Path) -> None:
+    """An RBAC forbid is still safely classified as rejected (nothing was
+    committed), but the PodSecurity namespace remediation must not be
+    attached to it — that diagnosis would be actionably wrong."""
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        failure = SimpleNamespace(
+            returncode=1,
+            stdout=b"",
+            stderr=b'Error from server (Forbidden): pods is forbidden: User "dev"'
+            b' cannot create resource "pods"',
+        )
+        with patch("korvid.ui.app.subprocess.run", return_value=failure):
+            outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
+        assert outcome == "error: pod creation rejected"
+
+        def _notified() -> bool:
+            return any("Could not create the debugger pod" in n.message for n in app._notifications)
+
+        await until(pilot, _notified, label="rejection notification")
+        message = next(
+            n.message
+            for n in app._notifications
+            if "Could not create the debugger pod" in n.message
+        )
+        assert "node_shell.namespace" not in message
