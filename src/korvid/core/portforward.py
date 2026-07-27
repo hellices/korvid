@@ -176,6 +176,7 @@ class ForwardRegistry:
                 line = raw.strip()
                 with record._lock:
                     if record._proc is not proc:
+                        ready.set()  # our generation is over — wake its waiter
                         return  # superseded by a re-attach — stale output
                     if line:
                         record.last_output = line
@@ -269,6 +270,13 @@ class ForwardRegistry:
         with record._lock:
             record._proc = replacement
             record.last_output = ""
+            superseded = record._ready
+        if superseded is not None:
+            # Resolve the previous generation's waiter right away — its
+            # reader may never observe the swap (blocked on a silent
+            # stream), and a superseded confirmation must not sit out the
+            # full readiness timeout before it can get out of the way.
+            superseded.set()
         self._begin_handshake(record)
         return record
 

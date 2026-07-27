@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 import time
 from time import monotonic
 from typing import Any
@@ -561,3 +562,29 @@ def test_fail_start_leaves_resolved_forwards_alone() -> None:
     assert not procs[0].terminated
     assert registry.fail_start(999) is None
     procs[0].stdout.feed(None)
+
+
+def test_reattach_releases_the_previous_generations_waiter() -> None:
+    """A superseded readiness waiter must not sit out its full timeout."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    results: list[str] = []
+
+    def _wait() -> None:
+        results.append(registry.wait_ready(record.id, timeout=30.0))
+
+    waiter = threading.Thread(target=_wait)
+    waiter.start()
+    time.sleep(0.05)  # let the waiter block on the first generation's event
+    # The child dies without flushing EOF — its reader thread stays blocked,
+    # so only the re-attach swap can release the stranded waiter.
+    procs[0].exit(1)
+    registry.refresh()
+    assert record.status == "broken"
+    assert registry.reattach(record.id) is record
+    waiter.join(timeout=5.0)
+    assert not waiter.is_alive(), "superseded waiter still blocked after re-attach"
+    assert results == ["starting"]  # the replacement generation, still unconfirmed
+    procs[0].stdout.feed(None)
+    procs[1].stdout.feed(None)
