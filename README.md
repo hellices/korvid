@@ -24,6 +24,7 @@ in the dialog; `--readonly` disables them all.
 | `/` | log pane | Open inline log search |
 | `Enter` | table | Drill down: pods → containers; deploy → replicasets (history) → pods; helm release → revisions |
 | `Esc` | table | Pop one drill-down level |
+| `Shift-N/A/C/M` | table | Sort by name / age / CPU / MEM (repeat flips ▲/▼; sorts on data, not rendered strings) |
 | `0` | global | Toggle all-namespaces view |
 | `d` | table | Describe selected resource (manifest + events) |
 | `s` | pods table | Shell into selected pod (`kubectl exec`; offers `kubectl debug` fallback for distroless images) |
@@ -40,11 +41,40 @@ in the dialog; `--readonly` disables them all.
 | `r` | table | Rolling restart of selected deployment / statefulset / daemonset (confirm dialog) |
 | `S` | table | Scale selected deployment / replicaset / statefulset (replica prompt + confirm dialog) |
 | `R` | pods table | In-place resize of pod CPU/memory requests/limits (Kubernetes 1.35+; prompt + confirm dialog) |
+| `I` | operators tables | Install the selected catalog operator (wizard + confirm dialog) or approve a pending InstallPlan |
 | `e` | table | Edit selected resource manifest in `$VISUAL`/`$EDITOR` (kubectl edit style; confirm dialog before the PUT) |
 | `i` | pods table | Open hint details overlay for a troubled pod (full container trouble + recent Warning events) |
 | `Ctrl-A` | global | Toggle AI agent panel |
 | `q` | global | Quit |
 | `Esc` | log pane | Close pane (or dismiss search / filter bar) |
+
+### Remapping keys
+
+App-level actions can be remapped via the `keybindings:` section of
+`~/.config/korvid/config.yaml`, mapping an **action name** from the list
+below to a new key (Textual key syntax — `x`, `f1`, `ctrl+q`, `shift+g`).
+Keys handled outside bindings (`Enter` drill-down, `Esc` close/pop, and the
+dialogs' own keys) are not remappable:
+
+```yaml
+keybindings:
+  delete_resource: ctrl+x   # free Ctrl-D for the terminal
+  sort_by_age: g
+```
+
+Action names: `quit`, `help`, `open_command`, `open_filter`,
+`toggle_all_namespaces`, `describe`, `shell`, `logs`, `logs_multi`,
+`log_format`, `log_wrap`, `log_timestamps`, `log_save`, `log_previous`,
+`log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
+`sort_by_mem`, `toggle_agent`, `delete_resource`, `rollout_restart`,
+`resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
+`port_forward`.
+
+Unknown actions, duplicate keys, and keys that shadow another action's
+default produce a startup warning and are skipped — never a crash. The
+approval dialogs' confirm keys are **not remappable** by design: writes are
+only ever confirmed by the fixed keystrokes. The help overlay (`?`) always
+shows the effective keys.
 
 ## Live metrics
 
@@ -86,6 +116,29 @@ revision history (newest first, like `helm history`); `d` describes a
 release or a single revision with the decoded metadata and the
 user-supplied values — the rendered manifest blob is deliberately left
 out.  This slice is read-only; install/upgrade/rollback lands separately.
+
+## Operator catalog (OLM)
+
+Where [OLM](https://olm.operatorframework.io/) is installed, `:operators`
+opens the operator catalog cluster-wide (catalog entries live in catalog
+namespaces, so the view defaults to all namespaces; `:operators <ns>`
+scopes it): every PackageManifest the cluster's catalog
+sources serve, with its catalog, default channel, and available channels.
+`:subscriptions`, `:csv`, and `:installplans` show the installed side with
+typed columns (subscription channel/state, CSV version/phase).  Without
+OLM, `:operators` explains what is missing instead of erroring.
+
+Press `I` on a catalog row to install: a wizard collects the target
+namespace, channel (validated against the package's own channel list),
+and approval mode — then the **full Subscription manifest** is shown in
+the standard approval dialog before anything is created.  On an
+InstallPlan row, `I` approves a pending manual plan (the dialog lists the
+CSVs the approval unblocks).  Everything shown comes from the cluster's
+catalog objects — korvid hardcodes no operator knowledge — and both
+writes go through the same SSAR pre-check, approval gate, and fail-closed
+audit log as every other mutation.  The AI agent gets a matching read-only
+`list_operators` tool (catalog + installed subscriptions); installing
+stays behind the UI approval gate.
 
 ## Log viewer
 
@@ -179,6 +232,21 @@ agent-requested — is recorded in an audit log at
 `~/.local/state/korvid/audit.jsonl` when `XDG_STATE_HOME` is unset;
 0600 permissions, size-rotated).  If the audit entry cannot be written, the
 write is blocked.
+
+### Cloud-provider awareness
+
+At startup korvid detects the cluster's cloud provider from
+`node.spec.providerID` prefixes and well-known managed-cluster node labels
+(AKS, EKS, GKE) — no Kubernetes API lists valid cloud annotations, so korvid
+ships **no annotation catalog**; the detected provider is injected into the
+agent's system context instead.  Ask "expose this service publicly" on an AKS
+cluster and the agent proposes Azure-appropriate load balancer annotations
+without you naming the CSP, applied through the same approval-gated write
+flow.  Describing a `Service` or `Ingress` on a detected provider shows a
+one-line footer pointing at the agent (`provider: aks — ask the agent about
+load balancer annotations (ctrl+a)`).  Detection is a bounded, cached,
+best-effort probe: RBAC-limited users (no node list permission), bare-metal,
+and local clusters simply detect as "unknown" and nothing changes.
 
 ### Dry-run previews
 

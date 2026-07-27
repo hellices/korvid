@@ -16,6 +16,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+from korvid.agent.context import cluster_context_note
 from korvid.agent.mcp_server import KorvidMCPServer, MCPController, default_endpoint_path
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
@@ -34,9 +35,11 @@ from korvid.core.portforward import ForwardRegistry
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.client import KubeClient, resolve_context_name
+from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.metrics import MetricsPoller
+from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.providers.configurator import ProviderConfigurator
 from korvid.providers.registry import create_provider
 from korvid.providers.token_store import TokenStore
@@ -90,7 +93,8 @@ async def _discover_in_background(
 ) -> None:
     """Merge full API discovery into *aliases* once available (shared dict)."""
     try:
-        discovered = build_alias_map(await kube.discover_resources())
+        metas = await kube.discover_resources()
+        discovered = build_alias_map(metas)
     except Exception:
         logger.warning("Resource discovery failed; staying pods-only", exc_info=True)
         return
@@ -102,6 +106,19 @@ async def _discover_in_background(
     reserved = {HELM_RELEASES_META.plural, HELM_REVISIONS_META.plural}
     aliases.update({a: m for a, m in discovered.items() if m.plural not in reserved})
     aliases.update(build_alias_map([HELM_RELEASES_META, HELM_REVISIONS_META]))
+    # build_alias_map keeps only the first meta per colliding alias, which
+    # can hide the OLM kinds behind a same-plural CRD from another group
+    # (e.g. a messaging "subscriptions"). Keep them reachable under their
+    # kubectl-style plural.group alias so the install flow and the agent's
+    # operator tool resolve the right API regardless of discovery order.
+    for meta in metas:
+        if meta.group in (PACKAGES_GROUP, OPERATORS_GROUP) and meta.plural not in reserved:
+            aliases.setdefault(f"{meta.plural}.{meta.group}", meta)
+    # Where OLM serves the operator catalog, `:operators` opens it - unless a
+    # real kind (e.g. OLM v1's Operator) already claims that alias.
+    pkg_meta = aliases.get(f"packagemanifests.{PACKAGES_GROUP}")
+    if pkg_meta is not None:
+        aliases.setdefault("operators", pkg_meta)
     app.on_aliases_updated()
 
 
@@ -208,12 +225,24 @@ async def _probe_pod_resize(kube: KubeClient, *, readonly: bool = False) -> bool
         return False
 
 
+async def _probe_cloud_provider(kube: KubeClient) -> ProviderInfo:
+    """Bounded cloud-provider detection at startup (issue #30). Detection is a
+    hint — a slow or unresponsive node list answers "unknown" rather than
+    delaying the TUI (same policy as the resize probe)."""
+    try:
+        return await asyncio.wait_for(kube.detect_cloud_provider(), _RESIZE_PROBE_TIMEOUT)
+    except TimeoutError:
+        logger.warning("cloud provider detection timed out; provider unknown")
+        return detect_provider([])
+
+
 def _build_agent_wiring(
     config: KorvidConfig,
     kube: KubeClient,
     aliases: dict[str, ResourceMeta],
     *,
     pod_resize_supported: bool = False,
+    cluster_context: str | None = None,
 ) -> tuple[
     AgentRuntime | None,
     ProviderConfigurator,
@@ -243,7 +272,12 @@ def _build_agent_wiring(
         oauth_token=oauth,
     )
     agent_runtime = (
-        AgentRuntime(provider, ToolExecutor(kube, aliases, ui=ui_proxy), tools=agent_tools)
+        AgentRuntime(
+            provider,
+            ToolExecutor(kube, aliases, ui=ui_proxy),
+            tools=agent_tools,
+            cluster_context=cluster_context,
+        )
         if provider
         else None
     )
@@ -282,7 +316,10 @@ def _build_agent_wiring(
         if new_provider is None:
             return None
         return AgentRuntime(
-            new_provider, ToolExecutor(kube, aliases, ui=ui_proxy), tools=agent_tools
+            new_provider,
+            ToolExecutor(kube, aliases, ui=ui_proxy),
+            tools=agent_tools,
+            cluster_context=cluster_context,
         )
 
     return agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy
@@ -412,8 +449,16 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
     # whether the agent is offered the resize tool (issue #27).
     pod_resize_supported = await _probe_pod_resize(kube, readonly=config.readonly)
 
+    # Detect the cloud provider once per connection (issue #30): it grounds
+    # the agent system prompt and the Service/Ingress describe footer.
+    provider_info = await _probe_cloud_provider(kube)
+
     agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy = _build_agent_wiring(
-        config, kube, aliases, pod_resize_supported=pod_resize_supported
+        config,
+        kube,
+        aliases,
+        pod_resize_supported=pod_resize_supported,
+        cluster_context=cluster_context_note(provider_info),
     )
 
     mcp_controller = MCPController(_make_mcp_factory(config, kube, aliases, ui_proxy))
@@ -438,6 +483,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         metrics=MetricsPoller(kube.list_pod_metrics),
         pod_resize_supported=pod_resize_supported,
         forwards=ForwardRegistry(context=config.kube_context),
+        provider_hint=provider_info.display if provider_info.known else None,
     )
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.

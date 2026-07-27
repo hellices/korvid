@@ -7,7 +7,7 @@ the real key handling.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import ClassVar
 
 from rich.text import Text
@@ -50,16 +50,23 @@ _ACTION_GROUPS: dict[str, tuple[str, ...]] = {
     "delete_resource": ("Table",),
     "rollout_restart": ("Table",),
     "resize_pod": ("Table",),
+    "operator_install": ("Table",),
     "scale_resource": ("Table",),
     "edit_resource": ("Table",),
     "hint_details": ("Table",),
+    # Column sorting (issue #37); shift+n doubles as sort-by-name via
+    # log_search_prev's no-pane fallback.
+    "sort_by_age": ("Table",),
+    "sort_by_cpu": ("Table",),
+    "sort_by_mem": ("Table",),
     "log_format": ("Logs",),
     "log_wrap": ("Logs",),
     "log_timestamps": ("Logs",),
     "log_save": ("Logs",),
     "log_previous": ("Logs",),
     "log_search_next": ("Logs",),
-    "log_search_prev": ("Logs",),
+    # N steps back through hits in a pane, sorts by name in the table.
+    "log_search_prev": ("Logs", "Table"),
     "toggle_agent": ("Agent",),
 }
 
@@ -90,6 +97,7 @@ def collect_help(
     app_bindings: Sequence[BindingType],
     describe_bindings: Sequence[BindingType],
     handler_keys: Sequence[tuple[str, str, str]] = (),
+    overrides: Mapping[str, str] | None = None,
 ) -> list[tuple[str, list[tuple[str, str]]]]:
     """Group ``(key, description)`` rows from real bindings for the overlay.
 
@@ -104,7 +112,12 @@ def collect_help(
     `handler_keys` covers user-facing keys handled in event handlers rather
     than ``BINDINGS`` (e.g. Enter drill-down, Esc close/pop); each entry is
     ``(group, key, description)``.
+
+    `overrides` maps action names to remapped keys from the `keybindings:`
+    config section (issue #35), so the overlay shows the keys that actually
+    work rather than the defaults.
     """
+    remapped = overrides or {}
     groups: dict[str, list[tuple[str, str]]] = {name: [] for name in _GROUP_ORDER}
     seen_actions: set[tuple[str, str]] = set()
 
@@ -113,7 +126,8 @@ def collect_help(
         if marker in seen_actions:
             return
         seen_actions.add(marker)
-        groups[group].append((key_label(binding.key), binding.description))
+        key = remapped.get(binding.action, binding.key)
+        groups[group].append((key_label(key), binding.description))
 
     for raw in app_bindings:
         binding = _as_binding(raw)

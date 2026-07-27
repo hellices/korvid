@@ -397,3 +397,175 @@ async def test_get_manifest_routes_helm_revision_names_to_specific_revision() ->
         await get_manifest("helmrevisions", "default", "not-a-revision-row")
     with pytest.raises(ValueError, match="namespace"):
         await get_manifest("helmreleases", None, "web")
+
+
+async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None:
+    """A detected-provider note reaches the runtime's system prompt (issue #30)."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+    )
+    kube_stub = cast("Any", object())
+    note = "This cluster runs on Azure (AKS managed)."
+    runtime, _, rebuild, _, _ = _build_agent_wiring(config, kube_stub, {}, cluster_context=note)
+    assert runtime is not None
+    assert note in runtime._messages[0]["content"]
+
+    from korvid.agent.setup import AgentSettings
+
+    rebuilt = rebuild(
+        AgentSettings(
+            provider="openai",
+            auth_method="api_key",
+            base_url="http://localhost:9999/v1",
+            model="m",
+            api_key_env="KORVID_TEST_KEY",
+        )
+    )
+    assert rebuilt is not None
+    assert note in rebuilt._messages[0]["content"]
+
+
+async def test_cloud_provider_probe_is_bounded(monkeypatch: object) -> None:
+    """Provider detection is a hint: a hung node list answers unknown quickly."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+
+    import korvid.__main__ as main_mod
+    from korvid.k8s.csp import ProviderInfo
+
+    mp.setattr(main_mod, "_RESIZE_PROBE_TIMEOUT", 0.05)
+
+    class HungKube:
+        async def detect_cloud_provider(self) -> ProviderInfo:
+            await asyncio.sleep(60)
+            return ProviderInfo("azure", "aks")
+
+    info = await main_mod._probe_cloud_provider(cast("Any", HungKube()))
+    assert info.provider == "unknown"
+
+
+async def test_cloud_provider_probe_passes_through_result() -> None:
+    import korvid.__main__ as main_mod
+    from korvid.k8s.csp import ProviderInfo
+
+    class FastKube:
+        async def detect_cloud_provider(self) -> ProviderInfo:
+            return ProviderInfo("aws", "eks")
+
+    info = await main_mod._probe_cloud_provider(cast("Any", FastKube()))
+    assert info.display == "eks"
+
+
+async def test_discovery_maps_operators_alias_to_packagemanifests() -> None:
+    """Where OLM serves PackageManifests, `:operators` opens the catalog;
+    the alias must not shadow a real kind that already claimed the name."""
+    from korvid.__main__ import _discover_in_background
+    from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+    from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
+
+    pkg_meta = ResourceMeta(
+        "PackageManifest", "packagemanifests", "packages.operators.coreos.com", "v1", True
+    )
+
+    class FakeKube:
+        async def discover_resources(self) -> list[ResourceMeta]:
+            return [PODS_META, pkg_meta]
+
+    class FakeApp:
+        def on_aliases_updated(self) -> None:
+            pass
+
+    aliases = build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META])
+    await _discover_in_background(FakeKube(), aliases, FakeApp())  # type: ignore[arg-type]
+    assert aliases["operators"] is pkg_meta
+    assert aliases["packagemanifests"] is pkg_meta
+
+
+async def test_discovery_without_olm_has_no_operators_alias() -> None:
+    from korvid.__main__ import _discover_in_background
+    from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+    from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
+
+    class FakeKube:
+        async def discover_resources(self) -> list[ResourceMeta]:
+            return [PODS_META]
+
+    class FakeApp:
+        def on_aliases_updated(self) -> None:
+            pass
+
+    aliases = build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META])
+    await _discover_in_background(FakeKube(), aliases, FakeApp())  # type: ignore[arg-type]
+    assert "operators" not in aliases
+
+
+async def test_discovery_does_not_shadow_a_real_operators_kind() -> None:
+    """OLM v1 (or any CRD) can define a kind whose plural is "operators";
+    that real kind keeps the alias and the convenience mapping backs off."""
+    from korvid.__main__ import _discover_in_background
+    from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+    from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
+
+    operators_meta = ResourceMeta("Operator", "operators", "operators.coreos.com", "v1", False)
+    pkg_meta = ResourceMeta(
+        "PackageManifest", "packagemanifests", "packages.operators.coreos.com", "v1", True
+    )
+
+    class FakeKube:
+        async def discover_resources(self) -> list[ResourceMeta]:
+            return [PODS_META, operators_meta, pkg_meta]
+
+    class FakeApp:
+        def on_aliases_updated(self) -> None:
+            pass
+
+    aliases = build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META])
+    await _discover_in_background(FakeKube(), aliases, FakeApp())  # type: ignore[arg-type]
+    assert aliases["operators"] is operators_meta
+    assert aliases["packagemanifests"] is pkg_meta
+
+
+async def test_discovery_preserves_olm_metas_under_group_qualified_aliases() -> None:
+    """First-meta-wins alias collapsing must not hide OLM: when another API
+    group claims 'subscriptions' first, the OLM Subscription stays reachable
+    under its kubectl-style plural.group alias."""
+    from korvid.__main__ import _discover_in_background
+    from korvid.k8s.discovery import ResourceMeta
+
+    foreign_sub = ResourceMeta("Subscription", "subscriptions", "messaging.example.com", "v1", True)
+    olm_sub = ResourceMeta(
+        "Subscription", "subscriptions", "operators.coreos.com", "v1alpha1", True
+    )
+    pkg = ResourceMeta(
+        "PackageManifest", "packagemanifests", "packages.operators.coreos.com", "v1", True
+    )
+
+    class FakeKube:
+        async def discover_resources(self) -> list[ResourceMeta]:
+            return [foreign_sub, olm_sub, pkg]
+
+    class FakeApp:
+        def on_aliases_updated(self) -> None:
+            pass
+
+    aliases: dict[str, ResourceMeta] = {}
+    await _discover_in_background(FakeKube(), aliases, FakeApp())  # type: ignore[arg-type]
+    assert aliases["subscriptions"] is foreign_sub
+    assert aliases["subscriptions.operators.coreos.com"] is olm_sub
+    assert aliases["packagemanifests.packages.operators.coreos.com"] is pkg

@@ -210,6 +210,12 @@ class DescribeScreen(ModalScreen[None]):
     DescribeScreen #describe-search {
         height: 1;
     }
+    DescribeScreen #describe-footer {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+        color: $text-muted;
+    }
     """
 
     def __init__(
@@ -217,11 +223,14 @@ class DescribeScreen(ModalScreen[None]):
         title: str,
         manifest: dict[str, Any],
         events: list[dict[str, Any]],
+        *,
+        footer_note: str | None = None,
     ) -> None:
         super().__init__()
         self._title = title
         self._manifest = manifest
         self._events = events
+        self._footer_note = footer_note
         self._search = BodySearch()
         self._pattern = ""
 
@@ -234,11 +243,15 @@ class DescribeScreen(ModalScreen[None]):
             yield Static(
                 _describe_body(self._manifest, self._events), id="describe-body", markup=False
             )
+        # One-line pointer (e.g. detected cloud provider, issue #30); hidden
+        # unless a note was supplied.
+        yield Static(self._footer_note or "", id="describe-footer", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
         self.title = self._title
         self.query_one("#describe-search", Input).display = False
+        self.query_one("#describe-footer", Static).display = self._footer_note is not None
         self._search.set_body(_manifest_yaml(self._manifest), _render_events(self._events))
 
     # ------------------------------------------------------------------
@@ -333,6 +346,12 @@ class DescribePane(Vertical):
         height: 1fr;
         padding: 0 1;
     }
+    DescribePane #describe-pane-footer {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+        color: $text-muted;
+    }
     """
 
     def __init__(self) -> None:
@@ -350,11 +369,20 @@ class DescribePane(Vertical):
         yield Input(placeholder="search…", id="describe-pane-search")
         with VerticalScroll():
             yield Static("", id="describe-pane-body", markup=False)
+        yield Static("", id="describe-pane-footer", markup=False)
 
     def on_mount(self) -> None:
         self.query_one("#describe-pane-search", Input).display = False
+        self.query_one("#describe-pane-footer", Static).display = False
 
-    def show(self, title: str, manifest: dict[str, Any], events: list[dict[str, Any]]) -> None:
+    def show(
+        self,
+        title: str,
+        manifest: dict[str, Any],
+        events: list[dict[str, Any]],
+        *,
+        footer_note: str | None = None,
+    ) -> None:
         yaml_text = _manifest_yaml(manifest)
         events_text = _render_events(events)
         self.body_text = _body_plain(yaml_text, events_text)
@@ -364,6 +392,10 @@ class DescribePane(Vertical):
         self._events = list(events)
         self._search.set_body(yaml_text, events_text)
         self.query_one("#describe-pane-search", Input).display = False
+        footer = self.query_one("#describe-pane-footer", Static)
+        footer.update(footer_note or "")
+        # Reset per show(): a Service footer must not leak onto the next Pod.
+        footer.display = footer_note is not None
         self._update_title()
         self.query_one("#describe-pane-body", Static).update(
             _body_renderable(yaml_text, events_text)

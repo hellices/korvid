@@ -70,6 +70,8 @@ def make_app(
     extra_data: dict[str, list[Summary]] | None = None,
     aliases: dict[str, ResourceMeta] | None = None,
     audit: AuditLog | None = None,
+    provider_hint: str | None = None,
+    config: KorvidConfig | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -86,12 +88,13 @@ def make_app(
         return ["default"] if namespaces is None else namespaces
 
     return KorvidApp(
-        config=KorvidConfig(namespace="default"),
+        config=config if config is not None else KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),
         list_namespaces=list_namespaces,
         aliases=aliases if aliases is not None else dict(_DEFAULT_TEST_ALIASES),
         audit=audit,
+        provider_hint=provider_hint,
     )
 
 
@@ -397,8 +400,8 @@ async def test_pods_all_adds_namespace_column() -> None:
         table = app.query_one(ResourceTable)
         assert app.current_scope == ALL_NAMESPACES
         assert table.row_count == 2
-        # Pod view all-ns: 13 columns (NAMESPACE + 12 pod columns incl. usage)
-        assert len(table.columns) == 13
+        # Pod view all-ns: 14 columns (NAMESPACE + 13 pod columns incl. usage + AGE)
+        assert len(table.columns) == 14
 
 
 async def test_zero_key_toggles_all_namespaces() -> None:

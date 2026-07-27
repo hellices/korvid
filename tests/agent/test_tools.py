@@ -25,7 +25,7 @@ def make_executor(kube: Any) -> ToolExecutor:
 
 def test_read_tools_schema_names() -> None:
     names = [t["function"]["name"] for t in READ_TOOLS]
-    assert names == ["list_resources", "get_resource", "get_logs", "get_events"]
+    assert names == ["list_resources", "get_resource", "get_logs", "get_events", "list_operators"]
 
 
 def test_read_tools_all_have_type_function() -> None:
@@ -647,3 +647,149 @@ async def test_resize_pod_rejects_invalid_container_name_grammar() -> None:
         )
         assert result.startswith("ERROR:")
         assert bridge.calls == []
+
+
+def _olm_aliases() -> dict[str, Any]:
+    from korvid.k8s.discovery import ResourceMeta
+    from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
+
+    return {
+        "pods": PODS_META,
+        "packagemanifests": ResourceMeta(
+            "PackageManifest", "packagemanifests", PACKAGES_GROUP, "v1", True
+        ),
+        "subscriptions": ResourceMeta(
+            "Subscription", "subscriptions", OPERATORS_GROUP, "v1alpha1", True
+        ),
+    }
+
+
+async def test_list_operators_reports_catalog_and_installed() -> None:
+    from korvid.k8s.models import OLMSubscriptionSummary, PackageManifestSummary
+
+    class OLMKube:
+        async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+            if meta.plural == "packagemanifests":
+                return [
+                    PackageManifestSummary(
+                        name="cert-manager",
+                        namespace="olm",
+                        kind="PackageManifest",
+                        created="2026-07-26T10:00:00Z",
+                        uid="p1",
+                        catalog="operatorhubio-catalog",
+                        default_channel="stable",
+                        channels=("candidate", "stable"),
+                    )
+                ]
+            return [
+                OLMSubscriptionSummary(
+                    name="argocd-operator",
+                    namespace="operators",
+                    kind="Subscription",
+                    created="2026-07-26T10:00:00Z",
+                    uid="s1",
+                    channel="alpha",
+                    source="operatorhubio-catalog",
+                    installed_csv="argocd-operator.v0.8.0",
+                    state="AtLatestKnown",
+                )
+            ]
+
+    ex = ToolExecutor(OLMKube(), _olm_aliases())  # type: ignore[arg-type]
+    out = await ex.execute("list_operators", {})
+    assert "cert-manager" in out
+    assert "channels=candidate,stable" in out
+    assert "default=stable" in out
+    assert "argocd-operator" in out
+    assert "argocd-operator.v0.8.0" in out
+    assert "AtLatestKnown" in out
+
+
+async def test_list_operators_without_olm_explains() -> None:
+    ex = make_executor(FakeKube())
+    out = await ex.execute("list_operators", {})
+    assert "OLM" in out
+    # Deliberately avoids asserting the raw API-group string: CodeQL flags
+    # domain-like substring checks as URL-sanitization smells.
+    assert "neither" in out
+    assert "API groups were discovered" in out
+
+
+async def test_list_operators_installed_first_and_catalog_capped_sorted() -> None:
+    """Installed state leads (a huge catalog must not push it past the
+    result cap), the catalog is sorted, and overflow is summarized."""
+    from korvid.agent.tools import _MAX_CATALOG_PACKAGES
+    from korvid.k8s.models import OLMSubscriptionSummary, PackageManifestSummary
+
+    class BigCatalogKube:
+        async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+            if meta.plural == "packagemanifests":
+                return [
+                    PackageManifestSummary(
+                        name=f"pkg-{i:04d}",
+                        namespace="olm",
+                        kind="PackageManifest",
+                        created="2026-07-26T10:00:00Z",
+                        uid=f"p{i}",
+                        catalog="operatorhubio-catalog",
+                        default_channel="stable",
+                        channels=("stable",),
+                    )
+                    # Reversed input proves the listing is sorted.
+                    for i in reversed(range(_MAX_CATALOG_PACKAGES + 5))
+                ]
+            return [
+                OLMSubscriptionSummary(
+                    name="argocd-operator",
+                    namespace="operators",
+                    kind="Subscription",
+                    created="2026-07-26T10:00:00Z",
+                    uid="s1",
+                    channel="alpha",
+                    source="operatorhubio-catalog",
+                    installed_csv="argocd-operator.v0.8.0",
+                    state="AtLatestKnown",
+                )
+            ]
+
+    ex = ToolExecutor(BigCatalogKube(), _olm_aliases())  # type: ignore[arg-type]
+    out = await ex.execute("list_operators", {})
+    assert out.index("INSTALLED") < out.index("AVAILABLE")
+    assert "pkg-0000" in out  # sorted: lowest names shown
+    assert f"pkg-{_MAX_CATALOG_PACKAGES:04d}" not in out  # beyond the cap
+    assert "...and 5 more catalog packages" in out
+
+
+async def test_list_operators_reports_installed_when_package_server_missing() -> None:
+    """subscriptions discovered but the package server absent: installed
+    operators are still reported, with an unavailable note for the catalog."""
+    from korvid.k8s.discovery import ResourceMeta
+    from korvid.k8s.models import OLMSubscriptionSummary
+
+    class SubsOnlyKube:
+        async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+            return [
+                OLMSubscriptionSummary(
+                    name="argocd-operator",
+                    namespace="operators",
+                    kind="Subscription",
+                    created="2026-07-26T10:00:00Z",
+                    uid="s1",
+                    channel="alpha",
+                    source="operatorhubio-catalog",
+                    installed_csv="argocd-operator.v0.8.0",
+                    state="AtLatestKnown",
+                )
+            ]
+
+    aliases = {
+        "pods": ResourceMeta("Pod", "pods", "", "v1", True),
+        "subscriptions": ResourceMeta(
+            "Subscription", "subscriptions", "operators.coreos.com", "v1alpha1", True
+        ),
+    }
+    ex = ToolExecutor(SubsOnlyKube(), aliases)  # type: ignore[arg-type]
+    out = await ex.execute("list_operators", {})
+    assert "argocd-operator" in out
+    assert "AVAILABLE (operator catalog): unavailable" in out

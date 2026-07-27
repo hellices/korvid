@@ -3,7 +3,15 @@ from typing import Any
 
 import pytest
 
-from korvid.k8s.models import GenericSummary, PodSummary, ReplicaSetSummary, summary_for
+from korvid.k8s.models import (
+    CSVSummary,
+    GenericSummary,
+    OLMSubscriptionSummary,
+    PackageManifestSummary,
+    PodSummary,
+    ReplicaSetSummary,
+    summary_for,
+)
 
 POD: dict[str, Any] = {
     "metadata": {"name": "checkout-7d9f", "namespace": "prod"},
@@ -1014,6 +1022,174 @@ class TestContainerLimits:
         )
         assert pod.cpu_limit_cores is None
         assert pod.mem_limit_bytes is None
+
+
+# ---------------------------------------------------------------------------
+# OLM summaries (issue #29)
+# ---------------------------------------------------------------------------
+
+
+def _pkg_manifest() -> dict[str, Any]:
+    return {
+        "apiVersion": "packages.operators.coreos.com/v1",
+        "kind": "PackageManifest",
+        "metadata": {
+            "name": "cert-manager",
+            "namespace": "olm",
+            "creationTimestamp": "2026-07-20T00:00:00Z",
+        },
+        "status": {
+            "catalogSource": "operatorhubio-catalog",
+            "defaultChannel": "stable",
+            "channels": [{"name": "candidate"}, {"name": "stable"}],
+        },
+    }
+
+
+def test_summary_for_dispatches_packagemanifest() -> None:
+    summary = summary_for("PackageManifest", _pkg_manifest())
+    assert isinstance(summary, PackageManifestSummary)
+    assert summary.catalog == "operatorhubio-catalog"
+    assert summary.default_channel == "stable"
+    assert summary.channels == ("candidate", "stable")
+
+
+def test_packagemanifest_summary_tolerates_malformed_status() -> None:
+    manifest = _pkg_manifest()
+    manifest["status"] = "oops"
+    summary = summary_for("PackageManifest", manifest)
+    assert isinstance(summary, PackageManifestSummary)
+    assert summary.catalog == ""
+    assert summary.channels == ()
+
+
+def test_summary_for_dispatches_olm_subscription() -> None:
+    manifest = {
+        "apiVersion": "operators.coreos.com/v1alpha1",
+        "kind": "Subscription",
+        "metadata": {"name": "cert-manager", "namespace": "operators"},
+        "spec": {"channel": "stable", "source": "operatorhubio-catalog"},
+        "status": {"installedCSV": "cert-manager.v1.14.4", "state": "AtLatestKnown"},
+    }
+    summary = summary_for("Subscription", manifest)
+    assert isinstance(summary, OLMSubscriptionSummary)
+    assert summary.channel == "stable"
+    assert summary.source == "operatorhubio-catalog"
+    assert summary.installed_csv == "cert-manager.v1.14.4"
+    assert summary.state == "AtLatestKnown"
+
+
+def test_summary_for_leaves_non_olm_subscription_kinds_generic() -> None:
+    """Other API groups also define a Subscription kind (e.g. eventing);
+    only operators.coreos.com objects get the OLM columns."""
+    manifest = {
+        "apiVersion": "messaging.example.com/v1",
+        "kind": "Subscription",
+        "metadata": {"name": "events", "namespace": "prod"},
+    }
+    summary = summary_for("Subscription", manifest)
+    assert not isinstance(summary, OLMSubscriptionSummary)
+
+
+def test_summary_for_dispatches_csv() -> None:
+    manifest = {
+        "apiVersion": "operators.coreos.com/v1alpha1",
+        "kind": "ClusterServiceVersion",
+        "metadata": {"name": "cert-manager.v1.14.4", "namespace": "operators"},
+        "spec": {"version": "1.14.4", "displayName": "cert-manager"},
+        "status": {"phase": "Succeeded"},
+    }
+    summary = summary_for("ClusterServiceVersion", manifest)
+    assert isinstance(summary, CSVSummary)
+    assert summary.version == "1.14.4"
+    assert summary.phase == "Succeeded"
+    assert summary.display_name == "cert-manager"
+
+
+def test_packagemanifest_summary_tolerates_non_list_channels() -> None:
+    """status.channels as a scalar must not break summary construction
+    (a malformed catalog entry must never kill the watch)."""
+    summary = summary_for(
+        "PackageManifest",
+        {
+            "apiVersion": "packages.operators.coreos.com/v1",
+            "kind": "PackageManifest",
+            "metadata": {"name": "p", "namespace": "olm", "uid": "u1"},
+            "status": {"channels": 1},
+        },
+    )
+    assert isinstance(summary, PackageManifestSummary)
+    assert summary.channels == ()
+
+
+def test_packagemanifest_summary_extracts_short_description() -> None:
+    """The default channel's CSV description annotation is the catalog's own
+    short description; it is capped so a hostile entry cannot bloat rows."""
+    manifest = _pkg_manifest()
+    manifest["status"]["channels"] = [
+        {"name": "candidate", "currentCSVDesc": {"annotations": {"description": "wrong"}}},
+        {
+            "name": "stable",
+            "currentCSVDesc": {"annotations": {"description": "X.509 certificate management"}},
+        },
+    ]
+    summary = summary_for("PackageManifest", manifest)
+    assert isinstance(summary, PackageManifestSummary)
+    assert summary.description == "X.509 certificate management"
+
+
+def test_packagemanifest_summary_description_caps_and_falls_back() -> None:
+    manifest = _pkg_manifest()
+    manifest["status"]["channels"] = [
+        {
+            "name": "stable",
+            "currentCSVDesc": {"description": "line one " + "x" * 200 + "\nline two"},
+        }
+    ]
+    summary = summary_for("PackageManifest", manifest)
+    assert isinstance(summary, PackageManifestSummary)
+    assert summary.description.startswith("line one")
+    assert "line two" not in summary.description
+    assert len(summary.description) <= 80
+    assert summary.description.endswith("\u2026")
+
+
+def test_pod_summary_carries_creation_timestamp() -> None:
+    """Feeds age sorting (issue #37): timestamps compare, not '3h' strings."""
+    manifest = {
+        "metadata": {
+            "name": "web-1",
+            "namespace": "default",
+            "creationTimestamp": "2026-07-26T09:00:00Z",
+        },
+        "spec": {},
+        "status": {},
+    }
+    pod = PodSummary.from_manifest(manifest)
+    assert pod.created == "2026-07-26T09:00:00Z"
+
+
+def test_pod_summary_created_defaults_to_empty() -> None:
+    pod = PodSummary.from_manifest({"metadata": {"name": "x"}, "spec": {}, "status": {}})
+    assert pod.created == ""
+
+
+def test_pod_summary_age_renders_like_generic() -> None:
+    """Feeds the pods AGE column (issue #37 sort indicator visibility)."""
+    pod = PodSummary.from_manifest(
+        {
+            "metadata": {"name": "x", "creationTimestamp": "2024-06-01T10:00:00Z"},
+            "spec": {},
+            "status": {},
+        }
+    )
+    now = datetime(2024, 6, 1, 13, 0, 0, tzinfo=UTC)
+    assert pod.age(now=now) == "3h"
+
+
+def test_pod_summary_age_dash_when_created_missing() -> None:
+    pod = PodSummary.from_manifest({"metadata": {"name": "x"}, "spec": {}, "status": {}})
+    assert pod.age() == "-"
 
 
 def test_pod_summary_carries_labels() -> None:

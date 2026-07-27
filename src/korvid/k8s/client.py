@@ -15,6 +15,7 @@ from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio import config as k8s_config
 from kubernetes_asyncio import watch as k8s_watch
 
+from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import ApiStatusError
@@ -97,6 +98,8 @@ class KubeClient(WriteOps):
         self._ssar_warned = False
         #: pods/resize discovery result; None until the first successful check.
         self._pod_resize_supported: bool | None = None
+        #: cloud provider detection result; None until the first lookup.
+        self._provider_info: ProviderInfo | None = None
 
     async def connect(self, context: str | None = None) -> None:
         await k8s_config.load_kube_config(context=context)
@@ -105,6 +108,7 @@ class KubeClient(WriteOps):
         # A new connection may target a different cluster; discard any
         # capability discovered against the previous one.
         self._pod_resize_supported = None
+        self._provider_info = None
 
     async def list_namespaces(self) -> list[str]:
         if self._core_v1 is None:
@@ -115,6 +119,31 @@ class KubeClient(WriteOps):
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
         return [item["metadata"]["name"] for item in data.get("items", [])]
+
+    async def detect_cloud_provider(self) -> ProviderInfo:
+        """Detect the cluster's cloud provider from a few nodes (issue #30).
+
+        Cached per connection; connect() discards the cache. Any API failure
+        (RBAC-limited users often cannot list nodes cluster-wide) yields
+        "unknown", also cached — detection is a hint, never worth retry churn.
+        """
+        if self._provider_info is not None:
+            return self._provider_info
+        if self._core_v1 is None:
+            raise RuntimeError("connect() first")
+        try:
+            resp = await self._core_v1.list_node(limit=5, _preload_content=False)
+            data = await _to_dict(resp)
+        except Exception as exc:
+            # Best-effort probe: RBAC denials arrive as ApiException, but
+            # transport failures (DNS, TLS, connection reset) surface as
+            # ordinary aiohttp/OS errors — none of them may abort startup.
+            # Cancellation (BaseException) still propagates.
+            logger.debug("cloud provider detection failed: %s", exc)
+            self._provider_info = detect_provider([])
+            return self._provider_info
+        self._provider_info = detect_provider(data.get("items", []))
+        return self._provider_info
 
     async def list_pods(self, namespace: str) -> list[PodSummary]:
         if self._core_v1 is None:
@@ -808,6 +837,24 @@ class KubeClient(WriteOps):
             body=body,
             content_type="application/json",
         )
+
+    async def create_object(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        manifest: dict[str, Any],
+    ) -> None:
+        """POST a new object onto the collection (OLM install, issue #29)."""
+        if meta.namespaced:
+            if namespace is None:
+                # Kubernetes allows a cluster-wide LIST on a namespaced
+                # collection but never a POST: reject locally instead of
+                # sending a guaranteed-invalid request.
+                raise ValueError(f"creating a {meta.kind} requires a namespace")
+            path = f"{meta.api_base}/namespaces/{_path_segment(namespace)}/{meta.plural}"
+        else:
+            path = f"{meta.api_base}/{meta.plural}"
+        await self._request_write(path, "POST", body=manifest, content_type="application/json")
 
     async def stream_logs(
         self,

@@ -49,6 +49,7 @@ from korvid.core.debugimage import (
 )
 from korvid.core.errors import explain_api_error
 from korvid.core.filters import ResourceFilter, parse_filter
+from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.core.portforward import (
@@ -59,6 +60,7 @@ from korvid.core.portforward import (
     controller_owner,
 )
 from korvid.core.secrets import mask_secret_manifest
+from korvid.core.sorting import SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
@@ -66,6 +68,14 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import PodSummary
+from korvid.k8s.olm import (
+    OPERATORS_GROUP,
+    PACKAGES_GROUP,
+    PackageInstallFacts,
+    build_subscription,
+    package_install_facts,
+    resolve_olm_meta,
+)
 from korvid.k8s.portforward import FORWARDABLE_KINDS, forward_target_gvr
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
@@ -102,6 +112,7 @@ from korvid.ui.widgets.hint_strip import HintStrip, parse_rfc3339
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
+from korvid.ui.widgets.operator_install import OperatorInstallPrompt
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.port_forward_screen import ForwardListScreen, PortForwardScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
@@ -352,37 +363,51 @@ class _ReplayFilter:
 
 
 class KorvidApp(App[None]):
+    # Every binding carries an ``id`` so the `keybindings:` config section
+    # can remap it via Textual's keymap (issue #35); uppercase duplicates
+    # of shift+<letter> keys share the action under an ``--alt`` id.
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
-        ("q", "quit", "Quit"),
-        Binding("question_mark", "help", "Help"),
-        ("colon", "open_command", "Command"),
-        ("slash", "open_filter", "Filter/Search"),
-        ("0", "toggle_all_namespaces", "All NS"),
-        ("d", "describe", "Describe"),
-        ("s", "shell", "Shell"),
-        ("l", "logs", "Logs"),
-        Binding("shift+l", "logs_multi", "Multi-log"),
+        Binding("q", "quit", "Quit", id="quit"),
+        Binding("question_mark", "help", "Help", id="help"),
+        Binding("colon", "open_command", "Command", id="open_command"),
+        Binding("slash", "open_filter", "Filter/Search", id="open_filter"),
+        Binding("0", "toggle_all_namespaces", "All NS", id="toggle_all_namespaces"),
+        Binding("d", "describe", "Describe", id="describe"),
+        Binding("s", "shell", "Shell", id="shell"),
+        Binding("l", "logs", "Logs", id="logs"),
+        Binding("shift+l", "logs_multi", "Multi-log", id="logs_multi"),
         # Real terminals deliver Shift+<letter> as the uppercase character,
         # not "shift+x"; bind both so the shortcut works outside Pilot tests.
-        Binding("L", "logs_multi", "Multi-log", show=False),
-        ("f", "log_format", "JSON/raw"),
-        Binding("w", "log_wrap", "Wrap", show=False),
-        Binding("t", "log_timestamps", "Timestamps", show=False),
-        Binding("ctrl+s", "log_save", "Save logs", show=False),
-        ("p", "log_previous", "Prev logs"),
-        ("n", "log_search_next", "Next hit"),
-        Binding("shift+n", "log_search_prev", "Prev hit"),
-        Binding("N", "log_search_prev", "Prev hit", show=False),
-        Binding("ctrl+a", "toggle_agent", "AI", priority=True),
-        Binding("ctrl+d", "delete_resource", "Delete"),
-        Binding("r", "rollout_restart", "Restart", show=False),
-        Binding("R", "resize_pod", "Resize", show=False),
-        Binding("S", "scale_resource", "Scale", show=False),
-        Binding("e", "edit_resource", "Edit", show=False),
-        Binding("i", "hint_details", "Hint details", show=False),
+        Binding("L", "logs_multi", "Multi-log", show=False, id="logs_multi--alt"),
+        Binding("f", "log_format", "JSON/raw", id="log_format"),
+        Binding("w", "log_wrap", "Wrap", show=False, id="log_wrap"),
+        Binding("t", "log_timestamps", "Timestamps", show=False, id="log_timestamps"),
+        Binding("ctrl+s", "log_save", "Save logs", show=False, id="log_save"),
+        Binding("p", "log_previous", "Prev logs", id="log_previous"),
+        Binding("n", "log_search_next", "Next hit", id="log_search_next"),
+        Binding("shift+n", "log_search_prev", "Prev hit / Sort name", id="log_search_prev"),
+        Binding(
+            "N", "log_search_prev", "Prev hit / Sort name", show=False, id="log_search_prev--alt"
+        ),
+        # Column sorting (issue #37); shift+n doubles as sort-by-name when
+        # no search pane is open (see action_log_search_prev).
+        Binding("shift+a", "sort_by_age", "Sort age", show=False, id="sort_by_age"),
+        Binding("A", "sort_by_age", "Sort age", show=False, id="sort_by_age--alt"),
+        Binding("shift+c", "sort_by_cpu", "Sort CPU", show=False, id="sort_by_cpu"),
+        Binding("C", "sort_by_cpu", "Sort CPU", show=False, id="sort_by_cpu--alt"),
+        Binding("shift+m", "sort_by_mem", "Sort MEM", show=False, id="sort_by_mem"),
+        Binding("M", "sort_by_mem", "Sort MEM", show=False, id="sort_by_mem--alt"),
+        Binding("ctrl+a", "toggle_agent", "AI", priority=True, id="toggle_agent"),
+        Binding("ctrl+d", "delete_resource", "Delete", id="delete_resource"),
+        Binding("r", "rollout_restart", "Restart", show=False, id="rollout_restart"),
+        Binding("R", "resize_pod", "Resize", show=False, id="resize_pod"),
+        Binding("S", "scale_resource", "Scale", show=False, id="scale_resource"),
+        Binding("e", "edit_resource", "Edit", show=False, id="edit_resource"),
+        Binding("i", "hint_details", "Hint details", show=False, id="hint_details"),
+        Binding("I", "operator_install", "Install/Approve", show=False, id="operator_install"),
         # Real terminals deliver Shift+F as "F" (see shift+l above).
-        Binding("shift+f", "port_forward", "Port-forward", show=False),
-        Binding("F", "port_forward", "Port-forward", show=False),
+        Binding("shift+f", "port_forward", "Port-forward", show=False, id="port_forward"),
+        Binding("F", "port_forward", "Port-forward", show=False, id="port_forward--alt"),
     ]
 
     # User-facing keys handled in event handlers rather than BINDINGS:
@@ -431,6 +456,7 @@ class KorvidApp(App[None]):
         metrics: MetricsPoller | None = None,
         pod_resize_supported: bool = False,
         forwards: ForwardRegistry | None = None,
+        provider_hint: str | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -484,6 +510,9 @@ class KorvidApp(App[None]):
         #: pods/resize subresource discovered on the connected cluster
         #: (1.35 GA); gates the R keybinding and the resize agent tool.
         self._pod_resize_supported = pod_resize_supported
+        #: detected cloud provider short name ("aks", "aws", ...) or None;
+        #: drives the Service/Ingress describe footer (issue #30).
+        self._provider_hint = provider_hint
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -515,6 +544,13 @@ class KorvidApp(App[None]):
         #: inverse / hide-completed — issue #44); single matcher shared by
         #: the table render and the agent's view of "what the user sees".
         self._resource_filter: ResourceFilter = parse_filter("")
+        #: Validated `keybindings:` overrides (action → key), applied via the
+        #: keymap in on_mount; the help overlay renders these keys (issue #35).
+        self._keybinding_overrides: dict[str, str] = {}
+        #: Active sort per view kind (issue #37): the choice survives watch
+        #: updates (every render re-applies it) and switching views restores
+        #: each kind's own sort.
+        self._sorts: dict[str, SortSpec] = {}
         # Drill-down levels (deploy -> rs -> pods); single source for the
         # breadcrumb line and the owner-uid filter on the current table.
         self._drill = NavigationStack()
@@ -568,10 +604,43 @@ class KorvidApp(App[None]):
         yield HintStrip()
         yield StatusBar()
 
+    @classmethod
+    def _binding_actions(cls) -> dict[str, tuple[str, ...]]:
+        """Every remappable app action mapped to its default keys."""
+        actions: dict[str, tuple[str, ...]] = {}
+        for raw in cls.BINDINGS:
+            binding = raw if isinstance(raw, Binding) else Binding(*raw)
+            actions[binding.action] = (*actions.get(binding.action, ()), binding.key)
+        return actions
+
+    def _apply_keybindings(self) -> None:
+        """Apply the `keybindings:` config overrides via the keymap (issue #35).
+
+        Only app bindings carry keymap ids, so the approval dialogs'
+        confirm keys are structurally out of reach; `plan_keybindings`
+        additionally rejects their action names and blocks priority
+        actions from taking the dialogs' keys. Shifted-letter overrides
+        expand to both spellings (`shift+g,G`) because real terminals
+        deliver Shift+<letter> as the uppercase character.
+        """
+        bindings = [raw if isinstance(raw, Binding) else Binding(*raw) for raw in self.BINDINGS]
+        priority_actions = {binding.action for binding in bindings if binding.priority}
+        plan = plan_keybindings(self.config.keybindings, self._binding_actions(), priority_actions)
+        self._keybinding_overrides = plan.overrides
+        keymap: dict[str, str] = {}
+        for binding in bindings:
+            if binding.id is not None and binding.action in plan.overrides:
+                keymap[binding.id] = shift_alias_keys(plan.overrides[binding.action])
+        if keymap:
+            self.set_keymap(keymap)
+        for warning in plan.warnings:
+            self.notify(warning, title="Keybindings", severity="warning")
+
     async def on_mount(self) -> None:
+        self._apply_keybindings()
         # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
         command_bar = self.query_one(CommandBar)
-        command_bar.known = lambda a: self.aliases[a].plural if a in self.aliases else None
+        command_bar.known = lambda a: self._canonical_kind(a) if a in self.aliases else None
         command_bar.command_words = sorted({*self.aliases, "ns", "namespaces", "q", "quit"})
         # Seed session-scoped log display settings from config (logs.wrap /
         # logs.timestamps); the w/t keys toggle them from there.
@@ -679,14 +748,20 @@ class KorvidApp(App[None]):
         metrics = None
         if kind == "pods" and self._metrics is not None and self._metrics.available:
             metrics = self._metrics.get
+        # Dispatch rendering on the resolved meta: a group-qualified view
+        # kind (alias collision) must still get its typed table, and the
+        # serving group scopes group-specific renderings (the OLM tables).
+        meta = self.aliases.get(kind)
         table.show(
-            kind,
+            meta.plural if meta is not None else kind,
             rows,
             all_namespaces=all_namespaces,
             # Filtering happened upstream (issue #44: labels/regex/fuzzy need
             # the full summaries, not just names) — no name pattern remains.
             pattern="",
             metrics=metrics,
+            group=meta.group if meta is not None else "",
+            sort=self._sorts.get(kind),
         )
         self._refresh_empty_state(kind, table.row_count)
         # The strip is driven by RowHighlighted on the pods view; anything
@@ -704,6 +779,7 @@ class KorvidApp(App[None]):
             list(self.BINDINGS),
             list(DescribeScreen.BINDINGS),
             handler_keys=self.HANDLER_KEY_HELP,
+            overrides=self._keybinding_overrides,
         )
         self.push_screen(HelpScreen(groups, command_help()))
 
@@ -762,6 +838,22 @@ class KorvidApp(App[None]):
         # kind/scope transition, which would strand a filterless child view.
         await self._navigate(message.view, message.namespace, drill_op=self._drill.clear)
 
+    def _default_scope_for(self, view: str | None, namespace: str | None) -> str | None:
+        """Catalog entries live in catalog namespaces (e.g. "olm"), not the
+        user's workload namespace: any packagemanifests view without an
+        explicit namespace defaults to the cluster-wide scope or the table
+        would commonly come up empty. Applied inside _navigate so every
+        entry path (command bar, agent, drill) behaves alike."""
+        if namespace is not None or view is None:
+            return namespace
+        meta = self.aliases.get(view)
+        if meta is not None and (meta.group, meta.plural) == (
+            PACKAGES_GROUP,
+            "packagemanifests",
+        ):
+            return ALL_NAMESPACES
+        return None
+
     async def _navigate(
         self,
         view: str | None,
@@ -779,7 +871,7 @@ class KorvidApp(App[None]):
         async with self._nav_lock:
             if drill_op is not None:
                 drill_op()
-            await self._navigate_locked(view, namespace)
+            await self._navigate_locked(view, self._default_scope_for(view, namespace))
         self.post_message(ResourcesUpdated(self.current_kind))
         self._refresh_status()
 
@@ -1087,7 +1179,15 @@ class KorvidApp(App[None]):
 
     def _canonical_kind(self, kind: str) -> str:
         meta = self.aliases.get(kind)
-        return meta.plural if meta is not None else kind
+        if meta is None:
+            return kind
+        if self.aliases.get(meta.plural) == meta:
+            return meta.plural
+        # The bare plural belongs to a different meta (a same-plural CRD from
+        # another group won the alias collision): keep the qualified alias as
+        # the canonical view kind so watching, rendering, and writes all
+        # resolve the meta this alias actually names.
+        return kind
 
     async def _drill_down_selected(self, row_key: str) -> None:
         """Keyboard Enter: push a drill level for the selected row."""
@@ -1225,7 +1325,9 @@ class KorvidApp(App[None]):
             # render masked; per-key reveal is explicit and audit-logged.
             await self.push_screen(SecretScreen(title, manifest, audit=self._audit))
             return
-        await self.push_screen(DescribeScreen(title, manifest, events))
+        await self.push_screen(
+            DescribeScreen(title, manifest, events, footer_note=self._provider_footer(manifest))
+        )
 
     def on_unknown_command(self, message: UnknownCommand) -> None:
         parts = message.text.strip().split()
@@ -1241,6 +1343,22 @@ class KorvidApp(App[None]):
             return
         if head == "pf":
             self._open_forward_list()
+            return
+        if head == "operators" and "operators" not in self.aliases:
+            # The catalog view only exists where OLM serves PackageManifests;
+            # explain the absence instead of a generic unknown-kind error.
+            # Only when the alias is genuinely unavailable: a syntax error on
+            # a discovered view (":operators ns extra") falls through to the
+            # normal unknown-command message.
+            # "Not discovered" and not "absent": background discovery may
+            # still be running, or may have failed (pods-only fallback) -
+            # indistinguishable states from here.
+            self.notify(
+                "The operator catalog is unavailable: the"
+                " packages.operators.coreos.com API group was not discovered"
+                " (OLM may be absent, or discovery may still be running)",
+                severity="warning",
+            )
             return
         self.notify(
             f"Unknown resource or command: {message.text}"
@@ -2635,6 +2753,8 @@ class KorvidApp(App[None]):
         "debug": ("patch", "ephemeralcontainers"),
         "edit": ("update", ""),
         "resize": ("patch", "resize"),
+        "install": ("create", ""),
+        "approve": ("update", ""),
     }
 
     @staticmethod
@@ -2665,6 +2785,21 @@ class KorvidApp(App[None]):
                 uid = str(getattr(obj, "uid", "") or "")
                 return uid or None
         return None
+
+    def _uid_intact_after_fetch(
+        self, manifest: dict[str, Any], ns: str | None, name: str, uid: str | None
+    ) -> bool:
+        """Post-await UID guarantee: after a manifest fetch, both the fetched
+        object and the selected row must still be the incarnation the user
+        acted on. An object deleted and recreated under the same name would
+        otherwise render in the dialog while the write pins the stale UID
+        (guaranteed conflict at best, wrong-object action at worst)."""
+        if not uid:
+            return True
+        fetched_uid = str(manifest.get("metadata", {}).get("uid") or "")
+        if fetched_uid and fetched_uid != uid:
+            return False
+        return self._selected_uid(ns, name) == uid
 
     def _write_target(self) -> tuple[ResourceMeta, str | None, str, str | None] | None:
         """Resolve (meta, namespace, name, uid) of the selected row for a
@@ -3363,6 +3498,249 @@ class KorvidApp(App[None]):
             _done,
         )
 
+    async def action_operator_install(self) -> None:
+        """I: on the operator catalog, install the selected package (wizard,
+        then approval with the full Subscription manifest); on InstallPlans,
+        approve a pending manual plan. Everything offered comes from the
+        cluster's own catalog objects - no hardcoded operator knowledge."""
+        if self._write_ops is None:
+            self.notify("Install unavailable in this session", severity="warning")
+            return
+        target = self._write_target()
+        if target is None:
+            return
+        meta, ns, name, uid = target
+        if (meta.group, meta.plural) == (PACKAGES_GROUP, "packagemanifests"):
+            await self._start_operator_install(meta, ns, name, uid)
+        elif (meta.group, meta.plural) == (OPERATORS_GROUP, "installplans"):
+            await self._start_installplan_approve(meta, ns, name, uid)
+        else:
+            self.notify(
+                f"Install/Approve does not apply to {self._gvr_label(meta)}"
+                " (use it on packagemanifests or installplans)",
+                severity="warning",
+            )
+
+    async def _start_operator_install(
+        self, pkg_meta: ResourceMeta, ns: str | None, name: str, uid: str | None
+    ) -> None:
+        """Fetch the PackageManifest and open the install wizard."""
+        sub_meta = resolve_olm_meta(self.aliases, "subscriptions", OPERATORS_GROUP)
+        if sub_meta is None:
+            self.notify(
+                "Install unavailable: the OLM Subscription API was not discovered",
+                severity="warning",
+            )
+            return
+        if self._get_manifest is None:
+            self.notify("Install unavailable: no manifest source", severity="warning")
+            return
+        try:
+            # Fetch by the canonical view kind (which may be a group-qualified
+            # alias), as the edit path does: a bare plural would resolve to a
+            # colliding foreign CRD's meta when names overlap.
+            manifest = await self._get_manifest(self._canonical_kind(self.current_kind), ns, name)
+        except Exception as exc:
+            self.notify(f"Could not fetch the package manifest: {exc}", severity="error")
+            return
+        # The wizard must be fed the incarnation the user selected: if the
+        # catalog entry was deleted and recreated under the same name during
+        # the fetch, its facts (channels, catalog source) may differ.
+        if not self._uid_intact_after_fetch(manifest, ns, name, uid):
+            self.notify(
+                f"install {self._gvr_label(pkg_meta)}/{name} cancelled -"
+                " the catalog entry changed during the manifest fetch",
+                severity="warning",
+            )
+            return
+        facts = package_install_facts(manifest)
+        if not self._write_context_intact(
+            "install", pkg_meta, ns, name, phase="the manifest fetch"
+        ):
+            return
+
+        def _on_choices(choices: tuple[str, str, str] | None) -> None:
+            if choices is None:
+                return
+            # The SSAR round trip must not run inside a screen callback:
+            # a worker re-checks, revalidates, then confirms.
+            self.run_worker(
+                self._confirm_operator_install(pkg_meta, sub_meta, ns, uid, facts, choices)
+            )
+
+        # The row namespace is where the catalog lives (e.g. "olm"), not
+        # where the user works: prefill the wizard with the active view
+        # namespace, or the configured workload namespace on the
+        # all-namespaces view (the catalog default since `:operators`
+        # opens cluster-wide).
+        view_ns = self.current_namespace
+        # Same fallback as current_scope's initialization: with zero config,
+        # config.namespace is None while the effective workload namespace is
+        # "default" - an empty prefill would fail validation on submit.
+        default_ns = view_ns if view_ns != ALL_NAMESPACES else (self.config.namespace or "default")
+        await self.push_screen(
+            OperatorInstallPrompt(facts, namespace=default_ns),
+            _on_choices,
+        )
+
+    async def _confirm_operator_install(
+        self,
+        pkg_meta: ResourceMeta,
+        sub_meta: ResourceMeta,
+        ns: str | None,
+        uid: str | None,
+        facts: PackageInstallFacts,
+        choices: tuple[str, str, str],
+    ) -> None:
+        """Approval dialog for an operator install: the full Subscription
+        manifest is shown before it is created (issue #29 requirement)."""
+        ops = self._write_ops
+        if ops is None:
+            return
+        namespace, channel, approval = choices
+        try:
+            manifest = build_subscription(
+                package=facts.package,
+                namespace=namespace,
+                channel=channel,
+                source=facts.catalog_source,
+                source_namespace=facts.catalog_source_namespace,
+                approval=approval,
+            )
+        except ValueError as exc:
+            # Blank catalog facts (malformed PackageManifest status) land
+            # here; the wizard already validated its own inputs.
+            self.notify(f"install cancelled: {exc}", severity="warning")
+            return
+        # Create is authorized against the collection POST before the object
+        # name exists (resourceNames rules cannot grant create), so the SSAR
+        # must omit the name to match the real request.
+        if not await self._permitted("install", sub_meta, namespace, ""):
+            return
+        if not self._write_context_intact(
+            "install", pkg_meta, ns, facts.package, phase="the install wizard"
+        ):
+            return
+        if uid and self._selected_uid(ns, facts.package) != uid:
+            # Same name, different incarnation: the catalog entry was
+            # replaced while the wizard was open.
+            self.notify(
+                f"install {self._gvr_label(pkg_meta)}/{facts.package} cancelled -"
+                " the catalog entry changed during the install wizard",
+                severity="warning",
+            )
+            return
+        operation = (
+            f"CREATE subscriptions/{facts.package} in namespace {namespace}\n"
+            "note: OLM requires an OperatorGroup in the target namespace -"
+            " without one the Subscription is accepted but stays pending\n\n"
+            + yaml.safe_dump(manifest, sort_keys=False)
+        )
+
+        def _done(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            # create has no server-side uid precondition (there is no target
+            # object yet): recheck the catalog incarnation one last time at
+            # execution, after the confirmation gap.
+            if uid and self._selected_uid(ns, facts.package) != uid:
+                self.notify(
+                    f"install {self._gvr_label(pkg_meta)}/{facts.package} cancelled -"
+                    " the catalog entry changed during the approval dialog",
+                    severity="warning",
+                )
+                return
+            self.run_worker(
+                self._run_write(
+                    "install",
+                    sub_meta,
+                    namespace,
+                    facts.package,
+                    ops.create_object(sub_meta, namespace, manifest),
+                    detail=f"channel={channel} approval={approval} source={facts.catalog_source}",
+                )
+            )
+
+        await self.push_screen(
+            ConfirmScreen(f"Install operator {facts.package}?", operation), _done
+        )
+
+    async def _start_installplan_approve(
+        self, meta: ResourceMeta, ns: str | None, name: str, uid: str | None
+    ) -> None:
+        """Approve a pending manual InstallPlan: fetch, flip spec.approved,
+        and replace behind the standard approval dialog listing the CSVs the
+        approval unblocks."""
+        ops = self._write_ops
+        if ops is None:
+            return
+        if not await self._precheck_keybinding_write("approve", meta, ns, name):
+            return
+        if self._get_manifest is None:
+            self.notify("Approve unavailable: no manifest source", severity="warning")
+            return
+        try:
+            # Canonical view kind, not the bare plural: safe under alias
+            # collisions (see _start_operator_install).
+            manifest = await self._get_manifest(self._canonical_kind(self.current_kind), ns, name)
+        except Exception as exc:
+            self.notify(f"Could not fetch the install plan: {exc}", severity="error")
+            return
+        if not self._uid_intact_after_fetch(manifest, ns, name, uid):
+            self.notify(
+                f"approve installplans/{name} cancelled -"
+                " the install plan changed during the manifest fetch",
+                severity="warning",
+            )
+            return
+        spec = self._approvable_plan_spec(manifest, name)
+        if spec is None:
+            return
+        if not self._write_context_intact("approve", meta, ns, name, phase="the manifest fetch"):
+            return
+        updated = dict(manifest)
+        updated["spec"] = {**spec, "approved": True}
+        csvs = ", ".join(str(c) for c in spec.get("clusterServiceVersionNames") or []) or "?"
+        operation = (
+            f"REPLACE installplans/{name} with spec.approved=true"
+            f"{self._write_locus(ns)}\ninstalls: {csvs}"
+        )
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_write(
+                        "approve",
+                        meta,
+                        ns,
+                        name,
+                        ops.replace_object(meta, ns, name, updated, uid=uid),
+                        detail=f"installs: {csvs}",
+                    )
+                )
+
+        await self.push_screen(ConfirmScreen(f"Approve installplans/{name}?", operation), _done)
+
+    def _approvable_plan_spec(self, manifest: dict[str, Any], name: str) -> dict[str, Any] | None:
+        """The plan's spec if it is a pending Manual plan, else None (with
+        the reason notified). An Automatic (or malformed) plan is OLM's own
+        to approve; flipping it manually would race the operator."""
+        spec = manifest.get("spec")
+        spec = spec if isinstance(spec, dict) else {}
+        approval_mode = str(spec.get("approval") or "")
+        if approval_mode != "Manual":
+            self.notify(
+                f"installplans/{name} has approval mode"
+                f" {approval_mode or '?'!r} - only pending Manual plans"
+                " can be approved here",
+                severity="warning",
+            )
+            return None
+        if spec.get("approved"):
+            self.notify(f"installplans/{name} is already approved", severity="information")
+            return None
+        return spec
+
     async def _open_log_pane(
         self,
         namespace: str,
@@ -3686,7 +4064,7 @@ class KorvidApp(App[None]):
             log_pane.search_next()
 
     def action_log_search_prev(self) -> None:
-        """Go back to the previous search hit (``N`` / shift+n key)."""
+        """Previous search hit in an open pane; sort by name otherwise (``N``)."""
         describe_pane = self.query_one(DescribePane)
         if describe_pane.display:
             describe_pane.search_prev()
@@ -3694,6 +4072,32 @@ class KorvidApp(App[None]):
         log_pane = self.query_one(LogPane)
         if log_pane.display:
             log_pane.search_prev()
+            return
+        self._toggle_sort("name")
+
+    # ------------------------------------------------------------------
+    # Column sorting (issue #37) — data-model sort keys, per-kind state.
+    # ------------------------------------------------------------------
+
+    def _toggle_sort(self, column: str) -> None:
+        """Apply/flip a sort column for the current view kind and re-render."""
+        kind = self.current_kind
+        if column in ("cpu", "mem") and kind != "pods":
+            # Only the pods view has CPU/MEM columns and a metrics feed;
+            # elsewhere the keypress would silently discard the current
+            # order while showing no indicator, so ignore it.
+            return
+        self._sorts[kind] = toggle_sort(self._sorts.get(kind), column)
+        self._render_table(kind)
+
+    def action_sort_by_age(self) -> None:
+        self._toggle_sort("age")
+
+    def action_sort_by_cpu(self) -> None:
+        self._toggle_sort("cpu")
+
+    def action_sort_by_mem(self) -> None:
+        self._toggle_sort("mem")
 
     # ------------------------------------------------------------------
     # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,
@@ -3792,7 +4196,9 @@ class KorvidApp(App[None]):
             # Same mapping as the human ':view all' command path.
             namespace = ALL_NAMESPACES
         try:
-            await self.on_navigate_command(NavigateCommand(meta.plural, namespace))
+            # Canonical view kind, not the bare plural: safe under alias
+            # collisions (same rule as the command-bar path).
+            await self.on_navigate_command(NavigateCommand(self._canonical_kind(key), namespace))
         except Exception as exc:
             return f"ERROR: {exc}"
         rows = self.store.get(self.current_kind, self.current_scope)
@@ -4342,10 +4748,26 @@ class KorvidApp(App[None]):
             # Masking pipeline (design §7): this path is agent-driven, so the
             # rendered body is LLM-adjacent — secret values must never appear.
             manifest = mask_secret_manifest(manifest)
+        footer = self._provider_footer(manifest)
         if share:
-            self.query_one(DescribePane).show(title, manifest, events)
+            self.query_one(DescribePane).show(title, manifest, events, footer_note=footer)
         else:
-            await self.push_screen(DescribeScreen(title, manifest, events))
+            await self.push_screen(DescribeScreen(title, manifest, events, footer_note=footer))
+
+    def _provider_footer(self, manifest: dict[str, Any]) -> str | None:
+        """One-line describe footer for Service/Ingress on a detected provider.
+
+        A pointer, not a catalog (issue #30): the CSP annotation knowledge
+        lives in the agent, so the footer just says where to ask.
+        """
+        if self._provider_hint is None:
+            return None
+        if manifest.get("kind") not in ("Service", "Ingress"):
+            return None
+        return (
+            f"provider: {self._provider_hint} — ask the agent about "
+            "load balancer annotations (ctrl+a)"
+        )
 
     def _refresh_empty_state(self, kind: str, visible_rows: int) -> None:
         """Show guidance instead of a silent blank table (empty ns or no filter match)."""
