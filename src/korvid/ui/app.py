@@ -1475,6 +1475,14 @@ class KorvidApp(App[None]):
         await self._drain_forward_audits()
         self._drill.clear()
         self.store.clear_all()
+        # The hint-events worker holds the old client and its exception path
+        # re-populates the cache — cancel it (and the parked-cursor refresh
+        # timer) before the cache is cleared, so no late result or retry can
+        # resurrect old-cluster hints.
+        self.workers.cancel_group(self, "hint-events")
+        if self._hint_refresh_timer is not None:
+            self._hint_refresh_timer.stop()
+            self._hint_refresh_timer = None
         self._hint_event_cache.clear()
         self.filter_pattern = ""
         self._resource_filter = parse_filter("")
@@ -1637,17 +1645,33 @@ class KorvidApp(App[None]):
         """Best-effort: append the newest warning event to the visible strip."""
         if self._get_events is None:  # caller guards; satisfy the type checker
             return
+        epoch = self._ctx_epoch
         try:
             events = await self._get_events.fetch(
                 summary.namespace, summary.name, uid=summary.uid or None
             )
         except Exception:  # events are decoration; the status-derived hint already shows
+            if self._ctx_switching or epoch != self._ctx_epoch:
+                # The fetch failed because the context switch closed the old
+                # client — recaching / rescheduling would resurrect
+                # old-cluster hints after teardown cleared them.
+                return
             self._store_hint_event(cache_key, None, None)
             # Retry once the TTL passes: a transient API failure must not
             # hide the hint forever while the cursor stays parked.
             if self.current_kind == "pods" and self._cursor_row_key() == row_key:
                 self._schedule_hint_refresh(row_key)
             return
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # A late success from the old cluster must not be cached against
+            # (or rendered over) a same-keyed row on the new one.
+            return
+        self._apply_hint_events(row_key, cache_key, summary, events)
+
+    def _apply_hint_events(
+        self, row_key: str, cache_key: str, summary: PodSummary, events: list[dict[str, Any]]
+    ) -> None:
+        """Cache the fetched events and render them if the cursor still fits."""
         # The snapshot taken at highlight time may be stale after the await:
         # re-read the store and filter/render against the *current* status.
         fresh = self._find_pod_summary(row_key)
@@ -2053,6 +2077,15 @@ class KorvidApp(App[None]):
         action = args[0].lower()
         if action not in ("on", "off"):
             self.notify("Usage: :mcp [on|off]", severity="warning")
+            return
+        if self._ctx_switching:
+            # The switch quiesced the server before swapping the client and
+            # alias map; a toggle landing mid-swap could restart it against
+            # state that is being replaced.
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
             return
 
         async def _switch() -> None:
@@ -2754,22 +2787,20 @@ class KorvidApp(App[None]):
         if self._transfer_in_flight:
             self.notify("A transfer is already in progress", severity="warning")
             return
+        if self._ctx_switching:
+            # The stream would race the teardown/retarget and could address
+            # whichever cluster wins — refuse up front.
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
+            return
+        epoch = self._ctx_epoch
 
-        table = self.query_one(ResourceTable)
-        if table.row_count == 0:
-            self.notify("No resource selected", severity="warning")
+        ns, name = self._selected_ns_name()
+        if ns is None or name is None:
             return
-        row_index = table.cursor_row
-        ordered = table.ordered_rows
-        if row_index >= len(ordered):
-            self.notify("No resource selected", severity="warning")
-            return
-        row_key = str(ordered[row_index].key.value)  # "namespace/name"
-        parts = row_key.split("/", 1)
-        if len(parts) != 2:
-            self.notify("Cannot determine resource from selection", severity="warning")
-            return
-        namespace, name = parts[0], parts[1]
+        namespace = ns
 
         summary = self._find_pod(namespace, name)
         containers = summary.containers if summary is not None else ()
@@ -2782,20 +2813,22 @@ class KorvidApp(App[None]):
 
             def _on_pick(container: str | None) -> None:
                 if container is not None:
-                    self._open_transfer_dialog(namespace, name, container, uid)
+                    self._open_transfer_dialog(namespace, name, container, uid, epoch)
 
             self.push_screen(PickScreen(f"Container in {name}:", list(containers)), _on_pick)
             return
-        self._open_transfer_dialog(namespace, name, containers[0] if containers else None, uid)
+        self._open_transfer_dialog(
+            namespace, name, containers[0] if containers else None, uid, epoch
+        )
 
     def _open_transfer_dialog(
-        self, namespace: str, name: str, container: str | None, uid: str | None
+        self, namespace: str, name: str, container: str | None, uid: str | None, epoch: int
     ) -> None:
         target = f"{namespace}/{name}" + (f" ({container})" if container else "")
 
         def _on_spec(spec: TransferSpec | None) -> None:
             if spec is not None:
-                self._start_transfer(namespace, name, container, spec, uid)
+                self._start_transfer(namespace, name, container, spec, uid, epoch)
 
         self.push_screen(TransferScreen(target), _on_spec)
 
@@ -2806,17 +2839,37 @@ class KorvidApp(App[None]):
         container: str | None,
         spec: TransferSpec,
         uid: str | None,
+        epoch: int,
     ) -> None:
         """Gate then launch: uploads write into the container filesystem, so
         they are blocked in read-only mode and pass the approval dialog."""
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The picker/transfer dialogs stayed open across a context
+            # switch: the pod selection (and its uid, which fails open when
+            # missing) belongs to the old cluster while the shared exec
+            # client now targets the new one.
+            self.notify(
+                f"transfer to {namespace}/{name} cancelled - the kube context"
+                " changed while the dialog was open",
+                severity="warning",
+            )
+            return
         if spec.direction == "upload":
             if self.config.readonly:
                 self.notify("Upload disabled in read-only mode", severity="warning")
                 return
 
             def _approved(approved: bool | None) -> None:
-                if approved:
-                    self.run_worker(self._run_transfer(namespace, name, container, spec, uid))
+                if not approved:
+                    return
+                if self._ctx_switching or epoch != self._ctx_epoch:
+                    self.notify(
+                        f"transfer to {namespace}/{name} cancelled - the kube"
+                        " context changed while the approval was open",
+                        severity="warning",
+                    )
+                    return
+                self.run_worker(self._run_transfer(namespace, name, container, spec, uid))
 
             self.push_screen(
                 ConfirmScreen(

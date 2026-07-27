@@ -718,3 +718,83 @@ async def test_helm_flow_cancelled_when_context_switched_before_approval() -> No
             lambda: any("kube context changed" in n.message for n in app._notifications),
             label="helm epoch refusal",
         )
+
+
+async def test_hint_fetch_result_dropped_when_context_switches() -> None:
+    """A hint-event fetch resolving after a completed :ctx switch must not
+    write the cache (either path): teardown cleared it, and a late result
+    would resurrect old-cluster hints (issue #36 review round 13)."""
+    env = _CtxEnv()
+    app = env.app
+
+    class _BumpingEvents:
+        def __init__(self, *, error: bool) -> None:
+            self.error = error
+
+        async def fetch(self, ns: str, name: str, uid: str | None = None) -> list[Any]:
+            app._ctx_epoch += 1  # a switch completes during the fetch
+            if self.error:
+                raise RuntimeError("client closed by the switch")
+            return []
+
+    async with app.run_test():
+        summary = _pod("pod-a")
+        for error in (False, True):
+            app._get_events = cast("Any", _BumpingEvents(error=error))
+            await app._fetch_hint_event("default/pod-a", "default/pod-a#u1", summary)
+            assert app._hint_event_cache == {}
+
+
+async def test_switch_cancels_hint_refresh_timer() -> None:
+    """Teardown stops the parked-cursor hint refresh: its old-cluster
+    row_key must not re-trigger a fetch after retarget."""
+    env = _CtxEnv()
+    app = env.app
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        app._hint_refresh_timer = app.set_timer(60, lambda: None)
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(pilot, lambda: app.config.kube_context == "ctx-b", label="switched")
+        assert app._hint_refresh_timer is None
+
+
+async def test_mcp_toggle_refused_while_switching() -> None:
+    """:mcp on landing mid-swap could restart the server against the client
+    and alias map being replaced — refused while the switch runs."""
+    env = _CtxEnv()
+    app = env.app
+    mcp = _FakeMCP()
+    app._mcp = cast("Any", mcp)
+    async with app.run_test() as pilot:
+        app._ctx_switching = True
+        try:
+            app._handle_mcp_command(["on"])
+            await until(
+                pilot,
+                lambda: any(
+                    "context switch is in progress" in n.message for n in app._notifications
+                ),
+                label="mcp toggle refusal",
+            )
+        finally:
+            app._ctx_switching = False
+        assert "mcp-started" not in mcp.events
+
+
+async def test_transfer_cancelled_when_context_switched_while_dialog_open() -> None:
+    """A transfer dialog chain that stayed open across a completed :ctx
+    switch must not stream: the pod selection (and its fail-open uid)
+    belongs to the old cluster (issue #36 review round 13)."""
+    from korvid.core.transfer import TransferSpec
+
+    env = _CtxEnv()
+    app = env.app
+    async with app.run_test() as pilot:
+        spec = TransferSpec(direction="download", remote_path="/tmp/x", local_path="/tmp/x")
+        app._start_transfer("default", "pod-a", None, spec, None, app._ctx_epoch - 1)
+        await until(
+            pilot,
+            lambda: any("kube context" in n.message for n in app._notifications),
+            label="transfer epoch refusal",
+        )
+        assert app._transfer_task is None

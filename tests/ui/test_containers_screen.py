@@ -16,6 +16,8 @@ from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 
+from .waits import until
+
 # ---------------------------------------------------------------------------
 # Pure unit tests: build_container_rows
 # ---------------------------------------------------------------------------
@@ -231,10 +233,16 @@ async def test_containers_screen_pick_cancelled_when_context_switched() -> None:
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
             await pilot.press("enter")
-            await pilot.pause(0.1)
-            assert isinstance(app.screen, ContainersScreen)
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ContainersScreen),
+                label="containers screen open",
+            )
             app._ctx_epoch += 1  # a context switch completed under the screen
             await pilot.press("s")
-            await pilot.pause(0.2)
+            await until(
+                pilot,
+                lambda: any("kube context" in n.message for n in app._notifications),
+                label="pick epoch refusal",
+            )
     assert calls == []
-    assert any("kube context" in n.message for n in app._notifications)

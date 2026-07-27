@@ -1477,8 +1477,11 @@ async def test_shell_picker_cancelled_when_context_switched_while_open() -> None
         async with app.run_test() as pilot:
             await pilot.pause(0.1)
             await pilot.press("s")
-            await pilot.pause(0.2)
-            assert isinstance(app.screen, PickScreen)
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, PickScreen),
+                label="container picker open",
+            )
             app._ctx_epoch += 1  # a context switch completed under the picker
             await pilot.press("enter")
             await until(
