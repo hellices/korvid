@@ -118,6 +118,14 @@ class _StreamState:
     has_usage: bool = False
 
 
+def _estimate_missing_usage(state: _StreamState, prompt_estimate: int) -> None:
+    """Fill in token estimates when the provider omitted usage — totals must
+    never read as zero for a request that was really transmitted."""
+    if not state.has_usage:
+        state.in_tok = prompt_estimate
+        state.out_tok = _stream_output_chars(state) // 4
+
+
 class AgentRuntime:
     """Drives the provider + tools loop, emitting typed AgentEvent objects."""
 
@@ -203,13 +211,6 @@ class AgentRuntime:
         while sum(_message_chars(m) for m in self._messages) > self._max_history_chars:
             user_indices = [i for i, m in enumerate(self._messages) if m.get("role") == "user"]
             if len(user_indices) <= 1:
-                if self._strict_history_budget:
-                    # Strict mode: even the sole most recent turn must not
-                    # be resent when it exceeds the budget (a turn the
-                    # mid-turn guard ended early stays oversized forever —
-                    # iteration zero sends unconditionally, so this is the
-                    # only place that can stop it going over the wire).
-                    self._messages = [self._messages[0]]
                 break
             self._messages = [self._messages[0], *self._messages[user_indices[1] :]]
 
@@ -318,8 +319,8 @@ class AgentRuntime:
         turns): capped tool results alone do not bound history growth —
         assistant text and kept-call arguments are stored verbatim, and
         trimming never splits the current turn. Never fires on the first
-        iteration (that request must always go out; `_trim_history` in
-        strict mode guarantees it is under budget); the overshoot is at
+        iteration — the strict pre-flight has already trimmed and, if
+        needed, rejected that request; the overshoot is at
         most one iteration's model output, which the provider's own output
         limit bounds.
         """
@@ -348,6 +349,22 @@ class AgentRuntime:
             ]
         return message
 
+    def _strict_preflight_over_budget(self) -> bool:
+        """Strict mode: bring history within budget after the new user
+        message was appended, and report a prompt that cannot fit.
+
+        Trimming runs again here because the pre-append trim cannot see
+        the new user message: a retained turn just below the cap plus the
+        new prompt would otherwise go over the wire on iteration zero.
+        Once appended, the previous turn is no longer the newest, so the
+        normal trim drops it; True means even that was not enough — the
+        request cannot fit by itself and must be rejected, not sent.
+        """
+        if not self._strict_history_budget:
+            return False
+        self._trim_history()
+        return sum(_message_chars(m) for m in self._messages) > self._max_history_chars
+
     async def run_turn(
         self,
         user_text: str,
@@ -358,6 +375,17 @@ class AgentRuntime:
         self._messages.append(
             {"role": "user", "content": f"[screen] {screen_context}\n\n{user_text}"}
         )
+        if self._strict_preflight_over_budget():
+            # Drop the unfittable prompt so it cannot poison later turns.
+            self._messages.pop()
+            yield AgentError(
+                message=(
+                    f"request too large for the history budget "
+                    f"({self._max_history_chars} chars) — shorten the question"
+                )
+            )
+            yield TurnComplete(input_tokens=0, output_tokens=0, estimated=False)
+            return
 
         turn_in = 0
         turn_out = 0
@@ -409,9 +437,7 @@ class AgentRuntime:
                 yield AgentError(message=str(exc))
                 return
 
-            if not state.has_usage:
-                state.in_tok = prompt_estimate
-                state.out_tok = _stream_output_chars(state) // 4
+            _estimate_missing_usage(state, prompt_estimate)
             turn_in += state.in_tok
             turn_out += state.out_tok
             usage_missing = usage_missing or not state.has_usage

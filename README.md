@@ -554,14 +554,16 @@ approval gate) but trims verbose tool descriptions, offers only the two
 evidence-showing UI tools (`open_logs`, `open_describe`) instead of all
 five, caps turns at 6 tool iterations with one tool call per response
 (extra parallel calls are discarded without entering history) and at most
-3k characters per tool
-result (compacted keeping head and tail, so one full turn always fits the
-retained-history budget without losing a report's trailing evidence
-sections; when parallel calls were discarded, a short fixed-size notice
-rides on top of the capped result), retains ~24k characters of history as
-a hard bound (sized to a realistic local
-serving context, not the model's advertised window), and swaps the system
-prompt for a short one with a single worked example. `full` reproduces the
+3k characters per tool result (compacted keeping head and tail so a
+report's trailing evidence sections survive; when parallel calls were
+discarded, a short fixed-size notice rides on top of the capped result),
+and retains ~24k characters of history as a hard bound (sized to a
+realistic local
+serving context, not the model's advertised window) — a turn whose
+retained text and tool-call arguments would push a follow-up request past
+that bound ends early instead of sending it. The system
+prompt is swapped for a short one with a single worked example. `full`
+reproduces the
 default wiring exactly, so frontier models are unaffected.
 
 The `:ai` wizard suggests `small` automatically when the provider is

@@ -712,3 +712,31 @@ async def test_strict_trim_drops_an_oversized_sole_previous_turn() -> None:
     assert "x" * 1_000 not in first_request  # oversized turn not resent
     assert "second" in first_request
     assert len(first_request) < 10_000
+
+
+async def test_strict_mode_rejects_a_prompt_that_cannot_fit() -> None:
+    """Iteration zero sends unconditionally, so strict mode must catch an
+    over-budget first request before it goes over the wire: after trimming
+    with the new user message in place, a prompt that cannot fit by itself
+    is rejected — and dropped, so it cannot poison later turns."""
+
+    class SpyExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    p = ScriptedProvider(
+        [
+            [{"type": "text_delta", "text": "hi"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, SpyExecutor(), max_history_chars=5_000, strict_history_budget=True)
+    events = await collect(runtime, "x" * 10_000)
+    assert len(p.calls) == 0  # never sent
+    errors = [e for e in events if isinstance(e, AgentError)]
+    assert any("too large" in e.message for e in errors)
+    assert any(isinstance(e, TurnComplete) for e in events)
+    # The rejected prompt was dropped: a normal follow-up works cleanly.
+    events2 = await collect(runtime, "hello")
+    assert len(p.calls) == 1
+    assert "x" * 1_000 not in json.dumps(p.calls[0])
+    assert not any(isinstance(e, AgentError) for e in events2)
