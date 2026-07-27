@@ -18,14 +18,13 @@ from typing import Any
 
 from korvid.agent.context import cluster_context_note
 from korvid.agent.mcp_server import KorvidMCPServer, MCPController, default_endpoint_path
+from korvid.agent.profiles import build_profile
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentSettings
 from korvid.agent.tools import (
     READ_TOOLS,
-    RESIZE_TOOLS,
     UI_TOOLS,
-    WRITE_TOOLS,
     ToolExecutor,
     UIBridge,
 )
@@ -256,14 +255,16 @@ def _build_agent_wiring(
     """Build the initial agent runtime plus the :ai wizard's configurator/rebuild hooks."""
     token_store = TokenStore()
     ui_proxy = _UIBridgeProxy()
-    agent_tools = READ_TOOLS + UI_TOOLS
-    if not config.readonly:
-        # In readonly mode the model is never even told write tools exist.
-        agent_tools = agent_tools + WRITE_TOOLS
-        if pod_resize_supported:
-            # Offered only when discovery found pods/resize (1.35 GA): the
-            # model is never told about a tool the cluster cannot honor.
-            agent_tools = agent_tools + RESIZE_TOOLS
+    # Model-capability profile (issue #71): tool surface, budgets, and
+    # prompts come from one place so the initial build and every wizard
+    # rebuild stay consistent. In readonly mode the model is never even
+    # told write tools exist; resize is offered only when discovery found
+    # pods/resize (1.35 GA).
+    profile = build_profile(
+        config.agent_profile,
+        readonly=config.readonly,
+        resize_supported=pod_resize_supported,
+    )
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
     ollama_options = OllamaOptions(
         num_ctx=config.agent_ollama_num_ctx,
@@ -286,7 +287,11 @@ def _build_agent_wiring(
         AgentRuntime(
             provider,
             ToolExecutor(kube, aliases, ui=ui_proxy),
-            tools=agent_tools,
+            tools=profile.tools,
+            max_iterations=profile.max_iterations,
+            max_history_chars=profile.max_history_chars,
+            system_prompt=profile.system_prompt,
+            ui_prompt=profile.ui_prompt,
             cluster_context=cluster_context,
         )
         if provider
@@ -304,6 +309,7 @@ def _build_agent_wiring(
             base_url=settings.base_url,
             model=settings.model,
             api_key_env=settings.api_key_env,
+            profile=settings.profile,
         )
 
     configurator = ProviderConfigurator(token_store, persist)
@@ -330,10 +336,21 @@ def _build_agent_wiring(
         provider_box[0] = new_provider
         if new_provider is None:
             return None
+        # The wizard's rebuild carries its own profile choice (e.g. small
+        # when the provider is ollama).
+        new_profile = build_profile(
+            settings.profile,
+            readonly=config.readonly,
+            resize_supported=pod_resize_supported,
+        )
         return AgentRuntime(
             new_provider,
             ToolExecutor(kube, aliases, ui=ui_proxy),
-            tools=agent_tools,
+            tools=new_profile.tools,
+            max_iterations=new_profile.max_iterations,
+            max_history_chars=new_profile.max_history_chars,
+            system_prompt=new_profile.system_prompt,
+            ui_prompt=new_profile.ui_prompt,
             cluster_context=cluster_context,
         )
 

@@ -21,19 +21,28 @@ from korvid.agent.events import (
     ToolCallFinished,
     ToolCallStarted,
 )
+from korvid.agent.profiles import build_profile
 from korvid.agent.runtime import AgentRuntime
-from korvid.agent.tools import READ_TOOLS, RESIZE_TOOLS, WRITE_TOOL_NAMES, WRITE_TOOLS
+from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Scenario
 
 #: Runs per scenario per configuration (issue #69: report variance, not means).
 DEFAULT_REPETITIONS = 3
 
-#: Schemas offered to the model. Write schemas are included so a live
-#: structured-tool provider can actually *choose* a write (making the
-#: write-attempt/safety metrics meaningful); safety comes from the executor,
-#: which has no UI bridge in eval runs, so every write call fails at dispatch.
-_EVAL_TOOLS: list[dict[str, Any]] = READ_TOOLS + WRITE_TOOLS + RESIZE_TOOLS
+
+def _eval_tools(profile_name: str) -> list[dict[str, Any]]:
+    """Schemas offered to the model for one capability profile (issue #71).
+
+    Write schemas are included so a live structured-tool provider can
+    actually *choose* a write (making the write-attempt/safety metrics
+    meaningful); safety comes from the executor, which has no UI bridge in
+    eval runs, so every write call fails at dispatch. UI tools are excluded
+    for the same reason — there is no screen to drive, and the grader
+    counts names outside the read/write surface as malformed.
+    """
+    profile = build_profile(profile_name, readonly=False, resize_supported=True)
+    return [t for t in profile.tools if t["function"]["name"] not in UI_TOOL_NAMES]
 
 
 class _RecordingExecutor:
@@ -179,10 +188,11 @@ async def _run_once(
     scenario: Scenario,
     provider_factory: Callable[[], Any],
     executor_factory: Callable[[], Any],
+    profile_name: str = "full",
 ) -> RunMetrics:
     raw_provider = provider_factory()
     try:
-        return await _drive_turn(scenario, raw_provider, executor_factory())
+        return await _drive_turn(scenario, raw_provider, executor_factory(), profile_name)
     finally:
         # Live providers own an httpx client; close it per repetition or a
         # full pack run leaks one client per run (the app calls aclose()
@@ -226,10 +236,19 @@ async def _drive_turn(
     scenario: Scenario,
     raw_provider: Any,
     raw_executor: Any,
+    profile_name: str = "full",
 ) -> RunMetrics:
     provider = _CountingProvider(raw_provider)
     executor = _RecordingExecutor(raw_executor)
-    runtime = AgentRuntime(provider, executor, tools=_EVAL_TOOLS)
+    profile = build_profile(profile_name, readonly=False, resize_supported=True)
+    runtime = AgentRuntime(
+        provider,
+        executor,
+        tools=_eval_tools(profile_name),
+        max_iterations=profile.max_iterations,
+        max_history_chars=profile.max_history_chars,
+        system_prompt=profile.system_prompt,
+    )
     tally = _TurnTally()
     started = time.monotonic()
     async for event in runtime.run_turn(scenario.question, scenario.screen):
@@ -292,10 +311,12 @@ async def run_scenario(
     provider_factory: Callable[[], Any],
     executor_factory: Callable[[], Any],
     repetitions: int = DEFAULT_REPETITIONS,
+    profile: str = "full",
 ) -> ScenarioReport:
     """Run one scenario ``repetitions`` times with fresh state per run."""
     runs = [
-        await _run_once(scenario, provider_factory, executor_factory) for _ in range(repetitions)
+        await _run_once(scenario, provider_factory, executor_factory, profile)
+        for _ in range(repetitions)
     ]
     return ScenarioReport(scenario_id=scenario.id, root_cause=scenario.root_cause, runs=runs)
 

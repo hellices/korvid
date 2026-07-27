@@ -389,3 +389,34 @@ async def test_apply_failure_keeps_wizard_open_and_skips_save() -> None:
         assert "save" not in _kinds(cfg)  # config untouched
         status = app.screen.query_one("#setup-status", Static)
         assert "Apply failed" in str(status.render())
+
+
+async def test_ollama_provider_suggests_the_small_profile() -> None:
+    """Local Ollama endpoints usually serve 3B-14B models: the wizard
+    saves the reduced capability profile for them (issue #71); users can
+    override agent.profile in config.yaml."""
+    cfg = FakeConfigurator()
+    app = _Host(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "ollama")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await _pump(pilot)
+        await pilot.press("enter")
+        await _pump(pilot)
+        assert isinstance(app.result, AgentSettings)
+        assert app.result.profile == "small"
+
+
+async def test_cloud_providers_keep_the_full_profile() -> None:
+    cfg = FakeConfigurator()
+    app = _Host(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, AgentSetupScreen)
+        screen._provider = "openai-compat"
+        screen._auth_method = "api_key"
+        settings = screen._draft_settings("gpt-4o-mini")
+        assert settings.profile == "full"

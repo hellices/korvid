@@ -235,6 +235,10 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
             base_url=self._base_url,
             model=model,
             api_key_env=self._api_key_env,
+            # Local Ollama endpoints usually serve 3B-14B models; suggest the
+            # reduced capability profile (issue #71). agent.profile in
+            # config.yaml overrides this on the next start.
+            profile="small" if self._provider == "ollama" else "full",
         )
 
     def _show_model_step(self, models: list[str]) -> None:

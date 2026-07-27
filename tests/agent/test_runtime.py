@@ -489,3 +489,25 @@ async def test_provider_error_after_tool_call_estimates_output() -> None:
     assert out_tok > 0
     assert in_tok > 0
     assert runtime.usage_estimated is True
+
+
+async def test_runtime_accepts_profile_prompt_overrides() -> None:
+    """A capability profile replaces the role statement and the UI-drive
+    instruction; the conditional write/no-write clause still applies."""
+    from korvid.agent.tools import UI_TOOLS
+
+    open_logs = next(t for t in UI_TOOLS if t["function"]["name"] == "open_logs")
+    p = ScriptedProvider([[{"type": "text_delta", "text": "hi"}, {"type": "done"}]])
+    runtime = AgentRuntime(
+        p,
+        EchoExecutor(),
+        tools=[open_logs],
+        system_prompt="CUSTOM ROLE.",
+        ui_prompt="CUSTOM UI RULES.",
+    )
+    _ = await collect(runtime, "q")
+    system = p.calls[0][0]
+    assert system["role"] == "system"
+    assert system["content"].startswith("CUSTOM ROLE.")
+    assert "CUSTOM UI RULES." in system["content"]
+    assert NO_WRITE_PROMPT in system["content"]

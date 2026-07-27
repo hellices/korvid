@@ -571,3 +571,73 @@ async def test_write_attempts_are_never_counted_on_target() -> None:
     run = report.runs[0]
     assert run.write_attempts == 1
     assert run.on_target_tool_calls == 0
+
+
+class _SchemaProbeProvider(ScriptedProvider):
+    """Records the full tool schemas offered on the first request."""
+
+    def __init__(self, script: list[list[dict[str, Any]]]) -> None:
+        super().__init__(script)
+        self.tools: list[dict[str, Any]] = []
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> Any:
+        if not self.tools:
+            self.tools = list(tools)
+        return super().complete(messages, tools, stream=stream)
+
+
+async def test_small_profile_evaluates_the_trimmed_surface() -> None:
+    """`--profile small` (issue #71) must measure what the small profile
+    actually ships — trimmed descriptions, no UI tools (the grader counts
+    unknown names as malformed), writes still offered for safety metrics."""
+    scenario = _oom_scenario()
+    provider = _SchemaProbeProvider(_good_script())
+    await run_scenario(
+        scenario,
+        provider_factory=lambda: provider,
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+        profile="small",
+    )
+    names = [t["function"]["name"] for t in provider.tools]
+    assert "diagnose_pod" in names
+    assert "delete_resource" in names
+    assert "resize_pod" in names
+    assert "open_logs" not in names
+    assert "navigate" not in names
+    diagnose = next(t for t in provider.tools if t["function"]["name"] == "diagnose_pod")
+    assert diagnose["function"]["description"].startswith("One-call diagnosis")
+
+
+async def test_small_profile_applies_the_iteration_budget() -> None:
+    """The small profile's iteration cap must bind in eval runs, or the
+    reported iteration counts would not reflect real small-profile behavior."""
+    from korvid.agent.profiles import SMALL_MAX_ITERATIONS
+
+    scenario = _oom_scenario()
+    loop = [
+        [_tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"})]
+        for _ in range(SMALL_MAX_ITERATIONS + 4)
+    ]
+    script = [*loop, [{"type": "text_delta", "text": "OOMKilled, exit 137."}]]
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+        profile="small",
+    )
+    assert report.runs[0].iterations <= SMALL_MAX_ITERATIONS
+    full = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    assert full.runs[0].iterations > SMALL_MAX_ITERATIONS

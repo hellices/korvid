@@ -875,3 +875,26 @@ def test_views_non_mapping_top_level_warned(tmp_path: Path) -> None:
     config = load_config(cfg)
     assert config.views == {}
     assert any(w.startswith("views") and "mapping" in w for w in config.warnings)
+
+
+def test_agent_profile_defaults_to_full(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n")
+    cfg = load_config(p)
+    assert cfg.agent_profile == "full"
+
+
+def test_agent_profile_parsed(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  profile: small\n")
+    cfg = load_config(p)
+    assert cfg.agent_profile == "small"
+
+
+def test_agent_profile_invalid_values_fall_back_to_full(tmp_path: Path) -> None:
+    """An unknown profile must not crash startup or half-configure the
+    agent — full keeps today's behavior."""
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  profile: tiny\n")
+    cfg = load_config(p)
+    assert cfg.agent_profile == "full"

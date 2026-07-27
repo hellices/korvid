@@ -12,6 +12,7 @@ import json
 import pytest
 
 from korvid.evals.__main__ import (
+    _parse_args,
     _positive_int,
     exit_code,
     provider_factory_from_env,
@@ -100,3 +101,12 @@ def test_exit_code_is_nonzero_when_any_run_errored(capsys: pytest.CaptureFixture
     assert exit_code([_report(), _report(error="connection refused")]) == 1
     stderr = capsys.readouterr().err
     assert "oom-killed: connection refused" in stderr
+
+
+def test_profile_flag_defaults_to_full_and_rejects_unknown_values() -> None:
+    """`--profile` selects which capability tier the pack measures
+    (issue #71); anything but the two real profiles is a usage error."""
+    assert _parse_args([]).profile == "full"
+    assert _parse_args(["--profile", "small"]).profile == "small"
+    with pytest.raises(SystemExit, match="2"):
+        _parse_args(["--profile", "huge"])

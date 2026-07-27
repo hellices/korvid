@@ -124,6 +124,8 @@ class AgentRuntime:
         max_iterations: int = 15,
         max_history_chars: int = MAX_HISTORY_CHARS,
         cluster_context: str | None = None,
+        system_prompt: str | None = None,
+        ui_prompt: str | None = None,
     ) -> None:
         self._provider = provider
         self._executor = executor
@@ -131,7 +133,10 @@ class AgentRuntime:
         # The serialized tool schemas ride along on every request; they are
         # part of the prompt cost when a provider omits usage.
         self._tools_chars = len(json.dumps(self._tools))
-        prompt = SYSTEM_PROMPT
+        # Capability profiles (issue #71) swap the role statement and the
+        # UI-drive instruction; the write/no-write clause below stays
+        # conditional on what is actually armed, whichever profile.
+        prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
         if cluster_context:
             # Detected-environment note (e.g. cloud provider, issue #30):
             # placed right after the role statement so provider-specific
@@ -139,7 +144,7 @@ class AgentRuntime:
             prompt = f"{prompt} {cluster_context}"
         armed = {t.get("function", {}).get("name") for t in self._tools}
         if armed & UI_TOOL_NAMES:
-            prompt = f"{prompt} {UI_DRIVE_PROMPT}"
+            prompt = f"{prompt} {ui_prompt if ui_prompt is not None else UI_DRIVE_PROMPT}"
         armed_writes = sorted(armed & WRITE_TOOL_NAMES)
         if armed_writes:
             names = ", ".join(armed_writes)

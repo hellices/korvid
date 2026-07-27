@@ -94,6 +94,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=f"repetitions per scenario, at least 1 (default: {DEFAULT_REPETITIONS})",
     )
     parser.add_argument(
+        "--profile",
+        choices=("full", "small"),
+        default="full",
+        help="agent capability profile to evaluate (issue #71; default: full)",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=None,
@@ -119,6 +125,7 @@ async def _run_all(
     scenarios: list[Scenario],
     provider_factory: Callable[[], Any],
     repetitions: int,
+    profile: str,
 ) -> list[ScenarioReport]:
     reports: list[ScenarioReport] = []
     for scenario in scenarios:
@@ -129,6 +136,7 @@ async def _run_all(
                 provider_factory=provider_factory,
                 executor_factory=_executor_factory(scenario),
                 repetitions=repetitions,
+                profile=profile,
             )
         )
     return reports
@@ -158,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     scenarios = load_scenarios(args.scenarios)
     if not scenarios:
         raise SystemExit(f"no scenario YAML files found in {args.scenarios}")
-    reports = asyncio.run(_run_all(scenarios, provider_factory, args.reps))
+    reports = asyncio.run(_run_all(scenarios, provider_factory, args.reps, args.profile))
     markdown = render_markdown(reports)
     print(markdown)
     if args.out is not None:

@@ -657,6 +657,9 @@ class KorvidApp(App[None]):
         self._agent_configurator = agent_configurator
         self._rebuild_agent = rebuild_agent
         self._agent_settings: AgentSettings | None = None
+        #: capability profile of the live runtime (issue #71); shown in the
+        #: agent panel header so users know which mode the agent runs in.
+        self._agent_profile = config.agent_profile
         # A runtime built from config.yaml at startup must seed the settings
         # snapshot so :model works without running the :ai wizard first.
         if agent_runtime is not None and config.agent_provider and config.agent_model:
@@ -666,6 +669,7 @@ class KorvidApp(App[None]):
                 base_url=config.agent_base_url,
                 model=config.agent_model,
                 api_key_env=config.agent_api_key_env,
+                profile=config.agent_profile,
             )
         self._agent_task: asyncio.Task[None] | None = None
         # Serializes view/scope switches: keyboard NavigateCommands and the
@@ -1674,6 +1678,7 @@ class KorvidApp(App[None]):
         self._agent_runtime = runtime
         self._agent_model_name = settings.model
         self._agent_settings = settings
+        self._agent_profile = settings.profile
         self._refresh_status()
         panel = self.query_one(AgentPanel)
         agent_input = panel.query_one("#agent-input")
@@ -1682,7 +1687,13 @@ class KorvidApp(App[None]):
         agent_input.disabled = False
         if panel.display:
             in_tok, out_tok = runtime.total_tokens
-            panel.set_header(settings.model, in_tok, out_tok, estimated=runtime.usage_estimated)
+            panel.set_header(
+                settings.model,
+                in_tok,
+                out_tok,
+                estimated=runtime.usage_estimated,
+                profile=settings.profile,
+            )
             agent_input.focus()
         return True
 
@@ -5829,7 +5840,11 @@ class KorvidApp(App[None]):
             runtime = self._agent_runtime
             in_tok, out_tok = runtime.total_tokens
             panel.set_header(
-                self._agent_model_name, in_tok, out_tok, estimated=runtime.usage_estimated
+                self._agent_model_name,
+                in_tok,
+                out_tok,
+                estimated=runtime.usage_estimated,
+                profile=self._agent_profile,
             )
         panel.query_one("#agent-input").focus()
 
