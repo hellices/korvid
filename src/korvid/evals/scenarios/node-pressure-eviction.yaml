@@ -1,0 +1,49 @@
+id: node-pressure-eviction
+question: Pod worker-3 in namespace jobs shows status Evicted. Why was it evicted?
+screen: "resource view: pods, namespace jobs, selected: jobs/worker-3 (Evicted)"
+root_cause: node_memory_pressure_eviction
+grading:
+  must_mention:
+    - [evicted, eviction]
+    - [memory pressure, memorypressure, low on memory, node was low]
+  must_not_mention:
+    - [exit code 137, image pull, crashloopbackoff]
+    - [oomkilled, oom killed]
+  expected_evidence:
+    - tool: get_resource
+      args: {kind: pods, name: worker-3, namespace: jobs}
+      contains: "low on resource: memory"
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: worker-3
+        namespace: jobs
+        uid: pod-evicted-1
+        creationTimestamp: "2026-07-27T05:50:00Z"
+        labels: {app: worker}
+      spec:
+        nodeName: node-c
+        containers:
+          - name: worker
+            image: jobs/worker:v3
+      status:
+        phase: Failed
+        reason: Evicted
+        message: "The node was low on resource: memory."
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-c}
+      status:
+        conditions:
+          - {type: MemoryPressure, status: "True", reason: KubeletHasInsufficientMemory}
+          - {type: Ready, status: "True"}
+  events:
+    - type: Warning
+      reason: Evicted
+      count: 1
+      lastTimestamp: "2026-07-27T07:12:00Z"
+      message: "The node was low on resource: memory."
+      involvedObject: {kind: Pod, name: worker-3, namespace: jobs, uid: pod-evicted-1}
+  logs: {}

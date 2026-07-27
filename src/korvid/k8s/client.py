@@ -37,6 +37,7 @@ from korvid.k8s.helm import (
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import PodMetrics, parse_pod_metrics_list
 from korvid.k8s.models import GenericSummary, PodSummary, summary_for
+from korvid.k8s.reads import ReadOps
 from korvid.k8s.writes import WriteOps
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,7 @@ def resolve_context_namespace(
     return str(namespace) if namespace else None
 
 
-class KubeClient(WriteOps):
+class KubeClient(ReadOps, WriteOps):
     """Thin wrapper over kubernetes_asyncio; returns typed summaries."""
 
     def __init__(
