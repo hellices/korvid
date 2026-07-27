@@ -463,6 +463,9 @@ class KorvidApp(App[None]):
         self._drain_worker: Worker[None] | None = None
         self._drain_node: str | None = None
         self._drain_progress: str = ""
+        # Bounded post-eviction termination wait (tests shrink these).
+        self._drain_wait_timeout: float = 120.0
+        self._drain_wait_poll: float = 2.0
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -2973,8 +2976,14 @@ class KorvidApp(App[None]):
         worker = self._drain_worker
         if worker is not None and worker.is_running:
             _, selected = self._selected_ns_name()
-            if self._drain_node is not None and selected != self._drain_node:
-                # Cancelling is a targeted act: another node being selected
+            kind_meta = self.aliases.get(self._canonical_kind(self.current_kind))
+            on_nodes = kind_meta is not None and (kind_meta.group, kind_meta.plural) == (
+                "",
+                "nodes",
+            )
+            if self._drain_node is not None and (not on_nodes or selected != self._drain_node):
+                # Cancelling is a targeted act: another node (or a same-named
+                # row in another view - the binding is global) being selected
                 # must not silently kill the running drain (issue #40 review).
                 self.notify(
                     f"drain of nodes/{self._drain_node} in progress"
@@ -3100,69 +3109,122 @@ class KorvidApp(App[None]):
         plan: DrainPlan,
     ) -> None:
         """Execute an approved drain: cordon, re-check the plan (pods may
-        have landed while the dialog was open), then evict pod by pod.
+        have landed while the dialog was open), evict pod by pod, then wait
+        (bounded) for the accepted evictions to actually terminate.
         Auditing is fail-closed (no intent record, no drain); a PDB-refused
         eviction (429) surfaces as a live warning and the drain moves on;
         cancellation anywhere after the intent record is audited, stops
         issuing evictions, and never uncordons the node."""
         total = len(plan.targets)
-        try:
-            await self._audit_write(
-                "drain", meta, None, name, f"planned evictions: {total}", "intent"
-            )
-        except Exception as exc:
-            logger.exception("audit intent record failed; drain blocked: %s", exc)
-            self.notify(f"drain nodes/{name} blocked: audit log unavailable", severity="error")
-            return
-        evicted = blocked = failed = 0
+        counts = {"evicted": 0, "blocked": 0, "failed": 0, "still": 0}
         try:
             try:
-                await ops.cordon_node(name, True, uid=uid)
-            except asyncio.CancelledError:
-                raise
+                await self._audit_write(
+                    "drain", meta, None, name, f"planned evictions: {total}", "intent"
+                )
             except Exception as exc:
-                with contextlib.suppress(Exception):
-                    await self._audit_write(
-                        "drain", meta, None, name, "cordon step failed", f"error: {exc}"
-                    )
-                self.notify(f"drain nodes/{name} failed: cordon: {exc}", severity="error")
+                logger.exception("audit intent record failed; drain blocked: %s", exc)
+                self.notify(f"drain nodes/{name} blocked: audit log unavailable", severity="error")
                 return
-            targets = await self._recheck_drain_plan(ops, meta, name, plan)
-            if targets is None:
-                return
-            total = len(targets)
-            self.notify(
-                f"drain nodes/{name}: cordoned; evicting {total} pods"
-                " (press the drain key again to cancel)",
-                severity="information",
-            )
             try:
-                for done, target in enumerate(targets, start=1):
-                    self._set_drain_progress(f"drain {name}: {done - 1}/{total}")
-                    result = await self._evict_one(ops, target)
-                    evicted += result == "evicted"
-                    blocked += result == "blocked"
-                    failed += result == "failed"
-                    self._set_drain_progress(f"drain {name}: {done}/{total}")
-            finally:
-                self._set_drain_progress("")
-        except asyncio.CancelledError:
-            summary = f"cancelled: evicted {evicted} of {total}; node was not uncordoned"
-            with contextlib.suppress(Exception):
-                await self._audit_write("drain", meta, None, name, summary, "cancelled")
-            self.notify(f"drain nodes/{name} {summary}", severity="warning")
-            raise
-        summary = f"evicted {evicted}, pdb-blocked {blocked}, failed {failed} of {total}"
-        outcome = "success" if failed == 0 and blocked == 0 else f"partial: {summary}"
+                try:
+                    await ops.cordon_node(name, True, uid=uid)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    with contextlib.suppress(Exception):
+                        await self._audit_write(
+                            "drain", meta, None, name, "cordon step failed", f"error: {exc}"
+                        )
+                    self.notify(f"drain nodes/{name} failed: cordon: {exc}", severity="error")
+                    return
+                targets = await self._recheck_drain_plan(ops, meta, name, plan)
+                if targets is None:
+                    return
+                total = len(targets)
+                self.notify(
+                    f"drain nodes/{name}: cordoned; evicting {total} pods"
+                    " (press the drain key again to cancel)",
+                    severity="information",
+                )
+                await self._evict_targets(ops, name, targets, counts)
+            except asyncio.CancelledError:
+                summary = (
+                    f"cancelled: evicted {counts['evicted']} of {total}; node was not uncordoned"
+                )
+                with contextlib.suppress(Exception):
+                    await self._audit_write("drain", meta, None, name, summary, "cancelled")
+                self.notify(f"drain nodes/{name} {summary}", severity="warning")
+                raise
+        finally:
+            self._drain_node = None
+        summary = (
+            f"evicted {counts['evicted']}, pdb-blocked {counts['blocked']},"
+            f" failed {counts['failed']} of {total}"
+        )
+        if counts["still"]:
+            summary += f"; {counts['still']} evicted pods not yet terminated"
+        clean = counts["blocked"] == 0 and counts["failed"] == 0 and counts["still"] == 0
+        outcome = "success" if clean else f"partial: {summary}"
         try:
             await self._audit_write("drain", meta, None, name, summary, outcome)
         except Exception:
             logger.exception("audit outcome record failed after drain")
             self.notify("Audit log write failed (drain already executed)", severity="warning")
-        if failed == 0 and blocked == 0:
+        if clean:
             self.notify(f"drain nodes/{name}: {summary}")
         else:
             self.notify(f"drain nodes/{name}: {summary}", severity="warning")
+
+    async def _evict_targets(
+        self,
+        ops: WriteOps,
+        name: str,
+        targets: tuple[DrainTarget, ...],
+        counts: dict[str, int],
+    ) -> None:
+        """Evict *targets* one by one with live progress, then wait for the
+        accepted evictions' pods to leave the node. Mutates *counts* in
+        place so a cancellation mid-loop still leaves accurate numbers for
+        the caller's audit record."""
+        total = len(targets)
+        accepted: list[DrainTarget] = []
+        try:
+            for done, target in enumerate(targets, start=1):
+                self._set_drain_progress(f"drain {name}: {done - 1}/{total}")
+                result = await self._evict_one(ops, target)
+                if result == "evicted":
+                    accepted.append(target)
+                counts[result] += 1
+                self._set_drain_progress(f"drain {name}: {done}/{total}")
+            if accepted:
+                keys = {t.uid or t.ref for t in accepted}
+                counts["still"] = await self._await_evictions(ops, name, keys)
+        finally:
+            self._set_drain_progress("")
+
+    async def _await_evictions(self, ops: WriteOps, name: str, keys: set[str]) -> int:
+        """A 201 from the Eviction API only *starts* graceful deletion: the
+        pod can linger for its grace period, a finalizer, or an unreachable
+        kubelet. Poll the node's pod list until the accepted pods are gone
+        (bounded) so progress and the audit outcome reflect reality; returns
+        how many are still present at the deadline (audited as partial)."""
+        deadline = monotonic() + self._drain_wait_timeout
+        while True:
+            try:
+                current = await ops.drain_plan(name)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("post-eviction termination poll failed", exc_info=True)
+                return len(keys)
+            keys &= {t.uid or t.ref for t in current.targets}
+            if not keys:
+                return 0
+            if monotonic() >= deadline:
+                return len(keys)
+            self._set_drain_progress(f"drain {name}: waiting for {len(keys)} pods to terminate")
+            await asyncio.sleep(self._drain_wait_poll)
 
     async def action_operator_install(self) -> None:
         """I: on the operator catalog, install the selected package (wizard,

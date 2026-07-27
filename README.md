@@ -235,7 +235,9 @@ eviction a PodDisruptionBudget currently refuses, skipped DaemonSet and
 mirror (static) pods, and emptyDir data-loss warnings. Drain executes
 through the Eviction API; PDB-refused evictions (HTTP 429) surface as live
 warnings instead of hanging, and pressing the drain key again cancels the
-remaining evictions while the node stays cordoned.
+remaining evictions while the node stays cordoned. After the evictions are
+accepted, drain waits (bounded) for the pods to actually leave the node —
+pods that linger past the deadline are reported as a partial outcome.
 
 ### Read-only mode
 

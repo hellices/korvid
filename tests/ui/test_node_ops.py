@@ -56,6 +56,7 @@ class NodeRecorder(WriteOps):
         self.evict_started = asyncio.Event()
         self.release_evictions = asyncio.Event()
         self.release_evictions.set()
+        self.evicted_names: set[str] = set()
 
     async def delete_object(self, meta, namespace, name, *, uid=None):  # type: ignore[no-untyped-def]  # fake
         pass
@@ -78,11 +79,16 @@ class NodeRecorder(WriteOps):
         error = self.evict_errors.get(name)
         if error is not None:
             raise error
+        self.evicted_names.add(name)
         self.calls.append(("evict", namespace, name, uid))
 
     async def drain_plan(self, node_name: str) -> DrainPlan:
         self.calls.append(("plan", node_name))
-        return self.plan
+        return DrainPlan(
+            targets=tuple(t for t in self.plan.targets if t.name not in self.evicted_names),
+            skipped_daemonset=self.plan.skipped_daemonset,
+            skipped_mirror=self.plan.skipped_mirror,
+        )
 
 
 def make_app(
@@ -525,3 +531,65 @@ async def test_drain_publishes_progress_on_status_bar(tmp_path: Path) -> None:
         )
         # Progress indicator is cleared once the drain completes.
         assert "drain worker-1" not in _status_text()
+
+
+async def test_drain_reports_pods_that_never_finish_terminating(tmp_path: Path) -> None:
+    """An accepted eviction only starts graceful deletion; if the pod
+    lingers past the bounded wait the drain is audited as partial."""
+
+    class LingeringRecorder(NodeRecorder):
+        async def drain_plan(self, node_name: str) -> DrainPlan:
+            self.calls.append(("plan", node_name))
+            return self.plan  # the evicted pod never leaves the node
+
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = LingeringRecorder(plan=plan)
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    app._drain_wait_timeout = 0.3
+    app._drain_wait_poll = 0.05
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        await _confirm_typed(pilot, "worker-1")
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "not yet terminated" in audit_path.read_text(),
+            label="drain finished with lingering pod",
+        )
+        assert ("evict", "default", "web-1", "uid-web-1") in rec.calls
+        entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        assert entries[-1]["outcome"].startswith("partial")
+        assert "1 evicted pods not yet terminated" in entries[-1]["detail"]
+
+
+async def test_drain_waits_for_evicted_pods_to_disappear(tmp_path: Path) -> None:
+    """The success audit is only written after the accepted evictions'
+    pods are gone from the node's pod list."""
+    plan = DrainPlan(
+        targets=(_target("web-1"), _target("cache-1")),
+        skipped_daemonset=(),
+        skipped_mirror=(),
+    )
+    rec = NodeRecorder(plan=plan)
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        await _confirm_typed(pilot, "worker-1")
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="drain finished",
+        )
+        # The verification poll ran after the evictions (recheck plan + wait plan).
+        plan_calls = [call for call in rec.calls if call[0] == "plan"]
+        assert len(plan_calls) >= 2
+        entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        assert entries[-1]["outcome"] == "success"
+        assert "not yet terminated" not in entries[-1]["detail"]

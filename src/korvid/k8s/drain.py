@@ -157,10 +157,26 @@ class _BudgetTracker:
             return f"multiple PDBs match ({names}) - the eviction API rejects this"
         if matches:
             pdb = matches[0]
+            if _always_allows_unhealthy(pdb) and not _pod_is_ready(pod):
+                # spec.unhealthyPodEvictionPolicy: AlwaysAllow admits a
+                # non-Ready pod without consuming the PDB allowance.
+                return None
             if self._remaining[id(pdb)] <= 0:
                 return str((pdb.get("metadata") or {}).get("name", ""))
             self._remaining[id(pdb)] -= 1
         return None
+
+
+def _always_allows_unhealthy(pdb: dict[str, Any]) -> bool:
+    return (pdb.get("spec") or {}).get("unhealthyPodEvictionPolicy") == "AlwaysAllow"
+
+
+def _pod_is_ready(pod: dict[str, Any]) -> bool:
+    return any(
+        cond.get("type") == "Ready" and cond.get("status") == "True"
+        for cond in (pod.get("status") or {}).get("conditions") or []
+        if isinstance(cond, dict)
+    )
 
 
 def _pdb_selector_matches(pdb: dict[str, Any], labels: dict[str, str]) -> bool:

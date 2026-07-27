@@ -251,3 +251,36 @@ def test_null_selector_matches_no_pods() -> None:
     }
     plan = build_drain_plan([pod], [null_selector_pdb])
     assert plan.targets[0].pdb_blocked is None
+
+
+def _ready(pod: dict[str, Any]) -> dict[str, Any]:
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    return pod
+
+
+def test_always_allow_policy_admits_non_ready_pod_despite_exhausted_budget() -> None:
+    pdb = _pdb("web-pdb", match_labels={"app": "web"}, disruptions_allowed=0)
+    pdb["spec"]["unhealthyPodEvictionPolicy"] = "AlwaysAllow"
+    # No Ready condition -> the pod is unhealthy; AlwaysAllow admits it.
+    plan = build_drain_plan([_pod("web-1", labels={"app": "web"})], [pdb])
+    assert plan.targets[0].pdb_blocked is None
+
+
+def test_always_allow_policy_still_blocks_ready_pod() -> None:
+    pdb = _pdb("web-pdb", match_labels={"app": "web"}, disruptions_allowed=0)
+    pdb["spec"]["unhealthyPodEvictionPolicy"] = "AlwaysAllow"
+    plan = build_drain_plan([_ready(_pod("web-1", labels={"app": "web"}))], [pdb])
+    assert plan.targets[0].pdb_blocked == "web-pdb"
+
+
+def test_always_allow_unhealthy_eviction_does_not_consume_the_allowance() -> None:
+    pdb = _pdb("web-pdb", match_labels={"app": "web"}, disruptions_allowed=1)
+    pdb["spec"]["unhealthyPodEvictionPolicy"] = "AlwaysAllow"
+    pods = [
+        _pod("sick-1", labels={"app": "web"}),  # unhealthy: free pass
+        _ready(_pod("web-1", labels={"app": "web"})),  # consumes the 1 allowance
+        _ready(_pod("web-2", labels={"app": "web"})),  # budget now exhausted
+    ]
+    plan = build_drain_plan(pods, [pdb])
+    blocked = {t.name: t.pdb_blocked for t in plan.targets}
+    assert blocked == {"sick-1": None, "web-1": None, "web-2": "web-pdb"}
