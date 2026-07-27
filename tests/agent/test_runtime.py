@@ -419,6 +419,29 @@ async def test_no_cluster_context_leaves_prompt_unchanged() -> None:
     assert "cluster runs on" not in p.calls[0][0]["content"]
 
 
+async def test_retarget_swaps_prompt_but_preserves_history() -> None:
+    """`:ctx` re-arms the runtime in place (issue #36): the system prompt
+    describes the new cluster while earlier conversation turns survive."""
+    p = ScriptedProvider(
+        [
+            [{"type": "text_delta", "text": "hi"}, {"type": "done"}],
+            [{"type": "text_delta", "text": "again"}, {"type": "done"}],
+        ]
+    )
+    rt = AgentRuntime(p, EchoExecutor(), cluster_context="The cluster runs on Azure (AKS).")
+    await collect(rt, "hello")
+
+    rt.retarget(tools=[], cluster_context="The cluster runs on AWS (EKS).")
+    await collect(rt, "still there?")
+
+    system = p.calls[1][0]
+    assert system["role"] == "system"
+    assert "The cluster runs on AWS (EKS)." in system["content"]
+    assert "Azure" not in system["content"]
+    history = [str(m.get("content") or "") for m in p.calls[1]]
+    assert any("hello" in content for content in history)
+
+
 async def test_missing_usage_estimates_prompt_tokens_too() -> None:
     """A provider that omits usage must not record zero input tokens: the
     prompt was really sent, so both directions get the heuristic estimate."""

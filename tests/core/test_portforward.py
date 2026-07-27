@@ -93,6 +93,39 @@ def test_start_pins_kube_context() -> None:
     assert "--context" in procs[0].argv
 
 
+def test_retarget_reopens_registry_for_new_context() -> None:
+    """`:ctx` switching (issue #36): after teardown stop_all() + retarget(),
+    new forwards must start (registry reopened) against the new cluster."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs, context="ctx-a")
+    registry.start(_spec())
+    registry.stop_all()
+    registry.retarget("ctx-b")
+    registry.start(_spec(local_port=9090))
+    idx = procs[-1].argv.index("--context")
+    assert procs[-1].argv[idx + 1] == "ctx-b"
+
+
+def test_retarget_discards_spawn_from_before_the_switch() -> None:
+    """A spawn in flight when stop_all() ran targets the old cluster: even
+    if it lands after retarget() reopened the registry, it is discarded."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs, context="ctx-a")
+    original_spawn = registry._spawn
+
+    def racing_spawn(spec: ForwardSpec) -> Any:
+        proc = original_spawn(spec)
+        registry.stop_all()  # the context switch wins the race mid-spawn
+        registry.retarget("ctx-b")
+        return proc
+
+    registry._spawn = racing_spawn  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="shut down"):
+        registry.start(_spec())
+    assert procs[0].terminated or procs[0].killed
+    assert registry.forwards() == []
+
+
 def test_ids_are_unique_and_stable() -> None:
     registry = _registry([])
     first = registry.start(_spec())

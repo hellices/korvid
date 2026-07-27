@@ -176,6 +176,14 @@ class AuditLog:
         self._backups = backups
         self._lock = threading.Lock()
 
+    def set_context(self, context: str | None) -> None:
+        """Re-attribute subsequent entries to *context* (issue #36).
+
+        Runtime `:ctx` switching retargets the whole session; without this,
+        writes on the new cluster would be logged against the old one.
+        """
+        self._context = context
+
     def _rotate_if_needed(self) -> None:
         """Rename audit.jsonl -> .1 -> .2 ... when the size cap is hit,
         dropping the oldest backup beyond the retention count."""

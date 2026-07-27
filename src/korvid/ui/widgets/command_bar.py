@@ -33,6 +33,7 @@ class CommandBar(Input):
         self.known: Callable[[str], str | None] = lambda _: None
         self.command_words: list[str] = []
         self.namespace_words: list[str] = []
+        self.context_words: list[str] = []
         self.suggester = _CommandSuggester(self)
 
     def complete(self, value: str) -> str | None:
@@ -45,10 +46,18 @@ class CommandBar(Input):
                 if word.startswith(value) and word != value:
                     return word
             return None
+        return self._complete_argument(head, rest)
+
+    def _complete_argument(self, head: str, rest: str) -> str | None:
+        """Second-token completion: namespaces for :ns, contexts for :ctx."""
         if head in {"ns", "namespaces"} and rest:
             for ns in self.namespace_words:
                 if ns.startswith(rest) and ns != rest:
                     return f"{head} {ns}"
+        if head in {"ctx", "context", "contexts"} and rest:
+            for ctx in self.context_words:
+                if ctx.startswith(rest) and ctx != rest:
+                    return f"{head} {ctx}"
         return None
 
     def open(self) -> None:

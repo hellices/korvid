@@ -472,3 +472,24 @@ async def test_fanout_purges_rows_seeded_by_the_forbidden_cluster_list() -> None
     names = {(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)}
     assert names == {("team-a", "p-team-a")}
     await mgr.stop_all()
+
+
+async def test_set_fallback_namespaces_applies_to_next_fanout() -> None:
+    """`:ctx` switching (issue #36) re-derives the fallback set for the new
+    cluster; a later 403 fanout must watch the new namespaces, not the old."""
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        if scope == ALL_NAMESPACES:
+            raise ApiStatusError(403, "Forbidden")
+        yield ("ADDED", _ns_pod(f"p-{scope}", scope))
+        while True:
+            await asyncio.sleep(0.01)
+
+    mgr = WatchManager(store, source, fallback_namespaces=("old-a", "old-b"), retry_delay=0)
+    mgr.set_fallback_namespaces(("new-a",))
+    await mgr.start("pods", ALL_NAMESPACES)
+    await asyncio.sleep(0.1)
+    names = {(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)}
+    assert names == {("new-a", "p-new-a")}
+    await mgr.stop_all()

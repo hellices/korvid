@@ -129,6 +129,40 @@ def _estimate_missing_usage(state: _StreamState, prompt_estimate: int) -> None:
         state.out_tok = _stream_output_chars(state) // 4
 
 
+def _compose_system_prompt(
+    tools: list[dict[str, Any]],
+    cluster_context: str | None,
+    *,
+    system_prompt: str | None = None,
+    ui_prompt: str | None = None,
+) -> str:
+    """System prompt for the armed tool set and detected environment.
+
+    Shared by ``__init__`` and ``retarget`` so a runtime that survives a
+    `:ctx` switch describes the *new* cluster and tool set, not the one it
+    was built against. Capability profiles (issue #71) swap the role
+    statement and the UI-drive instruction via `system_prompt`/`ui_prompt`;
+    the write/no-write clause stays conditional on what is actually armed,
+    whichever profile.
+    """
+    prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
+    if cluster_context:
+        # Detected-environment note (e.g. cloud provider, issue #30):
+        # placed right after the role statement so provider-specific
+        # requests are grounded before any tool instructions.
+        prompt = f"{prompt} {cluster_context}"
+    armed = {t.get("function", {}).get("name") for t in tools}
+    if armed & UI_TOOL_NAMES:
+        prompt = f"{prompt} {ui_prompt if ui_prompt is not None else UI_DRIVE_PROMPT}"
+    armed_writes = sorted(armed & WRITE_TOOL_NAMES)
+    if armed_writes:
+        names = ", ".join(armed_writes)
+        prompt = f"{prompt} You can request cluster writes with {names}. {WRITE_PROMPT}"
+    else:
+        prompt = f"{prompt} {NO_WRITE_PROMPT}"
+    return prompt
+
+
 class AgentRuntime:
     """Drives the provider + tools loop, emitting typed AgentEvent objects."""
 
@@ -153,24 +187,17 @@ class AgentRuntime:
         # The serialized tool schemas ride along on every request; they are
         # part of the prompt cost when a provider omits usage.
         self._tools_chars = len(json.dumps(self._tools))
-        # Capability profiles (issue #71) swap the role statement and the
-        # UI-drive instruction; the write/no-write clause below stays
-        # conditional on what is actually armed, whichever profile.
-        prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
-        if cluster_context:
-            # Detected-environment note (e.g. cloud provider, issue #30):
-            # placed right after the role statement so provider-specific
-            # requests are grounded before any tool instructions.
-            prompt = f"{prompt} {cluster_context}"
-        armed = {t.get("function", {}).get("name") for t in self._tools}
-        if armed & UI_TOOL_NAMES:
-            prompt = f"{prompt} {ui_prompt if ui_prompt is not None else UI_DRIVE_PROMPT}"
-        armed_writes = sorted(armed & WRITE_TOOL_NAMES)
-        if armed_writes:
-            names = ", ".join(armed_writes)
-            prompt = f"{prompt} You can request cluster writes with {names}. {WRITE_PROMPT}"
-        else:
-            prompt = f"{prompt} {NO_WRITE_PROMPT}"
+        # Remembered for retarget(): a `:ctx` switch recomposes the system
+        # prompt and must keep the active profile's role statement and
+        # UI-drive instruction (issue #71), not reset them to the defaults.
+        self._system_prompt_override = system_prompt
+        self._ui_prompt_override = ui_prompt
+        prompt = _compose_system_prompt(
+            self._tools,
+            cluster_context,
+            system_prompt=system_prompt,
+            ui_prompt=ui_prompt,
+        )
         self._max_iterations = max_iterations
         self._max_history_chars = max_history_chars
         # Optional per-result cap below the executor's own ingest limit —
@@ -190,6 +217,27 @@ class AgentRuntime:
         self._total_in = 0
         self._total_out = 0
         self._estimated = False
+
+    def retarget(self, *, tools: list[dict[str, Any]], cluster_context: str | None) -> None:
+        """Re-arm the runtime for a new cluster (issue #36, `:ctx`).
+
+        Conversation history survives — the system prompt is recomposed in
+        place so later turns describe the new environment (cloud provider
+        note) and the new capability-gated tool set (e.g. ``resize_pod``),
+        instead of the cluster the runtime was originally built against.
+        """
+        self._tools = tools
+        # Keep the omitted-usage estimate honest for the new tool set.
+        self._tools_chars = len(json.dumps(self._tools))
+        self._messages[0] = {
+            "role": "system",
+            "content": _compose_system_prompt(
+                tools,
+                cluster_context,
+                system_prompt=self._system_prompt_override,
+                ui_prompt=self._ui_prompt_override,
+            ),
+        }
 
     @property
     def total_tokens(self) -> tuple[int, int]:
