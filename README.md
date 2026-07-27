@@ -80,6 +80,45 @@ approval dialogs' confirm keys are **not remappable** by design: writes are
 only ever confirmed by the fixed keystrokes. The help overlay (`?`) always
 shows the effective keys.
 
+## Custom columns
+
+Teams encode operational facts in labels, annotations, and spec fields —
+owning team, release version, container image. The `views:` section of
+`config.yaml` adds them to any resource table (keyed by the **plural** kind
+name used in `:` navigation):
+
+```yaml
+views:
+  pods:
+    columns:
+      - name: TEAM
+        label: team                          # metadata.labels['team']
+      - name: OWNER
+        annotation: owner                    # metadata.annotations['owner']
+      - name: IMAGE
+        jsonpath: .spec.containers[0].image  # dotted path + [index] subset
+  deployments:
+    replace: true          # replace the defaults (NAME/NAMESPACE always stay)
+    columns:
+      - name: VERSION
+        label: app.kubernetes.io/version
+```
+
+Each column declares exactly one source: `label:`, `annotation:`, or
+`jsonpath:` (a read-only built-in subset — dotted keys and `[n]` indexes;
+no filters or wildcards). By default custom columns are appended after the
+kind's built-in columns; `replace: true` keeps only NAME (and NAMESPACE in
+all-namespaces mode) plus your columns.
+
+Missing values render `<none>`; an expression that fails at runtime renders
+`<err>` — the render loop never crashes. Invalid column definitions
+(including duplicates, names shadowing built-in columns, the synthetic
+helm views, and `secrets` — Secret values only render through the masking
+pipeline) are dropped with a startup warning. `:sort <COLUMN>` sorts by
+any custom column or by the built-in sort keys `name`, `age`, `cpu`, `mem`
+(only while their columns are visible; custom values compare as
+case-insensitive strings). Repeating flips direction, bare `:sort` clears.
+
 ## Live metrics
 
 The pods table shows live `CPU` / `MEM` usage and `%CPU/R` / `%MEM/R`

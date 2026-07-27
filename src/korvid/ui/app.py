@@ -39,7 +39,7 @@ from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.agent.tools import UIBridge
 from korvid.core.audit import AuditLog
-from korvid.core.config import KorvidConfig
+from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.debugimage import (
     FALLBACK_IMAGE,
     ephemeral_container_names,
@@ -60,7 +60,7 @@ from korvid.core.portforward import (
     controller_owner,
 )
 from korvid.core.secrets import mask_secret_manifest
-from korvid.core.sorting import SortSpec, toggle_sort
+from korvid.core.sorting import SORT_COLUMNS, SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.transfer import (
     TransferError,
@@ -100,6 +100,7 @@ from korvid.ui.messages import (
     ResourcesUpdated,
     ShowError,
     ShowNamespacePicker,
+    SortCommand,
     TransferCancelRequested,
     UnknownCommand,
 )
@@ -700,6 +701,10 @@ class KorvidApp(App[None]):
             # must fire when one breaks even while :pf is closed.
             self.set_interval(_FORWARD_POLL_SECONDS, self._poll_forwards)
         self._prefetch_namespaces()
+        for warning in self.config.warnings:
+            # Config problems (e.g. an invalid custom column) surface once at
+            # startup instead of hiding in a log file (issue #45).
+            self.notify(warning, title="Config warning", severity="warning")
 
         # Both callbacks fire from watch tasks on the same loop; post_message is
         # loop-safe. Watch tasks are cancelled in on_unmount before shutdown to
@@ -806,8 +811,9 @@ class KorvidApp(App[None]):
         # kind (alias collision) must still get its typed table, and the
         # serving group scopes group-specific renderings (the OLM tables).
         meta = self.aliases.get(kind)
+        plural = meta.plural if meta is not None else kind
         table.show(
-            meta.plural if meta is not None else kind,
+            plural,
             rows,
             all_namespaces=all_namespaces,
             # Filtering happened upstream (issue #44: labels/regex/fuzzy need
@@ -816,6 +822,7 @@ class KorvidApp(App[None]):
             metrics=metrics,
             group=meta.group if meta is not None else "",
             sort=self._sorts.get(kind),
+            view=self.config.views.get(plural),
         )
         self._refresh_empty_state(kind, table.row_count)
         # The strip is driven by RowHighlighted on the pods view; anything
@@ -4824,6 +4831,11 @@ class KorvidApp(App[None]):
     # Column sorting (issue #37) — data-model sort keys, per-kind state.
     # ------------------------------------------------------------------
 
+    def _view_for(self, kind: str) -> ViewConfig | None:
+        """The `views:` config entry for a view kind, resolved via its meta."""
+        meta = self.aliases.get(kind)
+        return self.config.views.get(meta.plural if meta is not None else kind)
+
     def _toggle_sort(self, column: str) -> None:
         """Apply/flip a sort column for the current view kind and re-render."""
         kind = self.current_kind
@@ -4831,6 +4843,11 @@ class KorvidApp(App[None]):
             # Only the pods view has CPU/MEM columns and a metrics feed;
             # elsewhere the keypress would silently discard the current
             # order while showing no indicator, so ignore it.
+            return
+        view = self._view_for(kind)
+        if column != "name" and view is not None and view.replace:
+            # `replace: true` hides AGE/CPU/MEM — sorting by an invisible
+            # column would reorder rows with no indicator, so ignore it.
             return
         self._sorts[kind] = toggle_sort(self._sorts.get(kind), column)
         self._render_table(kind)
@@ -4843,6 +4860,31 @@ class KorvidApp(App[None]):
 
     def action_sort_by_mem(self) -> None:
         self._toggle_sort("mem")
+
+    def on_sort_command(self, message: SortCommand) -> None:
+        """`:sort <column>` (issue #45): builtin or custom column; bare `:sort` clears."""
+        kind = self.current_kind
+        if message.column is None:
+            self._sorts.pop(kind, None)
+            self._render_table(kind)
+            return
+        requested = message.column
+        view = self._view_for(kind)
+        custom_names = tuple(column.name for column in view.columns) if view is not None else ()
+        builtins = ("name",) if view is not None and view.replace else SORT_COLUMNS
+        if requested.lower() in builtins:
+            self._toggle_sort(requested.lower())
+            return
+        matched = next((name for name in custom_names if name.lower() == requested.lower()), None)
+        if matched is None:
+            columns = ", ".join((*builtins, *custom_names))
+            self.notify(
+                f"Unknown sort column {requested!r} — available: {columns}",
+                severity="warning",
+            )
+            return
+        self._sorts[kind] = toggle_sort(self._sorts.get(kind), matched)
+        self._render_table(kind)
 
     # ------------------------------------------------------------------
     # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,
