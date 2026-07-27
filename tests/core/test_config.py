@@ -756,3 +756,21 @@ views:
     config = load_config(cfg)
     assert config.views == {}
     assert len(config.warnings) == 2
+
+
+def test_views_builtin_colliding_names_dropped_with_warning(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods:
+    columns:
+      - name: CPU
+        label: team
+      - name: TEAM
+        label: team
+"""
+    )
+    config = load_config(cfg)
+    assert [c.name for c in config.views["pods"].columns] == ["TEAM"]
+    assert any("built-in" in w for w in config.warnings)

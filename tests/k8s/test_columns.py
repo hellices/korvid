@@ -114,3 +114,10 @@ def test_evaluate_all_preserves_column_order() -> None:
         CustomColumn("IMAGE", "jsonpath", ".spec.containers[0].image"),
     )
     assert evaluate_all(cols, _MANIFEST) == ("payments", "ghcr.io/acme/api:1.2.3")
+
+
+def test_parse_jsonpath_caches_compiled_segments() -> None:
+    """Hot path: watch fan-out evaluates per event — parsing must not repeat."""
+    assert parse_jsonpath(".spec.containers[0].image") is parse_jsonpath(
+        ".spec.containers[0].image"
+    )

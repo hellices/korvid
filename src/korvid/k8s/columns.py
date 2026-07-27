@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -32,12 +33,17 @@ class CustomColumn:
     expr: str  # label/annotation key, or a JSONPath expression
 
 
+@lru_cache(maxsize=256)
 def parse_jsonpath(expr: str) -> tuple[str | int, ...]:
     """Compile the supported JSONPath subset to path segments.
 
     Supported: leading-dot key paths with optional non-negative integer
     indexes — `.spec.containers[0].image`. Filters, wildcards, slices, and
     quoted keys are not (labels/annotations have their own sources).
+
+    Cached: `evaluate` runs per row and per watch event, and the distinct
+    expressions are bounded by config — recompiling would burn CPU on the
+    watch fan-out hot path.
 
     Raises:
         ValueError: If the expression falls outside the subset.

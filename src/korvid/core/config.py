@@ -325,6 +325,38 @@ def _parse_column(kind: str, entry: Any) -> tuple[CustomColumn | None, str | Non
     return CustomColumn(name, source, expr), None
 
 
+#: Custom column names that would collide with identity/sortable built-in
+#: headers: `:sort CPU` would hit the builtin branch first (never the custom
+#: column) and the sort arrow would decorate two identical headers.
+_RESERVED_COLUMN_NAMES = frozenset({"name", "namespace", "age", "cpu", "mem"})
+
+
+def _collect_columns(kind: str, raw_columns: Any) -> tuple[list[CustomColumn], list[str]]:
+    """Valid, uniquely-named columns for one view; problems become warnings.
+
+    Case-insensitive duplicates and names shadowing built-in headers are
+    dropped: both would make headers ambiguous and later columns
+    unreachable for `:sort`.
+    """
+    columns: list[CustomColumn] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for entry in raw_columns if isinstance(raw_columns, list) else []:
+        column, warning = _parse_column(kind, entry)
+        if warning is not None:
+            warnings.append(warning)
+        if column is None:
+            continue
+        if column.name.lower() in _RESERVED_COLUMN_NAMES:
+            warnings.append(f"views.{kind}.{column.name}: collides with a built-in column")
+        elif column.name.lower() in seen:
+            warnings.append(f"views.{kind}.{column.name}: duplicate column name")
+        else:
+            seen.add(column.name.lower())
+            columns.append(column)
+    return columns, warnings
+
+
 def _parse_views(value: Any) -> tuple[dict[str, ViewConfig], list[str]]:
     """`views:` custom columns (issue #45): invalid columns are dropped with
     a warning instead of failing the whole config — a typo in one column
@@ -341,21 +373,8 @@ def _parse_views(value: Any) -> tuple[dict[str, ViewConfig], list[str]]:
             # is no manifest to evaluate custom columns against.
             warnings.append(f"views.{kind}: synthetic view kinds don't support custom columns")
             continue
-        columns: list[CustomColumn] = []
-        seen: set[str] = set()
-        raw_columns = view_raw.get("columns")
-        for entry in raw_columns if isinstance(raw_columns, list) else []:
-            column, warning = _parse_column(str(kind), entry)
-            if column is not None:
-                # Case-insensitive duplicate names would make headers
-                # ambiguous and later columns unreachable for :sort.
-                if column.name.lower() in seen:
-                    warnings.append(f"views.{kind}.{column.name}: duplicate column name")
-                else:
-                    seen.add(column.name.lower())
-                    columns.append(column)
-            if warning is not None:
-                warnings.append(warning)
+        columns, column_warnings = _collect_columns(str(kind), view_raw.get("columns"))
+        warnings.extend(column_warnings)
         if columns:
             views[str(kind)] = ViewConfig(
                 columns=tuple(columns), replace=view_raw.get("replace") is True
