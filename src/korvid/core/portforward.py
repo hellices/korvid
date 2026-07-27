@@ -99,6 +99,12 @@ class ForwardRegistry:
     ) -> None:
         self._context = context
         self._popen = popen
+        #: Registered forwards. Single-key lookups (get(), and the entry
+        #: reads in wait_ready()/fail_start()/reattach()) are deliberately
+        #: lock-free: CPython dict reads are atomic and a record object is
+        #: never replaced under its id — a re-attach swaps the *process*
+        #: inside the record under the record's own lock. Every compound
+        #: read (iteration) and every mutation holds _ops.
         self._records: dict[int, ForwardRecord] = {}
         self._next_id = 1
         #: Terminated processes awaiting exit: (proc, kill deadline, local port).
@@ -128,11 +134,16 @@ class ForwardRegistry:
         """
         self.refresh()  # a just-died forward must not hold its local port
         self._ensure_port_free(spec.local_port)  # claims the port on success
+        # try/finally, not an OSError catch: _spawn also raises ValueError
+        # for an unforwardable kind, and *any* failure escaping with the
+        # claim held would block the port for the rest of the session.
+        spawned = False
         try:
             proc = self._spawn(spec)
-        except OSError:
-            self._release_claim(spec.local_port)
-            raise
+            spawned = True
+        finally:
+            if not spawned:
+                self._release_claim(spec.local_port)
         with self._ops:
             self._claimed_ports.discard(spec.local_port)
             closed = self._closed
@@ -332,11 +343,15 @@ class ForwardRegistry:
         # (poll() can lag the stream closing) — it is signalled and reaped
         # there instead of being orphaned by the process swap below.
         self._ensure_port_free(record.spec.local_port)  # claims the port on success
+        # Same failure-shape as start(): any exception escaping the spawn
+        # must release the claim, not just the documented OSError.
+        spawned = False
         try:
             replacement = self._spawn(record.spec)
-        except OSError:
-            self._release_claim(record.spec.local_port)
-            raise
+            spawned = True
+        finally:
+            if not spawned:
+                self._release_claim(record.spec.local_port)
         superseded: threading.Event | None = None
         # Adopt under the ops lock: a stop or teardown that won the race
         # while the spawn was in flight must not have its outcome undone by

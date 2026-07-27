@@ -805,6 +805,38 @@ def test_failed_spawn_releases_the_port_claim() -> None:
     assert registry.start(_spec()).status == "alive"  # port claim was released
 
 
+def test_non_oserror_spawn_failure_releases_the_port_claim() -> None:
+    """An unforwardable kind fails before Popen — the claim must still be released."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    with pytest.raises(ValueError, match="pods and services only"):
+        registry.start(_spec(kind="deployments"))
+    assert registry.start(_spec()).status == "alive"  # port claim was released
+
+
+def test_failed_reattach_spawn_releases_the_port_claim() -> None:
+    """A replacement spawn raising anything must not leave the port claimed."""
+    procs: list[_FakeProc] = []
+    calls: list[int] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("spawn exploded")
+        proc = _FakeProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    record = registry.start(_spec())
+    procs[0].exit(1)
+    registry.refresh()
+    assert record.status == "broken"
+    with pytest.raises(RuntimeError, match="spawn exploded"):
+        registry.reattach(record.id)
+    assert registry.reattach(record.id) is record  # port claim was released
+
+
 def test_wait_ready_tells_a_stale_waiter_it_was_superseded() -> None:
     """A waiter woken by a re-attach must not read the replacement's fate as its own."""
     procs: list[_FakeProc] = []

@@ -461,6 +461,14 @@ class KorvidApp(App[None]):
         #: generation removes its token, and a still-pending superseded
         #: worker must never be promoted back to "current" by that.
         self._current_confirmations: dict[int, Worker[None]] = {}
+        #: launches whose registry.start() may still be off-loop. Teardown
+        #: awaits them (and stop audits defer behind them) so a quit or stop
+        #: landing between the registry publishing a record and the launch
+        #: coroutine resuming can never audit a stop before its start.
+        self._launching_forwards: set[Worker[None]] = set()
+        #: set by _teardown_forwards: audits enqueue directly (the teardown
+        #: flush drains them) since no new workers may spawn mid-shutdown.
+        self._forwards_closing = False
         #: stops deferred behind a pending confirmation, keyed by forward id;
         #: teardown flushes leftovers so a cancelled worker can't lose them.
         self._deferred_stop_audits: dict[int, ForwardSpec] = {}
@@ -1460,19 +1468,55 @@ class KorvidApp(App[None]):
             local_port=local_port,
             remote_port=remote_port,
         )
+        worker = get_current_worker()
+        self._launching_forwards.add(worker)
         try:
             # Off the event loop: reclaiming the local port may block briefly
             # on reaping a previously stopped child that ignored SIGTERM.
             record = await asyncio.to_thread(registry.start, spec)
         except (OSError, ValueError) as exc:
             # OSError: spawn failed (kubectl missing). ValueError: local
-            # port collision detected up front by the registry.
-            self.notify(f"Port-forward failed to start: {exc}", severity="error")
-            self._audit_forward("port-forward-start", spec, outcome=f"error: {exc}")
+            # port collision detected up front by the registry, or a spawn
+            # that lost the race against teardown (registry shut down).
+            if not self._forwards_closing:
+                self.notify(f"Port-forward failed to start: {exc}", severity="error")
+            self._audit_forward_shutdown_safe("port-forward-start", spec, outcome=f"error: {exc}")
+            return
+        except asyncio.CancelledError:
+            # Shutdown cancelled the launch mid-spawn — the start must still
+            # reach the log before any teardown stop entry (enqueue
+            # directly: no new workers during shutdown).
+            if self._audit is not None:
+                self._enqueue_forward_audit(
+                    "port-forward-start", spec, outcome="stopped before ready"
+                )
+            raise
+        finally:
+            self._launching_forwards.discard(worker)
+        if self._forwards_closing or registry.get(record.id) is None:
+            # A quit or stop won the race between the registry publishing
+            # the record and this coroutine resuming: no confirmation may
+            # spawn (shutdown) or would ever resolve (record gone) — audit
+            # the start here so its stop entry never reaches the log first.
+            self._audit_forward_shutdown_safe(
+                "port-forward-start", spec, outcome="stopped before ready"
+            )
             return
         # Popen returning only proves the child exists — success is reported
         # after kubectl confirms the listener (or fails the bind/RBAC check).
         self._track_confirmation(record)
+
+    def _audit_forward_shutdown_safe(self, action: str, spec: ForwardSpec, *, outcome: str) -> None:
+        """Audit a forward event without spawning workers once teardown began.
+
+        The teardown flush drains directly-enqueued entries, so nothing is
+        lost — outside of teardown this is a plain `_audit_forward` call.
+        """
+        if not self._forwards_closing:
+            self._audit_forward(action, spec, outcome=outcome)
+            return
+        if self._audit is not None:
+            self._enqueue_forward_audit(action, spec, outcome=outcome)
 
     async def _confirm_forward(self, record: ForwardRecord, *, reattached: bool = False) -> None:
         """Toast and audit a forward start only once kubectl signals ready.
@@ -1681,7 +1725,13 @@ class KorvidApp(App[None]):
             # A stopped broken forward will never poll alive again — drop its
             # id so the broken set does not grow for the session's lifetime.
             self._broken_forwards.discard(record.id)
-            pending = list(self._confirming_forwards.get(record.id, ()))
+            # In-flight launches count as pending too: a stop landing in the
+            # window between the registry publishing a record and its launch
+            # coroutine resuming has no confirmation to defer behind yet.
+            pending = [
+                *self._launching_forwards,
+                *self._confirming_forwards.get(record.id, ()),
+            ]
             if not pending:
                 self._audit_forward("port-forward-stop", record.spec)
             else:
@@ -4172,6 +4222,12 @@ class KorvidApp(App[None]):
         during startup still logs the start entry first (never a stop-only
         or reversed trail).
         """
+        self._forwards_closing = True
+        # Launches whose spawn is still off-loop must land (and enqueue
+        # their start entries) before any stop below is recorded.
+        for launch in list(self._launching_forwards):
+            with contextlib.suppress(Exception):
+                await launch.wait()
         records = await asyncio.to_thread(registry.stop_all)
         for confirm in [w for workers in self._confirming_forwards.values() for w in workers]:
             with contextlib.suppress(Exception):

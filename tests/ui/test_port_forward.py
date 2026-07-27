@@ -1076,6 +1076,46 @@ async def test_teardown_during_startup_keeps_audit_order(tmp_path: Path) -> None
     assert lines.index("port-forward-start") < lines.index("port-forward-stop")
 
 
+async def test_quit_during_spawn_still_audits_the_start_first(tmp_path: Path) -> None:
+    """Quit while Popen is still off-loop: the start entry must land, before any stop.
+
+    Between registry.start() publishing the record in its thread and the
+    launch coroutine resuming on the loop, no confirmation is tracked yet —
+    a teardown in that window used to audit the stop with no start at all.
+    """
+    gate = threading.Event()
+    spawn_started = threading.Event()
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        spawn_started.set()
+        gate.wait(5.0)  # the launch is mid-spawn while the app shuts down
+        proc = _FakeProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: spawn_started.is_set(), label="spawn in flight")
+            # Release the spawn only once teardown is already waiting on it.
+            threading.Timer(0.2, gate.set).start()
+    lines = _audit_lines(tmp_path)
+    assert "port-forward-start" in lines, "the start never reached the audit log"
+    if "port-forward-stop" in lines:
+        assert lines.index("port-forward-start") < lines.index("port-forward-stop")
+
+
 async def test_udp_only_service_is_rejected_up_front() -> None:
     """A Service with no TCP ports cannot be forwarded — kubectl is TCP-only."""
     procs: list[_FakeProc] = []
