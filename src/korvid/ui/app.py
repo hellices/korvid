@@ -1357,8 +1357,8 @@ class KorvidApp(App[None]):
             if mcp_restart is None:
                 return
             await self._teardown_for_context_switch()
-            applied = await self._retarget_context(name, old)
-            if applied is None:
+            ok, applied = await self._retarget_context(name, old)
+            if not ok:
                 if mcp_restart:
                     self.notify(
                         "Embedded MCP server was stopped for the switch —"
@@ -1479,17 +1479,19 @@ class KorvidApp(App[None]):
         self.filter_pattern = ""
         self._resource_filter = parse_filter("")
 
-    async def _retarget_context(self, name: str, old: str | None) -> str | None:
+    async def _retarget_context(self, name: str, old: str | None) -> tuple[bool, str | None]:
         """Swap the connection to *name*; on failure fall back to *old*.
 
-        Returns the context actually applied, or None when even the fallback
-        failed (the session then needs a restart — everything is already
-        torn down and nothing is connected).
+        Returns ``(ok, applied)``: ``ok`` is False only when even the
+        fallback failed (the session then needs a restart — everything is
+        already torn down and nothing is connected). ``applied`` is the
+        context actually in effect, which may legitimately be None (the
+        kubeconfig default) — that is why success is a separate flag.
         """
         try:
             result = await self._switch_context(name)  # type: ignore[misc]  # guarded by caller
             self._apply_context_switch(name, old, result)
-            return name
+            return True, name
         except Exception as exc:
             self.notify(
                 f"Context switch to {name!r} failed mid-swap: {self._describe_ctx_error(exc)}",
@@ -1500,7 +1502,7 @@ class KorvidApp(App[None]):
             result = await self._switch_context(old)  # type: ignore[misc]  # guarded by caller
             self._apply_context_switch(old, old, result)
             self.notify(f"Restored context {old or '(kubeconfig default)'}")
-            return old
+            return True, old
         except Exception as exc:
             self.notify(
                 f"Could not restore context {old or '(kubeconfig default)'}:"
@@ -1508,7 +1510,7 @@ class KorvidApp(App[None]):
                 severity="error",
                 timeout=15,
             )
-            return None
+            return False, None
 
     def _apply_context_switch(
         self, name: str | None, old: str | None, result: ContextSwitchResult
@@ -3725,20 +3727,21 @@ class KorvidApp(App[None]):
         meta: ResourceMeta,
         ns: str | None,
         name: str,
+        *,
         phase: str = "the permission check",
-        epoch: int | None = None,
+        epoch: int,
     ) -> bool:
         """Re-validate after an awaited gap (the RBAC round-trip, a dry-run
         preview, or an editor session - named by ``phase`` so cancellation
         messages state the true cause), before pushing a dialog: the user may
         have opened another screen or moved the selection meanwhile - and
         keystrokes typed during the await must never land on a confirmation
-        they did not see. When ``epoch`` (captured when the write flow began)
-        is given, a context switch that started - or fully completed - during
-        the gap also aborts: a same-named row on the new cluster would
-        otherwise satisfy the selection checks. Abort (with a notification)
-        unless everything still matches."""
-        if self._ctx_switching or (epoch is not None and epoch != self._ctx_epoch):
+        they did not see. ``epoch`` (captured when the write flow began) also
+        aborts on a context switch that started - or fully completed - during
+        the gap: a same-named row on the new cluster would otherwise satisfy
+        the selection checks. Abort (with a notification) unless everything
+        still matches."""
+        if self._ctx_switching or epoch != self._ctx_epoch:
             self.notify(
                 f"{action} {self._gvr_label(meta)}/{name} cancelled -"
                 f" the kube context changed during {phase}",
@@ -4027,7 +4030,7 @@ class KorvidApp(App[None]):
         meta: ResourceMeta,
         ns: str | None,
         name: str,
-        epoch: int | None = None,
+        epoch: int,
     ) -> dict[str, Any] | None:
         """Fetch the manifest for an edit; None (with a notification) aborts.
         The fetch is another awaited round-trip: a selection change while it
@@ -4267,7 +4270,7 @@ class KorvidApp(App[None]):
         uid: str | None,
         current: int | None,
         replicas: int,
-        epoch: int | None = None,
+        epoch: int,
     ) -> None:
         """Dry-run preview + approval dialog for a scale, after the replica
         count is known. Revalidates the selection after the preview round
@@ -4398,7 +4401,7 @@ class KorvidApp(App[None]):
         name: str,
         uid: str | None,
         resources: dict[str, dict[str, dict[str, str]]],
-        epoch: int | None = None,
+        epoch: int,
     ) -> None:
         """Dry-run preview + approval dialog for an in-place pod resize.
         Revalidates the selection after the preview round trip: keystrokes
@@ -5319,7 +5322,7 @@ class KorvidApp(App[None]):
         uid: str | None,
         facts: PackageInstallFacts,
         choices: tuple[str, str, str],
-        epoch: int | None = None,
+        epoch: int,
     ) -> None:
         """Approval dialog for an operator install: the full Subscription
         manifest is shown before it is created (issue #29 requirement)."""
@@ -5531,6 +5534,7 @@ class KorvidApp(App[None]):
         helm = self._helm_gate()
         if helm is None:
             return
+        epoch = self._ctx_epoch
         hits = await self._helm_search(helm, "")
         if hits is None:
             return
@@ -5545,7 +5549,9 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return
-        self._helm_pick_chart(hits, release=None, namespace=self._helm_view_namespace())
+        self._helm_pick_chart(
+            hits, release=None, namespace=self._helm_view_namespace(), epoch=epoch
+        )
 
     async def _helm_upgrade_flow(self) -> None:
         """Upgrade (the `uncordon_node` key on a release row): the same
@@ -5554,6 +5560,7 @@ class KorvidApp(App[None]):
         helm = self._helm_gate()
         if helm is None:
             return
+        epoch = self._ctx_epoch
         ns, name = self._selected_ns_name()
         if name is None:
             return
@@ -5563,14 +5570,14 @@ class KorvidApp(App[None]):
         if hits is None:
             return
         if not self._write_context_intact(
-            "helm-upgrade", HELM_RELEASES_META, ns, name, phase="the chart search"
+            "helm-upgrade", HELM_RELEASES_META, ns, name, phase="the chart search", epoch=epoch
         ):
             return
         namespace = ns or (row.namespace if row is not None else self._helm_view_namespace())
-        self._helm_pick_chart(hits, release=name, namespace=namespace)
+        self._helm_pick_chart(hits, release=name, namespace=namespace, epoch=epoch)
 
     def _helm_pick_chart(
-        self, hits: list[ChartHit], *, release: str | None, namespace: str
+        self, hits: list[ChartHit], *, release: str | None, namespace: str, epoch: int
     ) -> None:
         """Chart picker feeding the install/upgrade wizard; everything
         offered comes from `helm search repo`, nothing is hardcoded."""
@@ -5589,7 +5596,9 @@ class KorvidApp(App[None]):
                 if choices is None:
                     return
                 self.run_worker(
-                    self._helm_confirm_change(hit, choices, upgrade=release is not None),
+                    self._helm_confirm_change(
+                        hit, choices, upgrade=release is not None, epoch=epoch
+                    ),
                     exclusive=True,
                     group="helm-write",
                 )
@@ -5600,7 +5609,7 @@ class KorvidApp(App[None]):
         self.push_screen(PickScreen(title, list(labels)), _picked)
 
     async def _helm_confirm_change(
-        self, hit: ChartHit, choices: HelmReleaseChoices, *, upgrade: bool
+        self, hit: ChartHit, choices: HelmReleaseChoices, *, upgrade: bool, epoch: int
     ) -> None:
         """Optional values editing, dry-run/diff preview, then the standard
         approval dialog; the mutation itself runs through `_run_write`, so
@@ -5624,7 +5633,7 @@ class KorvidApp(App[None]):
             values_text = text if meaningful else None
         rendered = await self._helm_change_preview(helm, hit, choices, values_text, upgrade=upgrade)
         action = "helm-upgrade" if upgrade else "helm-install"
-        if not self._helm_context_after_preview(action, choices, upgrade=upgrade):
+        if not self._helm_context_after_preview(action, choices, upgrade=upgrade, epoch=epoch):
             return
         preview, preview_title = rendered if rendered is not None else (None, "")
         verb = "UPGRADE" if upgrade else "INSTALL"
@@ -5663,7 +5672,7 @@ class KorvidApp(App[None]):
         )
 
     def _helm_context_after_preview(
-        self, action: str, choices: HelmReleaseChoices, *, upgrade: bool
+        self, action: str, choices: HelmReleaseChoices, *, upgrade: bool, epoch: int
     ) -> bool:
         """The preview runs over the interactive table: the state the user
         approves must still be the state that was previewed."""
@@ -5675,7 +5684,17 @@ class KorvidApp(App[None]):
                 choices.namespace,
                 choices.release,
                 phase="the preview render",
+                epoch=epoch,
             )
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The helm wrapper this flow captured is bound to the old
+            # cluster's --kube-context: a switch completed during the wizard
+            # or preview must cancel before an approval can open.
+            self.notify(
+                "helm install cancelled - the kube context changed during the preview",
+                severity="warning",
+            )
+            return False
         if len(self.screen_stack) > 1:  # another dialog opened during the preview
             return False
         if self._canonical_kind(self.current_kind) != HELM_RELEASES_META.plural:
@@ -5776,6 +5795,7 @@ class KorvidApp(App[None]):
         helm = self._helm_gate()
         if helm is None:
             return
+        epoch = self._ctx_epoch
         ns, name = self._selected_ns_name()
         if name is None:
             return
@@ -5786,7 +5806,7 @@ class KorvidApp(App[None]):
         namespace = ns or row.namespace
         preview = await self._helm_rollback_preview(helm, row.release, row.revision, namespace)
         if not self._write_context_intact(
-            "helm-rollback", HELM_REVISIONS_META, ns, name, phase="the diff preview"
+            "helm-rollback", HELM_REVISIONS_META, ns, name, phase="the diff preview", epoch=epoch
         ):
             return
         operation = (

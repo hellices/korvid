@@ -669,3 +669,52 @@ async def test_switch_rebinds_helm_wrapper() -> None:
         app.post_message(SwitchContextCommand("ctx-b"))
         await until(pilot, lambda: app.config.kube_context == "ctx-b", label="switched")
         assert app._helm is new_helm
+
+
+async def test_recovery_to_kubeconfig_default_is_success() -> None:
+    """None is a legitimate applied context (the kubeconfig default): a
+    recovery swap back to it must count as success, restarting the MCP
+    server and watches instead of taking the total-failure path
+    (issue #36 review round 10)."""
+    import dataclasses
+
+    env = _CtxEnv(switch_error=RuntimeError("target cluster unreachable"))
+    app = env.app
+    app.config = dataclasses.replace(app.config, kube_context=None)
+    mcp = _FakeMCP()
+    app._mcp = cast("Any", mcp)
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(pilot, lambda: len(env.switch_calls) == 2, label="recovery swap ran")
+        assert env.switch_calls == ["ctx-b", None]
+        await until(pilot, lambda: "mcp-started" in mcp.events, label="mcp restarted")
+        await until(
+            pilot,
+            lambda: any("Restored context" in n.message for n in app._notifications),
+            label="restored notice",
+        )
+        assert not any("restart korvid" in n.message for n in app._notifications)
+
+
+async def test_helm_flow_cancelled_when_context_switched_before_approval() -> None:
+    """The helm wrapper captured by an install flow pins the old cluster's
+    --kube-context: a switch completed during the wizard or preview must
+    cancel before an approval dialog can open (issue #36 review round 10)."""
+    from korvid.ui.widgets.helm_install import HelmReleaseChoices
+
+    env = _CtxEnv()
+    app = env.app
+    async with app.run_test() as pilot:
+        choices = HelmReleaseChoices(
+            release="web", version="", namespace="default", edit_values=False
+        )
+        ok = app._helm_context_after_preview(
+            "helm-install", choices, upgrade=False, epoch=app._ctx_epoch - 1
+        )
+        assert ok is False
+        await until(
+            pilot,
+            lambda: any("kube context changed" in n.message for n in app._notifications),
+            label="helm epoch refusal",
+        )
