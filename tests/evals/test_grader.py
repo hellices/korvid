@@ -256,3 +256,12 @@ def test_grade_forbidden_keywords_may_contain_their_own_negator() -> None:
     result = grade(scenario, "The service looks healthy but has no endpoints.", [])
     assert not result.diagnosis_success
     assert result.forbidden_mentions == ("no endpoints",)
+
+
+def test_grade_evidence_rejects_error_results() -> None:
+    """A failed call whose ERROR message echoes the expected substring
+    (e.g. the object name in a not-found message) is not evidence."""
+    record = _record(result="ERROR: could not diagnose: exit=137 pod not found")
+    result = grade(_scenario(), "OOMKilled, exit 137.", [record])
+    assert not result.evidence_fetched
+    assert result.missing_evidence == ((_EVIDENCE,),)

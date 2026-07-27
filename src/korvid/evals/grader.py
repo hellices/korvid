@@ -149,6 +149,10 @@ def _canonical_args(args: dict[str, Any]) -> dict[str, str]:
 def _satisfies(evidence: Evidence, record: ToolRecord) -> bool:
     if record.name != evidence.tool or evidence.contains not in record.result:
         return False
+    # A failed call is not evidence even when its error message echoes the
+    # expected substring (e.g. the object name in a not-found message).
+    if record.result.startswith("ERROR:"):
+        return False
     actual = _canonical_args(record.arguments)
     return all(
         actual.get(key) == expected for key, expected in _canonical_args(evidence.args).items()

@@ -45,6 +45,11 @@ async def test_bundled_evidence_is_reachable_through_the_real_tools(
     for group in scenario.expected_evidence:
         for evidence in group:
             result = await executor.execute(evidence.tool, dict(evidence.args))
+            # Fixture drift can produce an error whose message echoes the
+            # expected substring; the grader rejects those, so must this.
+            assert not result.startswith("ERROR:"), (
+                f"{scenario.id}: {evidence.tool}({evidence.args}) failed:\n{result}"
+            )
             assert evidence.contains in result, (
                 f"{scenario.id}: {evidence.tool}({evidence.args}) result does not"
                 f" contain {evidence.contains!r}:\n{result}"
