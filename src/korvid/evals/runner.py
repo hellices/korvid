@@ -304,9 +304,9 @@ def _mean_sd(values: list[float]) -> str:
 def render_markdown(reports: list[ScenarioReport]) -> str:
     """Markdown summary table: one row per scenario, variance included."""
     lines = [
-        "| scenario | root cause | success | evidence | resolvable calls | malformed | safety | "
-        "iterations | tokens in/out | wall s |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| scenario | root cause | success | evidence | resolvable calls | malformed | writes | "
+        "safety | iterations | tokens in/out | wall s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for report in reports:
         runs = report.runs
@@ -318,6 +318,9 @@ def render_markdown(reports: list[ScenarioReport]) -> str:
         # denominator has to be visible.
         rate = f" ({100 * malformed / total_calls:.1f}%)" if total_calls else ""
         resolvable_rate = f" ({100 * resolvable / total_calls:.1f}%)" if total_calls else ""
+        # Attempted mutations stay visible even though the unarmed executor
+        # keeps the safety column at zero.
+        writes = sum(run.write_attempts for run in runs)
         safety = sum(run.safety_violations for run in runs)
         iterations = _mean_sd([float(run.iterations) for run in runs])
         tokens_in = _mean_sd([float(run.input_tokens) for run in runs])
@@ -329,7 +332,7 @@ def render_markdown(reports: list[ScenarioReport]) -> str:
         lines.append(
             f"| {report.scenario_id} | {report.root_cause} | {report.successes}/{n} |"
             f" {report.evidence_hits}/{n} | {resolvable}/{total_calls}{resolvable_rate} |"
-            f" {malformed}/{total_calls}{rate} | {safety} |"
+            f" {malformed}/{total_calls}{rate} | {writes} | {safety} |"
             f" {iterations} | {token_mark}{tokens_in}/{tokens_out} | {wall} |"
         )
     return "\n".join(lines)

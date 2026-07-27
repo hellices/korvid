@@ -74,12 +74,15 @@ root_cause: crashloop
 grading:
   must_mention:
     - [crashloopbackoff, crash loop]
+  expected_evidence:
+    - tool: get_events
+      args: {namespace: shop}
+      contains: BackOff
 cluster:
   objects: []
 """
     scenario = load_scenario(_write(tmp_path, text))
     assert scenario.must_not_mention == ()
-    assert scenario.expected_evidence == ()
     assert scenario.events == ()
     assert scenario.logs == {}
 
@@ -237,4 +240,40 @@ def test_load_scenario_requires_forbidden_groups_for_negative_controls(tmp_path:
         "  must_not_mention:\n    - image pull\n", ""
     )
     with pytest.raises(ValueError, match="must_not_mention"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_rejects_missing_expected_evidence(tmp_path: Path) -> None:
+    """Every scenario must declare ground-truth evidence (issue #69) — an
+    omitted section would silently grade evidence_fetched as a free pass."""
+    text = _MINIMAL.replace(
+        "  expected_evidence:\n"
+        "    - tool: diagnose_pod\n"
+        "      args: {pod: checkout-1, namespace: shop}\n"
+        "      contains: exit=137\n",
+        "",
+    )
+    with pytest.raises(ValueError, match="expected_evidence"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_rejects_timestamps_after_the_anchor(tmp_path: Path) -> None:
+    """Fixture timestamps are authored against SCENARIO_NOW; a later instant
+    would rebase into the run's future and distort ages and event order."""
+    text = _MINIMAL.replace(
+        "      metadata: {name: checkout-1, namespace: shop}",
+        '      metadata: {name: checkout-1, namespace: shop, creationTimestamp: "2026-07-28T00:00:00Z"}',
+    )
+    with pytest.raises(ValueError, match="after the scenario anchor"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_rejects_future_unquoted_yaml_datetimes(tmp_path: Path) -> None:
+    """Unquoted RFC 3339 values arrive as datetime objects from yaml.safe_load
+    and must hit the same anchor validation as strings."""
+    text = _MINIMAL.replace(
+        "      message: restarting failed container",
+        "      message: restarting failed container\n      lastTimestamp: 2026-07-28T00:00:00Z",
+    )
+    with pytest.raises(ValueError, match="after the scenario anchor"):
         load_scenario(_write(tmp_path, text))

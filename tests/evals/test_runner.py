@@ -414,6 +414,9 @@ def test_render_markdown_summarizes_reports() -> None:
     # Execution-quality rate: schema-valid calls that resolved in-cluster.
     assert "resolvable calls" in text
     assert "6/8 (75.0%)" in text
+    # Write attempts must be visible in the primary report even when the
+    # unarmed executor keeps the safety column at zero.
+    assert "| writes |" in text
     # Identical repetitions: mean with zero dispersion. Exact usage: no
     # estimate marker.
     assert "2.0±0.0" in text

@@ -9,11 +9,24 @@ take any diagnostic path while the ground truth stays fixed.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+#: The instant scenario fixture timestamps are authored against. Every
+#: fixture timestamp must be at or before this instant — the fake cluster
+#: rebases it to the wall clock at construction, so a later instant would
+#: land in the run's future and distort ages and event ordering.
+SCENARIO_NOW = datetime(2026, 7, 27, 8, 0, 0, tzinfo=UTC)
+
+#: RFC 3339 timestamp string, as Kubernetes serializes them.
+TIMESTAMP_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
 
 
 @dataclass(frozen=True)
@@ -156,6 +169,33 @@ def _logs(raw: Any) -> dict[str, ContainerLogs]:
     return logs
 
 
+def _as_instant(value: Any) -> datetime | None:
+    """The instant `value` denotes, if it is a fixture timestamp — either an
+    RFC 3339 string or the `datetime` `yaml.safe_load` produces for unquoted
+    ones (naive values are read as UTC, the timezone fixtures use)."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if isinstance(value, str) and TIMESTAMP_PATTERN.match(value):
+        return datetime.fromisoformat(value)
+    return None
+
+
+def _reject_future_timestamps(value: Any, label: str) -> None:
+    """Recursively reject any fixture timestamp after `SCENARIO_NOW`."""
+    instant = _as_instant(value)
+    if instant is not None and instant > SCENARIO_NOW:
+        raise ValueError(
+            f"{label}: timestamp {value!r} is after the scenario anchor"
+            f" {SCENARIO_NOW.isoformat().replace('+00:00', 'Z')}"
+        )
+    if isinstance(value, dict):
+        for item in value.values():
+            _reject_future_timestamps(item, label)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            _reject_future_timestamps(item, label)
+
+
 def _manifests(raw: Any, key: str) -> tuple[dict[str, Any], ...]:
     if raw is None:
         return ()
@@ -206,6 +246,15 @@ def load_scenario(path: Path) -> Scenario:
             f"{path.name}: negative controls (root_cause 'none') need at"
             " least one must_not_mention entry"
         )
+    expected_evidence = _evidence(grading.get("expected_evidence"))
+    if not expected_evidence:
+        # Issue #69: every scenario declares ground-truth evidence; without
+        # it evidence_fetched would grade as a free pass.
+        raise ValueError(f"{path.name}: grading needs at least one expected_evidence entry")
+    objects = _manifests(cluster.get("objects"), "objects")
+    events = _manifests(cluster.get("events"), "events")
+    _reject_future_timestamps(objects, f"{path.name}: 'objects'")
+    _reject_future_timestamps(events, f"{path.name}: 'events'")
     return Scenario(
         id=_require_str(data, "id"),
         question=_require_str(data, "question"),
@@ -213,9 +262,9 @@ def load_scenario(path: Path) -> Scenario:
         root_cause=root_cause,
         must_mention=must_mention,
         must_not_mention=must_not_mention,
-        expected_evidence=_evidence(grading.get("expected_evidence")),
-        objects=_manifests(cluster.get("objects"), "objects"),
-        events=_manifests(cluster.get("events"), "events"),
+        expected_evidence=expected_evidence,
+        objects=objects,
+        events=events,
         logs=_logs(cluster.get("logs")),
     )
 

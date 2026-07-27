@@ -12,24 +12,19 @@ runs — repeated runs of the same scenario see the same cluster.
 
 from __future__ import annotations
 
-import re
 from collections.abc import AsyncIterator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from korvid.evals.scenario import Scenario
+from korvid.evals.scenario import SCENARIO_NOW, TIMESTAMP_PATTERN, Scenario
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, summary_for
 from korvid.k8s.reads import ReadOps
 
-#: The instant scenario fixture timestamps are authored against. Every
-#: fixture timestamp must be at or before this instant.
-SCENARIO_NOW = datetime(2026, 7, 27, 8, 0, 0, tzinfo=UTC)
-
-_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+__all__ = ["SCENARIO_NOW", "FakeKubeClient", "builtin_aliases"]
 
 
 def _rebase(value: Any, delta: timedelta) -> Any:
@@ -38,7 +33,7 @@ def _rebase(value: Any, delta: timedelta) -> Any:
     strings and the `datetime` objects `yaml.safe_load` produces for
     unquoted RFC 3339 values (naive ones are read as UTC, the timezone
     fixtures are authored against)."""
-    if isinstance(value, str) and _TIMESTAMP.match(value):
+    if isinstance(value, str) and TIMESTAMP_PATTERN.match(value):
         shifted = (datetime.fromisoformat(value) + delta).astimezone(UTC)
         return shifted.isoformat().replace("+00:00", "Z")
     if isinstance(value, datetime):
