@@ -677,3 +677,23 @@ async def test_create_failure_outcomes_distinguish_launch_error_from_timeout(
         ):
             outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == "error: pod creation timed out; cleanup skipped: check namespace default"
+
+
+async def test_ambiguous_create_failure_keeps_namespace_hint(tmp_path: Path) -> None:
+    """A non-zero kubectl exit does not prove the create was rejected — the
+    server can commit the pod and the client still fail (lost response). Only
+    clearly identified admission rejections claim nothing was created; other
+    failures must keep the cleanup-skipped namespace hint."""
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        failure = SimpleNamespace(
+            returncode=1, stdout=b"", stderr=b"error: unexpected EOF reading response"
+        )
+        with patch("korvid.ui.app.subprocess.run", return_value=failure):
+            outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
+        assert outcome == "error: pod creation failed; cleanup skipped: check namespace default"
+
+        def _hinted() -> bool:
+            return any("may still have been created" in n.message for n in app._notifications)
+
+        await until(pilot, _hinted, label="ambiguous-create namespace hint")

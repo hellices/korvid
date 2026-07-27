@@ -261,6 +261,18 @@ def _event_line_fresh(event_ts: datetime | None, summary: PodSummary) -> bool:
     return event_ts is not None and event_ts >= max(cutoffs)
 
 
+def _looks_like_admission_rejection(stderr: str) -> bool:
+    """True when kubectl stderr clearly shows the API server refused the
+    create — only then is it safe to state that no pod was committed.
+
+    Matches the stable phrases of the two refusal shapes: RBAC/PodSecurity
+    forbids (`Error from server (Forbidden): ... is forbidden: ...`) and
+    admission webhooks (`admission webhook ... denied the request`).
+    """
+    lowered = stderr.lower()
+    return "forbidden" in lowered or "denied the request" in lowered
+
+
 def _yaml_equal(a: object, b: object) -> bool:
     """Type-sensitive structural equality for parsed YAML documents.
     Python's ``==`` conflates YAML booleans and integers (``True == 1``),
@@ -3779,12 +3791,12 @@ class KorvidApp(App[None]):
 
         On failure returns the audit outcome string instead — distinct per
         cause, because they leave different cluster states: a kubectl launch
-        failure never reached the cluster, a rejected create (where
-        PodSecurity admission refusals surface, hence the namespace hint)
-        leaves nothing behind, while a timeout or a create whose output
-        cannot be parsed may have created a pod korvid cannot identify, so
-        the audit records cleanup as skipped and names the namespace to
-        inspect.
+        failure never reached the cluster, a clearly identified admission
+        rejection (where PodSecurity refusals surface, hence the namespace
+        hint) leaves nothing behind, while any other non-zero exit, a
+        timeout, or a create whose output cannot be parsed may have created
+        a pod korvid cannot identify, so the audit records cleanup as
+        skipped and names the namespace to inspect.
         """
         argv = build_node_debug_create_argv(
             node, namespace, context=self.config.kube_context, image=image
@@ -3809,13 +3821,25 @@ class KorvidApp(App[None]):
         if proc.returncode != 0:
             stderr = proc.stderr.decode(errors="replace").strip()
             logger.warning("node-debugger pod creation failed: %s", stderr)
+            if _looks_like_admission_rejection(stderr):
+                # The API server refused the create: nothing was committed.
+                self.notify(
+                    f"Could not create the debugger pod: {stderr}"
+                    " — the cluster refuses privileged pods (PodSecurity admission);"
+                    " try setting node_shell.namespace to a namespace that allows them",
+                    severity="error",
+                )
+                return "error: pod creation rejected"
+            # A non-zero exit does not prove rejection: the server can commit
+            # the pod and kubectl still fail afterwards (lost response, local
+            # output error) — treat as ambiguous, the pod may exist.
             self.notify(
                 f"Could not create the debugger pod: {stderr or f'exit {proc.returncode}'}"
-                " — the cluster may refuse privileged pods (PodSecurity admission);"
-                " try setting node_shell.namespace to a namespace that allows them",
+                f" — a pod may still have been created; check {namespace} for"
+                " leftover node-debugger pods",
                 severity="error",
             )
-            return "error: pod creation rejected"
+            return f"error: pod creation failed; cleanup skipped: check namespace {namespace}"
         try:
             payload = json.loads(proc.stdout)
         except ValueError:
