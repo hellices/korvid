@@ -379,7 +379,11 @@ async def test_split_serializes_with_navigation_lock() -> None:
         await app._nav_lock.acquire()
         try:
             task = asyncio.create_task(app._split_pane())
-            await pilot.pause(0.1)
+            # Yield until the task reaches (and blocks on) the nav lock -
+            # deterministic, unlike a wall-clock delay.
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert not task.done()
             assert len(app._panes) == 1  # blocked behind the nav lock
         finally:
             app._nav_lock.release()
@@ -409,7 +413,11 @@ async def test_filtering_one_pane_does_not_reset_other_panes_cursor() -> None:
         for ch in "api":
             await pilot.press(ch)
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: app._panes[0].filter_pattern == "api",
+            label="pane 1 filter applied",
+        )
         assert second.cursor_row == 1  # pane 2 untouched by pane 1's filter
 
 
@@ -451,3 +459,68 @@ async def test_close_restores_empty_state_for_empty_survivor() -> None:
         empty = app.query_one("#empty-state", Static)
         await until(pilot, lambda: empty.display, label="empty-state guidance restored")
         assert "zzz" in str(empty.render())
+
+
+async def test_focused_pane_indicator_survives_input_focus() -> None:
+    """The accent border must mark the command-routing target even while an
+    Input (command bar) owns keyboard focus - `:focus` alone drops the
+    indicator exactly when the user is choosing where a command goes."""
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)
+        first = app.query_one("#pane-0", ResourceTable)
+        second = app.query_one("#pane-1", ResourceTable)
+        assert second.has_class("focused-pane")
+        assert not first.has_class("focused-pane")
+        await pilot.press("colon")  # command bar takes keyboard focus
+        assert second.has_class("focused-pane")  # routed pane stays marked
+        await pilot.press("escape")
+        await pilot.press("ctrl+w", "w")
+        assert first.has_class("focused-pane")
+        assert not second.has_class("focused-pane")
+        await pilot.press("ctrl+w", "q")  # close pane 0; survivor is single
+        await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="single pane")
+        assert not second.has_class("focused-pane")
+        await pilot.pause()
+
+
+async def test_highlight_in_non_focused_pane_does_not_drive_hint() -> None:
+    """A cursor/highlight event in the non-focused pane (e.g. from its own
+    re-render) must not rewrite the hint strip, which reflects the focused
+    pane's selection."""
+    from korvid.k8s.models import ContainerTrouble, PodSummary
+    from korvid.ui.widgets.hint_strip import HintStrip
+
+    crash = ContainerTrouble(
+        container="app",
+        reason="CrashLoopBackOff",
+        message="back-off restarting failed container",
+        exit_code=137,
+        exit_reason="OOMKilled",
+        restarts=3,
+    )
+    bad = PodSummary(
+        name="a-bad",
+        namespace="default",
+        phase="CrashLoopBackOff",
+        ready="0/1",
+        restarts=3,
+        node=None,
+        uid="uid-bad",
+        trouble=(crash,),
+    )
+    app = make_app([bad, _pod("b-ok")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)
+        second = app.query_one("#pane-1", ResourceTable)
+        await until(pilot, lambda: second.row_count == 2, label="clone rendered")
+        strip = app.query_one(HintStrip)
+        # Focused clone's cursor sits on the trouble pod (row 0, sorted).
+        await until(pilot, lambda: strip.display, label="hint for focused pane's selection")
+        # Move the non-focused pane's cursor to the healthy row: its
+        # highlight must not clear the focused pane's hint.
+        app.query_one("#pane-0", ResourceTable).move_cursor(row=1)
+        await pilot.pause()
+        assert strip.display is True

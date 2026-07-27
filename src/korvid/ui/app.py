@@ -565,7 +565,10 @@ class KorvidApp(App[None]):
     ResourceTable.split-pane {
         border: round $panel;
     }
-    ResourceTable.split-pane:focus {
+    /* A class, not `:focus`: the accent border marks the command-routing
+       target (`_focused_pane`), which must stay visible while an Input
+       (command/filter bar, agent panel) owns keyboard focus. */
+    ResourceTable.split-pane.focused-pane {
         border: round $accent;
     }
     """
@@ -1302,6 +1305,11 @@ class KorvidApp(App[None]):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         """Cursor movement drives the ops hint strip (pods view only)."""
         if not isinstance(event.data_table, ResourceTable):
+            return
+        if event.data_table.id != self._pane.table_id:
+            # Highlight from the non-focused pane (e.g. a watch-driven
+            # re-render moving its cursor): the hint strip reflects the
+            # focused pane's selection only.
             return
         if self.current_kind != "pods" or event.row_key is None:
             self.query_one(HintStrip).clear_hint()
@@ -3267,14 +3275,28 @@ class KorvidApp(App[None]):
         # Render only the new pane: the source is already current, and a
         # repaint would reset its cursor/scroll.
         self._render_table(pane.kind, only=pane)
+        self._update_pane_focus_classes()
         table.focus()
         self._refresh_status()
+
+    def _update_pane_focus_classes(self) -> None:
+        """Mark the command-routing target with `focused-pane`. A class, not
+        `:focus`: opening the command/filter bar or agent panel moves keyboard
+        focus to an Input, but `_focused_pane` still decides where the command
+        goes - the indicator must not vanish at that moment."""
+        for index, pane in enumerate(self._panes):
+            try:
+                table = self.query_one(f"#{pane.table_id}", ResourceTable)
+            except NoMatches:
+                continue
+            table.set_class(len(self._panes) > 1 and index == self._focused_pane, "focused-pane")
 
     def _focus_other_pane(self) -> None:
         """`ctrl+w w`: move focus (commands, filters, keybindings) across."""
         if len(self._panes) < 2:
             return
         self._focused_pane = 1 - self._focused_pane
+        self._update_pane_focus_classes()
         self._focused_table().focus()
         self._refresh_status()
 
@@ -3293,6 +3315,7 @@ class KorvidApp(App[None]):
             await self.query_one(f"#{closing.table_id}", ResourceTable).remove()
             self.query_one(f"#{remaining.table_id}", ResourceTable).remove_class("split-pane")
             await self._sync_metrics_poller()
+        self._update_pane_focus_classes()
         # No repaint: `show()` clears and re-adds rows, which would reset the
         # survivor's cursor/scroll; its table is already current. The
         # single-pane empty-state does need a refresh (an empty survivor
@@ -3311,6 +3334,7 @@ class KorvidApp(App[None]):
             if pane.table_id == widget.id:
                 if index != self._focused_pane:
                     self._focused_pane = index
+                    self._update_pane_focus_classes()
                     self._refresh_status()
                 return
 
