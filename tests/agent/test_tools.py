@@ -913,10 +913,13 @@ class FakeDiagnoseKube:
         pod: str,
         container: str,
         *,
+        previous: bool = False,
         follow: bool = True,
         tail_lines: int = 200,
     ) -> Any:
-        self.log_calls.append({"pod": pod, "container": container, "tail_lines": tail_lines})
+        self.log_calls.append(
+            {"pod": pod, "container": container, "previous": previous, "tail_lines": tail_lines}
+        )
         for text in self.log_lines:
             yield LogLine(pod=pod, container=container, text=text)
 
@@ -1047,3 +1050,66 @@ async def test_diagnose_pod_without_owner_reports_standalone() -> None:
         "diagnose_pod", {"pod": "api-1", "namespace": "default"}
     )
     assert "owner: none (standalone pod)" in out
+
+
+async def test_diagnose_pod_reads_previous_instance_logs_after_restarts() -> None:
+    """The crash evidence of a restarted container lives in the previous
+    instance; the current one is either freshly restarted or gone."""
+    kube = FakeDiagnoseKube()  # container "app" has restartCount=7
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert [(c["container"], c["previous"]) for c in kube.log_calls] == [("app", True)]
+    assert "[app] (previous instance)" in out
+
+
+async def test_diagnose_pod_falls_back_to_current_logs_when_previous_unavailable() -> None:
+    class NoPreviousKube(FakeDiagnoseKube):
+        async def stream_logs(self, *a: Any, previous: bool = False, **k: Any) -> Any:
+            if previous:
+                raise RuntimeError("previous terminated logs rotated away")
+            async for line in super().stream_logs(*a, previous=previous, **k):
+                yield line
+
+    kube = NoPreviousKube()
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "ERROR: db connection refused" in out
+    assert "(previous instance)" not in out
+
+
+async def test_diagnose_pod_reads_current_logs_for_a_never_restarted_container() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("pods", "api-1")]["status"]["containerStatuses"][0]["restartCount"] = 0
+    _ = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert [(c["container"], c["previous"]) for c in kube.log_calls] == [("app", False)]
+
+
+async def test_diagnose_pod_unbounded_messages_cannot_evict_the_log_evidence() -> None:
+    """Event/condition messages are cluster-controlled and unbounded; the
+    report must clamp them and reserve room so the final LOG EXCERPTS
+    section survives instead of being prefix-truncated away."""
+    kube = FakeDiagnoseKube()
+    kube.objects[("pods", "api-1")]["status"]["conditions"] = [
+        {"type": "Ready", "status": "False", "reason": "Huge", "message": "c" * 5000}
+    ]
+    kube.events = [
+        {
+            "type": "Warning",
+            "reason": f"Reason{i}",
+            "message": f"m{i} " + "e" * 4000,
+            "count": 1,
+            "lastTimestamp": f"2026-07-27T06:{i % 60:02d}:00Z",
+        }
+        for i in range(10)
+    ]
+    kube.log_lines = ["boot ok", "ERROR: db connection refused", "final line " + "z" * 3000]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert len(out) <= MAX_RESULT_CHARS
+    assert "truncated" not in out  # budgeted by construction, not chopped by execute()
+    assert "ERROR: db connection refused" in out  # the evidence survived

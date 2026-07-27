@@ -10,6 +10,7 @@ functions only — fetching lives in the tool executor.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 #: Warning events shown before the report elides the rest.
@@ -17,6 +18,9 @@ MAX_WARNING_EVENTS = 10
 
 #: Lines matching this pattern anchor the targeted log excerpt.
 _ERROR_PATTERN = re.compile(r"error|fatal|panic|exception|traceback", re.IGNORECASE)
+
+#: Sort fallback for events that carry no parseable timestamp at all.
+_EPOCH = datetime.min.replace(tzinfo=UTC)
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -103,7 +107,7 @@ def troubled_containers(pod: dict[str, Any]) -> list[str]:
 
     Waiting states, non-zero terminations, and any restarts qualify — a
     container that crashed and recovered still logged why it crashed.
-    Completed init containers (exit 0) are healthy by definition.
+    Completed containers (exit 0) are healthy even after earlier restarts.
     """
     names: list[str] = []
     for _prefix, cs in _container_statuses(pod):
@@ -114,10 +118,22 @@ def troubled_containers(pod: dict[str, Any]) -> list[str]:
         restarts = cs.get("restartCount") or 0
         waiting = isinstance(state.get("waiting"), dict)
         terminated = state.get("terminated")
-        failed_exit = isinstance(terminated, dict) and terminated.get("exitCode") != 0
+        if isinstance(terminated, dict) and terminated.get("exitCode") == 0:
+            continue  # Completed — earlier restarts no longer matter, it succeeded
+        failed_exit = isinstance(terminated, dict)
         if waiting or failed_exit or restarts > 0:
             names.append(name)
     return names
+
+
+def restarted_containers(pod: dict[str, Any]) -> set[str]:
+    """Container names with restarts — their crash evidence is in the
+    *previous* instance's logs, not the freshly restarted current one."""
+    return {
+        name
+        for _prefix, cs in _container_statuses(pod)
+        if isinstance(name := cs.get("name"), str) and name and (cs.get("restartCount") or 0) > 0
+    }
 
 
 def condition_lines(pod: dict[str, Any]) -> list[str]:
@@ -141,6 +157,40 @@ def condition_lines(pod: dict[str, Any]) -> list[str]:
     return failing + healthy
 
 
+def _event_count(ev: dict[str, Any]) -> int:
+    """Recurrence count: `series.count` (events.k8s.io repeating events)
+    first, then the core v1 `count`, defaulting to a single occurrence."""
+    raw = _dict(ev.get("series")).get("count") or ev.get("count") or 1
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _event_last_seen(ev: dict[str, Any]) -> str:
+    """Raw timestamp of the latest occurrence: `series.lastObservedTime`
+    for repeating events, then the non-series fallbacks."""
+    raw = (
+        _dict(ev.get("series")).get("lastObservedTime")
+        or ev.get("lastTimestamp")
+        or ev.get("eventTime")
+        or ev.get("firstTimestamp")
+        or ""
+    )
+    return str(raw)
+
+
+def _event_instant(ev: dict[str, Any]) -> datetime:
+    """Parsed instant for sorting — RFC 3339 strings do not sort
+    chronologically once offsets or fractional seconds differ."""
+    raw = _event_last_seen(ev)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return _EPOCH
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 def warning_event_lines(events: list[dict[str, Any]]) -> list[str]:
     """Warning events, deduplicated by (reason, message), newest first.
 
@@ -150,9 +200,7 @@ def warning_event_lines(events: list[dict[str, Any]]) -> list[str]:
     warnings = [
         ev for ev in events if isinstance(ev, dict) and str(ev.get("type") or "") == "Warning"
     ]
-    warnings.sort(
-        key=lambda ev: str(ev.get("lastTimestamp") or ev.get("eventTime") or ""), reverse=True
-    )
+    warnings.sort(key=_event_instant, reverse=True)
     seen: set[tuple[str, str]] = set()
     lines: list[str] = []
     deduped = 0
@@ -164,9 +212,8 @@ def warning_event_lines(events: list[dict[str, Any]]) -> list[str]:
         deduped += 1
         if deduped > MAX_WARNING_EVENTS:
             continue
-        count = int(ev.get("count") or 1)
-        ts = str(ev.get("lastTimestamp") or ev.get("eventTime") or "")
-        line = f"{key[0]} ({count}x"
+        ts = _event_last_seen(ev)
+        line = f"{key[0]} ({_event_count(ev)}x"
         if ts:
             line += f", last {ts}"
         line += f"): {key[1]}"

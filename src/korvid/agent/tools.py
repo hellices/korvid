@@ -16,6 +16,7 @@ from korvid.agent.diagnose import (
     log_excerpt,
     node_condition_line,
     pvc_names,
+    restarted_containers,
     troubled_containers,
     warning_event_lines,
 )
@@ -826,6 +827,12 @@ class ToolExecutor:
     _DIAGNOSE_LOG_TAIL = 200
     #: Troubled containers whose logs are excerpted; more are named only.
     _DIAGNOSE_MAX_LOG_CONTAINERS = 3
+    #: Per-line clamp — event/condition messages and log lines are
+    #: cluster-controlled and unbounded.
+    _DIAGNOSE_LINE_CLAMP = 240
+    #: Per-section budget for the non-log sections, so the final LOG
+    #: EXCERPTS section always has reserved room under MAX_RESULT_CHARS.
+    _DIAGNOSE_SECTION_BUDGET = 1000
 
     def _meta_for_kind_name(self, kind_name: str) -> ResourceMeta | None:
         """Discovery metadata for an API kind name (e.g. ``"ReplicaSet"``)."""
@@ -886,27 +893,87 @@ class ToolExecutor:
             return [f"unavailable ({exc})"]
         return warning_event_lines(events) or ["(no warning events)"]
 
+    async def _fetch_log_excerpt(
+        self, namespace: str, pod_name: str, container: str, *, previous: bool
+    ) -> tuple[bool, str]:
+        """(succeeded, excerpt-or-diagnostic) for one container instance."""
+        try:
+            tail: list[str] = []
+            async for log_line in self._kube.stream_logs(
+                namespace,
+                pod_name,
+                container,
+                previous=previous,
+                follow=False,
+                tail_lines=self._DIAGNOSE_LOG_TAIL,
+            ):
+                tail.append(self._clamp_line(log_line.text))
+        except Exception as exc:
+            return False, f"unavailable ({exc})"
+        if not tail:
+            return False, "(no log output)"
+        return True, log_excerpt(tail)
+
     async def _diagnose_logs(self, namespace: str, name: str, pod: dict[str, Any]) -> list[str]:
-        """Targeted excerpt per troubled container — the report's final section."""
+        """Targeted excerpt per troubled container — the report's final section.
+
+        A restarted container's crash evidence lives in the *previous*
+        instance's logs (the current one is freshly restarted or still
+        waiting), so restarts read that instance first, falling back to
+        the current one when the previous logs have rotated away.
+        """
         troubled = troubled_containers(pod)
         if not troubled:
             return ["(no troubled containers — logs skipped)"]
+        restarted = restarted_containers(pod)
         lines: list[str] = []
         for container in troubled[: self._DIAGNOSE_MAX_LOG_CONTAINERS]:
-            lines.append(f"[{container}]")
-            try:
-                tail: list[str] = []
-                async for log_line in self._kube.stream_logs(
-                    namespace, name, container, follow=False, tail_lines=self._DIAGNOSE_LOG_TAIL
-                ):
-                    tail.append(log_line.text)
-                lines.append(log_excerpt(tail) if tail else "(no log output)")
-            except Exception as exc:
-                lines.append(f"unavailable ({exc})")
+            previous = container in restarted
+            ok, text = await self._fetch_log_excerpt(namespace, name, container, previous=previous)
+            if previous and not ok:
+                ok, text = await self._fetch_log_excerpt(namespace, name, container, previous=False)
+                previous = False
+            suffix = " (previous instance)" if previous else ""
+            lines.append(f"[{container}]{suffix}")
+            lines.append(text)
         skipped = troubled[self._DIAGNOSE_MAX_LOG_CONTAINERS :]
         if skipped:
             lines.append(f"(also troubled, logs not fetched: {', '.join(skipped)})")
         return lines
+
+    @classmethod
+    def _clamp_line(cls, line: str) -> str:
+        limit = cls._DIAGNOSE_LINE_CLAMP
+        return line if len(line) <= limit else line[: limit - 1] + "…"
+
+    @classmethod
+    def _budget_section(cls, lines: list[str]) -> list[str]:
+        """Keep leading lines within the per-section budget, eliding the rest."""
+        out: list[str] = []
+        used = 0
+        for index, line in enumerate(lines):
+            used += len(line) + 1
+            if used > cls._DIAGNOSE_SECTION_BUDGET:
+                out.append(f"…{len(lines) - index} more line(s) elided")
+                return out
+            out.append(line)
+        return out
+
+    @staticmethod
+    def _trim_front(lines: list[str], budget: int) -> list[str]:
+        """Drop leading lines until the joined text fits the budget.
+
+        The tail is the most recent — and most diagnostic — log evidence,
+        so overflow is cut from the front, never from the end.
+        """
+        total = sum(len(line) + 1 for line in lines)
+        if total <= budget:
+            return lines
+        trimmed = list(lines)
+        while len(trimmed) > 1 and total + 4 > budget:  # room for the "  …" marker
+            total -= len(trimmed[0]) + 1
+            trimmed.pop(0)
+        return ["  …", *trimmed]
 
     async def _diagnose_pod(self, args: dict[str, Any]) -> str:
         """Compound read-only diagnosis (issue #70).
@@ -914,13 +981,16 @@ class ToolExecutor:
         Evidence gathering is deterministic code; the model only interprets.
         Only the pod fetch may fail the tool — every other section degrades
         to an ``unavailable`` line. Ordered for primacy/recency: identity
-        first, the most diagnostic evidence (events, then logs) last.
+        first, the most diagnostic evidence (events, then logs) last. Lines
+        are clamped and sections budgeted so the report stays under
+        ``MAX_RESULT_CHARS`` without the shared prefix-truncation ever
+        eating the final log evidence.
         """
         name = str(args["pod"])
         namespace = str(args["namespace"])
         pods_meta = self._api_meta("pods")
         pod = await self._kube.get_object(pods_meta, namespace, name)
-        sections: list[tuple[str, list[str]]] = [
+        head_sections: list[tuple[str, list[str]]] = [
             (
                 f"IDENTITY — pod {namespace}/{name}",
                 [*identity_lines(pod), await self._diagnose_owner_chain(namespace, pod)],
@@ -932,13 +1002,20 @@ class ToolExecutor:
                 "WARNING EVENTS (newest first)",
                 await self._diagnose_events(namespace, name, pod),
             ),
-            ("LOG EXCERPTS (troubled containers)", await self._diagnose_logs(namespace, name, pod)),
         ]
         report: list[str] = []
-        for title, lines in sections:
+        for title, lines in head_sections:
             report.append(title)
-            report.extend(f"  {line}" for line in lines)
-        return "\n".join(report)
+            clamped = [self._clamp_line(line) for line in lines]
+            report.extend(f"  {line}" for line in self._budget_section(clamped))
+        log_title = "LOG EXCERPTS (troubled containers)"
+        log_lines = [
+            f"  {segment}"
+            for entry in await self._diagnose_logs(namespace, name, pod)
+            for segment in (entry.splitlines() or [entry])
+        ]
+        budget = MAX_RESULT_CHARS - sum(len(line) + 1 for line in report) - len(log_title) - 1
+        return "\n".join([*report, log_title, *self._trim_front(log_lines, budget)])
 
 
 def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:

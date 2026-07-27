@@ -15,6 +15,7 @@ from korvid.agent.diagnose import (
     log_excerpt,
     node_condition_line,
     pvc_names,
+    restarted_containers,
     troubled_containers,
     warning_event_lines,
 )
@@ -185,6 +186,34 @@ def test_troubled_containers_skip_a_succeeded_init_container() -> None:
     assert troubled_containers(pod) == []
 
 
+def test_troubled_containers_skip_a_completed_init_container_despite_restarts() -> None:
+    """Earlier failed attempts leave restartCount > 0 on a now-Completed init
+    container; it succeeded, so its logs carry no diagnostic evidence."""
+    pod = _crashloop_pod()
+    pod["status"]["containerStatuses"] = []
+    pod["status"]["initContainerStatuses"] = [
+        {
+            "name": "migrate",
+            "ready": True,
+            "restartCount": 2,
+            "state": {"terminated": {"exitCode": 0, "reason": "Completed"}},
+        }
+    ]
+    assert troubled_containers(pod) == []
+
+
+def test_restarted_containers_lists_names_with_restarts() -> None:
+    pod = _crashloop_pod()
+    pod["status"]["initContainerStatuses"] = [
+        {"name": "migrate", "restartCount": 0, "state": {"terminated": {"exitCode": 0}}}
+    ]
+    assert restarted_containers(pod) == {"app"}
+
+
+def test_restarted_containers_empty_status_yields_empty() -> None:
+    assert restarted_containers({}) == set()
+
+
 # --- conditions -------------------------------------------------------------
 
 
@@ -236,6 +265,28 @@ def test_warning_event_lines_cap_the_list() -> None:
 
 def test_warning_event_lines_no_warnings_yields_empty() -> None:
     assert warning_event_lines([_event("Pulled", "ok", etype="Normal")]) == []
+
+
+def test_warning_event_lines_prefer_series_fields_for_repeating_events() -> None:
+    """events.k8s.io series record recurrence in `series.count` and
+    `series.lastObservedTime`; the top-level fallbacks describe only the
+    initial observation of an actively repeating warning."""
+    repeating = _event("BackOff", "restarting failed container", ts="2026-07-27T05:00:00Z")
+    repeating["series"] = {"count": 40, "lastObservedTime": "2026-07-27T06:30:00Z"}
+    fresh = _event("Unhealthy", "probe failed", ts="2026-07-27T06:00:00Z")
+    lines = warning_event_lines([fresh, repeating])
+    assert lines[0].startswith("BackOff (40x, last 2026-07-27T06:30:00Z")
+    assert lines[1].startswith("Unhealthy")
+
+
+def test_warning_event_lines_sort_by_parsed_instants_not_strings() -> None:
+    """RFC 3339 strings do not sort chronologically once offsets differ."""
+    # 10:00+09:00 is 01:00Z — older than 05:00Z despite the larger string.
+    older = _event("A", "offset ts", ts="2026-07-27T10:00:00+09:00")
+    newer = _event("B", "utc ts", ts="2026-07-27T05:00:00Z")
+    lines = warning_event_lines([older, newer])
+    assert lines[0].startswith("B")
+    assert lines[1].startswith("A")
 
 
 # --- log excerpt ------------------------------------------------------------
