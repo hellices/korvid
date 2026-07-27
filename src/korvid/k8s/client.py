@@ -733,18 +733,23 @@ class KubeClient(WriteOps):
     async def drain_plan(self, node_name: str) -> DrainPlan:
         """Impact plan for draining *node_name*: every pod scheduled there,
         classified against the cluster's PodDisruptionBudgets (see
-        ``korvid.k8s.drain``). A missing policy/v1 API (or RBAC-denied PDB
-        list) degrades to an empty budget list: the plan then simply cannot
-        flag blocked evictions up front - they still surface as 429s during
-        execution."""
+        ``korvid.k8s.drain``). Only a missing policy/v1 API (404) degrades
+        to an empty budget list - blocked evictions then surface as 429s
+        during execution; any other PDB-list failure (RBAC denial, auth,
+        transport) propagates so the UI aborts instead of showing a falsely
+        PDB-aware plan."""
         pods = await self._request_json(
             "/api/v1/pods",
             query_params=[("fieldSelector", f"spec.nodeName={node_name}")],
         )
         try:
             pdbs = await self._request_json("/apis/policy/v1/poddisruptionbudgets")
-        except Exception:
-            logger.debug("PDB list failed; drain plan proceeds without budgets", exc_info=True)
+        except ApiStatusError as exc:
+            if exc.status != 404:
+                # RBAC denial, auth failure or transport trouble must abort
+                # the drain rather than present a falsely PDB-aware plan.
+                raise
+            logger.debug("policy/v1 PDB API absent (404); drain plan proceeds without budgets")
             pdbs = {}
         return build_drain_plan(pods.get("items") or [], pdbs.get("items") or [])
 

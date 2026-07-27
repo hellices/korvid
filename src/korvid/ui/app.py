@@ -3028,6 +3028,47 @@ class KorvidApp(App[None]):
             return "failed"
         return "evicted"
 
+    async def _recheck_drain_plan(
+        self,
+        ops: WriteOps,
+        meta: ResourceMeta,
+        name: str,
+        plan: DrainPlan,
+    ) -> tuple[DrainTarget, ...] | None:
+        """Re-list the node's pods right after cordoning: the node was still
+        schedulable while the user reviewed the plan, so pods may have landed
+        since. Pods that disappeared are simply dropped; pods the user never
+        approved abort the drain (the node stays cordoned, so a re-run shows
+        a stable plan to re-approve). None means the drain must not proceed
+        (already audited and notified)."""
+        try:
+            fresh = await ops.drain_plan(name)
+        except Exception as exc:
+            summary = f"plan re-check failed after cordon: {exc}"
+            with contextlib.suppress(Exception):
+                await self._audit_write("drain", meta, None, name, summary, "aborted")
+            self.notify(
+                f"drain nodes/{name} aborted: {summary}; node remains cordoned",
+                severity="error",
+            )
+            return None
+        approved = {t.uid or t.ref for t in plan.targets}
+        unapproved = [t.ref for t in fresh.targets if (t.uid or t.ref) not in approved]
+        if unapproved:
+            summary = (
+                f"plan changed after cordon: {len(unapproved)} unapproved pods"
+                f" ({', '.join(unapproved[:3])})"
+            )
+            with contextlib.suppress(Exception):
+                await self._audit_write("drain", meta, None, name, summary, "aborted")
+            self.notify(
+                f"drain nodes/{name} aborted: {summary};"
+                " node remains cordoned - re-run drain to review the updated plan",
+                severity="warning",
+            )
+            return None
+        return fresh.targets
+
     async def _run_drain(
         self,
         ops: WriteOps,
@@ -3036,10 +3077,12 @@ class KorvidApp(App[None]):
         uid: str | None,
         plan: DrainPlan,
     ) -> None:
-        """Execute an approved drain: cordon, then evict pod by pod.
+        """Execute an approved drain: cordon, re-check the plan (pods may
+        have landed while the dialog was open), then evict pod by pod.
         Auditing is fail-closed (no intent record, no drain); a PDB-refused
         eviction (429) surfaces as a live warning and the drain moves on;
-        cancellation stops issuing evictions and the node stays cordoned."""
+        cancellation anywhere after the intent record is audited, stops
+        issuing evictions, and never uncordons the node."""
         total = len(plan.targets)
         try:
             await self._audit_write(
@@ -3049,35 +3092,41 @@ class KorvidApp(App[None]):
             logger.exception("audit intent record failed; drain blocked: %s", exc)
             self.notify(f"drain nodes/{name} blocked: audit log unavailable", severity="error")
             return
-        try:
-            await ops.cordon_node(name, True, uid=uid)
-        except Exception as exc:
-            with contextlib.suppress(Exception):
-                await self._audit_write(
-                    "drain", meta, None, name, "cordon step failed", f"error: {exc}"
-                )
-            self.notify(f"drain nodes/{name} failed: cordon: {exc}", severity="error")
-            return
-        self.notify(
-            f"drain nodes/{name}: cordoned; evicting {total} pods"
-            " (press the drain key again to cancel)",
-            severity="information",
-        )
         evicted = blocked = failed = 0
         try:
-            for target in plan.targets:
+            try:
+                await ops.cordon_node(name, True, uid=uid)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                with contextlib.suppress(Exception):
+                    await self._audit_write(
+                        "drain", meta, None, name, "cordon step failed", f"error: {exc}"
+                    )
+                self.notify(f"drain nodes/{name} failed: cordon: {exc}", severity="error")
+                return
+            targets = await self._recheck_drain_plan(ops, meta, name, plan)
+            if targets is None:
+                return
+            total = len(targets)
+            self.notify(
+                f"drain nodes/{name}: cordoned; evicting {total} pods"
+                " (press the drain key again to cancel)",
+                severity="information",
+            )
+            for target in targets:
                 result = await self._evict_one(ops, target)
                 evicted += result == "evicted"
                 blocked += result == "blocked"
                 failed += result == "failed"
         except asyncio.CancelledError:
-            summary = f"cancelled: evicted {evicted} of {total}; node remains cordoned"
+            summary = f"cancelled: evicted {evicted} of {total}; node was not uncordoned"
             with contextlib.suppress(Exception):
                 await self._audit_write("drain", meta, None, name, summary, "cancelled")
             self.notify(f"drain nodes/{name} {summary}", severity="warning")
             raise
         summary = f"evicted {evicted}, pdb-blocked {blocked}, failed {failed} of {total}"
-        outcome = "success" if failed == 0 else f"partial: {summary}"
+        outcome = "success" if failed == 0 and blocked == 0 else f"partial: {summary}"
         try:
             await self._audit_write("drain", meta, None, name, summary, outcome)
         except Exception:

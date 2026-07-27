@@ -196,3 +196,16 @@ def test_preview_lines_when_nothing_to_evict() -> None:
 def test_plan_is_a_drainplan_dataclass() -> None:
     plan = build_drain_plan([], [])
     assert isinstance(plan, DrainPlan)
+
+
+def test_non_controller_daemonset_reference_is_still_evicted() -> None:
+    """Only a *controlling* DaemonSet owner exempts a pod (kubectl drain
+    semantics); a non-controller reference must not hide the pod from the
+    plan."""
+    pod = _pod("web-1", uid="u1")
+    pod["metadata"]["ownerReferences"] = [
+        {"kind": "DaemonSet", "name": "owner", "controller": False},
+    ]
+    plan = build_drain_plan([pod], [])
+    assert plan.skipped_daemonset == ()
+    assert [t.name for t in plan.targets] == ["web-1"]

@@ -142,8 +142,11 @@ def _blocking_pdb(pod: dict[str, Any], pdbs: list[dict[str, Any]]) -> str | None
 
 
 def _is_daemonset_pod(pod: dict[str, Any]) -> bool:
+    """Only a *controlling* DaemonSet reference exempts a pod from
+    eviction (kubectl drain semantics); a non-controller reference to a
+    DaemonSet leaves the pod evictable."""
     return any(
-        ref.get("kind") == "DaemonSet"
+        ref.get("kind") == "DaemonSet" and ref.get("controller") is True
         for ref in (pod.get("metadata") or {}).get("ownerReferences") or []
     )
 

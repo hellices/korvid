@@ -11,6 +11,7 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from textual.css.query import NoMatches
 from textual.widgets import Static
 
 from korvid.core.audit import AuditLog
@@ -24,6 +25,7 @@ from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.writes import WriteOps
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from korvid.ui.widgets.resource_table import ResourceTable
 
 from .waits import until
 
@@ -136,7 +138,15 @@ async def _to_nodes(pilot) -> None:  # type: ignore[no-untyped-def]  # Pilot's a
     for ch in "nodes":
         await pilot.press(ch)
     await pilot.press("enter")
-    await pilot.pause(0.1)
+
+    def _node_row_rendered() -> bool:
+        try:
+            table = pilot.app.query_one(ResourceTable)
+        except NoMatches:
+            return False
+        return table.row_count > 0 and str(table.get_row_at(0)[0]) == "worker-1"
+
+    await until(pilot, _node_row_rendered, label="nodes view rendered")
 
 
 async def _confirm_typed(pilot, name: str) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed
@@ -398,3 +408,43 @@ async def test_drain_while_drain_in_progress_cancels_instead_of_stacking(tmp_pat
         )
         assert not isinstance(app.screen, ConfirmScreen)
         assert len([call for call in rec.calls if call[0] == "plan"]) == plans_before
+
+
+async def test_drain_aborts_when_plan_gains_unapproved_pods_after_cordon(tmp_path: Path) -> None:
+    """The node is still schedulable while the approval dialog is open; a
+    pod that lands in that window was never reviewed. The post-cordon
+    re-check must abort (node stays cordoned) instead of silently skipping
+    or evicting it."""
+    approved = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    grown = DrainPlan(
+        targets=(_target("web-1"), _target("sneaky-1")),
+        skipped_daemonset=(),
+        skipped_mirror=(),
+    )
+
+    class GrowingRecorder(NodeRecorder):
+        async def drain_plan(self, node_name: str) -> DrainPlan:
+            self.calls.append(("plan", node_name))
+            plan_calls = sum(1 for call in self.calls if call[0] == "plan")
+            return approved if plan_calls == 1 else grown
+
+    rec = GrowingRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        await _confirm_typed(pilot, "worker-1")
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "plan changed after cordon" in audit_path.read_text(),
+            label="drain aborted on plan change",
+        )
+        # Cordoned, then aborted: nothing was evicted.
+        assert ("cordon", "worker-1", True, "node-uid-1") in rec.calls
+        assert not any(call[0] == "evict" for call in rec.calls)
+        entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        assert entries[-1]["outcome"] == "aborted"
+        assert "sneaky-1" in entries[-1]["detail"]

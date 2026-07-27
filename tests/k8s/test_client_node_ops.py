@@ -175,3 +175,18 @@ async def test_writeops_defaults_reject_node_ops() -> None:
     with pytest.raises(NotImplementedError, match="drain"):
         await ops.drain_plan("n")
     assert await ops.preview_cordon("n", True) is None
+
+
+async def test_drain_plan_propagates_non_404_pdb_failure() -> None:
+    """RBAC denial (or any non-404 PDB-list failure) must abort the plan
+    rather than silently presenting a falsely PDB-aware preview."""
+    from kubernetes_asyncio.client.exceptions import ApiException
+
+    client = KubeClient()
+    api = MagicMock()
+    pods: dict[str, Any] = {"items": []}
+    api.call_api = AsyncMock(
+        side_effect=[_resp(pods), ApiException(status=403, reason="Forbidden")]
+    )
+    with patch.object(client, "_api", api), pytest.raises(ApiStatusError, match="403"):
+        await client.drain_plan("worker-1")
