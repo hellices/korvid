@@ -18,6 +18,17 @@ from __future__ import annotations
 #: Resource kinds a forward can target, mapped to the kubectl type prefix.
 FORWARDABLE_KINDS: dict[str, str] = {"pods": "pod", "services": "service"}
 
+#: Workload kinds kubectl port-forward resolves to a live pod itself — used
+#: when a re-attach follows a replaced pod to its owning workload (issue #38).
+WORKLOAD_KINDS: dict[str, str] = {
+    "deployments": "deployment",
+    "replicasets": "replicaset",
+    "replicationcontrollers": "replicationcontroller",
+    "statefulsets": "statefulset",
+    "daemonsets": "daemonset",
+    "jobs": "job",
+}
+
 
 def build_port_forward_argv(
     kind: str,
@@ -28,7 +39,7 @@ def build_port_forward_argv(
     remote_port: int,
     context: str | None = None,
 ) -> list[str]:
-    """Return argv for `kubectl port-forward` to a pod or service.
+    """Return argv for `kubectl port-forward` to a pod, service, or workload.
 
     Binds explicitly to ``127.0.0.1``: kubectl's default ``localhost`` also
     tries ``::1``, and a forward is a local debugging convenience, never a
@@ -37,9 +48,9 @@ def build_port_forward_argv(
     Raises:
         ValueError: when ``kind`` is not a forwardable resource kind.
     """
-    prefix = FORWARDABLE_KINDS.get(kind)
+    prefix = FORWARDABLE_KINDS.get(kind) or WORKLOAD_KINDS.get(kind)
     if prefix is None:
-        raise ValueError(f"cannot port-forward to {kind!r} (pods and services only)")
+        raise ValueError(f"cannot port-forward to {kind!r} (pods, services, and workloads only)")
     return [
         "kubectl",
         "port-forward",

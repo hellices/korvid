@@ -545,6 +545,60 @@ async def test_pf_reattach_gone_message_is_kind_appropriate() -> None:
         assert "no longer exists" in notices[0]
 
 
+async def test_pf_reattach_follows_the_owning_workload_when_pod_gone(tmp_path: Path) -> None:
+    """Issue #38: a Deployment pod's replacement has a new name — re-attach
+    retargets the forward at the owning workload so kubectl resolves the
+    replacement pod, instead of telling the user to start over."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    pod_gone = False
+
+    async def _manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        if kind == "pods":
+            if pod_gone:
+                raise ApiStatusError(404, f'pods "{name}" not found')
+            return {
+                "metadata": {
+                    "ownerReferences": [
+                        {"kind": "ReplicaSet", "name": "api-6d5f", "controller": True}
+                    ]
+                },
+                "spec": {"containers": [{"name": "app", "ports": [{"containerPort": 8080}]}]},
+            }
+        if kind == "replicasets":
+            return {
+                "metadata": {
+                    "ownerReferences": [{"kind": "Deployment", "name": "api", "controller": True}]
+                }
+            }
+        raise ApiStatusError(404, f'{kind} "{name}" not found')
+
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: len(procs) == 1, label="forward started")
+            record = registry.forwards()[0]
+            # The pod dies and its Deployment replaces it under a new name.
+            procs[0].returncode = 1
+            pod_gone = True
+            await _open_pf(app, pilot)
+            await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
+            await pilot.press("r")
+            await until(pilot, lambda: len(procs) == 2, label="workload re-attach spawned")
+            assert "deployment/api" in procs[1].argv
+            await until(pilot, lambda: record.status == "alive", label="replacement confirmed")
+            assert any("deployment/api" in row for row in _forward_rows(app))
+
+
 async def test_teardown_audit_failure_does_not_abort_shutdown(tmp_path: Path) -> None:
     """A full disk during a teardown audit must not skip the rest of unmount."""
     procs: list[_FakeProc] = []

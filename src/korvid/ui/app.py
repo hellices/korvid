@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import json
 import logging
 import os
@@ -55,6 +56,7 @@ from korvid.core.portforward import (
     ForwardRegistry,
     ForwardSpec,
     candidate_remote_ports,
+    controller_owner,
 )
 from korvid.core.secrets import mask_secret_manifest
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -1461,6 +1463,44 @@ class KorvidApp(App[None]):
             return [], False
         return candidate_remote_ports(kind, manifest), True
 
+    #: Pod controller kinds a re-attach can follow, mapped to their plural.
+    #: ReplicaSets are chased one level up so the forward survives rollouts,
+    #: not just single pod replacements.
+    _WORKLOAD_PLURALS: ClassVar[dict[str, str]] = {
+        "Deployment": "deployments",
+        "ReplicaSet": "replicasets",
+        "ReplicationController": "replicationcontrollers",
+        "StatefulSet": "statefulsets",
+        "DaemonSet": "daemonsets",
+        "Job": "jobs",
+    }
+
+    async def _resolve_forward_workload(self, namespace: str, name: str) -> str | None:
+        """The pod's owning workload as ``"<plural>/<name>"``, best effort.
+
+        Captured when a forward starts so a later re-attach can follow the
+        pod to its replacement (issue #38). ReplicaSets are resolved to their
+        Deployment when they have one. Any failure yields None — the forward
+        still works, only the follow-the-workload re-attach is unavailable.
+        """
+        if self._get_manifest is None:
+            return None
+        try:
+            owner = controller_owner(await self._get_manifest("pods", namespace, name))
+            if owner is not None and owner[0] == "ReplicaSet":
+                parent = controller_owner(
+                    await self._get_manifest("replicasets", namespace, owner[1])
+                )
+                if parent is not None and parent[0] == "Deployment":
+                    owner = parent
+        except Exception as exc:  # a convenience — never blocks the forward
+            logger.debug("workload resolution for port-forward failed: %s", exc)
+            return None
+        if owner is None:
+            return None
+        plural = self._WORKLOAD_PLURALS.get(owner[0])
+        return f"{plural}/{owner[1]}" if plural is not None else None
+
     async def _start_forward(
         self, kind: str, namespace: str, name: str, *, local_port: int, remote_port: int
     ) -> None:
@@ -1468,12 +1508,14 @@ class KorvidApp(App[None]):
         registry = self._forwards
         if registry is None:  # pragma: no cover - action guard already checked
             return
+        workload = await self._resolve_forward_workload(namespace, name) if kind == "pods" else None
         spec = ForwardSpec(
             kind=kind,
             namespace=namespace,
             name=name,
             local_port=local_port,
             remote_port=remote_port,
+            workload=workload,
         )
         worker = get_current_worker()
         self._launching_forwards[worker] = spec
@@ -1514,9 +1556,12 @@ class KorvidApp(App[None]):
         self._track_confirmation(record)
 
     async def _spawn_reattach(
-        self, registry: ForwardRegistry, record: ForwardRecord
+        self, registry: ForwardRegistry, record: ForwardRecord, *, retarget: bool = False
     ) -> ForwardRecord | None:
         """Re-attach off-loop while teardown (and stops) can see and await it.
+
+        With ``retarget`` the replacement follows the spec's recorded owning
+        workload instead of the vanished pod (issue #38).
 
         Mirrors `_start_forward`'s tracking: between the registry adopting
         the replacement in its thread and this coroutine resuming, a quit or
@@ -1526,7 +1571,9 @@ class KorvidApp(App[None]):
         done = asyncio.Event()
         self._reattaching_forwards[done] = record.spec
         try:
-            revived = await asyncio.to_thread(registry.reattach, record.id)
+            revived = await asyncio.to_thread(
+                functools.partial(registry.reattach, record.id, retarget=retarget)
+            )
         except asyncio.CancelledError:
             # Shutdown cancelled the re-attach mid-spawn. The registry only
             # adopts a replacement while it is still open, so if one was (or
@@ -1823,8 +1870,8 @@ class KorvidApp(App[None]):
         def _on_reattach_error(record: ForwardRecord, exc: Exception) -> None:
             self._audit_forward("port-forward-start", record.spec, outcome=f"error: {exc}")
 
-        async def _reattach(record: ForwardRecord) -> ForwardRecord | None:
-            return await self._spawn_reattach(registry, record)
+        async def _reattach(record: ForwardRecord, retarget: bool) -> ForwardRecord | None:
+            return await self._spawn_reattach(registry, record, retarget=retarget)
 
         async def _target_exists(record: ForwardRecord) -> bool:
             # Only a confirmed 404 blocks the re-attach; when the target

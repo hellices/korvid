@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic
 from typing import Any, Protocol
 
@@ -60,11 +60,27 @@ _WatcherBinding = tuple[_ForwardProcess, Iterable[str], threading.Event]
 class ForwardSpec:
     """What to forward: everything needed to (re)build the kubectl argv."""
 
-    kind: str  # "pods" | "services"
+    kind: str  # "pods" | "services" | a workload plural after a retarget
     namespace: str
     name: str
     local_port: int
     remote_port: int
+    #: The pod's owning workload as ``"<kind-plural>/<name>"`` (captured at
+    #: start). Lets a re-attach follow a replaced pod to its replacement.
+    workload: str | None = None
+
+    def retargeted(self) -> ForwardSpec | None:
+        """The same forward aimed at the owning workload, or None without one.
+
+        kubectl resolves a live pod itself for workload targets, so the
+        revived forward reaches the vanished pod's replacement (issue #38).
+        """
+        if self.workload is None:
+            return None
+        kind, _, name = self.workload.partition("/")
+        if not kind or not name:
+            return None
+        return replace(self, kind=kind, name=name, workload=None)
 
 
 @dataclass
@@ -376,14 +392,21 @@ class ForwardRegistry:
         self._release_waiters(ready)
         return record
 
-    def reattach(self, forward_id: int) -> ForwardRecord | None:
-        """Restart a ``broken`` forward in place (same id, same spec).
+    def reattach(self, forward_id: int, *, retarget: bool = False) -> ForwardRecord | None:
+        """Restart a ``broken`` forward in place (same id, same ports).
+
+        With ``retarget`` the replacement aims at the spec's recorded owning
+        workload instead of the original pod — the way a forward follows a
+        vanished pod to its replacement (kubectl resolves a live pod itself
+        for workload targets). The record's spec is updated on adoption so
+        the forward list shows what actually runs.
 
         Returns None (and changes nothing) when the id is unknown, the
         forward is still alive — re-running a live forward would just fail
-        on the occupied local port — or the record was stopped or torn down
-        while the replacement was being spawned (the replacement is put
-        down, never adopted).
+        on the occupied local port — a retarget was requested without a
+        recorded workload, or the record was stopped or torn down while the
+        replacement was being spawned (the replacement is put down, never
+        adopted).
 
         Raises:
             OSError: when the replacement subprocess cannot be spawned.
@@ -394,27 +417,30 @@ class ForwardRegistry:
         record = self._records.get(forward_id)
         if record is None or record.status != "broken":
             return None
+        spec = record.spec.retargeted() if retarget else record.spec
+        if spec is None:
+            return None
         # _ensure_port_free also covers this record itself: a record broken
         # by EOF may still have its child running and holding the local port
         # (poll() can lag the stream closing) — it is signalled and reaped
         # there instead of being orphaned by the process swap below.
-        self._ensure_port_free(record.spec.local_port)  # claims the port on success
+        self._ensure_port_free(spec.local_port)  # claims the port on success
         # Same failure-shape as start(): any exception escaping the spawn
         # must release the claim, not just the documented OSError.
         spawned = False
         try:
-            replacement = self._spawn(record.spec)
+            replacement = self._spawn(spec)
             spawned = True
         finally:
             if not spawned:
-                self._release_claim(record.spec.local_port)
+                self._release_claim(spec.local_port)
         superseded: threading.Event | None = None
         binding: _WatcherBinding | None = None
         # Adopt under the ops lock: a stop or teardown that won the race
         # while the spawn was in flight must not have its outcome undone by
         # this thread publishing a fresh process afterwards.
         with self._ops:
-            self._claimed_ports.discard(record.spec.local_port)
+            self._claimed_ports.discard(spec.local_port)
             adopted = not self._closed and self._records.get(forward_id) is record
             if adopted:
                 # Swap under the record lock: a stale watcher that already
@@ -422,6 +448,7 @@ class ForwardRegistry:
                 # before the new process (and the reset output) are published.
                 with record._lock:
                     record._proc = replacement
+                    record.spec = spec
                     record.last_output = ""
                     record._generation += 1
                     superseded = record._ready
@@ -675,6 +702,25 @@ class ForwardRegistry:
                 # Keep until poll() confirms the exit so the child is reaped.
                 remaining.append((proc, deadline, port))
             self._reaping = remaining
+
+
+def controller_owner(manifest: dict[str, Any]) -> tuple[str, str] | None:
+    """The (kind, name) of the reference that controls this object, if any.
+
+    Reads ``metadata.ownerReferences`` and picks the entry marked
+    ``controller: true`` — the workload a re-attach can follow when the pod
+    itself is gone. Malformed or missing data yields None, never an error.
+    """
+    refs = manifest.get("metadata", {}).get("ownerReferences")
+    if not isinstance(refs, list):
+        return None
+    for ref in refs:
+        if not isinstance(ref, dict) or not ref.get("controller"):
+            continue
+        kind, name = ref.get("kind"), ref.get("name")
+        if isinstance(kind, str) and isinstance(name, str) and kind and name:
+            return kind, name
+    return None
 
 
 def candidate_remote_ports(kind: str, manifest: dict[str, Any]) -> list[int]:

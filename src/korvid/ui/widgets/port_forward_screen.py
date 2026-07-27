@@ -22,7 +22,7 @@ from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from korvid.core.portforward import ForwardRecord, ForwardRegistry
-from korvid.k8s.portforward import FORWARDABLE_KINDS
+from korvid.k8s.portforward import FORWARDABLE_KINDS, WORKLOAD_KINDS
 
 _CSS = """
 PortForwardScreen {
@@ -185,7 +185,7 @@ def forward_row(record: ForwardRecord) -> str:
     highlighted row, so the mapping alone must disambiguate them.
     """
     spec = record.spec
-    prefix = FORWARDABLE_KINDS.get(spec.kind, spec.kind)
+    prefix = FORWARDABLE_KINDS.get(spec.kind) or WORKLOAD_KINDS.get(spec.kind, spec.kind)
     return (
         f"#{record.id}  {record.status:<8}  "
         f"localhost:{spec.local_port} -> {spec.namespace}/{prefix}/{spec.name}:{spec.remote_port}"
@@ -217,7 +217,7 @@ class ForwardListScreen(ModalScreen[None]):
         on_reattach: Callable[[ForwardRecord], None] | None = None,
         on_reattach_error: Callable[[ForwardRecord, Exception], None] | None = None,
         target_exists: Callable[[ForwardRecord], Awaitable[bool]] | None = None,
-        reattach: Callable[[ForwardRecord], Awaitable[ForwardRecord | None]] | None = None,
+        reattach: Callable[[ForwardRecord, bool], Awaitable[ForwardRecord | None]] | None = None,
     ) -> None:
         super().__init__()
         self._registry = registry
@@ -288,7 +288,8 @@ class ForwardListScreen(ModalScreen[None]):
                 severity="warning",
             )
             return
-        if self._target_exists is not None and not await self._target_exists(record):
+        gone = self._target_exists is not None and not await self._target_exists(record)
+        if gone and (self._reattach is None or record.spec.workload is None):
             # A Deployment replaces a dead pod under a new name; a Service
             # keeps its name, so the hint stays kind-appropriate.
             hint = (
@@ -306,8 +307,10 @@ class ForwardListScreen(ModalScreen[None]):
             # previously stopped child that still holds the local port. The
             # injected re-attach lets the app track the in-flight spawn so a
             # teardown in that window still audits the start entry first.
+            # A gone pod is followed to its owning workload — kubectl
+            # resolves the replacement pod itself (issue #38).
             if self._reattach is not None:
-                revived = await self._reattach(record)
+                revived = await self._reattach(record, gone)
             else:
                 revived = await asyncio.to_thread(self._registry.reattach, record.id)
         except (OSError, ValueError) as exc:

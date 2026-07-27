@@ -175,6 +175,53 @@ def test_reattach_unknown_id_returns_none() -> None:
     assert registry.reattach(42) is None
 
 
+def test_reattach_can_retarget_at_the_owning_workload() -> None:
+    """A vanished pod's forward follows its workload — kubectl resolves the
+    replacement pod when the target is a workload (issue #38)."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    record = registry.start(_spec(workload="deployments/api"))
+    procs[0].exit(1)
+    registry.refresh()
+    revived = registry.reattach(record.id, retarget=True)
+    assert revived is record
+    assert "deployment/api" in procs[1].argv
+    # The record now describes the workload target the forward actually runs.
+    assert record.spec.kind == "deployments"
+    assert record.spec.name == "api"
+    assert record.spec.local_port == 8080  # port mapping is untouched
+    assert record.status == "alive"
+
+
+def test_reattach_retarget_without_a_workload_is_refused() -> None:
+    """No recorded owner means nothing to follow — no blind respawn."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    record = registry.start(_spec())
+    procs[0].exit(1)
+    registry.refresh()
+    assert registry.reattach(record.id, retarget=True) is None
+    assert len(procs) == 1
+    assert record.status == "broken"  # still listed, still re-attachable
+
+
+def test_controller_owner_reads_the_controlling_reference() -> None:
+    from korvid.core.portforward import controller_owner
+
+    manifest = {
+        "metadata": {
+            "ownerReferences": [
+                {"kind": "Node", "name": "n1"},  # not a controller
+                {"kind": "ReplicaSet", "name": "api-6d5f", "controller": True},
+            ]
+        }
+    }
+    assert controller_owner(manifest) == ("ReplicaSet", "api-6d5f")
+    assert controller_owner({}) is None
+    assert controller_owner({"metadata": {"ownerReferences": "bogus"}}) is None
+    assert controller_owner({"metadata": {"ownerReferences": [{"controller": True}]}}) is None
+
+
 def test_stop_all_terminates_every_live_forward() -> None:
     procs: list[_FakeProc] = []
     registry = _registry(procs)
@@ -1009,8 +1056,8 @@ def test_non_oserror_spawn_failure_releases_the_port_claim() -> None:
     """An unforwardable kind fails before Popen — the claim must still be released."""
     procs: list[_FakeProc] = []
     registry = _registry(procs)
-    with pytest.raises(ValueError, match="pods and services only"):
-        registry.start(_spec(kind="deployments"))
+    with pytest.raises(ValueError, match="pods, services, and workloads only"):
+        registry.start(_spec(kind="configmaps"))
     assert registry.start(_spec()).status == "alive"  # port claim was released
 
 
