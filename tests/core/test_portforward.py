@@ -5,7 +5,6 @@ from __future__ import annotations
 import queue
 import subprocess
 import threading
-import time
 from time import monotonic
 from typing import Any
 from unittest.mock import patch
@@ -667,10 +666,13 @@ def test_delayed_initial_watcher_stays_bound_to_its_own_generation() -> None:
     procs: list[_FakeProc] = []
     registry = _piped_registry(procs)
     watched: list[Any] = []
+    both_watching = threading.Event()
     original_watch = registry._watch_output
 
     def _spy_watch(record: ForwardRecord, proc: Any, stream: Any, ready: Any) -> None:
         watched.append(stream)
+        if len(watched) == 2:
+            both_watching.set()
         original_watch(record, proc, stream, ready)
 
     registry._watch_output = _spy_watch  # type: ignore[method-assign]  # test spy
@@ -686,9 +688,8 @@ def test_delayed_initial_watcher_stays_bound_to_its_own_generation() -> None:
 
     registry._start_watcher = _delayed  # type: ignore[assignment]  # test spy
     record = registry.start(_spec())
-    deadline = monotonic() + 2.0
-    while len(watched) < 2 and monotonic() < deadline:
-        time.sleep(0.01)
+    # One watcher per generation — signalled deterministically by the spy.
+    assert both_watching.wait(2.0)
     # One reader per generation, each on its own stream — never two on the
     # replacement's.
     assert {id(stream) for stream in watched} == {
@@ -708,10 +709,9 @@ def test_wait_ready_reports_failed_start_with_kubectl_detail() -> None:
     procs[0].stdout.feed("error: address already in use\n")
     procs[0].stdout.feed(None)
     procs[0].exit(1)
+    # The watcher records the error line before it resolves readiness, so a
+    # returned "broken" already implies last_output is written.
     assert registry.wait_ready(record.id, timeout=2.0) == "broken"
-    deadline = monotonic() + 2.0
-    while not record.last_output and monotonic() < deadline:
-        time.sleep(0.01)
     assert "address already in use" in record.last_output
 
 

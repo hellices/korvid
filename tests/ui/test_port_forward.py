@@ -6,7 +6,6 @@ import asyncio
 import io
 import queue
 import threading
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -16,7 +15,7 @@ from textual.widgets import Input
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
-from korvid.core.portforward import ForwardRegistry, ForwardSpec
+from korvid.core.portforward import ForwardRecord, ForwardRegistry, ForwardSpec
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
@@ -487,7 +486,6 @@ async def test_pf_reattach_verifies_target_still_exists() -> None:
 
 def test_forward_row_includes_target_kind() -> None:
     """Pods and services can share namespace/name/port — the row must disambiguate."""
-    from korvid.core.portforward import ForwardRecord
     from korvid.ui.widgets.port_forward_screen import forward_row
 
     pod_row = forward_row(
@@ -889,14 +887,23 @@ async def test_poll_stays_quiet_while_a_launch_is_still_in_flight(tmp_path: Path
             await _wait_rows(app, pilot)
             await pilot.press("F")
             await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            # Signal publication deterministically: start() returns (on the
+            # launch's spawn thread) only after the record is published.
+            published = threading.Event()
+            original_start = registry.start
+
+            def _signal_start(spec: ForwardSpec) -> ForwardRecord:
+                result = original_start(spec)
+                published.set()
+                return result
+
+            registry.start = _signal_start  # type: ignore[method-assign]  # test spy
             await pilot.press("enter")
             release.set()
-            # Busy-wait without yielding: the spawn thread publishes the
-            # record, but the launch coroutine cannot resume while this
-            # coroutine holds the event loop — the exact window at issue.
-            deadline = time.monotonic() + 2.0
-            while not registry.forwards() and time.monotonic() < deadline:
-                time.sleep(0.005)
+            # Block without yielding: the spawn thread publishes the record,
+            # but the launch coroutine cannot resume while this coroutine
+            # holds the event loop — the exact window at issue.
+            assert published.wait(2.0)
             record = registry.forwards()[0]
             assert record.id not in app._current_confirmations  # still launching
             procs[0].returncode = 1  # kubectl died before the coroutine resumed
@@ -937,10 +944,8 @@ async def test_launch_on_another_port_does_not_defer_a_breakage_toast(tmp_path: 
         ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
     )
     procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
-    deadline = time.monotonic() + 2.0
-    while established.status != "alive" and time.monotonic() < deadline:
-        time.sleep(0.005)
-    assert established.status == "alive"
+    # wait_ready blocks on the handshake event itself — deterministic.
+    assert registry.wait_ready(established.id, timeout=2.0) == "alive"
     notices: list[str] = []
     original = app.notify
 
@@ -1476,14 +1481,23 @@ async def test_teardown_during_reattach_window_keeps_audit_order(tmp_path: Path)
             app._poll_forwards()
             await until(pilot, lambda: record.status == "broken", label="marked broken")
             await _open_pf(app, pilot)
+            # Signal adoption deterministically: reattach() returns (on the
+            # re-attach's spawn thread) only after the swap is published.
+            adopted = threading.Event()
+            original_reattach = registry.reattach
+
+            def _signal_reattach(forward_id: int, **kwargs: Any) -> ForwardRecord | None:
+                result = original_reattach(forward_id, **kwargs)
+                adopted.set()
+                return result
+
+            registry.reattach = _signal_reattach  # type: ignore[method-assign]  # test spy
             await pilot.press("r")  # re-attach blocks in the gated spawn
             release.set()
-            # Busy-wait without yielding: the registry adopts the replacement
+            # Block without yielding: the registry adopts the replacement
             # in its thread, but the re-attach coroutine cannot resume while
             # this coroutine holds the event loop — then quit in that window.
-            deadline = time.monotonic() + 2.0
-            while record.status != "starting" and time.monotonic() < deadline:
-                time.sleep(0.005)
+            assert adopted.wait(2.0)
             assert record.status == "starting"  # replacement adopted
     lines = _audit_lines(tmp_path)
     assert lines.count("port-forward-start") == 2, "the replacement's start never landed"
@@ -1523,10 +1537,8 @@ async def test_stale_confirmation_never_reports_the_replacement_as_its_own(
     assert registry.wait_ready(record.id, timeout=2.0) == "broken"
     assert registry.reattach(record.id) is record
     procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
-    deadline = time.monotonic() + 2.0
-    while record.status != "alive" and time.monotonic() < deadline:
-        time.sleep(0.005)
-    assert record.status == "alive"  # the replacement confirmed
+    # wait_ready blocks on the replacement's handshake event — deterministic.
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"  # replacement confirmed
     notices: list[str] = []
     original = app.notify
 
