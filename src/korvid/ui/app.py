@@ -461,11 +461,18 @@ class KorvidApp(App[None]):
         #: generation removes its token, and a still-pending superseded
         #: worker must never be promoted back to "current" by that.
         self._current_confirmations: dict[int, Worker[None]] = {}
-        #: launches whose registry.start() may still be off-loop. Teardown
-        #: awaits them (and stop audits defer behind them) so a quit or stop
-        #: landing between the registry publishing a record and the launch
-        #: coroutine resuming can never audit a stop before its start.
-        self._launching_forwards: set[Worker[None]] = set()
+        #: launches whose registry.start() may still be off-loop, keyed by
+        #: their spec. Teardown awaits them (and stop audits / poll toasts
+        #: for the same local port defer behind them) so a quit, stop, or
+        #: poll landing between the registry publishing a record and the
+        #: launch coroutine resuming can never audit a stop before its start
+        #: or double-report the launch's failure.
+        self._launching_forwards: dict[Worker[None], ForwardSpec] = {}
+        #: re-attaches whose registry.reattach() may still be off-loop,
+        #: keyed by their spec — same contract as _launching_forwards; the
+        #: event resolves when the re-attach coroutine has landed its
+        #: tracking (or its audit fallback).
+        self._reattaching_forwards: dict[asyncio.Event, ForwardSpec] = {}
         #: set by _teardown_forwards: audits enqueue directly (the teardown
         #: flush drains them) since no new workers may spawn mid-shutdown.
         self._forwards_closing = False
@@ -1469,7 +1476,7 @@ class KorvidApp(App[None]):
             remote_port=remote_port,
         )
         worker = get_current_worker()
-        self._launching_forwards.add(worker)
+        self._launching_forwards[worker] = spec
         try:
             # Off the event loop: reclaiming the local port may block briefly
             # on reaping a previously stopped child that ignored SIGTERM.
@@ -1492,7 +1499,7 @@ class KorvidApp(App[None]):
                 )
             raise
         finally:
-            self._launching_forwards.discard(worker)
+            self._launching_forwards.pop(worker, None)
         if self._forwards_closing or registry.get(record.id) is None:
             # A quit or stop won the race between the registry publishing
             # the record and this coroutine resuming: no confirmation may
@@ -1505,6 +1512,53 @@ class KorvidApp(App[None]):
         # Popen returning only proves the child exists — success is reported
         # after kubectl confirms the listener (or fails the bind/RBAC check).
         self._track_confirmation(record)
+
+    async def _spawn_reattach(
+        self, registry: ForwardRegistry, record: ForwardRecord
+    ) -> ForwardRecord | None:
+        """Re-attach off-loop while teardown (and stops) can see and await it.
+
+        Mirrors `_start_forward`'s tracking: between the registry adopting
+        the replacement in its thread and this coroutine resuming, a quit or
+        stop must defer behind this event so the replacement's start entry
+        always reaches the audit log before any stop entry.
+        """
+        done = asyncio.Event()
+        self._reattaching_forwards[done] = record.spec
+        try:
+            revived = await asyncio.to_thread(registry.reattach, record.id)
+        except asyncio.CancelledError:
+            # Shutdown cancelled the re-attach mid-spawn. The registry only
+            # adopts a replacement while it is still open, so if one was (or
+            # will be) adopted, its start must reach the log before the
+            # teardown stop entries (enqueue directly: no new workers now).
+            if self._audit is not None:
+                self._enqueue_forward_audit(
+                    "port-forward-start", record.spec, outcome="stopped before ready"
+                )
+            raise
+        finally:
+            self._reattaching_forwards.pop(done, None)
+            done.set()
+        if revived is None:
+            # Never adopted (broken no more, stopped, or torn down mid-spawn)
+            # — no replacement started, so there is nothing to report.
+            return None
+        if self._forwards_closing or registry.get(revived.id) is None:
+            # A quit or stop won the race between the adoption and this
+            # coroutine resuming: no confirmation may spawn (shutdown) or
+            # would ever resolve (record gone) — audit the start here so its
+            # stop entry never reaches the log first.
+            self._audit_forward_shutdown_safe(
+                "port-forward-start", revived.spec, outcome="stopped before ready"
+            )
+            return revived
+        # Re-arm the broken toast right away: waiting for the next global
+        # poll would silently swallow a breakage of the fresh process.
+        self._broken_forwards.discard(revived.id)
+        # Same readiness handshake as a fresh start (issue #38 review).
+        self._track_confirmation(revived, reattached=True)
+        return revived
 
     def _audit_forward_shutdown_safe(self, action: str, spec: ForwardSpec, *, outcome: str) -> None:
         """Audit a forward event without spawning workers once teardown began.
@@ -1630,19 +1684,27 @@ class KorvidApp(App[None]):
         already verified this confirmation is the record's current one.
 
         ``status`` is only a timeout snapshot: the abort itself is the
-        registry's atomic compare-and-transition (generation-guarded, so a
-        re-attach that raced the snapshot keeps its replacement), and when
-        that yields to a readiness line that landed after the snapshot, the
-        confirmed forward is reported as the success it is instead of being
-        torn down.
+        registry's atomic compare-and-transition, whose returned outcome says
+        exactly what happened — a readiness line that landed after the
+        snapshot (``alive``) is reported as the success it is, a re-attach
+        that raced the snapshot (``superseded``) keeps its replacement and
+        only audits the supersession, and a stop that unlisted the record
+        (``gone``) stands as the deliberate outcome it was.
         """
         spec = record.spec
-        if registry.fail_start(record.id, keep=reattached, generation=generation) is None:
+        outcome = registry.fail_start(record.id, keep=reattached, generation=generation)
+        if outcome == "alive":
             # The handshake resolved between the wait snapshot and the abort.
-            if registry.get(record.id) is record and record.status == "alive":
-                self._report_forward_ready(record, reattached=reattached)
-            else:  # stopped from :pf in the same window
-                self._audit_forward("port-forward-start", spec, outcome="stopped before ready")
+            self._report_forward_ready(record, reattached=reattached)
+            return
+        if outcome == "superseded":
+            # A re-attach adopted a replacement while this confirmation timed
+            # out — the replacement reports its own fate; this generation
+            # only records that it was superseded.
+            self._audit_forward("port-forward-start", spec, outcome="superseded by re-attach")
+            return
+        if outcome == "gone":  # stopped from :pf (or torn down) in the same window
+            self._audit_forward("port-forward-start", spec, outcome="stopped before ready")
             return
         if status == "starting":
             detail = f"kubectl did not confirm the forward within {_FORWARD_READY_SECONDS:g}s"
@@ -1656,12 +1718,15 @@ class KorvidApp(App[None]):
         self.notify(f"Port-forward failed to start: {detail}", severity="error")
         self._audit_forward("port-forward-start", spec, outcome=f"error: {detail}")
 
-    async def _audit_stop_after_confirm(self, pending: list[Worker[None]], forward_id: int) -> None:
+    async def _audit_stop_after_confirm(
+        self, pending: list[Worker[None] | asyncio.Event], forward_id: int
+    ) -> None:
         """Audit a stop only after every outstanding confirmation resolved.
 
         A superseded generation may still be waiting alongside the current
         one — each enqueues its own start entry, so the stop must defer
-        behind all of them. The spec lives in `_deferred_stop_audits`
+        behind all of them (in-flight launches and re-attaches included).
+        The spec lives in `_deferred_stop_audits`
         (popped here on success) so that a shutdown cancelling this worker
         cannot lose the entry — teardown flushes whatever is left after the
         confirmations settle.
@@ -1728,16 +1793,21 @@ class KorvidApp(App[None]):
         if self._forwards is None:
             self.notify("Port-forward unavailable in this build", severity="warning")
             return
+        registry = self._forwards
 
         def _on_stop(record: ForwardRecord) -> None:
             # A stopped broken forward will never poll alive again — drop its
             # id so the broken set does not grow for the session's lifetime.
             self._broken_forwards.discard(record.id)
-            # In-flight launches count as pending too: a stop landing in the
-            # window between the registry publishing a record and its launch
-            # coroutine resuming has no confirmation to defer behind yet.
-            pending = [
-                *self._launching_forwards,
+            # In-flight launches and re-attaches on this record's local port
+            # count as pending too: a stop landing in the window between the
+            # registry publishing (or adopting) a record and its coroutine
+            # resuming has no confirmation to defer behind yet. Other ports'
+            # launches are unrelated and must not delay this stop's entry.
+            port = record.spec.local_port
+            pending: list[Worker[None] | asyncio.Event] = [
+                *(w for w, spec in self._launching_forwards.items() if spec.local_port == port),
+                *(e for e, spec in self._reattaching_forwards.items() if spec.local_port == port),
                 *self._confirming_forwards.get(record.id, ()),
             ]
             if not pending:
@@ -1750,15 +1820,11 @@ class KorvidApp(App[None]):
                 self.run_worker(self._audit_stop_after_confirm(pending, record.id))
             self.notify(f"Stopped forward localhost:{record.spec.local_port}")
 
-        def _on_reattach(record: ForwardRecord) -> None:
-            # Re-arm the broken toast right away: waiting for the next global
-            # poll would silently swallow a breakage of the fresh process.
-            self._broken_forwards.discard(record.id)
-            # Same readiness handshake as a fresh start (issue #38 review).
-            self._track_confirmation(record, reattached=True)
-
         def _on_reattach_error(record: ForwardRecord, exc: Exception) -> None:
             self._audit_forward("port-forward-start", record.spec, outcome=f"error: {exc}")
+
+        async def _reattach(record: ForwardRecord) -> ForwardRecord | None:
+            return await self._spawn_reattach(registry, record)
 
         async def _target_exists(record: ForwardRecord) -> bool:
             # Only a confirmed 404 blocks the re-attach; when the target
@@ -1780,7 +1846,7 @@ class KorvidApp(App[None]):
             ForwardListScreen(
                 self._forwards,
                 on_stop=_on_stop,
-                on_reattach=_on_reattach,
+                reattach=_reattach,
                 on_reattach_error=_on_reattach_error,
                 target_exists=_target_exists,
             )
@@ -1792,15 +1858,22 @@ class KorvidApp(App[None]):
         if registry is None:  # pragma: no cover - interval only set when present
             return
         registry.refresh()
+        launching_ports = {
+            spec.local_port
+            for spec in (*self._launching_forwards.values(), *self._reattaching_forwards.values())
+        }
         for record in registry.forwards():
             if record.status == "broken" and record.id not in self._broken_forwards:
-                if record.id in self._current_confirmations or self._launching_forwards:
+                if (
+                    record.id in self._current_confirmations
+                    or record.spec.local_port in launching_ports
+                ):
                     # A readiness confirmation — tracked, or still being
-                    # installed by an in-flight launch — is about to report
-                    # this exact failure with its specific error; the generic
-                    # breakage toast must not double it. Leaving the id out
-                    # of the armed set only defers an unrelated breakage's
-                    # toast to the next poll tick.
+                    # installed by an in-flight launch or re-attach on this
+                    # record's local port — is about to report this exact
+                    # failure with its specific error; the generic breakage
+                    # toast must not double it. Other ports' launches are
+                    # unrelated and never defer this record's toast.
                     continue
                 self._broken_forwards.add(record.id)
                 self.notify(
@@ -4239,11 +4312,14 @@ class KorvidApp(App[None]):
         or reversed trail).
         """
         self._forwards_closing = True
-        # Launches whose spawn is still off-loop must land (and enqueue
-        # their start entries) before any stop below is recorded.
+        # Launches and re-attaches whose spawn is still off-loop must land
+        # (and enqueue their start entries) before any stop below is recorded.
         for launch in list(self._launching_forwards):
             with contextlib.suppress(Exception):
                 await launch.wait()
+        for done in list(self._reattaching_forwards):
+            with contextlib.suppress(Exception):
+                await done.wait()
         records = await asyncio.to_thread(registry.stop_all)
         for confirm in [w for workers in self._confirming_forwards.values() for w in workers]:
             with contextlib.suppress(Exception):

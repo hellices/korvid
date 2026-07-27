@@ -755,6 +755,62 @@ async def test_poll_stays_quiet_while_a_launch_is_still_in_flight(tmp_path: Path
             procs[0].stdout.feed(None)  # release the reader thread
 
 
+async def test_launch_on_another_port_does_not_defer_a_breakage_toast(tmp_path: Path) -> None:
+    """An in-flight launch defers only its own record's generic toast — an
+    unrelated established forward's breakage still toasts immediately."""
+    procs: list[_FakeProc] = []
+    release = threading.Event()
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        if procs:  # gate only the second (in-flight) launch
+            release.wait(2.0)
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    established = registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    deadline = time.monotonic() + 2.0
+    while established.status != "alive" and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert established.status == "alive"
+    notices: list[str] = []
+    original = app.notify
+
+    def _capture(message: str, **kwargs: Any) -> Any:
+        notices.append(message)
+        return original(message, **kwargs)
+
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            app.notify = _capture  # type: ignore[method-assign]  # test spy
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            assert isinstance(app.screen, PortForwardScreen)
+            app.screen.query_one("#pf-local", Input).value = "9090"
+            await pilot.press("enter")
+            await until(pilot, lambda: bool(app._launching_forwards), label="launch in flight")
+            # The established forward on the *other* port breaks meanwhile.
+            procs[0].returncode = 1
+            procs[0].stdout.feed(None)
+            app._poll_forwards()
+            assert any("target gone?" in n for n in notices)  # not deferred
+            release.set()
+            await until(pilot, lambda: len(procs) == 2, label="gated launch lands")
+    procs[1].stdout.feed(None)
+
+
 async def test_forward_audit_failure_does_not_crash_app(tmp_path: Path) -> None:
     """A failing audit sink must not kill the app on a normal forward start."""
     procs: list[_FakeProc] = []
@@ -1223,6 +1279,119 @@ async def test_quit_during_spawn_still_audits_the_start_first(tmp_path: Path) ->
     assert "port-forward-start" in lines, "the start never reached the audit log"
     if "port-forward-stop" in lines:
         assert lines.index("port-forward-start") < lines.index("port-forward-stop")
+
+
+async def test_teardown_during_reattach_window_keeps_audit_order(tmp_path: Path) -> None:
+    """Quit after the registry adopts a re-attached replacement but before the
+    re-attach coroutine resumes: the replacement's start entry must still
+    reach the log before any stop entry."""
+    release = threading.Event()
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        if procs:  # gate only the replacement spawn
+            release.wait(5.0)
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: len(procs) == 1)
+            record = registry.forwards()[0]
+            procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+            await until(pilot, lambda: record.status == "alive", label="forward confirmed")
+            # The child dies; the poll marks it broken.
+            procs[0].returncode = 1
+            procs[0].stdout.feed(None)
+            app._poll_forwards()
+            await until(pilot, lambda: record.status == "broken", label="marked broken")
+            await _open_pf(app, pilot)
+            await pilot.press("r")  # re-attach blocks in the gated spawn
+            release.set()
+            # Busy-wait without yielding: the registry adopts the replacement
+            # in its thread, but the re-attach coroutine cannot resume while
+            # this coroutine holds the event loop — then quit in that window.
+            deadline = time.monotonic() + 2.0
+            while record.status != "starting" and time.monotonic() < deadline:
+                time.sleep(0.005)
+            assert record.status == "starting"  # replacement adopted
+    lines = _audit_lines(tmp_path)
+    assert lines.count("port-forward-start") == 2, "the replacement's start never landed"
+    assert "port-forward-stop" in lines
+    assert lines.rindex("port-forward-start") < lines.index("port-forward-stop")
+    if len(procs) == 2:
+        procs[1].stdout.feed(None)  # release the replacement's reader thread
+
+
+async def test_stale_confirmation_never_reports_the_replacement_as_its_own(
+    tmp_path: Path,
+) -> None:
+    """A timed-out confirmation whose generation was superseded must audit the
+    supersession — inferring from the reused record would report the
+    replacement's state (here: alive) as the old generation's success."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    record = registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    stale_generation = registry.generation(record.id)
+    procs[0].stdout.feed(None)  # EOF: the first child broke
+    procs[0].returncode = 1
+    assert registry.wait_ready(record.id, timeout=2.0) == "broken"
+    assert registry.reattach(record.id) is record
+    procs[1].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    deadline = time.monotonic() + 2.0
+    while record.status != "alive" and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert record.status == "alive"  # the replacement confirmed
+    notices: list[str] = []
+    original = app.notify
+
+    def _capture(message: str, **kwargs: Any) -> Any:
+        notices.append(message)
+        return original(message, **kwargs)
+
+    async with app.run_test() as pilot:
+        app.notify = _capture  # type: ignore[method-assign]  # test spy
+        # The old generation's timed-out confirmation lands only now.
+        app._report_failed_forward_start(
+            registry, record, "starting", reattached=False, generation=stale_generation
+        )
+        await until(
+            pilot,
+            lambda: "superseded by re-attach" in _audit_lines(tmp_path),
+            label="supersession audited",
+        )
+        assert record.status == "alive"  # the replacement was left untouched
+        assert not procs[1].terminated
+    assert not any(n.startswith("Forwarding localhost") for n in notices)
+    procs[1].stdout.feed(None)  # release the replacement's reader thread
 
 
 async def test_udp_only_service_is_rejected_up_front() -> None:

@@ -766,7 +766,7 @@ def test_fail_start_aborts_silent_child_but_keeps_it_listed() -> None:
     record = registry.start(_spec())
     assert registry.wait_ready(record.id, timeout=0.05) == "starting"
     failed = registry.fail_start(record.id)
-    assert failed is record
+    assert failed == "aborted"
     assert record.status == "broken"
     assert procs[0].terminated
     # Stays listed so :pf can show the failure and offer a re-attach.
@@ -785,10 +785,10 @@ def test_fail_start_leaves_resolved_forwards_alone() -> None:
     record = registry.start(_spec())
     procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
     assert registry.wait_ready(record.id, timeout=2.0) == "alive"
-    assert registry.fail_start(record.id) is None
+    assert registry.fail_start(record.id) == "alive"
     assert record.status == "alive"
     assert not procs[0].terminated
-    assert registry.fail_start(999) is None
+    assert registry.fail_start(999) == "gone"
     procs[0].stdout.feed(None)
 
 
@@ -802,7 +802,7 @@ def test_fail_start_stops_a_child_that_eofed_but_still_runs() -> None:
     procs[0].stdout.feed(None)
     assert registry.wait_ready(record.id, timeout=2.0) == "broken"
     failed = registry.fail_start(record.id)
-    assert failed is record
+    assert failed == "aborted"
     assert procs[0].terminated, "the lingering child was never signalled down"
     # Stays listed so :pf can show the failure and offer a re-attach.
     assert registry.get(record.id) is record
@@ -815,7 +815,7 @@ def test_fail_start_can_drop_a_start_that_never_worked() -> None:
     record = registry.start(_spec())
     assert registry.wait_ready(record.id, timeout=0.05) == "starting"
     failed = registry.fail_start(record.id, keep=False)
-    assert failed is record
+    assert failed == "aborted"
     assert record.status == "broken"
     assert procs[0].terminated
     assert registry.get(record.id) is None  # never worked — not offered for re-attach
@@ -829,7 +829,7 @@ def test_fail_start_keep_false_yields_to_a_confirmed_forward() -> None:
     record = registry.start(_spec())
     procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
     assert registry.wait_ready(record.id, timeout=2.0) == "alive"
-    assert registry.fail_start(record.id, keep=False) is None
+    assert registry.fail_start(record.id, keep=False) == "alive"
     assert registry.get(record.id) is record  # still listed, still alive
     assert not procs[0].terminated
     procs[0].stdout.feed(None)
@@ -846,7 +846,7 @@ def test_fail_start_from_a_superseded_generation_leaves_the_replacement_alone() 
     assert record.status == "broken"
     assert registry.reattach(record.id) is record  # bumps the generation
     assert record.status == "alive"
-    assert registry.fail_start(record.id, generation=stale_generation) is None
+    assert registry.fail_start(record.id, generation=stale_generation) == "superseded"
     assert record.status == "alive"  # the replacement was left untouched
     assert not procs[1].terminated
 
@@ -858,7 +858,7 @@ def test_fail_start_with_the_current_generation_still_aborts() -> None:
     record = registry.start(_spec())
     assert registry.wait_ready(record.id, timeout=0.05) == "starting"
     generation = registry.generation(record.id)
-    assert registry.fail_start(record.id, generation=generation) is record
+    assert registry.fail_start(record.id, generation=generation) == "aborted"
     assert record.status == "broken"
     assert procs[0].terminated
     procs[0].stdout.feed(None)  # release the reader thread
@@ -915,7 +915,7 @@ def test_fail_start_racing_a_stop_defers_to_the_stop() -> None:
             return found
 
     registry._records = _StopAmbushDict(registry._records)
-    assert registry.fail_start(record.id, keep=False) is None
+    assert registry.fail_start(record.id, keep=False) == "gone"
     assert stops == [record.id]
     assert record.status == "starting"  # the abort never mutated the stopped record
     procs[0].stdout.feed(None)  # release the reader thread

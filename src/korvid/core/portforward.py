@@ -448,7 +448,7 @@ class ForwardRegistry:
 
     def fail_start(
         self, forward_id: int, *, keep: bool = True, generation: int | None = None
-    ) -> ForwardRecord | None:
+    ) -> str:
         """Abort a forward whose readiness handshake never resolved.
 
         Covers both unconfirmed outcomes: a child silent-but-running after
@@ -459,35 +459,41 @@ class ForwardRegistry:
         listed so `:pf` shows the failure and offers a re-attach;
         ``keep=False`` also unlists a start that never worked.
 
-        Returns None without touching anything when the forward confirmed
-        its listener in the meantime (``alive``) — the caller's timeout
-        snapshot lost that race and must treat the forward as ready — or
-        when ``generation`` (snapshot from `generation()` before waiting)
-        no longer matches: the timed-out handshake belongs to a superseded
-        process and must not tear down the re-attached replacement.
+        Returns the outcome so the caller never has to infer it from the
+        (possibly reused) record:
+
+        - ``"aborted"``: this call failed the forward and signalled its child.
+        - ``"alive"``: the forward confirmed its listener in the meantime —
+          the caller's timeout snapshot lost that race; the forward is ready.
+        - ``"superseded"``: ``generation`` (snapshot from `generation()`
+          before waiting) no longer matches — the timed-out handshake belongs
+          to a superseded process and the re-attached replacement was left
+          untouched, whatever its state.
+        - ``"gone"``: the record was already unlisted (stopped, torn down, or
+          never known) — that deliberate outcome stands.
         """
         record = self._records.get(forward_id)
         if record is None:
-            return None
-        # The whole abort is one _ops critical section: a re-attach that
-        # would adopt a replacement (it needs _ops too) can only run before
-        # the generation check or after the teardown — never between the
-        # validation and the pop/signal, where it used to get its fresh
-        # process signalled down as the failed generation.
+            return "gone"
+        # Validation and teardown form one _ops critical section: a re-attach
+        # that would adopt a replacement (it needs _ops too) can only run
+        # before the generation check or after the abort — never between the
+        # validation and the pop, where it used to get its fresh process
+        # signalled down as the failed generation.
         with self._ops:
             if self._records.get(forward_id) is not record:
                 # A stop (or teardown) unlisted the record between the
                 # lock-free lookup and this lock — that deliberate outcome
                 # stands; reporting a failed start would misdescribe it.
-                return None
+                return "gone"
             with record._lock:
                 if generation is not None and record._generation != generation:
-                    return None
+                    return "superseded"
                 # Check and transition atomically: the reader thread flips
                 # ``starting`` to ``alive`` under the same lock, so a forward
                 # confirmed at the last instant cannot be torn down here.
                 if record.status == "alive":
-                    return None
+                    return "alive"
                 record.status = "broken"
                 # Snapshot the validated generation's process and waiter:
                 # only these may be torn down below, whatever the record
@@ -496,9 +502,11 @@ class ForwardRegistry:
                 ready = record._ready
             if not keep:
                 self._records.pop(forward_id, None)
-            self._signal_proc(proc, record.spec.local_port)
+        # Signal outside _ops: the snapshot pins the validated generation's
+        # process, so other registry operations need not wait on the syscall.
+        self._signal_proc(proc, record.spec.local_port)
         self._release_waiters(ready)
-        return record
+        return "aborted"
 
     def _ensure_port_free(self, local_port: int) -> None:
         """Guarantee ``local_port`` is bindable before spawning kubectl.

@@ -217,6 +217,7 @@ class ForwardListScreen(ModalScreen[None]):
         on_reattach: Callable[[ForwardRecord], None] | None = None,
         on_reattach_error: Callable[[ForwardRecord, Exception], None] | None = None,
         target_exists: Callable[[ForwardRecord], Awaitable[bool]] | None = None,
+        reattach: Callable[[ForwardRecord], Awaitable[ForwardRecord | None]] | None = None,
     ) -> None:
         super().__init__()
         self._registry = registry
@@ -224,6 +225,7 @@ class ForwardListScreen(ModalScreen[None]):
         self._on_reattach = on_reattach
         self._on_reattach_error = on_reattach_error
         self._target_exists = target_exists
+        self._reattach = reattach
         self._ids: list[int] = []
 
     def compose(self) -> ComposeResult:
@@ -301,8 +303,13 @@ class ForwardListScreen(ModalScreen[None]):
             return
         try:
             # Off the event loop: the registry may block briefly reaping a
-            # previously stopped child that still holds the local port.
-            revived = await asyncio.to_thread(self._registry.reattach, record.id)
+            # previously stopped child that still holds the local port. The
+            # injected re-attach lets the app track the in-flight spawn so a
+            # teardown in that window still audits the start entry first.
+            if self._reattach is not None:
+                revived = await self._reattach(record)
+            else:
+                revived = await asyncio.to_thread(self._registry.reattach, record.id)
         except (OSError, ValueError) as exc:
             # OSError: spawn failed. ValueError: another live forward has
             # claimed the local port since this one broke.
