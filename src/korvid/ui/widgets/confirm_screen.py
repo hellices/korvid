@@ -9,7 +9,7 @@ for scale operations.
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import events, on
@@ -41,16 +41,16 @@ ConfirmScreen .confirm-hint, ReplicasPrompt .confirm-hint, ImagePrompt .confirm-
 """
 
 
-class _FreshKeysInput(Input):
+class FreshKeysInput(Input):
     """Input that discards key events created before ``created_time``.
 
-    Keystrokes buffered while the caller's pre-checks ran (an RBAC round
-    trip) predate the dialog: they must never type or submit the
-    confirmation name for an operation the user has not yet seen.
+    Keystrokes buffered while the caller's pre-checks ran (an RBAC or
+    manifest-fetch round trip) predate the dialog: they must never type
+    into or submit a prompt the user has not yet seen.
     """
 
-    def __init__(self, created_time: float, *, placeholder: str, id: str) -> None:
-        super().__init__(placeholder=placeholder, id=id)
+    def __init__(self, created_time: float, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
         self._created_time = created_time
 
     async def _on_key(self, event: events.Key) -> None:
@@ -108,7 +108,7 @@ class ConfirmScreen(ModalScreen[bool]):
                     f"Type {self._require_name!r} and press Enter to confirm (Esc cancels)",
                     classes="confirm-hint",
                 )
-                yield _FreshKeysInput(
+                yield FreshKeysInput(
                     self._created_time, placeholder=self._require_name, id="confirm-name"
                 )
 
