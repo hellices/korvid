@@ -199,9 +199,46 @@ async def test_list_models_openai_compat_lists_ids(tmp_path: Path) -> None:
         http_client_factory=lambda: _models_client(handler),
     )
     settings = AgentSettings(
-        provider="ollama", auth_method="none", base_url="http://localhost:11434/v1", model=""
+        provider="openai-compat",
+        auth_method="none",
+        base_url="http://localhost:11434/v1",
+        model="",
     )
     assert await cfg.list_models(settings) == ["llama3", "mistral"]
+
+
+async def test_list_models_ollama_uses_native_tags(tmp_path: Path) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert str(req.url) == "http://localhost:11434/api/tags"
+        return httpx.Response(
+            200, json={"models": [{"name": "qwen3:8b"}, {"name": "llama3:latest"}]}
+        )
+
+    cfg = ProviderConfigurator(
+        _store(tmp_path),
+        persist=lambda s: None,
+        http_client_factory=lambda: _models_client(handler),
+    )
+    settings = AgentSettings(
+        provider="ollama", auth_method="none", base_url="http://localhost:11434", model=""
+    )
+    assert await cfg.list_models(settings) == ["llama3:latest", "qwen3:8b"]
+
+
+async def test_list_models_ollama_normalizes_shim_base_url(tmp_path: Path) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert str(req.url) == "http://localhost:11434/api/tags"
+        return httpx.Response(200, json={"models": [{"name": "llama3"}]})
+
+    cfg = ProviderConfigurator(
+        _store(tmp_path),
+        persist=lambda s: None,
+        http_client_factory=lambda: _models_client(handler),
+    )
+    settings = AgentSettings(
+        provider="ollama", auth_method="none", base_url="http://localhost:11434/v1", model=""
+    )
+    assert await cfg.list_models(settings) == ["llama3"]
 
 
 async def test_list_models_openai_compat_sends_api_key(
