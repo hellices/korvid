@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from itertools import count
 from typing import Any
 
 import httpx
@@ -21,6 +23,9 @@ from korvid.agent.provider import LLMProvider
 from korvid.providers.openai_compat import ProviderError
 
 logger = logging.getLogger(__name__)
+
+#: FIFO cap on remembered per-turn reasoning (keyed by tool-call id).
+_MAX_THINKING_ENTRIES = 64
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,13 @@ class OllamaProvider(LLMProvider):
         self._client = client  # injected or lazily created on first call
         self._owns_client = client is None
         self._options = options or OllamaOptions()
+        # Monotonic counter for generated tool-call ids: ids must stay
+        # unique across completions within one agent conversation.
+        self._id_counter = count()
+        # Reasoning text of past assistant turns, keyed by tool-call id, so
+        # it can be re-attached to history (the runtime only stores content
+        # and tool calls). Bounded FIFO to keep memory flat.
+        self._thinking_by_call_id: OrderedDict[str, str] = OrderedDict()
 
     @property
     def name(self) -> str:
@@ -111,7 +123,7 @@ class OllamaProvider(LLMProvider):
             request_options["seed"] = opts.seed
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": _to_ollama_messages(messages),
+            "messages": self._convert_messages(messages),
             "stream": True,
             "think": opts.think,
             "options": request_options,
@@ -138,6 +150,7 @@ class OllamaProvider(LLMProvider):
         client = self._get_client()
         tool_calls: list[dict[str, str]] = []
         usage: dict[str, int] | None = None
+        thinking = ""
 
         async with client.stream(
             "POST",
@@ -159,15 +172,19 @@ class OllamaProvider(LLMProvider):
                 if chunk.get("error"):
                     raise ProviderError(f"Ollama stream error: {chunk['error']}")
                 message: dict[str, Any] = chunk.get("message") or {}
-                # message.thinking is intentionally dropped: reasoning tokens
-                # are not part of the answer the runtime should render.
+                # message.thinking is never rendered as answer text, but it is
+                # accumulated so the reasoning state can be re-attached to the
+                # assistant history on the next iteration (Ollama's streaming
+                # contract expects thinking to be echoed back with tool calls).
+                thinking += str(message.get("thinking") or "")
                 content: str | None = message.get("content")
                 if content:
                     yield {"type": "text_delta", "text": content}
-                _collect_tool_calls(message, tool_calls)
+                self._collect_tool_calls(message, tool_calls)
                 if chunk.get("done"):
                     usage = _usage_from_chunk(chunk)
 
+        self._remember_thinking(thinking, tool_calls)
         for call in tool_calls:
             yield {"type": "tool_call", **call}
 
@@ -176,23 +193,95 @@ class OllamaProvider(LLMProvider):
 
         yield {"type": "done"}
 
+    def _collect_tool_calls(self, message: dict[str, Any], acc: list[dict[str, str]]) -> None:
+        """Fold native tool calls into acc, serializing object arguments exactly once.
 
-def _collect_tool_calls(message: dict[str, Any], acc: list[dict[str, str]]) -> None:
-    """Fold native tool calls into acc, serializing object arguments exactly once.
+        A server-supplied id is preserved (current Ollama releases emit one);
+        for older servers that omit it, a monotonically unique `call_N` id is
+        generated so the runtime's id-based tool-result correlation keeps
+        working across iterations.
+        """
+        for call in message.get("tool_calls") or []:
+            fn: dict[str, Any] = call.get("function") or {}
+            arguments = fn.get("arguments")
+            native_id = call.get("id")
+            acc.append(
+                {
+                    "id": str(native_id) if native_id else f"call_{next(self._id_counter)}",
+                    "name": str(fn.get("name", "")),
+                    "arguments": json.dumps(arguments if isinstance(arguments, dict) else {}),
+                }
+            )
 
-    The native API has no call ids; sequential `call_N` ids are generated so
-    the runtime's id-based tool-result correlation keeps working.
-    """
-    for call in message.get("tool_calls") or []:
-        fn: dict[str, Any] = call.get("function") or {}
-        arguments = fn.get("arguments")
-        acc.append(
-            {
-                "id": f"call_{len(acc)}",
-                "name": str(fn.get("name", "")),
-                "arguments": json.dumps(arguments if isinstance(arguments, dict) else {}),
-            }
-        )
+    def _remember_thinking(self, thinking: str, tool_calls: list[dict[str, str]]) -> None:
+        """Key this turn's reasoning by its tool-call ids for history rebuilds.
+
+        Only turns that issue tool calls come back through the history, so
+        thinking is stored per call id. The FIFO cap keeps memory flat over
+        long conversations.
+        """
+        if not thinking:
+            return
+        for call in tool_calls:
+            self._thinking_by_call_id[call["id"]] = thinking
+        while len(self._thinking_by_call_id) > _MAX_THINKING_ENTRIES:
+            self._thinking_by_call_id.popitem(last=False)
+
+    def _convert_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Convert runtime history (OpenAI-shaped) for the native API.
+
+        - Assistant tool-call arguments are stored as JSON strings by the
+          runtime; the native API requires objects, so they are parsed back
+          (a parse failure is defensive only and degrades to an empty
+          object).
+        - `function.index` is reconstructed from the preserved call order so
+          parallel calls keep their distinct ordering in model templates.
+        - Tool-result messages carry only `tool_call_id`; native history
+          identifies the executed function by `tool_name`, recovered from
+          the matching assistant call.
+        - Reasoning text recorded for this turn's tool calls is re-attached
+          as `thinking` so R1-style models keep their reasoning state across
+          tool iterations.
+        """
+        converted: list[dict[str, Any]] = []
+        call_names: dict[str, str] = {}
+        for message in messages:
+            if message.get("role") == "tool":
+                name = call_names.get(str(message.get("tool_call_id", "")))
+                converted.append({**message, "tool_name": name} if name else message)
+                continue
+            calls = message.get("tool_calls")
+            if not calls:
+                converted.append(message)
+                continue
+            new_calls = [
+                {
+                    **call,
+                    "function": {
+                        **fn,
+                        "index": index,
+                        "arguments": _parse_arguments(fn.get("arguments")),
+                    },
+                }
+                for index, call in enumerate(calls)
+                for fn in [call.get("function") or {}]
+            ]
+            for call in new_calls:
+                if call.get("id"):
+                    call_names[str(call["id"])] = str(call["function"].get("name", ""))
+            new_message = {**message, "tool_calls": new_calls}
+            thinking = next(
+                (
+                    self._thinking_by_call_id[str(call["id"])]
+                    for call in new_calls
+                    if str(call.get("id", "")) in self._thinking_by_call_id
+                ),
+                None,
+            )
+            if thinking:
+                new_message["thinking"] = thinking
+            converted.append(new_message)
+        return converted
 
 
 def _usage_from_chunk(chunk: dict[str, Any]) -> dict[str, int] | None:
@@ -208,42 +297,6 @@ def _usage_from_chunk(chunk: dict[str, Any]) -> dict[str, int] | None:
         "input_tokens": int(chunk["prompt_eval_count"]),
         "output_tokens": int(chunk["eval_count"]),
     }
-
-
-def _to_ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert runtime history (OpenAI-shaped) for the native API.
-
-    The runtime stores assistant tool-call arguments as JSON strings; the
-    native API requires objects, so they are parsed back. Arguments were
-    serialized by this provider (or validated upstream), so a parse failure
-    is defensive only and degrades to an empty object.
-
-    Tool-result messages carry only `tool_call_id`; native Ollama history
-    identifies the executed function by `tool_name` (templates may not
-    correlate generated ids), so the name is recovered from the matching
-    assistant call.
-    """
-    converted: list[dict[str, Any]] = []
-    call_names: dict[str, str] = {}
-    for message in messages:
-        if message.get("role") == "tool":
-            name = call_names.get(str(message.get("tool_call_id", "")))
-            converted.append({**message, "tool_name": name} if name else message)
-            continue
-        calls = message.get("tool_calls")
-        if not calls:
-            converted.append(message)
-            continue
-        new_calls = [
-            {**call, "function": {**fn, "arguments": _parse_arguments(fn.get("arguments"))}}
-            for call in calls
-            for fn in [call.get("function") or {}]
-        ]
-        for call in new_calls:
-            if call.get("id"):
-                call_names[str(call["id"])] = str(call["function"].get("name", ""))
-        converted.append({**message, "tool_calls": new_calls})
-    return converted
 
 
 def _parse_arguments(raw: Any) -> dict[str, Any]:

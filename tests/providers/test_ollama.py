@@ -258,3 +258,103 @@ async def test_tool_result_messages_gain_tool_name() -> None:
     assert sent[1]["tool_name"] == "get_logs"
     assert sent[1]["tool_call_id"] == "call_0"
     assert "tool_name" not in sent[2]
+
+
+async def test_native_tool_call_ids_are_preserved() -> None:
+    body = _ndjson(
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "srv-abc", "function": {"name": "t", "arguments": {}}},
+                    {"function": {"name": "u", "arguments": {}}},
+                ],
+            },
+            "done": False,
+        },
+        _done(),
+    )
+    events = await _events(_provider(body))
+    ids = [e["id"] for e in events if e["type"] == "tool_call"]
+    assert ids[0] == "srv-abc"
+    assert ids[1].startswith("call_")
+
+
+async def test_generated_ids_stay_unique_across_completions() -> None:
+    body = _ndjson(
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "t", "arguments": {}}}],
+            },
+            "done": False,
+        },
+        _done(),
+    )
+    provider = _provider(body)
+    first = [e["id"] for e in await _events(provider) if e["type"] == "tool_call"]
+    second = [e["id"] for e in await _events(provider) if e["type"] == "tool_call"]
+    assert first != second
+    assert len(set(first + second)) == 2
+
+
+async def test_thinking_is_reattached_to_assistant_history() -> None:
+    capture: dict[str, Any] = {}
+    body = _ndjson(
+        {
+            "message": {"role": "assistant", "content": "", "thinking": "step 1; "},
+            "done": False,
+        },
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "thinking": "step 2",
+                "tool_calls": [{"function": {"name": "get_logs", "arguments": {}}}],
+            },
+            "done": False,
+        },
+        _done(),
+    )
+    provider = _provider(body, capture=capture, options=OllamaOptions(think=True))
+    events = await _events(provider)
+    call_id = next(e["id"] for e in events if e["type"] == "tool_call")
+
+    history: list[dict[str, Any]] = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": "get_logs", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": call_id, "content": "ok"},
+    ]
+    await _events(provider, history)
+    sent = capture["json"]["messages"]
+    assert sent[1]["thinking"] == "step 1; step 2"
+
+
+async def test_history_tool_calls_gain_sequential_indices() -> None:
+    capture: dict[str, Any] = {}
+    provider = _provider(_ndjson(_done()), capture=capture)
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "t", "arguments": "{}"}},
+                {"id": "b", "type": "function", "function": {"name": "u", "arguments": "{}"}},
+            ],
+        },
+    ]
+    await _events(provider, messages)
+    sent_calls = capture["json"]["messages"][0]["tool_calls"]
+    assert [c["function"]["index"] for c in sent_calls] == [0, 1]
