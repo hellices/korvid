@@ -1152,3 +1152,56 @@ async def test_diagnose_pod_budgets_each_container_block_keeping_headers() -> No
     for i in range(3):  # every block keeps its attribution header
         assert f"[c{i}] (previous instance)" in out
     assert out.count("…") >= 3  # each over-budget block elides visibly
+
+
+async def test_diagnose_pod_works_with_pod_only_aliases() -> None:
+    """Before background API discovery lands, the alias table holds only
+    pods — the built-in ReplicaSet/Node/PVC lookups must still work via
+    fixed metadata for these stable APIs, not silently vanish."""
+    kube: Any = FakeDiagnoseKube()
+    executor = ToolExecutor(kube, {"pods": PODS_META, "pod": PODS_META})
+    out = await executor.execute("diagnose_pod", {"pod": "api-1", "namespace": "default"})
+    assert "owner: Deployment api (via ReplicaSet api-6f)" in out
+    assert "MemoryPressure=True" in out
+    assert "pvc data-claim: Bound" in out
+
+
+async def test_diagnose_pod_labels_a_failed_parent_lookup() -> None:
+    """An RBAC/API failure on the ReplicaSet hop must not masquerade as
+    'this ReplicaSet has no controller'."""
+
+    class NoRsKube(FakeDiagnoseKube):
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            if meta.plural == "replicasets":
+                raise RuntimeError("rbac denied")
+            return await super().get_object(meta, namespace, name)
+
+    out = await _diagnose_executor(NoRsKube()).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "owner: ReplicaSet api-6f" in out
+    assert "parent lookup unavailable" in out
+
+
+async def test_diagnose_pod_clamps_the_skipped_container_summary() -> None:
+    """The 'also troubled' name list is cluster-controlled (many long
+    container names) and must respect the line clamp like everything else."""
+    kube = FakeDiagnoseKube()
+    pod = kube.objects[("pods", "api-1")]
+    names = [f"sidecar-{i}-" + "n" * 50 for i in range(30)]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": name,
+            "ready": False,
+            "restartCount": 0,
+            "state": {"waiting": {"reason": "ImagePullBackOff"}},
+        }
+        for name in names
+    ]
+    kube.log_lines = ["pull failed"]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert len(out) <= MAX_RESULT_CHARS
+    assert "truncated" not in out  # never falls back to prefix truncation
+    assert all(len(line) <= 250 for line in out.splitlines())

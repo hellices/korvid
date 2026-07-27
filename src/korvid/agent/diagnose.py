@@ -288,8 +288,10 @@ def node_condition_line(node: dict[str, Any]) -> str:
             continue
         ctype = str(cond.get("type") or "")
         cstatus = str(cond.get("status") or "?")
-        # Ready is healthy when True; every other condition is healthy False.
-        abnormal = cstatus != "True" if ctype == "Ready" else cstatus == "True"
+        # Ready is healthy when True; every other condition is healthy only
+        # when False — Unknown means the kubelet cannot report, so it counts
+        # as abnormal for both.
+        abnormal = cstatus != "True" if ctype == "Ready" else cstatus != "False"
         if ctype == "Ready" or abnormal:
             parts.append(f"{ctype}={cstatus}")
     return f"node {name}: " + ", ".join(parts)

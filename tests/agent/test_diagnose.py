@@ -353,5 +353,23 @@ def test_node_condition_line_summarizes_pressure_conditions() -> None:
     assert "DiskPressure" not in line  # only Ready and abnormal conditions shown
 
 
+def test_node_condition_line_treats_unknown_pressure_as_abnormal() -> None:
+    """Unknown means the kubelet cannot report — that is not healthy."""
+    node = {
+        "metadata": {"name": "node-a"},
+        "status": {
+            "conditions": [
+                {"type": "Ready", "status": "Unknown"},
+                {"type": "MemoryPressure", "status": "Unknown"},
+                {"type": "DiskPressure", "status": "False"},
+            ]
+        },
+    }
+    line = node_condition_line(node)
+    assert "Ready=Unknown" in line
+    assert "MemoryPressure=Unknown" in line
+    assert "DiskPressure" not in line
+
+
 def test_node_condition_line_handles_missing_conditions() -> None:
     assert "no conditions reported" in node_condition_line({"metadata": {"name": "n"}})

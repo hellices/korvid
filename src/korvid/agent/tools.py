@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, ClassVar
 
 import yaml
 
@@ -833,13 +833,25 @@ class ToolExecutor:
     #: Per-section budget for the non-log sections, so the final LOG
     #: EXCERPTS section always has reserved room under MAX_RESULT_CHARS.
     _DIAGNOSE_SECTION_BUDGET = 1000
+    #: Stable built-in APIs the diagnosis relies on — used as fallbacks so
+    #: the related evidence never depends on background API discovery
+    #: having populated the alias table.
+    _DIAGNOSE_BUILTIN_METAS: ClassVar[dict[str, ResourceMeta]] = {
+        "ReplicaSet": ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True),
+        "Node": ResourceMeta("Node", "nodes", "", "v1", False),
+        "PersistentVolumeClaim": ResourceMeta(
+            "PersistentVolumeClaim", "persistentvolumeclaims", "", "v1", True
+        ),
+    }
 
     def _meta_for_kind_name(self, kind_name: str) -> ResourceMeta | None:
-        """Discovery metadata for an API kind name (e.g. ``"ReplicaSet"``)."""
-        return next(
+        """Discovery metadata for an API kind name (e.g. ``"ReplicaSet"``),
+        falling back to fixed metadata for the stable built-in kinds."""
+        discovered = next(
             (m for m in self._aliases.values() if m.kind == kind_name and not m.synthetic),
             None,
         )
+        return discovered or self._DIAGNOSE_BUILTIN_METAS.get(kind_name)
 
     async def _diagnose_owner_chain(self, namespace: str, pod: dict[str, Any]) -> str:
         """``Deployment api (via ReplicaSet api-6f)`` — best-effort, never raises."""
@@ -855,8 +867,8 @@ class ToolExecutor:
             return f"owner: {kind_name} {name}"
         try:
             parent = controller_owner(await self._kube.get_object(meta, namespace, name))
-        except Exception:  # the chase is a convenience; the direct owner stands
-            parent = None
+        except Exception as exc:  # the direct owner stands, but say why the hop failed
+            return f"owner: {kind_name} {name} (parent lookup unavailable ({exc}))"
         if parent is None:
             return f"owner: {kind_name} {name}"
         return f"owner: {parent[0]} {parent[1]} (via {kind_name} {name})"
@@ -989,7 +1001,7 @@ class ToolExecutor:
         share = budget // max(1, len(blocks))
         lines: list[str] = []
         for block in blocks:
-            header = f"  {block[0]}"
+            header = f"  {self._clamp_line(block[0])}"
             body = [f"  {segment}" for segment in block[1:]]
             lines.append(header)
             lines.extend(self._trim_front(body, share - len(header) - 1))
