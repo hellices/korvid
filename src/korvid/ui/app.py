@@ -3224,13 +3224,13 @@ class KorvidApp(App[None]):
         deadline = monotonic() + self._drain_wait_timeout
         while True:
             try:
-                current = await ops.drain_plan(name)
+                present = await ops.pods_on_node(name)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.debug("post-eviction termination poll failed", exc_info=True)
                 return len(keys)
-            keys &= {t.uid or t.ref for t in current.targets}
+            keys &= set(present)
             if not keys:
                 return 0
             if monotonic() >= deadline:

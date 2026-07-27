@@ -343,3 +343,19 @@ def test_pod_already_terminating_is_exempt_from_pdb_accounting() -> None:
     doomed["metadata"]["deletionTimestamp"] = "2026-07-27T00:00:00Z"
     plan = build_drain_plan([doomed], [pdb])
     assert plan.targets[0].pdb_blocked is None
+
+
+def test_bare_pod_is_classified_unmanaged_with_preview_warning() -> None:
+    """A pod with no controlling owner is deleted permanently by eviction
+    (kubectl drain refuses these without --force) - the plan classifies it
+    and the approval preview carries an explicit irreversible-loss flag."""
+    plan = build_drain_plan([_pod("bare-1")], [])
+    assert plan.targets[0].unmanaged is True
+    out = "\n".join(plan.preview_lines())
+    assert "no controller: pod will not be recreated" in out
+
+
+def test_controlled_pod_is_not_flagged_unmanaged() -> None:
+    plan = build_drain_plan([_pod("web-1", owner_kind="ReplicaSet")], [])
+    assert plan.targets[0].unmanaged is False
+    assert "no controller" not in "\n".join(plan.preview_lines())

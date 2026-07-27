@@ -41,6 +41,9 @@ class DrainTarget:
     #: Name of a PodDisruptionBudget with no disruptions left, if any:
     #: the eviction will be refused (429) until the budget allows it.
     pdb_blocked: str | None
+    #: No controller owns this pod - eviction deletes it permanently
+    #: (kubectl drain refuses these without ``--force``).
+    unmanaged: bool = False
 
     @property
     def ref(self) -> str:
@@ -62,10 +65,8 @@ class DrainPlan:
         lines: list[str] = []
         if evictable:
             lines.append(f"Pods to evict ({len(evictable)}):")
-            for target in evictable:
-                flag = "  [local storage: emptyDir - data will be lost]"
-                # "- " prefix: the approval dialog styles removals red.
-                lines.append(f"- {target.ref}{flag if target.local_storage else ''}")
+            # "- " prefix: the approval dialog styles removals red.
+            lines.extend(f"- {target.ref}{_target_flags(target)}" for target in evictable)
         else:
             lines.append("No pods to evict.")
         if blocked:
@@ -74,13 +75,11 @@ class DrainPlan:
                 f"Blocked by PodDisruptionBudget ({len(blocked)})"
                 " - evictions will be refused until the budget allows:"
             )
-            for target in blocked:
-                flag = "  [local storage: emptyDir - data will be lost]"
-                # "~ " prefix: styled yellow, these need operator attention.
-                lines.append(
-                    f"~ {target.ref} (pdb: {target.pdb_blocked})"
-                    f"{flag if target.local_storage else ''}"
-                )
+            # "~ " prefix: styled yellow, these need operator attention.
+            lines.extend(
+                f"~ {target.ref} (pdb: {target.pdb_blocked}){_target_flags(target)}"
+                for target in blocked
+            )
         if self.skipped_daemonset:
             lines.append("")
             lines.append(f"DaemonSet pods skipped ({len(self.skipped_daemonset)}):")
@@ -90,6 +89,16 @@ class DrainPlan:
             lines.append(f"Mirror (static) pods skipped ({len(self.skipped_mirror)}):")
             lines.extend(f"  {ref}" for ref in self.skipped_mirror)
         return lines
+
+
+def _target_flags(target: DrainTarget) -> str:
+    """Warning suffixes for one preview line."""
+    flags = ""
+    if target.unmanaged:
+        flags += "  [no controller: pod will not be recreated]"
+    if target.local_storage:
+        flags += "  [local storage: emptyDir - data will be lost]"
+    return flags
 
 
 def _expression_matches(expr: dict[str, Any], labels: dict[str, str]) -> bool:
@@ -225,6 +234,14 @@ def _is_daemonset_pod(pod: dict[str, Any]) -> bool:
     )
 
 
+def _has_controller(pod: dict[str, Any]) -> bool:
+    return any(
+        ref.get("controller") is True
+        for ref in (pod.get("metadata") or {}).get("ownerReferences") or []
+        if isinstance(ref, dict)
+    )
+
+
 def _has_local_storage(pod: dict[str, Any]) -> bool:
     return any(
         "emptyDir" in volume
@@ -260,6 +277,7 @@ def build_drain_plan(pods: list[dict[str, Any]], pdbs: list[dict[str, Any]]) -> 
                 uid=str(uid) if uid else None,
                 local_storage=_has_local_storage(pod),
                 pdb_blocked=budgets.blocking_reason(pod),
+                unmanaged=not _has_controller(pod),
             )
         )
     return DrainPlan(

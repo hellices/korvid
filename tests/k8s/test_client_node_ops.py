@@ -226,3 +226,54 @@ async def test_drain_plan_falls_back_to_namespaced_pdbs_on_403() -> None:
     ns_call = api.call_api.call_args_list[2]
     assert ns_call.args[0] == "/apis/policy/v1/namespaces/team-a/poddisruptionbudgets"
     assert plan.targets[0].pdb_blocked == "web-pdb"
+
+
+async def test_pods_on_node_lists_pods_without_pdb_queries() -> None:
+    """The termination poll only needs presence: one pods list filtered by
+    node, and no PodDisruptionBudget scans on every poll."""
+    client = KubeClient()
+    api = MagicMock()
+    pods = {
+        "items": [
+            {"metadata": {"name": "web-1", "namespace": "default", "uid": "u1"}},
+            {"metadata": {"name": "no-uid", "namespace": "kube-system"}},
+        ]
+    }
+    api.call_api = AsyncMock(side_effect=[_resp(pods)])
+    with patch.object(client, "_api", api):
+        keys = await client.pods_on_node("worker-1")
+    assert keys == ("u1", "kube-system/no-uid")
+    assert api.call_api.call_count == 1
+    pods_call = api.call_api.call_args_list[0]
+    assert pods_call.args[0] == "/api/v1/pods"
+    assert ("fieldSelector", "spec.nodeName=worker-1") in pods_call.kwargs["query_params"]
+
+
+async def test_writeops_default_pods_on_node_derives_from_drain_plan() -> None:
+    from korvid.k8s.drain import DrainPlan, DrainTarget
+
+    class PlanOnly(WriteOps):
+        async def delete_object(self, meta, namespace, name, *, uid=None):  # type: ignore[no-untyped-def]  # fake
+            pass
+
+        async def scale_object(self, meta, namespace, name, replicas, *, uid=None):  # type: ignore[no-untyped-def]  # fake
+            pass
+
+        async def rollout_restart(self, meta, namespace, name, *, uid=None):  # type: ignore[no-untyped-def]  # fake
+            pass
+
+        async def replace_object(self, meta, namespace, name, manifest, *, uid=None):  # type: ignore[no-untyped-def]  # fake
+            pass
+
+        async def drain_plan(self, node_name: str) -> DrainPlan:
+            target = DrainTarget(
+                namespace="default",
+                name="web-1",
+                uid="u1",
+                local_storage=False,
+                pdb_blocked=None,
+            )
+            return DrainPlan(targets=(target,), skipped_daemonset=(), skipped_mirror=())
+
+    keys = await PlanOnly().pods_on_node("worker-1")
+    assert keys == ("u1",)

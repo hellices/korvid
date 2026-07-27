@@ -131,6 +131,16 @@ class WriteOps(abc.ABC):
         Non-abstract on purpose: see ``cordon_node``."""
         raise NotImplementedError("this transport does not support drain planning")
 
+    async def pods_on_node(self, node_name: str) -> tuple[str, ...]:
+        """Identifiers (uid, or ``namespace/name`` when the uid is unknown)
+        of every evictable pod currently on *node_name*. Used by the
+        post-drain termination poll, which only needs presence - the
+        default derives from ``drain_plan`` so existing transports keep
+        working, while ``KubeClient`` overrides with a single pods list
+        (no PDB scans on every poll)."""
+        plan = await self.drain_plan(node_name)
+        return tuple(t.uid or t.ref for t in plan.targets)
+
     # -- Dry-run previews (issue #19). Non-abstract on purpose: transports
     # -- without server-side dryRun support inherit "no preview" and the
     # -- approval dialog falls back to the synthesized operation string.

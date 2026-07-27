@@ -759,6 +759,21 @@ class KubeClient(WriteOps):
                 raise
         return build_drain_plan(pod_items, pdb_items)
 
+    async def pods_on_node(self, node_name: str) -> tuple[str, ...]:
+        """Lightweight presence probe for the post-drain termination poll:
+        one pods list filtered by node, no PDB queries."""
+        pods = await self._request_json(
+            "/api/v1/pods",
+            query_params=[("fieldSelector", f"spec.nodeName={node_name}")],
+        )
+        keys = []
+        for pod in pods.get("items") or []:
+            metadata = pod.get("metadata") or {}
+            uid = metadata.get("uid")
+            ref = f"{metadata.get('namespace', '')}/{metadata.get('name', '')}"
+            keys.append(str(uid) if uid else ref)
+        return tuple(keys)
+
     async def _pdbs_by_namespace(self, pods: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Cluster-wide PDB list was RBAC-denied: retry per namespace of the
         pods being drained, which namespace-scoped users can usually read.
