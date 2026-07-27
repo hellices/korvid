@@ -8,8 +8,10 @@ from typing import cast
 from rich.text import Text
 from textual.widgets import DataTable
 
+from korvid.core.config import ViewConfig
 from korvid.core.sorting import SortSpec, sort_rows
 from korvid.core.store import Summary
+from korvid.k8s.columns import MISSING
 from korvid.k8s.helm import HelmReleaseSummary, HelmRevisionSummary
 from korvid.k8s.metrics import PodMetrics
 from korvid.k8s.models import (
@@ -120,10 +122,52 @@ def _typed_kind(kind: str, group: str) -> str:
     return kind
 
 
-def _columns_for(kind: str, *, all_namespaces: bool) -> tuple[str, ...]:
-    """Column headers for *kind*; unknown kinds get the generic NAME/AGE set."""
+def _columns_for(kind: str, *, all_namespaces: bool, view: ViewConfig | None) -> tuple[str, ...]:
+    """Column headers for *kind*; unknown kinds get the generic NAME/AGE set.
+
+    A configured view (issue #45) appends its custom column names after the
+    defaults, or replaces everything but the identity columns (NAME, and
+    NAMESPACE in all-namespaces mode) when `replace` is set.
+    """
     single, all_ns = _COLS_BY_KIND.get(kind, (_GENERIC_COLS, _GENERIC_COLS_ALL_NS))
-    return all_ns if all_namespaces else single
+    base = all_ns if all_namespaces else single
+    if view is None:
+        return base
+    names = tuple(column.name for column in view.columns)
+    if view.replace:
+        head = ("NAMESPACE", "NAME") if all_namespaces else ("NAME",)
+        return (*head, *names)
+    return (*base, *names)
+
+
+def sanitize_views(
+    views: dict[str, ViewConfig],
+) -> tuple[dict[str, ViewConfig], tuple[str, ...]]:
+    """Drop custom columns that shadow a kind's actual built-in headers.
+
+    Config parsing rejects the universal identity/sort names, but only the
+    UI knows each kind's full header set (STATUS, READY, NODE, ...). A
+    shadowing name would render two identical headers and decorate both
+    with the sort arrow. `replace: true` views keep such names — their
+    built-ins are hidden. Called once from the composition root.
+    """
+    sanitized: dict[str, ViewConfig] = {}
+    warnings: list[str] = []
+    for kind, view in views.items():
+        if view.replace:
+            sanitized[kind] = view
+            continue
+        single, all_ns = _COLS_BY_KIND.get(kind, (_GENERIC_COLS, _GENERIC_COLS_ALL_NS))
+        builtin = {header.lower() for header in (*single, *all_ns)}
+        kept = tuple(column for column in view.columns if column.name.lower() not in builtin)
+        for column in view.columns:
+            if column.name.lower() in builtin:
+                warnings.append(
+                    f"views.{kind}.{column.name}: shadows a built-in column of this kind"
+                )
+        if kept:
+            sanitized[kind] = ViewConfig(columns=kept, replace=view.replace)
+    return sanitized, tuple(warnings)
 
 
 def _ready_cell(ready: str) -> Text:
@@ -239,11 +283,13 @@ def _replicaset_sort_key(rs: ReplicaSetSummary) -> tuple[str, int, str]:
 _SORT_LABELS = {"name": "NAME", "age": "AGE", "cpu": "CPU", "mem": "MEM"}
 
 
-def _decorate_columns(columns: tuple[str, ...], sort: SortSpec | None) -> tuple[str, ...]:
+def _decorate_columns(
+    columns: tuple[str, ...], sort: SortSpec | None, custom_names: tuple[str, ...] = ()
+) -> tuple[str, ...]:
     """Append ▲/▼ to the sorted column's header; untouched when inactive."""
     if sort is None:
         return columns
-    label = _SORT_LABELS.get(sort.column)
+    label = sort.column if sort.column in custom_names else _SORT_LABELS.get(sort.column)
     arrow = "▼" if sort.descending else "▲"
     return tuple(f"{col} {arrow}" if col == label else col for col in columns)
 
@@ -252,12 +298,14 @@ class ResourceTable(DataTable[str | Text]):
     _last_kind: str | None = None
     _last_all_namespaces: bool | None = None
     _last_sort: SortSpec | None = None
+    _active_view: ViewConfig | None = None
 
     def on_mount(self) -> None:
         self.cursor_type = "row"
         self._last_kind = None
         self._last_all_namespaces = None
         self._last_sort = None
+        self._active_view = None
 
     def show(
         self,
@@ -269,21 +317,30 @@ class ResourceTable(DataTable[str | Text]):
         metrics: MetricsLookup | None = None,
         group: str = "",
         sort: SortSpec | None = None,
+        view: ViewConfig | None = None,
     ) -> None:
         """Render rows into the table; rebuilds columns when (kind, all_namespaces, sort) changes.
 
         ``group`` is the API group serving *kind*: typed renderings that are
-        specific to one group (the OLM tables) apply only there.
+        specific to one group (the OLM tables) apply only there. ``view`` is
+        the kind's custom column config (issue #45), if any.
         """
         kind = _typed_kind(kind, group)
-        if (kind, all_namespaces, sort) != (
+        if (kind, all_namespaces, sort, view) != (
             self._last_kind,
             self._last_all_namespaces,
             self._last_sort,
+            self._active_view,
         ):
+            self._active_view = view
             self.clear(columns=True)
+            custom_names = tuple(column.name for column in view.columns) if view else ()
             self.add_columns(
-                *_decorate_columns(_columns_for(kind, all_namespaces=all_namespaces), sort)
+                *_decorate_columns(
+                    _columns_for(kind, all_namespaces=all_namespaces, view=view),
+                    sort,
+                    custom_names,
+                )
             )
             self._last_kind = kind
             self._last_all_namespaces = all_namespaces
@@ -293,6 +350,25 @@ class ResourceTable(DataTable[str | Text]):
         self._render_rows(
             kind, rows, all_namespaces=all_namespaces, pattern=pattern, metrics=metrics, sort=sort
         )
+
+    def _emit_row(self, obj: Summary, cells: list[str | Text], *, all_namespaces: bool) -> None:
+        """Finish one row: apply the custom view (issue #45), prepend the
+        namespace in all-namespaces mode, and add it keyed by ns/name.
+
+        *cells* is the kind's default cell list without the namespace. Rows
+        whose summaries carry fewer custom values than configured (e.g.
+        seeded before the config existed) pad with `<none>`.
+        """
+        view = self._active_view
+        if view is not None:
+            values: tuple[str, ...] = getattr(obj, "custom", ())
+            extras: list[str | Text] = [
+                values[i] if i < len(values) else MISSING for i in range(len(view.columns))
+            ]
+            cells = [cells[0], *extras] if view.replace else [*cells, *extras]
+        if all_namespaces:
+            cells.insert(0, obj.namespace)
+        self.add_row(*cells, key=f"{obj.namespace}/{obj.name}")
 
     def _render_rows(
         self,
@@ -308,7 +384,12 @@ class ResourceTable(DataTable[str | Text]):
             # User-selected order wins over the per-kind defaults below; the
             # keys come from the data model (issue #37), pre-applied here so
             # every row path renders in the same order.
-            rows = sort_rows(rows, sort, metrics=metrics)
+            custom_names = (
+                tuple(column.name for column in self._active_view.columns)
+                if self._active_view is not None
+                else ()
+            )
+            rows = sort_rows(rows, sort, metrics=metrics, custom_columns=custom_names)
         presorted = sort is not None
         if kind == "pods":
             self._add_pod_rows(
@@ -375,9 +456,7 @@ class ResourceTable(DataTable[str | Text]):
                 pod.age(),
                 pod.node or "-",
             ]
-            if all_namespaces:
-                cells.insert(0, pod.namespace)
-            self.add_row(*cells, key=f"{pod.namespace}/{pod.name}")
+            self._emit_row(pod, cells, all_namespaces=all_namespaces)
 
     def _add_replicaset_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
@@ -415,9 +494,7 @@ class ResourceTable(DataTable[str | Text]):
             else:
                 age = obj.age() if isinstance(obj, GenericSummary) else ""
                 cells = [obj.name, "", "", "", "", age]
-            if all_namespaces:
-                cells.insert(0, obj.namespace)
-            self.add_row(*cells, key=f"{obj.namespace}/{obj.name}")
+            self._emit_row(obj, cells, all_namespaces=all_namespaces)
 
     def _add_helm_release_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
@@ -436,9 +513,7 @@ class ResourceTable(DataTable[str | Text]):
                 rel.app_version,
                 rel.age(),
             ]
-            if all_namespaces:
-                cells.insert(0, rel.namespace)
-            self.add_row(*cells, key=f"{rel.namespace}/{rel.name}")
+            self._emit_row(rel, cells, all_namespaces=all_namespaces)
 
     def _add_helm_revision_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
@@ -459,9 +534,7 @@ class ResourceTable(DataTable[str | Text]):
                 rev.description,
                 rev.age(),
             ]
-            if all_namespaces:
-                cells.insert(0, rev.namespace)
-            self.add_row(*cells, key=f"{rev.namespace}/{rev.name}")
+            self._emit_row(rev, cells, all_namespaces=all_namespaces)
 
     def _add_fallback_rows(
         self,
@@ -482,9 +555,7 @@ class ResourceTable(DataTable[str | Text]):
                 continue
             age = obj.age() if isinstance(obj, GenericSummary) else ""
             cells: list[str | Text] = [obj.name, *[""] * (width - 2), age]
-            if all_namespaces:
-                cells.insert(0, obj.namespace)
-            self.add_row(*cells, key=f"{obj.namespace}/{obj.name}")
+            self._emit_row(obj, cells, all_namespaces=all_namespaces)
 
     def _add_package_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
@@ -503,9 +574,7 @@ class ResourceTable(DataTable[str | Text]):
                 pkg.description or "-",
                 pkg.age(),
             ]
-            if all_namespaces:
-                cells.insert(0, pkg.namespace)
-            self.add_row(*cells, key=f"{pkg.namespace}/{pkg.name}")
+            self._emit_row(pkg, cells, all_namespaces=all_namespaces)
         fallbacks = [r for r in rows if not isinstance(r, PackageManifestSummary)]
         self._add_fallback_rows(
             fallbacks,
@@ -532,9 +601,7 @@ class ResourceTable(DataTable[str | Text]):
                 sub.state or "-",
                 sub.age(),
             ]
-            if all_namespaces:
-                cells.insert(0, sub.namespace)
-            self.add_row(*cells, key=f"{sub.namespace}/{sub.name}")
+            self._emit_row(sub, cells, all_namespaces=all_namespaces)
         fallbacks = [r for r in rows if not isinstance(r, OLMSubscriptionSummary)]
         self._add_fallback_rows(
             fallbacks,
@@ -560,9 +627,7 @@ class ResourceTable(DataTable[str | Text]):
                 _csv_phase_cell(csv.phase),
                 csv.age(),
             ]
-            if all_namespaces:
-                cells.insert(0, csv.namespace)
-            self.add_row(*cells, key=f"{csv.namespace}/{csv.name}")
+            self._emit_row(csv, cells, all_namespaces=all_namespaces)
         fallbacks = [r for r in rows if not isinstance(r, CSVSummary)]
         self._add_fallback_rows(
             fallbacks,
@@ -581,8 +646,5 @@ class ResourceTable(DataTable[str | Text]):
         for obj in generics:
             if pattern and pattern.lower() not in obj.name.lower():
                 continue
-            row_key = f"{obj.namespace}/{obj.name}"
-            if all_namespaces:
-                self.add_row(obj.namespace, obj.name, obj.age(), key=row_key)
-            else:
-                self.add_row(obj.name, obj.age(), key=row_key)
+            cells: list[str | Text] = [obj.name, obj.age()]
+            self._emit_row(obj, cells, all_namespaces=all_namespaces)

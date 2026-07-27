@@ -29,6 +29,7 @@ PDB-aware impact plan; `--readonly` disables them all.
 | `0` | global | Toggle all-namespaces view |
 | `d` | table | Describe selected resource (manifest + events) |
 | `s` | pods table | Shell into selected pod (`kubectl exec`; offers `kubectl debug` fallback for distroless images) |
+| `s` | nodes table | Node shell (`kubectl debug node/`; approval dialog — privileged pod with the host filesystem at `/host`, deleted on exit) |
 | `Shift-F` | pods / services table | Port-forward the selected target (local port prompt; prefilled from declared ports) |
 | `l` | pods table | Open / close log pane for selected pod |
 | `L` | pods table | Merge logs of all currently filtered pods (up to 8) |
@@ -47,6 +48,8 @@ PDB-aware impact plan; `--readonly` disables them all.
 | `Shift-D` | nodes table | Drain the selected node — PDB-aware impact preview (evictions, PDB-blocked pods, skipped DaemonSet/mirror pods, emptyDir warnings), typed-name confirm, live progress; press again to cancel mid-drain (node stays cordoned) |
 | `e` | table | Edit selected resource manifest in `$VISUAL`/`$EDITOR` (kubectl edit style; confirm dialog before the PUT) |
 | `i` | pods table | Open hint details overlay for a troubled pod (full container trouble + recent Warning events) |
+| `i` / `u` | helm table | Install a chart / upgrade the selected release (wizard + dry-run preview + confirm dialog; needs `helm` on `PATH`) |
+| `r` | helm revisions table | Roll back the release to the selected revision (confirm dialog; needs `helm` on `PATH`) |
 | `Ctrl-T` | pods table | Transfer a file to/from the selected container (exec tar stream; upload needs approval) |
 | `Ctrl-A` | global | Toggle AI agent panel |
 | `q` | global | Quit |
@@ -79,6 +82,45 @@ default produce a startup warning and are skipped — never a crash. The
 approval dialogs' confirm keys are **not remappable** by design: writes are
 only ever confirmed by the fixed keystrokes. The help overlay (`?`) always
 shows the effective keys.
+
+## Custom columns
+
+Teams encode operational facts in labels, annotations, and spec fields —
+owning team, release version, container image. The `views:` section of
+`config.yaml` adds them to any resource table (keyed by the **plural** kind
+name used in `:` navigation):
+
+```yaml
+views:
+  pods:
+    columns:
+      - name: TEAM
+        label: team                          # metadata.labels['team']
+      - name: OWNER
+        annotation: owner                    # metadata.annotations['owner']
+      - name: IMAGE
+        jsonpath: .spec.containers[0].image  # dotted path + [index] subset
+  deployments:
+    replace: true          # replace the defaults (NAME/NAMESPACE always stay)
+    columns:
+      - name: VERSION
+        label: app.kubernetes.io/version
+```
+
+Each column declares exactly one source: `label:`, `annotation:`, or
+`jsonpath:` (a read-only built-in subset — dotted keys and `[n]` indexes;
+no filters or wildcards). By default custom columns are appended after the
+kind's built-in columns; `replace: true` keeps only NAME (and NAMESPACE in
+all-namespaces mode) plus your columns.
+
+Missing values render `<none>`; an expression that fails at runtime renders
+`<err>` — the render loop never crashes. Invalid column definitions
+(including duplicates, names shadowing built-in columns, the synthetic
+helm views, and `secrets` — Secret values only render through the masking
+pipeline) are dropped with a startup warning. `:sort <COLUMN>` sorts by
+any custom column or by the built-in sort keys `name`, `age`, `cpu`, `mem`
+(only while their columns are visible; custom values compare as
+case-insensitive strings). Repeating flips direction, bare `:sort` clears.
 
 ## Live metrics
 
@@ -119,7 +161,35 @@ watch pipeline as any other view.  `Enter` drills into the release's
 revision history (newest first, like `helm history`); `d` describes a
 release or a single revision with the decoded metadata and the
 user-supplied values — the rendered manifest blob is deliberately left
-out.  This slice is read-only; install/upgrade/rollback lands separately.
+out.
+
+### Helm install / upgrade / rollback
+
+When a `helm` binary is on `PATH`, the browser gains write actions
+(without one the keys explain what's missing and nothing else changes):
+
+| Key | View | Action |
+|---|---|---|
+| `i` | `:helm` | Install: chart picker (`helm search repo`), release/version/namespace wizard, optional values in `$EDITOR` |
+| `u` | `:helm` | Upgrade the selected release — same wizard, pinned to that release; defaults to reusing the release's current values (`--reuse-values`) |
+| `r` | revision drill-down | Roll back the release to the selected revision |
+
+Install and upgrade render a preview before the confirmation
+dialog: install and upgrade run `--dry-run` (with `--hide-secret`, helm
+3.13+, so generated Secrets stay masked), and when the
+[helm-diff](https://github.com/databus23/helm-diff) plugin is installed,
+upgrade and rollback show a real diff against the live release instead.
+If the preview render fails or times out, the confirmation dialog still
+opens — just without a preview.
+Rollback has a preview **only** with the plugin — without it the
+confirmation dialog states the release and target revision but shows no
+manifest diff.
+Nothing executes until you approve the exact command in the confirmation
+dialog, and every run is audit-logged like any other write — no audit
+log, no writes.  Values entered through `$EDITOR` are passed via a
+private temp file that is deleted as soon as helm returns.  Repo
+management (`helm repo add`) and OCI registry auth stay outside korvid —
+configure them with the helm CLI itself.
 
 ## Operator catalog (OLM)
 
@@ -207,6 +277,30 @@ debug:
   images:
     jvm: registry.corp.local/tools/debug-jvm:latest
     python: registry.corp.local/tools/debug-python:latest
+```
+
+## Node shell
+
+`s` on the nodes view opens a debug shell on the selected node via
+`kubectl debug node/<name> --profile=sysadmin` (kubectl 1.30+).  Because that
+creates a privileged pod with the node's filesystem mounted at `/host`, it
+always passes the approval gate with the privilege escalation stated
+explicitly, and the whole action is audit-logged fail-closed like every other
+write.  korvid creates the debugger pod detached (`--attach=false`), parses
+the pod name from kubectl's creation message, fetches its uid with an exact
+`kubectl get pod`, waits for it to become Ready, attaches
+interactively, and deletes precisely that pod (uid precondition) when the
+shell exits — a debugger pod another operator started is never touched.
+A warning tells you where to look if the cleanup fails.
+
+The image and the namespace the debug pod is created in are configurable —
+useful for air-gapped clusters and for clusters whose `default` namespace
+blocks privileged pods via PodSecurity admission:
+
+```yaml
+node_shell:
+  image: registry.corp.local/tools/busybox:1.36
+  namespace: node-debug
 ```
 
 ## RBAC-limited clusters

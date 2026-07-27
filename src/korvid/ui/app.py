@@ -39,7 +39,7 @@ from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.agent.tools import UIBridge
 from korvid.core.audit import AuditLog
-from korvid.core.config import KorvidConfig
+from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.debugimage import (
     FALLBACK_IMAGE,
     ephemeral_container_names,
@@ -60,7 +60,7 @@ from korvid.core.portforward import (
     controller_owner,
 )
 from korvid.core.secrets import mask_secret_manifest
-from korvid.core.sorting import SortSpec, toggle_sort
+from korvid.core.sorting import SORT_COLUMNS, SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.transfer import (
     TransferError,
@@ -76,6 +76,13 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan, DrainTarget, is_pdb_denial
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.helm import (
+    HELM_RELEASES_META,
+    HELM_REVISIONS_META,
+    HelmReleaseSummary,
+    HelmRevisionSummary,
+)
+from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import PodSummary
@@ -100,6 +107,7 @@ from korvid.ui.messages import (
     ResourcesUpdated,
     ShowError,
     ShowNamespacePicker,
+    SortCommand,
     TransferCancelRequested,
     UnknownCommand,
 )
@@ -108,8 +116,12 @@ from korvid.ui.shell import (
     DEBUG_IMAGE,
     build_debug_argv,
     build_exec_argv,
+    build_node_debug_create_argv,
+    build_pod_attach_argv,
     build_pod_get_argv,
+    build_pod_wait_argv,
     build_probe_argv,
+    parse_debug_pod_name,
 )
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
@@ -118,6 +130,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt, Replica
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
+from korvid.ui.widgets.helm_install import HelmInstallPrompt, HelmReleaseChoices
 from korvid.ui.widgets.help_screen import HelpScreen, collect_help
 from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.hint_strip import HintStrip, parse_rfc3339
@@ -276,6 +289,22 @@ def _event_line_fresh(event_ts: datetime | None, summary: PodSummary) -> bool:
     return event_ts is not None and event_ts >= max(cutoffs)
 
 
+def _looks_like_admission_rejection(stderr: str) -> bool:
+    """True when kubectl stderr clearly shows the API server refused the
+    create — only then is it safe to state that no pod was committed.
+
+    Matches the stable phrases of the two refusal shapes: API-server
+    refusals (`Error from server (Forbidden): ... is forbidden: ...`) and
+    admission webhooks (`admission webhook ... denied the request`). The
+    match is deliberately tight — a false positive here suppresses the
+    cleanup hint and can strand a privileged pod, so a bare `forbidden`
+    substring (which could appear in a pod or image name, or quoted inside
+    an unrelated server error) is not enough.
+    """
+    lowered = stderr.lower()
+    return "error from server (forbidden)" in lowered or "denied the request" in lowered
+
+
 def _yaml_equal(a: object, b: object) -> bool:
     """Type-sensitive structural equality for parsed YAML documents.
     Python's ``==`` conflates YAML booleans and integers (``True == 1``),
@@ -323,11 +352,60 @@ _UID_LOOKUP_TIMEOUT = 10.0
 #: approval flow.
 _PREVIEW_TIMEOUT = 3.0
 
+#: Upper bound on a helm preview (issue #31): `helm ... --dry-run` shells out
+#: and may pull the chart from a repo, so it gets more budget than an API
+#: server dry-run - still bounded, the approval dialog is never wedged.
+_HELM_PREVIEW_TIMEOUT = 20.0
+
+#: A rendered chart can run to thousands of lines; the approval dialog shows
+#: at most this many so the operation summary stays reviewable.
+_HELM_PREVIEW_MAX_LINES = 60
+
 #: Upper bound on the hint-overlay events fetch (issue #34): the trouble half
 #: comes from the status the app already holds, so a stalled API connection
 #: must not delay the overlay past this - the events are marked unavailable
 #: instead.
 _HINT_EVENTS_TIMEOUT = 3.0
+
+
+def _chart_base(chart: str) -> str:
+    """`"nginx-18.1.0"` -> `"nginx"`: strip the version suffix helm appends
+    to a release's chart field, so an upgrade can pre-filter the chart search
+    by name. Charts whose last dash segment is not a version stay whole."""
+    base, sep, tail = chart.rpartition("-")
+    if sep and tail[:1].isdigit():
+        return base
+    return chart
+
+
+def _clip_preview(text: str) -> list[str] | None:
+    """Dry-run/diff output as approval-dialog preview lines, capped at
+    `_HELM_PREVIEW_MAX_LINES`; None when there is nothing to show."""
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    if len(lines) > _HELM_PREVIEW_MAX_LINES:
+        hidden = len(lines) - _HELM_PREVIEW_MAX_LINES
+        return [*lines[:_HELM_PREVIEW_MAX_LINES], f"... ({hidden} more lines)"]
+    return lines
+
+
+@contextlib.asynccontextmanager
+async def _temp_values_file(values_text: str | None) -> AsyncIterator[str | None]:
+    """A 0600 temp file holding the edited values for one helm invocation,
+    deleted as soon as the command returns (values may embed credentials);
+    None passes straight through as "no values override"."""
+    if values_text is None:
+        yield None
+        return
+    fd, tmp = tempfile.mkstemp(suffix=".yaml", prefix="korvid-helm-values-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(values_text)
+        yield tmp
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
 
 
 class _ReplayFilter:
@@ -433,10 +511,17 @@ class KorvidApp(App[None]):
     # Enter drills down via `on_data_table_row_selected`, Escape closes
     # panes / pops a drill level via `on_key`.  Listed here so the help
     # overlay (`?`) renders them alongside the real bindings.
-    HANDLER_KEY_HELP: ClassVar[tuple[tuple[str, str, str], ...]] = (
-        ("Table", "enter", "Drill down (pods → containers, deploy → rs → pods)"),
-        ("Table", "escape", "Pop one drill-down level"),
-        ("Logs", "escape", "Close pane (or dismiss search)"),
+    #: user-facing keys handled in event handlers or via dispatch rather than
+    #: dedicated bindings: (help group, default key, description, action id).
+    #: A non-empty action id ties the row to a remappable binding so the help
+    #: overlay shows the effective key (issue #35), not the default.
+    HANDLER_KEY_HELP: ClassVar[tuple[tuple[str, str, str, str], ...]] = (
+        ("Table", "enter", "Drill down (pods → containers, deploy → rs → pods)", ""),
+        ("Table", "escape", "Pop one drill-down level", ""),
+        ("Logs", "escape", "Close pane (or dismiss search)", ""),
+        ("Helm", "i", "Install a chart (helm view; needs helm on PATH)", "hint_details"),
+        ("Helm", "u", "Upgrade the selected release (helm view)", "uncordon_node"),
+        ("Helm", "r", "Rollback to the selected revision (drill-down)", "rollout_restart"),
     )
 
     DEFAULT_CSS = """
@@ -478,6 +563,7 @@ class KorvidApp(App[None]):
         provider_hint: str | None = None,
         open_pod_exec: Callable[..., contextlib.AbstractAsyncContextManager[Any]] | None = None,
         fallback_namespaces: tuple[str, ...] = (),
+        helm: HelmCLI | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -554,6 +640,10 @@ class KorvidApp(App[None]):
         #: KubeClient.open_pod_exec, bound at composition; None means no
         #: cluster connection, so file transfer (issue #47) is unavailable.
         self._open_pod_exec = open_pod_exec
+        #: detected helm binary wrapper (issue #31), or None when helm is
+        #: not on PATH - the install/upgrade/rollback keys then explain
+        #: their absence instead of doing nothing.
+        self._helm = helm
         #: the in-flight transfer stream; the progress screen's escape
         #: cancels it (never the surrounding worker).
         self._transfer_task: asyncio.Task[int] | None = None
@@ -700,6 +790,10 @@ class KorvidApp(App[None]):
             # must fire when one breaks even while :pf is closed.
             self.set_interval(_FORWARD_POLL_SECONDS, self._poll_forwards)
         self._prefetch_namespaces()
+        for warning in self.config.warnings:
+            # Config problems (e.g. an invalid custom column) surface once at
+            # startup instead of hiding in a log file (issue #45).
+            self.notify(warning, title="Config warning", severity="warning")
 
         # Both callbacks fire from watch tasks on the same loop; post_message is
         # loop-safe. Watch tasks are cancelled in on_unmount before shutdown to
@@ -806,8 +900,9 @@ class KorvidApp(App[None]):
         # kind (alias collision) must still get its typed table, and the
         # serving group scopes group-specific renderings (the OLM tables).
         meta = self.aliases.get(kind)
+        plural = meta.plural if meta is not None else kind
         table.show(
-            meta.plural if meta is not None else kind,
+            plural,
             rows,
             all_namespaces=all_namespaces,
             # Filtering happened upstream (issue #44: labels/regex/fuzzy need
@@ -816,6 +911,7 @@ class KorvidApp(App[None]):
             metrics=metrics,
             group=meta.group if meta is not None else "",
             sort=self._sorts.get(kind),
+            view=self.config.views.get(plural),
         )
         self._refresh_empty_state(kind, table.row_count)
         # The strip is driven by RowHighlighted on the pods view; anything
@@ -829,11 +925,16 @@ class KorvidApp(App[None]):
 
     def action_help(self) -> None:
         """Open the help overlay generated from the live binding lists (issue #41)."""
+        overrides = self._keybinding_overrides
+        handler_keys = [
+            (group, overrides.get(action, key) if action else key, description)
+            for group, key, description, action in self.HANDLER_KEY_HELP
+        ]
         groups = collect_help(
             list(self.BINDINGS),
             list(DescribeScreen.BINDINGS),
-            handler_keys=self.HANDLER_KEY_HELP,
-            overrides=self._keybinding_overrides,
+            handler_keys=handler_keys,
+            overrides=overrides,
         )
         self.push_screen(HelpScreen(groups, command_help()))
 
@@ -1198,6 +1299,11 @@ class KorvidApp(App[None]):
         """Open the read-only detail overlay for the hinted pod row (issue #34):
         the full trouble list plus recent Warning events - everything the
         two-line strip folded away."""
+        if self._canonical_kind(self.current_kind) == "helmreleases":
+            # Same key, different view: on the helm browser `i` starts the
+            # chart install wizard (issue #31).
+            self.run_worker(self._helm_install_flow(), exclusive=True, group="helm-write")
+            return
         if self.current_kind != "pods":
             return
         row_key = self._cursor_row_key()
@@ -1585,10 +1691,17 @@ class KorvidApp(App[None]):
 
         Multi-container pods show a container picker first; if exec fails
         (typically a distroless image without sh/bash) a `kubectl debug`
-        ephemeral-container fallback is offered.
+        ephemeral-container fallback is offered. On the nodes view the same
+        key opens a node shell via `kubectl debug node/` behind an approval
+        dialog (issue #46).
         """
-        if self.current_kind != "pods":
-            self.notify("Shell is only available for pods", severity="warning")
+        kind = self._canonical_kind(self.current_kind)
+        meta = self.aliases.get(kind)
+        if meta is not None and (meta.group, meta.plural) == ("", "nodes"):
+            self.run_worker(self._node_shell_flow())
+            return
+        if kind != "pods":
+            self.notify("Shell is available for pods and nodes", severity="warning")
             return
 
         table = self.query_one(ResourceTable)
@@ -3133,6 +3246,9 @@ class KorvidApp(App[None]):
         "cordon": ("patch", ""),
         "uncordon": ("patch", ""),
         "drain": ("patch", ""),
+        # Node shell creates a privileged debug pod in the shell namespace
+        # (kubectl debug node/, issue #46); the pre-check runs against pods.
+        "node-shell": ("create", ""),
     }
 
     @staticmethod
@@ -3429,7 +3545,12 @@ class KorvidApp(App[None]):
         )
 
     async def action_rollout_restart(self) -> None:
-        """r: rolling restart of the selected deployment/statefulset/daemonset."""
+        """r: rolling restart of the selected deployment/statefulset/daemonset;
+        on the helm revision drill-down the same key rolls the release back
+        to the selected revision (issue #31)."""
+        if self._canonical_kind(self.current_kind) == "helmrevisions":
+            await self._helm_rollback_flow()
+            return
         ops = self._write_ops
         if ops is None:
             self.notify("Rollout restart unavailable in this session", severity="warning")
@@ -3898,7 +4019,12 @@ class KorvidApp(App[None]):
         await self._cordon_action(unschedulable=True)
 
     async def action_uncordon_node(self) -> None:
-        """u: mark the selected node schedulable again (kubectl uncordon)."""
+        """u: mark the selected node schedulable again (kubectl uncordon);
+        on the helm browser the same key upgrades the selected release
+        (issue #31)."""
+        if self._canonical_kind(self.current_kind) == "helmreleases":
+            await self._helm_upgrade_flow()
+            return
         await self._cordon_action(unschedulable=False)
 
     async def _cordon_action(self, *, unschedulable: bool) -> None:
@@ -4242,6 +4368,412 @@ class KorvidApp(App[None]):
             self._set_drain_progress(f"drain {name}: waiting for {len(keys)} pods to terminate")
             await asyncio.sleep(self._drain_wait_poll)
 
+    # -- Node shell (issue #46): privileged debug shell via kubectl debug node/
+
+    async def _node_shell_flow(self) -> None:
+        """`s` on the nodes view: approval-gated `kubectl debug node/` shell.
+
+        The shell runs in a `node-debugger-…` pod with the node's filesystem
+        mounted at `/host` — a privilege escalation, so it always passes the
+        approval gate with that stated explicitly, is audit-logged
+        fail-closed, and the debug pod is deleted when the shell exits.
+        """
+        resolved = self._node_target("node shell")
+        if resolved is None:
+            return
+        ops, meta, name, uid = resolved
+        if shutil.which("kubectl") is None:
+            self.notify("kubectl not found on PATH — node shell requires kubectl", severity="error")
+            return
+        image = self.config.node_shell_image or DEBUG_IMAGE
+        shell_ns = self.config.node_shell_namespace or "default"
+        pods_meta = self.aliases.get("pods")
+        if pods_meta is None:
+            # Fail-open like the pod-debug pre-check, but never silently.
+            logger.warning("pods alias missing; skipping node-shell RBAC pre-check (fail-open)")
+        elif not await self._permitted("node-shell", pods_meta, shell_ns, ""):
+            return
+        if not self._write_context_intact("node shell", meta, None, name):
+            # The RBAC round-trip ran concurrently with user input: the
+            # approval must stay bound to the selection that initiated it,
+            # and never stack over a dialog that opened meanwhile.
+            return
+
+        def _on_choice(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(self._run_node_shell(ops, name, shell_ns, image, uid))
+
+        self.push_screen(
+            ConfirmScreen(
+                f"Node shell on {name}",
+                f"kubectl debug node/{name}: creates a privileged debug pod"
+                f" (image {image}) in namespace {shell_ns} with the node's"
+                " filesystem mounted at /host (uses --profile=sysadmin;"
+                " requires kubectl 1.30+). The pod is deleted when the shell"
+                " exits. This action is audit-logged.",
+            ),
+            _on_choice,
+        )
+
+    async def _run_node_shell(
+        self, ops: WriteOps, node: str, namespace: str, image: str, approved_uid: str | None
+    ) -> None:
+        """Run the approved node shell, then delete the debugger pod.
+
+        A cluster write (pod creation via kubectl): the intent record must
+        persist before the subprocess starts, or the shell is blocked.
+        kubectl addresses the node by name only, so the approved node
+        incarnation is re-verified just before creating the pod (like the
+        pod debug path). The pod is created detached (`--attach=false`); its
+        name is parsed from kubectl's creation message and its uid fetched
+        with an exact `kubectl get pod`, so korvid knows precisely which pod
+        it owns: the interactive session then `kubectl attach`es to it, and
+        cleanup deletes exactly that pod with a uid precondition — a debugger
+        another operator starts meanwhile is never touched.
+        """
+        audit = self._audit
+        if audit is None:  # _node_target already refused; defensive re-check
+            return
+        if approved_uid is not None and not await self._node_uid_unchanged(node, approved_uid):
+            return
+        detail = f"privileged node shell (kubectl debug node, image {image}, namespace {namespace})"
+        try:
+            await asyncio.to_thread(self._audit_node_shell, audit, node, detail, "intent")
+        except Exception:
+            logger.exception("audit append failed; blocking node shell")
+            self.notify("Write blocked: audit log unavailable", severity="error")
+            return
+        # The create itself is shielded + settled: cancelling an
+        # asyncio.to_thread await does not stop the kubectl subprocess, so a
+        # cancellation here could otherwise leak a pod that was created
+        # moments later with no finalizer installed.
+        create_task = asyncio.ensure_future(self._create_node_debug_pod(node, namespace, image))
+        try:
+            created = await asyncio.shield(create_task)
+        except asyncio.CancelledError:
+            try:
+                created = await create_task
+            except asyncio.CancelledError:
+                # The create task itself was cancelled outright (e.g. loop
+                # shutdown cancels every task, bypassing the shield): nothing
+                # to settle, but a pod may still appear — leave a trace.
+                logger.warning(
+                    "node shell create cancelled outright; cleanup skipped -"
+                    " check namespace %s for leftover node-debugger pods",
+                    namespace,
+                )
+                raise
+            if isinstance(created, str):
+                await self._audit_create_failure(audit, node, detail, created)
+            else:
+                await self._finalize_node_shell(
+                    ops,
+                    audit,
+                    node,
+                    namespace,
+                    created[0],
+                    created[1],
+                    detail,
+                    "error: interrupted",
+                )
+            raise
+        if isinstance(created, str):  # creation failed or pod unidentifiable
+            await self._audit_create_failure(audit, node, detail, created)
+            return
+        pod_name, pod_uid = created
+        # Everything after a successful create runs under a finalizer:
+        # a worker cancellation, an attach launch error, or Ctrl-C raising
+        # KeyboardInterrupt from subprocess.call must still delete the
+        # privileged host-mounted pod and record the outcome.
+        outcome = "error: interrupted"
+        try:
+            outcome = await self._wait_and_attach_node_shell(node, namespace, pod_name)
+        finally:
+            # Shielded + settled so a cancelled worker still deletes the pod
+            # and records the outcome: shield() raises CancelledError here on
+            # outer cancellation while the finalizer keeps running, so it is
+            # re-awaited before the cancellation propagates.
+            finalize = asyncio.ensure_future(
+                self._finalize_node_shell(
+                    ops, audit, node, namespace, pod_name, pod_uid, detail, outcome
+                )
+            )
+            try:
+                await asyncio.shield(finalize)
+            except asyncio.CancelledError:
+                await finalize
+                raise
+
+    async def _wait_and_attach_node_shell(self, node: str, namespace: str, pod_name: str) -> str:
+        """Wait for the debugger pod, attach interactively, return the outcome.
+
+        Runs entirely under the caller's finalizer, so every exit path —
+        including an attach binary that cannot be launched — leaves the pod
+        deletion and outcome audit to run.
+        """
+        wait_argv = build_pod_wait_argv(namespace, pod_name, context=self.config.kube_context)
+        ready = await self._run_kubectl_ok(wait_argv, timeout=75)
+        if not ready:
+            self.notify(
+                f"Debugger pod {pod_name} did not become Ready — the shell may"
+                " fail to attach (image pull error or admission problem?)",
+                severity="warning",
+            )
+        attach_argv = build_pod_attach_argv(namespace, pod_name, context=self.config.kube_context)
+        try:
+            with self.suspend():
+                exit_code = self._run_interactive(
+                    attach_argv, f"korvid node shell → {node} (exit to return)"
+                )
+        except SuspendNotSupported:
+            # Non-suspending drivers (e.g. Windows, web): refuse gracefully —
+            # the finalizer still deletes the pod that was just created.
+            self.notify(
+                "node shell unavailable: this environment does not support"
+                " suspending the TUI for an interactive shell",
+                severity="error",
+            )
+            outcome = "error: suspend not supported"
+        except OSError as exc:
+            # kubectl itself could not be launched (removed or not executable
+            # since the create): keep a specific outcome and let the finalizer
+            # delete the pod — an escaping exception would kill the worker and
+            # take the TUI down with it.
+            logger.warning("kubectl attach could not be launched", exc_info=True)
+            self.notify(f"Could not launch kubectl attach: {exc}", severity="error")
+            outcome = "error: attach could not be launched"
+        else:
+            outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
+        self.refresh()
+        return outcome
+
+    async def _audit_create_failure(
+        self, audit: AuditLog, node: str, detail: str, outcome: str
+    ) -> None:
+        """Persist a failed/unidentifiable create outcome; surfaced on
+        failure because the outcome may record a skipped cleanup the user
+        must act on."""
+        try:
+            await asyncio.to_thread(self._audit_node_shell, audit, node, detail, outcome)
+        except Exception:
+            logger.exception("audit append failed after node shell create failure")
+            self.notify("Audit write failed for the node shell attempt", severity="warning")
+
+    async def _finalize_node_shell(
+        self,
+        ops: WriteOps,
+        audit: AuditLog,
+        node: str,
+        namespace: str,
+        pod_name: str,
+        pod_uid: str,
+        detail: str,
+        outcome: str,
+    ) -> None:
+        """Delete the debugger pod and record the outcome — always runs,
+        even when the shell worker was cancelled or interrupted. The audit
+        write is best-effort here: the cluster write already happened, so
+        failing it must not hide the cleanup."""
+        cleanup = await self._delete_node_debug_pod(ops, namespace, pod_name, pod_uid)
+        try:
+            await asyncio.to_thread(
+                self._audit_node_shell, audit, node, detail, f"{outcome}; {cleanup}"
+            )
+        except Exception:
+            logger.exception("audit append failed after node shell")
+            self.notify("Audit write failed for the executed node shell", severity="warning")
+
+    async def _create_node_debug_pod(
+        self, node: str, namespace: str, image: str
+    ) -> tuple[str, str] | str:
+        """Create the node-debugger pod detached; returns (name, uid).
+
+        On failure returns the audit outcome string instead — distinct per
+        cause, because they leave different cluster states: a kubectl launch
+        failure never reached the cluster, a clearly identified admission
+        rejection (where PodSecurity refusals surface, hence the namespace
+        hint) leaves nothing behind, while any other non-zero exit, a
+        timeout, or a create whose output cannot be parsed may have created
+        a pod korvid cannot identify, so the audit records cleanup as
+        skipped and names the namespace to inspect.
+        """
+        argv = build_node_debug_create_argv(
+            node, namespace, context=self.config.kube_context, image=image
+        )
+        try:
+            proc = await asyncio.to_thread(subprocess.run, argv, capture_output=True, timeout=30)
+        except OSError as exc:
+            # kubectl itself could not be launched (removed or not executable
+            # since the PATH check): no request reached the cluster, so no
+            # pod exists and no namespace inspection is needed.
+            logger.warning("kubectl could not be launched for node debug", exc_info=True)
+            self.notify(f"Could not launch kubectl: {exc}", severity="error")
+            return "error: kubectl could not be launched; no pod created"
+        except subprocess.TimeoutExpired:
+            logger.warning("node-debugger pod creation timed out", exc_info=True)
+            self.notify(
+                f"kubectl debug node did not respond — a debugger pod may still have"
+                f" been created; check {namespace} for leftover node-debugger pods",
+                severity="error",
+            )
+            return f"error: pod creation timed out; cleanup skipped: check namespace {namespace}"
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode(errors="replace").strip()
+            logger.warning("node-debugger pod creation failed: %s", stderr)
+            if _looks_like_admission_rejection(stderr):
+                # The API server refused the create: nothing was committed.
+                # The namespace remediation only applies when PodSecurity
+                # did the refusing — an RBAC forbid or an unrelated webhook
+                # denial would make that hint actionably wrong.
+                hint = (
+                    " — the cluster refuses privileged pods (PodSecurity admission);"
+                    " try setting node_shell.namespace to a namespace that allows them"
+                    if "podsecurity" in stderr.lower()
+                    else ""
+                )
+                self.notify(
+                    f"Could not create the debugger pod: {stderr}{hint}",
+                    severity="error",
+                )
+                return "error: pod creation rejected"
+            # A non-zero exit does not prove rejection: the server can commit
+            # the pod and kubectl still fail afterwards (lost response, local
+            # output error) — treat as ambiguous, the pod may exist.
+            self.notify(
+                f"Could not create the debugger pod: {stderr or f'exit {proc.returncode}'}"
+                f" — a pod may still have been created; check {namespace} for"
+                " leftover node-debugger pods",
+                severity="error",
+            )
+            return f"error: pod creation failed; cleanup skipped: check namespace {namespace}"
+        pod_name = parse_debug_pod_name(proc.stdout.decode(errors="replace"))
+        if pod_name is None:
+            # Pod created (exit 0) but unidentifiable: refuse to guess.
+            self.notify(
+                f"kubectl did not report the created pod — check {namespace} for"
+                " leftover node-debugger pods",
+                severity="error",
+            )
+            return (
+                "error: created pod could not be identified;"
+                f" cleanup skipped: check namespace {namespace}"
+            )
+        uid = await self._fetch_created_pod_uid(namespace, pod_name)
+        if uid is None:
+            # Without the uid the cleanup delete would lose its precondition
+            # and could remove a same-name replacement pod: refuse.
+            self.notify(
+                f"kubectl did not report the created pod's uid — check pod"
+                f" {pod_name} in namespace {namespace}",
+                severity="error",
+            )
+            return (
+                "error: created pod could not be identified;"
+                f" cleanup skipped: check namespace {namespace}"
+            )
+        return pod_name, uid
+
+    async def _fetch_created_pod_uid(self, namespace: str, pod_name: str) -> str | None:
+        """Fetch the just-created debugger pod's uid with an exact get.
+
+        `kubectl debug` has no machine-readable output, so after parsing the
+        pod name from its message the uid — required as the cleanup delete's
+        precondition — comes from `kubectl get pod <name> -o json`. Any
+        failure (launch, timeout, non-zero exit, malformed JSON) returns
+        None: the caller treats the pod as unidentifiable rather than guess.
+        """
+        argv = build_pod_get_argv(namespace, pod_name, context=self.config.kube_context)
+        try:
+            proc = await asyncio.to_thread(subprocess.run, argv, capture_output=True, timeout=15)
+        except (subprocess.TimeoutExpired, OSError):
+            logger.warning("could not fetch created debugger pod", exc_info=True)
+            return None
+        if proc.returncode != 0:
+            logger.warning(
+                "created debugger pod fetch failed: %s",
+                proc.stderr.decode(errors="replace").strip(),
+            )
+            return None
+        try:
+            payload = json.loads(proc.stdout)
+        except ValueError:
+            return None
+        item_meta = payload.get("metadata") if isinstance(payload, dict) else None
+        if not isinstance(item_meta, dict):
+            # Valid JSON with an unexpected shape (e.g. metadata is a scalar)
+            # must land in the unidentifiable branch, not raise past the
+            # finalizer while a privileged pod may exist.
+            return None
+        uid = item_meta.get("uid")
+        return uid if isinstance(uid, str) and uid else None
+
+    async def _run_kubectl_ok(self, argv: list[str], timeout: float) -> bool:
+        """Run a non-interactive kubectl helper; True on exit 0."""
+        try:
+            proc = await asyncio.to_thread(
+                subprocess.run, argv, capture_output=True, timeout=timeout
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            logger.warning("kubectl helper failed", exc_info=True)
+            return False
+        return proc.returncode == 0
+
+    async def _node_uid_unchanged(self, name: str, approved_uid: str) -> bool:
+        """Re-verify the approved node incarnation just before the shell
+        launches; notifies and returns False when the node is gone or was
+        replaced under the same name while the dialog was open."""
+        try:
+            current_uid = await self._target_uid("nodes", None, name)
+        except ApiStatusError:
+            self.notify(
+                f"node shell cancelled - node {name} no longer exists.",
+                severity="warning",
+            )
+            return False
+        if current_uid is not None and current_uid != approved_uid:
+            self.notify(
+                f"node shell cancelled - node {name} was replaced since the prompt was shown.",
+                severity="warning",
+            )
+            return False
+        return True
+
+    async def _delete_node_debug_pod(
+        self, ops: WriteOps, namespace: str, pod_name: str, pod_uid: str
+    ) -> str:
+        """Delete exactly the debugger pod this session created (uid
+        precondition), returning the audit note."""
+        pods_meta = self.aliases.get("pods")
+        if pods_meta is None:
+            self.notify(
+                f"Cannot delete debug pod {pod_name} in {namespace} — remove it manually",
+                severity="warning",
+            )
+            return f"cleanup failed for: {pod_name}"
+        try:
+            await ops.delete_object(pods_meta, namespace, pod_name, uid=pod_uid)
+        except Exception:
+            logger.exception("node-debugger pod deletion failed")
+            self.notify(
+                f"Failed to delete debug pod {pod_name} in {namespace} — remove it manually",
+                severity="warning",
+            )
+            return f"cleanup failed for: {pod_name}"
+        return f"cleanup: deleted {pod_name}"
+
+    @staticmethod
+    def _audit_node_shell(audit: AuditLog, node: str, detail: str, outcome: str) -> None:
+        audit.append(
+            action="node-shell",
+            kind="nodes",
+            group="",  # nodes are core/v1
+            version="v1",
+            namespace=None,
+            name=node,
+            detail=detail,
+            outcome=outcome,
+        )
+
     async def action_operator_install(self) -> None:
         """I: on the operator catalog, install the selected package (wizard,
         then approval with the full Subscription manifest); on InstallPlans,
@@ -4484,6 +5016,393 @@ class KorvidApp(App[None]):
             self.notify(f"installplans/{name} is already approved", severity="information")
             return None
         return spec
+
+    # ------------------------------------------------------------------
+    # helm install / upgrade / rollback via the detected helm CLI (issue #31)
+    # ------------------------------------------------------------------
+
+    def _helm_gate(self) -> HelmCLI | None:
+        """Common gate for helm write flows: read-only mode and the
+        fail-closed audit rule apply exactly as to API writes, plus the
+        binary must have been detected at startup. None (with a
+        notification) blocks the flow."""
+        if self.config.readonly:
+            self.notify("Read-only mode: cluster writes are disabled", severity="warning")
+            return None
+        if self._audit is None:
+            # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
+            self.notify("Writes disabled: no audit log configured", severity="warning")
+            return None
+        if self._helm is None:
+            self.notify(
+                "helm CLI not found on PATH - install/upgrade/rollback unavailable",
+                severity="error",
+            )
+            return None
+        return self._helm
+
+    def _helm_view_namespace(self) -> str:
+        """Namespace a fresh install targets by default: the active view
+        namespace, or the configured workload namespace on the
+        all-namespaces view (same fallback as the operator install wizard)."""
+        view_ns = self.current_namespace
+        return view_ns if view_ns != ALL_NAMESPACES else (self.config.namespace or "default")
+
+    async def _helm_search(self, helm: HelmCLI, keyword: str) -> list[ChartHit] | None:
+        """Installable charts from the user's own repos, or None (with a
+        notification) when the search failed or found nothing."""
+        try:
+            hits = await helm.search_repo(keyword)
+            if not hits and keyword:
+                # Nothing matched the release's chart name (renamed, or from
+                # a repo no longer configured): fall back to everything.
+                hits = await helm.search_repo()
+        except HelmError as exc:
+            self.notify(f"helm search failed: {exc}", severity="error")
+            return None
+        if not hits:
+            self.notify(
+                "no installable charts found - configure repos with `helm repo add` first",
+                severity="warning",
+            )
+            return None
+        return hits
+
+    async def _helm_install_flow(self) -> None:
+        """Install (the `hint_details` key on the helm view): chart picker ->
+        wizard -> dry-run preview ->
+        approval -> audited `helm install`."""
+        helm = self._helm_gate()
+        if helm is None:
+            return
+        hits = await self._helm_search(helm, "")
+        if hits is None:
+            return
+        if len(self.screen_stack) > 1:  # another dialog opened during the search
+            return
+        if self._canonical_kind(self.current_kind) != HELM_RELEASES_META.plural:
+            # The search runs in a worker over an interactive table: opening
+            # the picker over an unrelated view would also derive the target
+            # namespace from that view.
+            self.notify(
+                "helm install cancelled - left the helm view during the chart search",
+                severity="warning",
+            )
+            return
+        self._helm_pick_chart(hits, release=None, namespace=self._helm_view_namespace())
+
+    async def _helm_upgrade_flow(self) -> None:
+        """Upgrade (the `uncordon_node` key on a release row): the same
+        wizard with the release name and
+        namespace fixed to the selected row's facts."""
+        helm = self._helm_gate()
+        if helm is None:
+            return
+        ns, name = self._selected_ns_name()
+        if name is None:
+            return
+        row = self._helm_release_row(ns, name)
+        keyword = _chart_base(row.chart) if row is not None else ""
+        hits = await self._helm_search(helm, keyword)
+        if hits is None:
+            return
+        if not self._write_context_intact(
+            "helm-upgrade", HELM_RELEASES_META, ns, name, phase="the chart search"
+        ):
+            return
+        namespace = ns or (row.namespace if row is not None else self._helm_view_namespace())
+        self._helm_pick_chart(hits, release=name, namespace=namespace)
+
+    def _helm_pick_chart(
+        self, hits: list[ChartHit], *, release: str | None, namespace: str
+    ) -> None:
+        """Chart picker feeding the install/upgrade wizard; everything
+        offered comes from `helm search repo`, nothing is hardcoded."""
+        labels: dict[str, ChartHit] = {}
+        for hit in hits:
+            labels.setdefault(f"{hit.name}  {hit.version}", hit)
+
+        def _picked(choice: str | None) -> None:
+            if choice is None:
+                return
+            hit = labels.get(choice)
+            if hit is None:  # pragma: no cover - PickScreen returns its own options
+                return
+
+            def _chosen(choices: HelmReleaseChoices | None) -> None:
+                if choices is None:
+                    return
+                self.run_worker(
+                    self._helm_confirm_change(hit, choices, upgrade=release is not None),
+                    exclusive=True,
+                    group="helm-write",
+                )
+
+            self.push_screen(HelmInstallPrompt(hit, namespace=namespace, release=release), _chosen)
+
+        title = f"Upgrade {release} with chart:" if release else "Install chart:"
+        self.push_screen(PickScreen(title, list(labels)), _picked)
+
+    async def _helm_confirm_change(
+        self, hit: ChartHit, choices: HelmReleaseChoices, *, upgrade: bool
+    ) -> None:
+        """Optional values editing, dry-run/diff preview, then the standard
+        approval dialog; the mutation itself runs through `_run_write`, so
+        the fail-closed audit rule applies unchanged."""
+        helm = self._helm
+        if helm is None:  # gate already passed; helm cannot vanish, but be safe
+            return
+        values_text: str | None = None
+        if choices.edit_values:
+            template = (
+                f"# values override for {hit.name} {choices.version or hit.version}\n"
+                "# an empty file (or comments only) keeps the chart defaults\n"
+            )
+            edit = self._edit_text or self._edit_in_external_editor
+            text = await edit(template)
+            if text is None:
+                return  # editor failed or was aborted; already notified
+            meaningful = any(
+                line.strip() and not line.lstrip().startswith("#") for line in text.splitlines()
+            )
+            values_text = text if meaningful else None
+        rendered = await self._helm_change_preview(helm, hit, choices, values_text, upgrade=upgrade)
+        action = "helm-upgrade" if upgrade else "helm-install"
+        if not self._helm_context_after_preview(action, choices, upgrade=upgrade):
+            return
+        preview, preview_title = rendered if rendered is not None else (None, "")
+        verb = "UPGRADE" if upgrade else "INSTALL"
+        version_label = choices.version or "latest"
+        if values_text is not None:
+            values_label, values_detail = "edited in $EDITOR", "custom"
+        elif choices.reuse_values:
+            values_label, values_detail = "reuse current values", "reused"
+        else:
+            values_label, values_detail = "chart defaults", "defaults"
+        operation = (
+            f"HELM {verb} {choices.release} (chart {hit.name} {version_label})"
+            f" in namespace {choices.namespace}\n"
+            f"values: {values_label}"
+        )
+        detail = f"chart={hit.name} version={version_label} values={values_detail}"
+
+        def _done(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            self.run_worker(
+                self._run_write(
+                    action,
+                    HELM_RELEASES_META,
+                    choices.namespace,
+                    choices.release,
+                    self._helm_apply_change(helm, hit, choices, values_text, upgrade=upgrade),
+                    detail=detail,
+                )
+            )
+
+        title = f"{'Upgrade' if upgrade else 'Install'} {choices.release}?"
+        await self.push_screen(
+            ConfirmScreen(title, operation, preview=preview, preview_title=preview_title),
+            _done,
+        )
+
+    def _helm_context_after_preview(
+        self, action: str, choices: HelmReleaseChoices, *, upgrade: bool
+    ) -> bool:
+        """The preview runs over the interactive table: the state the user
+        approves must still be the state that was previewed."""
+        if upgrade:
+            # The row selected for upgrade must still be the one approved.
+            return self._write_context_intact(
+                action,
+                HELM_RELEASES_META,
+                choices.namespace,
+                choices.release,
+                phase="the preview render",
+            )
+        if len(self.screen_stack) > 1:  # another dialog opened during the preview
+            return False
+        if self._canonical_kind(self.current_kind) != HELM_RELEASES_META.plural:
+            self.notify(
+                "helm install cancelled - left the helm view during the preview",
+                severity="warning",
+            )
+            return False
+        return True
+
+    async def _helm_apply_change(
+        self,
+        helm: HelmCLI,
+        hit: ChartHit,
+        choices: HelmReleaseChoices,
+        values_text: str | None,
+        *,
+        upgrade: bool,
+    ) -> None:
+        """The approved mutation, awaited by `_run_write` after the intent
+        audit record persisted."""
+        version = choices.version or None
+        async with _temp_values_file(values_text) as values_file:
+            if upgrade:
+                await helm.upgrade(
+                    choices.release,
+                    hit.name,
+                    choices.namespace,
+                    version=version,
+                    values_file=values_file,
+                    reuse_values=choices.reuse_values,
+                )
+            else:
+                await helm.install(
+                    choices.release,
+                    hit.name,
+                    choices.namespace,
+                    version=version,
+                    values_file=values_file,
+                )
+
+    async def _helm_change_preview(
+        self,
+        helm: HelmCLI,
+        hit: ChartHit,
+        choices: HelmReleaseChoices,
+        values_text: str | None,
+        *,
+        upgrade: bool,
+    ) -> tuple[list[str], str] | None:
+        """Preview lines plus their heading for the approval dialog: `helm
+        diff upgrade` when the plugin exists (issue #31), else the plain
+        `--dry-run` render - the heading names which one the user is looking
+        at. None on any failure - a preview must never block the approval
+        flow."""
+
+        async def _render() -> tuple[str, str]:
+            version = choices.version or None
+            async with _temp_values_file(values_text) as values_file:
+                if upgrade and await helm.has_diff_plugin():
+                    return "helm diff upgrade preview:", await helm.diff_upgrade(
+                        choices.release,
+                        hit.name,
+                        choices.namespace,
+                        version=version,
+                        values_file=values_file,
+                        reuse_values=choices.reuse_values,
+                    )
+                if upgrade:
+                    return "helm upgrade --dry-run preview:", await helm.dry_run_upgrade(
+                        choices.release,
+                        hit.name,
+                        choices.namespace,
+                        version=version,
+                        values_file=values_file,
+                        reuse_values=choices.reuse_values,
+                    )
+                return "helm install --dry-run preview:", await helm.dry_run_install(
+                    choices.release,
+                    hit.name,
+                    choices.namespace,
+                    version=version,
+                    values_file=values_file,
+                )
+
+        try:
+            title, text = await asyncio.wait_for(_render(), _HELM_PREVIEW_TIMEOUT)
+        except Exception:
+            logger.debug("helm preview failed; dialog opens without it", exc_info=True)
+            return None
+        lines = _clip_preview(text)
+        return (lines, title) if lines is not None else None
+
+    async def _helm_rollback_flow(self) -> None:
+        """Rollback (the `rollout_restart` key on a revision row of the
+        drill-down): approval-gated, audited
+        `helm rollback` to that revision."""
+        helm = self._helm_gate()
+        if helm is None:
+            return
+        ns, name = self._selected_ns_name()
+        if name is None:
+            return
+        row = self._helm_revision_row(ns, name)
+        if row is None:
+            self.notify("no helm revision selected", severity="warning")
+            return
+        namespace = ns or row.namespace
+        preview = await self._helm_rollback_preview(helm, row.release, row.revision, namespace)
+        if not self._write_context_intact(
+            "helm-rollback", HELM_REVISIONS_META, ns, name, phase="the diff preview"
+        ):
+            return
+        operation = (
+            f"HELM ROLLBACK {row.release} to revision {row.revision} in namespace {namespace}"
+        )
+
+        def _done(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            self.run_worker(
+                self._run_write(
+                    "helm-rollback",
+                    HELM_RELEASES_META,
+                    namespace,
+                    row.release,
+                    self._helm_apply_rollback(helm, row.release, row.revision, namespace),
+                    detail=f"revision={row.revision}",
+                )
+            )
+
+        await self.push_screen(
+            ConfirmScreen(
+                f"Rollback {row.release} to revision {row.revision}?",
+                operation,
+                preview=preview,
+                preview_title="helm diff rollback preview:",
+            ),
+            _done,
+        )
+
+    async def _helm_apply_rollback(
+        self, helm: HelmCLI, release: str, revision: int, namespace: str
+    ) -> None:
+        await helm.rollback(release, revision, namespace)
+
+    async def _helm_rollback_preview(
+        self, helm: HelmCLI, release: str, revision: int, namespace: str
+    ) -> list[str] | None:
+        """`helm diff rollback` preview when the plugin exists; None
+        otherwise (plain rollback has no meaningful dry-run output)."""
+
+        async def _render() -> str | None:
+            if not await helm.has_diff_plugin():
+                return None
+            return await helm.diff_rollback(release, revision, namespace)
+
+        try:
+            text = await asyncio.wait_for(_render(), _HELM_PREVIEW_TIMEOUT)
+        except Exception:
+            logger.debug("helm rollback preview failed; dialog opens without it", exc_info=True)
+            return None
+        return _clip_preview(text) if text is not None else None
+
+    def _helm_release_row(self, ns: str | None, name: str) -> HelmReleaseSummary | None:
+        for obj in self.store.get("helmreleases", self.current_scope):
+            if (
+                obj.name == name
+                and (ns is None or obj.namespace == ns)
+                and isinstance(obj, HelmReleaseSummary)
+            ):
+                return obj
+        return None
+
+    def _helm_revision_row(self, ns: str | None, name: str) -> HelmRevisionSummary | None:
+        for obj in self.store.get("helmrevisions", self.current_scope):
+            if (
+                obj.name == name
+                and (ns is None or obj.namespace == ns)
+                and isinstance(obj, HelmRevisionSummary)
+            ):
+                return obj
+        return None
 
     async def _open_log_pane(
         self,
@@ -4824,6 +5743,11 @@ class KorvidApp(App[None]):
     # Column sorting (issue #37) — data-model sort keys, per-kind state.
     # ------------------------------------------------------------------
 
+    def _view_for(self, kind: str) -> ViewConfig | None:
+        """The `views:` config entry for a view kind, resolved via its meta."""
+        meta = self.aliases.get(kind)
+        return self.config.views.get(meta.plural if meta is not None else kind)
+
     def _toggle_sort(self, column: str) -> None:
         """Apply/flip a sort column for the current view kind and re-render."""
         kind = self.current_kind
@@ -4831,6 +5755,11 @@ class KorvidApp(App[None]):
             # Only the pods view has CPU/MEM columns and a metrics feed;
             # elsewhere the keypress would silently discard the current
             # order while showing no indicator, so ignore it.
+            return
+        view = self._view_for(kind)
+        if column != "name" and view is not None and view.replace:
+            # `replace: true` hides AGE/CPU/MEM — sorting by an invisible
+            # column would reorder rows with no indicator, so ignore it.
             return
         self._sorts[kind] = toggle_sort(self._sorts.get(kind), column)
         self._render_table(kind)
@@ -4843,6 +5772,31 @@ class KorvidApp(App[None]):
 
     def action_sort_by_mem(self) -> None:
         self._toggle_sort("mem")
+
+    def on_sort_command(self, message: SortCommand) -> None:
+        """`:sort <column>` (issue #45): builtin or custom column; bare `:sort` clears."""
+        kind = self.current_kind
+        if message.column is None:
+            self._sorts.pop(kind, None)
+            self._render_table(kind)
+            return
+        requested = message.column
+        view = self._view_for(kind)
+        custom_names = tuple(column.name for column in view.columns) if view is not None else ()
+        builtins = ("name",) if view is not None and view.replace else SORT_COLUMNS
+        if requested.lower() in builtins:
+            self._toggle_sort(requested.lower())
+            return
+        matched = next((name for name in custom_names if name.lower() == requested.lower()), None)
+        if matched is None:
+            columns = ", ".join((*builtins, *custom_names))
+            self.notify(
+                f"Unknown sort column {requested!r} — available: {columns}",
+                severity="warning",
+            )
+            return
+        self._sorts[kind] = toggle_sort(self._sorts.get(kind), matched)
+        self._render_table(kind)
 
     # ------------------------------------------------------------------
     # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,

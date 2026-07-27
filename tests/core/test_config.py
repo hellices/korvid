@@ -481,6 +481,36 @@ def test_debug_non_string_entries_dropped(tmp_path: Path) -> None:
     assert cfg.debug_images == {"python": "img:1"}
 
 
+def test_node_shell_defaults() -> None:
+    cfg = KorvidConfig()
+    assert cfg.node_shell_image is None
+    assert cfg.node_shell_namespace is None
+
+
+def test_node_shell_from_yaml(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text("node_shell:\n  image: registry.local/toolkit:1\n  namespace: debug-ns\n")
+    cfg = load_config(f)
+    assert cfg.node_shell_image == "registry.local/toolkit:1"
+    assert cfg.node_shell_namespace == "debug-ns"
+
+
+def test_node_shell_scalar_section_tolerated(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text("node_shell: yes\n")
+    cfg = load_config(f)
+    assert cfg.node_shell_image is None
+    assert cfg.node_shell_namespace is None
+
+
+def test_node_shell_non_string_values_ignored(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text("node_shell:\n  image: 3\n  namespace: ''\n")
+    cfg = load_config(f)
+    assert cfg.node_shell_image is None
+    assert cfg.node_shell_namespace is None
+
+
 def test_ollama_defaults_when_unconfigured(tmp_path: Path) -> None:
     p = tmp_path / "config.yaml"
     p.write_text("agent:\n  provider: ollama\n")
@@ -595,3 +625,253 @@ def test_namespaces_non_string_entries_skipped(tmp_path: Path) -> None:
     p.write_text('namespaces:\n  - team-a\n  - 5\n  - ""\n  - null\n')
     cfg = load_config(p)
     assert cfg.namespaces == ("team-a",)
+
+
+# ---------------------------------------------------------------------------
+# views: custom columns (issue #45)
+# ---------------------------------------------------------------------------
+
+
+def test_views_parses_all_three_sources(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods:
+    columns:
+      - name: TEAM
+        label: team
+      - name: OWNER
+        annotation: owner
+      - name: IMAGE
+        jsonpath: .spec.containers[0].image
+"""
+    )
+    config = load_config(cfg)
+    view = config.views["pods"]
+    assert [(c.name, c.source, c.expr) for c in view.columns] == [
+        ("TEAM", "label", "team"),
+        ("OWNER", "annotation", "owner"),
+        ("IMAGE", "jsonpath", ".spec.containers[0].image"),
+    ]
+    assert view.replace is False
+
+
+def test_views_replace_flag(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  deployments:
+    replace: true
+    columns:
+      - name: TEAM
+        label: team
+"""
+    )
+    config = load_config(cfg)
+    assert config.views["deployments"].replace is True
+
+
+def test_views_invalid_jsonpath_drops_column_with_warning(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods:
+    columns:
+      - name: BAD
+        jsonpath: "spec[oops"
+      - name: TEAM
+        label: team
+"""
+    )
+    config = load_config(cfg)
+    assert [c.name for c in config.views["pods"].columns] == ["TEAM"]
+    assert any("BAD" in warning for warning in config.warnings)
+
+
+def test_views_column_without_exactly_one_source_dropped(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods:
+    columns:
+      - name: NOSOURCE
+      - name: TWOSOURCES
+        label: team
+        annotation: owner
+      - name: TEAM
+        label: team
+"""
+    )
+    config = load_config(cfg)
+    assert [c.name for c in config.views["pods"].columns] == ["TEAM"]
+    assert len(config.warnings) == 2
+
+
+def test_views_column_without_name_dropped(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods:
+    columns:
+      - label: team
+"""
+    )
+    config = load_config(cfg)
+    assert "pods" not in config.views
+    assert len(config.warnings) == 1
+
+
+def test_views_non_mapping_entries_ignored(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods: "oops"
+  deployments:
+    columns:
+      - name: TEAM
+        label: team
+"""
+    )
+    config = load_config(cfg)
+    assert set(config.views) == {"deployments"}
+
+
+def test_views_absent_means_empty(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("namespace: default\n")
+    config = load_config(cfg)
+    assert config.views == {}
+    assert config.warnings == ()
+
+
+def test_views_duplicate_column_names_case_insensitive_dropped(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods:
+    columns:
+      - name: TEAM
+        label: team
+      - name: team
+        annotation: team
+"""
+    )
+    config = load_config(cfg)
+    assert [c.name for c in config.views["pods"].columns] == ["TEAM"]
+    assert any("duplicate" in w for w in config.warnings)
+
+
+def test_views_synthetic_helm_kinds_rejected_with_warning(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  helmreleases:
+    columns:
+      - name: TEAM
+        label: team
+  helmrevisions:
+    columns:
+      - name: TEAM
+        label: team
+"""
+    )
+    config = load_config(cfg)
+    assert config.views == {}
+    assert len(config.warnings) == 2
+
+
+def test_views_builtin_colliding_names_dropped_with_warning(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods:
+    columns:
+      - name: CPU
+        label: team
+      - name: TEAM
+        label: team
+"""
+    )
+    config = load_config(cfg)
+    assert [c.name for c in config.views["pods"].columns] == ["TEAM"]
+    assert any("built-in" in w for w in config.warnings)
+
+
+def test_views_whitespace_column_name_dropped_with_warning(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods:
+    columns:
+      - name: APP VERSION
+        label: version
+      - name: TEAM
+        label: team
+"""
+    )
+    config = load_config(cfg)
+    assert [c.name for c in config.views["pods"].columns] == ["TEAM"]
+    assert any("single token" in w for w in config.warnings)
+
+
+def test_views_non_list_columns_warned(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods:
+    columns: {name: TEAM, label: team}
+"""
+    )
+    config = load_config(cfg)
+    assert "pods" not in config.views
+    assert any("must be a list" in w for w in config.warnings)
+
+
+def test_views_secrets_rejected_with_warning(tmp_path: Path) -> None:
+    """Security invariant: Secret values only render through the masking
+    pipeline — custom columns evaluate raw manifests, so the kind is banned."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  secrets:
+    columns:
+      - name: TOKEN
+        jsonpath: .data.token
+"""
+    )
+    config = load_config(cfg)
+    assert config.views == {}
+    assert any("secrets" in w and "masking" in w for w in config.warnings)
+
+
+def test_views_non_mapping_view_warned(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods: []
+"""
+    )
+    config = load_config(cfg)
+    assert config.views == {}
+    assert any("pods" in w and "mapping" in w for w in config.warnings)
+
+
+def test_views_non_mapping_top_level_warned(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("views: []\n")
+    config = load_config(cfg)
+    assert config.views == {}
+    assert any(w.startswith("views") and "mapping" in w for w in config.warnings)

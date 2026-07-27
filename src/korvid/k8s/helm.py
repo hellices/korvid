@@ -62,6 +62,11 @@ HELM_REVISIONS_META = ResourceMeta(
     "HelmRevision", "helmrevisions", "", "v1", True, synthetic=True, backing=("secrets", "")
 )
 
+#: Plural kind names whose tables are adapted from backing Secrets, not from
+#: their own manifests — `views:` custom columns have nothing to evaluate
+#: against and are rejected at config load (issue #45).
+SYNTHETIC_VIEW_KINDS = frozenset({HELM_RELEASES_META.plural, HELM_REVISIONS_META.plural})
+
 
 def release_uid(namespace: str, name: str) -> str:
     """Stable synthetic uid for a release: the latest revision Secret (and
