@@ -118,8 +118,8 @@ logger = logging.getLogger(__name__)
 #: How often the app polls the forward registry for dead kubectl processes.
 _FORWARD_POLL_SECONDS = 2.0
 
-#: How long to wait for kubectl's readiness line before optimistically
-#: assuming a silent-but-running forward is fine.
+#: How long to wait for kubectl's readiness line before the start is failed
+#: explicitly — the silent child is terminated, never assumed to be ready.
 _FORWARD_READY_SECONDS = 5.0
 
 _MAX_MULTI_STREAM_PODS = 8
@@ -1479,6 +1479,13 @@ class KorvidApp(App[None]):
             status = await asyncio.to_thread(
                 registry.wait_ready, record.id, timeout=_FORWARD_READY_SECONDS
             )
+            if self._confirming_forwards.get(record.id) is not worker:
+                # A re-attach superseded this confirmation while it waited:
+                # the record was re-armed in place, so ``status`` may describe
+                # the replacement process — nothing observed here may be
+                # toasted or audited as this generation's result.
+                self._audit_forward("port-forward-start", spec, outcome="superseded by re-attach")
+                return
             if registry.get(record.id) is None:
                 # The user stopped the still-starting forward from :pf. Its
                 # deferred stop entry is queued behind this confirmation, so
@@ -1487,9 +1494,7 @@ class KorvidApp(App[None]):
                 self._audit_forward("port-forward-start", spec, outcome="stopped before ready")
                 return
             if status != "alive":
-                self._report_failed_forward_start(
-                    registry, record, status, worker=worker, reattached=reattached
-                )
+                self._report_failed_forward_start(registry, record, status, reattached=reattached)
                 return
             if reattached:
                 self._audit_forward("port-forward-start", spec, outcome="reattached")
@@ -1522,7 +1527,6 @@ class KorvidApp(App[None]):
         record: ForwardRecord,
         status: str,
         *,
-        worker: Worker[None],
         reattached: bool,
     ) -> None:
         """Handle a readiness handshake that did not end in ``alive``.
@@ -1530,22 +1534,19 @@ class KorvidApp(App[None]):
         A ``starting`` result means kubectl stayed silent through the wait
         window: readiness was never confirmed and liveness polling could not
         correct a false success later (it only detects exits), so the forward
-        is failed explicitly instead of reported ready on a guess.
+        is failed explicitly instead of reported ready on a guess. The caller
+        already verified this confirmation is the record's current one.
         """
         spec = record.spec
         if status == "starting":
             detail = f"kubectl did not confirm the forward within {_FORWARD_READY_SECONDS:g}s"
         else:
             detail = record.last_output or "kubectl exited before the forward was ready"
-        if self._confirming_forwards.get(record.id) is worker:
-            if reattached:
-                # A failed re-attach stays listed as broken for another try.
-                registry.fail_start(record.id)
-            else:
-                registry.stop(record.id)  # never worked — drop it from :pf
-        # else: a re-attach superseded this confirmation while the wait
-        # resolved — the record now runs a fresh process owned by a fresh
-        # confirmation, so only this generation's failure is reported.
+        if reattached:
+            # A failed re-attach stays listed as broken for another try.
+            registry.fail_start(record.id)
+        else:
+            registry.stop(record.id)  # never worked — drop it from :pf
         self.notify(f"Port-forward failed to start: {detail}", severity="error")
         self._audit_forward("port-forward-start", spec, outcome=f"error: {detail}")
 
