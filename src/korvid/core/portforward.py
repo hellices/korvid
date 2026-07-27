@@ -22,6 +22,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, Protocol
@@ -282,6 +283,16 @@ class ForwardRegistry:
         record = self._records.get(forward_id)
         if record is None or record.status != "broken":
             return None
+        # A record broken by EOF may still have its child running and holding
+        # the local port (poll() can lag the stream closing). Signal it down
+        # so the port check below reaps it instead of orphaning it.
+        lingering = record._proc
+        if (
+            lingering is not None
+            and lingering.poll() is None
+            and all(reaping is not lingering for reaping, _, _ in self._reaping)
+        ):
+            self._signal_stop(record)
         self._ensure_port_free(record.spec.local_port)
         replacement = self._spawn(record.spec)
         # Swap under the record lock: a stale watcher that already passed its
@@ -397,9 +408,11 @@ class ForwardRegistry:
                 for proc in live:
                     if proc.poll() is None:
                         proc.kill()
-                        # SIGKILL cannot be ignored — this wait is immediate
-                        # and reaps the child so no zombie outlives teardown.
-                        proc.wait()
+                        # SIGKILL cannot be ignored, but reaping a child stuck
+                        # in the kernel can still stall — bound the wait so
+                        # one wedged process cannot hang app exit forever.
+                        with suppress(subprocess.TimeoutExpired):
+                            proc.wait(timeout=_STOP_GRACE_SECONDS)
                 break
             time.sleep(_STOP_POLL_SECONDS)
         return records

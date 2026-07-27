@@ -1166,6 +1166,7 @@ async def test_superseded_confirmation_never_reports_success(tmp_path: Path) -> 
         replacement = app.run_worker(asyncio.sleep(0))
         stale = app.run_worker(app._confirm_forward(record))
         app._confirming_forwards[record.id] = [stale, replacement]
+        app._current_confirmations[record.id] = replacement
         procs[0].stdout.feed("Forwarding from 127.0.0.1:18080 -> 80\n")
         await stale.wait()
         # The observed 'alive' belongs to the replacement generation — the
@@ -1174,5 +1175,59 @@ async def test_superseded_confirmation_never_reports_success(tmp_path: Path) -> 
         assert registry.get(record.id) is record
         # ...and it removes only its own tracking entry on the way out.
         assert app._confirming_forwards.get(record.id) == [replacement]
+        await until(pilot, lambda: "superseded by re-attach" in _audit_lines(tmp_path))
+        procs[0].stdout.feed(None)  # release the reader thread
+
+
+async def test_finished_replacement_does_not_promote_a_stale_confirmation(
+    tmp_path: Path,
+) -> None:
+    """A superseded confirmation stays superseded after the current one exits.
+
+    The current generation is tracked by an explicit token, not by position
+    in the pending list — otherwise a replacement finishing (and removing
+    itself) before the stale worker resumed would wrongly promote the stale
+    worker back to "current" and let it claim the replacement's result.
+    """
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    notices: list[str] = []
+    original = app.notify
+
+    def _capture(message: str, **kwargs: Any) -> Any:
+        notices.append(message)
+        return original(message, **kwargs)
+
+    async with app.run_test() as pilot:
+        app.notify = _capture  # type: ignore[method-assign]  # test spy
+        await _wait_rows(app, pilot)
+        record = registry.start(
+            ForwardSpec(
+                kind="pods", namespace="default", name="api-1", local_port=18080, remote_port=80
+            )
+        )
+        # The replacement confirmation already finished and cleaned up its
+        # token — only the superseded worker is still pending.
+        stale = app.run_worker(app._confirm_forward(record))
+        app._confirming_forwards[record.id] = [stale]
+        app._current_confirmations.pop(record.id, None)
+        procs[0].stdout.feed("Forwarding from 127.0.0.1:18080 -> 80\n")
+        await stale.wait()
+        # Being last in the pending list must not make the stale worker
+        # "current" again — it may not toast the replacement's success.
+        assert not any(n.startswith("Forwarding") for n in notices)
         await until(pilot, lambda: "superseded by re-attach" in _audit_lines(tmp_path))
         procs[0].stdout.feed(None)  # release the reader thread

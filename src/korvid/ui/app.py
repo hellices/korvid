@@ -456,6 +456,11 @@ class KorvidApp(App[None]):
         #: audit for such a record is serialized behind every outstanding
         #: confirmation so each start entry always reaches the log first.
         self._confirming_forwards: dict[int, list[Worker[None]]] = {}
+        #: forward id -> the current-generation confirmation worker. An
+        #: explicit token, not the pending list's tail: a finished current
+        #: generation removes its token, and a still-pending superseded
+        #: worker must never be promoted back to "current" by that.
+        self._current_confirmations: dict[int, Worker[None]] = {}
         #: stops deferred behind a pending confirmation, keyed by forward id;
         #: teardown flushes leftovers so a cancelled worker can't lose them.
         self._deferred_stop_audits: dict[int, ForwardSpec] = {}
@@ -1463,9 +1468,7 @@ class KorvidApp(App[None]):
             return
         # Popen returning only proves the child exists — success is reported
         # after kubectl confirms the listener (or fails the bind/RBAC check).
-        self._confirming_forwards.setdefault(record.id, []).append(
-            self.run_worker(self._confirm_forward(record))
-        )
+        self._track_confirmation(record)
 
     async def _confirm_forward(self, record: ForwardRecord, *, reattached: bool = False) -> None:
         """Toast and audit a forward start only once kubectl signals ready.
@@ -1523,17 +1526,30 @@ class KorvidApp(App[None]):
             # audit is enqueued (above) — stops defer behind every
             # outstanding confirmation, so a superseded generation must stay
             # tracked until its entry cannot land after a stop anymore.
-            entries = self._confirming_forwards.get(record.id)
-            if entries is not None:
-                with contextlib.suppress(ValueError):
-                    entries.remove(worker)
-                if not entries:
-                    del self._confirming_forwards[record.id]
+            self._untrack_confirmation(record.id, worker)
+
+    def _untrack_confirmation(self, forward_id: int, worker: Worker[None]) -> None:
+        """Remove one finished confirmation generation from the tracking maps."""
+        entries = self._confirming_forwards.get(forward_id)
+        if entries is not None:
+            with contextlib.suppress(ValueError):
+                entries.remove(worker)
+            if not entries:
+                del self._confirming_forwards[forward_id]
+        # Only the current generation clears its own token — a superseded
+        # worker leaving must not disturb the replacement's marker.
+        if self._current_confirmations.get(forward_id) is worker:
+            del self._current_confirmations[forward_id]
+
+    def _track_confirmation(self, record: ForwardRecord, *, reattached: bool = False) -> None:
+        """Spawn a readiness confirmation and register it as the current one."""
+        worker = self.run_worker(self._confirm_forward(record, reattached=reattached))
+        self._confirming_forwards.setdefault(record.id, []).append(worker)
+        self._current_confirmations[record.id] = worker
 
     def _current_confirmation(self, forward_id: int) -> Worker[None] | None:
         """The forward's current-generation confirmation worker, if any."""
-        entries = self._confirming_forwards.get(forward_id)
-        return entries[-1] if entries else None
+        return self._current_confirmations.get(forward_id)
 
     def _report_failed_forward_start(
         self,
@@ -1657,9 +1673,7 @@ class KorvidApp(App[None]):
             # poll would silently swallow a breakage of the fresh process.
             self._broken_forwards.discard(record.id)
             # Same readiness handshake as a fresh start (issue #38 review).
-            self._confirming_forwards.setdefault(record.id, []).append(
-                self.run_worker(self._confirm_forward(record, reattached=True))
-            )
+            self._track_confirmation(record, reattached=True)
 
         def _on_reattach_error(record: ForwardRecord, exc: Exception) -> None:
             self._audit_forward("port-forward-start", record.spec, outcome=f"error: {exc}")

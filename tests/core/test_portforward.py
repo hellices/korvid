@@ -329,6 +329,55 @@ def test_stop_all_covers_previously_stopped_stragglers() -> None:
     assert procs[0].killed
 
 
+def test_reattach_stops_a_lingering_child_before_respawning() -> None:
+    """An EOF-broken record may still have a running child holding the port."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    procs[0].stdout.feed("error: unable to listen\n")
+    # Stream closes while poll() still reports the child as running.
+    procs[0].stdout.feed(None)
+    assert registry.wait_ready(record.id, timeout=2.0) == "broken"
+    assert registry.reattach(record.id) is record
+    assert procs[0].terminated, "the lingering child was orphaned by the re-attach"
+    assert len(procs) == 2
+    assert record.status == "starting"
+    procs[1].stdout.feed(None)
+
+
+def test_stop_all_does_not_hang_on_an_unreapable_straggler() -> None:
+    """A kill-immune child must not block app exit forever."""
+    procs: list[_FakeProc] = []
+
+    class _UnreapableProc(_StubbornProc):
+        def kill(self) -> None:
+            self.killed = True  # SIGKILL sent; the child is stuck in the kernel
+
+        def wait(self, timeout: float | None = None) -> int:
+            raise subprocess.TimeoutExpired(cmd=self.argv, timeout=timeout or 0.0)
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _UnreapableProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    registry.start(_spec())
+    clock = monotonic()
+    first = iter([clock])
+
+    def _mono() -> float:
+        return next(first, clock + 60.0)
+
+    with (
+        patch("korvid.core.portforward.monotonic", side_effect=_mono),
+        patch("korvid.core.portforward.time.sleep"),
+    ):
+        records = registry.stop_all()  # must return despite the wedged child
+    assert len(records) == 1
+    assert procs[0].killed
+
+
 def test_candidate_ports_excludes_booleans() -> None:
     """bool is an int subclass — `port: true` must not become prefill 'True'."""
     manifest = {"spec": {"containers": [{"ports": [{"containerPort": True}]}]}}
