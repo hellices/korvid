@@ -1,0 +1,61 @@
+id: image-pull-typo
+question: Pod web-1 in namespace front is stuck in ImagePullBackOff. What is the cause?
+screen: "resource view: pods, namespace front, selected: front/web-1 (ImagePullBackOff)"
+root_cause: image_pull_typo
+grading:
+  must_mention:
+    - [imagepullbackoff, image pull, pull the image, pulling the image]
+    - [manifest unknown, not found, does not exist, no such tag, wrong tag, typo]
+  must_not_mention:
+    # Reciprocal to image-pull-auth: a hedged "either a wrong tag or bad
+    # credentials" answer must fail. Positive claims only — explicitly
+    # ruling out an auth failure still passes.
+    - [unauthorized, "401", invalid credentials, bad credentials, missing pull secret,
+       wrong pull secret, authentication failure, authentication failed, access denied]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: web-1, namespace: front}
+      contains: manifest unknown
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: web-1
+        namespace: front
+        uid: pod-pulltypo-1
+        creationTimestamp: "2026-07-27T07:10:00Z"
+        labels: {app: web}
+      spec:
+        nodeName: node-a
+        containers:
+          - name: web
+            image: front/web:v99
+      status:
+        phase: Pending
+        conditions:
+          - {type: Ready, status: "False", reason: ContainersNotReady}
+        containerStatuses:
+          - name: web
+            ready: false
+            restartCount: 0
+            state:
+              waiting:
+                reason: ImagePullBackOff
+                message: Back-off pulling image "front/web:v99"
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+  events:
+    - type: Warning
+      reason: Failed
+      count: 5
+      lastTimestamp: "2026-07-27T07:26:00Z"
+      message: >-
+        Failed to pull image "front/web:v99": rpc error: code = NotFound
+        desc = manifest for front/web:v99 not found: manifest unknown
+      involvedObject: {kind: Pod, name: web-1, namespace: front, uid: pod-pulltypo-1}
+  logs: {}

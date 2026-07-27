@@ -1,0 +1,62 @@
+id: healthy-restart-history
+question: >-
+  Pod cache-1 in namespace shop shows 2 restarts. Is something wrong with it
+  right now?
+screen: "resource view: pods, namespace shop, selected: shop/cache-1 (Running, restarts: 2)"
+root_cause: none
+grading:
+  must_mention:
+    - [healthy, no issues, no problems, fine, running normally, not a current problem, stable, recovered]
+  must_not_mention:
+    - [crashloopbackoff, crash loop, crashlooping, restart loop]
+    - [oomkilled, imagepullbackoff]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: cache-1, namespace: shop}
+      contains: "ready  restarts=2"
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: cache-1
+        namespace: shop
+        uid: pod-cache-1
+        creationTimestamp: "2026-07-20T09:00:00Z"
+        labels: {app: cache}
+      spec:
+        nodeName: node-a
+        containers:
+          - name: cache
+            image: shop/cache:v4
+      status:
+        phase: Running
+        conditions:
+          - {type: Ready, status: "True"}
+        containerStatuses:
+          - name: cache
+            ready: true
+            restartCount: 2
+            state:
+              running: {startedAt: "2026-07-21T02:15:00Z"}
+            lastState:
+              terminated:
+                exitCode: 255
+                reason: Error
+                startedAt: "2026-07-21T02:10:00Z"
+                finishedAt: "2026-07-21T02:14:30Z"
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+  events: []
+  logs:
+    shop/cache-1/cache:
+      current:
+        - "cache v4 started"
+        - "cache warm, hit ratio 0.94"
+      previous:
+        - "cache v4 started"
+        - "lost connection to peer, exiting for restart"
