@@ -1478,3 +1478,20 @@ class TestSwitchContext:
         assert load_calls[-1]["context"] == "ctx-b"
         assert kube._pod_resize_supported is None
         assert kube._provider_info is None
+
+    async def test_stalled_retarget_load_times_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The retarget load is bounded like the probe: an exec credential
+        plugin that succeeded during the probe but stalls on this second
+        invocation must surface as a timeout into the caller's recovery
+        path, not hang the already-torn-down session (issue #36 review)."""
+        import asyncio
+
+        async def stalling_load(**kwargs: Any) -> None:
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(k8s_config, "load_kube_config", stalling_load)
+        monkeypatch.setattr(client_mod, "_PROBE_TIMEOUT", 0.05)
+
+        kube = KubeClient()
+        with pytest.raises(TimeoutError):
+            await kube.switch_context("ctx-slow-creds")

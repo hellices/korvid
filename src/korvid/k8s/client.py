@@ -234,9 +234,13 @@ class KubeClient(WriteOps):
         ``ApiClient`` is closed here, which would otherwise kill their
         streams mid-read. The kubeconfig is loaded as the global default so
         per-session ``WsApiClient`` instances (exec/transfer) follow along.
+        The load is bounded like the probe: an exec credential plugin that
+        succeeded during the probe but stalls on this second invocation must
+        surface as a timeout into the caller's recovery path, not hang the
+        already-torn-down session forever.
         """
         old_api = self._api
-        await k8s_config.load_kube_config(context=context)
+        await asyncio.wait_for(k8s_config.load_kube_config(context=context), _PROBE_TIMEOUT)
         self._api = k8s_client.ApiClient()
         self._core_v1 = k8s_client.CoreV1Api(self._api)
         # Per-connection caches describe the previous cluster.

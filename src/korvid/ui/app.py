@@ -1764,15 +1764,35 @@ class KorvidApp(App[None]):
         parts = row_key.split("/", 1)
         if len(parts) != 2:
             return
-        namespace, name = parts[0], parts[1]
+        await self._open_containers_screen(parts[0], parts[1])
 
+    async def _open_containers_screen(self, namespace: str, name: str) -> None:
+        """Push the containers screen for a pod; shell/logs run per pick.
+
+        The row fetch and the open screen both span awaited gaps, so the
+        context epoch captured here cancels stale picks: a shell or log
+        stream started after a completed switch would target the new cluster
+        with the old cluster's pod selection.
+        """
+        epoch = self._ctx_epoch
         rows = await self._build_container_rows(namespace, name)
         if not rows:
             self.notify("No containers found for this pod", severity="warning")
             return
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The row fetch awaited through a context switch: the selection
+            # belongs to the old cluster.
+            return
 
         def _on_pick(result: tuple[str, str] | None) -> None:
             if result is None:
+                return
+            if self._ctx_switching or epoch != self._ctx_epoch:
+                self.notify(
+                    f"container action on {name} cancelled - the kube context"
+                    " changed while the containers screen was open",
+                    severity="warning",
+                )
                 return
             action, container = result
             if action == "shell":
