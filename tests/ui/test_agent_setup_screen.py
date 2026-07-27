@@ -14,6 +14,8 @@ from textual.widgets import Input, OptionList, Static
 from korvid.agent.setup import AgentConfigurator, AgentSettings, DeviceLoginPrompt
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 
+from .waits import until
+
 
 class FakeConfigurator(AgentConfigurator):
     def __init__(self, test_error: str | None = None, models: list[str] | None = None) -> None:
@@ -400,11 +402,16 @@ async def test_ollama_provider_suggests_the_small_profile() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         _select(app, "#setup-provider", "ollama")
-        await pilot.press("enter")
-        await pilot.press("enter")
-        await _pump(pilot)
-        await pilot.press("enter")
-        await _pump(pilot)
+        await pilot.press("enter")  # pick provider
+        await pilot.press("enter")  # accept base_url default
+        # No models from the API -> typed model input fallback.
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#setup-model", Input).display,
+            label="model input shown",
+        )
+        await pilot.press("enter")  # accept model default
+        await until(pilot, lambda: app.result is not None, label="wizard result")
         assert isinstance(app.result, AgentSettings)
         assert app.result.profile == "small"
 

@@ -898,3 +898,38 @@ def test_agent_profile_invalid_values_fall_back_to_full(tmp_path: Path) -> None:
     p.write_text("agent:\n  provider: ollama\n  profile: tiny\n")
     cfg = load_config(p)
     assert cfg.agent_profile == "full"
+
+
+def test_save_agent_config_persists_the_small_profile(tmp_path: Path) -> None:
+    """The wizard's profile suggestion must survive a restart (issue #71):
+    saving `small` writes agent.profile so the next start rebuilds the same
+    reduced surface the user just tested."""
+    p = tmp_path / "c.yaml"
+    save_agent_config(
+        p,
+        provider="ollama",
+        auth_method="none",
+        base_url="http://localhost:11434",
+        model="qwen3:8b",
+        api_key_env=None,
+        profile="small",
+    )
+    assert load_config(p).agent_profile == "small"
+
+
+def test_save_agent_config_drops_the_profile_when_back_to_full(tmp_path: Path) -> None:
+    """Saving `full` removes an existing `profile: small` — otherwise the
+    wizard's live choice diverges from what is restored after restart."""
+    p = tmp_path / "c.yaml"
+    p.write_text("agent:\n  provider: ollama\n  model: qwen3:8b\n  profile: small\n")
+    save_agent_config(
+        p,
+        provider="openai-compat",
+        auth_method="api_key",
+        base_url="https://api.openai.com/v1",
+        model="gpt-4o-mini",
+        api_key_env="OPENAI_API_KEY",
+        profile="full",
+    )
+    assert load_config(p).agent_profile == "full"
+    assert "profile" not in p.read_text()

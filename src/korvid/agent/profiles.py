@@ -60,8 +60,8 @@ _SMALL_UI_TOOL_NAMES = ("open_logs", "open_describe")
 
 #: Concise description overrides for schemas that are verbose in the full
 #: profile — every request retransmits the schemas, so on a 4k-token
-#: serving context the wording is a real cost (EasyTool; verified with the
-#: #69 harness rather than assumed).
+#: serving context the wording is a real cost (EasyTool). The effect is
+#: measurable per endpoint with the #69 harness (`--profile small`).
 _SMALL_DESCRIPTIONS: dict[str, str] = {
     "diagnose_pod": (
         "One-call diagnosis of a broken pod: container states, exit codes, "
