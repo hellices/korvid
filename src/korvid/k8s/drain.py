@@ -24,9 +24,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from korvid.k8s.errors import ApiStatusError
+
 _MIRROR_ANNOTATION = "kubernetes.io/config.mirror"
 #: Phases whose pods no longer count against a PodDisruptionBudget.
 _TERMINAL_PHASES = frozenset({"Succeeded", "Failed"})
+
+
+def is_pdb_denial(exc: ApiStatusError) -> bool:
+    """Whether a 429 from the Eviction API is a PodDisruptionBudget
+    admission denial. Not every 429 is: API Priority and Fairness (and
+    other apiserver throttling) answers 429 too, and must be treated as
+    transient overload rather than "blocked by budget". A PDB denial's
+    ``Status`` body carries a ``DisruptionBudget`` cause and the message
+    "would violate the pod's disruption budget"."""
+    if exc.status != 429:
+        return False
+    detail = f"{exc.body} {exc.reason}"
+    return "DisruptionBudget" in detail or "disruption budget" in detail.lower()
 
 
 @dataclass(frozen=True)

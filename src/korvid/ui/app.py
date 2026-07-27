@@ -55,7 +55,7 @@ from korvid.core.sorting import SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
-from korvid.k8s.drain import DrainPlan, DrainTarget
+from korvid.k8s.drain import DrainPlan, DrainTarget, is_pdb_denial
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
@@ -466,6 +466,9 @@ class KorvidApp(App[None]):
         # Bounded post-eviction termination wait (tests shrink these).
         self._drain_wait_timeout: float = 120.0
         self._drain_wait_poll: float = 2.0
+        # Bounded retry for throttled (non-PDB) 429s during eviction.
+        self._evict_throttle_retries: int = 2
+        self._evict_throttle_backoff: float = 1.0
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -3048,26 +3051,34 @@ class KorvidApp(App[None]):
             self._refresh_status()
 
     async def _evict_one(self, ops: WriteOps, target: DrainTarget) -> str:
-        """Issue one eviction; returns 'evicted', 'blocked' (PDB refused,
-        429 - warn live and move on instead of hanging on a budget that may
-        never free) or 'failed'. Cancellation propagates."""
-        try:
-            await ops.evict_pod(target.namespace, target.name, uid=target.uid)
-        except asyncio.CancelledError:
-            raise
-        except ApiStatusError as exc:
-            if exc.status == 429:
-                self.notify(
-                    f"eviction refused by PodDisruptionBudget: {target.ref}",
-                    severity="warning",
-                )
-                return "blocked"
-            self.notify(f"eviction failed: {target.ref}: {exc}", severity="error")
-            return "failed"
-        except Exception as exc:
-            self.notify(f"eviction failed: {target.ref}: {exc}", severity="error")
-            return "failed"
-        return "evicted"
+        """Issue one eviction; returns 'evicted', 'blocked' (PDB admission
+        denial - warn live and move on instead of hanging on a budget that
+        may never free) or 'failed'. A 429 *without* the PDB denial markers
+        is apiserver throttling (API Priority and Fairness): retried with
+        bounded backoff instead of being misreported as pdb-blocked.
+        Cancellation propagates."""
+        for attempt in range(self._evict_throttle_retries + 1):
+            try:
+                await ops.evict_pod(target.namespace, target.name, uid=target.uid)
+            except asyncio.CancelledError:
+                raise
+            except ApiStatusError as exc:
+                if is_pdb_denial(exc):
+                    self.notify(
+                        f"eviction refused by PodDisruptionBudget: {target.ref}",
+                        severity="warning",
+                    )
+                    return "blocked"
+                if exc.status == 429 and attempt < self._evict_throttle_retries:
+                    await asyncio.sleep(self._evict_throttle_backoff * (attempt + 1))
+                    continue
+                self.notify(f"eviction failed: {target.ref}: {exc}", severity="error")
+                return "failed"
+            except Exception as exc:
+                self.notify(f"eviction failed: {target.ref}: {exc}", severity="error")
+                return "failed"
+            return "evicted"
+        return "failed"  # not reached: the last attempt returns above
 
     async def _recheck_drain_plan(
         self,

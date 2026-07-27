@@ -425,7 +425,11 @@ class KubeClient(WriteOps):
             raw: bytes = await resp.read()
             return raw
         except k8s_client.exceptions.ApiException as exc:
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+            raise ApiStatusError(
+                int(exc.status or 0),
+                str(exc.reason or ""),
+                body=str(getattr(exc, "body", "") or ""),
+            ) from exc
 
     async def can_i(
         self,

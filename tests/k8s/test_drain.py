@@ -4,7 +4,8 @@ pods are flagged, and PDB-violating evictions are called out up front."""
 
 from typing import Any
 
-from korvid.k8s.drain import DrainPlan, build_drain_plan
+from korvid.k8s.drain import DrainPlan, build_drain_plan, is_pdb_denial
+from korvid.k8s.errors import ApiStatusError
 
 
 def _pod(
@@ -359,3 +360,29 @@ def test_controlled_pod_is_not_flagged_unmanaged() -> None:
     plan = build_drain_plan([_pod("web-1", owner_kind="ReplicaSet")], [])
     assert plan.targets[0].unmanaged is False
     assert "no controller" not in "\n".join(plan.preview_lines())
+
+
+def test_pdb_denial_is_recognized_by_status_body_cause() -> None:
+    exc = ApiStatusError(
+        429,
+        "Too Many Requests",
+        body='{"details":{"causes":[{"reason":"DisruptionBudget"}]}}',
+    )
+    assert is_pdb_denial(exc) is True
+
+
+def test_pdb_denial_is_recognized_by_message() -> None:
+    exc = ApiStatusError(429, "Cannot evict pod as it would violate the pod's disruption budget.")
+    assert is_pdb_denial(exc) is True
+
+
+def test_plain_throttling_429_is_not_a_pdb_denial() -> None:
+    """API Priority and Fairness answers 429 too - without the PDB markers
+    it must be treated as transient overload, not a budget block."""
+    exc = ApiStatusError(429, "Too Many Requests")
+    assert is_pdb_denial(exc) is False
+
+
+def test_non_429_is_never_a_pdb_denial() -> None:
+    exc = ApiStatusError(500, "disruption budget mumble")
+    assert is_pdb_denial(exc) is False

@@ -292,7 +292,11 @@ async def test_drain_pdb_blocked_eviction_warns_and_continues(tmp_path: Path) ->
     )
     rec = NodeRecorder(
         plan=plan,
-        evict_errors={"db-1": ApiStatusError(429, "Cannot evict pod: PDB violated")},
+        evict_errors={
+            "db-1": ApiStatusError(
+                429, "Cannot evict pod as it would violate the pod's disruption budget."
+            )
+        },
     )
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
@@ -622,3 +626,69 @@ async def test_uncordon_is_refused_while_node_is_being_drained(tmp_path: Path) -
             lambda: audit_path.exists() and "evicted 1" in audit_path.read_text(),
             label="drain finished",
         )
+
+
+async def test_throttled_429_eviction_is_retried_not_reported_pdb_blocked(
+    tmp_path: Path,
+) -> None:
+    """A 429 without the PDB denial markers is apiserver throttling
+    (API Priority and Fairness): retried with backoff, and never
+    misreported as pdb-blocked."""
+
+    class ThrottlingRecorder(NodeRecorder):
+        def __init__(self, plan: DrainPlan) -> None:
+            super().__init__(plan=plan)
+            self.throttles_left = 1
+
+        async def evict_pod(self, namespace: str, name: str, *, uid: str | None = None) -> None:
+            if self.throttles_left:
+                self.throttles_left -= 1
+                raise ApiStatusError(429, "Too Many Requests")
+            await super().evict_pod(namespace, name, uid=uid)
+
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = ThrottlingRecorder(plan)
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    app._evict_throttle_backoff = 0.01
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        await _confirm_typed(pilot, "worker-1")
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "evicted 1" in audit_path.read_text(),
+            label="drain finished",
+        )
+        assert ("evict", "default", "web-1", "uid-web-1") in rec.calls
+        entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        assert entries[-1]["outcome"] == "success"
+        assert "pdb-blocked 0" in entries[-1]["detail"]
+
+
+async def test_persistently_throttled_eviction_counts_as_failed(tmp_path: Path) -> None:
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = NodeRecorder(
+        plan=plan,
+        evict_errors={"web-1": ApiStatusError(429, "Too Many Requests")},
+    )
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    app._evict_throttle_retries = 1
+    app._evict_throttle_backoff = 0.01
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        await _confirm_typed(pilot, "worker-1")
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "failed 1" in audit_path.read_text(),
+            label="drain finished",
+        )
+        entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        assert entries[-1]["outcome"].startswith("partial")
+        assert "pdb-blocked 0" in entries[-1]["detail"]
