@@ -168,7 +168,7 @@ class AgentRuntime:
         self._max_result_chars = max_result_chars
         # The small profile's size bound assumes one result per iteration;
         # prompt text alone does not enforce that, so extra parallel calls
-        # in one response are refused at dispatch (issue #71).
+        # in one response are discarded at dispatch (issue #71).
         self._max_tool_calls_per_iteration = max_tool_calls_per_iteration
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
         self._total_in = 0
@@ -230,24 +230,27 @@ class AgentRuntime:
         self,
         tool_calls: list[dict[str, Any]],
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Execute each tool call; yield Started/Finished events; append results."""
+        """Execute the kept tool calls; yield Started/Finished events; append results.
+
+        Excess parallel calls (beyond `max_tool_calls_per_iteration`) are
+        discarded entirely: they are never executed and never stored — not
+        even a refusal message — because retaining their arguments would
+        let a parallel-call-happy model grow history past the profile
+        budget mid-turn (trimming never drops the newest turn). The
+        assistant message stores only the kept calls (see `run_turn`), so
+        the provider protocol stays valid with one tool message per kept
+        call. The model learns the rule from a fixed-size notice appended
+        to the last kept result; the UI still sees a Finished(ok=False)
+        event per discarded call.
+        """
         call_limit = self._max_tool_calls_per_iteration
-        for index, tc in enumerate(tool_calls):
+        kept = tool_calls if call_limit is None else tool_calls[:call_limit]
+        excess = [] if call_limit is None else tool_calls[call_limit:]
+        for index, tc in enumerate(kept):
             call_id = str(tc["id"])
             name = str(tc["name"])
             arguments = str(tc["arguments"])
             yield ToolCallStarted(call_id=call_id, name=name, arguments=arguments)
-            if call_limit is not None and index >= call_limit:
-                # Every call id still gets a tool message so the provider
-                # protocol stays valid; the refusal teaches the model the
-                # rule its profile prompt states.
-                result = (
-                    "ERROR: too many tool calls in one response — call one "
-                    "tool at a time and wait for its result."
-                )
-                yield ToolCallFinished(call_id=call_id, name=name, ok=False, summary=result[:120])
-                self._messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
-                continue
             try:
                 parsed = json.loads(arguments or "{}")
             except json.JSONDecodeError:
@@ -264,9 +267,16 @@ class AgentRuntime:
                         # Same ingest cap as ToolExecutor — a huge exception
                         # message must not bypass the limit into history.
                         result = cap_result(f"ERROR: {exc}")
+            if excess and index == len(kept) - 1:
+                result += (
+                    f"\n\nNOTE: {len(excess)} extra tool call(s) in this response "
+                    "were discarded — call one tool at a time and wait for its result."
+                )
             if self._max_result_chars is not None:
                 # Head+tail compaction, not a prefix cut: reports place
                 # their evidence (events, log excerpts) last by design.
+                # Applied after the notice so the bound holds strictly
+                # (the notice sits in the tail, which compaction keeps).
                 result = compact_result(result, self._max_result_chars)
             yield ToolCallFinished(
                 call_id=call_id,
@@ -275,6 +285,14 @@ class AgentRuntime:
                 summary=result[:120],
             )
             self._messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+        for tc in excess:
+            summary = "discarded: too many tool calls in one response"
+            yield ToolCallStarted(
+                call_id=str(tc["id"]), name=str(tc["name"]), arguments=str(tc["arguments"])
+            )
+            yield ToolCallFinished(
+                call_id=str(tc["id"]), name=str(tc["name"]), ok=False, summary=summary
+            )
 
     async def run_turn(
         self,
@@ -332,13 +350,19 @@ class AgentRuntime:
 
             assistant_msg: dict[str, Any] = {"role": "assistant", "content": state.text}
             if state.tool_calls:
+                # Store only the calls _dispatch_tools will keep — excess
+                # parallel calls (arguments included) must not enter history,
+                # and the provider protocol needs exactly one tool message
+                # per stored call.
+                limit = self._max_tool_calls_per_iteration
+                stored = state.tool_calls if limit is None else state.tool_calls[:limit]
                 assistant_msg["tool_calls"] = [
                     {
                         "id": tc["id"],
                         "type": "function",
                         "function": {"name": tc["name"], "arguments": tc["arguments"]},
                     }
-                    for tc in state.tool_calls
+                    for tc in stored
                 ]
             self._messages.append(assistant_msg)
 

@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -568,8 +569,7 @@ async def test_profile_result_cap_preserves_the_tail_evidence() -> None:
 
 async def test_tool_call_limit_per_iteration_is_enforced() -> None:
     """The small prompt says 'call one tool at a time' but text does not
-    enforce anything: extra parallel calls must be refused (with a proper
-    tool message per call id, keeping the provider protocol valid) so one
+    enforce anything: extra parallel calls must be discarded so one
     iteration cannot blow the per-turn size bound."""
     executed: list[str] = []
 
@@ -592,9 +592,40 @@ async def test_tool_call_limit_per_iteration_is_enforced() -> None:
     runtime = AgentRuntime(p, SpyExecutor(), max_tool_calls_per_iteration=1)
     events = await collect(runtime, "go")
     assert executed == ["get_logs"]
+    assistant = next(m for m in p.calls[1] if m["role"] == "assistant")
+    assert len(assistant["tool_calls"]) == 1  # excess calls never enter history
     tool_msgs = [m for m in p.calls[1] if m["role"] == "tool"]
-    assert len(tool_msgs) == 3  # every call id answered
-    assert "ERROR" in tool_msgs[1]["content"]
-    assert "one tool" in tool_msgs[1]["content"]
+    assert len(tool_msgs) == 1  # matches the stored assistant tool calls
+    assert "2 extra tool call" in tool_msgs[0]["content"]
+    assert "one tool at a time" in tool_msgs[0]["content"]
     finished = [e for e in events if isinstance(e, ToolCallFinished)]
     assert [f.ok for f in finished] == [True, False, False]
+
+
+async def test_discarded_excess_calls_do_not_grow_history() -> None:
+    """Refusing execution is not enough: the arguments of excess parallel
+    calls (and per-call refusal messages) must not be retained either, or a
+    model emitting many large parallel calls each iteration still exceeds
+    the history budget mid-turn (trimming never drops the newest turn)."""
+
+    class SpyExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    huge = json.dumps({"manifest": "x" * 50_000})
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "{}"},
+                {"type": "tool_call", "id": "c2", "name": "apply", "arguments": huge},
+                {"type": "tool_call", "id": "c3", "name": "apply", "arguments": huge},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, SpyExecutor(), max_tool_calls_per_iteration=1)
+    await collect(runtime, "go")
+    retained = json.dumps(p.calls[1])
+    assert "x" * 1_000 not in retained
+    assert len(retained) < 2_000

@@ -35,7 +35,7 @@ SMALL_MAX_HISTORY_CHARS = 24_000
 #: the executor's own 8k ingest cap instead.
 SMALL_MAX_RESULT_CHARS = 3_000
 #: One result per iteration, enforced at dispatch (extra parallel calls in
-#: a response are refused with an instructive error) — the size bound
+#: a response are discarded, never entering history) — the size bound
 #: below only holds if the prompt's "call one tool at a time" is a rule,
 #: not a suggestion.
 SMALL_MAX_TOOL_CALLS_PER_ITERATION = 1
@@ -103,8 +103,9 @@ class AgentProfile:
     #: Oversized results are compacted keeping head AND tail — reports like
     #: diagnose_pod place their evidence sections last by design.
     max_result_chars: int | None
-    #: When set, at most this many tool calls are executed per model
-    #: response; extra parallel calls are refused at dispatch.
+    #: When set, at most this many tool calls are kept per model response;
+    #: extra parallel calls are discarded at dispatch (arguments and all,
+    #: so they cannot grow history).
     max_tool_calls_per_iteration: int | None
     system_prompt: str
     ui_prompt: str
