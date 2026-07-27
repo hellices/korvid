@@ -900,13 +900,14 @@ def test_agent_profile_explicit_full_is_preserved(tmp_path: Path) -> None:
     assert cfg.agent_profile == "full"
 
 
-def test_agent_profile_invalid_values_fall_back_to_unset(tmp_path: Path) -> None:
-    """An unknown profile must not crash startup or half-configure the
-    agent — unset keeps today's runtime behavior (full)."""
+def test_agent_profile_invalid_values_fall_back_to_full(tmp_path: Path) -> None:
+    """A present-but-unknown profile must not crash startup or half-configure
+    the agent — it falls back to `full` (not unset) so a typo keeps today's
+    runtime behavior and the wizard never silently turns it into `small`."""
     p = tmp_path / "config.yaml"
     p.write_text("agent:\n  provider: ollama\n  profile: tiny\n")
     cfg = load_config(p)
-    assert cfg.agent_profile is None
+    assert cfg.agent_profile == "full"
 
 
 def test_save_agent_config_persists_the_small_profile(tmp_path: Path) -> None:

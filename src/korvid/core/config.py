@@ -260,12 +260,19 @@ def _parse_buffer_lines(value: Any) -> int:
 
 
 def _parse_profile(value: Any) -> str | None:
-    """Coerce `agent.profile` to a known profile name; None when unset, and
-    fall back to None for an unknown value too so it never crashes startup
-    or half-configures the agent (the runtime treats None as `full`)."""
+    """Coerce `agent.profile` to a known profile name.
+
+    None only when the key is absent — that is the "unset" state the `:ai`
+    wizard is allowed to fill with its Ollama suggestion. A present but
+    unknown value falls back to `full` (never crashing startup) so a typo
+    keeps today's runtime behavior AND stays stable through the wizard
+    instead of silently becoming `small`.
+    """
+    if value is None:
+        return None
     if isinstance(value, str) and value.strip().lower() in ("full", "small"):
         return value.strip().lower()
-    return None
+    return "full"
 
 
 def _parse_num_ctx(value: Any) -> int:

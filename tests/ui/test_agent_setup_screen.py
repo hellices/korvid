@@ -415,7 +415,13 @@ async def test_ollama_provider_suggests_the_small_profile() -> None:
             label="model input shown",
         )
         await pilot.press("enter")  # accept model default
-        await until(pilot, lambda: app.result is not None, label="wizard result")
+        # app.result starts as the "unset" sentinel, so wait for the actual
+        # AgentSettings the dismiss callback produces — not merely non-None.
+        await until(
+            pilot,
+            lambda: isinstance(app.result, AgentSettings),
+            label="wizard result",
+        )
         assert isinstance(app.result, AgentSettings)
         assert app.result.profile == "small"
 
@@ -450,7 +456,13 @@ async def test_explicit_full_profile_survives_the_ollama_wizard() -> None:
             label="model input shown",
         )
         await pilot.press("enter")  # accept model default
-        await until(pilot, lambda: app.result is not None, label="wizard result")
+        # app.result starts as the "unset" sentinel, so wait for the actual
+        # AgentSettings the dismiss callback produces — not merely non-None.
+        await until(
+            pilot,
+            lambda: isinstance(app.result, AgentSettings),
+            label="wizard result",
+        )
         assert isinstance(app.result, AgentSettings)
         assert app.result.profile == "full"
 
