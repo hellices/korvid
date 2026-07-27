@@ -1497,3 +1497,77 @@ async def _overflow_stream(
         yield LogLine(pod=pod, container=container, text=f"line{i}")
     if follow:
         await asyncio.Event().wait()
+
+
+async def test_l_refused_while_context_switching() -> None:
+    """`l` during a :ctx switch must not spawn streams: they would attach to
+    whichever cluster wins the swap while labeled with the old selection
+    (issue #84)."""
+    fake = FakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        app._ctx_switching = True
+        try:
+            await pilot.press("l")
+            await pilot.pause(0.05)
+        finally:
+            app._ctx_switching = False
+        assert app.query_one(LogPane).display is False
+        msgs = [n.message for n in app._notifications]
+        assert any("context switch is in progress" in m for m in msgs)
+
+
+async def test_multi_logs_refused_while_context_switching() -> None:
+    """`L` (multi-stream) during a :ctx switch is refused up front (issue #84)."""
+    fake = FakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        app._ctx_switching = True
+        try:
+            await pilot.press("L")
+            await pilot.pause(0.05)
+        finally:
+            app._ctx_switching = False
+        assert app.query_one(LogPane).display is False
+        msgs = [n.message for n in app._notifications]
+        assert any("context switch is in progress" in m for m in msgs)
+
+
+async def test_previous_logs_refused_while_context_switching() -> None:
+    """`p` during a :ctx switch must not respawn streams: teardown is about
+    to close the pane and the re-opened tasks would race the client swap
+    (issue #84)."""
+    fake = FakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("l")
+        await pilot.pause(0.1)
+        assert app.query_one(LogPane).display is True
+        app._ctx_switching = True
+        try:
+            await pilot.press("p")
+            await pilot.pause(0.05)
+        finally:
+            app._ctx_switching = False
+        assert app._log_pane_mode == "l"  # previous mode never engaged
+        msgs = [n.message for n in app._notifications]
+        assert any("context switch is in progress" in m for m in msgs)
+
+
+async def test_open_log_pane_dropped_when_epoch_moved() -> None:
+    """A :ctx switch completing inside the awaited gap between the keypress
+    and the pane open must drop the open — the streams would attach to the
+    new cluster labeled with the old selection (issue #84)."""
+    fake = FakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._open_log_pane("default", [("myapp", "main")], epoch=app._ctx_epoch - 1)
+        await pilot.pause(0.05)
+        assert app.query_one(LogPane).display is False
+        assert not app._log_tasks
+        msgs = [n.message for n in app._notifications]
+        assert any("kube context changed" in m for m in msgs)
