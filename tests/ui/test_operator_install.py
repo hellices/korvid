@@ -3,9 +3,9 @@ Subscription (issue #29). Prefilled from the PackageManifest's install facts;
 submit validates against the known channels and approval modes."""
 
 from textual.app import App, ComposeResult
-from textual.widgets import Input, Static
+from textual.widgets import Input, Select, Static
 
-from korvid.k8s.olm import PackageInstallFacts
+from korvid.k8s.olm import APPROVAL_MODES, PackageInstallFacts
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
 
 from .waits import until
@@ -48,10 +48,22 @@ async def test_inputs_prefilled_with_defaults() -> None:
     async with app.run_test() as pilot:
         await _open(app)
         await _opened(app, pilot)
-        values = {i.id: i.value for i in app.screen.query(Input)}
-        assert values["install-namespace"] == "operators"
-        assert values["install-channel"] == "stable"
-        assert values["install-approval"] == "Automatic"
+        assert app.screen.query_one("#install-namespace", Input).value == "operators"
+        assert app.screen.query_one("#install-channel", Select).value == "stable"
+        assert app.screen.query_one("#install-approval", Select).value == "Automatic"
+
+
+async def test_channel_and_approval_are_selects_with_known_options() -> None:
+    """Channel/approval value sets are known (issue #62): Select widgets
+    make typos structurally impossible instead of failing on submit."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await _opened(app, pilot)
+        channel = app.screen.query_one("#install-channel", Select)
+        approval = app.screen.query_one("#install-approval", Select)
+        assert [v for _, v in channel._options] == ["candidate", "stable"]
+        assert [v for _, v in approval._options] == list(APPROVAL_MODES)
 
 
 async def test_submit_returns_choices() -> None:
@@ -59,43 +71,11 @@ async def test_submit_returns_choices() -> None:
     async with app.run_test() as pilot:
         await _open(app)
         await _opened(app, pilot)
-        app.screen.query_one("#install-channel", Input).value = "candidate"
-        app.screen.query_one("#install-approval", Input).value = "Manual"
+        app.screen.query_one("#install-channel", Select).value = "candidate"
+        app.screen.query_one("#install-approval", Select).value = "Manual"
         await pilot.press("enter")
         await until(pilot, lambda: app.result != "unset", label="prompt dismissed with choices")
         assert app.result == ("operators", "candidate", "Manual")
-
-
-async def test_unknown_channel_is_rejected() -> None:
-    app = HostApp()
-    async with app.run_test() as pilot:
-        prompt = await _open(app)
-        await _opened(app, pilot)
-        app.screen.query_one("#install-channel", Input).value = "nightly"
-        await pilot.press("enter")
-        await until(
-            pilot,
-            lambda: any("unknown channel" in str(n.message) for n in app._notifications),
-            label="rejection notified",
-        )
-        assert app.result == "unset"  # still open, nothing dismissed
-        assert app.screen is prompt
-
-
-async def test_unknown_approval_mode_is_rejected() -> None:
-    app = HostApp()
-    async with app.run_test() as pilot:
-        prompt = await _open(app)
-        await _opened(app, pilot)
-        app.screen.query_one("#install-approval", Input).value = "Sometimes"
-        await pilot.press("enter")
-        await until(
-            pilot,
-            lambda: any("approval must be" in str(n.message) for n in app._notifications),
-            label="rejection notified",
-        )
-        assert app.result == "unset"
-        assert app.screen is prompt
 
 
 async def test_blank_namespace_is_rejected() -> None:
@@ -130,6 +110,7 @@ async def test_unknown_channels_allowed_when_facts_have_none() -> None:
     async with app.run_test() as pilot:
         await _open(app, facts)
         await _opened(app, pilot)
+        assert not app.screen.query("Select#install-channel")  # fallback is a text input
         app.screen.query_one("#install-channel", Input).value = "beta"
         await pilot.press("enter")
         await until(pilot, lambda: app.result != "unset", label="prompt dismissed")
@@ -164,7 +145,10 @@ async def test_enter_buffered_before_prompt_does_not_submit_defaults() -> None:
         focused.post_message(stale)
         # A fresh interaction drains the queued stale event deterministically
         # before the assertion (repository convention: no raw time pauses).
+        # tab+shift+tab returns focus to the namespace input, where Enter
+        # submits (on a Select it would open the dropdown instead).
         await pilot.press("tab")
+        await pilot.press("shift+tab")
         assert app.result == "unset"  # stale Enter discarded
         await pilot.press("enter")
         await until(pilot, lambda: app.result != "unset", label="fresh Enter submits")

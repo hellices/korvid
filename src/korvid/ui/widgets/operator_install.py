@@ -17,7 +17,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Input, Static
+from textual.widgets import Input, Select, Static
 
 from korvid.k8s.olm import APPROVAL_MODES, PackageInstallFacts
 from korvid.ui.widgets.confirm_screen import FreshKeysInput
@@ -50,6 +50,9 @@ OperatorInstallPrompt .install-label {
     color: $text-muted;
 }
 OperatorInstallPrompt .install-row Input {
+    width: 1fr;
+}
+OperatorInstallPrompt .install-row Select {
     width: 1fr;
 }
 """
@@ -88,25 +91,62 @@ class OperatorInstallPrompt(ModalScreen["tuple[str, str, str] | None"]):
                 classes="confirm-hint",
                 markup=False,
             )
-            for label, field_id, value in (
-                ("namespace", "install-namespace", self._namespace),
-                ("channel", "install-channel", facts.default_channel),
-                ("approval", "install-approval", APPROVAL_MODES[0]),
-            ):
-                with Horizontal(classes="install-row"):
-                    yield Static(label, classes="install-label", markup=False)
-                    yield FreshKeysInput(
-                        self._created_time, value=value, id=field_id, select_on_focus=True
+            with Horizontal(classes="install-row"):
+                yield Static("namespace", classes="install-label", markup=False)
+                yield FreshKeysInput(
+                    self._created_time,
+                    value=self._namespace,
+                    id="install-namespace",
+                    select_on_focus=True,
+                )
+            with Horizontal(classes="install-row"):
+                yield Static("channel", classes="install-label", markup=False)
+                if facts.channels:
+                    # The valid channel set is known: a Select makes typos
+                    # structurally impossible (issue #62).
+                    default = (
+                        facts.default_channel
+                        if facts.default_channel in facts.channels
+                        else facts.channels[0]
                     )
+                    yield Select.from_values(
+                        facts.channels, value=default, allow_blank=False, id="install-channel"
+                    )
+                else:
+                    # Malformed PackageManifest status: fall back to free
+                    # text so the server stays the final validator.
+                    yield FreshKeysInput(
+                        self._created_time,
+                        value=facts.default_channel,
+                        id="install-channel",
+                        select_on_focus=True,
+                    )
+            with Horizontal(classes="install-row"):
+                yield Static("approval", classes="install-label", markup=False)
+                yield Select.from_values(
+                    APPROVAL_MODES,
+                    value=APPROVAL_MODES[0],
+                    allow_blank=False,
+                    id="install-approval",
+                )
 
     def on_mount(self) -> None:
         self.query(Input).first().focus()
 
+    def _field_value(self, field_id: str) -> str:
+        """Current value of a wizard field, whichever widget backs it."""
+        widget = self.query_one(f"#{field_id}")
+        if isinstance(widget, Select):
+            return str(widget.value)
+        if isinstance(widget, Input):
+            return widget.value.strip()
+        raise TypeError(f"unexpected widget for field {field_id!r}")  # pragma: no cover
+
     def _collect(self) -> tuple[str, str, str] | None:
         """Validated (namespace, channel, approval); None keeps the prompt open."""
-        namespace = self.query_one("#install-namespace", Input).value.strip()
-        channel = self.query_one("#install-channel", Input).value.strip()
-        approval = self.query_one("#install-approval", Input).value.strip()
+        namespace = self._field_value("install-namespace")
+        channel = self._field_value("install-channel")
+        approval = self._field_value("install-approval")
         if not namespace:
             self.notify("namespace must not be blank", severity="warning")
             return None
