@@ -46,6 +46,7 @@ from korvid.core.debugimage import (
 )
 from korvid.core.errors import explain_api_error
 from korvid.core.filters import ResourceFilter, parse_filter
+from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.core.secrets import mask_secret_manifest
@@ -343,43 +344,48 @@ class _ReplayFilter:
 
 
 class KorvidApp(App[None]):
+    # Every binding carries an ``id`` so the `keybindings:` config section
+    # can remap it via Textual's keymap (issue #35); uppercase duplicates
+    # of shift+<letter> keys share the action under an ``--alt`` id.
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
-        ("q", "quit", "Quit"),
-        Binding("question_mark", "help", "Help"),
-        ("colon", "open_command", "Command"),
-        ("slash", "open_filter", "Filter/Search"),
-        ("0", "toggle_all_namespaces", "All NS"),
-        ("d", "describe", "Describe"),
-        ("s", "shell", "Shell"),
-        ("l", "logs", "Logs"),
-        Binding("shift+l", "logs_multi", "Multi-log"),
+        Binding("q", "quit", "Quit", id="quit"),
+        Binding("question_mark", "help", "Help", id="help"),
+        Binding("colon", "open_command", "Command", id="open_command"),
+        Binding("slash", "open_filter", "Filter/Search", id="open_filter"),
+        Binding("0", "toggle_all_namespaces", "All NS", id="toggle_all_namespaces"),
+        Binding("d", "describe", "Describe", id="describe"),
+        Binding("s", "shell", "Shell", id="shell"),
+        Binding("l", "logs", "Logs", id="logs"),
+        Binding("shift+l", "logs_multi", "Multi-log", id="logs_multi"),
         # Real terminals deliver Shift+<letter> as the uppercase character,
         # not "shift+x"; bind both so the shortcut works outside Pilot tests.
-        Binding("L", "logs_multi", "Multi-log", show=False),
-        ("f", "log_format", "JSON/raw"),
-        Binding("w", "log_wrap", "Wrap", show=False),
-        Binding("t", "log_timestamps", "Timestamps", show=False),
-        Binding("ctrl+s", "log_save", "Save logs", show=False),
-        ("p", "log_previous", "Prev logs"),
-        ("n", "log_search_next", "Next hit"),
-        Binding("shift+n", "log_search_prev", "Prev hit / Sort name"),
-        Binding("N", "log_search_prev", "Prev hit / Sort name", show=False),
+        Binding("L", "logs_multi", "Multi-log", show=False, id="logs_multi--alt"),
+        Binding("f", "log_format", "JSON/raw", id="log_format"),
+        Binding("w", "log_wrap", "Wrap", show=False, id="log_wrap"),
+        Binding("t", "log_timestamps", "Timestamps", show=False, id="log_timestamps"),
+        Binding("ctrl+s", "log_save", "Save logs", show=False, id="log_save"),
+        Binding("p", "log_previous", "Prev logs", id="log_previous"),
+        Binding("n", "log_search_next", "Next hit", id="log_search_next"),
+        Binding("shift+n", "log_search_prev", "Prev hit / Sort name", id="log_search_prev"),
+        Binding(
+            "N", "log_search_prev", "Prev hit / Sort name", show=False, id="log_search_prev--alt"
+        ),
         # Column sorting (issue #37); shift+n doubles as sort-by-name when
         # no search pane is open (see action_log_search_prev).
-        Binding("shift+a", "sort_by_age", "Sort age", show=False),
-        Binding("A", "sort_by_age", "Sort age", show=False),
-        Binding("shift+c", "sort_by_cpu", "Sort CPU", show=False),
-        Binding("C", "sort_by_cpu", "Sort CPU", show=False),
-        Binding("shift+m", "sort_by_mem", "Sort MEM", show=False),
-        Binding("M", "sort_by_mem", "Sort MEM", show=False),
-        Binding("ctrl+a", "toggle_agent", "AI", priority=True),
-        Binding("ctrl+d", "delete_resource", "Delete"),
-        Binding("r", "rollout_restart", "Restart", show=False),
-        Binding("R", "resize_pod", "Resize", show=False),
-        Binding("S", "scale_resource", "Scale", show=False),
-        Binding("e", "edit_resource", "Edit", show=False),
-        Binding("i", "hint_details", "Hint details", show=False),
-        Binding("I", "operator_install", "Install/Approve", show=False),
+        Binding("shift+a", "sort_by_age", "Sort age", show=False, id="sort_by_age"),
+        Binding("A", "sort_by_age", "Sort age", show=False, id="sort_by_age--alt"),
+        Binding("shift+c", "sort_by_cpu", "Sort CPU", show=False, id="sort_by_cpu"),
+        Binding("C", "sort_by_cpu", "Sort CPU", show=False, id="sort_by_cpu--alt"),
+        Binding("shift+m", "sort_by_mem", "Sort MEM", show=False, id="sort_by_mem"),
+        Binding("M", "sort_by_mem", "Sort MEM", show=False, id="sort_by_mem--alt"),
+        Binding("ctrl+a", "toggle_agent", "AI", priority=True, id="toggle_agent"),
+        Binding("ctrl+d", "delete_resource", "Delete", id="delete_resource"),
+        Binding("r", "rollout_restart", "Restart", show=False, id="rollout_restart"),
+        Binding("R", "resize_pod", "Resize", show=False, id="resize_pod"),
+        Binding("S", "scale_resource", "Scale", show=False, id="scale_resource"),
+        Binding("e", "edit_resource", "Edit", show=False, id="edit_resource"),
+        Binding("i", "hint_details", "Hint details", show=False, id="hint_details"),
+        Binding("I", "operator_install", "Install/Approve", show=False, id="operator_install"),
     ]
 
     # User-facing keys handled in event handlers rather than BINDINGS:
@@ -476,6 +482,9 @@ class KorvidApp(App[None]):
         #: inverse / hide-completed — issue #44); single matcher shared by
         #: the table render and the agent's view of "what the user sees".
         self._resource_filter: ResourceFilter = parse_filter("")
+        #: Validated `keybindings:` overrides (action → key), applied via the
+        #: keymap in on_mount; the help overlay renders these keys (issue #35).
+        self._keybinding_overrides: dict[str, str] = {}
         #: Active sort per view kind (issue #37): the choice survives watch
         #: updates (every render re-applies it) and switching views restores
         #: each kind's own sort.
@@ -533,7 +542,40 @@ class KorvidApp(App[None]):
         yield HintStrip()
         yield StatusBar()
 
+    @classmethod
+    def _binding_actions(cls) -> dict[str, tuple[str, ...]]:
+        """Every remappable app action mapped to its default keys."""
+        actions: dict[str, tuple[str, ...]] = {}
+        for raw in cls.BINDINGS:
+            binding = raw if isinstance(raw, Binding) else Binding(*raw)
+            actions[binding.action] = (*actions.get(binding.action, ()), binding.key)
+        return actions
+
+    def _apply_keybindings(self) -> None:
+        """Apply the `keybindings:` config overrides via the keymap (issue #35).
+
+        Only app bindings carry keymap ids, so the approval dialogs'
+        confirm keys are structurally out of reach; `plan_keybindings`
+        additionally rejects their action names and blocks priority
+        actions from taking the dialogs' keys. Shifted-letter overrides
+        expand to both spellings (`shift+g,G`) because real terminals
+        deliver Shift+<letter> as the uppercase character.
+        """
+        bindings = [raw if isinstance(raw, Binding) else Binding(*raw) for raw in self.BINDINGS]
+        priority_actions = {binding.action for binding in bindings if binding.priority}
+        plan = plan_keybindings(self.config.keybindings, self._binding_actions(), priority_actions)
+        self._keybinding_overrides = plan.overrides
+        keymap: dict[str, str] = {}
+        for binding in bindings:
+            if binding.id is not None and binding.action in plan.overrides:
+                keymap[binding.id] = shift_alias_keys(plan.overrides[binding.action])
+        if keymap:
+            self.set_keymap(keymap)
+        for warning in plan.warnings:
+            self.notify(warning, title="Keybindings", severity="warning")
+
     async def on_mount(self) -> None:
+        self._apply_keybindings()
         # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
         command_bar = self.query_one(CommandBar)
         command_bar.known = lambda a: self._canonical_kind(a) if a in self.aliases else None
@@ -671,6 +713,7 @@ class KorvidApp(App[None]):
             list(self.BINDINGS),
             list(DescribeScreen.BINDINGS),
             handler_keys=self.HANDLER_KEY_HELP,
+            overrides=self._keybinding_overrides,
         )
         self.push_screen(HelpScreen(groups, command_help()))
 

@@ -70,6 +70,7 @@ def make_app(
     extra_data: dict[str, list[Summary]] | None = None,
     aliases: dict[str, ResourceMeta] | None = None,
     audit: AuditLog | None = None,
+    config: KorvidConfig | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -86,7 +87,7 @@ def make_app(
         return ["default"] if namespaces is None else namespaces
 
     return KorvidApp(
-        config=KorvidConfig(namespace="default"),
+        config=config if config is not None else KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, source),
         list_namespaces=list_namespaces,
