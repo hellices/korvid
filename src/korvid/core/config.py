@@ -367,8 +367,10 @@ def _parse_views(value: Any) -> tuple[dict[str, ViewConfig], list[str]]:
     """`views:` custom columns (issue #45): invalid columns are dropped with
     a warning instead of failing the whole config — a typo in one column
     must not take the TUI down."""
-    if not isinstance(value, dict):
+    if value is None:
         return {}, []
+    if not isinstance(value, dict):
+        return {}, ["views: must be a mapping of kind names to view definitions"]
     views: dict[str, ViewConfig] = {}
     warnings: list[str] = []
     for kind, view_raw in value.items():

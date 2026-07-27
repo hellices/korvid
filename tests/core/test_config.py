@@ -837,3 +837,11 @@ views:
     config = load_config(cfg)
     assert config.views == {}
     assert any("pods" in w and "mapping" in w for w in config.warnings)
+
+
+def test_views_non_mapping_top_level_warned(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("views: []\n")
+    config = load_config(cfg)
+    assert config.views == {}
+    assert any(w.startswith("views") and "mapping" in w for w in config.warnings)
