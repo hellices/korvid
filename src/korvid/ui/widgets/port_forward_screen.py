@@ -21,7 +21,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from korvid.core.portforward import ForwardRecord, ForwardRegistry
+from korvid.core.portforward import ForwardRecord, ForwardRegistry, ForwardSpec
 from korvid.k8s.portforward import FORWARDABLE_KINDS, WORKLOAD_KINDS
 
 _CSS = """
@@ -215,7 +215,7 @@ class ForwardListScreen(ModalScreen[None]):
         *,
         on_stop: Callable[[ForwardRecord], None] | None = None,
         on_reattach: Callable[[ForwardRecord], None] | None = None,
-        on_reattach_error: Callable[[ForwardRecord, Exception], None] | None = None,
+        on_reattach_error: Callable[[ForwardSpec, Exception], None] | None = None,
         target_exists: Callable[[ForwardRecord], Awaitable[bool]] | None = None,
         reattach: Callable[[ForwardRecord, bool], Awaitable[ForwardRecord | None]] | None = None,
     ) -> None:
@@ -318,8 +318,11 @@ class ForwardListScreen(ModalScreen[None]):
             # claimed the local port since this one broke.
             self.notify(f"Re-attach failed: {exc}", severity="error")
             if self._on_reattach_error is not None:
-                # The app audits failed re-attaches like failed starts.
-                self._on_reattach_error(record, exc)
+                # The app audits failed re-attaches like failed starts. A
+                # failed retarget ran against the workload, not the vanished
+                # pod — audit the spec the spawn actually targeted.
+                attempted = (record.spec.retargeted() if gone else None) or record.spec
+                self._on_reattach_error(attempted, exc)
             return
         if revived is not None and self._on_reattach is not None:
             self._on_reattach(revived)

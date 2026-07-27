@@ -1487,15 +1487,22 @@ class KorvidApp(App[None]):
             return None
         try:
             owner = controller_owner(await self._get_manifest("pods", namespace, name))
-            if owner is not None and owner[0] == "ReplicaSet":
-                parent = controller_owner(
-                    await self._get_manifest("replicasets", namespace, owner[1])
-                )
-                if parent is not None and parent[0] == "Deployment":
-                    owner = parent
         except Exception as exc:  # a convenience — never blocks the forward
             logger.debug("workload resolution for port-forward failed: %s", exc)
             return None
+        if owner is not None and owner[0] == "ReplicaSet":
+            # A failed chase (e.g. discovery has not learned replicasets yet)
+            # keeps the ReplicaSet as the fallback target — the parent lookup
+            # improves the target to a Deployment, it is not required.
+            try:
+                parent = controller_owner(
+                    await self._get_manifest("replicasets", namespace, owner[1])
+                )
+            except Exception as exc:
+                logger.debug("deployment lookup failed; keeping replicaset owner: %s", exc)
+                parent = None
+            if parent is not None and parent[0] == "Deployment":
+                owner = parent
         if owner is None:
             return None
         plural = self._WORKLOAD_PLURALS.get(owner[0])
@@ -1871,8 +1878,8 @@ class KorvidApp(App[None]):
                 self.run_worker(self._audit_stop_after_confirm(pending, record.id))
             self.notify(f"Stopped forward localhost:{record.spec.local_port}")
 
-        def _on_reattach_error(record: ForwardRecord, exc: Exception) -> None:
-            self._audit_forward("port-forward-start", record.spec, outcome=f"error: {exc}")
+        def _on_reattach_error(spec: ForwardSpec, exc: Exception) -> None:
+            self._audit_forward("port-forward-start", spec, outcome=f"error: {exc}")
 
         async def _reattach(record: ForwardRecord, retarget: bool) -> ForwardRecord | None:
             return await self._spawn_reattach(registry, record, retarget=retarget)
