@@ -43,6 +43,7 @@ from korvid.k8s.client import (
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
+from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.providers.configurator import ProviderConfigurator
@@ -422,6 +423,14 @@ async def _teardown(
             await leftover
 
 
+def _build_helm(config: KorvidConfig) -> HelmCLI | None:
+    """Wrap a detected helm binary, or None so the UI gates helm actions off."""
+    binary = find_helm()
+    if binary is None:
+        return None
+    return HelmCLI(binary, kube_context=config.kube_context)
+
+
 def _fallback_namespaces(config: KorvidConfig, context: str | None) -> tuple[str, ...]:
     """Namespaces an RBAC-limited user can fall back to (issue #49), deduped
     in priority order: explicit `namespaces:` config, the kubeconfig
@@ -485,6 +494,9 @@ def _make_switch_context(
             provider_hint=provider_info.display if provider_info.known else None,
             fallback_namespaces=_fallback_namespaces(config, name),
             context_namespace=resolve_context_namespace(name),
+            # HelmCLI pins --kube-context per instance: rebuild it for the
+            # new context so helm writes follow the active cluster.
+            helm=_build_helm(dataclasses.replace(config, kube_context=name)),
         )
 
     return switch_context
@@ -644,6 +656,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         switch_context=_make_switch_context(
             config, kube, aliases, app_box, discovery_box, retarget_agent
         ),
+        helm=_build_helm(config),
     )
     app_box.append(app)
     # Late-bind the UI bridge: from here on the agent's UI-control tools

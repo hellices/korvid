@@ -650,3 +650,26 @@ async def test_ctx_switch_quiesces_discovery_before_swapping_connection() -> Non
         "connection-swapped",
     ]
     assert "stale-crd" not in aliases  # reseeded before the swap
+
+
+def test_build_helm_wires_binary_and_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A detected helm binary becomes a HelmCLI bound to the configured context."""
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _build_helm
+    from korvid.core.config import KorvidConfig
+
+    monkeypatch.setattr(main_mod, "find_helm", lambda: "/usr/local/bin/helm")
+    helm = _build_helm(KorvidConfig(kube_context="staging"))
+    assert helm is not None
+    assert helm._binary == "/usr/local/bin/helm"
+    assert helm._kube_context == "staging"
+
+
+def test_build_helm_returns_none_without_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No helm on PATH means the app gets helm=None (actions gated off)."""
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _build_helm
+    from korvid.core.config import KorvidConfig
+
+    monkeypatch.setattr(main_mod, "find_helm", lambda: None)
+    assert _build_helm(KorvidConfig()) is None

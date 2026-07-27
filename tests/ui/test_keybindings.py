@@ -133,3 +133,22 @@ async def test_priority_action_cannot_take_an_approval_dialog_key() -> None:
             label="priority/approval-key warning notified",
         )
         assert app._keybinding_overrides == {}
+
+
+async def test_help_overlay_applies_remap_to_helm_handler_rows() -> None:
+    """The Helm rows in the help overlay are dispatched through remappable
+    actions (hint_details/uncordon_node/rollout_restart): the overlay must
+    advertise the effective keys, not the hardcoded defaults."""
+    app = make_app([_pod("web")], config=_config({"hint_details": "x"}))
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        await pilot.press("question_mark")
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, HelpScreen),
+            label="help overlay open",
+        )
+        body = app.screen.body_text() if isinstance(app.screen, HelpScreen) else ""
+        assert "x          Install a chart" in body
+        assert "i          Install a chart" not in body

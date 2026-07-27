@@ -645,3 +645,27 @@ async def test_delete_aborted_when_context_switches_during_preview(tmp_path: Pat
             ),
             label="preview epoch refusal",
         )
+
+
+async def test_switch_rebinds_helm_wrapper() -> None:
+    """HelmCLI pins --kube-context per instance (issue #31): after a `:ctx`
+    switch the app must adopt the wrapper rebuilt for the new context, or
+    helm writes would keep landing on the old cluster."""
+    from korvid.k8s.helmcli import HelmCLI
+
+    new_helm = HelmCLI("/usr/bin/helm", kube_context="ctx-b")
+    env = _CtxEnv(
+        result=ContextSwitchResult(
+            pod_resize_supported=False,
+            provider_hint=None,
+            fallback_namespaces=(),
+            context_namespace=None,
+            helm=new_helm,
+        )
+    )
+    app = env.app
+    app._helm = HelmCLI("/usr/bin/helm", kube_context="ctx-a")
+    async with app.run_test() as pilot:
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(pilot, lambda: app.config.kube_context == "ctx-b", label="switched")
+        assert app._helm is new_helm
