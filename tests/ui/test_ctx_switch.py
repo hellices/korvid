@@ -941,3 +941,33 @@ async def test_namespace_picker_list_dropped_when_context_switches() -> None:
             label="picker epoch refusal",
         )
         assert app.query_one(NamespacePicker).display is False
+
+
+async def test_mcp_toggle_queued_before_switch_rechecks_inside_lock() -> None:
+    """A toggle worker queued before :ctx claimed _ctx_switching must not
+    start the server mid-swap: it serializes on _nav_lock (held by the
+    switch through quiesce/teardown/retarget) and re-checks the flag inside
+    (issue #36 review round 21)."""
+    env = _CtxEnv()
+    app = env.app
+    mcp = _FakeMCP()
+    app._mcp = cast("Any", mcp)
+    async with app.run_test() as pilot:
+        await app._nav_lock.acquire()  # stand-in for the switch holding it
+        try:
+            app._handle_mcp_command(["on"])  # pre-check passes; worker blocks
+            await pilot.pause()
+            app._ctx_switching = True  # the switch claims while the toggle waits
+        finally:
+            app._nav_lock.release()
+        try:
+            await until(
+                pilot,
+                lambda: any(
+                    "context switch is in progress" in n.message for n in app._notifications
+                ),
+                label="in-lock mcp toggle refusal",
+            )
+        finally:
+            app._ctx_switching = False
+        assert "mcp-started" not in mcp.events

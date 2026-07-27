@@ -2148,7 +2148,19 @@ class KorvidApp(App[None]):
             return
 
         async def _switch() -> None:
-            msg = await (mcp.start() if action == "on" else mcp.stop())
+            # Serialize with the `:ctx` flow (which holds _nav_lock through
+            # quiesce/teardown/retarget) and re-check inside the lock: a
+            # toggle queued just before the switch claimed _ctx_switching
+            # could otherwise start the server against the client/alias map
+            # mid-swap, or have its stop undone by the switch's restart.
+            async with self._nav_lock:
+                if self._ctx_switching:
+                    self.notify(
+                        "A context switch is in progress — try again once it completes",
+                        severity="warning",
+                    )
+                    return
+                msg = await (mcp.start() if action == "on" else mcp.stop())
             self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
             self._refresh_status()
 
