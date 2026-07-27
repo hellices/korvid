@@ -449,26 +449,95 @@ async def test_picker_marks_kubeconfig_default_when_no_explicit_context() -> Non
         assert any("ctx-a" in p and "current" in p for p in prompts)
 
 
-async def test_mcp_restart_status_surfaces_after_switch() -> None:
-    """When the embedded MCP server was quiesced for the swap, the restart
-    outcome on the new cluster is surfaced to the operator."""
-    env = _CtxEnv(
-        result=ContextSwitchResult(
-            pod_resize_supported=False,
-            provider_hint=None,
-            fallback_namespaces=(),
-            context_namespace=None,
-            mcp_status="MCP on :4321",
-        )
-    )
+class _FakeMCP:
+    """Recording stand-in for the injected MCPController."""
+
+    def __init__(self, *, drainable: bool = True) -> None:
+        self.running = True
+        self.drainable = drainable
+        self.events: list[str] = []
+
+    async def shutdown(self) -> Any:
+        if not self.drainable:
+            return object()  # still-pending server task
+        self.running = False
+        self.events.append("mcp-stopped")
+        return None
+
+    async def start(self) -> str:
+        self.running = True
+        self.events.append("mcp-started")
+        return "MCP on :4321"
+
+    def status(self) -> str:
+        return "MCP :4321" if self.running else ""
+
+
+async def test_mcp_quiesced_before_teardown_and_restarted_after_switch() -> None:
+    """External MCP callers share the client and alias map being swapped:
+    the server drains BEFORE anything is torn down, resumes once the new
+    cluster is live, and the restart outcome is surfaced to the operator."""
+    env = _CtxEnv()
     app = env.app
+    mcp = _FakeMCP()
+    app._mcp = cast("Any", mcp)
+    teardowns: list[str] = []
+    real_teardown = app._teardown_for_context_switch
+
+    async def spying_teardown() -> None:
+        teardowns.append(f"teardown(mcp-running={mcp.running})")
+        await real_teardown()
+
+    app._teardown_for_context_switch = spying_teardown  # type: ignore[method-assign]
     async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
         app.post_message(SwitchContextCommand("ctx-b"))
+        await until(pilot, lambda: app.config.kube_context == "ctx-b", label="switched")
+        assert teardowns == ["teardown(mcp-running=False)"]  # quiesced first
+        assert mcp.events == ["mcp-stopped", "mcp-started"]
+        assert mcp.running is True
         await until(
             pilot,
             lambda: any("MCP on :4321" in n.message for n in app._notifications),
             label="mcp restart notification",
         )
+
+
+async def test_switch_aborts_before_teardown_when_mcp_wont_drain() -> None:
+    """If even cancellation can't stop the MCP server, an in-flight tool call
+    could cross the context boundary — the switch aborts with the old
+    context fully untouched (watches, store, connection all intact)."""
+    env = _CtxEnv()
+    app = env.app
+    mcp = _FakeMCP(drainable=False)
+    app._mcp = cast("Any", mcp)
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: any("did not stop in time" in n.message for n in app._notifications),
+            label="abort notice",
+        )
+        assert env.switch_calls == []  # nothing was swapped or torn down
+        assert app.config.kube_context == "ctx-a"
+        await _first_pod_visible(env, pilot, "pod-a")  # old watch still live
+
+
+async def test_mcp_restart_survives_failed_target_swap() -> None:
+    """A failed target swap recovers back to the old context — the stopped
+    MCP server must still be restarted (now serving the restored cluster)."""
+    env = _CtxEnv(switch_error=RuntimeError("target cluster unreachable"))
+    app = env.app
+    mcp = _FakeMCP()
+    app._mcp = cast("Any", mcp)
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(pilot, lambda: len(env.switch_calls) == 2, label="recovery swap ran")
+        await until(pilot, lambda: "mcp-started" in mcp.events, label="mcp restarted")
+        assert mcp.events == ["mcp-stopped", "mcp-started"]
+        assert mcp.running is True
 
 
 async def test_keybinding_write_aborted_when_context_changed_during_precheck() -> None:
@@ -487,7 +556,7 @@ async def test_keybinding_write_aborted_when_context_changed_during_precheck() -
         assert ok is False
         await until(
             pilot,
-            lambda: any("context changed while preparing" in n.message for n in app._notifications),
+            lambda: any("kube context changed" in n.message for n in app._notifications),
             label="epoch-change refusal",
         )
 
@@ -519,23 +588,60 @@ async def test_write_slot_released_when_coroutine_never_runs() -> None:
 async def test_total_switch_failure_mentions_stopped_mcp() -> None:
     """When even the recovery swap fails, the operator learns the embedded
     MCP server was stopped for the switch instead of it dying silently."""
-    from types import SimpleNamespace
-
     env = _CtxEnv()
     app = env.app
+    mcp = _FakeMCP()
+    app._mcp = cast("Any", mcp)
+
+    async def always_failing_switch(name: str | None) -> ContextSwitchResult:
+        raise RuntimeError("boom")
+
     async with app.run_test() as pilot:
-        mcp = SimpleNamespace(running=True)
-        app._mcp = cast("Any", mcp)
-
-        async def failing_switch(name: str | None) -> ContextSwitchResult:
-            mcp.running = False  # the closure stopped the server before dying
-            raise RuntimeError("boom")
-
-        app._switch_context = failing_switch
-        applied = await app._retarget_context("ctx-b", "ctx-a")
-        assert applied is None
+        await _first_pod_visible(env, pilot, "pod-a")
+        app._switch_context = always_failing_switch
+        app.post_message(SwitchContextCommand("ctx-b"))
         await until(
             pilot,
             lambda: any("MCP server was stopped" in n.message for n in app._notifications),
             label="stopped-MCP notice",
+        )
+        assert mcp.running is False  # not restarted into a dead session
+
+
+async def test_delete_aborted_when_context_switches_during_preview(tmp_path: Path) -> None:
+    """A context switch that fully completes during the dry-run preview await
+    (flag off, epoch bumped) must cancel the write: a same-named row on the
+    new cluster would otherwise satisfy the selection-only checks."""
+    env = _CtxEnv(audit_path=tmp_path / "audit.log")
+    app = env.app
+
+    class _EpochBumpOps:
+        def __init__(self) -> None:
+            self.deletes: list[str] = []
+
+        async def preview_delete(
+            self, meta: Any, ns: Any, name: Any, *, uid: str | None = None
+        ) -> list[str]:
+            app._ctx_epoch += 1  # a switch was applied while we awaited
+            return ["- pod pod-a"]
+
+        async def delete_object(
+            self, meta: Any, ns: Any, name: Any, *, uid: str | None = None
+        ) -> None:
+            self.deletes.append(str(name))
+
+    ops = _EpochBumpOps()
+    app._write_ops = cast("Any", ops)
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        await app.action_delete_resource()
+        assert len(app.screen_stack) == 1  # no confirmation dialog opened
+        assert ops.deletes == []
+        await until(
+            pilot,
+            lambda: any(
+                "kube context changed during the dry-run preview" in n.message
+                for n in app._notifications
+            ),
+            label="preview epoch refusal",
         )

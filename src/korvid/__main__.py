@@ -443,7 +443,6 @@ def _make_switch_context(
     app_box: list[KorvidApp],
     discovery_box: list[asyncio.Task[None]],
     retarget_agent: Callable[[AgentRuntime | None, bool, str | None], None],
-    mcp: MCPController,
 ) -> Callable[[str | None], Awaitable[ContextSwitchResult]]:
     """Build the `:ctx` retarget closure (issue #36).
 
@@ -455,27 +454,10 @@ def _make_switch_context(
     first discovery task are created after this closure.
     """
 
-    # One switch transaction may invoke the closure twice (target, then the
-    # recovery swap back): the restart intent must survive across those
-    # invocations — after a successful stop() the recovery call sees
-    # mcp.running == False, which must not erase the operator's server.
-    mcp_needs_restart = False
-
     async def switch_context(name: str | None) -> ContextSwitchResult:
-        nonlocal mcp_needs_restart
-        # External MCP callers share this client and alias map: quiesce the
-        # server before the swap (in-flight tool calls drain against the old
-        # cluster) and restart it once the new cluster is fully retargeted,
-        # so no request can observe mixed-context state.
-        if mcp.running:
-            pending = await mcp.shutdown()
-            if pending is not None:
-                # Even cancellation didn't land within its deadline: an
-                # in-flight tool call could cross the context boundary.
-                # Abort before anything is torn down — the old context
-                # stays fully usable.
-                raise RuntimeError("embedded MCP server did not stop in time; switch aborted")
-            mcp_needs_restart = True
+        # The embedded MCP server is quiesced by the app BEFORE any teardown
+        # (KorvidApp._switch_context_locked) — by the time this closure runs
+        # no external caller shares the client or alias map being swapped.
         # switch_context closes the old ApiClient — the background discovery
         # task still issues requests on it, so quiesce it (and reseed the
         # alias map it mutates) before the connection is torn down.
@@ -498,18 +480,11 @@ def _make_switch_context(
             pod_resize_supported,
             cluster_context_note(provider_info),
         )
-        mcp_status: str | None = None
-        if mcp_needs_restart:
-            # Resume on the same endpoint, now serving the new cluster.
-            mcp_status = await mcp.start()
-            if mcp.running:
-                mcp_needs_restart = False
         return ContextSwitchResult(
             pod_resize_supported=pod_resize_supported,
             provider_hint=provider_info.display if provider_info.known else None,
             fallback_namespaces=_fallback_namespaces(config, name),
             context_namespace=resolve_context_namespace(name),
-            mcp_status=mcp_status,
         )
 
     return switch_context
@@ -667,7 +642,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         list_contexts=list_context_names,
         probe_context=kube.probe_context,
         switch_context=_make_switch_context(
-            config, kube, aliases, app_box, discovery_box, retarget_agent, mcp_controller
+            config, kube, aliases, app_box, discovery_box, retarget_agent
         ),
     )
     app_box.append(app)

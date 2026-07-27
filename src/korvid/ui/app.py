@@ -366,9 +366,6 @@ class ContextSwitchResult:
     provider_hint: str | None
     fallback_namespaces: tuple[str, ...]
     context_namespace: str | None
-    #: Status line from restarting the embedded MCP server on the new
-    #: cluster (None when MCP was not running when the switch began).
-    mcp_status: str | None = None
 
 
 _WriteParams = ParamSpec("_WriteParams")
@@ -1273,10 +1270,28 @@ class KorvidApp(App[None]):
             if blocker is not None:
                 self.notify(blocker, severity="warning")
                 return
+            # Quiesce the embedded MCP server BEFORE any teardown: external
+            # callers share the client and alias map being swapped, and an
+            # undrainable server must abort while the old context is still
+            # fully usable (watches, forwards, store all intact).
+            mcp_restart = await self._quiesce_mcp_for_switch()
+            if mcp_restart is None:
+                return
             await self._teardown_for_context_switch()
             applied = await self._retarget_context(name, old)
             if applied is None:
+                if mcp_restart:
+                    self.notify(
+                        "Embedded MCP server was stopped for the switch —"
+                        " restart it with :mcp on once reconnected",
+                        severity="warning",
+                        timeout=15,
+                    )
                 return
+            if mcp_restart and self._mcp is not None:
+                # Resume on the same endpoint, now serving whichever context
+                # was actually applied (target, or the restored old one).
+                self.notify(await self._mcp.start())
             await self.watch_manager.start(self.current_kind, self.current_scope)
             await self._sync_metrics_poller()
         self.post_message(ResourcesUpdated(self.current_kind))
@@ -1285,6 +1300,28 @@ class KorvidApp(App[None]):
         self.on_aliases_updated()
         if applied == name:
             self.notify(f"Switched to context {name} (ns: {self.current_scope})")
+
+    async def _quiesce_mcp_for_switch(self) -> bool | None:
+        """Drain and stop the embedded MCP server ahead of a context switch.
+
+        Returns True when a restart is owed after the switch, False when the
+        server was not running, and None when the server could not be drained
+        in time — the switch must then abort with nothing torn down.
+        """
+        if self._mcp is None or not self._mcp.running:
+            return False
+        pending = await self._mcp.shutdown()
+        if pending is not None:
+            # Even cancellation didn't land within its deadline: an in-flight
+            # tool call could cross the context boundary if we proceeded.
+            self.notify(
+                "Embedded MCP server did not stop in time — context"
+                " switch aborted (old context untouched)",
+                severity="error",
+                timeout=10,
+            )
+            return None
+        return True
 
     def _ctx_switch_blocker(self) -> str | None:
         """Why a switch cannot proceed right now, or None when it can."""
@@ -1370,7 +1407,6 @@ class KorvidApp(App[None]):
         failed (the session then needs a restart — everything is already
         torn down and nothing is connected).
         """
-        mcp_was_on = self._mcp is not None and self._mcp.running
         try:
             result = await self._switch_context(name)  # type: ignore[misc]  # guarded by caller
             self._apply_context_switch(name, old, result)
@@ -1387,15 +1423,9 @@ class KorvidApp(App[None]):
             self.notify(f"Restored context {old or '(kubeconfig default)'}")
             return old
         except Exception as exc:
-            mcp_down = (
-                " Embedded MCP server was stopped for the switch — it restarts"
-                " automatically if a context recovers, or manually via :mcp on."
-                if mcp_was_on and self._mcp is not None and not self._mcp.running
-                else ""
-            )
             self.notify(
                 f"Could not restore context {old or '(kubeconfig default)'}:"
-                f" {self._describe_ctx_error(exc)} — restart korvid.{mcp_down}",
+                f" {self._describe_ctx_error(exc)} — restart korvid",
                 severity="error",
                 timeout=15,
             )
@@ -1420,10 +1450,6 @@ class KorvidApp(App[None]):
             self._forwards_closing = False
         self.current_kind = "pods"
         self.current_scope = result.context_namespace or self.config.namespace or "default"
-        if result.mcp_status is not None:
-            # The embedded MCP server was quiesced for the swap and restarted
-            # against the new cluster — surface how that went.
-            self.notify(result.mcp_status)
         if name != old:
             self._ctx_switch_note = (
                 f"kube context switched from {old or '(default)'} to {name};"
@@ -3613,14 +3639,25 @@ class KorvidApp(App[None]):
         ns: str | None,
         name: str,
         phase: str = "the permission check",
+        epoch: int | None = None,
     ) -> bool:
-        """Re-validate after an awaited gap (the RBAC round-trip, or an
-        editor session - named by ``phase`` so cancellation messages state
-        the true cause), before pushing a dialog: the user may have opened
-        another screen or moved the selection meanwhile - and keystrokes
-        typed during the await must never land on a confirmation they did
-        not see. Abort (with a notification) unless the base screen is still
-        on top and the same row is still selected."""
+        """Re-validate after an awaited gap (the RBAC round-trip, a dry-run
+        preview, or an editor session - named by ``phase`` so cancellation
+        messages state the true cause), before pushing a dialog: the user may
+        have opened another screen or moved the selection meanwhile - and
+        keystrokes typed during the await must never land on a confirmation
+        they did not see. When ``epoch`` (captured when the write flow began)
+        is given, a context switch that started - or fully completed - during
+        the gap also aborts: a same-named row on the new cluster would
+        otherwise satisfy the selection checks. Abort (with a notification)
+        unless everything still matches."""
+        if self._ctx_switching or (epoch is not None and epoch != self._ctx_epoch):
+            self.notify(
+                f"{action} {self._gvr_label(meta)}/{name} cancelled -"
+                f" the kube context changed during {phase}",
+                severity="warning",
+            )
+            return False
         if len(self.screen_stack) > 1:
             self.notify(
                 f"{action} {self._gvr_label(meta)}/{name} cancelled -"
@@ -3667,13 +3704,7 @@ class KorvidApp(App[None]):
         # The permission check awaited network I/O — a switch may have
         # started (flag) or fully completed (epoch) meanwhile; the approved
         # intent must not land on a different cluster.
-        if self._ctx_switching or epoch != self._ctx_epoch:
-            self.notify(
-                "The kube context changed while preparing this write — aborted",
-                severity="warning",
-            )
-            return False
-        return self._write_context_intact(action, meta, ns, name)
+        return self._write_context_intact(action, meta, ns, name, epoch=epoch)
 
     async def _permitted(
         self, action: str, meta: ResourceMeta, namespace: str | None, name: str
@@ -3818,10 +3849,13 @@ class KorvidApp(App[None]):
         if target is None:
             return
         meta, ns, name, uid = target
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("delete", meta, ns, name):
             return
         preview = await self._dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
-        if not self._write_context_intact("delete", meta, ns, name, phase="the dry-run preview"):
+        if not self._write_context_intact(
+            "delete", meta, ns, name, phase="the dry-run preview", epoch=epoch
+        ):
             return
         operation = f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}"
         require = None if meta.namespaced else name
@@ -3859,6 +3893,7 @@ class KorvidApp(App[None]):
                 f"rollout restart does not apply to {self._gvr_label(meta)}", severity="warning"
             )
             return
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("rollout_restart", meta, ns, name):
             return
         # One stamp per approval: the previewed request and the executed
@@ -3868,7 +3903,7 @@ class KorvidApp(App[None]):
             ops.preview_rollout_restart(meta, ns, name, uid=uid, restarted_at=stamp)
         )
         if not self._write_context_intact(
-            "rollout_restart", meta, ns, name, phase="the dry-run preview"
+            "rollout_restart", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
             return
 
@@ -3895,7 +3930,12 @@ class KorvidApp(App[None]):
         )
 
     async def _fetch_manifest_for_edit(
-        self, label: str, meta: ResourceMeta, ns: str | None, name: str
+        self,
+        label: str,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        epoch: int | None = None,
     ) -> dict[str, Any] | None:
         """Fetch the manifest for an edit; None (with a notification) aborts.
         The fetch is another awaited round-trip: a selection change while it
@@ -3908,7 +3948,9 @@ class KorvidApp(App[None]):
         except Exception as exc:
             self.notify(f"edit {label} failed: {exc}", severity="error")
             return None
-        if not self._write_context_intact("edit", meta, ns, name, phase="the manifest fetch"):
+        if not self._write_context_intact(
+            "edit", meta, ns, name, phase="the manifest fetch", epoch=epoch
+        ):
             return None
         # managedFields is server-side bookkeeping noise; kubectl edit hides
         # it too. resourceVersion stays so concurrent modifications 409.
@@ -3928,10 +3970,11 @@ class KorvidApp(App[None]):
         if target is None:
             return
         meta, ns, name, uid = target
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("edit", meta, ns, name):
             return
         label = f"{self._gvr_label(meta)}/{name}"
-        manifest = await self._fetch_manifest_for_edit(label, meta, ns, name)
+        manifest = await self._fetch_manifest_for_edit(label, meta, ns, name, epoch=epoch)
         if manifest is None:
             return
         original_text = yaml.safe_dump(manifest, sort_keys=False)
@@ -3943,7 +3986,9 @@ class KorvidApp(App[None]):
             return
         # The editor round-trip is arbitrarily long: re-validate that the
         # same row is still selected before pushing the confirmation.
-        if not self._write_context_intact("edit", meta, ns, name, phase="the editor session"):
+        if not self._write_context_intact(
+            "edit", meta, ns, name, phase="the editor session", epoch=epoch
+        ):
             return
         detail = self._edit_detail(manifest, edited)
 
@@ -4106,6 +4151,7 @@ class KorvidApp(App[None]):
         if (meta.group, meta.plural) not in self._SCALABLE:
             self.notify(f"scale does not apply to {self._gvr_label(meta)}", severity="warning")
             return
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("scale", meta, ns, name):
             return
         current = self._current_replicas(ns, name)
@@ -4115,7 +4161,7 @@ class KorvidApp(App[None]):
                 return
             # The dry-run round trip must not run inside a screen callback:
             # a worker fetches the preview, revalidates, then confirms.
-            self.run_worker(self._confirm_scale(meta, ns, name, uid, current, replicas))
+            self.run_worker(self._confirm_scale(meta, ns, name, uid, current, replicas, epoch))
 
         await self.push_screen(
             ReplicasPrompt(f"{self._gvr_label(meta)}/{name}", current=current), _on_replicas
@@ -4129,6 +4175,7 @@ class KorvidApp(App[None]):
         uid: str | None,
         current: int | None,
         replicas: int,
+        epoch: int | None = None,
     ) -> None:
         """Dry-run preview + approval dialog for a scale, after the replica
         count is known. Revalidates the selection after the preview round
@@ -4138,7 +4185,9 @@ class KorvidApp(App[None]):
         if ops is None:
             return
         preview = await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
-        if not self._write_context_intact("scale", meta, ns, name, phase="the dry-run preview"):
+        if not self._write_context_intact(
+            "scale", meta, ns, name, phase="the dry-run preview", epoch=epoch
+        ):
             return
 
         def _done(confirmed: bool | None) -> None:
@@ -4187,12 +4236,15 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("resize", meta, ns, name):
             return
         containers = await self._pod_container_resources(ns, name)
         if containers is None:
             return
-        if not self._write_context_intact("resize", meta, ns, name, phase="the manifest fetch"):
+        if not self._write_context_intact(
+            "resize", meta, ns, name, phase="the manifest fetch", epoch=epoch
+        ):
             return
 
         def _on_resources(resources: dict[str, dict[str, dict[str, str]]] | None) -> None:
@@ -4200,7 +4252,7 @@ class KorvidApp(App[None]):
                 return
             # The dry-run round trip must not run inside a screen callback:
             # a worker fetches the preview, revalidates, then confirms.
-            self.run_worker(self._confirm_resize(meta, ns, name, uid, resources))
+            self.run_worker(self._confirm_resize(meta, ns, name, uid, resources, epoch))
 
         await self.push_screen(
             ResizePrompt(f"{self._gvr_label(meta)}/{name}", containers=containers), _on_resources
@@ -4254,6 +4306,7 @@ class KorvidApp(App[None]):
         name: str,
         uid: str | None,
         resources: dict[str, dict[str, dict[str, str]]],
+        epoch: int | None = None,
     ) -> None:
         """Dry-run preview + approval dialog for an in-place pod resize.
         Revalidates the selection after the preview round trip: keystrokes
@@ -4266,7 +4319,9 @@ class KorvidApp(App[None]):
         preview = await self._dry_run_preview(
             ops.preview_resize(namespace, name, resources, uid=uid)
         )
-        if not self._write_context_intact("resize", meta, ns, name, phase="the dry-run preview"):
+        if not self._write_context_intact(
+            "resize", meta, ns, name, phase="the dry-run preview", epoch=epoch
+        ):
             return
         summary = self._resize_summary(resources)
 
@@ -4335,10 +4390,13 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write(action, meta, None, name):
             return
         preview = await self._dry_run_preview(ops.preview_cordon(name, unschedulable, uid=uid))
-        if not self._write_context_intact(action, meta, None, name, phase="the dry-run preview"):
+        if not self._write_context_intact(
+            action, meta, None, name, phase="the dry-run preview", epoch=epoch
+        ):
             return
         flag = "true" if unschedulable else "false"
 
@@ -4393,6 +4451,7 @@ class KorvidApp(App[None]):
         if resolved is None:
             return
         ops, meta, name, uid = resolved
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("drain", meta, None, name):
             return
         try:
@@ -4403,7 +4462,9 @@ class KorvidApp(App[None]):
                 severity="error",
             )
             return
-        if not self._write_context_intact("drain", meta, None, name, phase="the drain plan"):
+        if not self._write_context_intact(
+            "drain", meta, None, name, phase="the drain plan", epoch=epoch
+        ):
             return
 
         def _done(confirmed: bool | None) -> None:
@@ -4679,12 +4740,13 @@ class KorvidApp(App[None]):
         image = self.config.node_shell_image or DEBUG_IMAGE
         shell_ns = self.config.node_shell_namespace or "default"
         pods_meta = self.aliases.get("pods")
+        epoch = self._ctx_epoch
         if pods_meta is None:
             # Fail-open like the pod-debug pre-check, but never silently.
             logger.warning("pods alias missing; skipping node-shell RBAC pre-check (fail-open)")
         elif not await self._permitted("node-shell", pods_meta, shell_ns, ""):
             return
-        if not self._write_context_intact("node shell", meta, None, name):
+        if not self._write_context_intact("node shell", meta, None, name, epoch=epoch):
             # The RBAC round-trip ran concurrently with user input: the
             # approval must stay bound to the selection that initiated it,
             # and never stack over a dialog that opened meanwhile.
@@ -5103,6 +5165,7 @@ class KorvidApp(App[None]):
         if self._get_manifest is None:
             self.notify("Install unavailable: no manifest source", severity="warning")
             return
+        epoch = self._ctx_epoch
         try:
             # Fetch by the canonical view kind (which may be a group-qualified
             # alias), as the edit path does: a bare plural would resolve to a
@@ -5123,7 +5186,7 @@ class KorvidApp(App[None]):
             return
         facts = package_install_facts(manifest)
         if not self._write_context_intact(
-            "install", pkg_meta, ns, name, phase="the manifest fetch"
+            "install", pkg_meta, ns, name, phase="the manifest fetch", epoch=epoch
         ):
             return
 
@@ -5133,7 +5196,7 @@ class KorvidApp(App[None]):
             # The SSAR round trip must not run inside a screen callback:
             # a worker re-checks, revalidates, then confirms.
             self.run_worker(
-                self._confirm_operator_install(pkg_meta, sub_meta, ns, uid, facts, choices)
+                self._confirm_operator_install(pkg_meta, sub_meta, ns, uid, facts, choices, epoch)
             )
 
         # The row namespace is where the catalog lives (e.g. "olm"), not
@@ -5159,6 +5222,7 @@ class KorvidApp(App[None]):
         uid: str | None,
         facts: PackageInstallFacts,
         choices: tuple[str, str, str],
+        epoch: int | None = None,
     ) -> None:
         """Approval dialog for an operator install: the full Subscription
         manifest is shown before it is created (issue #29 requirement)."""
@@ -5186,7 +5250,7 @@ class KorvidApp(App[None]):
         if not await self._permitted("install", sub_meta, namespace, ""):
             return
         if not self._write_context_intact(
-            "install", pkg_meta, ns, facts.package, phase="the install wizard"
+            "install", pkg_meta, ns, facts.package, phase="the install wizard", epoch=epoch
         ):
             return
         if uid and self._selected_uid(ns, facts.package) != uid:
@@ -5242,6 +5306,7 @@ class KorvidApp(App[None]):
         ops = self._write_ops
         if ops is None:
             return
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("approve", meta, ns, name):
             return
         if self._get_manifest is None:
@@ -5264,7 +5329,9 @@ class KorvidApp(App[None]):
         spec = self._approvable_plan_spec(manifest, name)
         if spec is None:
             return
-        if not self._write_context_intact("approve", meta, ns, name, phase="the manifest fetch"):
+        if not self._write_context_intact(
+            "approve", meta, ns, name, phase="the manifest fetch", epoch=epoch
+        ):
             return
         updated = dict(manifest)
         updated["spec"] = {**spec, "approved": True}
