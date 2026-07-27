@@ -1278,7 +1278,9 @@ async def test_drain_cancelled_mid_write_does_not_duplicate(tmp_path: Path) -> N
 
     with patch.object(audit, "append", gated_append):
         drain = asyncio.create_task(app._drain_forward_audits())
-        await asyncio.to_thread(started.wait, 5)
+        # The write must be in flight before the cancel, or this test would
+        # pass without exercising the duplicate window at all.
+        assert await asyncio.to_thread(started.wait, 5)
         drain.cancel()
         with pytest.raises(asyncio.CancelledError):
             await drain
@@ -1287,7 +1289,7 @@ async def test_drain_cancelled_mid_write_does_not_duplicate(tmp_path: Path) -> N
         # thread and skip the entry it already committed.
         await app._drain_forward_audits()
     for evt in list(finished):
-        await asyncio.to_thread(evt.wait, 5)
+        assert await asyncio.to_thread(evt.wait, 5)
     assert _audit_lines(tmp_path).count("port-forward-stop") == 1
 
 
