@@ -13,10 +13,12 @@ class StatusBar(Static):
         breadcrumb: str = "",
         mcp_label: str = "",
         filter_label: str = "",
+        progress_label: str = "",
     ) -> None:
         ctx = context or "(current)"
         trail = f"  {breadcrumb}" if breadcrumb else ""
         mcp = f"  ⇄{mcp_label}" if mcp_label else ""
         flt = f"  ▼{filter_label}" if filter_label else ""
+        prog = f"  ⏳{progress_label}" if progress_label else ""
         # Text keeps user-entered filter text literal (never Rich markup).
-        self.update(Text(f"ctx:{ctx}  ns:{namespace}  ⚡{agent_label}{mcp}{flt}{trail}"))
+        self.update(Text(f"ctx:{ctx}  ns:{namespace}  ⚡{agent_label}{mcp}{flt}{prog}{trail}"))

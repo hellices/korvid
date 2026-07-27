@@ -19,6 +19,7 @@ from kubernetes_asyncio.stream import WsApiClient
 
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta
+from korvid.k8s.drain import DrainPlan, build_drain_plan
 from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import (
@@ -503,7 +504,11 @@ class KubeClient(WriteOps):
             raw: bytes = await resp.read()
             return raw
         except k8s_client.exceptions.ApiException as exc:
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+            raise ApiStatusError(
+                int(exc.status or 0),
+                str(exc.reason or ""),
+                body=str(getattr(exc, "body", "") or ""),
+            ) from exc
 
     async def can_i(
         self,
@@ -738,6 +743,140 @@ class KubeClient(WriteOps):
             logger.debug("resize dry-run preview failed", exc_info=True)
             return None
         return diff_manifests(current, proposed)
+
+    @staticmethod
+    def _cordon_patch(unschedulable: bool, uid: str | None) -> dict[str, Any]:
+        """Strategic-merge-patch body for cordon/uncordon. A ``uid`` in the
+        patched metadata is an apiserver precondition (409 when the node
+        object was recreated). Shared by the real write and its dry-run
+        preview so the two can never drift apart."""
+        body: dict[str, Any] = {"spec": {"unschedulable": unschedulable}}
+        if uid:
+            body["metadata"] = {"uid": uid}
+        return body
+
+    @staticmethod
+    def _node_path(name: str) -> str:
+        return f"/api/v1/nodes/{_path_segment(name)}"
+
+    async def cordon_node(self, name: str, unschedulable: bool, *, uid: str | None = None) -> None:
+        """Cordon (or uncordon) a node by patching ``spec.unschedulable``,
+        the way kubectl does it. A ``uid`` precondition pins the exact node
+        object incarnation that was approved."""
+        await self._request_write(
+            self._node_path(name),
+            "PATCH",
+            body=self._cordon_patch(unschedulable, uid),
+            content_type="application/strategic-merge-patch+json",
+        )
+
+    async def preview_cordon(
+        self, name: str, unschedulable: bool, *, uid: str | None = None
+    ) -> list[str] | None:
+        """Diff of the node before vs after a dry-run cordon/uncordon.
+        ``uid`` semantics match ``preview_scale``; the dry run is pinned to
+        the GET snapshot's resourceVersion (see ``_pin_revision``). None on
+        any failure: a preview must never block the approval flow."""
+        path = self._node_path(name)
+        try:
+            current = await self._request_json(path)
+            proposed = await self._dry_run(
+                path,
+                "PATCH",
+                self._pin_revision(self._cordon_patch(unschedulable, uid), current),
+                "application/strategic-merge-patch+json",
+            )
+        except Exception:
+            logger.debug("cordon dry-run preview failed", exc_info=True)
+            return None
+        return diff_manifests(current, proposed)
+
+    async def evict_pod(self, namespace: str, name: str, *, uid: str | None = None) -> None:
+        """Evict one pod through the Eviction API (policy/v1) - the
+        PDB-respecting path kubectl drain uses. The server answers 429 when
+        a PodDisruptionBudget has no disruptions left (surfaced as
+        ApiStatusError, never retried here). A ``uid`` precondition pins the
+        pod incarnation captured in the drain plan."""
+        delete_options: dict[str, Any] = {}
+        if uid:
+            delete_options["preconditions"] = {"uid": uid}
+        body = {
+            "apiVersion": "policy/v1",
+            "kind": "Eviction",
+            "metadata": {"name": name, "namespace": namespace},
+            "deleteOptions": delete_options,
+        }
+        await self._request_write(
+            f"{self._object_path(PODS_META, namespace, name)}/eviction",
+            "POST",
+            body=body,
+            content_type="application/json",
+        )
+
+    async def drain_plan(self, node_name: str) -> DrainPlan:
+        """Impact plan for draining *node_name*: every pod scheduled there,
+        classified against the cluster's PodDisruptionBudgets (see
+        ``korvid.k8s.drain``). A missing policy/v1 API (404) degrades to an
+        empty budget list - blocked evictions then surface as 429s during
+        execution; an RBAC-denied cluster-wide list (403) falls back to
+        per-namespace PDB queries so namespace-scoped users still get
+        up-front warnings; any other failure propagates so the UI aborts
+        instead of showing a falsely PDB-aware plan."""
+        pods = await self._request_json(
+            "/api/v1/pods",
+            query_params=[("fieldSelector", f"spec.nodeName={node_name}")],
+        )
+        pod_items = pods.get("items") or []
+        try:
+            pdbs = await self._request_json("/apis/policy/v1/poddisruptionbudgets")
+            pdb_items = pdbs.get("items") or []
+        except ApiStatusError as exc:
+            if exc.status == 404:
+                logger.debug("policy/v1 PDB API absent (404); drain plan proceeds without budgets")
+                pdb_items = []
+            elif exc.status == 403:
+                pdb_items = await self._pdbs_by_namespace(pod_items)
+            else:
+                # Auth failure or transport trouble must abort the drain
+                # rather than present a falsely PDB-aware plan.
+                raise
+        return build_drain_plan(pod_items, pdb_items)
+
+    async def pods_on_node(self, node_name: str) -> tuple[str, ...]:
+        """Lightweight presence probe for the post-drain termination poll:
+        one pods list filtered by node, no PDB queries."""
+        pods = await self._request_json(
+            "/api/v1/pods",
+            query_params=[("fieldSelector", f"spec.nodeName={node_name}")],
+        )
+        keys = []
+        for pod in pods.get("items") or []:
+            metadata = pod.get("metadata") or {}
+            uid = metadata.get("uid")
+            ref = f"{metadata.get('namespace', '')}/{metadata.get('name', '')}"
+            keys.append(str(uid) if uid else ref)
+        return tuple(keys)
+
+    async def _pdbs_by_namespace(self, pods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Cluster-wide PDB list was RBAC-denied: retry per namespace of the
+        pods being drained, which namespace-scoped users can usually read.
+        404 means no PDBs in that namespace's view; anything else (including
+        a per-namespace 403) propagates - see ``drain_plan``."""
+        namespaces = sorted(
+            {str((p.get("metadata") or {}).get("namespace", "")) for p in pods} - {""}
+        )
+        items: list[dict[str, Any]] = []
+        for namespace in namespaces:
+            try:
+                got = await self._request_json(
+                    f"/apis/policy/v1/namespaces/{namespace}/poddisruptionbudgets"
+                )
+            except ApiStatusError as exc:
+                if exc.status == 404:
+                    continue
+                raise
+            items.extend(got.get("items") or [])
+        return items
 
     async def _dry_run(
         self,
@@ -1037,7 +1176,9 @@ class KubeClient(WriteOps):
 
         return _watch_call
 
-    async def _request_json(self, path: str) -> dict[str, Any]:
+    async def _request_json(
+        self, path: str, query_params: list[tuple[str, str]] | None = None
+    ) -> dict[str, Any]:
         """Raw GET through the ApiClient; wraps ApiException as ApiStatusError."""
         if self._api is None:
             raise RuntimeError("connect() first")
@@ -1046,6 +1187,7 @@ class KubeClient(WriteOps):
                 path,
                 "GET",
                 auth_settings=["BearerToken"],
+                query_params=query_params or [],
                 _preload_content=False,
             )
             body = await resp.read()
