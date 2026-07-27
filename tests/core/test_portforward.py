@@ -11,7 +11,12 @@ from unittest.mock import patch
 
 import pytest
 
-from korvid.core.portforward import ForwardRegistry, ForwardSpec, candidate_remote_ports
+from korvid.core.portforward import (
+    ForwardRecord,
+    ForwardRegistry,
+    ForwardSpec,
+    candidate_remote_ports,
+)
 
 
 class _FakeProc:
@@ -564,23 +569,22 @@ def test_fail_start_leaves_resolved_forwards_alone() -> None:
     procs[0].stdout.feed(None)
 
 
-def test_reattach_releases_the_previous_generations_waiter() -> None:
-    """A superseded readiness waiter must not sit out its full timeout."""
-    procs: list[_FakeProc] = []
-    registry = _piped_registry(procs)
-    record = registry.start(_spec())
+class _SignallingEvent(threading.Event):
+    """Readiness-event double that reports when wait() was entered."""
 
-    class _SignallingEvent(threading.Event):
-        """Readiness-event double that reports when wait() was entered."""
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
 
-        def __init__(self) -> None:
-            super().__init__()
-            self.entered = threading.Event()
+    def wait(self, timeout: float | None = None) -> bool:
+        self.entered.set()
+        return super().wait(timeout)
 
-        def wait(self, timeout: float | None = None) -> bool:
-            self.entered.set()
-            return super().wait(timeout)
 
+def _blocked_waiter(
+    registry: ForwardRegistry, record: ForwardRecord
+) -> tuple[threading.Thread, list[str]]:
+    """A thread provably blocked in wait_ready() on ``record``'s handshake."""
     gate = _SignallingEvent()
     record._ready = gate
     results: list[str] = []
@@ -590,12 +594,48 @@ def test_reattach_releases_the_previous_generations_waiter() -> None:
 
     waiter = threading.Thread(target=_wait)
     waiter.start()
-    assert gate.entered.wait(5.0), "waiter never blocked on the first generation's event"
+    assert gate.entered.wait(5.0), "waiter never blocked on the readiness event"
+    return waiter, results
+
+
+def test_eof_before_exit_is_a_failed_start() -> None:
+    """kubectl closing stdout fails the handshake before poll() sees the exit."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    procs[0].stdout.feed("error: pod not found\n")
+    # EOF arrives while poll() still reports the child as running.
+    procs[0].stdout.feed(None)
+    assert registry.wait_ready(record.id, timeout=2.0) == "broken"
+    assert "pod not found" in record.last_output
+
+
+def test_refresh_releases_waiter_when_a_starting_child_dies_silently() -> None:
+    """Liveness polling must fail a blocked handshake, not leave it to time out."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    waiter, results = _blocked_waiter(registry, record)
     # The child dies without flushing EOF — its reader thread stays blocked,
-    # so only the re-attach swap can release the stranded waiter.
+    # so only the poll can notice and must release the stranded waiter.
     procs[0].exit(1)
     registry.refresh()
-    assert record.status == "broken"
+    waiter.join(timeout=5.0)
+    assert not waiter.is_alive(), "waiter still blocked after refresh marked it broken"
+    assert results == ["broken"]
+    procs[0].stdout.feed(None)
+
+
+def test_reattach_releases_the_previous_generations_waiter() -> None:
+    """A superseded readiness waiter must not sit out its full timeout."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    waiter, results = _blocked_waiter(registry, record)
+    procs[0].exit(1)
+    # Mark the record broken without waking the waiter — the swap itself must
+    # be sufficient to release it, whatever path flipped the status.
+    record.status = "broken"
     assert registry.reattach(record.id) is record
     waiter.join(timeout=5.0)
     assert not waiter.is_alive(), "superseded waiter still blocked after re-attach"

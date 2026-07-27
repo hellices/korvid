@@ -185,7 +185,14 @@ class ForwardRegistry:
                         ready.set()
         except (OSError, ValueError):  # pipe closed under us mid-read
             pass
-        ready.set()  # EOF — the child exited (or closed its stdout)
+        # EOF: the child exited or closed its stdout — either way this
+        # generation can never confirm its listener. Mark the failed start
+        # now: poll() may not observe the exit yet, and reporting "starting"
+        # would cost the caller its full timeout and hide kubectl's error.
+        with record._lock:
+            if record._proc is proc and record.status == "starting":
+                record.status = "broken"
+        ready.set()
 
     def wait_ready(self, forward_id: int, *, timeout: float) -> str:
         """Block until the forward's handshake resolves (call off the loop).
@@ -206,6 +213,8 @@ class ForwardRegistry:
         record._ready.wait(timeout)
         if record.status == "alive":
             return "alive"
+        if record.status == "broken":
+            return "broken"
         proc = record._proc
         if proc is not None and proc.poll() is not None:
             record.status = "broken"
@@ -223,6 +232,9 @@ class ForwardRegistry:
             proc = record._proc
             if record.status != "broken" and proc is not None and proc.poll() is not None:
                 record.status = "broken"
+                # A handshake blocked on this now-dead child must fail now,
+                # not after its full timeout — a wedged pipe never EOFs.
+                self._release_waiters(record)
 
     def forwards(self) -> list[ForwardRecord]:
         """Tracked forwards in start order."""
@@ -276,6 +288,10 @@ class ForwardRegistry:
             # reader may never observe the swap (blocked on a silent
             # stream), and a superseded confirmation must not sit out the
             # full readiness timeout before it can get out of the way.
+            # Invariant: wait_ready() captures record._ready once on entry,
+            # so setting the old event here can never spuriously wake a
+            # waiter of the replacement generation — those only ever block
+            # on the fresh event _begin_handshake() installs below.
             superseded.set()
         self._begin_handshake(record)
         return record
