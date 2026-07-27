@@ -7,13 +7,15 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, urlencode
 
 from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio import config as k8s_config
 from kubernetes_asyncio import watch as k8s_watch
+from kubernetes_asyncio.stream import WsApiClient
 
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta
@@ -144,6 +146,54 @@ class KubeClient(WriteOps):
             return self._provider_info
         self._provider_info = detect_provider(data.get("items", []))
         return self._provider_info
+
+    def open_pod_exec(
+        self,
+        namespace: str,
+        pod: str,
+        container: str | None,
+        command: list[str],
+        *,
+        stdin: bool,
+    ) -> AbstractAsyncContextManager[Any]:
+        """Open an exec websocket against a pod for streaming I/O (issue #47).
+
+        Yields the raw connection (channel-framed messages, ``send_bytes``);
+        `korvid.core.transfer` speaks the frame protocol on top of it. A
+        dedicated ``WsApiClient`` is created per session — it shares the
+        kubeconfig ``connect()`` loaded — and closed with the session.
+        """
+        if self._core_v1 is None:
+            raise RuntimeError("connect() first")
+
+        @asynccontextmanager
+        async def _session() -> AsyncIterator[Any]:
+            ws_api = WsApiClient()
+            try:
+                core = k8s_client.CoreV1Api(ws_api)
+                kwargs: dict[str, Any] = {
+                    "command": command,
+                    "stderr": True,
+                    "stdin": stdin,
+                    "stdout": True,
+                    "tty": False,
+                    "_preload_content": False,
+                }
+                if container is not None:
+                    kwargs["container"] = container
+                # The generated stubs type exec responses as `str` (the
+                # preloaded form); with _preload_content=False the WsApiClient
+                # returns the websocket context manager instead.
+                ws_ctx = cast(
+                    AbstractAsyncContextManager[Any],
+                    await core.connect_get_namespaced_pod_exec(pod, namespace, **kwargs),
+                )
+                async with ws_ctx as ws:
+                    yield ws
+            finally:
+                await ws_api.close()
+
+        return _session()
 
     async def list_pods(self, namespace: str) -> list[PodSummary]:
         if self._core_v1 is None:
