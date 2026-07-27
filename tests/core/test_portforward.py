@@ -378,6 +378,65 @@ def test_stop_all_does_not_hang_on_an_unreapable_straggler() -> None:
     assert procs[0].killed
 
 
+def test_start_reaps_a_broken_but_running_child_on_the_same_port() -> None:
+    """A broken record's still-running child must not win the new bind race."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    procs[0].stdout.feed("error: unable to listen\n")
+    # Stream closes while poll() still reports the child as running.
+    procs[0].stdout.feed(None)
+    assert registry.wait_ready(record.id, timeout=2.0) == "broken"
+    fresh = registry.start(_spec(name="api-2"))  # same local port
+    assert procs[0].terminated, "the broken record's child still held the port"
+    assert fresh.status == "starting"
+    procs[1].stdout.feed(None)
+
+
+def test_stop_all_reaps_stragglers_under_one_shared_deadline() -> None:
+    """Multiple unreapable children must not stack their kill timeouts."""
+    now = {"t": 0.0}
+
+    class _SlowUnreapableProc(_StubbornProc):
+        def __init__(self, argv: list[str]) -> None:
+            super().__init__(argv)
+            self.wait_calls: list[float | None] = []
+
+        def kill(self) -> None:
+            self.killed = True  # SIGKILL sent; the child is stuck in the kernel
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.wait_calls.append(timeout)
+            now["t"] += timeout or 0.0  # reaping this child burns wall time
+            raise subprocess.TimeoutExpired(cmd=self.argv, timeout=timeout or 0.0)
+
+    procs: list[_SlowUnreapableProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _SlowUnreapableProc:
+        proc = _SlowUnreapableProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    registry.start(_spec())
+    registry.start(_spec(local_port=9090))
+
+    def _sleep(seconds: float) -> None:
+        now["t"] += seconds
+
+    with (
+        patch("korvid.core.portforward.monotonic", side_effect=lambda: now["t"]),
+        patch("korvid.core.portforward.time.sleep", side_effect=_sleep),
+    ):
+        records = registry.stop_all()
+    assert len(records) == 2
+    assert all(p.killed for p in procs)
+    # The first wedged child consumed the shared reap budget — the second
+    # must not be granted a fresh timeout of its own.
+    waits = [w for p in procs for w in p.wait_calls]
+    assert len(waits) == 1
+
+
 def test_candidate_ports_excludes_booleans() -> None:
     """bool is an int subclass — `port: true` must not become prefill 'True'."""
     manifest = {"spec": {"containers": [{"ports": [{"containerPort": True}]}]}}

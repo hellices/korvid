@@ -9,6 +9,7 @@ dialog constrains the remote port to the discovered service ports.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import ClassVar
 
@@ -299,7 +300,9 @@ class ForwardListScreen(ModalScreen[None]):
             )
             return
         try:
-            revived = self._registry.reattach(record.id)
+            # Off the event loop: the registry may block briefly reaping a
+            # previously stopped child that still holds the local port.
+            revived = await asyncio.to_thread(self._registry.reattach, record.id)
         except (OSError, ValueError) as exc:
             # OSError: spawn failed. ValueError: another live forward has
             # claimed the local port since this one broke.

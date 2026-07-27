@@ -1419,7 +1419,9 @@ class KorvidApp(App[None]):
 
         def _on_result(result: tuple[int, int] | None) -> None:
             if result is not None:
-                self._start_forward(kind, ns, name, local_port=result[0], remote_port=result[1])
+                self.run_worker(
+                    self._start_forward(kind, ns, name, local_port=result[0], remote_port=result[1])
+                )
 
         await self.push_screen(
             PortForwardScreen(f"{kind}/{ns}/{name}", ports, restrict_remote=kind == "services"),
@@ -1444,7 +1446,7 @@ class KorvidApp(App[None]):
             return [], False
         return candidate_remote_ports(kind, manifest), True
 
-    def _start_forward(
+    async def _start_forward(
         self, kind: str, namespace: str, name: str, *, local_port: int, remote_port: int
     ) -> None:
         """Spawn a forward from the registry, audit it, and confirm to the user."""
@@ -1459,7 +1461,9 @@ class KorvidApp(App[None]):
             remote_port=remote_port,
         )
         try:
-            record = registry.start(spec)
+            # Off the event loop: reclaiming the local port may block briefly
+            # on reaping a previously stopped child that ignored SIGTERM.
+            record = await asyncio.to_thread(registry.start, spec)
         except (OSError, ValueError) as exc:
             # OSError: spawn failed (kubectl missing). ValueError: local
             # port collision detected up front by the registry.
@@ -1573,8 +1577,11 @@ class KorvidApp(App[None]):
         else:
             detail = record.last_output or "kubectl exited before the forward was ready"
         if reattached:
-            # A failed re-attach stays listed as broken for another try.
+            # A failed re-attach stays listed as broken for another try. Mark
+            # the breakage as already reported: the specific error toasted
+            # below must not be followed by the poll's generic broken toast.
             registry.fail_start(record.id)
+            self._broken_forwards.add(record.id)
         else:
             registry.stop(record.id)  # never worked — drop it from :pf
         self.notify(f"Port-forward failed to start: {detail}", severity="error")

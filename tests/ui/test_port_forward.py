@@ -588,6 +588,64 @@ async def test_reattach_rearms_broken_notification_immediately() -> None:
         assert record.id not in app._broken_forwards
 
 
+async def test_failed_reattach_marks_breakage_as_already_reported(tmp_path: Path) -> None:
+    """A failed re-attach's specific error must not be followed by the poll's
+    generic broken toast for the same breakage."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    record = registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    procs[0].stdout.feed(None)
+    procs[0].returncode = 1
+    registry.refresh()
+    notices: list[str] = []
+    original = app.notify
+
+    def _capture(message: str, **kwargs: Any) -> Any:
+        notices.append(message)
+        return original(message, **kwargs)
+
+    with patch("korvid.ui.app._FORWARD_READY_SECONDS", 0.05):
+        async with app.run_test() as pilot:
+            app.notify = _capture  # type: ignore[method-assign]  # test spy
+            await _wait_rows(app, pilot)
+            app._broken_forwards.add(record.id)  # first breakage already toasted
+            await _open_pf(app, pilot)
+            await until(pilot, lambda: any("broken" in row for row in _forward_rows(app)))
+            await pilot.press("r")
+            await until(pilot, lambda: len(procs) == 2, label="replacement spawned")
+            # The silent replacement fails the re-attach handshake...
+            await until(
+                pilot,
+                lambda: any("did not confirm" in n for n in notices),
+                label="re-attach failure toast",
+            )
+            # ...which must re-mark the breakage as reported (the re-attach
+            # re-armed the toast) so the poll doesn't repeat the bad news.
+            await until(
+                pilot,
+                lambda: record.id in app._broken_forwards,
+                label="failed re-attach re-marks the breakage",
+            )
+            assert not any("target gone?" in n for n in notices)  # no generic re-toast
+            assert registry.get(record.id) is record  # still listed for another try
+            procs[1].stdout.feed(None)  # release the reader thread
+
+
 async def test_forward_audit_failure_does_not_crash_app(tmp_path: Path) -> None:
     """A failing audit sink must not kill the app on a normal forward start."""
     procs: list[_FakeProc] = []

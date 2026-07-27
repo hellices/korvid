@@ -283,16 +283,10 @@ class ForwardRegistry:
         record = self._records.get(forward_id)
         if record is None or record.status != "broken":
             return None
-        # A record broken by EOF may still have its child running and holding
-        # the local port (poll() can lag the stream closing). Signal it down
-        # so the port check below reaps it instead of orphaning it.
-        lingering = record._proc
-        if (
-            lingering is not None
-            and lingering.poll() is None
-            and all(reaping is not lingering for reaping, _, _ in self._reaping)
-        ):
-            self._signal_stop(record)
+        # _ensure_port_free also covers this record itself: a record broken
+        # by EOF may still have its child running and holding the local port
+        # (poll() can lag the stream closing) — it is signalled and reaped
+        # there instead of being orphaned by the process swap below.
         self._ensure_port_free(record.spec.local_port)
         replacement = self._spawn(record.spec)
         # Swap under the record lock: a stale watcher that already passed its
@@ -348,6 +342,9 @@ class ForwardRegistry:
         child still exiting (SIGTERM grace) may also hold the socket; that
         one is forced down with SIGKILL (immediate, cannot be ignored) so a
         stop-then-restart on the same port works without a delayed failure.
+        A ``broken`` record's child can also still be running (EOF marks the
+        status before poll() observes the exit) — it is signalled down and
+        handed to the same reap pass instead of keeping the port.
 
         Raises:
             ValueError: when a live forward already uses ``local_port``, or
@@ -356,9 +353,18 @@ class ForwardRegistry:
                 caller (the UI event loop) indefinitely.
         """
         for existing in self._records.values():
-            if existing.status != "broken" and existing.spec.local_port == local_port:
+            if existing.spec.local_port != local_port:
+                continue
+            if existing.status != "broken":
                 msg = f"local port {local_port} already forwarded by #{existing.id}"
                 raise ValueError(msg)
+            proc = existing._proc
+            if (
+                proc is not None
+                and proc.poll() is None
+                and all(reaping is not proc for reaping, _, _ in self._reaping)
+            ):
+                self._signal_stop(existing)
         remaining: list[tuple[_ForwardProcess, float, int]] = []
         for proc, deadline, port in self._reaping:
             if port == local_port:
@@ -405,14 +411,20 @@ class ForwardRegistry:
         deadline = monotonic() + _STOP_GRACE_SECONDS
         while any(proc.poll() is None for proc in live):
             if monotonic() > deadline:
-                for proc in live:
-                    if proc.poll() is None:
-                        proc.kill()
-                        # SIGKILL cannot be ignored, but reaping a child stuck
-                        # in the kernel can still stall — bound the wait so
-                        # one wedged process cannot hang app exit forever.
-                        with suppress(subprocess.TimeoutExpired):
-                            proc.wait(timeout=_STOP_GRACE_SECONDS)
+                stragglers = [proc for proc in live if proc.poll() is None]
+                for proc in stragglers:
+                    proc.kill()
+                # SIGKILL cannot be ignored, but reaping a child stuck in
+                # the kernel can still stall — all stragglers share one
+                # bounded reap budget so teardown latency stays a single
+                # grace period, not one per wedged child.
+                reap_deadline = monotonic() + _STOP_GRACE_SECONDS
+                for proc in stragglers:
+                    budget = reap_deadline - monotonic()
+                    if budget <= 0:
+                        break
+                    with suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=budget)
                 break
             time.sleep(_STOP_POLL_SECONDS)
         return records
