@@ -824,3 +824,16 @@ views:
     config = load_config(cfg)
     assert config.views == {}
     assert any("secrets" in w and "masking" in w for w in config.warnings)
+
+
+def test_views_non_mapping_view_warned(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  pods: []
+"""
+    )
+    config = load_config(cfg)
+    assert config.views == {}
+    assert any("pods" in w and "mapping" in w for w in config.warnings)

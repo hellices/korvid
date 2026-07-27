@@ -373,6 +373,7 @@ def _parse_views(value: Any) -> tuple[dict[str, ViewConfig], list[str]]:
     warnings: list[str] = []
     for kind, view_raw in value.items():
         if not isinstance(view_raw, dict):
+            warnings.append(f"views.{kind}: a view definition must be a mapping")
             continue
         if str(kind) in SYNTHETIC_VIEW_KINDS:
             # Synthetic helm views are adapted from backing Secrets — there
