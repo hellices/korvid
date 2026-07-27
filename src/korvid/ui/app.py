@@ -1229,13 +1229,9 @@ class KorvidApp(App[None]):
         if self._list_namespaces is None:
             self.notify("Namespace listing unavailable", severity="warning")
             return
-        if self._ctx_switching:
-            # The listing would race the client swap and could return either
-            # cluster's namespaces — refuse up front.
-            self.notify(
-                "A context switch is in progress — try again once it completes",
-                severity="warning",
-            )
+        # The listing would race the client swap and could return either
+        # cluster's namespaces — refuse up front.
+        if not self._ctx_reads_allowed():
             return
         epoch = self._ctx_epoch
         try:
@@ -1267,6 +1263,21 @@ class KorvidApp(App[None]):
     def _ctx_switch_crossed(self, epoch: int) -> bool:
         """True when a :ctx switch started or completed since *epoch* was taken."""
         return self._ctx_switching or epoch != self._ctx_epoch
+
+    def _ctx_reads_allowed(self) -> bool:
+        """Refuse read actions that spawn cluster streams during a :ctx switch.
+
+        Streams started mid-swap would attach to whichever cluster wins the
+        switch while still labeled with the old selection (issue #84).
+        Returns True when it is safe to proceed.
+        """
+        if self._ctx_switching:
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
+            return False
+        return True
 
     def _handle_namespace_list_error(self, exc: ApiStatusError) -> None:
         """RBAC-limited fallback for the picker (issue #49): a forbidden
@@ -1986,13 +1997,9 @@ class KorvidApp(App[None]):
         if self._get_manifest is None:
             self.notify("Describe unavailable", severity="warning")
             return
-        if self._ctx_switching:
-            # The fetch would race the client swap and could render either
-            # cluster's manifest — refuse up front.
-            self.notify(
-                "A context switch is in progress — try again once it completes",
-                severity="warning",
-            )
+        # The fetch would race the client swap and could render either
+        # cluster's manifest — refuse up front.
+        if not self._ctx_reads_allowed():
             return
         epoch = self._ctx_epoch
 
@@ -2216,13 +2223,9 @@ class KorvidApp(App[None]):
         """
         kind = self._canonical_kind(self.current_kind)
         meta = self.aliases.get(kind)
-        if self._ctx_switching:
-            # The exec would race the teardown/retarget and could attach to
-            # whichever cluster wins — refuse up front.
-            self.notify(
-                "A context switch is in progress — try again once it completes",
-                severity="warning",
-            )
+        # The exec would race the teardown/retarget and could attach to
+        # whichever cluster wins — refuse up front.
+        if not self._ctx_reads_allowed():
             return
         if meta is not None and (meta.group, meta.plural) == ("", "nodes"):
             self.run_worker(self._node_shell_flow())
@@ -2275,13 +2278,9 @@ class KorvidApp(App[None]):
         if self.current_kind not in FORWARDABLE_KINDS:
             self.notify("Port-forward is only available for pods and services", severity="warning")
             return
-        if self._ctx_switching:
-            # The forward would race the teardown/retarget and could spawn
-            # against whichever cluster wins — refuse up front.
-            self.notify(
-                "A context switch is in progress — try again once it completes",
-                severity="warning",
-            )
+        # The forward would race the teardown/retarget and could spawn
+        # against whichever cluster wins — refuse up front.
+        if not self._ctx_reads_allowed():
             return
         epoch = self._ctx_epoch
         if self._forwards is None:
@@ -2887,13 +2886,9 @@ class KorvidApp(App[None]):
         if self._transfer_in_flight:
             self.notify("A transfer is already in progress", severity="warning")
             return
-        if self._ctx_switching:
-            # The stream would race the teardown/retarget and could address
-            # whichever cluster wins — refuse up front.
-            self.notify(
-                "A context switch is in progress — try again once it completes",
-                severity="warning",
-            )
+        # The stream would race the teardown/retarget and could address
+        # whichever cluster wins — refuse up front.
+        if not self._ctx_reads_allowed():
             return
         epoch = self._ctx_epoch
 
@@ -3695,6 +3690,9 @@ class KorvidApp(App[None]):
         if self.current_kind != "pods":
             self.notify("Logs are only available for pods", severity="warning")
             return
+        if not self._ctx_reads_allowed():
+            return
+        epoch = self._ctx_epoch
 
         log_pane = self.query_one(LogPane)
         if log_pane.display and self._log_pane_mode != "l":
@@ -3711,12 +3709,14 @@ class KorvidApp(App[None]):
             return
 
         if log_pane.display:
-            await self._toggle_log_pod(ns, name)
+            await self._toggle_log_pod(ns, name, epoch)
             return
 
         self._log_pane_mode = "l"
         triples = self._pod_triples(ns, name)
-        await self._open_log_pane(ns, [(pod, ctr) for _, pod, ctr in triples], triples=triples)
+        await self._open_log_pane(
+            ns, [(pod, ctr) for _, pod, ctr in triples], triples=triples, epoch=epoch
+        )
 
     def _pod_triples(self, namespace: str, name: str) -> list[tuple[str, str, str]]:
         """Return (ns, pod, container) triples for one pod (one per container)."""
@@ -3725,7 +3725,7 @@ class KorvidApp(App[None]):
             return [(namespace, name, ctr) for ctr in containers]
         return [(namespace, name, "")]
 
-    async def _toggle_log_pod(self, namespace: str, name: str) -> None:
+    async def _toggle_log_pod(self, namespace: str, name: str, epoch: int) -> None:
         """Add or remove *namespace/name* from the accumulated live-log panels."""
         existing = list(self._current_log_triples)
         pods: list[tuple[str, str]] = []
@@ -3755,13 +3755,16 @@ class KorvidApp(App[None]):
 
         await self._cancel_log_tasks()
         sources = [(pod, ctr) for _, pod, ctr in triples]
-        await self._open_log_pane(triples[0][0], sources, triples=triples)
+        await self._open_log_pane(triples[0][0], sources, triples=triples, epoch=epoch)
 
     async def action_logs_multi(self) -> None:
         """Stream all filtered pods' containers (``L`` binding); cap at 8."""
         if self.current_kind != "pods":
             self.notify("Logs are only available for pods", severity="warning")
             return
+        if not self._ctx_reads_allowed():
+            return
+        epoch = self._ctx_epoch
 
         if self._stream_logs is None:
             self.notify("Log streaming unavailable", severity="warning")
@@ -3783,7 +3786,11 @@ class KorvidApp(App[None]):
         self._log_pane_mode = "L"
         ns0 = triples[0][0]
         await self._open_log_pane(
-            ns0, [(pod, ctr) for _, pod, ctr in triples], triples=triples, force_prefix=True
+            ns0,
+            [(pod, ctr) for _, pod, ctr in triples],
+            triples=triples,
+            force_prefix=True,
+            epoch=epoch,
         )
 
     def _build_multi_stream_triples(self, table: ResourceTable) -> list[tuple[str, str, str]]:
@@ -6114,8 +6121,22 @@ class KorvidApp(App[None]):
         triples: list[tuple[str, str, str]] | None = None,
         force_prefix: bool = False,
         previous: bool = False,
+        epoch: int | None = None,
     ) -> None:
-        """Show log pane and spawn one streaming task per (pod, container)."""
+        """Show log pane and spawn one streaming task per (pod, container).
+
+        *epoch* is the `_ctx_epoch` captured when the user triggered the
+        action; when a :ctx switch started or completed since (issue #84),
+        the open is dropped — the streams would attach to the new cluster
+        while labeled with the old selection. Callers without an awaited
+        gap (epoch=None) are still refused while a switch is in flight.
+        """
+        if self._ctx_switch_crossed(self._ctx_epoch if epoch is None else epoch):
+            self.notify(
+                "Log streaming cancelled - the kube context changed",
+                severity="warning",
+            )
+            return
         self._log_pane_gen += 1
         # Resolve triples before saving so _current_log_triples is always complete.
         if triples is None:
@@ -6408,6 +6429,9 @@ class KorvidApp(App[None]):
             return
         if not self._current_log_triples:
             return
+        if not self._ctx_reads_allowed():
+            return
+        epoch = self._ctx_epoch
         triples = list(self._current_log_triples)
         force_prefix = self._current_log_force_prefix
         sources = [(pod, ctr) for _, pod, ctr in triples]
@@ -6417,7 +6441,7 @@ class KorvidApp(App[None]):
         # Re-open with previous=True (clears RichLog, writes banner, spawns tasks).
         ns0 = triples[0][0]
         await self._open_log_pane(
-            ns0, sources, triples=triples, force_prefix=force_prefix, previous=True
+            ns0, sources, triples=triples, force_prefix=force_prefix, previous=True, epoch=epoch
         )
 
     def action_log_search_next(self) -> None:

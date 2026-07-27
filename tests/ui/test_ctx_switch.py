@@ -44,6 +44,8 @@ class _CtxEnv:
         switch_error: Exception | None = None,
         result: ContextSwitchResult | None = None,
         audit_path: Path | None = None,
+        stream_logs: Any = None,
+        probe_gate: asyncio.Event | None = None,
     ) -> None:
         self.probe_calls: list[str] = []
         self.switch_calls: list[str | None] = []
@@ -70,6 +72,8 @@ class _CtxEnv:
 
         async def probe(name: str) -> None:
             self.probe_calls.append(name)
+            if probe_gate is not None:
+                await probe_gate.wait()
             if self.probe_error is not None:
                 raise self.probe_error
 
@@ -90,6 +94,7 @@ class _CtxEnv:
             list_contexts=list_contexts,
             probe_context=probe,
             switch_context=switch,
+            stream_logs=stream_logs,
         )
 
 
@@ -996,4 +1001,92 @@ async def test_failed_mcp_restart_after_switch_notifies_as_error() -> None:
                 for n in app._notifications
             ),
             label="mcp restart error severity",
+        )
+
+
+async def test_switch_closes_live_log_pane() -> None:
+    """A live log stream (long-lived read) must die with the old cluster:
+    the teardown closes the pane and cancels its stream tasks (issue #84)."""
+    from korvid.k8s.logs import LogLine
+    from korvid.ui.widgets.log_pane import LogPane
+
+    streaming = asyncio.Event()
+
+    async def stream(
+        namespace: str,
+        pod: str,
+        container: str = "",
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncIterator[LogLine]:
+        streaming.set()
+        yield LogLine(pod=pod, container=container, text="line0")
+        while True:
+            await asyncio.sleep(0.01)
+
+    env = _CtxEnv(stream_logs=stream)
+    app = env.app
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        await pilot.press("l")
+        await until(pilot, lambda: streaming.is_set(), label="stream started")
+        assert app.query_one(LogPane).display is True
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: app.config.kube_context == "ctx-b",
+            label="config context updated",
+        )
+        assert app.query_one(LogPane).display is False
+        assert not app._log_tasks
+
+
+async def test_logs_refused_during_switch_via_ctx_flow() -> None:
+    """`l` pressed while a real `:ctx` switch is in flight (blocked at the
+    auth probe, which runs after `_ctx_switching` is claimed) is refused up
+    front (issue #84)."""
+    from korvid.ui.widgets.log_pane import LogPane
+
+    async def stream(
+        namespace: str,
+        pod: str,
+        container: str = "",
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncIterator[Any]:
+        return
+        yield  # pragma: no cover
+
+    gate = asyncio.Event()
+    env = _CtxEnv(stream_logs=stream, probe_gate=gate)
+    app = env.app
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: env.probe_calls == ["ctx-b"] and app._ctx_switching,
+            label="switch flow blocked at the probe",
+        )
+        try:
+            await pilot.press("l")
+            await until(
+                pilot,
+                lambda: any(
+                    "context switch is in progress" in n.message for n in app._notifications
+                ),
+                label="logs refusal notification",
+            )
+            assert app.query_one(LogPane).display is False
+            assert not app._log_tasks
+        finally:
+            gate.set()
+        await until(
+            pilot,
+            lambda: app.config.kube_context == "ctx-b",
+            label="switch completed",
         )
