@@ -3156,25 +3156,27 @@ class KorvidApp(App[None]):
                     await self._audit_write("drain", meta, None, name, summary, "cancelled")
                 self.notify(f"drain nodes/{name} {summary}", severity="warning")
                 raise
+            summary = (
+                f"evicted {counts['evicted']}, pdb-blocked {counts['blocked']},"
+                f" failed {counts['failed']} of {total}"
+            )
+            if counts["still"]:
+                summary += f"; {counts['still']} evicted pods not yet terminated"
+            clean = counts["blocked"] == 0 and counts["failed"] == 0 and counts["still"] == 0
+            outcome = "success" if clean else f"partial: {summary}"
+            try:
+                await self._audit_write("drain", meta, None, name, summary, outcome)
+            except Exception:
+                logger.exception("audit outcome record failed after drain")
+                self.notify("Audit log write failed (drain already executed)", severity="warning")
+            if clean:
+                self.notify(f"drain nodes/{name}: {summary}")
+            else:
+                self.notify(f"drain nodes/{name}: {summary}", severity="warning")
         finally:
+            # Last: while the worker is finalizing (outcome audit/notify)
+            # the targeted-cancel guard must still see its node.
             self._drain_node = None
-        summary = (
-            f"evicted {counts['evicted']}, pdb-blocked {counts['blocked']},"
-            f" failed {counts['failed']} of {total}"
-        )
-        if counts["still"]:
-            summary += f"; {counts['still']} evicted pods not yet terminated"
-        clean = counts["blocked"] == 0 and counts["failed"] == 0 and counts["still"] == 0
-        outcome = "success" if clean else f"partial: {summary}"
-        try:
-            await self._audit_write("drain", meta, None, name, summary, outcome)
-        except Exception:
-            logger.exception("audit outcome record failed after drain")
-            self.notify("Audit log write failed (drain already executed)", severity="warning")
-        if clean:
-            self.notify(f"drain nodes/{name}: {summary}")
-        else:
-            self.notify(f"drain nodes/{name}: {summary}", severity="warning")
 
     async def _evict_targets(
         self,

@@ -284,3 +284,30 @@ def test_always_allow_unhealthy_eviction_does_not_consume_the_allowance() -> Non
     plan = build_drain_plan(pods, [pdb])
     blocked = {t.name: t.pdb_blocked for t in plan.targets}
     assert blocked == {"sick-1": None, "web-1": None, "web-2": "web-pdb"}
+
+
+def test_stale_pdb_status_blocks_fail_safe() -> None:
+    """Eviction admission refuses disruptions while status.observedGeneration
+    trails metadata.generation, whatever the stale allowance says."""
+    pdb = _pdb("web-pdb", match_labels={"app": "web"}, disruptions_allowed=5)
+    pdb["metadata"]["generation"] = 3
+    pdb["status"]["observedGeneration"] = 2
+    plan = build_drain_plan([_pod("web-1", labels={"app": "web"})], [pdb])
+    assert plan.targets[0].pdb_blocked == "web-pdb (status not up to date)"
+
+
+def test_stale_pdb_status_does_not_override_always_allow_unhealthy() -> None:
+    pdb = _pdb("web-pdb", match_labels={"app": "web"}, disruptions_allowed=0)
+    pdb["spec"]["unhealthyPodEvictionPolicy"] = "AlwaysAllow"
+    pdb["metadata"]["generation"] = 3
+    pdb["status"]["observedGeneration"] = 2
+    plan = build_drain_plan([_pod("web-1", labels={"app": "web"})], [pdb])
+    assert plan.targets[0].pdb_blocked is None
+
+
+def test_up_to_date_pdb_status_is_trusted() -> None:
+    pdb = _pdb("web-pdb", match_labels={"app": "web"}, disruptions_allowed=1)
+    pdb["metadata"]["generation"] = 3
+    pdb["status"]["observedGeneration"] = 3
+    plan = build_drain_plan([_pod("web-1", labels={"app": "web"})], [pdb])
+    assert plan.targets[0].pdb_blocked is None

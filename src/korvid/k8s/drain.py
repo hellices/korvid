@@ -161,10 +161,24 @@ class _BudgetTracker:
                 # spec.unhealthyPodEvictionPolicy: AlwaysAllow admits a
                 # non-Ready pod without consuming the PDB allowance.
                 return None
+            pdb_name = str((pdb.get("metadata") or {}).get("name", ""))
+            if _status_is_stale(pdb):
+                # Eviction admission refuses disruptions while the PDB's
+                # status lags its spec (observedGeneration < generation),
+                # regardless of the stale disruptionsAllowed - fail safe.
+                return f"{pdb_name} (status not up to date)"
             if self._remaining[id(pdb)] <= 0:
-                return str((pdb.get("metadata") or {}).get("name", ""))
+                return pdb_name
             self._remaining[id(pdb)] -= 1
         return None
+
+
+def _status_is_stale(pdb: dict[str, Any]) -> bool:
+    generation = (pdb.get("metadata") or {}).get("generation")
+    observed = (pdb.get("status") or {}).get("observedGeneration")
+    if not isinstance(generation, int) or not isinstance(observed, int):
+        return False
+    return observed < generation
 
 
 def _always_allows_unhealthy(pdb: dict[str, Any]) -> bool:
