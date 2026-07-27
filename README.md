@@ -483,6 +483,34 @@ claude mcp add --transport http korvid http://127.0.0.1:7878/mcp
 {"context_servers": {"korvid": {"url": "http://127.0.0.1:7878/mcp"}}}
 ```
 
+## Agent eval harness
+
+`korvid.evals` measures how well a model diagnoses cluster faults through
+korvid's real agent runtime and tools. Each scenario is a YAML fixture — a
+simulated cluster (manifests, events, log tails), a user question, and
+deterministic grading assertions (keywords the answer must mention, misdiagnoses
+it must not claim, and tool results it must have fetched as evidence). The
+bundled pack covers crashloops, OOM kills, image-pull failures (auth and typo),
+failing readiness probes, unbound PVCs, service selector mismatches, stuck
+rollouts, quota exhaustion, node-pressure evictions, and two healthy negative
+controls.
+
+Run it against any OpenAI-compatible endpoint (this talks to a live model, so
+it never runs in CI — CI only smoke-tests the harness with a scripted provider):
+
+```sh
+export KORVID_EVAL_BASE_URL=http://localhost:11434/v1   # e.g. Ollama
+export KORVID_EVAL_MODEL=qwen3:14b
+# export KORVID_EVAL_API_KEY=...                        # if the endpoint needs one
+
+uv run python -m korvid.evals --reps 3 --out report.md --json report.json
+```
+
+The report is a markdown table with per-scenario success and evidence-fetch
+rates, malformed-tool-call and safety-violation counts, iteration counts, token
+usage, and wall-time variance across repetitions. Custom scenario packs can be
+pointed at with `--scenarios DIR`.
+
 ## Installation
 
 Not yet on PyPI. Install straight from the repository:

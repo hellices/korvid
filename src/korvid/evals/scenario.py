@@ -138,6 +138,11 @@ def _manifests(raw: Any, key: str) -> tuple[dict[str, Any], ...]:
     return tuple(raw)
 
 
+def bundled_scenarios_dir() -> Path:
+    """Directory containing the scenario pack that ships with korvid."""
+    return Path(__file__).parent / "scenarios"
+
+
 def load_scenario(path: Path) -> Scenario:
     """Load and validate one scenario YAML file."""
     data = yaml.safe_load(path.read_text())

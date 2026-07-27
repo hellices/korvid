@@ -1,0 +1,63 @@
+id: readiness-probe-failing
+question: >-
+  The payments pod in namespace shop shows 0/1 ready but it is not restarting.
+  Why is it not ready?
+screen: "resource view: pods, namespace shop, selected: shop/payments-1 (Running 0/1)"
+root_cause: readiness_probe_failing
+grading:
+  must_mention:
+    - [readiness probe, readiness]
+    - ["503", failing, failed, unhealthy]
+  must_not_claim:
+    - [crashloopbackoff, oomkilled, image pull]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: payments-1, namespace: shop}
+      contains: "Readiness probe failed"
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: payments-1
+        namespace: shop
+        uid: pod-readiness-1
+        creationTimestamp: "2026-07-27T06:40:00Z"
+        labels: {app: payments}
+      spec:
+        nodeName: node-b
+        containers:
+          - name: payments
+            image: shop/payments:v8
+            readinessProbe:
+              httpGet: {path: /healthz, port: 8080}
+      status:
+        phase: Running
+        conditions:
+          - {type: Ready, status: "False", reason: ContainersNotReady, message: "containers with unready status: [payments]"}
+          - {type: PodScheduled, status: "True"}
+        containerStatuses:
+          - name: payments
+            ready: false
+            restartCount: 0
+            state:
+              running: {startedAt: "2026-07-27T06:40:10Z"}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-b}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+  events:
+    - type: Warning
+      reason: Unhealthy
+      count: 41
+      lastTimestamp: "2026-07-27T07:29:00Z"
+      message: "Readiness probe failed: HTTP probe failed with statuscode: 503"
+      involvedObject: {kind: Pod, name: payments-1, namespace: shop}
+  logs:
+    shop/payments-1/payments:
+      current:
+        - "payments v8 listening on :8080"
+        - "healthz: dependency check failed: ledger database connection timed out"
+        - "healthz returning 503 until ledger is reachable"

@@ -1,0 +1,63 @@
+id: image-pull-auth
+question: The api pod in namespace shop will not start. Can you find out why?
+screen: "resource view: pods, namespace shop, selected: shop/api-1 (ImagePullBackOff)"
+root_cause: image_pull_auth
+grading:
+  must_mention:
+    - [imagepullbackoff, image pull, pull the image, pulling the image]
+    - [unauthorized, authentication, credentials, pull secret, imagepullsecret, "401", access denied]
+  must_not_claim:
+    - [manifest unknown, typo, does not exist, wrong tag, not found in the registry]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: api-1, namespace: shop}
+      contains: 401 Unauthorized
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: api-1
+        namespace: shop
+        uid: pod-pullauth-1
+        creationTimestamp: "2026-07-27T07:00:00Z"
+        labels: {app: api}
+      spec:
+        nodeName: node-a
+        containers:
+          - name: api
+            image: registry.corp.local/shop/api:v3
+      status:
+        phase: Pending
+        conditions:
+          - {type: Ready, status: "False", reason: ContainersNotReady}
+        containerStatuses:
+          - name: api
+            ready: false
+            restartCount: 0
+            state:
+              waiting:
+                reason: ImagePullBackOff
+                message: Back-off pulling image "registry.corp.local/shop/api:v3"
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+  events:
+    - type: Warning
+      reason: Failed
+      count: 7
+      lastTimestamp: "2026-07-27T07:25:00Z"
+      message: >-
+        Failed to pull image "registry.corp.local/shop/api:v3": rpc error:
+        code = Unknown desc = failed to authorize: 401 Unauthorized
+      involvedObject: {kind: Pod, name: api-1, namespace: shop}
+    - type: Warning
+      reason: BackOff
+      count: 12
+      lastTimestamp: "2026-07-27T07:28:00Z"
+      message: Back-off pulling image "registry.corp.local/shop/api:v3"
+      involvedObject: {kind: Pod, name: api-1, namespace: shop}
+  logs: {}

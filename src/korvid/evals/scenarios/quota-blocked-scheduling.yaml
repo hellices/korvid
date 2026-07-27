@@ -1,0 +1,74 @@
+id: quota-blocked-scheduling
+question: >-
+  The batch deployment in namespace jobs shows 0 of 3 pods running and no pods
+  are being created. What is preventing them?
+screen: "resource view: deployments, namespace jobs, selected: jobs/batch (0/3 ready)"
+root_cause: quota_blocked
+grading:
+  must_mention:
+    - [quota, resourcequota]
+    - [exceeded, forbidden, limit]
+  must_not_claim:
+    - [image pull, crashloopbackoff, oomkilled]
+  expected_evidence:
+    - tool: get_events
+      args: {kind: replicasets, namespace: jobs, name: batch-9d4c}
+      contains: exceeded quota
+cluster:
+  objects:
+    - kind: Deployment
+      apiVersion: apps/v1
+      metadata:
+        name: batch
+        namespace: jobs
+        uid: deploy-batch-1
+      spec:
+        replicas: 3
+        selector:
+          matchLabels: {app: batch}
+      status:
+        replicas: 0
+        readyReplicas: 0
+        conditions:
+          - type: Available
+            status: "False"
+            reason: MinimumReplicasUnavailable
+          - type: ReplicaFailure
+            status: "True"
+            reason: FailedCreate
+            message: >-
+              pods "batch-9d4c-x" is forbidden: exceeded quota: jobs-quota,
+              requested: limits.memory=2Gi, used: limits.memory=7Gi,
+              limited: limits.memory=8Gi
+    - kind: ReplicaSet
+      apiVersion: apps/v1
+      metadata:
+        name: batch-9d4c
+        namespace: jobs
+        uid: rs-batch-1
+        ownerReferences:
+          - {kind: Deployment, name: batch, controller: true}
+      spec: {replicas: 3}
+      status: {replicas: 0}
+    - kind: ResourceQuota
+      apiVersion: v1
+      metadata:
+        name: jobs-quota
+        namespace: jobs
+        uid: quota-1
+      spec:
+        hard: {limits.memory: 8Gi}
+      status:
+        hard: {limits.memory: 8Gi}
+        used: {limits.memory: 7Gi}
+  events:
+    - type: Warning
+      reason: FailedCreate
+      count: 17
+      lastTimestamp: "2026-07-27T07:25:00Z"
+      message: >-
+        Error creating: pods "batch-9d4c-x" is forbidden: exceeded quota:
+        jobs-quota, requested: limits.memory=2Gi, used: limits.memory=7Gi,
+        limited: limits.memory=8Gi
+      involvedObject: {kind: ReplicaSet, name: batch-9d4c, namespace: jobs}
+  logs: {}
