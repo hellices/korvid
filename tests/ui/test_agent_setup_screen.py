@@ -45,16 +45,20 @@ class FakeConfigurator(AgentConfigurator):
 
 
 class _Host(App[None]):
-    def __init__(self, configurator: FakeConfigurator) -> None:
+    def __init__(self, configurator: FakeConfigurator, current_profile: str | None = None) -> None:
         super().__init__()
         self.configurator = configurator
+        self.current_profile = current_profile
         self.result: AgentSettings | None | str = "unset"
 
     def on_mount(self) -> None:
         def _done(res: AgentSettings | None) -> None:
             self.result = res
 
-        self.push_screen(AgentSetupScreen(self.configurator), callback=_done)
+        self.push_screen(
+            AgentSetupScreen(self.configurator, current_profile=self.current_profile),
+            callback=_done,
+        )
 
 
 def _select(app: App[None], option_id: str, wanted: str) -> None:
@@ -394,9 +398,9 @@ async def test_apply_failure_keeps_wizard_open_and_skips_save() -> None:
 
 
 async def test_ollama_provider_suggests_the_small_profile() -> None:
-    """Local Ollama endpoints usually serve 3B-14B models: the wizard
-    saves the reduced capability profile for them (issue #71); users can
-    override agent.profile in config.yaml."""
+    """Local Ollama endpoints usually serve 3B-14B models: with no profile
+    configured, the wizard saves the reduced capability profile for them
+    (issue #71)."""
     cfg = FakeConfigurator()
     app = _Host(cfg)
     async with app.run_test() as pilot:
@@ -427,3 +431,40 @@ async def test_cloud_providers_keep_the_full_profile() -> None:
         screen._auth_method = "api_key"
         settings = screen._draft_settings("gpt-4o-mini")
         assert settings.profile == "full"
+
+
+async def test_explicit_full_profile_survives_the_ollama_wizard() -> None:
+    """`agent.profile: full` is a deliberate choice — reopening `:ai` for an
+    Ollama endpoint must preserve it instead of silently overriding it with
+    the `small` suggestion, which is only for an unset profile."""
+    cfg = FakeConfigurator()
+    app = _Host(cfg, current_profile="full")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _select(app, "#setup-provider", "ollama")
+        await pilot.press("enter")  # pick provider
+        await pilot.press("enter")  # accept base_url default
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#setup-model", Input).display,
+            label="model input shown",
+        )
+        await pilot.press("enter")  # accept model default
+        await until(pilot, lambda: app.result is not None, label="wizard result")
+        assert isinstance(app.result, AgentSettings)
+        assert app.result.profile == "full"
+
+
+async def test_explicit_small_profile_survives_a_cloud_provider() -> None:
+    """The preservation rule is symmetric: an explicit `small` is kept even
+    when the wizard would otherwise draft `full` for a cloud provider."""
+    cfg = FakeConfigurator()
+    app = _Host(cfg, current_profile="small")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, AgentSetupScreen)
+        screen._provider = "openai-compat"
+        screen._auth_method = "api_key"
+        settings = screen._draft_settings("gpt-4o-mini")
+        assert settings.profile == "small"

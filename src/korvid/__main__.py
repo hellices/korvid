@@ -261,7 +261,7 @@ def _build_agent_wiring(
     # told write tools exist; resize is offered only when discovery found
     # pods/resize (1.35 GA).
     profile = build_profile(
-        config.agent_profile,
+        config.agent_profile or "full",
         readonly=config.readonly,
         resize_supported=pod_resize_supported,
     )

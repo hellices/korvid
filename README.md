@@ -567,7 +567,9 @@ reproduces the
 default wiring exactly, so frontier models are unaffected.
 
 The `:ai` wizard suggests `small` automatically when the provider is
-Ollama; the agent panel header shows `[small]` so you always know which
+Ollama and no profile has been configured yet — an explicit
+`agent.profile` (either value) is always preserved. The agent panel
+header shows `[small]` so you always know which
 mode is live. Compare the profiles on your own endpoint with the eval
 harness: `python -m korvid.evals --profile small` (see below).
 

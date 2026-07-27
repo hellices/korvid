@@ -659,7 +659,10 @@ class KorvidApp(App[None]):
         self._agent_settings: AgentSettings | None = None
         #: capability profile of the live runtime (issue #71); shown in the
         #: agent panel header so users know which mode the agent runs in.
-        self._agent_profile = config.agent_profile
+        self._agent_profile = config.agent_profile or "full"
+        #: profile as explicitly configured (None = unset) — the `:ai`
+        #: wizard only suggests `small` for Ollama when this is unset.
+        self._configured_agent_profile = config.agent_profile
         # A runtime built from config.yaml at startup must seed the settings
         # snapshot so :model works without running the :ai wizard first.
         if agent_runtime is not None and config.agent_provider and config.agent_model:
@@ -669,7 +672,7 @@ class KorvidApp(App[None]):
                 base_url=config.agent_base_url,
                 model=config.agent_model,
                 api_key_env=config.agent_api_key_env,
-                profile=config.agent_profile,
+                profile=config.agent_profile or "full",
             )
         self._agent_task: asyncio.Task[None] | None = None
         # Serializes view/scope switches: keyboard NavigateCommands and the
@@ -1591,7 +1594,11 @@ class KorvidApp(App[None]):
         # The wizard applies the settings itself (via apply_settings) before
         # persisting, so a refused swap keeps the wizard open and unsaved.
         self.push_screen(
-            AgentSetupScreen(self._agent_configurator, apply_settings=self._apply_agent_settings)
+            AgentSetupScreen(
+                self._agent_configurator,
+                apply_settings=self._apply_agent_settings,
+                current_profile=self._configured_agent_profile,
+            )
         )
 
     def _handle_model_command(self, args: list[str]) -> None:
@@ -1679,6 +1686,9 @@ class KorvidApp(App[None]):
         self._agent_model_name = settings.model
         self._agent_settings = settings
         self._agent_profile = settings.profile
+        # Once applied (and persisted by the wizard) the profile is an
+        # explicit choice — reopening :ai must preserve it.
+        self._configured_agent_profile = settings.profile
         self._refresh_status()
         panel = self.query_one(AgentPanel)
         agent_input = panel.query_one("#agent-input")

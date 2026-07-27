@@ -47,8 +47,10 @@ class KorvidConfig:
     agent_auth_method: str | None = None
     #: Model-capability profile (issue #71): `agent.profile` — `full` keeps
     #: the frontier surface; `small` reduces tools, budgets and prompt for
-    #: 3B-14B local models.
-    agent_profile: str = "full"
+    #: 3B-14B local models. None means unset: the runtime treats it as
+    #: `full`, but the `:ai` wizard may still suggest `small` for Ollama
+    #: (an explicit `full` is never overridden by that suggestion).
+    agent_profile: str | None = None
     #: Native Ollama tuning (issue #72): `agent.ollama.*` in config.yaml.
     agent_ollama_num_ctx: int = 16384
     agent_ollama_temperature: float = 0.0
@@ -179,13 +181,11 @@ def save_agent_config(
     agent: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
     agent["provider"] = provider
     agent["model"] = model
-    # The capability profile is managed alongside the model choice: the
-    # wizard suggests small for local Ollama endpoints (issue #71). `full`
-    # is the default, so it is dropped rather than written.
-    if profile != "full":
-        agent["profile"] = profile
-    else:
-        agent.pop("profile", None)
+    # The capability profile is managed alongside the model choice and is
+    # always written explicitly: after the wizard runs, the profile is a
+    # deliberate choice (preserved or suggested), and an explicit `full`
+    # must survive so reopening `:ai` never re-suggests `small` over it.
+    agent["profile"] = profile
     # Merge into any existing auth mapping: only `method` is managed here,
     # unrelated nested keys must survive the read-modify-write.
     existing_auth = agent.get("auth")
@@ -259,12 +259,13 @@ def _parse_buffer_lines(value: Any) -> int:
     return lines if lines > 0 else 5000
 
 
-def _parse_profile(value: Any) -> str:
-    """Coerce `agent.profile` to a known profile name; fall back to `full`
-    so an unknown value never crashes startup or half-configures the agent."""
+def _parse_profile(value: Any) -> str | None:
+    """Coerce `agent.profile` to a known profile name; None when unset, and
+    fall back to None for an unknown value too so it never crashes startup
+    or half-configures the agent (the runtime treats None as `full`)."""
     if isinstance(value, str) and value.strip().lower() in ("full", "small"):
         return value.strip().lower()
-    return "full"
+    return None
 
 
 def _parse_num_ctx(value: Any) -> int:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -22,6 +23,8 @@ from korvid.agent.tools import (
     cap_result,
     compact_result,
 )
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are korvid's Kubernetes diagnostic agent, embedded in a live TUI the "
@@ -201,6 +204,7 @@ class AgentRuntime:
     def _trim_history(self) -> None:
         """Keep the system prompt plus at most MAX_HISTORY_TURNS-1 recent turns,
         then drop oldest complete turns until within the character budget."""
+        before = len(self._messages)
         user_indices = [i for i, m in enumerate(self._messages) if m.get("role") == "user"]
         if len(user_indices) >= MAX_HISTORY_TURNS:
             cut = user_indices[-(MAX_HISTORY_TURNS - 1)]
@@ -213,6 +217,15 @@ class AgentRuntime:
             if len(user_indices) <= 1:
                 break
             self._messages = [self._messages[0], *self._messages[user_indices[1] :]]
+        if len(self._messages) < before:
+            # Dropped context makes the agent "forget" earlier exchanges;
+            # leave a trace so such reports are debuggable.
+            logger.info(
+                "trimmed agent history: dropped %d message(s), %d retained (budget %d chars)",
+                before - len(self._messages),
+                len(self._messages),
+                self._max_history_chars,
+            )
 
     async def _consume_stream(
         self,
@@ -378,6 +391,11 @@ class AgentRuntime:
         if self._strict_preflight_over_budget():
             # Drop the unfittable prompt so it cannot poison later turns.
             self._messages.pop()
+            logger.warning(
+                "strict history budget: rejected a prompt that cannot fit by itself "
+                "(budget %d chars)",
+                self._max_history_chars,
+            )
             yield AgentError(
                 message=(
                     f"request too large for the history budget "
