@@ -985,6 +985,17 @@ def test_start_racing_teardown_never_leaks_a_child() -> None:
     assert registry.forwards() == []
 
 
+def test_start_after_shutdown_never_spawns_kubectl() -> None:
+    """A closed registry must reject a start before Popen — spawning a real
+    kubectl just to kill it is an external side effect of a shutdown guard."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs)
+    registry.stop_all()
+    with pytest.raises(ValueError, match="shut down"):
+        registry.start(_spec())
+    assert procs == []
+
+
 def test_reattach_racing_teardown_never_leaks_a_child() -> None:
     """A replacement spawned after stop_all() is discarded, not adopted."""
     procs: list[_FakeProc] = []

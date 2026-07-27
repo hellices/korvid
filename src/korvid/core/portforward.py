@@ -553,14 +553,51 @@ class ForwardRegistry:
         registered or the start failed.
 
         Raises:
-            ValueError: when a live forward already uses ``local_port``,
-                another start is already claiming it, or a previously
-                stopped child holding it cannot be reaped in time — the
-                spawn fails cleanly instead of blocking the caller
-                indefinitely.
+            ValueError: when the registry has been shut down, a live forward
+                already uses ``local_port``, another start is already
+                claiming it, or a previously stopped child holding it cannot
+                be reaped in time — the spawn fails cleanly instead of
+                blocking the caller indefinitely.
+        """
+        holders = self._claim_port(local_port)
+        # Blocking waits happen outside the ops lock so refresh()/stop() on
+        # the event loop are never stalled behind a stuck port reclaim.
+        for index, (proc, _deadline, _port) in enumerate(holders):
+            if proc.poll() is not None:
+                continue  # exited — no longer holds the port, drop the entry
+            proc.kill()
+            try:
+                proc.wait(timeout=_STOP_GRACE_SECONDS)
+            except subprocess.TimeoutExpired as exc:
+                # Even SIGKILL cannot reap a child stuck in the kernel. Keep
+                # tracking every unreaped holder and fail this spawn bounded
+                # rather than freezing the caller.
+                with self._ops:
+                    self._reaping.extend(holders[index:])
+                    self._claimed_ports.discard(local_port)
+                msg = f"local port {local_port} is still being released — try again"
+                raise ValueError(msg) from exc
+
+    def _claim_port(self, local_port: int) -> list[tuple[_ForwardProcess, float, int]]:
+        """Atomically validate and claim ``local_port`` under the ops lock.
+
+        Returns the unreaped previous holders of the port for the caller to
+        wait on outside the lock.
+
+        Raises:
+            ValueError: when the registry is shut down, the port is used by
+                a live forward, or another start is already claiming it.
         """
         holders: list[tuple[_ForwardProcess, float, int]] = []
         with self._ops:
+            if self._closed:
+                # Rejecting here (atomically with the claim) keeps shutdown
+                # side-effect free: a late caller must never spawn a real
+                # kubectl just for the post-spawn check to put it down. The
+                # post-spawn check still covers a shutdown that begins after
+                # this point.
+                msg = "port-forward registry is shut down"
+                raise ValueError(msg)
             if local_port in self._claimed_ports:
                 msg = f"local port {local_port} is already being claimed by another start"
                 raise ValueError(msg)
@@ -582,23 +619,7 @@ class ForwardRegistry:
                 (holders if entry[2] == local_port else remaining).append(entry)
             self._reaping = remaining
             self._claimed_ports.add(local_port)
-        # Blocking waits happen outside the ops lock so refresh()/stop() on
-        # the event loop are never stalled behind a stuck port reclaim.
-        for index, (proc, _deadline, _port) in enumerate(holders):
-            if proc.poll() is not None:
-                continue  # exited — no longer holds the port, drop the entry
-            proc.kill()
-            try:
-                proc.wait(timeout=_STOP_GRACE_SECONDS)
-            except subprocess.TimeoutExpired as exc:
-                # Even SIGKILL cannot reap a child stuck in the kernel. Keep
-                # tracking every unreaped holder and fail this spawn bounded
-                # rather than freezing the caller.
-                with self._ops:
-                    self._reaping.extend(holders[index:])
-                    self._claimed_ports.discard(local_port)
-                msg = f"local port {local_port} is still being released — try again"
-                raise ValueError(msg) from exc
+        return holders
 
     def _release_claim(self, local_port: int) -> None:
         """Release a port claim after a failed spawn (never registered)."""
