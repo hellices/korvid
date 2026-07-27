@@ -3,8 +3,10 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio.client.exceptions import ApiException
 
+from korvid.k8s import client as client_mod
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
@@ -1012,3 +1014,118 @@ async def test_create_object_posts_on_cluster_scoped_collection_path() -> None:
     assert args[0] == "/apis/example.com/v1/clusterthings"
     assert args[1] == "POST"
     assert kwargs["body"] == manifest
+
+
+class TestOpenPodExec:
+    """open_pod_exec builds the exec websocket session for file transfer (issue #47)."""
+
+    def test_requires_connect(self) -> None:
+        kube = client_mod.KubeClient()
+        with pytest.raises(RuntimeError, match="connect"):
+            kube.open_pod_exec("ns", "pod", None, ["tar"], stdin=False)
+
+    async def test_opens_ws_with_exec_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sentinel_ws = object()
+        closed: list[bool] = []
+        captured: dict[str, object] = {}
+
+        class FakeWsApi:
+            async def close(self) -> None:
+                closed.append(True)
+
+        class FakeWsCtx:
+            async def __aenter__(self) -> object:
+                return sentinel_ws
+
+            async def __aexit__(self, *exc: object) -> None:
+                return None
+
+        class FakeCoreWs:
+            def __init__(self, api: object) -> None:
+                captured["api"] = api
+
+            async def connect_get_namespaced_pod_exec(
+                self, name: str, namespace: str, **kwargs: object
+            ) -> FakeWsCtx:
+                captured["name"] = name
+                captured["namespace"] = namespace
+                captured.update(kwargs)
+                return FakeWsCtx()
+
+        monkeypatch.setattr(client_mod, "WsApiClient", FakeWsApi)
+        monkeypatch.setattr(k8s_client, "CoreV1Api", FakeCoreWs)
+        kube = client_mod.KubeClient()
+        kube._core_v1 = object()  # type: ignore[assignment]  # connected marker
+
+        async with kube.open_pod_exec(
+            "prod", "api-0", "app", ["tar", "cf", "-"], stdin=False
+        ) as ws:
+            assert ws is sentinel_ws
+        assert captured["name"] == "api-0"
+        assert captured["namespace"] == "prod"
+        assert captured["command"] == ["tar", "cf", "-"]
+        assert captured["container"] == "app"
+        assert captured["stdin"] is False
+        assert captured["stdout"] is True
+        assert captured["stderr"] is True
+        assert captured["tty"] is False
+        assert captured["_preload_content"] is False
+        assert closed == [True]
+
+    async def test_omits_container_when_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeWsApi:
+            async def close(self) -> None:
+                return None
+
+        class FakeWsCtx:
+            async def __aenter__(self) -> object:
+                return object()
+
+            async def __aexit__(self, *exc: object) -> None:
+                return None
+
+        class FakeCoreWs:
+            def __init__(self, api: object) -> None:
+                pass
+
+            async def connect_get_namespaced_pod_exec(
+                self, name: str, namespace: str, **kwargs: object
+            ) -> FakeWsCtx:
+                captured.update(kwargs)
+                return FakeWsCtx()
+
+        monkeypatch.setattr(client_mod, "WsApiClient", FakeWsApi)
+        monkeypatch.setattr(k8s_client, "CoreV1Api", FakeCoreWs)
+        kube = client_mod.KubeClient()
+        kube._core_v1 = object()  # type: ignore[assignment]  # connected marker
+
+        async with kube.open_pod_exec("ns", "p", None, ["tar"], stdin=True):
+            pass
+        assert "container" not in captured
+        assert captured["stdin"] is True
+
+    async def test_ws_api_closed_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        closed: list[bool] = []
+
+        class FakeWsApi:
+            async def close(self) -> None:
+                closed.append(True)
+
+        class FakeCoreWs:
+            def __init__(self, api: object) -> None:
+                pass
+
+            async def connect_get_namespaced_pod_exec(self, *a: object, **k: object) -> object:
+                raise OSError("boom")
+
+        monkeypatch.setattr(client_mod, "WsApiClient", FakeWsApi)
+        monkeypatch.setattr(k8s_client, "CoreV1Api", FakeCoreWs)
+        kube = client_mod.KubeClient()
+        kube._core_v1 = object()  # type: ignore[assignment]  # connected marker
+
+        with pytest.raises(OSError, match="boom"):
+            async with kube.open_pod_exec("ns", "p", None, ["tar"], stdin=False):
+                pass
+        assert closed == [True]

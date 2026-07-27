@@ -484,6 +484,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         pod_resize_supported=pod_resize_supported,
         forwards=ForwardRegistry(context=config.kube_context),
         provider_hint=provider_info.display if provider_info.known else None,
+        open_pod_exec=kube.open_pod_exec,
     )
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.

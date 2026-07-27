@@ -85,3 +85,10 @@ class AgentPromptSubmitted(Message):
     def __init__(self, text: str) -> None:
         super().__init__()
         self.text = text
+
+
+class TransferCancelRequested(Message):
+    """Posted by TransferProgressScreen (bubbling to the app) when the user
+    hits escape during a file transfer."""
+
+    pass
