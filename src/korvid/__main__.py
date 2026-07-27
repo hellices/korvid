@@ -34,7 +34,12 @@ from korvid.core.config import DEFAULT_CONFIG_PATH, KorvidConfig, load_config, s
 from korvid.core.portforward import ForwardRegistry
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
-from korvid.k8s.client import KubeClient, resolve_context_name, resolve_context_namespace
+from korvid.k8s.client import (
+    KubeClient,
+    list_context_names,
+    resolve_context_name,
+    resolve_context_namespace,
+)
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
@@ -45,7 +50,7 @@ from korvid.providers.configurator import ProviderConfigurator
 from korvid.providers.ollama import OllamaOptions
 from korvid.providers.registry import create_provider
 from korvid.providers.token_store import TokenStore
-from korvid.ui.app import AppUIBridge, EventsFetcher, KorvidApp
+from korvid.ui.app import AppUIBridge, ContextSwitchResult, EventsFetcher, KorvidApp
 from korvid.ui.widgets.resource_table import sanitize_views
 
 logger = logging.getLogger(__name__)
@@ -239,6 +244,21 @@ async def _probe_cloud_provider(kube: KubeClient) -> ProviderInfo:
         return detect_provider([])
 
 
+def _compose_agent_tools(readonly: bool, pod_resize_supported: bool) -> list[dict[str, Any]]:
+    """Tool set for the current cluster's capabilities.
+
+    In readonly mode the model is never even told write tools exist, and
+    ``resize_pod`` is offered only when discovery found pods/resize (1.35
+    GA) — the model is never told about a tool the cluster cannot honor.
+    """
+    tools = READ_TOOLS + UI_TOOLS
+    if not readonly:
+        tools = tools + WRITE_TOOLS
+        if pod_resize_supported:
+            tools = tools + RESIZE_TOOLS
+    return tools
+
+
 def _build_agent_wiring(
     config: KorvidConfig,
     kube: KubeClient,
@@ -250,20 +270,14 @@ def _build_agent_wiring(
     AgentRuntime | None,
     ProviderConfigurator,
     Callable[[AgentSettings], AgentRuntime | None],
+    Callable[[AgentRuntime | None, bool, str | None], None],
     list[LLMProvider | None],
     _UIBridgeProxy,
 ]:
     """Build the initial agent runtime plus the :ai wizard's configurator/rebuild hooks."""
     token_store = TokenStore()
     ui_proxy = _UIBridgeProxy()
-    agent_tools = READ_TOOLS + UI_TOOLS
-    if not config.readonly:
-        # In readonly mode the model is never even told write tools exist.
-        agent_tools = agent_tools + WRITE_TOOLS
-        if pod_resize_supported:
-            # Offered only when discovery found pods/resize (1.35 GA): the
-            # model is never told about a tool the cluster cannot honor.
-            agent_tools = agent_tools + RESIZE_TOOLS
+    agent_tools = _compose_agent_tools(config.readonly, pod_resize_supported)
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
     ollama_options = OllamaOptions(
         num_ctx=config.agent_ollama_num_ctx,
@@ -295,6 +309,11 @@ def _build_agent_wiring(
 
     # Mutable holder so rebuild_agent/_shutdown always see the live provider.
     provider_box: list[LLMProvider | None] = [provider]
+    # Per-cluster agent inputs: a `:ctx` switch replaces both, so a wizard
+    # rebuild after the switch must not resurrect the old cluster's prompt
+    # note or capability-gated tool set.
+    tools_box: list[list[dict[str, Any]]] = [agent_tools]
+    note_box: list[str | None] = [cluster_context]
 
     def persist(settings: AgentSettings) -> None:
         save_agent_config(
@@ -333,11 +352,29 @@ def _build_agent_wiring(
         return AgentRuntime(
             new_provider,
             ToolExecutor(kube, aliases, ui=ui_proxy),
-            tools=agent_tools,
-            cluster_context=cluster_context,
+            tools=tools_box[0],
+            cluster_context=note_box[0],
         )
 
-    return agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy
+    def retarget_agent(
+        runtime: AgentRuntime | None,
+        pod_resize_supported: bool,
+        cluster_context: str | None,
+    ) -> None:
+        """Re-arm the agent for a new cluster (issue #36, `:ctx`).
+
+        Recomposes the tool set with the new cluster's capabilities and
+        updates the live runtime's system prompt in place — conversation
+        history survives the switch, but later turns must describe the new
+        environment, not the one the runtime was built against.
+        """
+        tools = _compose_agent_tools(config.readonly, pod_resize_supported)
+        tools_box[0] = tools
+        note_box[0] = cluster_context
+        if runtime is not None:
+            runtime.retarget(tools=tools, cluster_context=cluster_context)
+
+    return agent_runtime, configurator, rebuild_agent, retarget_agent, provider_box, ui_proxy
 
 
 def _load_startup_config(readonly: bool, mcp: bool = False) -> KorvidConfig:
@@ -394,16 +431,80 @@ def _build_helm(config: KorvidConfig) -> HelmCLI | None:
     return HelmCLI(binary, kube_context=config.kube_context)
 
 
-def _fallback_namespaces(config: KorvidConfig) -> tuple[str, ...]:
+def _fallback_namespaces(config: KorvidConfig, context: str | None) -> tuple[str, ...]:
     """Namespaces an RBAC-limited user can fall back to (issue #49), deduped
     in priority order: explicit `namespaces:` config, the kubeconfig
-    context's namespace, korvid's default namespace."""
+    context's namespace, korvid's default namespace. *context* is explicit
+    (not read from config) so a runtime `:ctx` switch can re-derive the set
+    for the new cluster (issue #36)."""
     candidates = [
         *config.namespaces,
-        resolve_context_namespace(config.kube_context),
+        resolve_context_namespace(context),
         config.namespace,
     ]
     return tuple(dict.fromkeys(ns for ns in candidates if ns))
+
+
+def _make_switch_context(
+    config: KorvidConfig,
+    kube: KubeClient,
+    aliases: dict[str, ResourceMeta],
+    app_box: list[KorvidApp],
+    discovery_box: list[asyncio.Task[None]],
+    retarget_agent: Callable[[AgentRuntime | None, bool, str | None], None],
+) -> Callable[[str | None], Awaitable[ContextSwitchResult]]:
+    """Build the `:ctx` retarget closure (issue #36).
+
+    Owns everything the composition root wired per-cluster at startup:
+    the client connection, the shared alias map (reset to the synthetic
+    base, then re-discovered in the background), and the capability
+    probes whose results gate the R keybinding and provider hints.
+    ``app_box``/``discovery_box`` are late-bound because the app and the
+    first discovery task are created after this closure.
+    """
+
+    async def switch_context(name: str | None) -> ContextSwitchResult:
+        # The embedded MCP server is quiesced by the app BEFORE any teardown
+        # (KorvidApp._switch_context_locked) — by the time this closure runs
+        # no external caller shares the client or alias map being swapped.
+        # switch_context closes the old ApiClient — the background discovery
+        # task still issues requests on it, so quiesce it (and reseed the
+        # alias map it mutates) before the connection is torn down.
+        old_task = discovery_box[0] if discovery_box else None
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await old_task
+        aliases.clear()
+        aliases.update(build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META]))
+        await kube.switch_context(name)
+        discovery_box[:] = [asyncio.create_task(_discover_in_background(kube, aliases, app_box[0]))]
+        pod_resize_supported = await _probe_pod_resize(kube, readonly=config.readonly)
+        provider_info = await _probe_cloud_provider(kube)
+        # The surviving conversation must be re-armed for this cluster: new
+        # provider note in the system prompt, resize tool gated by the new
+        # cluster's capability (issue #36 review).
+        retarget_agent(
+            app_box[0].agent_runtime if app_box else None,
+            pod_resize_supported,
+            cluster_context_note(provider_info),
+        )
+        # The startup `config` is a stale snapshot here: _apply_context_switch
+        # folds each applied context's namespace into app.config, and that
+        # evolving session default must seed the next cluster's fallback set
+        # (e.g. A -> B(ns-b) -> C(no namespace) keeps ns-b).
+        effective_config = app_box[0].config if app_box else config
+        return ContextSwitchResult(
+            pod_resize_supported=pod_resize_supported,
+            provider_hint=provider_info.display if provider_info.known else None,
+            fallback_namespaces=_fallback_namespaces(effective_config, name),
+            context_namespace=resolve_context_namespace(name),
+            # HelmCLI pins --kube-context per instance: rebuild it for the
+            # new context so helm writes follow the active cluster.
+            helm=_build_helm(dataclasses.replace(effective_config, kube_context=name)),
+        )
+
+    return switch_context
 
 
 def _make_watch_source(
@@ -490,7 +591,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
     # RBAC-limited fallback namespaces (issue #49): the config list plus the
     # kubeconfig context's namespace and korvid's default namespace, deduped
     # in priority order. Feeds the picker and the per-namespace watch fanout.
-    fallback_namespaces = _fallback_namespaces(config)
+    fallback_namespaces = _fallback_namespaces(config, config.kube_context)
 
     def _is_namespaced(kind: str) -> bool:
         # Cluster-scoped kinds must not fan out per namespace (the source
@@ -514,15 +615,23 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
     # the agent system prompt and the Service/Ingress describe footer.
     provider_info = await _probe_cloud_provider(kube)
 
-    agent_runtime, configurator, rebuild_agent, provider_box, ui_proxy = _build_agent_wiring(
-        config,
-        kube,
-        aliases,
-        pod_resize_supported=pod_resize_supported,
-        cluster_context=cluster_context_note(provider_info),
+    agent_runtime, configurator, rebuild_agent, retarget_agent, provider_box, ui_proxy = (
+        _build_agent_wiring(
+            config,
+            kube,
+            aliases,
+            pod_resize_supported=pod_resize_supported,
+            cluster_context=cluster_context_note(provider_info),
+        )
     )
 
     mcp_controller = MCPController(_make_mcp_factory(config, kube, aliases, ui_proxy))
+
+    # `:ctx` switching (issue #36): the closure needs the app (for discovery
+    # restarts) and the live discovery task, both created below — boxes
+    # late-bind them, mirroring ui_proxy.target.
+    app_box: list[KorvidApp] = []
+    discovery_box: list[asyncio.Task[None]] = []
 
     app = KorvidApp(
         config=config,
@@ -547,19 +656,27 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         forwards=ForwardRegistry(context=config.kube_context),
         provider_hint=provider_info.display if provider_info.known else None,
         open_pod_exec=kube.open_pod_exec,
+        list_contexts=list_context_names,
+        probe_context=kube.probe_context,
+        switch_context=_make_switch_context(
+            config, kube, aliases, app_box, discovery_box, retarget_agent
+        ),
         helm=_build_helm(config),
     )
+    app_box.append(app)
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.
     ui_proxy.target = AppUIBridge(app)
 
     await _start_mcp_if_enabled(config, mcp_controller)
 
-    discovery_task = asyncio.create_task(_discover_in_background(kube, aliases, app))
+    discovery_box.append(asyncio.create_task(_discover_in_background(kube, aliases, app)))
     try:
         await app.run_async()
     finally:
-        await _teardown(mcp_controller, discovery_task, provider_box[0], kube)
+        # discovery_box[0] is the *live* task: a `:ctx` switch may have
+        # replaced the one started above.
+        await _teardown(mcp_controller, discovery_box[0], provider_box[0], kube)
 
 
 def main() -> None:

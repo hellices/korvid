@@ -57,6 +57,14 @@ class WatchManager:
     def active(self) -> set[tuple[str, str]]:
         return set(self._tasks)
 
+    def set_fallback_namespaces(self, namespaces: Sequence[str]) -> None:
+        """Replace the RBAC fallback set (issue #36).
+
+        A runtime context switch re-derives the fallback namespaces for the
+        new cluster; watches started afterwards fan out into these.
+        """
+        self._fallback_namespaces = tuple(namespaces)
+
     async def start(self, kind: str, scope: str) -> None:
         key = (kind, scope)
         if key in self._tasks:

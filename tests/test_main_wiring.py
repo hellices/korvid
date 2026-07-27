@@ -152,7 +152,7 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
         agent_api_key_env="KORVID_TEST_KEY",
     )
     kube_stub = cast("Any", object())  # wiring never touches kube before a tool call
-    runtime, _, _, _, proxy = _build_agent_wiring(config, kube_stub, {})
+    runtime, _, _, _, _, proxy = _build_agent_wiring(config, kube_stub, {})
     assert runtime is not None
     names = [t["function"]["name"] for t in runtime._tools]
     assert "navigate" in names
@@ -162,7 +162,7 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
     assert executor._ui is proxy
 
     # readonly strips every write tool: the model is never told they exist.
-    ro_runtime, _, _, _, _ = _build_agent_wiring(
+    ro_runtime, _, _, _, _, _ = _build_agent_wiring(
         dataclasses.replace(config, readonly=True), kube_stub, {}
     )
     assert ro_runtime is not None
@@ -194,15 +194,15 @@ def test_agent_wiring_gates_resize_tool_on_discovery(monkeypatch: object) -> Non
     )
     kube_stub = cast("Any", object())
 
-    runtime, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=True)
+    runtime, _, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=True)
     assert runtime is not None
     assert "resize_pod" in [t["function"]["name"] for t in runtime._tools]
 
-    gated, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
+    gated, _, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
     assert gated is not None
     assert "resize_pod" not in [t["function"]["name"] for t in gated._tools]
 
-    ro, _, _, _, _ = _build_agent_wiring(
+    ro, _, _, _, _, _ = _build_agent_wiring(
         dataclasses.replace(config, readonly=True), kube_stub, {}, pod_resize_supported=True
     )
     assert ro is not None
@@ -420,7 +420,9 @@ async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None
     )
     kube_stub = cast("Any", object())
     note = "This cluster runs on Azure (AKS managed)."
-    runtime, _, rebuild, _, _ = _build_agent_wiring(config, kube_stub, {}, cluster_context=note)
+    runtime, _, rebuild, retarget, _, _ = _build_agent_wiring(
+        config, kube_stub, {}, cluster_context=note
+    )
     assert runtime is not None
     assert note in runtime._messages[0]["content"]
 
@@ -437,6 +439,26 @@ async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None
     )
     assert rebuilt is not None
     assert note in rebuilt._messages[0]["content"]
+
+    # `:ctx` switch (issue #36): the live runtime is re-armed in place and
+    # any later wizard rebuild uses the new cluster's note and tool set.
+    new_note = "This cluster runs on AWS (EKS managed)."
+    retarget(rebuilt, True, new_note)
+    assert new_note in rebuilt._messages[0]["content"]
+    assert note not in rebuilt._messages[0]["content"]
+    assert "resize_pod" in [t["function"]["name"] for t in rebuilt._tools]
+    rebuilt_after = rebuild(
+        AgentSettings(
+            provider="openai",
+            auth_method="api_key",
+            base_url="http://localhost:9999/v1",
+            model="m",
+            api_key_env="KORVID_TEST_KEY",
+        )
+    )
+    assert rebuilt_after is not None
+    assert new_note in rebuilt_after._messages[0]["content"]
+    assert "resize_pod" in [t["function"]["name"] for t in rebuilt_after._tools]
 
 
 async def test_cloud_provider_probe_is_bounded(monkeypatch: object) -> None:
@@ -571,6 +593,66 @@ async def test_discovery_preserves_olm_metas_under_group_qualified_aliases() -> 
     assert aliases["packagemanifests.packages.operators.coreos.com"] is pkg
 
 
+async def test_ctx_switch_quiesces_discovery_before_swapping_connection() -> None:
+    """switch_context closes the old ApiClient — the background discovery
+    task issuing requests on it must be cancelled (and the alias map reseeded)
+    before the connection swap, not after (issue #36 review)."""
+    import asyncio
+    import contextlib
+    from types import SimpleNamespace
+
+    from korvid.__main__ import _make_switch_context
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.csp import detect_provider
+
+    events: list[str] = []
+
+    class FakeKube:
+        async def switch_context(self, name: str | None) -> None:
+            events.append("connection-swapped")
+
+        async def detect_cloud_provider(self) -> Any:
+            return detect_provider([])
+
+        async def discover_resources(self) -> list[Any]:
+            return []
+
+    async def _old_discovery() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("discovery-cancelled")
+            raise
+
+    old_task = asyncio.create_task(_old_discovery())
+    await asyncio.sleep(0)  # let it start so cancellation unwinds it
+
+    aliases: dict[str, Any] = {"stale-crd": object()}
+    discovery_box: list[asyncio.Task[None]] = [old_task]
+    startup_config = KorvidConfig(namespace="default", readonly=True)
+    switch = _make_switch_context(
+        startup_config,
+        cast("Any", FakeKube()),
+        aliases,
+        cast("Any", [SimpleNamespace(agent_runtime=None, config=startup_config)]),  # app_box
+        discovery_box,
+        lambda runtime, resize, note: None,
+    )
+    try:
+        await switch("ctx-b")
+    finally:
+        discovery_box[0].cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await discovery_box[0]
+
+    # The stale discovery task drains before the connection is retargeted.
+    assert events == [
+        "discovery-cancelled",
+        "connection-swapped",
+    ]
+    assert "stale-crd" not in aliases  # reseeded before the swap
+
+
 def test_build_helm_wires_binary_and_context(monkeypatch: pytest.MonkeyPatch) -> None:
     """A detected helm binary becomes a HelmCLI bound to the configured context."""
     import korvid.__main__ as main_mod
@@ -592,3 +674,60 @@ def test_build_helm_returns_none_without_binary(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(main_mod, "find_helm", lambda: None)
     assert _build_helm(KorvidConfig()) is None
+
+
+async def test_ctx_switch_fallbacks_follow_session_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sequential switches derive fallbacks from the app's evolving session
+    default, not the startup snapshot: A -> B(ns-b) -> C(no kubeconfig
+    namespace) must keep ns-b in C's fallback set (issue #36 review)."""
+    import asyncio
+    import contextlib
+    import dataclasses
+    from types import SimpleNamespace
+
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _make_switch_context
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.csp import detect_provider
+
+    class FakeKube:
+        async def switch_context(self, name: str | None) -> None:
+            pass
+
+        async def detect_cloud_provider(self) -> Any:
+            return detect_provider([])
+
+        async def discover_resources(self) -> list[Any]:
+            return []
+
+    ctx_namespaces = {"ctx-b": "ns-b", "ctx-c": None}
+    monkeypatch.setattr(main_mod, "resolve_context_namespace", ctx_namespaces.get)
+
+    startup = KorvidConfig(namespace="startup-ns", readonly=True)
+    app_stub = SimpleNamespace(agent_runtime=None, config=startup)
+    discovery_box: list[asyncio.Task[None]] = []
+    switch = _make_switch_context(
+        startup,
+        cast("Any", FakeKube()),
+        {},
+        cast("Any", [app_stub]),
+        discovery_box,
+        lambda runtime, resize, note: None,
+    )
+    try:
+        result_b = await switch("ctx-b")
+        assert "ns-b" in result_b.fallback_namespaces
+        # Mimic KorvidApp._apply_context_switch adopting ns-b as the default.
+        app_stub.config = dataclasses.replace(
+            startup, kube_context="ctx-b", namespace=result_b.context_namespace
+        )
+        result_c = await switch("ctx-c")
+    finally:
+        for task in discovery_box:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+    assert "ns-b" in result_c.fallback_namespaces
+    assert "startup-ns" not in result_c.fallback_namespaces

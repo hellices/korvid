@@ -149,3 +149,18 @@ def test_clear_namespace_on_missing_bucket_is_noop() -> None:
     store = ResourceStore()
     store.clear_namespace("pods", ALL_NAMESPACES, "prod")
     assert store.get("pods", ALL_NAMESPACES) == []
+
+
+def test_clear_all_drops_every_bucket_and_notifies() -> None:
+    """`:ctx` teardown (issue #36): no rows from the old cluster may survive."""
+    store = ResourceStore()
+    store.apply_event("pods", "default", "ADDED", _pod("a"))
+    store.apply_event("deployments", "other", "ADDED", _pod("b", ns="other"))
+    notified: list[str] = []
+    store.subscribe(notified.append)
+
+    store.clear_all()
+
+    assert store.get("pods", "default") == []
+    assert store.get("deployments", "other") == []
+    assert set(notified) == {"pods", "deployments"}

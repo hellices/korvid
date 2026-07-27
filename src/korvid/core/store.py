@@ -54,6 +54,17 @@ class ResourceStore:
         self._data.pop((kind, scope), None)
         self._notify(kind)
 
+    def clear_all(self) -> None:
+        """Drop every bucket and notify each affected kind once.
+
+        Context switching (issue #36) purges the whole store: rows from the
+        previous cluster must never render against the new one.
+        """
+        kinds = {kind for kind, _ in self._data}
+        self._data.clear()
+        for kind in kinds:
+            self._notify(kind)
+
     def clear_namespace(self, kind: str, scope: str, namespace: str) -> None:
         """Remove one namespace's objects from a (kind, scope) bucket.
 

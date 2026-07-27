@@ -352,3 +352,16 @@ def test_actor_detection_failures_fall_back_to_unknown(
     log.append(action="delete", kind="pods", namespace="default", name="web-1")
     entry = json.loads((tmp_path / "audit.jsonl").read_text())
     assert entry["actor"] == "unknown"
+
+
+def test_set_context_applies_to_subsequent_entries(tmp_path: Path) -> None:
+    """`:ctx` switching (issue #36): entries written after a context switch
+    must be attributed to the new cluster."""
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path, context="ctx-a")
+    log.append(action="delete", kind="pods", namespace="ns", name="a", outcome="requested")
+    log.set_context("ctx-b")
+    log.append(action="delete", kind="pods", namespace="ns", name="b", outcome="requested")
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert lines[0]["context"] == "ctx-a"
+    assert lines[1]["context"] == "ctx-b"
