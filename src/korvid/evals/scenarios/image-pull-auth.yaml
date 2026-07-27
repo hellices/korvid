@@ -6,7 +6,7 @@ grading:
   must_mention:
     - [imagepullbackoff, image pull, pull the image, pulling the image]
     - [unauthorized, authentication, credentials, pull secret, imagepullsecret, "401", access denied]
-  must_not_claim:
+  must_not_mention:
     - [manifest unknown, typo, does not exist, wrong tag, not found in the registry]
   expected_evidence:
     - tool: diagnose_pod

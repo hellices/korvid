@@ -9,8 +9,6 @@ honest — a scenario can't assert evidence the tools would never return.
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
 from korvid.agent.tools import ToolExecutor
@@ -21,8 +19,7 @@ BUNDLED = load_scenarios(bundled_scenarios_dir())
 
 
 def _executor(scenario: Scenario) -> ToolExecutor:
-    kube: Any = FakeKubeClient(scenario)
-    return ToolExecutor(kube, builtin_aliases())
+    return ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
 
 
 def test_bundled_pack_loads_and_covers_the_planned_fault_matrix() -> None:
@@ -37,7 +34,9 @@ async def test_bundled_evidence_is_reachable_through_the_real_tools(
     scenario: Scenario,
 ) -> None:
     executor = _executor(scenario)
-    assert scenario.must_mention  # loader guarantees it; keep the invariant visible
+    # Every bundled scenario (negative controls included) must declare
+    # evidence, so "answered without fetching evidence" is detectable.
+    assert scenario.expected_evidence
     for evidence in scenario.expected_evidence:
         result = await executor.execute(evidence.tool, dict(evidence.args))
         assert evidence.contains in result, (

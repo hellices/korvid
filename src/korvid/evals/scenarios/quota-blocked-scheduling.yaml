@@ -8,7 +8,7 @@ grading:
   must_mention:
     - [quota, resourcequota]
     - [exceeded, forbidden, limit]
-  must_not_claim:
+  must_not_mention:
     - [image pull, crashloopbackoff, oomkilled]
   expected_evidence:
     - tool: get_events

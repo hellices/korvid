@@ -15,6 +15,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, summary_for
+from korvid.k8s.reads import ReadOps
 
 _BUILTIN_METAS: tuple[ResourceMeta, ...] = (
     ResourceMeta("Pod", "pods", "", "v1", True, ("po",)),
@@ -48,8 +49,12 @@ def builtin_aliases() -> dict[str, ResourceMeta]:
     return aliases
 
 
-class FakeKubeClient:
-    """Read-only fake of the k8s client surface the agent read tools use."""
+class FakeKubeClient(ReadOps):
+    """Read-only fake of the k8s client surface the agent read tools use.
+
+    Implements the `ReadOps` boundary ABC so it substitutes for the real
+    client under strict typing — read-surface drift becomes a type error.
+    """
 
     def __init__(self, scenario: Scenario) -> None:
         self._scenario = scenario
@@ -83,7 +88,7 @@ class FakeKubeClient:
         namespace: str,
         name: str,
         *,
-        kind: str = "Pod",
+        kind: str | None = None,
         uid: str | None = None,
     ) -> list[dict[str, Any]]:
         matched: list[dict[str, Any]] = []
@@ -91,7 +96,7 @@ class FakeKubeClient:
             involved = event.get("involvedObject") or {}
             if (
                 str(involved.get("name") or "") == name
-                and str(involved.get("kind") or "") == kind
+                and (kind is None or str(involved.get("kind") or "") == kind)
                 and str(involved.get("namespace") or "") == namespace
             ):
                 matched.append(event)

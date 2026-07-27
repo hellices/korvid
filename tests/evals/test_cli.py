@@ -42,7 +42,7 @@ def _report() -> ScenarioReport:
         diagnosis_success=True,
         evidence_fetched=True,
         missing_mentions=(),
-        forbidden_claims=(),
+        forbidden_mentions=(),
         missing_evidence=(),
     )
     run = RunMetrics(

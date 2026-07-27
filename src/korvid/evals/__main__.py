@@ -103,8 +103,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def _executor_factory(scenario: Scenario) -> Callable[[], ToolExecutor]:
     def factory() -> ToolExecutor:
-        kube: Any = FakeKubeClient(scenario)
-        return ToolExecutor(kube, builtin_aliases())
+        return ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
 
     return factory
 

@@ -8,7 +8,7 @@ grading:
   must_mention:
     - [selector]
     - [mismatch, does not match, doesn't match, no match, web-v2, label]
-  must_not_claim:
+  must_not_mention:
     - [crashloopbackoff, oomkilled, image pull]
   expected_evidence:
     - tool: get_resource

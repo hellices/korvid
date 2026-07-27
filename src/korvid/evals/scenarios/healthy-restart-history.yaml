@@ -7,9 +7,10 @@ root_cause: none
 grading:
   must_mention:
     - [healthy, no issues, no problems, fine, running normally, not a current problem, stable, recovered, old, past, days ago, historical]
-  must_not_claim:
-    - [crashloopbackoff, currently crashing, image pull, evicted]
-  expected_evidence: []
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: cache-1, namespace: shop}
+      contains: "running since 2026-07-21T02:15:00Z  ready  restarts=2"
 cluster:
   objects:
     - kind: Pod

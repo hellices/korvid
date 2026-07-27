@@ -488,8 +488,10 @@ claude mcp add --transport http korvid http://127.0.0.1:7878/mcp
 `korvid.evals` measures how well a model diagnoses cluster faults through
 korvid's real agent runtime and tools. Each scenario is a YAML fixture — a
 simulated cluster (manifests, events, log tails), a user question, and
-deterministic grading assertions (keywords the answer must mention, misdiagnoses
-it must not claim, and tool results it must have fetched as evidence). The
+deterministic grading assertions (keywords the answer must mention, misdiagnosis
+keywords it must not mention — even in negation, so fixtures pick keywords a
+correct answer would never bring up — and tool results it must have fetched as
+evidence). The
 bundled pack covers crashloops, OOM kills, image-pull failures (auth and typo),
 failing readiness probes, unbound PVCs, service selector mismatches, stuck
 rollouts, quota exhaustion, node-pressure evictions, and two healthy negative

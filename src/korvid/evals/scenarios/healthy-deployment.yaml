@@ -5,9 +5,13 @@ root_cause: none
 grading:
   must_mention:
     - [healthy, no issues, no problems, looks fine, running normally, working as expected, fully available]
-  must_not_claim:
-    - [crashloopbackoff, oomkilled, image pull, evicted, quota, probe failed]
-  expected_evidence: []
+  expected_evidence:
+    - tool: get_resource
+      args: {kind: deployments, name: checkout, namespace: shop}
+      contains: "readyReplicas: 2"
+    - tool: diagnose_pod
+      args: {pod: checkout-5b7d-1, namespace: shop}
+      contains: "ready  restarts=0"
 cluster:
   objects:
     - kind: Deployment

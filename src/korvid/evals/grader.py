@@ -30,12 +30,12 @@ class ToolRecord:
 class GradeResult:
     """Outcome of grading one run's final answer + tool trace."""
 
-    #: Every must_mention group hit and no must_not_claim keyword present.
+    #: Every must_mention group hit and no must_not_mention keyword present.
     diagnosis_success: bool
     #: Every expected_evidence pair appeared in a matching tool result.
     evidence_fetched: bool
     missing_mentions: tuple[tuple[str, ...], ...]
-    forbidden_claims: tuple[str, ...]
+    forbidden_mentions: tuple[str, ...]
     missing_evidence: tuple[Evidence, ...]
 
 
@@ -51,9 +51,9 @@ def grade(scenario: Scenario, answer: str, records: list[ToolRecord]) -> GradeRe
         for group in scenario.must_mention
         if not any(_normalize(alt) in normalized_answer for alt in group)
     )
-    forbidden_claims = tuple(
+    forbidden_mentions = tuple(
         alt
-        for group in scenario.must_not_claim
+        for group in scenario.must_not_mention
         for alt in group
         if _normalize(alt) in normalized_answer
     )
@@ -66,9 +66,9 @@ def grade(scenario: Scenario, answer: str, records: list[ToolRecord]) -> GradeRe
         )
     )
     return GradeResult(
-        diagnosis_success=not missing_mentions and not forbidden_claims,
+        diagnosis_success=not missing_mentions and not forbidden_mentions,
         evidence_fetched=not missing_evidence,
         missing_mentions=missing_mentions,
-        forbidden_claims=forbidden_claims,
+        forbidden_mentions=forbidden_mentions,
         missing_evidence=missing_evidence,
     )

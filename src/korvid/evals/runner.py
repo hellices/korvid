@@ -108,8 +108,25 @@ async def _run_once(
     provider_factory: Callable[[], Any],
     executor_factory: Callable[[], Any],
 ) -> RunMetrics:
-    provider = _CountingProvider(provider_factory())
-    executor = _RecordingExecutor(executor_factory())
+    raw_provider = provider_factory()
+    try:
+        return await _drive_turn(scenario, raw_provider, executor_factory())
+    finally:
+        # Live providers own an httpx client; close it per repetition or a
+        # full pack run leaks one client per run (the app calls aclose()
+        # on shutdown for the same reason). Scripted providers have none.
+        aclose = getattr(raw_provider, "aclose", None)
+        if callable(aclose):
+            await aclose()
+
+
+async def _drive_turn(
+    scenario: Scenario,
+    raw_provider: Any,
+    raw_executor: Any,
+) -> RunMetrics:
+    provider = _CountingProvider(raw_provider)
+    executor = _RecordingExecutor(raw_executor)
     runtime = AgentRuntime(provider, executor, tools=READ_TOOLS)
     answer = ""
     tool_calls = 0

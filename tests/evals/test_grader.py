@@ -21,7 +21,7 @@ def _scenario(**overrides: Any) -> Scenario:
         "screen": "pods view",
         "root_cause": "oom_killed",
         "must_mention": (("oomkilled", "oom killed"), ("137",)),
-        "must_not_claim": (("image pull", "imagepull"),),
+        "must_not_mention": (("image pull", "imagepull"),),
         "expected_evidence": (_EVIDENCE,),
     }
     fields.update(overrides)
@@ -42,7 +42,7 @@ def test_grade_passes_when_all_assertions_hold() -> None:
     assert result.diagnosis_success
     assert result.evidence_fetched
     assert result.missing_mentions == ()
-    assert result.forbidden_claims == ()
+    assert result.forbidden_mentions == ()
     assert result.missing_evidence == ()
 
 
@@ -62,7 +62,7 @@ def test_grade_fails_on_a_forbidden_claim_even_with_the_right_answer() -> None:
     answer = "OOMKilled, exit 137 — though it could also be an image pull problem."
     result = grade(_scenario(), answer, [_record()])
     assert not result.diagnosis_success
-    assert result.forbidden_claims == ("image pull",)
+    assert result.forbidden_mentions == ("image pull",)
 
 
 def test_grade_reports_unfetched_evidence() -> None:
@@ -88,7 +88,7 @@ def test_grade_negative_control_scenario() -> None:
     scenario = _scenario(
         root_cause="none",
         must_mention=(("healthy", "no issue", "nothing is wrong"),),
-        must_not_claim=(("crashloop",), ("oomkilled",)),
+        must_not_mention=(("crashloop",), ("oomkilled",)),
         expected_evidence=(),
     )
     result = grade(scenario, "Everything looks healthy; no action needed.", [])

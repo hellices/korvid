@@ -49,9 +49,11 @@ class Scenario:
     #: Alternative-groups: the answer must mention at least one keyword
     #: from every group (matched on normalized text).
     must_mention: tuple[tuple[str, ...], ...]
-    #: Alternative-groups of misdiagnoses: mentioning any keyword from
-    #: any group fails the run even if the right answer also appears.
-    must_not_claim: tuple[tuple[str, ...], ...] = ()
+    #: Alternative-groups of misdiagnosis keywords: **any mention** from any
+    #: group fails the run, even a negated one ("this is not an image pull
+    #: problem"). Grading is deterministic keyword matching, not assertion
+    #: parsing, so pick keywords a correct answer would never bring up.
+    must_not_mention: tuple[tuple[str, ...], ...] = ()
     #: Which tool results contain the ground truth — detects "answered
     #: without fetching the evidence".
     expected_evidence: tuple[Evidence, ...] = ()
@@ -113,6 +115,15 @@ def _evidence(raw: Any) -> tuple[Evidence, ...]:
     return tuple(entries)
 
 
+def _log_stream(entry: dict[str, Any], key: str, stream: str) -> tuple[str, ...]:
+    raw = entry.get(stream)
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(line, str) for line in raw):
+        raise ValueError(f"log entry {key!r} field {stream!r} must be a list of strings")
+    return tuple(raw)
+
+
 def _logs(raw: Any) -> dict[str, ContainerLogs]:
     if raw is None:
         return {}
@@ -122,10 +133,14 @@ def _logs(raw: Any) -> dict[str, ContainerLogs]:
     for key, value in raw.items():
         if str(key).count("/") != 2:
             raise ValueError(f"log key {key!r} must be 'namespace/pod/container'")
-        entry = value if isinstance(value, dict) else {}
+        if not isinstance(value, dict):
+            raise ValueError(f"log entry {key!r} must be a mapping of current/previous")
+        unknown = set(value) - {"current", "previous"}
+        if unknown:
+            raise ValueError(f"log entry {key!r} has unknown keys: {sorted(unknown)}")
         logs[str(key)] = ContainerLogs(
-            current=tuple(str(line) for line in entry.get("current") or ()),
-            previous=tuple(str(line) for line in entry.get("previous") or ()),
+            current=_log_stream(value, str(key), "current"),
+            previous=_log_stream(value, str(key), "previous"),
         )
     return logs
 
@@ -163,7 +178,7 @@ def load_scenario(path: Path) -> Scenario:
         screen=_require_str(data, "screen"),
         root_cause=_require_str(data, "root_cause"),
         must_mention=must_mention,
-        must_not_claim=_alt_groups(grading.get("must_not_claim"), "must_not_claim"),
+        must_not_mention=_alt_groups(grading.get("must_not_mention"), "must_not_mention"),
         expected_evidence=_evidence(grading.get("expected_evidence")),
         objects=_manifests(cluster.get("objects"), "objects"),
         events=_manifests(cluster.get("events"), "events"),

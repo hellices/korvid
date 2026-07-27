@@ -23,7 +23,7 @@ def _oom_scenario() -> Scenario:
         screen="pods view, namespace shop",
         root_cause="oom_killed",
         must_mention=(("oomkilled", "oom"), ("137",)),
-        must_not_claim=(("image pull",),),
+        must_not_mention=(("image pull",),),
         expected_evidence=(
             Evidence(
                 tool="diagnose_pod",
@@ -102,8 +102,7 @@ def _good_script() -> list[list[dict[str, Any]]]:
 def _executor_factory(scenario: Scenario) -> Any:
     from korvid.agent.tools import ToolExecutor
 
-    kube: Any = FakeKubeClient(scenario)
-    return ToolExecutor(kube, builtin_aliases())
+    return ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
 
 
 async def test_run_scenario_smoke_passes_with_a_correct_scripted_run() -> None:
@@ -158,7 +157,7 @@ async def test_run_scenario_grades_a_wrong_answer_as_failure() -> None:
     )
     run = report.runs[0]
     assert not run.grade.diagnosis_success
-    assert "image pull" in run.grade.forbidden_claims
+    assert "image pull" in run.grade.forbidden_mentions
     assert not run.grade.evidence_fetched
 
 
@@ -234,3 +233,30 @@ def test_render_markdown_summarizes_reports() -> None:
     text = render_markdown([report])
     assert "oom-killed" in text
     assert "2/2" in text
+
+
+class _ClosableProvider(ScriptedProvider):
+    """Scripted provider that records aclose(), like a live provider's
+    owned httpx client."""
+
+    def __init__(self, script: list[list[dict[str, Any]]], closed: list[bool]) -> None:
+        super().__init__(script)
+        self._closed = closed
+
+    async def aclose(self) -> None:
+        self._closed.append(True)
+
+
+async def test_run_scenario_closes_the_provider_after_every_repetition() -> None:
+    """Live providers own an httpx client; leaking one per repetition
+    across a 12-scenario x 3-rep run would leak dozens of clients."""
+    scenario = _oom_scenario()
+    closed: list[bool] = []
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: _ClosableProvider(_good_script(), closed),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=2,
+    )
+    assert len(report.runs) == 2
+    assert closed == [True, True]

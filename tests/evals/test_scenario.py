@@ -17,7 +17,7 @@ grading:
   must_mention:
     - [oomkilled, oom]
     - "137"
-  must_not_claim:
+  must_not_mention:
     - image pull
   expected_evidence:
     - tool: diagnose_pod
@@ -54,7 +54,7 @@ def test_load_scenario_parses_all_fields(tmp_path: Path) -> None:
     assert scenario.question.startswith("Why does")
     assert scenario.screen == "pods view, namespace shop"
     assert scenario.must_mention == (("oomkilled", "oom"), ("137",))
-    assert scenario.must_not_claim == (("image pull",),)
+    assert scenario.must_not_mention == (("image pull",),)
     evidence = scenario.expected_evidence[0]
     assert evidence.tool == "diagnose_pod"
     assert evidence.contains == "exit=137"
@@ -78,7 +78,7 @@ cluster:
   objects: []
 """
     scenario = load_scenario(_write(tmp_path, text))
-    assert scenario.must_not_claim == ()
+    assert scenario.must_not_mention == ()
     assert scenario.expected_evidence == ()
     assert scenario.events == ()
     assert scenario.logs == {}
@@ -119,6 +119,35 @@ def test_load_scenario_rejects_unknown_evidence_shape(tmp_path: Path) -> None:
 def test_load_scenario_rejects_bad_log_key(tmp_path: Path) -> None:
     text = _MINIMAL.replace("shop/checkout-1/app:", "checkout-1-app:")
     with pytest.raises(ValueError, match="namespace/pod/container"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_rejects_non_mapping_log_entry(tmp_path: Path) -> None:
+    text = _MINIMAL.replace(
+        'shop/checkout-1/app:\n      current: ["allocating buffers", "out of memory"]\n'
+        '      previous: ["previous crash line"]',
+        "shop/checkout-1/app: just a string",
+    )
+    with pytest.raises(ValueError, match="must be a mapping"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_rejects_scalar_log_stream(tmp_path: Path) -> None:
+    """A scalar stream would otherwise iterate character-by-character."""
+    text = _MINIMAL.replace(
+        'current: ["allocating buffers", "out of memory"]',
+        "current: out of memory",
+    )
+    with pytest.raises(ValueError, match="list of strings"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_rejects_unknown_log_stream_key(tmp_path: Path) -> None:
+    text = _MINIMAL.replace(
+        'previous: ["previous crash line"]',
+        'extra: ["previous crash line"]',
+    )
+    with pytest.raises(ValueError, match="extra"):
         load_scenario(_write(tmp_path, text))
 
 

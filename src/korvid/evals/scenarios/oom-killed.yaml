@@ -6,7 +6,7 @@ grading:
   must_mention:
     - [oomkilled, oom killed, out of memory, oom]
     - ["137", memory limit]
-  must_not_claim:
+  must_not_mention:
     - [image pull, imagepull]
   expected_evidence:
     - tool: diagnose_pod

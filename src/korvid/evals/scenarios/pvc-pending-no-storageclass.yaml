@@ -6,7 +6,7 @@ grading:
   must_mention:
     - [persistentvolumeclaim, pvc, claim]
     - [storageclass, storage class, fast-ssd]
-  must_not_claim:
+  must_not_mention:
     - [image pull, crashloopbackoff, oomkilled]
   expected_evidence:
     - tool: diagnose_pod

@@ -8,7 +8,7 @@ grading:
   must_mention:
     - [rollout, progressdeadlineexceeded, progress deadline, stuck, not progressing]
     - [image pull, imagepullbackoff, v9-typo, pull the image]
-  must_not_claim:
+  must_not_mention:
     - [oomkilled, quota]
   expected_evidence:
     - tool: get_resource

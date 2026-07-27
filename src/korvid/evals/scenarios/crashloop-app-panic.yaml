@@ -6,7 +6,7 @@ grading:
   must_mention:
     - [crashloopbackoff, crash loop, crashloop, crashing, keeps restarting]
     - [panic, nil map, crash in the application, application bug, application error, code bug]
-  must_not_claim:
+  must_not_mention:
     - [image pull, imagepull, oomkilled, out of memory]
   expected_evidence:
     - tool: diagnose_pod

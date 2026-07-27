@@ -8,7 +8,7 @@ grading:
   must_mention:
     - [readiness probe, readiness]
     - ["503", failing, failed, unhealthy]
-  must_not_claim:
+  must_not_mention:
     - [crashloopbackoff, oomkilled, image pull]
   expected_evidence:
     - tool: diagnose_pod
