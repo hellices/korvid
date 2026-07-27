@@ -294,7 +294,7 @@ async def test_shell_non_pods_kind_warning() -> None:
             await pilot.press("s")
             await pilot.pause(0.1)
             notifications = [n.message for n in app._notifications]
-            assert any("Shell is only available for pods" in m for m in notifications)
+            assert any("Shell is available for pods and nodes" in m for m in notifications)
             mock_call.assert_not_called()
 
 
@@ -1342,3 +1342,98 @@ async def test_debug_not_offered_when_pod_gone(tmp_path: Path) -> None:
             )
             assert not isinstance(app.screen, (PickScreen, ConfirmScreen))
             mock_call.assert_called_once()  # only the failed exec; no debug
+
+
+# ---------------------------------------------------------------------------
+# Node shell argv builders (issue #46)
+# ---------------------------------------------------------------------------
+
+
+def test_build_node_debug_create_argv_defaults() -> None:
+    from korvid.ui.shell import build_node_debug_create_argv
+
+    argv = build_node_debug_create_argv("worker-1", "default")
+    assert argv[:2] == ["kubectl", "debug"]
+    assert "node/worker-1" in argv
+    assert f"--image={DEBUG_IMAGE}" in argv
+    # the approval dialog promises a privileged pod; the default profile
+    # is not privileged, so sysadmin must be requested explicitly
+    assert "--profile=sysadmin" in argv
+    # detached create: korvid parses the created pod's name from kubectl's
+    # message and fetches the uid with an exact get, so cleanup never
+    # touches another operator's pod. `kubectl debug` has no -o/--output —
+    # passing one would make every create fail to parse flags.
+    assert "--attach=false" in argv
+    assert "-o" not in argv
+    assert "--output" not in argv
+    ns_idx = argv.index("-n")
+    assert argv[ns_idx + 1] == "default"
+    # every kubectl flag must precede the `--` command separator
+    dd = argv.index("--")
+    assert dd > argv.index("node/worker-1")
+
+
+def test_build_node_debug_create_argv_custom_image_and_context() -> None:
+    from korvid.ui.shell import build_node_debug_create_argv
+
+    argv = build_node_debug_create_argv(
+        "worker-1", "debug-ns", context="prod", image="registry.local/toolkit:1"
+    )
+    idx = argv.index("--context")
+    assert argv[idx + 1] == "prod"
+    assert idx < argv.index("--")
+    assert "--image=registry.local/toolkit:1" in argv
+    ns_idx = argv.index("-n")
+    assert argv[ns_idx + 1] == "debug-ns"
+
+
+def test_build_pod_wait_argv() -> None:
+    from korvid.ui.shell import build_pod_wait_argv
+
+    assert build_pod_wait_argv("debug-ns", "node-debugger-x") == [
+        "kubectl",
+        "wait",
+        "-n",
+        "debug-ns",
+        "pod/node-debugger-x",
+        "--for=condition=Ready",
+        "--timeout=60s",
+    ]
+    argv = build_pod_wait_argv("debug-ns", "node-debugger-x", context="prod")
+    assert argv[argv.index("--context") + 1] == "prod"
+
+
+def test_build_pod_attach_argv() -> None:
+    from korvid.ui.shell import build_pod_attach_argv
+
+    assert build_pod_attach_argv("debug-ns", "node-debugger-x") == [
+        "kubectl",
+        "attach",
+        "-it",
+        "-n",
+        "debug-ns",
+        "node-debugger-x",
+    ]
+    argv = build_pod_attach_argv("debug-ns", "node-debugger-x", context="prod")
+    assert argv[argv.index("--context") + 1] == "prod"
+
+
+def test_parse_debug_pod_name() -> None:
+    from korvid.ui.shell import parse_debug_pod_name
+
+    out = (
+        "Creating debugging pod node-debugger-worker-1-abcde with container"
+        " debugger on node worker-1.\n"
+    )
+    assert parse_debug_pod_name(out) == "node-debugger-worker-1-abcde"
+    # message may be preceded by other informational lines
+    assert parse_debug_pod_name(f"some warning\n{out}") == "node-debugger-worker-1-abcde"
+
+
+def test_parse_debug_pod_name_absent_returns_none() -> None:
+    from korvid.ui.shell import parse_debug_pod_name
+
+    assert parse_debug_pod_name("") is None
+    assert parse_debug_pod_name("something unexpected") is None
+    # similar words embedded mid-line must not match the anchored message
+    assert parse_debug_pod_name("note: Creating debugging pod soon") is None

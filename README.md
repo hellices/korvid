@@ -29,6 +29,7 @@ PDB-aware impact plan; `--readonly` disables them all.
 | `0` | global | Toggle all-namespaces view |
 | `d` | table | Describe selected resource (manifest + events) |
 | `s` | pods table | Shell into selected pod (`kubectl exec`; offers `kubectl debug` fallback for distroless images) |
+| `s` | nodes table | Node shell (`kubectl debug node/`; approval dialog — privileged pod with the host filesystem at `/host`, deleted on exit) |
 | `Shift-F` | pods / services table | Port-forward the selected target (local port prompt; prefilled from declared ports) |
 | `l` | pods table | Open / close log pane for selected pod |
 | `L` | pods table | Merge logs of all currently filtered pods (up to 8) |
@@ -246,6 +247,30 @@ debug:
   images:
     jvm: registry.corp.local/tools/debug-jvm:latest
     python: registry.corp.local/tools/debug-python:latest
+```
+
+## Node shell
+
+`s` on the nodes view opens a debug shell on the selected node via
+`kubectl debug node/<name> --profile=sysadmin` (kubectl 1.30+).  Because that
+creates a privileged pod with the node's filesystem mounted at `/host`, it
+always passes the approval gate with the privilege escalation stated
+explicitly, and the whole action is audit-logged fail-closed like every other
+write.  korvid creates the debugger pod detached (`--attach=false`), parses
+the pod name from kubectl's creation message, fetches its uid with an exact
+`kubectl get pod`, waits for it to become Ready, attaches
+interactively, and deletes precisely that pod (uid precondition) when the
+shell exits — a debugger pod another operator started is never touched.
+A warning tells you where to look if the cleanup fails.
+
+The image and the namespace the debug pod is created in are configurable —
+useful for air-gapped clusters and for clusters whose `default` namespace
+blocks privileged pods via PodSecurity admission:
+
+```yaml
+node_shell:
+  image: registry.corp.local/tools/busybox:1.36
+  namespace: node-debug
 ```
 
 ## RBAC-limited clusters
