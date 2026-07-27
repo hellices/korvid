@@ -462,6 +462,7 @@ class KorvidApp(App[None]):
         #: cancels it (evictions stop; the node stays cordoned).
         self._drain_worker: Worker[None] | None = None
         self._drain_node: str | None = None
+        self._drain_progress: str = ""
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -3005,11 +3006,13 @@ class KorvidApp(App[None]):
                 self._drain_node = name
                 self._drain_worker = self.run_worker(self._run_drain(ops, meta, name, uid, plan))
 
-        evictable = sum(1 for t in plan.targets if t.pdb_blocked is None)
+        blocked_now = sum(1 for t in plan.targets if t.pdb_blocked is not None)
+        note = f"; {blocked_now} currently PDB-blocked" if blocked_now else ""
         await self.push_screen(
             ConfirmScreen(
                 f"Drain nodes/{name}?",
-                f"Cordon nodes/{name}, then evict {evictable} pods via the Eviction API"
+                f"Cordon nodes/{name}, then attempt eviction of {len(plan.targets)} pods"
+                f" via the Eviction API{note}"
                 " (press the drain key again to cancel mid-drain)",
                 require_name=name,
                 preview=plan.preview_lines(),
@@ -3017,6 +3020,13 @@ class KorvidApp(App[None]):
             ),
             _done,
         )
+
+    def _set_drain_progress(self, label: str) -> None:
+        """Publish live drain progress on the status bar (issue #40); a
+        failure to render must never interrupt the drain itself."""
+        self._drain_progress = label
+        with contextlib.suppress(Exception):
+            self._refresh_status()
 
     async def _evict_one(self, ops: WriteOps, target: DrainTarget) -> str:
         """Issue one eviction; returns 'evicted', 'blocked' (PDB refused,
@@ -3126,11 +3136,16 @@ class KorvidApp(App[None]):
                 " (press the drain key again to cancel)",
                 severity="information",
             )
-            for target in targets:
-                result = await self._evict_one(ops, target)
-                evicted += result == "evicted"
-                blocked += result == "blocked"
-                failed += result == "failed"
+            try:
+                for done, target in enumerate(targets, start=1):
+                    self._set_drain_progress(f"drain {name}: {done - 1}/{total}")
+                    result = await self._evict_one(ops, target)
+                    evicted += result == "evicted"
+                    blocked += result == "blocked"
+                    failed += result == "failed"
+                    self._set_drain_progress(f"drain {name}: {done}/{total}")
+            finally:
+                self._set_drain_progress("")
         except asyncio.CancelledError:
             summary = f"cancelled: evicted {evicted} of {total}; node was not uncordoned"
             with contextlib.suppress(Exception):
@@ -3637,6 +3652,7 @@ class KorvidApp(App[None]):
             breadcrumb=self._drill.breadcrumb(),
             mcp_label=mcp_label,
             filter_label=self._resource_filter.describe(),
+            progress_label=self._drain_progress,
         )
 
     # ------------------------------------------------------------------

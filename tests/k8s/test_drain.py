@@ -225,3 +225,29 @@ def test_multiple_matching_pdbs_block_regardless_of_budget() -> None:
     assert "multiple PDBs match" in blocked
     assert "pdb-a" in blocked
     assert "pdb-b" in blocked
+
+
+def test_pdb_allowance_is_allocated_across_the_plan() -> None:
+    """disruptionsAllowed is budget-wide: a budget of 1 covering two pods
+    on the node lets only the first through; the second is blocked."""
+    pods = [
+        _pod("web-1", uid="u1", labels={"app": "web"}),
+        _pod("web-2", uid="u2", labels={"app": "web"}),
+    ]
+    pdbs = [_pdb("web-pdb", match_labels={"app": "web"}, disruptions_allowed=1)]
+    plan = build_drain_plan(pods, pdbs)
+    assert plan.targets[0].pdb_blocked is None
+    assert plan.targets[1].pdb_blocked == "web-pdb"
+
+
+def test_null_selector_matches_no_pods() -> None:
+    """policy/v1: a null/missing selector matches no pods; only an
+    explicitly empty {} selector matches the whole namespace."""
+    pod = _pod("web-1", uid="u1", labels={"app": "web"})
+    null_selector_pdb = {
+        "metadata": {"name": "null-pdb", "namespace": "default"},
+        "spec": {},
+        "status": {"disruptionsAllowed": 0},
+    }
+    plan = build_drain_plan([pod], [null_selector_pdb])
+    assert plan.targets[0].pdb_blocked is None

@@ -120,30 +120,56 @@ def _selector_matches(selector: dict[str, Any], labels: dict[str, str]) -> bool:
     return all(_expression_matches(expr, labels) for expr in selector.get("matchExpressions") or [])
 
 
-def _blocking_pdb(pod: dict[str, Any], pdbs: list[dict[str, Any]]) -> str | None:
-    """Why evicting *pod* would currently be refused, or None. A single
-    matching PDB blocks when its budget is exhausted; more than one matching
-    PDB blocks unconditionally - the Eviction API rejects such pods with a
-    500 regardless of budget (kubectl drain fails the same way)."""
-    metadata = pod.get("metadata") or {}
-    if str((pod.get("status") or {}).get("phase", "")) in _TERMINAL_PHASES:
+class _BudgetTracker:
+    """Allocates each PDB's ``disruptionsAllowed`` across the planned
+    eviction order: a budget of 1 lets exactly one matching pod through
+    and blocks the rest, matching what the Eviction API would do as the
+    drain consumes the allowance."""
+
+    def __init__(self, pdbs: list[dict[str, Any]]) -> None:
+        self._pdbs = pdbs
+        self._remaining = {
+            id(pdb): int((pdb.get("status") or {}).get("disruptionsAllowed", 0) or 0)
+            for pdb in pdbs
+        }
+
+    def blocking_reason(self, pod: dict[str, Any]) -> str | None:
+        """Why evicting *pod* would currently be refused, or None (and one
+        unit of the matching PDB's allowance is consumed). More than one
+        matching PDB blocks unconditionally - the Eviction API rejects such
+        pods with a 500 regardless of budget (kubectl drain fails the same
+        way)."""
+        metadata = pod.get("metadata") or {}
+        if str((pod.get("status") or {}).get("phase", "")) in _TERMINAL_PHASES:
+            return None
+        namespace = str(metadata.get("namespace", ""))
+        labels = {str(k): str(v) for k, v in (metadata.get("labels") or {}).items()}
+        matches = [
+            pdb
+            for pdb in self._pdbs
+            if str((pdb.get("metadata") or {}).get("namespace", "")) == namespace
+            and _pdb_selector_matches(pdb, labels)
+        ]
+        if len(matches) > 1:
+            names = ", ".join(
+                sorted(str((m.get("metadata") or {}).get("name", "")) for m in matches)
+            )
+            return f"multiple PDBs match ({names}) - the eviction API rejects this"
+        if matches:
+            pdb = matches[0]
+            if self._remaining[id(pdb)] <= 0:
+                return str((pdb.get("metadata") or {}).get("name", ""))
+            self._remaining[id(pdb)] -= 1
         return None
-    namespace = str(metadata.get("namespace", ""))
-    labels = {str(k): str(v) for k, v in (metadata.get("labels") or {}).items()}
-    matches = [
-        pdb
-        for pdb in pdbs
-        if str((pdb.get("metadata") or {}).get("namespace", "")) == namespace
-        and _selector_matches((pdb.get("spec") or {}).get("selector") or {}, labels)
-    ]
-    if len(matches) > 1:
-        names = ", ".join(sorted(str((m.get("metadata") or {}).get("name", "")) for m in matches))
-        return f"multiple PDBs match ({names}) - the eviction API rejects this"
-    if matches:
-        allowed = (matches[0].get("status") or {}).get("disruptionsAllowed", 0)
-        if int(allowed or 0) <= 0:
-            return str((matches[0].get("metadata") or {}).get("name", ""))
-    return None
+
+
+def _pdb_selector_matches(pdb: dict[str, Any], labels: dict[str, str]) -> bool:
+    """policy/v1 semantics: a null/missing selector matches no pods, while
+    an explicitly empty ``{}`` selector matches every pod in the namespace."""
+    selector = (pdb.get("spec") or {}).get("selector")
+    if selector is None:
+        return False
+    return _selector_matches(selector, labels)
 
 
 def _is_daemonset_pod(pod: dict[str, Any]) -> bool:
@@ -167,10 +193,13 @@ def _has_local_storage(pod: dict[str, Any]) -> bool:
 def build_drain_plan(pods: list[dict[str, Any]], pdbs: list[dict[str, Any]]) -> DrainPlan:
     """Classify *pods* (everything scheduled on the node being drained)
     against *pdbs* (cluster-wide PodDisruptionBudget list) into the
-    eviction plan shown to the user for approval."""
+    eviction plan shown to the user for approval. PDB allowances are
+    allocated across the planned eviction order: a budget of 1 covering
+    two pods on this node marks only the first as evictable."""
     targets: list[DrainTarget] = []
     skipped_daemonset: list[str] = []
     skipped_mirror: list[str] = []
+    budgets = _BudgetTracker(pdbs)
     for pod in pods:
         metadata = pod.get("metadata") or {}
         ref = f"{metadata.get('namespace', '')}/{metadata.get('name', '')}"
@@ -187,7 +216,7 @@ def build_drain_plan(pods: list[dict[str, Any]], pdbs: list[dict[str, Any]]) -> 
                 name=str(metadata.get("name", "")),
                 uid=str(uid) if uid else None,
                 local_storage=_has_local_storage(pod),
-                pdb_blocked=_blocking_pdb(pod, pdbs),
+                pdb_blocked=budgets.blocking_reason(pod),
             )
         )
     return DrainPlan(

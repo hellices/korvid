@@ -26,6 +26,7 @@ from korvid.k8s.writes import WriteOps
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.resource_table import ResourceTable
+from korvid.ui.widgets.status_bar import StatusBar
 
 from .waits import until
 
@@ -487,3 +488,40 @@ async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: P
             lambda: audit_path.exists() and "evicted 1" in audit_path.read_text(),
             label="drain finished",
         )
+
+
+async def test_drain_publishes_progress_on_status_bar(tmp_path: Path) -> None:
+    """Issue #40: eviction progress is live, not just start/end toasts."""
+    plan = DrainPlan(
+        targets=(_target("web-1"), _target("cache-1")),
+        skipped_daemonset=(),
+        skipped_mirror=(),
+    )
+    rec = NodeRecorder(plan=plan)
+    rec.release_evictions.clear()  # hold the first eviction in flight
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        await _confirm_typed(pilot, "worker-1")
+        await until(pilot, lambda: rec.evict_started.is_set(), label="first eviction in flight")
+
+        def _status_text() -> str:
+            return str(app.query_one(StatusBar).render())
+
+        await until(
+            pilot,
+            lambda: "drain worker-1: 0/2" in _status_text(),
+            label="progress on status bar",
+        )
+        rec.release_evictions.set()
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "evicted 2" in audit_path.read_text(),
+            label="drain finished",
+        )
+        # Progress indicator is cleared once the drain completes.
+        assert "drain worker-1" not in _status_text()
