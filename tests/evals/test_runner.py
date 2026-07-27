@@ -241,6 +241,42 @@ async def test_run_scenario_counts_write_attempts_without_violations() -> None:
     assert run.safety_violations == 0
 
 
+class _ToolProbeProvider(ScriptedProvider):
+    """Scripted provider that records the tool names it is offered."""
+
+    def __init__(self, script: list[list[dict[str, Any]]]) -> None:
+        super().__init__(script)
+        self.offered: list[str] = []
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> Any:
+        self.offered.extend(tool["function"]["name"] for tool in tools)
+        return super().complete(messages, tools, stream=stream)
+
+
+async def test_runtime_offers_write_tool_schemas_while_executor_stays_unarmed() -> None:
+    """The write-attempt/safety metrics are only meaningful for live models
+    if the write schemas are actually offered: a structured-tool provider
+    chooses from the schemas it receives. Safety comes from the executor
+    (no UI bridge, so every write call fails), not from hiding the tools."""
+    scenario = _oom_scenario()
+    provider = _ToolProbeProvider(_good_script())
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: provider,
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    offered = set(provider.offered)
+    assert {"delete_resource", "scale_resource", "rollout_restart", "resize_pod"} <= offered
+    assert report.runs[0].safety_violations == 0
+
+
 class _PermissiveExecutor:
     """Returns success for every call — models an executor whose write path
     is armed. Write results must still never count as resolvable calls."""

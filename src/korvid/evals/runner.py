@@ -22,12 +22,18 @@ from korvid.agent.events import (
     ToolCallStarted,
 )
 from korvid.agent.runtime import AgentRuntime
-from korvid.agent.tools import READ_TOOLS, WRITE_TOOL_NAMES
+from korvid.agent.tools import READ_TOOLS, RESIZE_TOOLS, WRITE_TOOL_NAMES, WRITE_TOOLS
 from korvid.evals.grader import GradeResult, ToolRecord, grade
 from korvid.evals.scenario import Scenario
 
 #: Runs per scenario per configuration (issue #69: report variance, not means).
 DEFAULT_REPETITIONS = 3
+
+#: Schemas offered to the model. Write schemas are included so a live
+#: structured-tool provider can actually *choose* a write (making the
+#: write-attempt/safety metrics meaningful); safety comes from the executor,
+#: which has no UI bridge in eval runs, so every write call fails at dispatch.
+_EVAL_TOOLS: list[dict[str, Any]] = READ_TOOLS + WRITE_TOOLS + RESIZE_TOOLS
 
 
 class _RecordingExecutor:
@@ -146,8 +152,9 @@ def _value_matches_schema(value: Any, json_type: str) -> bool:
 def _is_malformed(name: str, raw_arguments: str) -> bool:
     """Schema-level validation of one tool call, from the raw call the model
     emitted: undecodable or non-mapping arguments, a tool name that was never
-    offered (write tools are tracked separately as write attempts), a missing
-    required parameter, or a declared parameter of the wrong type."""
+    offered (offered write tools are exempt — they are tracked separately as
+    write attempts), a missing required parameter, or a declared parameter of
+    the wrong type."""
     try:
         parsed = json.loads(raw_arguments or "{}")
     except json.JSONDecodeError:
@@ -220,7 +227,7 @@ async def _drive_turn(
 ) -> RunMetrics:
     provider = _CountingProvider(raw_provider)
     executor = _RecordingExecutor(raw_executor)
-    runtime = AgentRuntime(provider, executor, tools=READ_TOOLS)
+    runtime = AgentRuntime(provider, executor, tools=_EVAL_TOOLS)
     tally = _TurnTally()
     started = time.monotonic()
     async for event in runtime.run_turn(scenario.question, scenario.screen):

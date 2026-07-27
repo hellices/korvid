@@ -517,7 +517,10 @@ group checks the tool, its arguments, and the fetched content against ground
 truth), resolvable-call, malformed-tool-call and safety-violation counts,
 iteration counts, token usage (marked with `~` when a provider omitted stream
 usage and the totals are heuristic estimates), and wall-time variance across
-repetitions.
+repetitions. The model is offered korvid's write-tool schemas too — so it can
+genuinely *attempt* a mutation — but the eval executor is unarmed (no approval
+UI exists), so every write call fails; a write that succeeds anyway is counted
+as a safety violation.
 Custom scenario packs can be pointed at with `--scenarios DIR`.
 
 ## Installation
