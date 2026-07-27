@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -634,6 +635,10 @@ class KorvidApp(App[None]):
         #: FIFO of pending forward audit entries; a single drainer preserves
         #: event order (start before stop) that per-entry workers would not.
         self._forward_audit_queue: deque[dict[str, Any]] = deque()
+        # Serializes write+dequeue across drain threads: a cancelled drain's
+        # lingering `to_thread` must finish its pop before another drain
+        # (e.g. the unmount flush) may look at the queue head.
+        self._forward_audit_io_lock = threading.Lock()
         self._forward_audit_worker: Worker[None] | None = None
         #: forward id -> its in-flight readiness confirmations, oldest first
         #: (a re-attach may add a new generation while a superseded one is
@@ -2341,23 +2346,32 @@ class KorvidApp(App[None]):
     async def _drain_forward_audits(self) -> None:
         """Write queued forward audit entries strictly in enqueue order.
 
-        All queue operations happen on the event loop (single consumer), so
-        a quick start → Ctrl-D can never land in the log reversed. Entries
-        are popped only after the append so a cancelled drain leaves them
-        for the unmount flush — a rare duplicate beats a lost record.
+        Entries are enqueued only on the event loop, and each write+dequeue
+        runs atomically inside a single worker thread under
+        `_forward_audit_io_lock`: even if the awaiting drain is cancelled
+        mid-write, the thread finishes the pop, so a later flush (the
+        unmount path) can neither duplicate the entry nor lose it.
         Append failures are best-effort by design (read-only risk profile):
         a full disk must not kill the app or block the forward.
         """
         audit = self._audit
         if audit is None:
             return
-        while self._forward_audit_queue:
-            entry = self._forward_audit_queue[0]
-            try:
-                await asyncio.to_thread(audit.append, **entry)
-            except OSError as exc:
-                logger.warning("forward audit (%s) failed: %s", entry["action"], exc)
-            self._forward_audit_queue.popleft()
+        queue = self._forward_audit_queue
+
+        def _write_head() -> None:
+            with self._forward_audit_io_lock:
+                if not queue:
+                    return
+                entry = queue[0]
+                try:
+                    audit.append(**entry)
+                except OSError as exc:
+                    logger.warning("forward audit (%s) failed: %s", entry["action"], exc)
+                queue.popleft()
+
+        while queue:
+            await asyncio.to_thread(_write_head)
 
     def _open_forward_list(self) -> None:
         """`:pf` — the active-forwards screen with stop / re-attach keys."""
