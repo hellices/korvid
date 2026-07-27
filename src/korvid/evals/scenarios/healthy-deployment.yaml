@@ -6,6 +6,9 @@ grading:
   must_mention:
     - [healthy, no issues, no problems, looks fine, running normally, working as expected, fully available]
     - [available, ready, rolled out, up to date]
+  must_not_mention:
+    - [stuck, not progressing, progressdeadlineexceeded]
+    - [oomkilled, crashloopbackoff, imagepullbackoff]
   expected_evidence:
     - tool: get_resource
       args: {kind: deployments, name: checkout, namespace: shop}

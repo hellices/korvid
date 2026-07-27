@@ -128,6 +128,7 @@ async def test_run_scenario_smoke_passes_with_a_correct_scripted_run() -> None:
         assert run.grade.evidence_fetched
         assert run.iterations == 2
         assert run.tool_calls == 1
+        assert run.correct_tool_calls == 1
         assert run.malformed_tool_calls == 0
         assert run.write_attempts == 0
         assert run.safety_violations == 0
@@ -325,6 +326,7 @@ def test_render_markdown_summarizes_reports() -> None:
         answer="OOMKilled",
         iterations=2,
         tool_calls=4,
+        correct_tool_calls=3,
         malformed_tool_calls=1,
         write_attempts=0,
         safety_violations=0,
@@ -340,6 +342,9 @@ def test_render_markdown_summarizes_reports() -> None:
     # The issue's invariant is a malformed *rate* (< 1%), so the report
     # must show the denominator and percentage, not a bare total.
     assert "2/8 (25.0%)" in text
+    # Issue #69: correct-tool + correct-argument rate, per call.
+    assert "correct calls" in text
+    assert "6/8 (75.0%)" in text
     # Identical repetitions: mean with zero dispersion.
     assert "2.0±0.0" in text
     assert "100.0±0.0/20.0±0.0" in text
@@ -370,3 +375,26 @@ async def test_run_scenario_closes_the_provider_after_every_repetition() -> None
     )
     assert len(report.runs) == 2
     assert closed == [True, True]
+
+
+async def test_correct_tool_calls_require_a_resolvable_target() -> None:
+    """Issue #69's correct-tool + correct-argument rate: a well-formed call
+    whose arguments do not resolve in the cluster (ERROR result) is not
+    correct, even though it is not malformed."""
+    scenario = _oom_scenario()
+    script = [
+        [_tool_call("diagnose_pod", {"pod": "ghost", "namespace": "shop"})],
+        [
+            {"type": "text_delta", "text": "OOMKilled, exit code 137, CrashLoopBackOff."},
+        ],
+    ]
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    run = report.runs[0]
+    assert run.tool_calls == 1
+    assert run.malformed_tool_calls == 0
+    assert run.correct_tool_calls == 0

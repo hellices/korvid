@@ -67,13 +67,13 @@ def test_load_scenario_parses_all_fields(tmp_path: Path) -> None:
 
 def test_load_scenario_defaults_optional_sections(tmp_path: Path) -> None:
     text = """\
-id: healthy
-question: Is anything wrong with this deployment?
+id: crashloop
+question: Why does this deployment keep restarting?
 screen: deployments view
-root_cause: none
+root_cause: crashloop
 grading:
   must_mention:
-    - [healthy, "no issue", "nothing is wrong", "working as expected"]
+    - [crashloopbackoff, crash loop]
 cluster:
   objects: []
 """
@@ -227,4 +227,14 @@ def test_load_scenario_rejects_non_string_mention_keywords(tmp_path: Path) -> No
     never match answer text, silently weakening the benchmark's assertions."""
     text = _MINIMAL.replace('- "137"', "- 137")
     with pytest.raises(ValueError, match="non-blank strings"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_requires_forbidden_groups_for_negative_controls(tmp_path: Path) -> None:
+    """A negative control without must_not_mention cannot catch over-diagnosis:
+    'healthy and ready, but OOMKilled' would satisfy every assertion."""
+    text = _MINIMAL.replace("root_cause: oom_killed", "root_cause: none").replace(
+        "  must_not_mention:\n    - image pull\n", ""
+    )
+    with pytest.raises(ValueError, match="must_not_mention"):
         load_scenario(_write(tmp_path, text))

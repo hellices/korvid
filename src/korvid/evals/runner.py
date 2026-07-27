@@ -79,6 +79,9 @@ class RunMetrics:
     answer: str
     iterations: int
     tool_calls: int
+    #: Correct-tool + correct-argument calls (issue #69): schema-valid AND
+    #: resolved against the cluster without an ERROR result.
+    correct_tool_calls: int
     #: Bad-JSON arguments or unknown tool names.
     malformed_tool_calls: int
     #: Write-tool calls attempted (they must all fail in an eval session).
@@ -227,11 +230,21 @@ async def _drive_turn(
     # run's spend — and unlike TurnComplete (never emitted on a provider
     # error) they include tokens paid for before a mid-turn failure.
     in_tokens, out_tokens = runtime.total_tokens
+    # Correct-tool + correct-argument rate (issue #69): a call counts as
+    # correct only when it is schema-valid AND its arguments resolved in
+    # the cluster (the executor returns 'ERROR: ...' otherwise).
+    correct_calls = sum(
+        1
+        for record in executor.records
+        if not record.result.startswith("ERROR:")
+        and not _is_malformed(record.name, json.dumps(record.arguments))
+    )
     return RunMetrics(
         grade=grade_result,
         answer=tally.answer,
         iterations=provider.completions,
         tool_calls=tally.tool_calls,
+        correct_tool_calls=correct_calls,
         malformed_tool_calls=tally.malformed,
         write_attempts=tally.write_attempts,
         safety_violations=tally.safety_violations,
@@ -276,18 +289,20 @@ def _mean_sd(values: list[float]) -> str:
 def render_markdown(reports: list[ScenarioReport]) -> str:
     """Markdown summary table: one row per scenario, variance included."""
     lines = [
-        "| scenario | root cause | success | evidence | malformed | safety | "
+        "| scenario | root cause | success | evidence | correct calls | malformed | safety | "
         "iterations | tokens in/out | wall s |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for report in reports:
         runs = report.runs
         n = len(runs)
         malformed = sum(run.malformed_tool_calls for run in runs)
+        correct = sum(run.correct_tool_calls for run in runs)
         total_calls = sum(run.tool_calls for run in runs)
         # The issue's invariant is a malformed *rate* (< 1%), so the
         # denominator has to be visible.
         rate = f" ({100 * malformed / total_calls:.1f}%)" if total_calls else ""
+        correct_rate = f" ({100 * correct / total_calls:.1f}%)" if total_calls else ""
         safety = sum(run.safety_violations for run in runs)
         iterations = _mean_sd([float(run.iterations) for run in runs])
         tokens_in = _mean_sd([float(run.input_tokens) for run in runs])
@@ -295,7 +310,8 @@ def render_markdown(reports: list[ScenarioReport]) -> str:
         wall = _fmt_seconds([run.wall_time_s for run in runs])
         lines.append(
             f"| {report.scenario_id} | {report.root_cause} | {report.successes}/{n} |"
-            f" {report.evidence_hits}/{n} | {malformed}/{total_calls}{rate} | {safety} |"
+            f" {report.evidence_hits}/{n} | {correct}/{total_calls}{correct_rate} |"
+            f" {malformed}/{total_calls}{rate} | {safety} |"
             f" {iterations} | {tokens_in}/{tokens_out} | {wall} |"
         )
     return "\n".join(lines)

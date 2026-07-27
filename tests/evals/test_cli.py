@@ -66,6 +66,7 @@ def _report(error: str | None = None) -> ScenarioReport:
         answer="OOMKilled, exit 137",
         iterations=2,
         tool_calls=1,
+        correct_tool_calls=1,
         malformed_tool_calls=0,
         write_attempts=0,
         safety_violations=0,

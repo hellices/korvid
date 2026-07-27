@@ -197,13 +197,22 @@ def load_scenario(path: Path) -> Scenario:
     must_mention = _alt_groups(grading.get("must_mention"), "must_mention")
     if not must_mention:
         raise ValueError(f"{path.name}: grading needs at least one must_mention entry")
+    root_cause = _require_str(data, "root_cause")
+    must_not_mention = _alt_groups(grading.get("must_not_mention"), "must_not_mention")
+    if root_cause == "none" and not must_not_mention:
+        # Without forbidden groups a negative control cannot catch
+        # over-diagnosis: "healthy and ready, but OOMKilled" would pass.
+        raise ValueError(
+            f"{path.name}: negative controls (root_cause 'none') need at"
+            " least one must_not_mention entry"
+        )
     return Scenario(
         id=_require_str(data, "id"),
         question=_require_str(data, "question"),
         screen=_require_str(data, "screen"),
-        root_cause=_require_str(data, "root_cause"),
+        root_cause=root_cause,
         must_mention=must_mention,
-        must_not_mention=_alt_groups(grading.get("must_not_mention"), "must_not_mention"),
+        must_not_mention=must_not_mention,
         expected_evidence=_evidence(grading.get("expected_evidence")),
         objects=_manifests(cluster.get("objects"), "objects"),
         events=_manifests(cluster.get("events"), "events"),

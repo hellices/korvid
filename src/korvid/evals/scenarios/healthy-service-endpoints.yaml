@@ -9,6 +9,9 @@ grading:
     - [healthy, no issues, no problems, looks fine, running normally,
        working as expected, nothing wrong]
     - [endpoints, endpoint]
+  must_not_mention:
+    - [no endpoints, empty endpoints, missing endpoints, selector mismatch]
+    - [oomkilled, crashloopbackoff, imagepullbackoff]
   expected_evidence:
     - tool: get_resource
       args: {kind: endpoints, name: search, namespace: front}

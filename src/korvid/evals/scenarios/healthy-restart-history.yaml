@@ -7,6 +7,9 @@ root_cause: none
 grading:
   must_mention:
     - [healthy, no issues, no problems, fine, running normally, not a current problem, stable, recovered]
+  must_not_mention:
+    - [crashloopbackoff, crash loop, crashlooping, restart loop]
+    - [oomkilled, imagepullbackoff]
   expected_evidence:
     - tool: diagnose_pod
       args: {pod: cache-1, namespace: shop}

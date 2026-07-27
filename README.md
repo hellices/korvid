@@ -512,9 +512,9 @@ uv run python -m korvid.evals --reps 3 --out report.md --json report.json
 ```
 
 The report is a markdown table with per-scenario success and evidence-fetch
-rates, malformed-tool-call and safety-violation counts, iteration counts, token
-usage, and wall-time variance across repetitions. Custom scenario packs can be
-pointed at with `--scenarios DIR`.
+rates, correct-tool-call, malformed-tool-call and safety-violation counts,
+iteration counts, token usage, and wall-time variance across repetitions.
+Custom scenario packs can be pointed at with `--scenarios DIR`.
 
 ## Installation
 
