@@ -1182,12 +1182,14 @@ class KorvidApp(App[None]):
         if self._list_contexts is None:
             self.notify("Context switching unavailable in this build", severity="warning")
             return
-        names, _ = await asyncio.to_thread(self._list_contexts)
+        names, active = await asyncio.to_thread(self._list_contexts)
         if not names:
             self.notify("No contexts found in kubeconfig", severity="warning")
             return
         self.query_one(CommandBar).context_words = names
-        current = self.config.kube_context
+        # Sessions started from the kubeconfig current-context have no
+        # explicit config value — fall back to what the kubeconfig reports.
+        current = self.config.kube_context or active
         # Explicit display->name mapping: decoding the label (suffix strip)
         # would corrupt a real context whose name ends in " (current)".
         labels: dict[str, str] = {}

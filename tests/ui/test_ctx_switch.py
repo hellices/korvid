@@ -426,3 +426,24 @@ async def test_agent_prompt_refused_while_switching() -> None:
             assert app._agent_task is None
         finally:
             app._ctx_switching = False
+
+
+async def test_picker_marks_kubeconfig_default_when_no_explicit_context() -> None:
+    """Sessions started without -c/--context still know their active context:
+    the picker falls back to what the kubeconfig reports (issue #36 review)."""
+    import dataclasses
+
+    env = _CtxEnv()
+    app = env.app
+    app.config = dataclasses.replace(app.config, kube_context=None)
+    async with app.run_test() as pilot:
+        app.post_message(ShowContextPicker())
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, PickScreen),
+            label="context picker open",
+        )
+        picker = app.screen
+        assert isinstance(picker, PickScreen)
+        prompts = list(picker._options)
+        assert any("ctx-a" in p and "current" in p for p in prompts)

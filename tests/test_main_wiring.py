@@ -591,3 +591,58 @@ async def test_discovery_preserves_olm_metas_under_group_qualified_aliases() -> 
     assert aliases["subscriptions"] is foreign_sub
     assert aliases["subscriptions.operators.coreos.com"] is olm_sub
     assert aliases["packagemanifests.packages.operators.coreos.com"] is pkg
+
+
+async def test_ctx_switch_quiesces_discovery_before_swapping_connection() -> None:
+    """switch_context closes the old ApiClient — the background discovery
+    task issuing requests on it must be cancelled (and the alias map reseeded)
+    before the connection swap, not after (issue #36 review)."""
+    import asyncio
+    import contextlib
+    from types import SimpleNamespace
+
+    from korvid.__main__ import _make_switch_context
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.csp import detect_provider
+
+    events: list[str] = []
+
+    class FakeKube:
+        async def switch_context(self, name: str | None) -> None:
+            events.append("connection-swapped")
+
+        async def detect_cloud_provider(self) -> Any:
+            return detect_provider([])
+
+        async def discover_resources(self) -> list[Any]:
+            return []
+
+    async def _old_discovery() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("discovery-cancelled")
+            raise
+
+    old_task = asyncio.create_task(_old_discovery())
+    await asyncio.sleep(0)  # let it start so cancellation unwinds it
+
+    aliases: dict[str, Any] = {"stale-crd": object()}
+    discovery_box: list[asyncio.Task[None]] = [old_task]
+    switch = _make_switch_context(
+        KorvidConfig(namespace="default", readonly=True),
+        cast("Any", FakeKube()),
+        aliases,
+        cast("Any", [SimpleNamespace(agent_runtime=None)]),  # app_box
+        discovery_box,
+        lambda runtime, resize, note: None,
+    )
+    try:
+        await switch("ctx-b")
+    finally:
+        discovery_box[0].cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await discovery_box[0]
+
+    assert events == ["discovery-cancelled", "connection-swapped"]
+    assert "stale-crd" not in aliases  # reseeded before the swap

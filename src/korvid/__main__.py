@@ -455,7 +455,9 @@ def _make_switch_context(
     """
 
     async def switch_context(name: str | None) -> ContextSwitchResult:
-        await kube.switch_context(name)
+        # switch_context closes the old ApiClient — the background discovery
+        # task still issues requests on it, so quiesce it (and reseed the
+        # alias map it mutates) before the connection is torn down.
         old_task = discovery_box[0] if discovery_box else None
         if old_task is not None and not old_task.done():
             old_task.cancel()
@@ -463,6 +465,7 @@ def _make_switch_context(
                 await old_task
         aliases.clear()
         aliases.update(build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META]))
+        await kube.switch_context(name)
         discovery_box[:] = [asyncio.create_task(_discover_in_background(kube, aliases, app_box[0]))]
         pod_resize_supported = await _probe_pod_resize(kube, readonly=config.readonly)
         provider_info = await _probe_cloud_provider(kube)
