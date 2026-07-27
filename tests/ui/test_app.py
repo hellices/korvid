@@ -75,6 +75,7 @@ def make_app(
     config: KorvidConfig | None = None,
     open_pod_exec: Any | None = None,
     get_manifest: Any | None = None,
+    metrics: Any | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     all_data: dict[str, list[Summary]] = {"pods": list(pods)}
@@ -100,6 +101,7 @@ def make_app(
         provider_hint=provider_hint,
         open_pod_exec=open_pod_exec,
         get_manifest=get_manifest,
+        metrics=metrics,
     )
 
 

@@ -129,7 +129,7 @@ async def test_closing_first_pane_moves_second_into_place() -> None:
         await pilot.press("ctrl+w", "q")  # close pane 1
         await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="back to one pane")
         assert app.current_kind == "deployments"  # pane 2's view took over
-        table = app.query_one("#pane-0", ResourceTable)
+        table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="deployments rendered")
 
 
@@ -226,3 +226,126 @@ async def test_single_pane_context_has_no_other_pane_summary() -> None:
     async with app.run_test() as pilot:
         await _first_render(app, pilot)
         assert "other_pane" not in app._screen_context()
+
+
+async def test_split_clones_active_filter() -> None:
+    """Splitting promises a clone of the focused view: an active filter
+    carries into the new pane, then evolves independently."""
+    app = make_app([_pod("api-1"), _pod("checkout-2")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await pilot.press("slash")
+        for ch in "check":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        first = app.query_one("#pane-0", ResourceTable)
+        await until(pilot, lambda: first.row_count == 1, label="pane 1 filtered")
+        await _split(app, pilot)
+        assert app._panes[1].filter_pattern == "check"
+        second = app.query_one("#pane-1", ResourceTable)
+        await until(pilot, lambda: second.row_count == 1, label="clone starts filtered")
+
+
+async def test_split_clones_drill_stack_independently() -> None:
+    """The clone starts at the source pane's drill-down position, but the
+    stacks are independent - popping one must not pop the other."""
+    from korvid.ui.navigation import DrillLevel
+
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        level = DrillLevel("deployments", "web", "default", "dep-1", "pods")
+        app._drill.push(level)
+        await _split(app, pilot)
+        assert app._panes[1].drill.breadcrumb() == app._panes[0].drill.breadcrumb()
+        app._panes[1].drill.pop()
+        assert app._panes[0].drill.active  # source stack untouched
+
+
+async def test_closing_first_pane_keeps_survivors_cursor() -> None:
+    """Closing pane 1 must not repaint pane 2's view into a stale widget -
+    the survivor keeps its cursor/scroll state."""
+    app = make_app([_pod("api-1"), _pod("api-2"), _pod("api-3")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)
+        second = app.query_one("#pane-1", ResourceTable)
+        await until(pilot, lambda: second.row_count == 3, label="clone rendered")
+        await pilot.press("down")  # cursor to row 1 in the focused clone
+        assert second.cursor_row == 1
+        await pilot.press("ctrl+w", "w")  # focus pane 1
+        await pilot.press("ctrl+w", "q")  # close pane 1
+        await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="single pane")
+        assert app.query_one(ResourceTable).cursor_row == 1
+
+
+async def test_navigation_lands_in_initiating_pane_after_focus_switch() -> None:
+    """A navigation must write kind/scope into the pane that initiated it,
+    even when pane focus moves during one of its awaits (regression:
+    focused-pane delegation resolved per property access)."""
+    from korvid.ui.messages import NavigateCommand
+
+    app = make_app([_pod("api-1")], extra_data={"deployments": [_deploy("web")]})
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)  # focused: pane 2
+
+        async def flip_focus_mid_navigation() -> None:
+            app._focused_pane = 0  # the user switches panes during the await
+
+        app._close_log_pane = flip_focus_mid_navigation  # type: ignore[method-assign]  # test seam
+        await app.on_navigate_command(NavigateCommand("deployments", None))
+        assert app._panes[1].kind == "deployments"  # initiating pane transitioned
+        assert app._panes[0].kind == "pods"  # newly focused pane untouched
+
+
+async def test_metrics_polling_follows_pod_pane_not_just_focused() -> None:
+    """Pane 1 stays on pods while pane 2 navigates to deployments: the
+    metrics poller must keep polling for the pod pane's scope."""
+    from korvid.k8s.metrics import MetricsPoller, PodMetrics
+
+    calls: list[str | None] = []
+
+    async def fetch(namespace: str | None) -> list[PodMetrics]:
+        calls.append(namespace)
+        return []
+
+    app = make_app(
+        [_pod("api-1")],
+        extra_data={"deployments": [_deploy("web")]},
+        metrics=MetricsPoller(fetch, interval=0.05),
+    )
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)
+        await _type_command(pilot, "deploy")
+        await until(pilot, lambda: app.current_kind == "deployments", label="pane 2 on deploys")
+        calls.clear()
+        await until(pilot, lambda: "default" in calls, label="poller still serves the pod pane")
+        assert "default" in calls
+
+
+async def test_two_pod_panes_in_different_scopes_poll_cluster_wide() -> None:
+    """Two pod panes in different namespaces: a single-scope poll would
+    blank one pane's numbers - poll cluster-wide instead."""
+    from korvid.k8s.metrics import MetricsPoller, PodMetrics
+
+    calls: list[str | None] = []
+
+    async def fetch(namespace: str | None) -> list[PodMetrics]:
+        calls.append(namespace)
+        return []
+
+    app = make_app(
+        [_pod("api-1")],
+        namespaces=["default", "kube-system"],
+        metrics=MetricsPoller(fetch, interval=0.05),
+    )
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)
+        await _type_command(pilot, "ns kube-system")
+        await until(pilot, lambda: app.current_scope == "kube-system", label="pane 2 rescoped")
+        calls.clear()
+        await until(pilot, lambda: None in calls, label="cluster-wide metrics poll")
+        assert None in calls
