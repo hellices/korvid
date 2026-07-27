@@ -15,6 +15,9 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
+from korvid.ui.widgets.resource_table import ResourceTable
+
+from .waits import until
 
 # ---------------------------------------------------------------------------
 # Pure unit tests: build_container_rows
@@ -210,3 +213,41 @@ async def test_enter_without_manifest_falls_back_to_store() -> None:
 @contextmanager
 def _noop_cm() -> Any:
     yield
+
+
+async def test_containers_screen_pick_cancelled_when_context_switched() -> None:
+    """A containers screen that stayed open across a completed :ctx switch
+    must not exec or stream: the pod selection belongs to the old cluster
+    (issue #36 review round 12)."""
+    calls: list[list[str]] = []
+
+    def _record_call(argv: list[str]) -> int:
+        calls.append(argv)
+        return 0
+
+    app = make_app([_pod("web-1")], get_manifest=_get_manifest)
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", side_effect=_record_call),
+        patch.object(type(app), "suspend", side_effect=lambda *a: _noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await until(
+                pilot,
+                lambda: app.query_one(ResourceTable).row_count > 0,
+                label="pod row visible",
+            )
+            await pilot.press("enter")
+            await until(
+                pilot,
+                lambda: isinstance(app.screen, ContainersScreen),
+                label="containers screen open",
+            )
+            app._ctx_epoch += 1  # a context switch completed under the screen
+            await pilot.press("s")
+            await until(
+                pilot,
+                lambda: any("kube context" in n.message for n in app._notifications),
+                label="pick epoch refusal",
+            )
+    assert calls == []
