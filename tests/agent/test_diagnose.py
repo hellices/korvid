@@ -14,8 +14,8 @@ from korvid.agent.diagnose import (
     identity_lines,
     log_excerpt,
     node_condition_line,
+    previous_log_containers,
     pvc_names,
-    restarted_containers,
     troubled_containers,
     warning_event_lines,
 )
@@ -231,16 +231,34 @@ def test_troubled_containers_skip_a_completed_regular_container_without_restarts
     assert troubled_containers(pod) == []
 
 
-def test_restarted_containers_lists_names_with_restarts() -> None:
+def test_previous_log_containers_lists_waiting_restarted_names() -> None:
     pod = _crashloop_pod()
     pod["status"]["initContainerStatuses"] = [
         {"name": "migrate", "restartCount": 0, "state": {"terminated": {"exitCode": 0}}}
     ]
-    assert restarted_containers(pod) == {"app"}
+    assert previous_log_containers(pod) == {"app"}
 
 
-def test_restarted_containers_empty_status_yields_empty() -> None:
-    assert restarted_containers({}) == set()
+def test_previous_log_containers_excludes_currently_failed_termination() -> None:
+    """A container terminated non-zero *right now* logged its failure in the
+    current instance — previous would be the penultimate crash."""
+    pod = _crashloop_pod()
+    pod["status"]["containerStatuses"][0]["state"] = {
+        "terminated": {"exitCode": 1, "reason": "Error"}
+    }
+    assert previous_log_containers(pod) == set()
+
+
+def test_previous_log_containers_includes_completed_with_restarts() -> None:
+    pod = _crashloop_pod()
+    pod["status"]["containerStatuses"][0]["state"] = {
+        "terminated": {"exitCode": 0, "reason": "Completed"}
+    }
+    assert previous_log_containers(pod) == {"app"}
+
+
+def test_previous_log_containers_empty_status_yields_empty() -> None:
+    assert previous_log_containers({}) == set()
 
 
 # --- conditions -------------------------------------------------------------
@@ -315,6 +333,19 @@ def test_warning_event_lines_sort_by_parsed_instants_not_strings() -> None:
     newer = _event("B", "utc ts", ts="2026-07-27T05:00:00Z")
     lines = warning_event_lines([older, newer])
     assert lines[0].startswith("B")
+    assert lines[1].startswith("A")
+
+
+def test_warning_event_lines_fall_back_to_creation_timestamp() -> None:
+    """Some events carry only `metadata.creationTimestamp` — without the
+    fallback they all sort as epoch and render without a time."""
+    older = _event("A", "older", ts="")
+    older["metadata"] = {"creationTimestamp": "2026-07-27T05:00:00Z"}
+    newer = _event("B", "newer", ts="")
+    newer["metadata"] = {"creationTimestamp": "2026-07-27T06:00:00Z"}
+    lines = warning_event_lines([older, newer])
+    assert lines[0].startswith("B")
+    assert "last 2026-07-27T06:00:00Z" in lines[0]
     assert lines[1].startswith("A")
 
 

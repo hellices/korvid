@@ -1069,6 +1069,28 @@ async def test_diagnose_pod_reads_previous_instance_logs_after_restarts() -> Non
     assert "[app] (previous instance)" in out
 
 
+async def test_diagnose_pod_reads_current_logs_for_a_currently_failed_termination() -> None:
+    """A container terminated non-zero *right now* logged that failure in the
+    current instance — previous=True would fetch the penultimate crash."""
+    kube = FakeDiagnoseKube()
+    kube.objects[("pods", "api-1")]["status"]["containerStatuses"][0]["state"] = {
+        "terminated": {"exitCode": 1, "reason": "Error"}
+    }
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert [(c["container"], c["previous"]) for c in kube.log_calls] == [("app", False)]
+    assert "(previous instance)" not in out
+
+
+def test_render_log_blocks_survives_a_non_positive_budget() -> None:
+    executor = _diagnose_executor(FakeDiagnoseKube())
+    blocks = [["[app]", "line 1", "line 2"], ["[sidecar]", "line 3"]]
+    lines = executor._render_log_blocks(blocks, -50)
+    assert "  [app]" in lines
+    assert "  [sidecar]" in lines
+
+
 async def test_diagnose_pod_falls_back_to_current_logs_when_previous_unavailable() -> None:
     class NoPreviousKube(FakeDiagnoseKube):
         async def stream_logs(self, *a: Any, previous: bool = False, **k: Any) -> Any:

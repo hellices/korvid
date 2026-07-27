@@ -15,8 +15,8 @@ from korvid.agent.diagnose import (
     identity_lines,
     log_excerpt,
     node_condition_line,
+    previous_log_containers,
     pvc_names,
-    restarted_containers,
     troubled_containers,
     warning_event_lines,
 )
@@ -943,18 +943,19 @@ class ToolExecutor:
     ) -> list[list[str]]:
         """One block (header + excerpt lines) per troubled container.
 
-        A restarted container's crash evidence lives in the *previous*
-        instance's logs (the current one is freshly restarted or still
-        waiting), so restarts read that instance first, falling back to
-        the current one when the previous logs have rotated away.
+        A restarted container's crash evidence usually lives in the
+        *previous* instance's logs — unless it is currently terminated
+        with a non-zero exit, where the current logs hold the latest
+        failure (`previous_log_containers` encodes that split). Previous
+        reads fall back to current when those logs have rotated away.
         """
         troubled = troubled_containers(pod)
         if not troubled:
             return [["(no troubled containers — logs skipped)"]]
-        restarted = restarted_containers(pod)
+        previous_first = previous_log_containers(pod)
         blocks: list[list[str]] = []
         for container in troubled[: self._DIAGNOSE_MAX_LOG_CONTAINERS]:
-            previous = container in restarted
+            previous = container in previous_first
             ok, text = await self._fetch_log_excerpt(namespace, name, container, previous=previous)
             if previous and not ok:
                 ok, text = await self._fetch_log_excerpt(namespace, name, container, previous=False)
@@ -1006,7 +1007,7 @@ class ToolExecutor:
         """Render container blocks within the budget, trimming *within*
         each block — one container's huge excerpt must never evict another
         container's header or evidence."""
-        share = budget // max(1, len(blocks))
+        share = max(0, budget) // max(1, len(blocks))
         lines: list[str] = []
         for block in blocks:
             header = f"  {self._clamp_line(block[0])}"

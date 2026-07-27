@@ -128,14 +128,26 @@ def troubled_containers(pod: dict[str, Any]) -> list[str]:
     return names
 
 
-def restarted_containers(pod: dict[str, Any]) -> set[str]:
-    """Container names with restarts — their crash evidence is in the
-    *previous* instance's logs, not the freshly restarted current one."""
-    return {
-        name
-        for _prefix, cs in _container_statuses(pod)
-        if isinstance(name := cs.get("name"), str) and name and (cs.get("restartCount") or 0) > 0
-    }
+def previous_log_containers(pod: dict[str, Any]) -> set[str]:
+    """Containers whose crash evidence lives in the *previous* instance's logs.
+
+    A restarted container that is now running or waiting logged its crash
+    in the previous instance. Exception: a container *currently* terminated
+    with a non-zero exit — its current logs hold the latest failure, and
+    previous would fetch the penultimate crash instead.
+    """
+    names: set[str] = set()
+    for _prefix, cs in _container_statuses(pod):
+        name = cs.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if (cs.get("restartCount") or 0) <= 0:
+            continue
+        terminated = _dict(cs.get("state")).get("terminated")
+        failed_now = isinstance(terminated, dict) and terminated.get("exitCode") != 0
+        if not failed_now:
+            names.add(name)
+    return names
 
 
 def condition_lines(pod: dict[str, Any]) -> list[str]:
@@ -177,6 +189,7 @@ def _event_last_seen(ev: dict[str, Any]) -> str:
         or ev.get("lastTimestamp")
         or ev.get("eventTime")
         or ev.get("firstTimestamp")
+        or _dict(ev.get("metadata")).get("creationTimestamp")
         or ""
     )
     return str(raw)
