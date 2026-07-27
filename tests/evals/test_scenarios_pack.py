@@ -37,9 +37,10 @@ async def test_bundled_evidence_is_reachable_through_the_real_tools(
     # Every bundled scenario (negative controls included) must declare
     # evidence, so "answered without fetching evidence" is detectable.
     assert scenario.expected_evidence
-    for evidence in scenario.expected_evidence:
-        result = await executor.execute(evidence.tool, dict(evidence.args))
-        assert evidence.contains in result, (
-            f"{scenario.id}: {evidence.tool}({evidence.args}) result does not"
-            f" contain {evidence.contains!r}:\n{result}"
-        )
+    for group in scenario.expected_evidence:
+        for evidence in group:
+            result = await executor.execute(evidence.tool, dict(evidence.args))
+            assert evidence.contains in result, (
+                f"{scenario.id}: {evidence.tool}({evidence.args}) result does not"
+                f" contain {evidence.contains!r}:\n{result}"
+            )

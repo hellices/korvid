@@ -207,12 +207,17 @@ class AgentRuntime:
             except json.JSONDecodeError:
                 result = "ERROR: bad arguments"
             else:
-                try:
-                    result = await self._executor.execute(name, parsed)
-                except Exception as exc:  # defensive: executor contract is never-raise
-                    # Same ingest cap as ToolExecutor — a huge exception
-                    # message must not bypass the limit into history.
-                    result = cap_result(f"ERROR: {exc}")
+                if not isinstance(parsed, dict):
+                    # The executor contract takes an argument mapping; valid
+                    # JSON of any other shape is equally bad arguments.
+                    result = "ERROR: bad arguments"
+                else:
+                    try:
+                        result = await self._executor.execute(name, parsed)
+                    except Exception as exc:  # defensive: executor contract is never-raise
+                        # Same ingest cap as ToolExecutor — a huge exception
+                        # message must not bypass the limit into history.
+                        result = cap_result(f"ERROR: {exc}")
             yield ToolCallFinished(
                 call_id=call_id,
                 name=name,

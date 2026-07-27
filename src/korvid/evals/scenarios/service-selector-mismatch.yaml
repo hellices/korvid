@@ -7,7 +7,9 @@ root_cause: service_selector_mismatch
 grading:
   must_mention:
     - [selector]
-    - [mismatch, does not match, doesn't match, no match, web-v2, label]
+    - [mismatch, mismatched, does not match, doesn't match, do not match,
+       don't match, no match, no matching, no endpoints, empty endpoints,
+       no pods, wrong label, different label]
   must_not_mention:
     - [crashloopbackoff, oomkilled, image pull]
   expected_evidence:

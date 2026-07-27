@@ -11,9 +11,12 @@ grading:
   must_not_mention:
     - [image pull, crashloopbackoff, oomkilled]
   expected_evidence:
-    - tool: get_events
-      args: {kind: replicasets, namespace: jobs, name: batch-9d4c}
-      contains: exceeded quota
+    - - tool: get_events
+        args: {kind: replicasets, namespace: jobs, name: batch-9d4c}
+        contains: exceeded quota
+      - tool: get_resource
+        args: {kind: deployments, name: batch, namespace: jobs}
+        contains: exceeded quota
 cluster:
   objects:
     - kind: Deployment

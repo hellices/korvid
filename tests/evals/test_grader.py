@@ -22,7 +22,7 @@ def _scenario(**overrides: Any) -> Scenario:
         "root_cause": "oom_killed",
         "must_mention": (("oomkilled", "oom killed"), ("137",)),
         "must_not_mention": (("image pull", "imagepull"),),
-        "expected_evidence": (_EVIDENCE,),
+        "expected_evidence": ((_EVIDENCE,),),
     }
     fields.update(overrides)
     return Scenario(**fields)
@@ -96,7 +96,7 @@ def test_grade_reports_unfetched_evidence() -> None:
     result = grade(_scenario(), "OOMKilled, exit 137.", [])
     assert result.diagnosis_success  # the answer itself is right...
     assert not result.evidence_fetched  # ...but the model never fetched proof
-    assert result.missing_evidence == (_EVIDENCE,)
+    assert result.missing_evidence == ((_EVIDENCE,),)
 
 
 def test_grade_evidence_requires_the_matching_tool_name() -> None:
@@ -117,7 +117,7 @@ def test_grade_evidence_requires_the_expected_arguments() -> None:
     records = [_record(arguments={"pod": "other-pod", "namespace": "shop"})]
     result = grade(_scenario(), "OOMKilled, exit 137.", records)
     assert not result.evidence_fetched
-    assert result.missing_evidence == (_EVIDENCE,)
+    assert result.missing_evidence == ((_EVIDENCE,),)
 
 
 def test_grade_evidence_ignores_extra_arguments_beyond_the_expected() -> None:
@@ -133,12 +133,31 @@ def test_grade_evidence_canonicalizes_kind_aliases() -> None:
         contains="readyReplicas: 2",
         args={"kind": "deployments", "name": "web", "namespace": "shop"},
     )
-    scenario = _scenario(expected_evidence=(evidence,))
+    scenario = _scenario(expected_evidence=((evidence,),))
     records = [
         _record(
             name="get_resource",
             result="status:\n  readyReplicas: 2",
             arguments={"kind": "deploy", "name": "web", "namespace": "shop"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched
+
+
+def test_grade_evidence_group_is_satisfied_by_any_alternative() -> None:
+    """A group of alternative locations accepts whichever path the model took."""
+    alternative = Evidence(
+        tool="get_resource",
+        contains="exit=137",
+        args={"kind": "pods", "name": "checkout-1", "namespace": "shop"},
+    )
+    scenario = _scenario(expected_evidence=((_EVIDENCE, alternative),))
+    records = [
+        _record(
+            name="get_resource",
+            result="lastState: exit=137",
+            arguments={"kind": "pods", "name": "checkout-1", "namespace": "shop"},
         )
     ]
     result = grade(scenario, "OOMKilled, exit 137.", records)

@@ -6,6 +6,8 @@ grading:
   must_mention:
     - [persistentvolumeclaim, pvc, claim]
     - [storageclass, storage class, fast-ssd]
+    - [not found, does not exist, doesn't exist, missing, nonexistent,
+       non-existent, no such]
   must_not_mention:
     - [image pull, crashloopbackoff, oomkilled]
   expected_evidence:

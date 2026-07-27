@@ -55,7 +55,7 @@ def test_load_scenario_parses_all_fields(tmp_path: Path) -> None:
     assert scenario.screen == "pods view, namespace shop"
     assert scenario.must_mention == (("oomkilled", "oom"), ("137",))
     assert scenario.must_not_mention == (("image pull",),)
-    evidence = scenario.expected_evidence[0]
+    evidence = scenario.expected_evidence[0][0]
     assert evidence.tool == "diagnose_pod"
     assert evidence.contains == "exit=137"
     assert evidence.args == {"pod": "checkout-1", "namespace": "shop"}
@@ -149,6 +149,30 @@ def test_load_scenario_rejects_unknown_log_stream_key(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="extra"):
         load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_parses_evidence_alternative_groups(tmp_path: Path) -> None:
+    text = _MINIMAL.replace(
+        """\
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: checkout-1, namespace: shop}
+      contains: exit=137
+""",
+        """\
+  expected_evidence:
+    - - tool: diagnose_pod
+        args: {pod: checkout-1, namespace: shop}
+        contains: exit=137
+      - tool: get_resource
+        args: {kind: pods, name: checkout-1, namespace: shop}
+        contains: "exitCode: 137"
+""",
+    )
+    scenario = load_scenario(_write(tmp_path, text))
+    assert len(scenario.expected_evidence) == 1
+    group = scenario.expected_evidence[0]
+    assert [evidence.tool for evidence in group] == ["diagnose_pod", "get_resource"]
 
 
 def test_load_scenario_rejects_unknown_grading_key(tmp_path: Path) -> None:

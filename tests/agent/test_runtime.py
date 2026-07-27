@@ -62,6 +62,23 @@ async def test_tool_call_roundtrip() -> None:
     assert p.calls[1][-1]["content"] == "result-of-get_logs"
 
 
+async def test_tool_call_with_non_mapping_arguments_is_rejected() -> None:
+    """Valid JSON that is not an argument mapping never reaches the executor."""
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "[]"},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    events = await collect(AgentRuntime(p, EchoExecutor()), "logs?")
+    finished = next(e for e in events if isinstance(e, ToolCallFinished))
+    assert not finished.ok
+    assert finished.summary == "ERROR: bad arguments"
+
+
 async def test_iteration_cap() -> None:
     turn = [{"type": "tool_call", "id": "c", "name": "t", "arguments": "{}"}, {"type": "done"}]
     p = ScriptedProvider([list(turn) for _ in range(20)])

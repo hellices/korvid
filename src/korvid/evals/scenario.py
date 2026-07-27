@@ -54,9 +54,10 @@ class Scenario:
     #: problem"). Grading is deterministic keyword matching, not assertion
     #: parsing, so pick keywords a correct answer would never bring up.
     must_not_mention: tuple[tuple[str, ...], ...] = ()
-    #: Which tool results contain the ground truth — detects "answered
-    #: without fetching the evidence".
-    expected_evidence: tuple[Evidence, ...] = ()
+    #: Alternative-groups of ground-truth locations: each group is satisfied
+    #: by fetching **any one** of its alternatives — detects "answered
+    #: without fetching the evidence" without pinning the diagnostic path.
+    expected_evidence: tuple[tuple[Evidence, ...], ...] = ()
     #: Full manifests, keyed by nothing — the fake kube indexes them.
     objects: tuple[dict[str, Any], ...] = ()
     #: Event manifests with ``involvedObject`` linking them to objects.
@@ -89,30 +90,36 @@ def _alt_groups(raw: Any, key: str) -> tuple[tuple[str, ...], ...]:
     return tuple(groups)
 
 
-def _evidence(raw: Any) -> tuple[Evidence, ...]:
+def _evidence_entry(entry: Any) -> Evidence:
+    if (
+        not isinstance(entry, dict)
+        or not entry.get("tool")
+        or not entry.get("contains")
+        or not isinstance(entry.get("args"), dict)
+    ):
+        raise ValueError("each expected_evidence entry needs 'tool', 'contains', and 'args' keys")
+    return Evidence(
+        tool=str(entry["tool"]),
+        contains=str(entry["contains"]),
+        args=dict(entry["args"]),
+    )
+
+
+def _evidence(raw: Any) -> tuple[tuple[Evidence, ...], ...]:
+    """Normalize evidence assertions into alternative-groups: each entry is
+    either one location or a list of alternative locations, of which any one
+    satisfies the group — the model is free to choose its diagnostic path."""
     if raw is None:
         return ()
     if not isinstance(raw, list):
         raise ValueError("grading field 'expected_evidence' must be a list")
-    entries: list[Evidence] = []
+    groups: list[tuple[Evidence, ...]] = []
     for entry in raw:
-        if (
-            not isinstance(entry, dict)
-            or not entry.get("tool")
-            or not entry.get("contains")
-            or not isinstance(entry.get("args"), dict)
-        ):
-            raise ValueError(
-                "each expected_evidence entry needs 'tool', 'contains', and 'args' keys"
-            )
-        entries.append(
-            Evidence(
-                tool=str(entry["tool"]),
-                contains=str(entry["contains"]),
-                args=dict(entry["args"]),
-            )
-        )
-    return tuple(entries)
+        alternatives = entry if isinstance(entry, list) else [entry]
+        if not alternatives:
+            raise ValueError("expected_evidence has an empty alternatives group")
+        groups.append(tuple(_evidence_entry(alt) for alt in alternatives))
+    return tuple(groups)
 
 
 def _log_stream(entry: dict[str, Any], key: str, stream: str) -> tuple[str, ...]:

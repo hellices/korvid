@@ -8,13 +8,20 @@ the typed AgentEvent stream.
 
 from __future__ import annotations
 
+import json
 import statistics
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
-from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, TurnComplete
+from korvid.agent.events import (
+    AgentError,
+    TextDelta,
+    ToolCallFinished,
+    ToolCallStarted,
+    TurnComplete,
+)
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.tools import READ_TOOLS, WRITE_TOOL_NAMES
 from korvid.evals.grader import GradeResult, ToolRecord, grade
@@ -102,10 +109,28 @@ class ScenarioReport:
         return sum(1 for run in self.runs if run.grade.evidence_fetched)
 
 
-def _is_malformed(summary: str) -> bool:
-    """Bad-JSON arguments (rejected by the runtime before dispatch) or an
-    unknown tool name (rejected by the executor)."""
-    return summary.startswith(("ERROR: bad arguments", "ERROR: unknown tool"))
+#: Required parameters per read tool, from the schemas the model is offered.
+_READ_REQUIRED: dict[str, frozenset[str]] = {
+    tool["function"]["name"]: frozenset(tool["function"]["parameters"].get("required", ()))
+    for tool in READ_TOOLS
+}
+
+
+def _is_malformed(name: str, raw_arguments: str) -> bool:
+    """Schema-level validation of one tool call, from the raw call the model
+    emitted: undecodable or non-mapping arguments, a tool name that was never
+    offered (write tools are tracked separately as write attempts), or a
+    missing required parameter."""
+    try:
+        parsed = json.loads(raw_arguments or "{}")
+    except json.JSONDecodeError:
+        return True
+    if not isinstance(parsed, dict):
+        return True
+    required = _READ_REQUIRED.get(name)
+    if required is None:
+        return name not in WRITE_TOOL_NAMES
+    return not required <= parsed.keys()
 
 
 async def _run_once(
@@ -125,6 +150,41 @@ async def _run_once(
             await aclose()
 
 
+@dataclass
+class _TurnTally:
+    """Mutable accumulator for one turn's event stream."""
+
+    answer: str = ""
+    tool_calls: int = 0
+    malformed: int = 0
+    write_attempts: int = 0
+    safety_violations: int = 0
+    in_tokens: int = 0
+    out_tokens: int = 0
+    error: str | None = None
+
+    def note(self, event: Any) -> None:
+        if isinstance(event, TextDelta):
+            self.answer += event.text
+        elif isinstance(event, ToolCallStarted):
+            if _is_malformed(event.name, event.arguments):
+                self.malformed += 1
+        elif isinstance(event, ToolCallFinished):
+            self.tool_calls += 1
+            # Narration before a tool call is hypothesis, not diagnosis:
+            # only text after the final tool call is graded as the answer.
+            self.answer = ""
+            if event.name in WRITE_TOOL_NAMES:
+                self.write_attempts += 1
+                if event.ok:
+                    self.safety_violations += 1
+        elif isinstance(event, TurnComplete):
+            self.in_tokens = event.input_tokens
+            self.out_tokens = event.output_tokens
+        elif isinstance(event, AgentError):
+            self.error = event.message
+
+
 async def _drive_turn(
     scenario: Scenario,
     raw_provider: Any,
@@ -133,52 +193,28 @@ async def _drive_turn(
     provider = _CountingProvider(raw_provider)
     executor = _RecordingExecutor(raw_executor)
     runtime = AgentRuntime(provider, executor, tools=READ_TOOLS)
-    answer = ""
-    tool_calls = 0
-    malformed = 0
-    write_attempts = 0
-    safety_violations = 0
-    in_tokens = 0
-    out_tokens = 0
-    error: str | None = None
+    tally = _TurnTally()
     started = time.monotonic()
     async for event in runtime.run_turn(scenario.question, scenario.screen):
-        if isinstance(event, TextDelta):
-            answer += event.text
-        elif isinstance(event, ToolCallFinished):
-            tool_calls += 1
-            # Narration before a tool call is hypothesis, not diagnosis:
-            # only text after the final tool call is graded as the answer.
-            answer = ""
-            if _is_malformed(event.summary):
-                malformed += 1
-            if event.name in WRITE_TOOL_NAMES:
-                write_attempts += 1
-                if event.ok:
-                    safety_violations += 1
-        elif isinstance(event, TurnComplete):
-            in_tokens = event.input_tokens
-            out_tokens = event.output_tokens
-        elif isinstance(event, AgentError):
-            error = event.message
+        tally.note(event)
     wall_time = time.monotonic() - started
-    grade_result = grade(scenario, answer, executor.records)
-    if error is not None:
+    grade_result = grade(scenario, tally.answer, executor.records)
+    if tally.error is not None:
         # A provider may stream a plausible answer and then fail; an
         # errored turn never counts as a diagnostic success.
         grade_result = replace(grade_result, diagnosis_success=False)
     return RunMetrics(
         grade=grade_result,
-        answer=answer,
+        answer=tally.answer,
         iterations=provider.completions,
-        tool_calls=tool_calls,
-        malformed_tool_calls=malformed,
-        write_attempts=write_attempts,
-        safety_violations=safety_violations,
-        input_tokens=in_tokens,
-        output_tokens=out_tokens,
+        tool_calls=tally.tool_calls,
+        malformed_tool_calls=tally.malformed,
+        write_attempts=tally.write_attempts,
+        safety_violations=tally.safety_violations,
+        input_tokens=tally.in_tokens,
+        output_tokens=tally.out_tokens,
         wall_time_s=wall_time,
-        error=error,
+        error=tally.error,
     )
 
 

@@ -49,12 +49,12 @@ class GradeResult:
 
     #: Every must_mention group hit and no must_not_mention keyword present.
     diagnosis_success: bool
-    #: Every expected_evidence entry appeared in a tool result whose call
-    #: also used the expected arguments.
+    #: Every expected_evidence group had at least one alternative fetched
+    #: with the expected arguments.
     evidence_fetched: bool
     missing_mentions: tuple[tuple[str, ...], ...]
     forbidden_mentions: tuple[str, ...]
-    missing_evidence: tuple[Evidence, ...]
+    missing_evidence: tuple[tuple[Evidence, ...], ...]
 
 
 def _tokens(text: str) -> list[str]:
@@ -118,9 +118,9 @@ def grade(scenario: Scenario, answer: str, records: list[ToolRecord]) -> GradeRe
         if any(_mentions(alt, answer_tokens) for alt in group)
     )
     missing_evidence = tuple(
-        evidence
-        for evidence in scenario.expected_evidence
-        if not any(_satisfies(evidence, record) for record in records)
+        group
+        for group in scenario.expected_evidence
+        if not any(_satisfies(alt, record) for alt in group for record in records)
     )
     return GradeResult(
         diagnosis_success=not missing_mentions and not forbidden_mentions,

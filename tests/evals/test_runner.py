@@ -25,10 +25,12 @@ def _oom_scenario() -> Scenario:
         must_mention=(("oomkilled", "oom"), ("137",)),
         must_not_mention=(("image pull",),),
         expected_evidence=(
-            Evidence(
-                tool="diagnose_pod",
-                contains="exit=137",
-                args={"pod": "checkout-1", "namespace": "shop"},
+            (
+                Evidence(
+                    tool="diagnose_pod",
+                    contains="exit=137",
+                    args={"pod": "checkout-1", "namespace": "shop"},
+                ),
             ),
         ),
         objects=(
@@ -172,6 +174,10 @@ async def test_run_scenario_counts_malformed_tool_calls() -> None:
         [
             {"type": "tool_call", "id": "c1", "name": "diagnose_pod", "arguments": "{not json"},
             {"type": "tool_call", "id": "c2", "name": "no_such_tool", "arguments": "{}"},
+            # Valid JSON but not an argument mapping, and a call missing a
+            # required parameter — schema-level malformations, not string ones.
+            {"type": "tool_call", "id": "c3", "name": "diagnose_pod", "arguments": "[]"},
+            {"type": "tool_call", "id": "c4", "name": "diagnose_pod", "arguments": '{"pod": "x"}'},
         ],
         [{"type": "text_delta", "text": "OOMKilled, exit 137."}],
     ]
@@ -181,7 +187,7 @@ async def test_run_scenario_counts_malformed_tool_calls() -> None:
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )
-    assert report.runs[0].malformed_tool_calls == 2
+    assert report.runs[0].malformed_tool_calls == 4
 
 
 async def test_run_scenario_counts_write_attempts_without_violations() -> None:
