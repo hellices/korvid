@@ -47,6 +47,8 @@ PDB-aware impact plan; `--readonly` disables them all.
 | `Shift-D` | nodes table | Drain the selected node — PDB-aware impact preview (evictions, PDB-blocked pods, skipped DaemonSet/mirror pods, emptyDir warnings), typed-name confirm, live progress; press again to cancel mid-drain (node stays cordoned) |
 | `e` | table | Edit selected resource manifest in `$VISUAL`/`$EDITOR` (kubectl edit style; confirm dialog before the PUT) |
 | `i` | pods table | Open hint details overlay for a troubled pod (full container trouble + recent Warning events) |
+| `i` / `u` | helm table | Install a chart / upgrade the selected release (wizard + dry-run preview + confirm dialog; needs `helm` on `PATH`) |
+| `r` | helm revisions table | Roll back the release to the selected revision (confirm dialog; needs `helm` on `PATH`) |
 | `Ctrl-T` | pods table | Transfer a file to/from the selected container (exec tar stream; upload needs approval) |
 | `Ctrl-A` | global | Toggle AI agent panel |
 | `q` | global | Quit |
@@ -158,7 +160,29 @@ watch pipeline as any other view.  `Enter` drills into the release's
 revision history (newest first, like `helm history`); `d` describes a
 release or a single revision with the decoded metadata and the
 user-supplied values — the rendered manifest blob is deliberately left
-out.  This slice is read-only; install/upgrade/rollback lands separately.
+out.
+
+### Helm install / upgrade / rollback
+
+When a `helm` binary is on `PATH`, the browser gains write actions
+(without one the keys explain what's missing and nothing else changes):
+
+| Key | View | Action |
+|---|---|---|
+| `i` | `:helm` | Install: chart picker (`helm search repo`), release/version/namespace wizard, optional values in `$EDITOR` |
+| `u` | `:helm` | Upgrade the selected release — same wizard, pinned to that release |
+| `r` | revision drill-down | Roll back the release to the selected revision |
+
+Every action shows a preview before the confirmation dialog: install and
+upgrade run `--dry-run`, and when the
+[helm-diff](https://github.com/databus23/helm-diff) plugin is installed,
+upgrade and rollback show a real diff against the live release instead.
+Nothing executes until you approve the exact command in the confirmation
+dialog, and every run is audit-logged like any other write — no audit
+log, no writes.  Values entered through `$EDITOR` are passed via a
+private temp file that is deleted as soon as helm returns.  Repo
+management (`helm repo add`) and OCI registry auth stay outside korvid —
+configure them with the helm CLI itself.
 
 ## Operator catalog (OLM)
 
