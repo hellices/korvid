@@ -629,11 +629,12 @@ async def test_ctx_switch_quiesces_discovery_before_swapping_connection() -> Non
 
     aliases: dict[str, Any] = {"stale-crd": object()}
     discovery_box: list[asyncio.Task[None]] = [old_task]
+    startup_config = KorvidConfig(namespace="default", readonly=True)
     switch = _make_switch_context(
-        KorvidConfig(namespace="default", readonly=True),
+        startup_config,
         cast("Any", FakeKube()),
         aliases,
-        cast("Any", [SimpleNamespace(agent_runtime=None)]),  # app_box
+        cast("Any", [SimpleNamespace(agent_runtime=None, config=startup_config)]),  # app_box
         discovery_box,
         lambda runtime, resize, note: None,
     )
@@ -673,3 +674,60 @@ def test_build_helm_returns_none_without_binary(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(main_mod, "find_helm", lambda: None)
     assert _build_helm(KorvidConfig()) is None
+
+
+async def test_ctx_switch_fallbacks_follow_session_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sequential switches derive fallbacks from the app's evolving session
+    default, not the startup snapshot: A -> B(ns-b) -> C(no kubeconfig
+    namespace) must keep ns-b in C's fallback set (issue #36 review)."""
+    import asyncio
+    import contextlib
+    import dataclasses
+    from types import SimpleNamespace
+
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _make_switch_context
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.csp import detect_provider
+
+    class FakeKube:
+        async def switch_context(self, name: str | None) -> None:
+            pass
+
+        async def detect_cloud_provider(self) -> Any:
+            return detect_provider([])
+
+        async def discover_resources(self) -> list[Any]:
+            return []
+
+    ctx_namespaces = {"ctx-b": "ns-b", "ctx-c": None}
+    monkeypatch.setattr(main_mod, "resolve_context_namespace", ctx_namespaces.get)
+
+    startup = KorvidConfig(namespace="startup-ns", readonly=True)
+    app_stub = SimpleNamespace(agent_runtime=None, config=startup)
+    discovery_box: list[asyncio.Task[None]] = []
+    switch = _make_switch_context(
+        startup,
+        cast("Any", FakeKube()),
+        {},
+        cast("Any", [app_stub]),
+        discovery_box,
+        lambda runtime, resize, note: None,
+    )
+    try:
+        result_b = await switch("ctx-b")
+        assert "ns-b" in result_b.fallback_namespaces
+        # Mimic KorvidApp._apply_context_switch adopting ns-b as the default.
+        app_stub.config = dataclasses.replace(
+            startup, kube_context="ctx-b", namespace=result_b.context_namespace
+        )
+        result_c = await switch("ctx-c")
+    finally:
+        for task in discovery_box:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+    assert "ns-b" in result_c.fallback_namespaces
+    assert "startup-ns" not in result_c.fallback_namespaces

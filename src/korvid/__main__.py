@@ -489,14 +489,19 @@ def _make_switch_context(
             pod_resize_supported,
             cluster_context_note(provider_info),
         )
+        # The startup `config` is a stale snapshot here: _apply_context_switch
+        # folds each applied context's namespace into app.config, and that
+        # evolving session default must seed the next cluster's fallback set
+        # (e.g. A -> B(ns-b) -> C(no namespace) keeps ns-b).
+        effective_config = app_box[0].config if app_box else config
         return ContextSwitchResult(
             pod_resize_supported=pod_resize_supported,
             provider_hint=provider_info.display if provider_info.known else None,
-            fallback_namespaces=_fallback_namespaces(config, name),
+            fallback_namespaces=_fallback_namespaces(effective_config, name),
             context_namespace=resolve_context_namespace(name),
             # HelmCLI pins --kube-context per instance: rebuild it for the
             # new context so helm writes follow the active cluster.
-            helm=_build_helm(dataclasses.replace(config, kube_context=name)),
+            helm=_build_helm(dataclasses.replace(effective_config, kube_context=name)),
         )
 
     return switch_context
