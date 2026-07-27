@@ -154,3 +154,41 @@ async def test_enter_buffered_before_prompt_does_not_submit_defaults() -> None:
         await until(pilot, lambda: app.result != "unset", label="fresh Enter submits")
         result: object = app.result
         assert result == ("operators", "stable", "Automatic")
+
+
+async def test_default_channel_missing_from_list_falls_back_to_first() -> None:
+    """A default channel absent from the channel list (inconsistent catalog
+    status) must not break the Select: the first known channel is offered."""
+    facts = PackageInstallFacts(
+        package="odd",
+        channels=("alpha", "beta"),
+        default_channel="nightly",
+        catalog_source="cat",
+        catalog_source_namespace="olm",
+    )
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app, facts)
+        await _opened(app, pilot)
+        assert app.screen.query_one("#install-channel", Select).value == "alpha"
+
+
+async def test_submit_button_submits_when_a_select_has_focus() -> None:
+    """Enter on a focused Select opens its overlay instead of submitting;
+    the explicit Install button provides a submit path from any field."""
+    from textual.widgets import Button
+
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await _opened(app, pilot)
+        app.screen.query_one("#install-approval", Select).focus()
+        await until(
+            pilot,
+            lambda: app.focused is app.screen.query_one("#install-approval", Select),
+            label="approval select focused",
+        )
+        button = app.screen.query_one("#install-submit", Button)
+        button.press()
+        await until(pilot, lambda: app.result != "unset", label="button submits")
+        assert app.result == ("operators", "stable", "Automatic")

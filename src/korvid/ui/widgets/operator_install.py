@@ -17,7 +17,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Input, Select, Static
+from textual.widgets import Button, Input, Select, Static
 
 from korvid.k8s.olm import APPROVAL_MODES, PackageInstallFacts
 from korvid.ui.widgets.confirm_screen import FreshKeysInput
@@ -54,6 +54,14 @@ OperatorInstallPrompt .install-row Input {
 }
 OperatorInstallPrompt .install-row Select {
     width: 1fr;
+}
+OperatorInstallPrompt .install-actions {
+    height: auto;
+    margin-top: 1;
+    align-horizontal: right;
+}
+OperatorInstallPrompt .install-actions Button {
+    margin-left: 2;
 }
 """
 
@@ -129,6 +137,12 @@ class OperatorInstallPrompt(ModalScreen["tuple[str, str, str] | None"]):
                     allow_blank=False,
                     id="install-approval",
                 )
+            with Horizontal(classes="install-actions"):
+                # Enter on a focused Select opens its overlay rather than
+                # submitting, so the wizard needs an explicit submit control
+                # reachable from any field (issue #62 review).
+                yield Button("Install", variant="primary", id="install-submit")
+                yield Button("Cancel", id="install-cancel")
 
     def on_mount(self) -> None:
         self.query(Input).first().focus()
@@ -173,6 +187,19 @@ class OperatorInstallPrompt(ModalScreen["tuple[str, str, str] | None"]):
     @on(Input.Submitted)
     def _submit(self, event: Input.Submitted) -> None:
         event.stop()
+        self._try_submit()
+
+    @on(Button.Pressed, "#install-submit")
+    def _submit_button(self, event: Button.Pressed) -> None:
+        event.stop()
+        self._try_submit()
+
+    @on(Button.Pressed, "#install-cancel")
+    def _cancel_button(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(None)
+
+    def _try_submit(self) -> None:
         choices = self._collect()
         if choices is None:
             return
