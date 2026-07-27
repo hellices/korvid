@@ -571,3 +571,43 @@ async def test_concurrent_closes_do_not_underflow_pane_list() -> None:
         await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="single pane")
         assert len(app._panes) == 1
         await pilot.pause()
+
+
+async def test_other_pane_navigation_keeps_log_stream() -> None:
+    """The primary split workflow - watch one pane while tailing logs from
+    the other - requires that only the log-owning pane's navigation closes
+    the log pane; another pane's `:view`/`:ns` must leave it streaming."""
+    from korvid.ui.widgets.log_pane import LogPane
+
+    app = make_app([_pod("api-1")], extra_data={"deployments": [_deploy("web")]})
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await app._open_log_pane("default", [("api-1", "app")])  # pane 1 owns the logs
+        assert app.query_one(LogPane).display
+        await _split(app, pilot)  # focus moves to pane 2
+        await _type_command(pilot, "deploy")
+        await until(pilot, lambda: app.current_kind == "deployments", label="pane 2 navigated")
+        assert app.query_one(LogPane).display  # pane 1's logs survived
+        await pilot.press("ctrl+w", "w")  # focus back to the owning pane
+        await _type_command(pilot, "deploy")
+        await until(
+            pilot,
+            lambda: not app.query_one(LogPane).display,
+            label="owner navigation closes logs",
+        )
+
+
+async def test_closing_log_owner_pane_closes_log_stream() -> None:
+    """Closing the pane that opened the logs must not leave an orphaned
+    stream pinned to the survivor's view."""
+    from korvid.ui.widgets.log_pane import LogPane
+
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)  # focus: pane 2
+        await app._open_log_pane("default", [("api-1", "app")])  # pane 2 owns the logs
+        assert app.query_one(LogPane).display
+        await pilot.press("ctrl+w", "q")  # close pane 2 (the owner)
+        await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="single pane")
+        assert not app.query_one(LogPane).display

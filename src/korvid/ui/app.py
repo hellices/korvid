@@ -746,6 +746,10 @@ class KorvidApp(App[None]):
         self._log_pane_gen: int = 0
         self._current_log_force_prefix: bool = False
         self._log_pane_mode: str = ""
+        #: Pane whose selection opened the log pane: only that pane's
+        #: navigation (or close) tears the stream down - the split workflow
+        #: is watching one pane while tailing logs from the other.
+        self._log_pane_owner: PaneState | None = None
         self._reconnect_sleep: float = 1.0
         self._ns_prefetch_task: asyncio.Task[None] | None = None
         self._splash_shown_at: float = monotonic()
@@ -1171,7 +1175,10 @@ class KorvidApp(App[None]):
         new_kind = view if view is not None else pane.kind
         new_scope = namespace if namespace is not None else pane.scope
         if new_kind != pane.kind or new_scope != pane.scope:
-            await self._close_log_pane()
+            if self._log_pane_owner is pane:
+                # Only the owning pane's navigation closes the logs: the
+                # other pane must keep its stream (issue #48 workflow).
+                await self._close_log_pane()
             old = (pane.kind, pane.scope)
             # Another pane may still be watching the old (kind, scope):
             # stopping it would freeze that pane's view (issue #48).
@@ -3310,6 +3317,10 @@ class KorvidApp(App[None]):
             closing = self._panes.pop(self._focused_pane)
             remaining = self._panes[0]
             self._focused_pane = 0
+            if self._log_pane_owner is closing:
+                # The pane whose selection drove the stream is gone: don't
+                # leave orphaned logs pinned over the survivor's view.
+                await self._close_log_pane()
             if (closing.kind, closing.scope) != (remaining.kind, remaining.scope):
                 await self.watch_manager.stop(closing.kind, closing.scope)
             # The survivor keeps its own table widget - and with it the
@@ -5729,6 +5740,7 @@ class KorvidApp(App[None]):
 
         self._current_log_triples = list(triples)
         self._current_log_force_prefix = force_prefix
+        self._log_pane_owner = self._pane
 
         log_pane = self.query_one(LogPane)
         self._log_buffer = LogBuffer(self._log_buffer_max_lines)
@@ -5932,6 +5944,7 @@ class KorvidApp(App[None]):
         self._current_log_triples = []
         self._current_log_force_prefix = False
         self._log_pane_mode = ""
+        self._log_pane_owner = None
         with contextlib.suppress(Exception):
             self.query_one(LogPane).close()
 
