@@ -110,14 +110,18 @@ class WatchManager:
         """Run one watch per fallback namespace, all feeding the ALL bucket.
 
         Each namespace loop swallows its own permanent failure (reported via
-        on_error) so one forbidden namespace never kills the siblings; only
-        cancellation propagates, tearing all of them down together.
+        on_error) so one forbidden namespace never kills the siblings; the
+        TaskGroup guarantees that if that invariant is ever broken (a child
+        raising), the remaining sibling watches are cancelled rather than
+        orphaned. Cancellation tears all of them down together.
         """
         names = ", ".join(self._fallback_namespaces)
         logger.info("cluster-wide %s watch forbidden; per-namespace fallback: %s", kind, names)
         if self.on_notice is not None:
             self.on_notice(f"Cluster-wide {kind} watch forbidden — watching namespaces: {names}")
-        await asyncio.gather(*(self._watch_namespace(kind, ns) for ns in self._fallback_namespaces))
+        async with asyncio.TaskGroup() as group:
+            for ns in self._fallback_namespaces:
+                group.create_task(self._watch_namespace(kind, ns))
 
     async def _watch_namespace(self, kind: str, namespace: str) -> None:
         exc = await self._watch_loop(kind, namespace, ALL_NAMESPACES)
