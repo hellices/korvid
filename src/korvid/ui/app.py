@@ -76,6 +76,13 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan, DrainTarget, is_pdb_denial
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.helm import (
+    HELM_RELEASES_META,
+    HELM_REVISIONS_META,
+    HelmReleaseSummary,
+    HelmRevisionSummary,
+)
+from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import PodSummary
@@ -119,6 +126,7 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt, Replica
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
+from korvid.ui.widgets.helm_install import HelmInstallPrompt, HelmReleaseChoices
 from korvid.ui.widgets.help_screen import HelpScreen, collect_help
 from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.hint_strip import HintStrip, parse_rfc3339
@@ -324,11 +332,60 @@ _UID_LOOKUP_TIMEOUT = 10.0
 #: approval flow.
 _PREVIEW_TIMEOUT = 3.0
 
+#: Upper bound on a helm preview (issue #31): `helm ... --dry-run` shells out
+#: and may pull the chart from a repo, so it gets more budget than an API
+#: server dry-run - still bounded, the approval dialog is never wedged.
+_HELM_PREVIEW_TIMEOUT = 20.0
+
+#: A rendered chart can run to thousands of lines; the approval dialog shows
+#: at most this many so the operation summary stays reviewable.
+_HELM_PREVIEW_MAX_LINES = 60
+
 #: Upper bound on the hint-overlay events fetch (issue #34): the trouble half
 #: comes from the status the app already holds, so a stalled API connection
 #: must not delay the overlay past this - the events are marked unavailable
 #: instead.
 _HINT_EVENTS_TIMEOUT = 3.0
+
+
+def _chart_base(chart: str) -> str:
+    """`"nginx-18.1.0"` -> `"nginx"`: strip the version suffix helm appends
+    to a release's chart field, so an upgrade can pre-filter the chart search
+    by name. Charts whose last dash segment is not a version stay whole."""
+    base, sep, tail = chart.rpartition("-")
+    if sep and tail[:1].isdigit():
+        return base
+    return chart
+
+
+def _clip_preview(text: str) -> list[str] | None:
+    """Dry-run/diff output as approval-dialog preview lines, capped at
+    `_HELM_PREVIEW_MAX_LINES`; None when there is nothing to show."""
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    if len(lines) > _HELM_PREVIEW_MAX_LINES:
+        hidden = len(lines) - _HELM_PREVIEW_MAX_LINES
+        return [*lines[:_HELM_PREVIEW_MAX_LINES], f"... ({hidden} more lines)"]
+    return lines
+
+
+@contextlib.asynccontextmanager
+async def _temp_values_file(values_text: str | None) -> AsyncIterator[str | None]:
+    """A 0600 temp file holding the edited values for one helm invocation,
+    deleted as soon as the command returns (values may embed credentials);
+    None passes straight through as "no values override"."""
+    if values_text is None:
+        yield None
+        return
+    fd, tmp = tempfile.mkstemp(suffix=".yaml", prefix="korvid-helm-values-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(values_text)
+        yield tmp
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
 
 
 class _ReplayFilter:
@@ -438,6 +495,9 @@ class KorvidApp(App[None]):
         ("Table", "enter", "Drill down (pods → containers, deploy → rs → pods)"),
         ("Table", "escape", "Pop one drill-down level"),
         ("Logs", "escape", "Close pane (or dismiss search)"),
+        ("Helm", "i", "Install a chart (helm view; needs helm on PATH)"),
+        ("Helm", "u", "Upgrade the selected release (helm view)"),
+        ("Helm", "r", "Rollback to the selected revision (drill-down)"),
     )
 
     DEFAULT_CSS = """
@@ -479,6 +539,7 @@ class KorvidApp(App[None]):
         provider_hint: str | None = None,
         open_pod_exec: Callable[..., contextlib.AbstractAsyncContextManager[Any]] | None = None,
         fallback_namespaces: tuple[str, ...] = (),
+        helm: HelmCLI | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -555,6 +616,10 @@ class KorvidApp(App[None]):
         #: KubeClient.open_pod_exec, bound at composition; None means no
         #: cluster connection, so file transfer (issue #47) is unavailable.
         self._open_pod_exec = open_pod_exec
+        #: detected helm binary wrapper (issue #31), or None when helm is
+        #: not on PATH - the install/upgrade/rollback keys then explain
+        #: their absence instead of doing nothing.
+        self._helm = helm
         #: the in-flight transfer stream; the progress screen's escape
         #: cancels it (never the surrounding worker).
         self._transfer_task: asyncio.Task[int] | None = None
@@ -1205,6 +1270,11 @@ class KorvidApp(App[None]):
         """Open the read-only detail overlay for the hinted pod row (issue #34):
         the full trouble list plus recent Warning events - everything the
         two-line strip folded away."""
+        if self._canonical_kind(self.current_kind) == "helmreleases":
+            # Same key, different view: on the helm browser `i` starts the
+            # chart install wizard (issue #31).
+            self.run_worker(self._helm_install_flow(), exclusive=True, group="helm-write")
+            return
         if self.current_kind != "pods":
             return
         row_key = self._cursor_row_key()
@@ -3436,7 +3506,12 @@ class KorvidApp(App[None]):
         )
 
     async def action_rollout_restart(self) -> None:
-        """r: rolling restart of the selected deployment/statefulset/daemonset."""
+        """r: rolling restart of the selected deployment/statefulset/daemonset;
+        on the helm revision drill-down the same key rolls the release back
+        to the selected revision (issue #31)."""
+        if self._canonical_kind(self.current_kind) == "helmrevisions":
+            await self._helm_rollback_flow()
+            return
         ops = self._write_ops
         if ops is None:
             self.notify("Rollout restart unavailable in this session", severity="warning")
@@ -3905,7 +3980,12 @@ class KorvidApp(App[None]):
         await self._cordon_action(unschedulable=True)
 
     async def action_uncordon_node(self) -> None:
-        """u: mark the selected node schedulable again (kubectl uncordon)."""
+        """u: mark the selected node schedulable again (kubectl uncordon);
+        on the helm browser the same key upgrades the selected release
+        (issue #31)."""
+        if self._canonical_kind(self.current_kind) == "helmreleases":
+            await self._helm_upgrade_flow()
+            return
         await self._cordon_action(unschedulable=False)
 
     async def _cordon_action(self, *, unschedulable: bool) -> None:
@@ -4491,6 +4571,342 @@ class KorvidApp(App[None]):
             self.notify(f"installplans/{name} is already approved", severity="information")
             return None
         return spec
+
+    # ------------------------------------------------------------------
+    # helm install / upgrade / rollback via the detected helm CLI (issue #31)
+    # ------------------------------------------------------------------
+
+    def _helm_gate(self) -> HelmCLI | None:
+        """Common gate for helm write flows: read-only mode and the
+        fail-closed audit rule apply exactly as to API writes, plus the
+        binary must have been detected at startup. None (with a
+        notification) blocks the flow."""
+        if self.config.readonly:
+            self.notify("Read-only mode: cluster writes are disabled", severity="warning")
+            return None
+        if self._audit is None:
+            # Fail-closed auditing (AGENTS.md): no audit sink means no writes.
+            self.notify("Writes disabled: no audit log configured", severity="warning")
+            return None
+        if self._helm is None:
+            self.notify(
+                "helm CLI not found on PATH - install/upgrade/rollback unavailable",
+                severity="error",
+            )
+            return None
+        return self._helm
+
+    def _helm_view_namespace(self) -> str:
+        """Namespace a fresh install targets by default: the active view
+        namespace, or the configured workload namespace on the
+        all-namespaces view (same fallback as the operator install wizard)."""
+        view_ns = self.current_namespace
+        return view_ns if view_ns != ALL_NAMESPACES else (self.config.namespace or "default")
+
+    async def _helm_search(self, helm: HelmCLI, keyword: str) -> list[ChartHit] | None:
+        """Installable charts from the user's own repos, or None (with a
+        notification) when the search failed or found nothing."""
+        try:
+            hits = await helm.search_repo(keyword)
+            if not hits and keyword:
+                # Nothing matched the release's chart name (renamed, or from
+                # a repo no longer configured): fall back to everything.
+                hits = await helm.search_repo()
+        except HelmError as exc:
+            self.notify(f"helm search failed: {exc}", severity="error")
+            return None
+        if not hits:
+            self.notify(
+                "no installable charts found - configure repos with `helm repo add` first",
+                severity="warning",
+            )
+            return None
+        return hits
+
+    async def _helm_install_flow(self) -> None:
+        """`i` on the helm view: chart picker -> wizard -> dry-run preview ->
+        approval -> audited `helm install`."""
+        helm = self._helm_gate()
+        if helm is None:
+            return
+        hits = await self._helm_search(helm, "")
+        if hits is None:
+            return
+        if len(self.screen_stack) > 1:  # another dialog opened during the search
+            return
+        self._helm_pick_chart(hits, release=None, namespace=self._helm_view_namespace())
+
+    async def _helm_upgrade_flow(self) -> None:
+        """`u` on a release row: the same wizard with the release name and
+        namespace fixed to the selected row's facts."""
+        helm = self._helm_gate()
+        if helm is None:
+            return
+        ns, name = self._selected_ns_name()
+        if name is None:
+            return
+        row = self._helm_release_row(ns, name)
+        keyword = _chart_base(row.chart) if row is not None else ""
+        hits = await self._helm_search(helm, keyword)
+        if hits is None:
+            return
+        if not self._write_context_intact(
+            "helm-upgrade", HELM_RELEASES_META, ns, name, phase="the chart search"
+        ):
+            return
+        namespace = ns or (row.namespace if row is not None else self._helm_view_namespace())
+        self._helm_pick_chart(hits, release=name, namespace=namespace)
+
+    def _helm_pick_chart(
+        self, hits: list[ChartHit], *, release: str | None, namespace: str
+    ) -> None:
+        """Chart picker feeding the install/upgrade wizard; everything
+        offered comes from `helm search repo`, nothing is hardcoded."""
+        labels: dict[str, ChartHit] = {}
+        for hit in hits:
+            labels.setdefault(f"{hit.name}  {hit.version}", hit)
+
+        def _picked(choice: str | None) -> None:
+            if choice is None:
+                return
+            hit = labels.get(choice)
+            if hit is None:  # pragma: no cover - PickScreen returns its own options
+                return
+
+            def _chosen(choices: HelmReleaseChoices | None) -> None:
+                if choices is None:
+                    return
+                self.run_worker(
+                    self._helm_confirm_change(hit, choices, upgrade=release is not None),
+                    exclusive=True,
+                    group="helm-write",
+                )
+
+            self.push_screen(HelmInstallPrompt(hit, namespace=namespace, release=release), _chosen)
+
+        title = f"Upgrade {release} with chart:" if release else "Install chart:"
+        self.push_screen(PickScreen(title, list(labels)), _picked)
+
+    async def _helm_confirm_change(
+        self, hit: ChartHit, choices: HelmReleaseChoices, *, upgrade: bool
+    ) -> None:
+        """Optional values editing, dry-run/diff preview, then the standard
+        approval dialog; the mutation itself runs through `_run_write`, so
+        the fail-closed audit rule applies unchanged."""
+        helm = self._helm
+        if helm is None:  # gate already passed; helm cannot vanish, but be safe
+            return
+        values_text: str | None = None
+        if choices.edit_values:
+            template = (
+                f"# values override for {hit.name} {choices.version or hit.version}\n"
+                "# an empty file (or comments only) keeps the chart defaults\n"
+            )
+            edit = self._edit_text or self._edit_in_external_editor
+            text = await edit(template)
+            if text is None:
+                return  # editor failed or was aborted; already notified
+            meaningful = any(
+                line.strip() and not line.lstrip().startswith("#") for line in text.splitlines()
+            )
+            values_text = text if meaningful else None
+        preview = await self._helm_change_preview(helm, hit, choices, values_text, upgrade=upgrade)
+        if len(self.screen_stack) > 1:  # another dialog opened during the preview
+            return
+        action = "helm-upgrade" if upgrade else "helm-install"
+        verb = "UPGRADE" if upgrade else "INSTALL"
+        version_label = choices.version or "latest"
+        operation = (
+            f"HELM {verb} {choices.release} (chart {hit.name} {version_label})"
+            f" in namespace {choices.namespace}\n"
+            f"values: {'edited in $EDITOR' if values_text is not None else 'chart defaults'}"
+        )
+        detail = (
+            f"chart={hit.name} version={version_label}"
+            f" values={'custom' if values_text is not None else 'defaults'}"
+        )
+
+        def _done(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            self.run_worker(
+                self._run_write(
+                    action,
+                    HELM_RELEASES_META,
+                    choices.namespace,
+                    choices.release,
+                    self._helm_apply_change(helm, hit, choices, values_text, upgrade=upgrade),
+                    detail=detail,
+                )
+            )
+
+        title = f"{'Upgrade' if upgrade else 'Install'} {choices.release}?"
+        await self.push_screen(ConfirmScreen(title, operation, preview=preview), _done)
+
+    async def _helm_apply_change(
+        self,
+        helm: HelmCLI,
+        hit: ChartHit,
+        choices: HelmReleaseChoices,
+        values_text: str | None,
+        *,
+        upgrade: bool,
+    ) -> None:
+        """The approved mutation, awaited by `_run_write` after the intent
+        audit record persisted."""
+        version = choices.version or None
+        async with _temp_values_file(values_text) as values_file:
+            if upgrade:
+                await helm.upgrade(
+                    choices.release,
+                    hit.name,
+                    choices.namespace,
+                    version=version,
+                    values_file=values_file,
+                )
+            else:
+                await helm.install(
+                    choices.release,
+                    hit.name,
+                    choices.namespace,
+                    version=version,
+                    values_file=values_file,
+                )
+
+    async def _helm_change_preview(
+        self,
+        helm: HelmCLI,
+        hit: ChartHit,
+        choices: HelmReleaseChoices,
+        values_text: str | None,
+        *,
+        upgrade: bool,
+    ) -> list[str] | None:
+        """Preview lines for the approval dialog: `helm diff upgrade` when
+        the plugin exists (issue #31), else the plain `--dry-run` render;
+        None on any failure - a preview must never block the approval flow."""
+
+        async def _render() -> str:
+            version = choices.version or None
+            async with _temp_values_file(values_text) as values_file:
+                if upgrade and await helm.has_diff_plugin():
+                    return await helm.diff_upgrade(
+                        choices.release,
+                        hit.name,
+                        choices.namespace,
+                        version=version,
+                        values_file=values_file,
+                    )
+                if upgrade:
+                    return await helm.dry_run_upgrade(
+                        choices.release,
+                        hit.name,
+                        choices.namespace,
+                        version=version,
+                        values_file=values_file,
+                    )
+                return await helm.dry_run_install(
+                    choices.release,
+                    hit.name,
+                    choices.namespace,
+                    version=version,
+                    values_file=values_file,
+                )
+
+        try:
+            return _clip_preview(await asyncio.wait_for(_render(), _HELM_PREVIEW_TIMEOUT))
+        except Exception:
+            logger.debug("helm preview failed; dialog opens without it", exc_info=True)
+            return None
+
+    async def _helm_rollback_flow(self) -> None:
+        """`r` on a revision row of the drill-down: approval-gated, audited
+        `helm rollback` to that revision."""
+        helm = self._helm_gate()
+        if helm is None:
+            return
+        ns, name = self._selected_ns_name()
+        if name is None:
+            return
+        row = self._helm_revision_row(ns, name)
+        if row is None:
+            self.notify("no helm revision selected", severity="warning")
+            return
+        namespace = ns or row.namespace
+        preview = await self._helm_rollback_preview(helm, row.release, row.revision, namespace)
+        if not self._write_context_intact(
+            "helm-rollback", HELM_REVISIONS_META, ns, name, phase="the diff preview"
+        ):
+            return
+        operation = (
+            f"HELM ROLLBACK {row.release} to revision {row.revision} in namespace {namespace}"
+        )
+
+        def _done(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            self.run_worker(
+                self._run_write(
+                    "helm-rollback",
+                    HELM_RELEASES_META,
+                    namespace,
+                    row.release,
+                    self._helm_apply_rollback(helm, row.release, row.revision, namespace),
+                    detail=f"revision={row.revision}",
+                )
+            )
+
+        await self.push_screen(
+            ConfirmScreen(
+                f"Rollback {row.release} to revision {row.revision}?",
+                operation,
+                preview=preview,
+            ),
+            _done,
+        )
+
+    async def _helm_apply_rollback(
+        self, helm: HelmCLI, release: str, revision: int, namespace: str
+    ) -> None:
+        await helm.rollback(release, revision, namespace)
+
+    async def _helm_rollback_preview(
+        self, helm: HelmCLI, release: str, revision: int, namespace: str
+    ) -> list[str] | None:
+        """`helm diff rollback` preview when the plugin exists; None
+        otherwise (plain rollback has no meaningful dry-run output)."""
+
+        async def _render() -> str | None:
+            if not await helm.has_diff_plugin():
+                return None
+            return await helm.diff_rollback(release, revision, namespace)
+
+        try:
+            text = await asyncio.wait_for(_render(), _HELM_PREVIEW_TIMEOUT)
+        except Exception:
+            logger.debug("helm rollback preview failed; dialog opens without it", exc_info=True)
+            return None
+        return _clip_preview(text) if text is not None else None
+
+    def _helm_release_row(self, ns: str | None, name: str) -> HelmReleaseSummary | None:
+        for obj in self.store.get("helmreleases", self.current_scope):
+            if (
+                obj.name == name
+                and (ns is None or obj.namespace == ns)
+                and isinstance(obj, HelmReleaseSummary)
+            ):
+                return obj
+        return None
+
+    def _helm_revision_row(self, ns: str | None, name: str) -> HelmRevisionSummary | None:
+        for obj in self.store.get("helmrevisions", self.current_scope):
+            if (
+                obj.name == name
+                and (ns is None or obj.namespace == ns)
+                and isinstance(obj, HelmRevisionSummary)
+            ):
+                return obj
+        return None
 
     async def _open_log_pane(
         self,
