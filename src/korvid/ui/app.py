@@ -3778,20 +3778,28 @@ class KorvidApp(App[None]):
         """Create the node-debugger pod detached; returns (name, uid).
 
         On failure returns the audit outcome string instead — distinct per
-        cause, because they leave different cluster states: a rejected
-        create (where PodSecurity admission refusals surface, hence the
-        namespace hint) leaves nothing behind, while a timeout or a create
-        whose output cannot be parsed may have created a pod korvid cannot
-        identify, so the audit records cleanup as skipped and names the
-        namespace to inspect.
+        cause, because they leave different cluster states: a kubectl launch
+        failure never reached the cluster, a rejected create (where
+        PodSecurity admission refusals surface, hence the namespace hint)
+        leaves nothing behind, while a timeout or a create whose output
+        cannot be parsed may have created a pod korvid cannot identify, so
+        the audit records cleanup as skipped and names the namespace to
+        inspect.
         """
         argv = build_node_debug_create_argv(
             node, namespace, context=self.config.kube_context, image=image
         )
         try:
             proc = await asyncio.to_thread(subprocess.run, argv, capture_output=True, timeout=30)
-        except (subprocess.TimeoutExpired, OSError):
-            logger.warning("node-debugger pod creation failed", exc_info=True)
+        except OSError as exc:
+            # kubectl itself could not be launched (removed or not executable
+            # since the PATH check): no request reached the cluster, so no
+            # pod exists and no namespace inspection is needed.
+            logger.warning("kubectl could not be launched for node debug", exc_info=True)
+            self.notify(f"Could not launch kubectl: {exc}", severity="error")
+            return "error: kubectl could not be launched; no pod created"
+        except subprocess.TimeoutExpired:
+            logger.warning("node-debugger pod creation timed out", exc_info=True)
             self.notify(
                 f"kubectl debug node did not respond — a debugger pod may still have"
                 f" been created; check {namespace} for leftover node-debugger pods",

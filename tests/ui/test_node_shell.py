@@ -655,3 +655,25 @@ async def test_node_shell_cancelled_during_create_still_deletes_pod(tmp_path: Pa
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     last = [e for e in entries if e["action"] == "node-shell"][-1]
     assert last["outcome"].startswith("error: interrupted; cleanup: deleted")
+
+
+async def test_create_failure_outcomes_distinguish_launch_error_from_timeout(
+    tmp_path: Path,
+) -> None:
+    """A kubectl launch failure never reached the cluster, so its outcome
+    must not claim a timeout or send the operator hunting for leftover pods;
+    a real timeout may have created a pod and must keep the namespace hint."""
+    import subprocess
+
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
+    async with app.run_test():
+        with patch("korvid.ui.app.subprocess.run", side_effect=OSError("kubectl vanished")):
+            outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
+        assert outcome == "error: kubectl could not be launched; no pod created"
+
+        with patch(
+            "korvid.ui.app.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["kubectl"], timeout=30),
+        ):
+            outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
+        assert outcome == "error: pod creation timed out; cleanup skipped: check namespace default"
