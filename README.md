@@ -444,6 +444,27 @@ Start with `korvid --readonly` (or set `readonly: true` in
 keybindings above are rejected and the write tools are never offered to the
 model.
 
+### Protected contexts
+
+List production contexts (glob patterns, matched against the kube context
+name) in `~/.config/korvid/config.yaml` to add a second layer of friction
+without going fully read-only:
+
+```yaml
+protected_contexts:
+  - prod-*
+  - "*-production"
+agent:
+  disable_in_protected: true   # optional: refuse agent prompts entirely
+```
+
+While a protected context is active the status bar shows a red
+`⛨ PROTECTED` marker, and every write confirmation requires typing the
+context name instead of a single `y` — including approvals requested by the
+agent.  Protection is re-evaluated on every `:ctx` switch.  With
+`agent.disable_in_protected: true` the agent prompt is rejected outright in
+protected contexts.
+
 ### Setup
 
 The quickest way to configure the agent is inside the TUI: type `:ai`
