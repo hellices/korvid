@@ -140,6 +140,36 @@ def _columns_for(kind: str, *, all_namespaces: bool, view: ViewConfig | None) ->
     return (*base, *names)
 
 
+def sanitize_views(
+    views: dict[str, ViewConfig],
+) -> tuple[dict[str, ViewConfig], tuple[str, ...]]:
+    """Drop custom columns that shadow a kind's actual built-in headers.
+
+    Config parsing rejects the universal identity/sort names, but only the
+    UI knows each kind's full header set (STATUS, READY, NODE, ...). A
+    shadowing name would render two identical headers and decorate both
+    with the sort arrow. `replace: true` views keep such names — their
+    built-ins are hidden. Called once from the composition root.
+    """
+    sanitized: dict[str, ViewConfig] = {}
+    warnings: list[str] = []
+    for kind, view in views.items():
+        if view.replace:
+            sanitized[kind] = view
+            continue
+        single, all_ns = _COLS_BY_KIND.get(kind, (_GENERIC_COLS, _GENERIC_COLS_ALL_NS))
+        builtin = {header.lower() for header in (*single, *all_ns)}
+        kept = tuple(column for column in view.columns if column.name.lower() not in builtin)
+        for column in view.columns:
+            if column.name.lower() in builtin:
+                warnings.append(
+                    f"views.{kind}.{column.name}: shadows a built-in column of this kind"
+                )
+        if kept:
+            sanitized[kind] = ViewConfig(columns=kept, replace=view.replace)
+    return sanitized, tuple(warnings)
+
+
 def _ready_cell(ready: str) -> Text:
     return Text(ready, style=ready_style(ready))
 

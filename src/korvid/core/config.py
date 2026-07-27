@@ -379,6 +379,15 @@ def _parse_views(value: Any) -> tuple[dict[str, ViewConfig], list[str]]:
             # is no manifest to evaluate custom columns against.
             warnings.append(f"views.{kind}: synthetic view kinds don't support custom columns")
             continue
+        if str(kind) == "secrets":
+            # Security invariant: Secret values only ever render through the
+            # masking pipeline — custom columns evaluate raw manifests
+            # (including last-applied-configuration), so the kind is banned.
+            warnings.append(
+                "views.secrets: Secret values only render through the masking "
+                "pipeline — custom columns are not supported"
+            )
+            continue
         columns, column_warnings = _collect_columns(str(kind), view_raw.get("columns"))
         warnings.extend(column_warnings)
         if columns:

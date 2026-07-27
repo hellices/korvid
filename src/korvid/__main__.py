@@ -45,6 +45,7 @@ from korvid.providers.ollama import OllamaOptions
 from korvid.providers.registry import create_provider
 from korvid.providers.token_store import TokenStore
 from korvid.ui.app import AppUIBridge, EventsFetcher, KorvidApp
+from korvid.ui.widgets.resource_table import sanitize_views
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +350,13 @@ def _load_startup_config(readonly: bool, mcp: bool = False) -> KorvidConfig:
     resolved_ctx = resolve_context_name(config.kube_context)
     if resolved_ctx != config.kube_context:
         config = dataclasses.replace(config, kube_context=resolved_ctx)
+    # Kind-aware column validation lives in the UI layer (only it knows each
+    # kind's headers); config parsing already rejected the universal names.
+    views, view_warnings = sanitize_views(config.views)
+    if view_warnings:
+        config = dataclasses.replace(
+            config, views=views, warnings=(*config.warnings, *view_warnings)
+        )
     return config
 
 

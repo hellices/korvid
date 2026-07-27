@@ -8,7 +8,7 @@ from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.store import Summary
 from korvid.k8s.columns import CustomColumn
 from korvid.k8s.models import GenericSummary
-from korvid.ui.widgets.resource_table import ResourceTable, _columns_for
+from korvid.ui.widgets.resource_table import ResourceTable, _columns_for, sanitize_views
 
 from .test_app import _pod, make_app
 from .waits import until
@@ -193,3 +193,29 @@ async def test_replace_view_sort_command_rejects_hidden_builtin() -> None:
         )
         # name stays sortable: NAME is an identity column replace keeps.
         assert not any("'name'" in n.message for n in app._notifications)
+
+
+# ---------------------------------------------------------------------------
+# sanitize_views — kind-aware header collision check (PR #78 review round 3)
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeViews:
+    def test_drops_names_colliding_with_kind_builtin_headers(self) -> None:
+        status = CustomColumn("STATUS", "label", "s")
+        team = CustomColumn("TEAM", "label", "team")
+        views, warnings = sanitize_views({"pods": ViewConfig(columns=(status, team))})
+        assert [c.name for c in views["pods"].columns] == ["TEAM"]
+        assert any("STATUS" in w for w in warnings)
+
+    def test_replace_views_keep_builtin_like_names(self) -> None:
+        status = CustomColumn("STATUS", "label", "s")
+        views, warnings = sanitize_views({"pods": ViewConfig(columns=(status,), replace=True)})
+        assert [c.name for c in views["pods"].columns] == ["STATUS"]
+        assert warnings == ()
+
+    def test_view_removed_when_all_columns_collide(self) -> None:
+        ready = CustomColumn("ready", "label", "r")  # case-insensitive
+        views, warnings = sanitize_views({"pods": ViewConfig(columns=(ready,))})
+        assert views == {}
+        assert len(warnings) == 1

@@ -127,8 +127,12 @@ class KubeClient(WriteOps):
         self._ssar_warned = False
         #: User-configured extra table columns (issue #45), keyed by plural
         #: kind; values are extracted from the raw manifest at summary time
-        #: (the manifest is discarded afterwards).
-        self._custom_columns: Mapping[str, tuple[CustomColumn, ...]] = custom_columns or {}
+        #: (the manifest is discarded afterwards). Secrets are dropped as
+        #: defense in depth: their values only render through the masking
+        #: pipeline, never through raw-manifest extraction.
+        self._custom_columns: Mapping[str, tuple[CustomColumn, ...]] = {
+            kind: columns for kind, columns in (custom_columns or {}).items() if kind != "secrets"
+        }
         #: pods/resize discovery result; None until the first successful check.
         self._pod_resize_supported: bool | None = None
         #: cloud provider detection result; None until the first lookup.

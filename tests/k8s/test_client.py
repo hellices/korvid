@@ -1259,3 +1259,28 @@ async def test_kinds_without_configured_columns_keep_empty_custom() -> None:
     ):
         summaries = await client.list_objects(_deploy_meta(), "default")
     assert summaries[0].custom == ()
+
+
+async def test_secrets_never_evaluate_custom_columns() -> None:
+    """Defense in depth: even a directly-constructed client must not run
+    custom extraction against raw Secret manifests (masking bypass)."""
+    from korvid.k8s.columns import CustomColumn
+
+    client = KubeClient(
+        custom_columns={"secrets": (CustomColumn("TOKEN", "jsonpath", ".data.token"),)}
+    )
+    secret = {
+        "metadata": {"name": "s1", "namespace": "default"},
+        "data": {"token": "aHVudGVyMg=="},
+    }
+    meta = ResourceMeta(kind="Secret", plural="secrets", group="", version="v1", namespaced=True)
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(return_value={"metadata": {"resourceVersion": "1"}, "items": [secret]}),
+        ),
+    ):
+        summaries = await client.list_objects(meta, "default")
+    assert summaries[0].custom == ()

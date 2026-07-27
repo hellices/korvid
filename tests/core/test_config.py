@@ -806,3 +806,21 @@ views:
     config = load_config(cfg)
     assert "pods" not in config.views
     assert any("must be a list" in w for w in config.warnings)
+
+
+def test_views_secrets_rejected_with_warning(tmp_path: Path) -> None:
+    """Security invariant: Secret values only render through the masking
+    pipeline — custom columns evaluate raw manifests, so the kind is banned."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+views:
+  secrets:
+    columns:
+      - name: TOKEN
+        jsonpath: .data.token
+"""
+    )
+    config = load_config(cfg)
+    assert config.views == {}
+    assert any("secrets" in w and "masking" in w for w in config.warnings)

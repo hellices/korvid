@@ -112,9 +112,9 @@ all-namespaces mode) plus your columns.
 
 Missing values render `<none>`; an expression that fails at runtime renders
 `<err>` — the render loop never crashes. Invalid column definitions
-(including duplicates, names shadowing built-in columns, and the synthetic
-helm views, which have no manifest to evaluate) are dropped with a startup
-warning. `:sort <COLUMN>` sorts by
+(including duplicates, names shadowing built-in columns, the synthetic
+helm views, and `secrets` — Secret values only render through the masking
+pipeline) are dropped with a startup warning. `:sort <COLUMN>` sorts by
 any custom column or by the built-in sort keys `name`, `age`, `cpu`, `mem`
 (only while their columns are visible; custom values compare as
 case-insensitive strings). Repeating flips direction, bare `:sort` clears.
