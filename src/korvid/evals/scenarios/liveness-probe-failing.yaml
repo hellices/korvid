@@ -1,0 +1,69 @@
+id: liveness-probe-failing
+question: >-
+  The gateway pod in namespace front keeps restarting even though its logs look
+  normal. What is causing the restarts?
+screen: "resource view: pods, namespace front, selected: front/gateway-1 (Running, 9 restarts)"
+root_cause: liveness_probe_failing
+grading:
+  must_mention:
+    - [liveness probe, liveness]
+    - [failing, failed, killing, killed, restart]
+  must_not_mention:
+    - [oomkilled, image pull, crashloopbackoff]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: gateway-1, namespace: front}
+      contains: "Liveness probe failed"
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: gateway-1
+        namespace: front
+        uid: pod-gateway-1
+        creationTimestamp: "2026-07-27T05:00:00Z"
+        labels: {app: gateway}
+      spec:
+        nodeName: node-b
+        containers:
+          - name: gateway
+            image: front/gateway:v9
+            livenessProbe:
+              httpGet: {path: /live, port: 9090}
+      status:
+        phase: Running
+        conditions:
+          - {type: Ready, status: "True"}
+        containerStatuses:
+          - name: gateway
+            ready: true
+            restartCount: 9
+            state:
+              running: {startedAt: "2026-07-27T07:24:00Z"}
+            lastState:
+              terminated: {exitCode: 137, reason: Error}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-b}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+  events:
+    - type: Warning
+      reason: Unhealthy
+      count: 27
+      lastTimestamp: "2026-07-27T07:23:00Z"
+      message: "Liveness probe failed: Get \"http://10.0.2.7:9090/live\": context deadline exceeded"
+      involvedObject: {kind: Pod, name: gateway-1, namespace: front, uid: pod-gateway-1}
+    - type: Normal
+      reason: Killing
+      count: 9
+      lastTimestamp: "2026-07-27T07:23:30Z"
+      message: "Container gateway failed liveness probe, will be restarted"
+      involvedObject: {kind: Pod, name: gateway-1, namespace: front, uid: pod-gateway-1}
+  logs:
+    front/gateway-1/gateway:
+      current:
+        - "gateway v9 listening on :8080"
+        - "handling requests normally"

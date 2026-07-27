@@ -1,0 +1,56 @@
+id: bad-command-crash
+question: The exporter pod in namespace metrics crashes instantly on every start. Why?
+screen: "resource view: pods, namespace metrics, selected: metrics/exporter-1 (CrashLoopBackOff)"
+root_cause: bad_command
+grading:
+  must_mention:
+    - [command, executable, entrypoint, binary, "127"]
+    - [not found, missing, wrong, invalid, incorrect, does not exist, doesn't exist]
+  must_not_mention:
+    - [oomkilled, image pull]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: exporter-1, namespace: metrics}
+      contains: "exec: \"serve\": executable file not found in $PATH"
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: exporter-1
+        namespace: metrics
+        uid: pod-exporter-1
+        creationTimestamp: "2026-07-27T06:55:00Z"
+        labels: {app: exporter}
+      spec:
+        nodeName: node-a
+        containers:
+          - name: exporter
+            image: metrics/exporter:v6
+            command: ["serve"]
+      status:
+        phase: Running
+        conditions:
+          - {type: Ready, status: "False", reason: ContainersNotReady}
+        containerStatuses:
+          - name: exporter
+            ready: false
+            restartCount: 8
+            state:
+              waiting: {reason: CrashLoopBackOff, message: "back-off 5m0s restarting failed container"}
+            lastState:
+              terminated: {exitCode: 127, reason: StartError, message: "failed to create containerd task: OCI runtime create failed: exec: \"serve\": executable file not found in $PATH"}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+  events:
+    - type: Warning
+      reason: Failed
+      count: 9
+      lastTimestamp: "2026-07-27T07:27:00Z"
+      message: "Error: failed to create containerd task: OCI runtime create failed: exec: \"serve\": executable file not found in $PATH"
+      involvedObject: {kind: Pod, name: exporter-1, namespace: metrics, uid: pod-exporter-1}
+  logs: {}

@@ -23,10 +23,12 @@ def _executor(scenario: Scenario) -> ToolExecutor:
 
 
 def test_bundled_pack_loads_and_covers_the_planned_fault_matrix() -> None:
-    ids = [scenario.id for scenario in BUNDLED]
-    assert len(ids) >= 10
+    """Issue #69 acceptance criteria: 20-40 fault scenarios plus 3-5
+    negative controls (healthy fixtures that catch over-diagnosis)."""
+    faults = [s for s in BUNDLED if s.root_cause != "none"]
     negative_controls = [s for s in BUNDLED if s.root_cause == "none"]
-    assert len(negative_controls) >= 2
+    assert 20 <= len(faults) <= 40
+    assert 3 <= len(negative_controls) <= 5
 
 
 @pytest.mark.parametrize("scenario", BUNDLED, ids=lambda s: s.id)

@@ -134,6 +134,16 @@ async def _run_all(
     return reports
 
 
+def exit_code(reports: list[ScenarioReport]) -> int:
+    """Nonzero when any run errored — an unreachable or misconfigured
+    endpoint must not look like a completed evaluation to calling scripts."""
+    errored = sum(1 for report in reports for run in report.runs if run.error is not None)
+    if errored:
+        print(f"{errored} run(s) errored — see the report above.", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point; returns a process exit code."""
     args = _parse_args(argv)
@@ -148,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         args.out.write_text(markdown + "\n")
     if args.json is not None:
         args.json.write_text(json.dumps(report_payload(reports), indent=2) + "\n")
-    return 0
+    return exit_code(reports)
 
 
 if __name__ == "__main__":

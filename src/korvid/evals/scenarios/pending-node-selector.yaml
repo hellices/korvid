@@ -1,0 +1,43 @@
+id: pending-node-selector
+question: >-
+  Pod gpu-worker-1 in namespace ml stays Pending forever while other pods in
+  the namespace schedule fine. What is blocking this one?
+screen: "resource view: pods, namespace ml, selected: ml/gpu-worker-1 (Pending)"
+root_cause: node_selector_mismatch
+grading:
+  must_mention:
+    - [node selector, nodeselector, node affinity, affinity, node label]
+    - [match, matches, matching, no node, unschedulable]
+  must_not_mention:
+    - [image pull, crashloopbackoff, oomkilled, quota]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: gpu-worker-1, namespace: ml}
+      contains: "didn't match Pod's node affinity/selector"
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: gpu-worker-1
+        namespace: ml
+        uid: pod-gpuworker-1
+        creationTimestamp: "2026-07-27T06:50:00Z"
+        labels: {app: gpu-worker}
+      spec:
+        nodeSelector: {accelerator: nvidia-a100}
+        containers:
+          - name: worker
+            image: ml/gpu-worker:v1
+      status:
+        phase: Pending
+        conditions:
+          - {type: PodScheduled, status: "False", reason: Unschedulable, message: "0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector."}
+  events:
+    - type: Warning
+      reason: FailedScheduling
+      count: 10
+      lastTimestamp: "2026-07-27T07:26:00Z"
+      message: "0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector."
+      involvedObject: {kind: Pod, name: gpu-worker-1, namespace: ml, uid: pod-gpuworker-1}
+  logs: {}

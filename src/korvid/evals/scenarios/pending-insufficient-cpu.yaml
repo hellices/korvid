@@ -1,0 +1,42 @@
+id: pending-insufficient-cpu
+question: Pod trainer-1 in namespace ml has been Pending for 15 minutes. Why is it not scheduled?
+screen: "resource view: pods, namespace ml, selected: ml/trainer-1 (Pending)"
+root_cause: insufficient_resources
+grading:
+  must_mention:
+    - [cpu]
+    - [insufficient, not enough, no node, unschedulable, lacks, exceeds]
+  must_not_mention:
+    - [image pull, crashloopbackoff, oomkilled]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: trainer-1, namespace: ml}
+      contains: "3 Insufficient cpu"
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: trainer-1
+        namespace: ml
+        uid: pod-trainer-1
+        creationTimestamp: "2026-07-27T07:12:00Z"
+        labels: {app: trainer}
+      spec:
+        containers:
+          - name: trainer
+            image: ml/trainer:v2
+            resources:
+              requests: {cpu: "16"}
+      status:
+        phase: Pending
+        conditions:
+          - {type: PodScheduled, status: "False", reason: Unschedulable, message: "0/3 nodes are available: 3 Insufficient cpu."}
+  events:
+    - type: Warning
+      reason: FailedScheduling
+      count: 12
+      lastTimestamp: "2026-07-27T07:27:00Z"
+      message: "0/3 nodes are available: 3 Insufficient cpu. preemption: 0/3 nodes are available: 3 No preemption victims found for incoming pod."
+      involvedObject: {kind: Pod, name: trainer-1, namespace: ml, uid: pod-trainer-1}
+  logs: {}

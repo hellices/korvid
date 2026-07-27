@@ -1,0 +1,58 @@
+id: missing-configmap-mount
+question: Pod render-1 in namespace media is stuck in ContainerCreating. What is holding it up?
+screen: "resource view: pods, namespace media, selected: media/render-1 (ContainerCreating)"
+root_cause: missing_configmap
+grading:
+  must_mention:
+    - [configmap, config map]
+    - [not found, missing, does not exist, doesn't exist, no such]
+  must_not_mention:
+    - [image pull, crashloopbackoff, oomkilled]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: render-1, namespace: media}
+      contains: "configmap \"render-config\" not found"
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: render-1
+        namespace: media
+        uid: pod-render-1
+        creationTimestamp: "2026-07-27T07:00:00Z"
+        labels: {app: render}
+      spec:
+        nodeName: node-a
+        containers:
+          - name: render
+            image: media/render:v4
+            volumeMounts:
+              - {name: config, mountPath: /etc/render}
+        volumes:
+          - name: config
+            configMap: {name: render-config}
+      status:
+        phase: Pending
+        conditions:
+          - {type: Ready, status: "False", reason: ContainersNotReady}
+        containerStatuses:
+          - name: render
+            ready: false
+            restartCount: 0
+            state:
+              waiting: {reason: ContainerCreating}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+  events:
+    - type: Warning
+      reason: FailedMount
+      count: 13
+      lastTimestamp: "2026-07-27T07:28:00Z"
+      message: "MountVolume.SetUp failed for volume \"config\" : configmap \"render-config\" not found"
+      involvedObject: {kind: Pod, name: render-1, namespace: media, uid: pod-render-1}
+  logs: {}

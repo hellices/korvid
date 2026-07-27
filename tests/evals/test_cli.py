@@ -11,7 +11,12 @@ import json
 
 import pytest
 
-from korvid.evals.__main__ import _positive_int, provider_factory_from_env, report_payload
+from korvid.evals.__main__ import (
+    _positive_int,
+    exit_code,
+    provider_factory_from_env,
+    report_payload,
+)
 from korvid.evals.grader import GradeResult
 from korvid.evals.runner import RunMetrics, ScenarioReport
 from korvid.providers.openai_compat import OpenAICompatProvider
@@ -48,7 +53,7 @@ def test_provider_factory_builds_a_fresh_openai_compat_provider() -> None:
     assert first is not second  # fresh provider per run
 
 
-def _report() -> ScenarioReport:
+def _report(error: str | None = None) -> ScenarioReport:
     grade = GradeResult(
         diagnosis_success=True,
         evidence_fetched=True,
@@ -67,7 +72,7 @@ def _report() -> ScenarioReport:
         input_tokens=100,
         output_tokens=20,
         wall_time_s=1.5,
-        error=None,
+        error=error,
     )
     return ScenarioReport(scenario_id="oom-killed", root_cause="oom_killed", runs=[run])
 
@@ -79,3 +84,13 @@ def test_report_payload_is_json_serializable_with_summary_counts() -> None:
     assert payload[0]["successes"] == 1
     assert payload[0]["evidence_hits"] == 1
     assert payload[0]["runs"][0]["grade"]["diagnosis_success"] is True
+
+
+def test_exit_code_is_zero_for_a_clean_evaluation() -> None:
+    assert exit_code([_report()]) == 0
+
+
+def test_exit_code_is_nonzero_when_any_run_errored() -> None:
+    """A failed evaluation (e.g. unreachable endpoint) must be
+    distinguishable from a completed one to calling scripts."""
+    assert exit_code([_report(), _report(error="connection refused")]) == 1
