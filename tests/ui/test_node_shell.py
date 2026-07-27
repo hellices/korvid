@@ -165,7 +165,7 @@ def _noop_cm() -> Any:
 
 
 @contextmanager
-def _node_shell_env(run_fake, call_exit: int = 0):  # type: ignore[no-untyped-def]  # test helper
+def _node_shell_env(run_fake, call_exit: int = 0, call_error: Exception | None = None):  # type: ignore[no-untyped-def]  # test helper
     """Patch kubectl discovery, the interactive attach, the create/wait
     subprocesses, and suspend (headless drivers raise SuspendNotSupported);
     yields the list of interactive kubectl invocations."""
@@ -173,6 +173,8 @@ def _node_shell_env(run_fake, call_exit: int = 0):  # type: ignore[no-untyped-de
 
     def fake_call(argv):  # type: ignore[no-untyped-def]  # test helper
         call_records.append(list(argv))
+        if call_error is not None:
+            raise call_error
         return call_exit
 
     with (
@@ -709,3 +711,33 @@ async def test_ambiguous_create_failure_keeps_namespace_hint(tmp_path: Path) -> 
         with patch("korvid.ui.app.subprocess.run", return_value=failure):
             outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == "error: pod creation failed; cleanup skipped: check namespace default"
+
+
+async def test_attach_launch_failure_still_deletes_pod_and_audits(tmp_path: Path) -> None:
+    """If kubectl attach cannot even be launched (executable vanished after
+    the create), the worker must not die on the escaping OSError: the user
+    is notified, the finalizer still deletes the pod, and the audit records
+    a specific outcome rather than a generic interruption."""
+    rec = DeleteRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    run_fake, _ = _kubectl_run()
+    with _node_shell_env(run_fake, call_error=OSError("kubectl vanished")):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await pilot.press("y")
+            await until(pilot, lambda: rec.deletes, label="cleanup delete")
+
+            def _notified() -> bool:
+                return any(
+                    "Could not launch kubectl attach" in n.message for n in app._notifications
+                )
+
+            await until(pilot, _notified, label="attach launch failure notification")
+    assert rec.deletes == [("pods", "default", DBG_POD, DBG_UID)]
+    entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+    ours = [e for e in entries if e["action"] == "node-shell"]
+    assert ours[-1]["outcome"].startswith("error: attach could not be launched")

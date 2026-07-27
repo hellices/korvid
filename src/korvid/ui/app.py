@@ -3719,23 +3719,7 @@ class KorvidApp(App[None]):
         # privileged host-mounted pod and record the outcome.
         outcome = "error: interrupted"
         try:
-            wait_argv = build_pod_wait_argv(namespace, pod_name, context=self.config.kube_context)
-            ready = await self._run_kubectl_ok(wait_argv, timeout=75)
-            if not ready:
-                self.notify(
-                    f"Debugger pod {pod_name} did not become Ready — the shell may"
-                    " fail to attach (image pull error or admission problem?)",
-                    severity="warning",
-                )
-            attach_argv = build_pod_attach_argv(
-                namespace, pod_name, context=self.config.kube_context
-            )
-            with self.suspend():
-                exit_code = self._run_interactive(
-                    attach_argv, f"korvid node shell → {node} (exit to return)"
-                )
-            self.refresh()
-            outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
+            outcome = await self._wait_and_attach_node_shell(node, namespace, pod_name)
         finally:
             # Shielded + settled so a cancelled worker still deletes the pod
             # and records the outcome: shield() raises CancelledError here on
@@ -3751,6 +3735,40 @@ class KorvidApp(App[None]):
             except asyncio.CancelledError:
                 await finalize
                 raise
+
+    async def _wait_and_attach_node_shell(self, node: str, namespace: str, pod_name: str) -> str:
+        """Wait for the debugger pod, attach interactively, return the outcome.
+
+        Runs entirely under the caller's finalizer, so every exit path —
+        including an attach binary that cannot be launched — leaves the pod
+        deletion and outcome audit to run.
+        """
+        wait_argv = build_pod_wait_argv(namespace, pod_name, context=self.config.kube_context)
+        ready = await self._run_kubectl_ok(wait_argv, timeout=75)
+        if not ready:
+            self.notify(
+                f"Debugger pod {pod_name} did not become Ready — the shell may"
+                " fail to attach (image pull error or admission problem?)",
+                severity="warning",
+            )
+        attach_argv = build_pod_attach_argv(namespace, pod_name, context=self.config.kube_context)
+        try:
+            with self.suspend():
+                exit_code = self._run_interactive(
+                    attach_argv, f"korvid node shell → {node} (exit to return)"
+                )
+        except OSError as exc:
+            # kubectl itself could not be launched (removed or not executable
+            # since the create): keep a specific outcome and let the finalizer
+            # delete the pod — an escaping exception would kill the worker and
+            # take the TUI down with it.
+            logger.warning("kubectl attach could not be launched", exc_info=True)
+            self.notify(f"Could not launch kubectl attach: {exc}", severity="error")
+            outcome = "error: attach could not be launched"
+        else:
+            outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
+        self.refresh()
+        return outcome
 
     async def _audit_create_failure(
         self, audit: AuditLog, node: str, detail: str, outcome: str
