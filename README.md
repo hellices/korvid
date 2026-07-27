@@ -263,7 +263,10 @@ Press `Ctrl-A` to open the agent panel — a chat sidebar that answers questions
 about the cluster you are looking at.  The agent sees your current screen
 context (view, namespace, selected resource, active filter) and inspects the
 cluster through read-only tools: fetching manifests, logs, events, and resource
-listings.  It can also drive the TUI itself — navigate views, apply filters,
+listings, plus a compound `diagnose_pod` tool that gathers a broken pod's
+container states, owner chain, warning events, and targeted log excerpts in a
+single deterministic call — projected evidence instead of raw YAML dumps, which
+is where small local models otherwise fail.  It can also drive the TUI itself — navigate views, apply filters,
 drill down, and open the log pane or describe screen — so "show me the crashing
 pod's logs" lands you in the actual log viewer instead of a text dump.
 Tool results are capped at 8,000 characters and `Secret` data is masked before

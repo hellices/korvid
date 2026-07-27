@@ -5,10 +5,22 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, ClassVar
 
 import yaml
 
+from korvid.agent.diagnose import (
+    condition_lines,
+    container_state_lines,
+    identity_lines,
+    log_excerpt,
+    node_condition_line,
+    previous_log_containers,
+    pvc_names,
+    troubled_containers,
+    warning_event_lines,
+)
+from korvid.core.portforward import controller_owner
 from korvid.core.secrets import mask_secret_manifest
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
@@ -159,6 +171,38 @@ READ_TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "diagnose_pod",
+            "description": (
+                "Compound diagnostic for a broken pod: one call gathers the"
+                " pod's identity and owner chain, per-container states"
+                " (waiting reasons, exit codes, restart counts), failing"
+                " conditions, recent Warning events, node and PVC context,"
+                " and a targeted log excerpt from up to 3 of the troubled"
+                " containers (any further troubled containers are named but"
+                " their logs are not fetched; use get_logs for those)."
+                " Prefer this over chaining"
+                " get_resource/get_events/get_logs when investigating why a"
+                " pod is failing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pod": {
+                        "type": "string",
+                        "description": "Pod name.",
+                    },
+                    "namespace": {
+                        "type": "string",
+                        "description": "Kubernetes namespace the pod lives in.",
+                    },
+                },
+                "required": ["pod", "namespace"],
             },
         },
     },
@@ -584,6 +628,8 @@ class ToolExecutor:
             return await self._get_events(arguments)
         if name == "list_operators":
             return await self._list_operators(arguments)
+        if name == "diagnose_pod":
+            return await self._diagnose_pod(arguments)
         raise ValueError(f"unknown tool: {name!r}")
 
     async def _dispatch_ui(self, name: str, args: dict[str, Any]) -> str:
@@ -778,6 +824,235 @@ class ToolExecutor:
             message = str(ev.get("message") or "")
             parts.append(f"{ev_type} {reason} ({count}x): {message}")
         return "\n".join(parts)
+
+    #: Log lines fetched per troubled container before excerpting.
+    _DIAGNOSE_LOG_TAIL = 200
+    #: Troubled containers whose logs are excerpted; more are named only.
+    _DIAGNOSE_MAX_LOG_CONTAINERS = 3
+    #: Mounted PVCs whose phase is fetched; more are named only.
+    _DIAGNOSE_MAX_PVCS = 5
+    #: Per-line clamp — event/condition messages and log lines are
+    #: cluster-controlled and unbounded.
+    _DIAGNOSE_LINE_CLAMP = 240
+    #: Per-section budget for the non-log sections, so the final LOG
+    #: EXCERPTS section always has reserved room under MAX_RESULT_CHARS.
+    _DIAGNOSE_SECTION_BUDGET = 1000
+    #: Stable built-in APIs the diagnosis relies on — used as fallbacks so
+    #: the related evidence never depends on background API discovery
+    #: having populated the alias table.
+    _DIAGNOSE_BUILTIN_METAS: ClassVar[dict[str, ResourceMeta]] = {
+        "ReplicaSet": ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True),
+        "Node": ResourceMeta("Node", "nodes", "", "v1", False),
+        "PersistentVolumeClaim": ResourceMeta(
+            "PersistentVolumeClaim", "persistentvolumeclaims", "", "v1", True
+        ),
+    }
+
+    def _meta_for_kind_name(self, kind_name: str) -> ResourceMeta | None:
+        """Discovery metadata for an API kind name (e.g. ``"ReplicaSet"``),
+        falling back to fixed metadata for the stable built-in kinds."""
+        discovered = next(
+            (m for m in self._aliases.values() if m.kind == kind_name and not m.synthetic),
+            None,
+        )
+        return discovered or self._DIAGNOSE_BUILTIN_METAS.get(kind_name)
+
+    async def _diagnose_owner_chain(self, namespace: str, pod: dict[str, Any]) -> str:
+        """``Deployment api (via ReplicaSet api-6f)`` — best-effort, never raises."""
+        owner = controller_owner(pod)
+        if owner is None:
+            return "owner: none (standalone pod)"
+        kind_name, name = owner
+        if kind_name != "ReplicaSet":
+            return f"owner: {kind_name} {name}"
+        # One more hop: a ReplicaSet is usually a Deployment's generation.
+        meta = self._meta_for_kind_name(kind_name)
+        if meta is None:
+            return f"owner: {kind_name} {name}"
+        try:
+            parent = controller_owner(await self._kube.get_object(meta, namespace, name))
+        except Exception as exc:  # the direct owner stands, but say why the hop failed
+            return f"owner: {kind_name} {name} (parent lookup unavailable ({exc}))"
+        if parent is None:
+            return f"owner: {kind_name} {name}"
+        return f"owner: {parent[0]} {parent[1]} (via {kind_name} {name})"
+
+    async def _diagnose_related(self, namespace: str, pod: dict[str, Any]) -> list[str]:
+        """Node condition summary and PVC phases — cheap context, best-effort."""
+        lines: list[str] = []
+        node_name = (pod.get("spec") or {}).get("nodeName")
+        node_meta = self._meta_for_kind_name("Node")
+        if node_name and node_meta is not None:
+            try:
+                node = await self._kube.get_object(node_meta, None, str(node_name))
+                lines.append(node_condition_line(node))
+            except Exception as exc:
+                lines.append(f"node {node_name}: unavailable ({exc})")
+        pvc_meta = self._meta_for_kind_name("PersistentVolumeClaim")
+        if pvc_meta is not None:
+            claims = pvc_names(pod)
+            for claim in claims[: self._DIAGNOSE_MAX_PVCS]:
+                try:
+                    pvc = await self._kube.get_object(pvc_meta, namespace, claim)
+                    phase = (pvc.get("status") or {}).get("phase") or "?"
+                    lines.append(f"pvc {claim}: {phase}")
+                except Exception as exc:
+                    lines.append(f"pvc {claim}: unavailable ({exc})")
+            omitted = claims[self._DIAGNOSE_MAX_PVCS :]
+            if omitted:
+                lines.append(f"({len(omitted)} more claims not fetched: {', '.join(omitted)})")
+        return lines
+
+    async def _diagnose_events(self, namespace: str, name: str, pod: dict[str, Any]) -> list[str]:
+        raw_uid = (pod.get("metadata") or {}).get("uid")
+        try:
+            events = await self._kube.list_events_for(
+                namespace, name, kind="Pod", uid=str(raw_uid) if raw_uid else None
+            )
+        except Exception as exc:
+            return [f"unavailable ({exc})"]
+        return warning_event_lines(events) or ["(no warning events)"]
+
+    async def _fetch_log_excerpt(
+        self, namespace: str, pod_name: str, container: str, *, previous: bool
+    ) -> tuple[bool, str]:
+        """(succeeded, excerpt-or-diagnostic) for one container instance."""
+        try:
+            tail: list[str] = []
+            async for log_line in self._kube.stream_logs(
+                namespace,
+                pod_name,
+                container,
+                previous=previous,
+                follow=False,
+                tail_lines=self._DIAGNOSE_LOG_TAIL,
+            ):
+                tail.append(log_line.text)
+        except Exception as exc:
+            return False, f"unavailable ({exc})"
+        if not tail:
+            return False, "(no log output)"
+        # Search the raw lines — clamping first could hide an error marker
+        # buried past the clamp in a long (e.g. JSON) line. Only the lines
+        # selected for the report are clamped.
+        excerpt = log_excerpt(tail)
+        return True, "\n".join(self._clamp_line(seg) for seg in excerpt.splitlines())
+
+    async def _diagnose_log_blocks(
+        self, namespace: str, name: str, pod: dict[str, Any]
+    ) -> list[list[str]]:
+        """One block (header + excerpt lines) per troubled container.
+
+        A restarted container's crash evidence usually lives in the
+        *previous* instance's logs — unless it is currently terminated
+        with a non-zero exit, where the current logs hold the latest
+        failure (`previous_log_containers` encodes that split). Previous
+        reads fall back to current when those logs have rotated away.
+        """
+        troubled = troubled_containers(pod)
+        if not troubled:
+            return [["(no troubled containers — logs skipped)"]]
+        previous_first = previous_log_containers(pod)
+        blocks: list[list[str]] = []
+        for container in troubled[: self._DIAGNOSE_MAX_LOG_CONTAINERS]:
+            previous = container in previous_first
+            ok, text = await self._fetch_log_excerpt(namespace, name, container, previous=previous)
+            if previous and not ok:
+                ok, text = await self._fetch_log_excerpt(namespace, name, container, previous=False)
+                previous = False
+            suffix = " (previous instance)" if previous else ""
+            blocks.append([f"[{container}]{suffix}", *text.splitlines()])
+        skipped = troubled[self._DIAGNOSE_MAX_LOG_CONTAINERS :]
+        if skipped:
+            blocks.append([f"(also troubled, logs not fetched: {', '.join(skipped)})"])
+        return blocks
+
+    @classmethod
+    def _clamp_line(cls, line: str) -> str:
+        limit = cls._DIAGNOSE_LINE_CLAMP
+        return line if len(line) <= limit else line[: limit - 1] + "…"
+
+    @classmethod
+    def _budget_section(cls, lines: list[str]) -> list[str]:
+        """Keep leading lines within the per-section budget, eliding the rest."""
+        out: list[str] = []
+        used = 0
+        for index, line in enumerate(lines):
+            used += len(line) + 1
+            if used > cls._DIAGNOSE_SECTION_BUDGET:
+                out.append(f"…{len(lines) - index} more line(s) elided")
+                return out
+            out.append(line)
+        return out
+
+    @staticmethod
+    def _trim_front(lines: list[str], budget: int) -> list[str]:
+        """Drop leading lines until the joined text fits the budget.
+
+        The tail is the most recent — and most diagnostic — log evidence,
+        so overflow is cut from the front, never from the end, and the
+        cut is marked visibly.
+        """
+        marker = "  … (earlier lines elided)"
+        total = sum(len(line) + 1 for line in lines)
+        if total <= budget:
+            return lines
+        trimmed = list(lines)
+        while len(trimmed) > 1 and total + len(marker) + 1 > budget:
+            total -= len(trimmed[0]) + 1
+            trimmed.pop(0)
+        return [marker, *trimmed]
+
+    def _render_log_blocks(self, blocks: list[list[str]], budget: int) -> list[str]:
+        """Render container blocks within the budget, trimming *within*
+        each block — one container's huge excerpt must never evict another
+        container's header or evidence."""
+        share = max(0, budget) // max(1, len(blocks))
+        lines: list[str] = []
+        for block in blocks:
+            header = f"  {self._clamp_line(block[0])}"
+            body = [f"  {segment}" for segment in block[1:]]
+            lines.append(header)
+            lines.extend(self._trim_front(body, share - len(header) - 1))
+        return lines
+
+    async def _diagnose_pod(self, args: dict[str, Any]) -> str:
+        """Compound read-only diagnosis (issue #70).
+
+        Evidence gathering is deterministic code; the model only interprets.
+        Only the pod fetch may fail the tool — every other section degrades
+        to an ``unavailable`` line. Ordered for primacy/recency: identity
+        first, the most diagnostic evidence (events, then logs) last. Lines
+        are clamped and sections budgeted so the report stays under
+        ``MAX_RESULT_CHARS`` without the shared prefix-truncation ever
+        eating the final log evidence.
+        """
+        name = str(args["pod"])
+        namespace = str(args["namespace"])
+        pods_meta = self._api_meta("pods")
+        pod = await self._kube.get_object(pods_meta, namespace, name)
+        head_sections: list[tuple[str, list[str]]] = [
+            (
+                f"IDENTITY — pod {namespace}/{name}",
+                [*identity_lines(pod), await self._diagnose_owner_chain(namespace, pod)],
+            ),
+            ("RELATED", await self._diagnose_related(namespace, pod) or ["(none)"]),
+            ("CONDITIONS (failing first)", condition_lines(pod) or ["(none reported)"]),
+            ("CONTAINERS", container_state_lines(pod) or ["(no container statuses)"]),
+            (
+                "WARNING EVENTS (newest first)",
+                await self._diagnose_events(namespace, name, pod),
+            ),
+        ]
+        report: list[str] = []
+        for title, lines in head_sections:
+            report.append(title)
+            clamped = [self._clamp_line(line) for line in lines]
+            report.extend(f"  {line}" for line in self._budget_section(clamped))
+        log_title = "LOG EXCERPTS (troubled containers)"
+        blocks = await self._diagnose_log_blocks(namespace, name, pod)
+        budget = MAX_RESULT_CHARS - sum(len(line) + 1 for line in report) - len(log_title) - 1
+        return "\n".join([*report, log_title, *self._render_log_blocks(blocks, budget)])
 
 
 def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:

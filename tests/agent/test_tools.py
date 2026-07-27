@@ -25,7 +25,14 @@ def make_executor(kube: Any) -> ToolExecutor:
 
 def test_read_tools_schema_names() -> None:
     names = [t["function"]["name"] for t in READ_TOOLS]
-    assert names == ["list_resources", "get_resource", "get_logs", "get_events", "list_operators"]
+    assert names == [
+        "list_resources",
+        "get_resource",
+        "get_logs",
+        "get_events",
+        "list_operators",
+        "diagnose_pod",
+    ]
 
 
 def test_read_tools_all_have_type_function() -> None:
@@ -793,3 +800,457 @@ async def test_list_operators_reports_installed_when_package_server_missing() ->
     out = await ex.execute("list_operators", {})
     assert "argocd-operator" in out
     assert "AVAILABLE (operator catalog): unavailable" in out
+
+
+# --- diagnose_pod (issue #70) ------------------------------------------------
+
+
+def _diagnose_aliases() -> dict[str, Any]:
+    from korvid.k8s.discovery import ResourceMeta
+
+    return {
+        "pods": PODS_META,
+        "pod": PODS_META,
+        "replicasets": ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True),
+        "deployments": ResourceMeta("Deployment", "deployments", "apps", "v1", True),
+        "nodes": ResourceMeta("Node", "nodes", "", "v1", False),
+        "persistentvolumeclaims": ResourceMeta(
+            "PersistentVolumeClaim", "persistentvolumeclaims", "", "v1", True
+        ),
+    }
+
+
+class FakeDiagnoseKube:
+    """Scripted cluster for the compound tool: pod, owners, node, PVC, events, logs."""
+
+    def __init__(self) -> None:
+        self.objects: dict[tuple[str, str], dict[str, Any]] = {
+            ("pods", "api-1"): {
+                "kind": "Pod",
+                "metadata": {
+                    "name": "api-1",
+                    "namespace": "default",
+                    "uid": "pod-uid",
+                    "creationTimestamp": "2026-07-27T06:00:00Z",
+                    "ownerReferences": [
+                        {"kind": "ReplicaSet", "name": "api-6f", "controller": True}
+                    ],
+                },
+                "spec": {
+                    "nodeName": "node-a",
+                    "containers": [{"name": "app"}],
+                    "volumes": [
+                        {"name": "data", "persistentVolumeClaim": {"claimName": "data-claim"}}
+                    ],
+                },
+                "status": {
+                    "phase": "Running",
+                    "conditions": [
+                        {"type": "Ready", "status": "False", "reason": "ContainersNotReady"}
+                    ],
+                    "containerStatuses": [
+                        {
+                            "name": "app",
+                            "ready": False,
+                            "restartCount": 7,
+                            "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+                            "lastState": {"terminated": {"exitCode": 1, "reason": "Error"}},
+                        }
+                    ],
+                },
+            },
+            ("replicasets", "api-6f"): {
+                "kind": "ReplicaSet",
+                "metadata": {
+                    "name": "api-6f",
+                    "ownerReferences": [{"kind": "Deployment", "name": "api", "controller": True}],
+                },
+            },
+            ("nodes", "node-a"): {
+                "metadata": {"name": "node-a"},
+                "status": {
+                    "conditions": [
+                        {"type": "Ready", "status": "True"},
+                        {"type": "MemoryPressure", "status": "True"},
+                    ]
+                },
+            },
+            ("persistentvolumeclaims", "data-claim"): {
+                "metadata": {"name": "data-claim"},
+                "status": {"phase": "Bound"},
+            },
+        }
+        self.events: list[dict[str, Any]] = [
+            {
+                "type": "Warning",
+                "reason": "BackOff",
+                "message": "restarting failed container",
+                "count": 9,
+                "lastTimestamp": "2026-07-27T06:20:00Z",
+            }
+        ]
+        self.log_lines: list[str] = [
+            *(f"serving request {i}" for i in range(40)),
+            "ERROR: db connection refused",
+            *(f"retrying {i}" for i in range(20)),
+        ]
+        self.log_calls: list[dict[str, Any]] = []
+
+    async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        obj = self.objects.get((meta.plural, name))
+        if obj is None:
+            raise ApiStatusError(404, "NotFound")
+        return obj
+
+    async def list_events_for(
+        self, namespace: str, name: str, *, kind: str | None = None, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self.events
+
+    async def stream_logs(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> Any:
+        self.log_calls.append(
+            {"pod": pod, "container": container, "previous": previous, "tail_lines": tail_lines}
+        )
+        for text in self.log_lines:
+            yield LogLine(pod=pod, container=container, text=text)
+
+
+def _diagnose_executor(kube: Any) -> ToolExecutor:
+    return ToolExecutor(kube, _diagnose_aliases())
+
+
+def test_diagnose_pod_schema_documents_the_log_container_cap() -> None:
+    schema = next(t for t in READ_TOOLS if t["function"]["name"] == "diagnose_pod")
+    description = schema["function"]["description"]
+    assert "up to 3" in description
+
+
+async def test_diagnose_pod_reports_all_sections_in_evidence_order() -> None:
+    kube = FakeDiagnoseKube()
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert not out.startswith("ERROR:")
+    # Identity and owner chain up front.
+    assert "pod default/api-1" in out
+    assert "phase=Running" in out
+    assert "owner: Deployment api (via ReplicaSet api-6f)" in out
+    # Related context.
+    assert "node node-a" in out
+    assert "MemoryPressure=True" in out
+    assert "pvc data-claim: Bound" in out
+    # Evidence.
+    assert "CrashLoopBackOff" in out
+    assert "restarts=7" in out
+    assert "BackOff (9x" in out
+    assert "ERROR: db connection refused" in out
+    # Primacy/recency ordering: identity first, log evidence last.
+    assert out.index("phase=Running") < out.index("BackOff (9x")
+    assert out.index("BackOff (9x") < out.index("ERROR: db connection refused")
+
+
+async def test_diagnose_pod_fetches_logs_only_for_troubled_containers() -> None:
+    kube = FakeDiagnoseKube()
+    _ = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert [c["container"] for c in kube.log_calls] == ["app"]
+
+
+async def test_diagnose_pod_healthy_pod_skips_log_fetches() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("pods", "api-1")]["status"]["containerStatuses"] = [
+        {
+            "name": "app",
+            "ready": True,
+            "restartCount": 0,
+            "state": {"running": {"startedAt": "2026-07-27T06:01:00Z"}},
+        }
+    ]
+    kube.objects[("pods", "api-1")]["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    kube.events = []
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert kube.log_calls == []
+    assert "no troubled containers" in out
+
+
+async def test_diagnose_pod_missing_pod_is_an_error() -> None:
+    kube = FakeDiagnoseKube()
+    del kube.objects[("pods", "api-1")]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert out.startswith("ERROR:")
+
+
+async def test_diagnose_pod_sub_fetch_failures_do_not_kill_the_report() -> None:
+    """Owner, node, PVC, events, and logs are all best-effort evidence."""
+
+    class FlakyKube(FakeDiagnoseKube):
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            if meta.plural != "pods":
+                raise RuntimeError("api hiccup")
+            return await super().get_object(meta, namespace, name)
+
+        async def list_events_for(self, *a: Any, **k: Any) -> list[dict[str, Any]]:
+            raise RuntimeError("events down")
+
+    out = await _diagnose_executor(FlakyKube()).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert not out.startswith("ERROR:")
+    assert "phase=Running" in out
+    assert "unavailable" in out  # the failed sections say so instead of vanishing
+    assert "ERROR: db connection refused" in out  # log evidence still present
+
+
+async def test_diagnose_pod_report_stays_under_the_ingest_cap() -> None:
+    kube = FakeDiagnoseKube()
+    kube.log_lines = [f"noise {i} " + "x" * 80 for i in range(1000)]
+    kube.log_lines[500] = "ERROR: the one that matters"
+    kube.events = [
+        {
+            "type": "Warning",
+            "reason": f"Reason{i}",
+            "message": f"message {i} " + "y" * 60,
+            "count": 1,
+            "lastTimestamp": f"2026-07-27T06:{i % 60:02d}:00Z",
+        }
+        for i in range(100)
+    ]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert len(out) < MAX_RESULT_CHARS
+    assert "truncated" not in out  # under the cap by construction, not by chopping
+    assert "ERROR: the one that matters" in out
+
+
+async def test_diagnose_pod_owner_chain_stops_at_a_direct_workload() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("pods", "api-1")]["metadata"]["ownerReferences"] = [
+        {"kind": "StatefulSet", "name": "db", "controller": True}
+    ]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "owner: StatefulSet db" in out
+    assert "via" not in out
+
+
+async def test_diagnose_pod_without_owner_reports_standalone() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("pods", "api-1")]["metadata"].pop("ownerReferences")
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "owner: none (standalone pod)" in out
+
+
+async def test_diagnose_pod_reads_previous_instance_logs_after_restarts() -> None:
+    """The crash evidence of a restarted container lives in the previous
+    instance; the current one is either freshly restarted or gone."""
+    kube = FakeDiagnoseKube()  # container "app" has restartCount=7
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert [(c["container"], c["previous"]) for c in kube.log_calls] == [("app", True)]
+    assert "[app] (previous instance)" in out
+
+
+async def test_diagnose_pod_reads_current_logs_for_a_currently_failed_termination() -> None:
+    """A container terminated non-zero *right now* logged that failure in the
+    current instance — previous=True would fetch the penultimate crash."""
+    kube = FakeDiagnoseKube()
+    kube.objects[("pods", "api-1")]["status"]["containerStatuses"][0]["state"] = {
+        "terminated": {"exitCode": 1, "reason": "Error"}
+    }
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert [(c["container"], c["previous"]) for c in kube.log_calls] == [("app", False)]
+    assert "(previous instance)" not in out
+
+
+def test_render_log_blocks_survives_a_non_positive_budget() -> None:
+    executor = _diagnose_executor(FakeDiagnoseKube())
+    blocks = [["[app]", "line 1", "line 2"], ["[sidecar]", "line 3"]]
+    lines = executor._render_log_blocks(blocks, -50)
+    assert "  [app]" in lines
+    assert "  [sidecar]" in lines
+
+
+async def test_diagnose_pod_falls_back_to_current_logs_when_previous_unavailable() -> None:
+    class NoPreviousKube(FakeDiagnoseKube):
+        async def stream_logs(self, *a: Any, previous: bool = False, **k: Any) -> Any:
+            if previous:
+                raise RuntimeError("previous terminated logs rotated away")
+            async for line in super().stream_logs(*a, previous=previous, **k):
+                yield line
+
+    kube = NoPreviousKube()
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "ERROR: db connection refused" in out
+    assert "(previous instance)" not in out
+
+
+async def test_diagnose_pod_reads_current_logs_for_a_never_restarted_container() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("pods", "api-1")]["status"]["containerStatuses"][0]["restartCount"] = 0
+    _ = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert [(c["container"], c["previous"]) for c in kube.log_calls] == [("app", False)]
+
+
+async def test_diagnose_pod_unbounded_messages_cannot_evict_the_log_evidence() -> None:
+    """Event/condition messages are cluster-controlled and unbounded; the
+    report must clamp them and reserve room so the final LOG EXCERPTS
+    section survives instead of being prefix-truncated away."""
+    kube = FakeDiagnoseKube()
+    kube.objects[("pods", "api-1")]["status"]["conditions"] = [
+        {"type": "Ready", "status": "False", "reason": "Huge", "message": "c" * 5000}
+    ]
+    kube.events = [
+        {
+            "type": "Warning",
+            "reason": f"Reason{i}",
+            "message": f"m{i} " + "e" * 4000,
+            "count": 1,
+            "lastTimestamp": f"2026-07-27T06:{i % 60:02d}:00Z",
+        }
+        for i in range(10)
+    ]
+    kube.log_lines = ["boot ok", "ERROR: db connection refused", "final line " + "z" * 3000]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert len(out) <= MAX_RESULT_CHARS
+    assert "truncated" not in out  # budgeted by construction, not chopped by execute()
+    assert "ERROR: db connection refused" in out  # the evidence survived
+
+
+async def test_diagnose_pod_finds_an_error_marker_beyond_the_line_clamp() -> None:
+    """The error marker must be searched in the raw line — clamping first
+    would hide a marker buried past the clamp in a long (e.g. JSON) line."""
+    kube = FakeDiagnoseKube()
+    kube.log_lines = [f"noise {i}" for i in range(40)]
+    kube.log_lines[19] = "context sentinel before the buried marker"
+    kube.log_lines[20] = "padding " * 40 + "ERROR: buried past the clamp"
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "context sentinel before the buried marker" in out
+
+
+async def test_diagnose_pod_budgets_each_container_block_keeping_headers() -> None:
+    """Overflow is trimmed within each container's block — a huge excerpt
+    for one container must not evict another container's header or logs."""
+    kube = FakeDiagnoseKube()
+    pod = kube.objects[("pods", "api-1")]
+    pod["spec"]["containers"] = [{"name": f"c{i}"} for i in range(3)]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": f"c{i}",
+            "ready": False,
+            "restartCount": 4,
+            "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+        }
+        for i in range(3)
+    ]
+    kube.log_lines = [f"line {j} " + "x" * 230 for j in range(60)]
+    kube.log_lines[30] = "ERROR: shared failure"
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert len(out) <= MAX_RESULT_CHARS
+    for i in range(3):  # every block keeps its attribution header
+        assert f"[c{i}] (previous instance)" in out
+    assert out.count("…") >= 3  # each over-budget block elides visibly
+
+
+async def test_diagnose_pod_marks_pvcs_beyond_the_fetch_cap() -> None:
+    """Storage evidence must not present a capped fetch as the full set —
+    claim six could be the Pending one."""
+    kube = FakeDiagnoseKube()
+    pod = kube.objects[("pods", "api-1")]
+    pod["spec"]["volumes"] = [
+        {"name": f"v{i}", "persistentVolumeClaim": {"claimName": f"claim-{i}"}} for i in range(7)
+    ]
+    for i in range(7):
+        kube.objects[("persistentvolumeclaims", f"claim-{i}")] = {
+            "metadata": {"name": f"claim-{i}"},
+            "status": {"phase": "Bound"},
+        }
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "pvc claim-4: Bound" in out
+    assert "pvc claim-5" not in out  # not fetched — and not silently omitted either
+    assert "(2 more claims not fetched: claim-5, claim-6)" in out
+
+
+async def test_diagnose_pod_works_with_pod_only_aliases() -> None:
+    """Before background API discovery lands, the alias table holds only
+    pods — the built-in ReplicaSet/Node/PVC lookups must still work via
+    fixed metadata for these stable APIs, not silently vanish."""
+    kube: Any = FakeDiagnoseKube()
+    executor = ToolExecutor(kube, {"pods": PODS_META, "pod": PODS_META})
+    out = await executor.execute("diagnose_pod", {"pod": "api-1", "namespace": "default"})
+    assert "owner: Deployment api (via ReplicaSet api-6f)" in out
+    assert "MemoryPressure=True" in out
+    assert "pvc data-claim: Bound" in out
+
+
+async def test_diagnose_pod_labels_a_failed_parent_lookup() -> None:
+    """An RBAC/API failure on the ReplicaSet hop must not masquerade as
+    'this ReplicaSet has no controller'."""
+
+    class NoRsKube(FakeDiagnoseKube):
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            if meta.plural == "replicasets":
+                raise RuntimeError("rbac denied")
+            return await super().get_object(meta, namespace, name)
+
+    out = await _diagnose_executor(NoRsKube()).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "owner: ReplicaSet api-6f" in out
+    assert "parent lookup unavailable" in out
+
+
+async def test_diagnose_pod_clamps_the_skipped_container_summary() -> None:
+    """The 'also troubled' name list is cluster-controlled (many long
+    container names) and must respect the line clamp like everything else."""
+    kube = FakeDiagnoseKube()
+    pod = kube.objects[("pods", "api-1")]
+    names = [f"sidecar-{i}-" + "n" * 50 for i in range(30)]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": name,
+            "ready": False,
+            "restartCount": 0,
+            "state": {"waiting": {"reason": "ImagePullBackOff"}},
+        }
+        for name in names
+    ]
+    kube.log_lines = ["pull failed"]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert len(out) <= MAX_RESULT_CHARS
+    assert "truncated" not in out  # never falls back to prefix truncation
+    assert all(len(line) <= 250 for line in out.splitlines())
