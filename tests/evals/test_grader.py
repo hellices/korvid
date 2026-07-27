@@ -365,3 +365,17 @@ def test_matches_target_requires_every_expected_argument() -> None:
         result="checkout-1 ... exit=137",
     )
     assert not matches_target(_EVIDENCE, record)
+
+
+def test_grade_negation_scope_ends_at_causal_conjunctions() -> None:
+    """'the pod is not healthy because the readiness probe is failing' —
+    the negator scopes over 'healthy' only; the cause after 'because' is a
+    positive claim, not a rule-out."""
+    scenario = _scenario(
+        must_mention=(("readiness",), ("failing", "fails")),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    answer = "The pod is not healthy because the readiness probe is failing."
+    result = grade(scenario, answer, [])
+    assert result.diagnosis_success

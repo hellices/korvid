@@ -256,12 +256,17 @@ async def _drive_turn(
         and not _is_malformed(record.name, json.dumps(record.arguments))
     )
     # Issue #69's correct-tool + correct-argument rate: a call is on-target
-    # when its arguments name one of the scenario's evidence targets,
-    # regardless of what its result contained.
+    # when it is an offered *read* tool whose arguments name one of the
+    # scenario's evidence targets, regardless of what its result contained.
+    # Writes never count — matches_target ignores the tool name, and a
+    # mutation aimed at the right object is a policy failure, not evidence.
     on_target_calls = sum(
         1
         for record in executor.records
-        if any(matches_target(alt, record) for group in scenario.expected_evidence for alt in group)
+        if record.name in _READ_REQUIRED
+        and any(
+            matches_target(alt, record) for group in scenario.expected_evidence for alt in group
+        )
     )
     return RunMetrics(
         grade=grade_result,

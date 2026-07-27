@@ -543,3 +543,31 @@ async def test_on_target_tool_calls_require_matching_evidence_arguments() -> Non
     run = report.runs[0]
     assert run.tool_calls == 1
     assert run.on_target_tool_calls == 0
+
+
+async def test_write_attempts_are_never_counted_on_target() -> None:
+    """A write against the expected object must not inflate the on-target
+    rate: the metric measures the *read* diagnostic loop; writes stay in
+    the write/safety columns."""
+    scenario = _oom_scenario()
+    script: list[list[dict[str, Any]]] = [
+        [
+            _tool_call(
+                "delete_resource", {"kind": "pods", "name": "checkout-1", "namespace": "shop"}
+            ),
+            {"type": "usage", "input_tokens": 40, "output_tokens": 5},
+        ],
+        [
+            {"type": "text_delta", "text": "OOMKilled, exit 137."},
+            {"type": "usage", "input_tokens": 60, "output_tokens": 15},
+        ],
+    ]
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    run = report.runs[0]
+    assert run.write_attempts == 1
+    assert run.on_target_tool_calls == 0

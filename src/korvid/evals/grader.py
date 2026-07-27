@@ -110,7 +110,22 @@ _NEGATORS = frozenset(
 _CLAUSE_SPLIT = re.compile(r"[.,;:!?\n()]")
 
 _SCOPE_BREAKERS = frozenset(
-    {"and", "but", "however", "yet", "although", "though", "whereas", "while"}
+    {
+        "and",
+        "but",
+        "however",
+        "yet",
+        "although",
+        "though",
+        "whereas",
+        "while",
+        # Causal conjunctions: in "not healthy because the probe is
+        # failing" the negator scopes over "healthy" only — the stated
+        # cause is a positive claim.
+        "because",
+        "since",
+        "so",
+    }
 )
 
 
