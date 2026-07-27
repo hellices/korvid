@@ -1229,19 +1229,44 @@ class KorvidApp(App[None]):
         if self._list_namespaces is None:
             self.notify("Namespace listing unavailable", severity="warning")
             return
+        if self._ctx_switching:
+            # The listing would race the client swap and could return either
+            # cluster's namespaces — refuse up front.
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
+            return
+        epoch = self._ctx_epoch
         try:
             namespaces = await self._list_namespaces()
         except ApiStatusError as exc:  # API failures get the actionable mapping (§5-5)
+            if self._ctx_switch_crossed(epoch):
+                return  # a stale old-cluster error is not worth surfacing
             self._handle_namespace_list_error(exc)
             return
         except Exception as exc:  # surface any other listing failure to the user
+            if self._ctx_switch_crossed(epoch):
+                return
             self.notify(str(exc), title="Failed to list namespaces", severity="error")
+            return
+        if self._ctx_switch_crossed(epoch):
+            # The listing awaited through a :ctx switch: opening the picker
+            # now would offer old-cluster namespaces to the new session.
+            self.notify(
+                "Namespace picker cancelled - the kube context changed",
+                severity="warning",
+            )
             return
         if not namespaces:
             self.notify("No namespaces visible (check RBAC)", severity="warning")
             return
         self.query_one(CommandBar).namespace_words = namespaces
         self.query_one(NamespacePicker).open(namespaces)
+
+    def _ctx_switch_crossed(self, epoch: int) -> bool:
+        """True when a :ctx switch started or completed since *epoch* was taken."""
+        return self._ctx_switching or epoch != self._ctx_epoch
 
     def _handle_namespace_list_error(self, exc: ApiStatusError) -> None:
         """RBAC-limited fallback for the picker (issue #49): a forbidden
@@ -1543,7 +1568,15 @@ class KorvidApp(App[None]):
     ) -> None:
         """Adopt the new cluster's identity and re-probed capabilities."""
         self._ctx_epoch += 1
-        self.config = dataclasses.replace(self.config, kube_context=name)
+        # Adopt the target context's kubeconfig namespace as the session
+        # default too: `ns` toggle-back and the helm/operator namespace
+        # fallbacks read config.namespace, and jumping to the *startup*
+        # context's namespace after a switch would cross clusters.
+        self.config = dataclasses.replace(
+            self.config,
+            kube_context=name,
+            namespace=result.context_namespace or self.config.namespace,
+        )
         self._pod_resize_supported = result.pod_resize_supported
         self._provider_hint = result.provider_hint
         self._fallback_namespaces = result.fallback_namespaces
@@ -1556,7 +1589,7 @@ class KorvidApp(App[None]):
             self._forwards.retarget(name)
             self._forwards_closing = False
         self.current_kind = "pods"
-        self.current_scope = result.context_namespace or self.config.namespace or "default"
+        self.current_scope = self.config.namespace or "default"
         # Rebind the helm wrapper: it pins --kube-context per instance, and
         # helm writes must follow the active cluster (None when helm is off).
         self._helm = result.helm

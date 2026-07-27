@@ -883,3 +883,57 @@ async def test_debug_fallback_cancelled_when_context_switched(tmp_path: Path) ->
             label="debug fallback epoch refusal",
         )
         assert len(app.screen_stack) == 1
+
+
+async def test_switch_adopts_context_namespace_as_session_default() -> None:
+    """The target context's kubeconfig namespace becomes the session default:
+    toggling all-namespaces off must return to it, not to the startup
+    namespace (issue #36 review round 16)."""
+    env = _CtxEnv()
+    app = env.app
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: app.current_scope == "ns-b",
+            label="scope follows new context",
+        )
+        assert app.config.namespace == "ns-b"
+        await app.action_toggle_all_namespaces()
+        await until(pilot, lambda: app.current_scope != "ns-b", label="all-namespaces on")
+        await app.action_toggle_all_namespaces()
+        await until(
+            pilot,
+            lambda: app.current_scope == "ns-b",
+            label="toggle-off returns to the new context's namespace",
+        )
+
+
+async def test_namespace_picker_list_dropped_when_context_switches() -> None:
+    """A namespace listing that straddles a completed :ctx switch must not
+    open the picker: its old-cluster options would navigate the new cluster
+    (issue #36 review round 16)."""
+    from korvid.ui.messages import ShowNamespacePicker
+    from korvid.ui.widgets.namespace_picker import NamespacePicker
+
+    env = _CtxEnv()
+    app = env.app
+
+    async def stale_list() -> list[str]:
+        app._ctx_epoch += 1  # a switch completed while the LIST was in flight
+        return ["old-ns"]
+
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        app._list_namespaces = stale_list
+        await app.on_show_namespace_picker(ShowNamespacePicker())
+        await until(
+            pilot,
+            lambda: any(
+                "Namespace picker cancelled - the kube context changed" in n.message
+                for n in app._notifications
+            ),
+            label="picker epoch refusal",
+        )
+        assert app.query_one(NamespacePicker).display is False
