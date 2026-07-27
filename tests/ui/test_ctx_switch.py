@@ -9,7 +9,7 @@ session restarts on the new cluster with capabilities re-probed.
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -489,4 +489,53 @@ async def test_keybinding_write_aborted_when_context_changed_during_precheck() -
             pilot,
             lambda: any("context changed while preparing" in n.message for n in app._notifications),
             label="epoch-change refusal",
+        )
+
+
+async def test_write_slot_released_when_coroutine_never_runs() -> None:
+    """A reserved write whose coroutine is closed without ever running
+    (worker cancelled before start, app shutdown) must not leak the counter
+    and block every future `:ctx` switch."""
+    import gc
+
+    from korvid.ui.app import _tracks_cluster_write
+
+    env = _CtxEnv()
+    app = env.app
+
+    @_tracks_cluster_write
+    async def fake_write(self: KorvidApp) -> None:  # pragma: no cover - never runs
+        raise AssertionError("must not start")
+
+    async with app.run_test():
+        coro = fake_write(app)
+        assert app._active_cluster_writes == 1
+        coro.close()  # unstarted coroutine: finally inside never executes
+        del coro
+        gc.collect()
+        assert app._active_cluster_writes == 0
+
+
+async def test_total_switch_failure_mentions_stopped_mcp() -> None:
+    """When even the recovery swap fails, the operator learns the embedded
+    MCP server was stopped for the switch instead of it dying silently."""
+    from types import SimpleNamespace
+
+    env = _CtxEnv()
+    app = env.app
+    async with app.run_test() as pilot:
+        mcp = SimpleNamespace(running=True)
+        app._mcp = cast("Any", mcp)
+
+        async def failing_switch(name: str | None) -> ContextSwitchResult:
+            mcp.running = False  # the closure stopped the server before dying
+            raise RuntimeError("boom")
+
+        app._switch_context = failing_switch
+        applied = await app._retarget_context("ctx-b", "ctx-a")
+        assert applied is None
+        await until(
+            pilot,
+            lambda: any("MCP server was stopped" in n.message for n in app._notifications),
+            label="stopped-MCP notice",
         )

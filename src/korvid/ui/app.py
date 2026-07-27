@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import weakref
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
@@ -392,14 +393,27 @@ def _tracks_cluster_write(
         # a later event-loop iteration — a queued `:ctx` processed in that
         # gap must already see the write as in flight.
         self._active_cluster_writes += 1
+        released = False
+
+        def release() -> None:
+            # Idempotent: normally fired by run()'s finally, but also by the
+            # GC finalizer when the coroutine is closed or collected without
+            # ever running (worker cancelled before start, app shutdown) —
+            # a leaked +1 would block every future `:ctx` switch.
+            nonlocal released
+            if not released:
+                released = True
+                self._active_cluster_writes -= 1
 
         async def run() -> _WriteResult:
             try:
                 return await method(self, *args, **kwargs)
             finally:
-                self._active_cluster_writes -= 1
+                release()
 
-        return run()
+        coro = run()
+        weakref.finalize(coro, release)
+        return coro
 
     # Not functools.wraps: its _Wrapped return type keeps the explicit
     # 'self' arg and fails the plain-Callable return annotation under
@@ -1356,6 +1370,7 @@ class KorvidApp(App[None]):
         failed (the session then needs a restart — everything is already
         torn down and nothing is connected).
         """
+        mcp_was_on = self._mcp is not None and self._mcp.running
         try:
             result = await self._switch_context(name)  # type: ignore[misc]  # guarded by caller
             self._apply_context_switch(name, old, result)
@@ -1372,9 +1387,15 @@ class KorvidApp(App[None]):
             self.notify(f"Restored context {old or '(kubeconfig default)'}")
             return old
         except Exception as exc:
+            mcp_down = (
+                " Embedded MCP server was stopped for the switch — it restarts"
+                " automatically if a context recovers, or manually via :mcp on."
+                if mcp_was_on and self._mcp is not None and not self._mcp.running
+                else ""
+            )
             self.notify(
                 f"Could not restore context {old or '(kubeconfig default)'}:"
-                f" {self._describe_ctx_error(exc)} — restart korvid",
+                f" {self._describe_ctx_error(exc)} — restart korvid.{mcp_down}",
                 severity="error",
                 timeout=15,
             )
