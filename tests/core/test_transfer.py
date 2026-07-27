@@ -115,6 +115,10 @@ class TestCommands:
     def test_upload_command_targets_parent_dir(self) -> None:
         assert upload_command("/opt/tools/dbg.sh") == ["tar", "xf", "-", "-C", "/opt/tools"]
 
+    def test_download_command_option_looking_basename_is_neutralised(self) -> None:
+        # A basename starting with "-" must not be parsed by tar as an option.
+        assert download_command("/tmp/-f") == ["tar", "cf", "-", "-C", "/tmp", "./-f"]
+
 
 class TestDefaultLocalPath:
     def test_uses_downloads_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

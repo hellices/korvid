@@ -106,9 +106,14 @@ def download_command(remote_path: str) -> list[str]:
     """tar argv producing a single-file archive of ``remote_path`` on stdout.
 
     ``-C dir base`` keeps the archive member name to the basename so the
-    local extraction never depends on the remote directory layout.
+    local extraction never depends on the remote directory layout. A basename
+    beginning with ``-`` is prefixed with ``./`` so tar treats it as an
+    operand, never as an option (the member name is irrelevant locally:
+    ``extract_single_file`` streams bytes into the caller-chosen path).
     """
     directory, base = posixpath.split(remote_path)
+    if base.startswith("-"):
+        base = f"./{base}"
     return ["tar", "cf", "-", "-C", directory or "/", base]
 
 
