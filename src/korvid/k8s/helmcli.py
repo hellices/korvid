@@ -45,12 +45,17 @@ async def _execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
     Killed (with its output discarded) when `timeout` passes - a hung helm
     must never wedge the TUI event loop's worker.
     """
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as exc:
+        # The binary can vanish or lose its execute bit after detection;
+        # surface it as HelmError so the UI's helm notification fires.
+        raise HelmError(f"failed to start helm: {exc}") from exc
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
     except TimeoutError:

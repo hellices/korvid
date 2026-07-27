@@ -287,3 +287,12 @@ async def test_execute_kills_the_subprocess_on_cancellation() -> None:
             await task
     assert proc.killed
     assert proc.reaped
+
+
+async def test_spawn_failure_raises_helm_error() -> None:
+    """A vanished/unexecutable binary must surface as HelmError so the UI
+    shows its actionable helm notification instead of a raw worker crash."""
+    from korvid.k8s.helmcli import _execute
+
+    with pytest.raises(HelmError, match="failed to start helm"):
+        await _execute(["/nonexistent/helm-binary-for-tests"], timeout=5.0)

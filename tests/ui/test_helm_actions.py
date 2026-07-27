@@ -315,6 +315,8 @@ async def test_install_preview_shows_dry_run_output(tmp_path: Path) -> None:
         preview = app.screen._preview  # type: ignore[attr-defined]  # test peeks the dialog
         assert preview is not None
         assert any("RENDERED-INSTALL-MANIFEST" in line for line in preview)
+        title = app.screen._preview_title  # type: ignore[attr-defined]  # test peeks the dialog
+        assert title == "helm install --dry-run preview:"
         assert ("dry-run-install", "nginx", "bitnami/nginx", "default", "18.1.0") in helm.calls
 
 
@@ -481,6 +483,8 @@ async def test_upgrade_preview_prefers_diff_plugin(tmp_path: Path) -> None:
         preview = app.screen._preview  # type: ignore[attr-defined]  # test peeks the dialog
         assert preview is not None
         assert any("UPGRADE-DIFF-LINE" in line for line in preview)
+        title = app.screen._preview_title  # type: ignore[attr-defined]  # test peeks the dialog
+        assert title == "helm diff upgrade preview:"
         assert not any(call[0] == "dry-run-upgrade" for call in helm.calls)
 
 
@@ -521,6 +525,8 @@ async def test_rollback_preview_uses_diff_plugin_when_present(tmp_path: Path) ->
         preview = app.screen._preview  # type: ignore[attr-defined]  # test peeks the dialog
         assert preview is not None
         assert any("ROLLBACK-DIFF-LINE" in line for line in preview)
+        title = app.screen._preview_title  # type: ignore[attr-defined]  # test peeks the dialog
+        assert title == "helm diff rollback preview:"
 
 
 async def test_rollback_without_helm_binary_reports_absence(tmp_path: Path) -> None:
@@ -553,3 +559,86 @@ async def test_helm_keys_do_not_leak_into_other_views(tmp_path: Path) -> None:
         await pilot.pause()
         assert helm.calls == []
         assert len(app.screen_stack) == 1
+
+
+class GatedSearchHelm(FakeHelm):
+    """Search blocks until the test releases it, exposing the await gap."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+
+    async def search_repo(self, keyword: str = "") -> list[ChartHit]:
+        await self.gate.wait()
+        return await super().search_repo(keyword)
+
+
+class GatedPreviewHelm(FakeHelm):
+    """The upgrade dry-run blocks until the test releases it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+
+    async def dry_run_upgrade(
+        self,
+        release: str,
+        chart: str,
+        namespace: str,
+        *,
+        version: str | None = None,
+        values_file: str | None = None,
+    ) -> str:
+        await self.gate.wait()
+        return await super().dry_run_upgrade(
+            release, chart, namespace, version=version, values_file=values_file
+        )
+
+
+async def test_install_aborts_when_user_leaves_helm_view_during_search(tmp_path: Path) -> None:
+    """`helm search repo` runs in a worker: if the user navigates away while
+    it is pending, the chart picker must not open over the new view (its
+    namespace would be derived from the wrong screen)."""
+    helm = GatedSearchHelm()
+    data = _default_data()
+    data["pods"] = []
+    app = make_app(data, helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await _navigate(pilot, "pods", "pods")
+        helm.gate.set()
+        await until(
+            pilot,
+            lambda: any("left the helm view" in n.message for n in app._notifications),
+            label="abort notified",
+        )
+        assert len(app.screen_stack) == 1
+        assert not isinstance(app.screen, PickScreen)
+
+
+async def test_upgrade_aborts_when_selection_changes_during_preview(tmp_path: Path) -> None:
+    """The preview runs after the wizard closes, over an interactive table:
+    a selection/view change during it must cancel the confirmation, like
+    every other write flow after an awaited preview."""
+    helm = GatedPreviewHelm()
+    data = _default_data()
+    data["pods"] = []
+    app = make_app(data, helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("u")
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="chart picker")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        await pilot.press("enter")  # preview now pending on the gate
+        await _navigate(pilot, "pods", "pods")
+        helm.gate.set()
+        await until(
+            pilot,
+            lambda: any("cancelled" in n.message for n in app._notifications),
+            label="abort notified",
+        )
+        assert len(app.screen_stack) == 1
+        assert not any(call[0] == "upgrade" for call in helm.calls)

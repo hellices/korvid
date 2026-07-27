@@ -4644,6 +4644,15 @@ class KorvidApp(App[None]):
             return
         if len(self.screen_stack) > 1:  # another dialog opened during the search
             return
+        if self._canonical_kind(self.current_kind) != HELM_RELEASES_META.plural:
+            # The search runs in a worker over an interactive table: opening
+            # the picker over an unrelated view would also derive the target
+            # namespace from that view.
+            self.notify(
+                "helm install cancelled - left the helm view during the chart search",
+                severity="warning",
+            )
+            return
         self._helm_pick_chart(hits, release=None, namespace=self._helm_view_namespace())
 
     async def _helm_upgrade_flow(self) -> None:
@@ -4721,10 +4730,29 @@ class KorvidApp(App[None]):
                 line.strip() and not line.lstrip().startswith("#") for line in text.splitlines()
             )
             values_text = text if meaningful else None
-        preview = await self._helm_change_preview(helm, hit, choices, values_text, upgrade=upgrade)
-        if len(self.screen_stack) > 1:  # another dialog opened during the preview
-            return
+        rendered = await self._helm_change_preview(helm, hit, choices, values_text, upgrade=upgrade)
         action = "helm-upgrade" if upgrade else "helm-install"
+        if upgrade:
+            # The preview runs over the interactive table: the row selected
+            # for upgrade must still be the one the user approves.
+            if not self._write_context_intact(
+                action,
+                HELM_RELEASES_META,
+                choices.namespace,
+                choices.release,
+                phase="the preview render",
+            ):
+                return
+        else:
+            if len(self.screen_stack) > 1:  # another dialog opened during the preview
+                return
+            if self._canonical_kind(self.current_kind) != HELM_RELEASES_META.plural:
+                self.notify(
+                    "helm install cancelled - left the helm view during the preview",
+                    severity="warning",
+                )
+                return
+        preview, preview_title = rendered if rendered is not None else (None, "")
         verb = "UPGRADE" if upgrade else "INSTALL"
         version_label = choices.version or "latest"
         operation = (
@@ -4752,7 +4780,10 @@ class KorvidApp(App[None]):
             )
 
         title = f"{'Upgrade' if upgrade else 'Install'} {choices.release}?"
-        await self.push_screen(ConfirmScreen(title, operation, preview=preview), _done)
+        await self.push_screen(
+            ConfirmScreen(title, operation, preview=preview, preview_title=preview_title),
+            _done,
+        )
 
     async def _helm_apply_change(
         self,
@@ -4792,16 +4823,18 @@ class KorvidApp(App[None]):
         values_text: str | None,
         *,
         upgrade: bool,
-    ) -> list[str] | None:
-        """Preview lines for the approval dialog: `helm diff upgrade` when
-        the plugin exists (issue #31), else the plain `--dry-run` render;
-        None on any failure - a preview must never block the approval flow."""
+    ) -> tuple[list[str], str] | None:
+        """Preview lines plus their heading for the approval dialog: `helm
+        diff upgrade` when the plugin exists (issue #31), else the plain
+        `--dry-run` render - the heading names which one the user is looking
+        at. None on any failure - a preview must never block the approval
+        flow."""
 
-        async def _render() -> str:
+        async def _render() -> tuple[str, str]:
             version = choices.version or None
             async with _temp_values_file(values_text) as values_file:
                 if upgrade and await helm.has_diff_plugin():
-                    return await helm.diff_upgrade(
+                    return "helm diff upgrade preview:", await helm.diff_upgrade(
                         choices.release,
                         hit.name,
                         choices.namespace,
@@ -4809,14 +4842,14 @@ class KorvidApp(App[None]):
                         values_file=values_file,
                     )
                 if upgrade:
-                    return await helm.dry_run_upgrade(
+                    return "helm upgrade --dry-run preview:", await helm.dry_run_upgrade(
                         choices.release,
                         hit.name,
                         choices.namespace,
                         version=version,
                         values_file=values_file,
                     )
-                return await helm.dry_run_install(
+                return "helm install --dry-run preview:", await helm.dry_run_install(
                     choices.release,
                     hit.name,
                     choices.namespace,
@@ -4825,10 +4858,12 @@ class KorvidApp(App[None]):
                 )
 
         try:
-            return _clip_preview(await asyncio.wait_for(_render(), _HELM_PREVIEW_TIMEOUT))
+            title, text = await asyncio.wait_for(_render(), _HELM_PREVIEW_TIMEOUT)
         except Exception:
             logger.debug("helm preview failed; dialog opens without it", exc_info=True)
             return None
+        lines = _clip_preview(text)
+        return (lines, title) if lines is not None else None
 
     async def _helm_rollback_flow(self) -> None:
         """Rollback (the `rollout_restart` key on a revision row of the
@@ -4873,6 +4908,7 @@ class KorvidApp(App[None]):
                 f"Rollback {row.release} to revision {row.revision}?",
                 operation,
                 preview=preview,
+                preview_title="helm diff rollback preview:",
             ),
             _done,
         )
