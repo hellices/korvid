@@ -1441,8 +1441,8 @@ def test_parse_debug_pod_name_absent_returns_none() -> None:
 
 
 async def test_shell_refused_while_context_switching() -> None:
-    """s during a :ctx switch is refused up front: the exec would race the
-    teardown and could attach to whichever cluster wins (issue #36)."""
+    """Pressing `s` during a :ctx switch is refused up front: the exec would
+    race the teardown and could attach to whichever cluster wins (issue #36)."""
     app = make_app([_pod("api-1")])
     with (
         patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
