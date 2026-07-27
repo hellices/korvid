@@ -105,7 +105,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_auth_method=auth_method,
         agent_ollama_num_ctx=_parse_num_ctx(ollama_raw.get("num_ctx")),
         agent_ollama_temperature=_parse_temperature(ollama_raw.get("temperature")),
-        agent_ollama_seed=_parse_positive_int(ollama_raw.get("seed")),
+        agent_ollama_seed=_parse_seed(ollama_raw.get("seed")),
         agent_ollama_think=ollama_raw.get("think") is True,
         agent_ollama_keep_alive=_parse_keep_alive(ollama_raw.get("keep_alive")),
         keybindings=dict(raw.get("keybindings") or {}),
@@ -217,7 +217,7 @@ def _parse_num_ctx(value: Any) -> int:
 
 
 def _parse_positive_int(value: Any) -> int | None:
-    """Coerce an `agent.ollama` count (num_ctx, seed) to a positive int, or None."""
+    """Coerce `agent.ollama.num_ctx` to a positive int, or None."""
     if isinstance(value, bool):  # YAML `true` would silently become 1
         return None
     try:
@@ -225,6 +225,21 @@ def _parse_positive_int(value: Any) -> int | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _parse_seed(value: Any) -> int | None:
+    """Coerce `agent.ollama.seed` to a non-negative int, or None.
+
+    Unlike num_ctx, `seed: 0` is a valid (reproducible) sampling seed and
+    must not fall back to the server's random default.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _parse_temperature(value: Any) -> float:

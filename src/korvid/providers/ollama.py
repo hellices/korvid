@@ -76,8 +76,11 @@ class OllamaProvider(LLMProvider):
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
+            # A generous read timeout: a cold start (model load after
+            # keep_alive expiry) can take well over a minute to the first
+            # token on large local models.
             self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(60.0, connect=10.0),
+                timeout=httpx.Timeout(300.0, connect=10.0),
             )
         return self._client
 
@@ -126,7 +129,12 @@ class OllamaProvider(LLMProvider):
         *,
         stream: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Yield completion events as an async generator."""
+        """Yield completion events as an async generator.
+
+        The `stream` parameter is part of the LLMProvider signature but has
+        no effect here: the native request always streams NDJSON and the
+        events yielded are identical either way.
+        """
         client = self._get_client()
         tool_calls: list[dict[str, str]] = []
         usage: dict[str, int] | None = None

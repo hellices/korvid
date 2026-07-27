@@ -548,3 +548,17 @@ def test_ollama_inf_and_overflow_values_fall_back(tmp_path: Path) -> None:
     assert cfg.agent_ollama_num_ctx == 16384
     assert cfg.agent_ollama_temperature == 0.0
     assert cfg.agent_ollama_seed is None
+
+
+def test_ollama_seed_zero_is_valid(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  ollama:\n    seed: 0\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_seed == 0
+
+
+def test_ollama_negative_seed_falls_back(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  ollama:\n    seed: -1\n")
+    cfg = load_config(p)
+    assert cfg.agent_ollama_seed is None

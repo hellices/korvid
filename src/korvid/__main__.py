@@ -319,6 +319,9 @@ def _build_agent_wiring(
             model=settings.model,
             api_key_env=settings.api_key_env,
             oauth_token=token_store.load("github-oauth"),
+            # ollama_options is captured from startup config: the :ai wizard
+            # does not edit agent.ollama.*, so the values cannot go stale. If
+            # config reload is ever added, re-derive the options here.
             ollama=ollama_options,
         )
         provider_box[0] = new_provider
