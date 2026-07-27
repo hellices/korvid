@@ -4732,38 +4732,23 @@ class KorvidApp(App[None]):
             values_text = text if meaningful else None
         rendered = await self._helm_change_preview(helm, hit, choices, values_text, upgrade=upgrade)
         action = "helm-upgrade" if upgrade else "helm-install"
-        if upgrade:
-            # The preview runs over the interactive table: the row selected
-            # for upgrade must still be the one the user approves.
-            if not self._write_context_intact(
-                action,
-                HELM_RELEASES_META,
-                choices.namespace,
-                choices.release,
-                phase="the preview render",
-            ):
-                return
-        else:
-            if len(self.screen_stack) > 1:  # another dialog opened during the preview
-                return
-            if self._canonical_kind(self.current_kind) != HELM_RELEASES_META.plural:
-                self.notify(
-                    "helm install cancelled - left the helm view during the preview",
-                    severity="warning",
-                )
-                return
+        if not self._helm_context_after_preview(action, choices, upgrade=upgrade):
+            return
         preview, preview_title = rendered if rendered is not None else (None, "")
         verb = "UPGRADE" if upgrade else "INSTALL"
         version_label = choices.version or "latest"
+        if values_text is not None:
+            values_label, values_detail = "edited in $EDITOR", "custom"
+        elif choices.reuse_values:
+            values_label, values_detail = "reuse current values", "reused"
+        else:
+            values_label, values_detail = "chart defaults", "defaults"
         operation = (
             f"HELM {verb} {choices.release} (chart {hit.name} {version_label})"
             f" in namespace {choices.namespace}\n"
-            f"values: {'edited in $EDITOR' if values_text is not None else 'chart defaults'}"
+            f"values: {values_label}"
         )
-        detail = (
-            f"chart={hit.name} version={version_label}"
-            f" values={'custom' if values_text is not None else 'defaults'}"
-        )
+        detail = f"chart={hit.name} version={version_label} values={values_detail}"
 
         def _done(confirmed: bool | None) -> None:
             if not confirmed:
@@ -4785,6 +4770,30 @@ class KorvidApp(App[None]):
             _done,
         )
 
+    def _helm_context_after_preview(
+        self, action: str, choices: HelmReleaseChoices, *, upgrade: bool
+    ) -> bool:
+        """The preview runs over the interactive table: the state the user
+        approves must still be the state that was previewed."""
+        if upgrade:
+            # The row selected for upgrade must still be the one approved.
+            return self._write_context_intact(
+                action,
+                HELM_RELEASES_META,
+                choices.namespace,
+                choices.release,
+                phase="the preview render",
+            )
+        if len(self.screen_stack) > 1:  # another dialog opened during the preview
+            return False
+        if self._canonical_kind(self.current_kind) != HELM_RELEASES_META.plural:
+            self.notify(
+                "helm install cancelled - left the helm view during the preview",
+                severity="warning",
+            )
+            return False
+        return True
+
     async def _helm_apply_change(
         self,
         helm: HelmCLI,
@@ -4805,6 +4814,7 @@ class KorvidApp(App[None]):
                     choices.namespace,
                     version=version,
                     values_file=values_file,
+                    reuse_values=choices.reuse_values,
                 )
             else:
                 await helm.install(
@@ -4840,6 +4850,7 @@ class KorvidApp(App[None]):
                         choices.namespace,
                         version=version,
                         values_file=values_file,
+                        reuse_values=choices.reuse_values,
                     )
                 if upgrade:
                     return "helm upgrade --dry-run preview:", await helm.dry_run_upgrade(
@@ -4848,6 +4859,7 @@ class KorvidApp(App[None]):
                         choices.namespace,
                         version=version,
                         values_file=values_file,
+                        reuse_values=choices.reuse_values,
                     )
                 return "helm install --dry-run preview:", await helm.dry_run_install(
                     choices.release,

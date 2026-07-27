@@ -167,7 +167,7 @@ async def test_dotted_release_name_is_accepted() -> None:
         await _opened(app, pilot)
         app.screen.query_one("#helm-release", Input).value = "team.web"
         await pilot.press("enter")
-        await pilot.pause()
+        await until(pilot, lambda: app.result != "unset", label="prompt dismissed")
         assert isinstance(app.result, HelmReleaseChoices)
         assert app.result.release == "team.web"
 
@@ -192,7 +192,7 @@ async def test_release_name_at_53_chars_is_accepted() -> None:
         await _opened(app, pilot)
         app.screen.query_one("#helm-release", Input).value = "a" * 53
         await pilot.press("enter")
-        await pilot.pause()
+        await until(pilot, lambda: app.result != "unset", label="prompt dismissed")
         assert isinstance(app.result, HelmReleaseChoices)
 
 
@@ -229,5 +229,37 @@ async def test_namespace_at_63_chars_is_accepted() -> None:
         await _opened(app, pilot)
         app.screen.query_one("#helm-namespace", Input).value = "n" * 63
         await pilot.press("enter")
-        await pilot.pause()
+        await until(pilot, lambda: app.result != "unset", label="prompt dismissed")
         assert isinstance(app.result, HelmReleaseChoices)
+
+
+async def test_upgrade_mode_defaults_to_reusing_current_values() -> None:
+    """`helm upgrade` resets custom values to chart defaults unless
+    `--reuse-values` is passed: the wizard's safe default for an existing
+    release is to keep its current overrides."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app, namespace="prod", release="web")
+        await _opened(app, pilot)
+        assert app.screen.query_one("#helm-values", Select).value == "reuse current values"
+        await pilot.press("enter")
+        await until(pilot, lambda: app.result != "unset", label="prompt dismissed")
+        assert isinstance(app.result, HelmReleaseChoices)
+        assert app.result.reuse_values is True
+        assert app.result.edit_values is False
+
+
+async def test_install_mode_offers_no_reuse_option() -> None:
+    """A fresh install has no current values to reuse."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open(app)
+        await _opened(app, pilot)
+        select = app.screen.query_one("#helm-values", Select)
+        assert select.value == VALUES_MODES[0]
+        labels = [str(prompt) for prompt, _ in select._options]
+        assert "reuse current values" not in labels
+        await pilot.press("enter")
+        await until(pilot, lambda: app.result != "unset", label="prompt dismissed")
+        assert isinstance(app.result, HelmReleaseChoices)
+        assert app.result.reuse_values is False

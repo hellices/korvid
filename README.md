@@ -170,7 +170,7 @@ When a `helm` binary is on `PATH`, the browser gains write actions
 | Key | View | Action |
 |---|---|---|
 | `i` | `:helm` | Install: chart picker (`helm search repo`), release/version/namespace wizard, optional values in `$EDITOR` |
-| `u` | `:helm` | Upgrade the selected release — same wizard, pinned to that release |
+| `u` | `:helm` | Upgrade the selected release — same wizard, pinned to that release; defaults to reusing the release's current values (`--reuse-values`) |
 | `r` | revision drill-down | Roll back the release to the selected revision |
 
 Install and upgrade always show a preview before the confirmation

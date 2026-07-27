@@ -172,11 +172,18 @@ class HelmCLI:
         version: str | None = None,
         values_file: str | None = None,
     ) -> str:
-        """`helm install --dry-run`: rendered manifests, nothing applied."""
+        """`helm install --dry-run`: rendered manifests, nothing applied.
+
+        `--hide-secret` (helm 3.13+) keeps generated Secret manifests out of
+        the preview - the approval dialog must not bypass korvid's masked
+        Secret display. On older helm the flag is unknown, the render fails,
+        and the dialog simply opens without a preview.
+        """
         return await self._run(
             "install",
             *self._release_args(release, chart, namespace, version, values_file),
             "--dry-run",
+            "--hide-secret",
         )
 
     async def upgrade(
@@ -187,11 +194,17 @@ class HelmCLI:
         *,
         version: str | None = None,
         values_file: str | None = None,
+        reuse_values: bool = False,
     ) -> str:
-        """`helm upgrade` - a cluster write; callers gate it behind approval."""
-        return await self._run(
-            "upgrade", *self._release_args(release, chart, namespace, version, values_file)
-        )
+        """`helm upgrade` - a cluster write; callers gate it behind approval.
+
+        `reuse_values` keeps the release's existing overrides (`helm upgrade`
+        resets them to chart defaults otherwise - a silent operational trap).
+        """
+        args = self._release_args(release, chart, namespace, version, values_file)
+        if reuse_values:
+            args.append("--reuse-values")
+        return await self._run("upgrade", *args)
 
     async def dry_run_upgrade(
         self,
@@ -201,13 +214,16 @@ class HelmCLI:
         *,
         version: str | None = None,
         values_file: str | None = None,
+        reuse_values: bool = False,
     ) -> str:
-        """`helm upgrade --dry-run`: rendered manifests, nothing applied."""
-        return await self._run(
-            "upgrade",
-            *self._release_args(release, chart, namespace, version, values_file),
-            "--dry-run",
-        )
+        """`helm upgrade --dry-run`: rendered manifests, nothing applied.
+
+        `--hide-secret` for the same reason as `dry_run_install`.
+        """
+        args = self._release_args(release, chart, namespace, version, values_file)
+        if reuse_values:
+            args.append("--reuse-values")
+        return await self._run("upgrade", *args, "--dry-run", "--hide-secret")
 
     async def diff_upgrade(
         self,
@@ -217,11 +233,13 @@ class HelmCLI:
         *,
         version: str | None = None,
         values_file: str | None = None,
+        reuse_values: bool = False,
     ) -> str:
         """`helm diff upgrade` (plugin): live-vs-proposed diff for previews."""
-        return await self._run(
-            "diff", "upgrade", *self._release_args(release, chart, namespace, version, values_file)
-        )
+        args = self._release_args(release, chart, namespace, version, values_file)
+        if reuse_values:
+            args.append("--reuse-values")
+        return await self._run("diff", "upgrade", *args)
 
     async def rollback(self, release: str, revision: int, namespace: str) -> str:
         """`helm rollback` - a cluster write; callers gate it behind approval."""

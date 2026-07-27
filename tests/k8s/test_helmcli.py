@@ -296,3 +296,37 @@ async def test_spawn_failure_raises_helm_error() -> None:
 
     with pytest.raises(HelmError, match="failed to start helm"):
         await _execute(["/nonexistent/helm-binary-for-tests"], timeout=5.0)
+
+
+async def test_dry_run_previews_hide_generated_secrets() -> None:
+    """Dry-run stdout is rendered in the approval dialog: generated Secret
+    manifests must be hidden so chart data/stringData cannot bypass the
+    masked Secret display."""
+    cli, execute = _cli()
+    execute.return_value = (0, "manifest...", "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        await cli.dry_run_install("web", "bitnami/nginx", "default")
+        await cli.dry_run_upgrade("web", "bitnami/nginx", "default")
+    for call in execute.await_args_list:
+        assert "--hide-secret" in call.args[0]
+
+
+async def test_upgrade_reuse_values_flag() -> None:
+    """`--reuse-values` keeps the release's existing overrides; without it a
+    default upgrade silently resets them to chart defaults."""
+    cli, execute = _cli()
+    execute.return_value = (0, "ok", "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        await cli.upgrade("web", "bitnami/nginx", "default", reuse_values=True)
+        await cli.dry_run_upgrade("web", "bitnami/nginx", "default", reuse_values=True)
+        await cli.diff_upgrade("web", "bitnami/nginx", "default", reuse_values=True)
+    for call in execute.await_args_list:
+        assert "--reuse-values" in call.args[0]
+
+
+async def test_upgrade_without_reuse_omits_the_flag() -> None:
+    cli, execute = _cli()
+    execute.return_value = (0, "ok", "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        await cli.upgrade("web", "bitnami/nginx", "default")
+    assert "--reuse-values" not in execute.await_args_list[0].args[0]

@@ -27,6 +27,11 @@ from korvid.ui.widgets.confirm_screen import FreshKeysInput
 #: values handling offered by the wizard, in display order (default first).
 VALUES_MODES: tuple[str, str] = ("chart defaults", "edit in $EDITOR")
 
+#: upgrade mode prepends (and defaults to) reusing the release's current
+#: overrides: a plain `helm upgrade` silently resets them to chart defaults.
+REUSE_VALUES_MODE = "reuse current values"
+UPGRADE_VALUES_MODES: tuple[str, ...] = (REUSE_VALUES_MODE, *VALUES_MODES)
+
 #: helm release names are DNS-1123 subdomains (dots allowed) capped at 53
 #: characters; namespaces are DNS-1123 labels capped at 63. Reject locally
 #: with a message instead of a cryptic server failure after approval.
@@ -88,6 +93,7 @@ class HelmReleaseChoices:
     version: str
     namespace: str
     edit_values: bool
+    reuse_values: bool = False
 
 
 class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
@@ -159,9 +165,8 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
                 )
             with Horizontal(classes="install-row"):
                 yield Static("values", classes="install-label", markup=False)
-                yield Select.from_values(
-                    VALUES_MODES, value=VALUES_MODES[0], allow_blank=False, id="helm-values"
-                )
+                modes = UPGRADE_VALUES_MODES if self._upgrade else VALUES_MODES
+                yield Select.from_values(modes, value=modes[0], allow_blank=False, id="helm-values")
             with Horizontal(classes="install-actions"):
                 yield Button(verb, variant="primary", id="helm-submit")
                 yield Button("Cancel", id="helm-cancel")
@@ -192,9 +197,13 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
                 severity="warning",
             )
             return None
-        edit_values = str(self.query_one("#helm-values", Select).value) == VALUES_MODES[1]
+        mode = str(self.query_one("#helm-values", Select).value)
         return HelmReleaseChoices(
-            release=release, version=version, namespace=namespace, edit_values=edit_values
+            release=release,
+            version=version,
+            namespace=namespace,
+            edit_values=mode == VALUES_MODES[1],
+            reuse_values=mode == REUSE_VALUES_MODE,
         )
 
     @on(Input.Submitted)

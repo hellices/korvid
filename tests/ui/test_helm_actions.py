@@ -103,8 +103,9 @@ class FakeHelm(HelmCLI):
         *,
         version: str | None = None,
         values_file: str | None = None,
+        reuse_values: bool = False,
     ) -> str:
-        self.calls.append(("dry-run-upgrade", release, chart, namespace, version))
+        self.calls.append(("dry-run-upgrade", release, chart, namespace, version, reuse_values))
         return "RENDERED-UPGRADE-MANIFEST"
 
     async def upgrade(
@@ -115,8 +116,9 @@ class FakeHelm(HelmCLI):
         *,
         version: str | None = None,
         values_file: str | None = None,
+        reuse_values: bool = False,
     ) -> str:
-        self.calls.append(("upgrade", release, chart, namespace, version))
+        self.calls.append(("upgrade", release, chart, namespace, version, reuse_values))
         self._snoop_values(values_file)
         return "upgraded"
 
@@ -128,8 +130,9 @@ class FakeHelm(HelmCLI):
         *,
         version: str | None = None,
         values_file: str | None = None,
+        reuse_values: bool = False,
     ) -> str:
-        self.calls.append(("diff-upgrade", release, chart, namespace, version))
+        self.calls.append(("diff-upgrade", release, chart, namespace, version, reuse_values))
         return "+ UPGRADE-DIFF-LINE"
 
     async def rollback(self, release: str, revision: int, namespace: str) -> str:
@@ -457,13 +460,15 @@ async def test_upgrade_key_reuses_wizard_with_fixed_release(tmp_path: Path) -> N
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
         assert "HELM UPGRADE web" in app.screen._operation  # type: ignore[attr-defined]  # test peeks
+        # the wizard's upgrade default keeps the release's current overrides
+        assert "values: reuse current values" in app.screen._operation  # type: ignore[attr-defined]  # test peeks
         await pilot.press("y")
         await until(
             pilot,
             lambda: audit_path.exists() and "success" in audit_path.read_text(),
             label="audited success",
         )
-        assert ("upgrade", "web", "bitnami/nginx", "default", "18.1.0") in helm.calls
+        assert ("upgrade", "web", "bitnami/nginx", "default", "18.1.0", True) in helm.calls
         assert _audit_entries(audit_path)[-1]["action"] == "helm-upgrade"
 
 
@@ -588,10 +593,16 @@ class GatedPreviewHelm(FakeHelm):
         *,
         version: str | None = None,
         values_file: str | None = None,
+        reuse_values: bool = False,
     ) -> str:
         await self.gate.wait()
         return await super().dry_run_upgrade(
-            release, chart, namespace, version=version, values_file=values_file
+            release,
+            chart,
+            namespace,
+            version=version,
+            values_file=values_file,
+            reuse_values=reuse_values,
         )
 
 
