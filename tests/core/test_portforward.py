@@ -694,6 +694,71 @@ def test_fail_start_stops_a_child_that_eofed_but_still_runs() -> None:
     assert registry.get(record.id) is record
 
 
+def test_fail_start_can_drop_a_start_that_never_worked() -> None:
+    """`keep=False` aborts the handshake and unlists the forward atomically."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    assert registry.wait_ready(record.id, timeout=0.05) == "starting"
+    failed = registry.fail_start(record.id, keep=False)
+    assert failed is record
+    assert record.status == "broken"
+    assert procs[0].terminated
+    assert registry.get(record.id) is None  # never worked — not offered for re-attach
+    procs[0].stdout.feed(None)  # release the reader thread
+
+
+def test_fail_start_keep_false_yields_to_a_confirmed_forward() -> None:
+    """Even with `keep=False` a last-instant confirmation wins: no teardown."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
+    assert registry.fail_start(record.id, keep=False) is None
+    assert registry.get(record.id) is record  # still listed, still alive
+    assert not procs[0].terminated
+    procs[0].stdout.feed(None)
+
+
+def test_start_racing_teardown_never_leaks_a_child() -> None:
+    """A spawn that lands after stop_all() is put down, not silently orphaned."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        registry.stop_all()  # teardown wins the race while the spawn is in flight
+        proc = _FakeProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    with pytest.raises(ValueError, match="shut down"):
+        registry.start(_spec())
+    assert procs[0].killed, "the orphaned child was left running past teardown"
+    assert registry.forwards() == []
+
+
+def test_reattach_racing_teardown_never_leaks_a_child() -> None:
+    """A replacement spawned after stop_all() is discarded, not adopted."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        if procs:  # the replacement spawn — teardown wins the race first
+            registry.stop_all()
+        proc = _FakeProc(argv)
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    record = registry.start(_spec())
+    procs[0].exit(1)
+    registry.refresh()
+    assert record.status == "broken"
+    assert registry.reattach(record.id) is None
+    assert procs[1].killed, "the orphaned replacement was left running past teardown"
+    assert registry.forwards() == []
+
+
 def test_start_gives_up_on_port_holder_that_cannot_be_reaped() -> None:
     """A kill-immune child must fail the new spawn, not block the caller."""
     procs: list[_FakeProc] = []

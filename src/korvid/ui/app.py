@@ -1507,15 +1507,7 @@ class KorvidApp(App[None]):
             if status != "alive":
                 self._report_failed_forward_start(registry, record, status, reattached=reattached)
                 return
-            if reattached:
-                self._audit_forward("port-forward-start", spec, outcome="reattached")
-                self.notify(f"Re-attached forward localhost:{spec.local_port}")
-                return
-            self._audit_forward("port-forward-start", spec)
-            self.notify(
-                f"Forwarding localhost:{spec.local_port} → "
-                f"{spec.namespace}/{spec.name}:{spec.remote_port}"
-            )
+            self._report_forward_ready(record, reattached=reattached)
         except asyncio.CancelledError:
             # Shutdown cancelled the confirmation mid-handshake — the start
             # must still reach the log before its teardown stop entry
@@ -1555,6 +1547,19 @@ class KorvidApp(App[None]):
         """The forward's current-generation confirmation worker, if any."""
         return self._current_confirmations.get(forward_id)
 
+    def _report_forward_ready(self, record: ForwardRecord, *, reattached: bool) -> None:
+        """Toast and audit a confirmed forward (fresh start or re-attach)."""
+        spec = record.spec
+        if reattached:
+            self._audit_forward("port-forward-start", spec, outcome="reattached")
+            self.notify(f"Re-attached forward localhost:{spec.local_port}")
+            return
+        self._audit_forward("port-forward-start", spec)
+        self.notify(
+            f"Forwarding localhost:{spec.local_port} → "
+            f"{spec.namespace}/{spec.name}:{spec.remote_port}"
+        )
+
     def _report_failed_forward_start(
         self,
         registry: ForwardRegistry,
@@ -1570,8 +1575,20 @@ class KorvidApp(App[None]):
         correct a false success later (it only detects exits), so the forward
         is failed explicitly instead of reported ready on a guess. The caller
         already verified this confirmation is the record's current one.
+
+        ``status`` is only a timeout snapshot: the abort itself is the
+        registry's atomic compare-and-transition, and when that yields to a
+        readiness line that landed after the snapshot, the confirmed forward
+        is reported as the success it is instead of being torn down.
         """
         spec = record.spec
+        if registry.fail_start(record.id, keep=reattached) is None:
+            # The handshake resolved between the wait snapshot and the abort.
+            if registry.get(record.id) is record and record.status == "alive":
+                self._report_forward_ready(record, reattached=reattached)
+            else:  # stopped from :pf in the same window
+                self._audit_forward("port-forward-start", spec, outcome="stopped before ready")
+            return
         if status == "starting":
             detail = f"kubectl did not confirm the forward within {_FORWARD_READY_SECONDS:g}s"
         else:
@@ -1580,10 +1597,7 @@ class KorvidApp(App[None]):
             # A failed re-attach stays listed as broken for another try. Mark
             # the breakage as already reported: the specific error toasted
             # below must not be followed by the poll's generic broken toast.
-            registry.fail_start(record.id)
             self._broken_forwards.add(record.id)
-        else:
-            registry.stop(record.id)  # never worked — drop it from :pf
         self.notify(f"Port-forward failed to start: {detail}", severity="error")
         self._audit_forward("port-forward-start", spec, outcome=f"error: {detail}")
 

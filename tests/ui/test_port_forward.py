@@ -1187,6 +1187,52 @@ async def test_silent_start_times_out_as_failure(tmp_path: Path) -> None:
             procs[0].stdout.feed(None)  # release the reader thread
 
 
+async def test_last_instant_confirmation_wins_over_the_timeout(tmp_path: Path) -> None:
+    """A ready line landing after the wait snapshot is a success, not a failure."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    record = registry.start(
+        ForwardSpec(kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80)
+    )
+    notices: list[str] = []
+    original = app.notify
+
+    def _capture(message: str, **kwargs: Any) -> Any:
+        notices.append(message)
+        return original(message, **kwargs)
+
+    async with app.run_test() as pilot:
+        app.notify = _capture  # type: ignore[method-assign]  # test spy
+        await _wait_rows(app, pilot)
+        procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+        await until(pilot, lambda: record.status == "alive", label="listener confirmed")
+        # The wait snapshot said "starting", but the listener confirmed since:
+        # the failure path must yield to the registry's atomic check.
+        app._report_failed_forward_start(registry, record, "starting", reattached=False)
+        await until(
+            pilot,
+            lambda: any(n.startswith("Forwarding") for n in notices),
+            label="success toast",
+        )
+        assert not any("failed to start" in n for n in notices)
+        assert registry.get(record.id) is record  # never torn down
+        assert not procs[0].terminated
+        procs[0].stdout.feed(None)  # release the reader thread
+
+
 async def test_superseded_confirmation_never_reports_success(tmp_path: Path) -> None:
     """A confirmation replaced by a re-attach must not claim the new process."""
     procs: list[_FakeProc] = []

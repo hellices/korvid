@@ -100,21 +100,39 @@ class ForwardRegistry:
         self._next_id = 1
         #: Terminated processes awaiting exit: (proc, kill deadline, local port).
         self._reaping: list[tuple[_ForwardProcess, float, int]] = []
+        #: Serializes registration state across threads: start()/reattach()
+        #: run off the UI event loop while refresh()/stop()/stop_all() run on
+        #: it. Held only for fast mutations — never across a blocking wait.
+        self._ops = threading.RLock()
+        #: Set (permanently) by stop_all(): a spawn that lands afterwards is
+        #: discarded instead of registered, so no child outlives teardown.
+        self._closed = False
 
     def start(self, spec: ForwardSpec) -> ForwardRecord:
         """Spawn `kubectl port-forward` for ``spec`` and track it.
 
         Raises:
             OSError: when the subprocess cannot be spawned (kubectl missing).
-            ValueError: when the spec's kind is not forwardable, or the local
+            ValueError: when the spec's kind is not forwardable, the local
                 port is already used by a live forward — kubectl would only
-                fail the bind asynchronously and masquerade as "broken".
+                fail the bind asynchronously and masquerade as "broken" —
+                or the registry has been shut down by stop_all().
         """
         self.refresh()  # a just-died forward must not hold its local port
         self._ensure_port_free(spec.local_port)
-        record = ForwardRecord(id=self._next_id, spec=spec, _proc=self._spawn(spec))
-        self._next_id += 1
-        self._records[record.id] = record
+        proc = self._spawn(spec)
+        with self._ops:
+            closed = self._closed
+            if not closed:
+                record = ForwardRecord(id=self._next_id, spec=spec, _proc=proc)
+                self._next_id += 1
+                self._records[record.id] = record
+        if closed:
+            # stop_all() won the race while the spawn was in flight — adopt
+            # nothing: an untracked child would outlive the session.
+            self._discard_spawn(proc)
+            msg = "port-forward registry is shut down"
+            raise ValueError(msg)
         self._begin_handshake(record)
         return record
 
@@ -233,7 +251,9 @@ class ForwardRegistry:
         grace deadline to SIGKILL — stop() itself never blocks.
         """
         self._reap()
-        for record in self._records.values():
+        # Snapshot: a start() on another thread may register concurrently,
+        # and iterating the live dict would raise on the size change.
+        for record in self.forwards():
             # Same lock discipline as the reader thread and fail_start():
             # status transitions stay serialized against the handshake.
             with record._lock:
@@ -247,7 +267,8 @@ class ForwardRegistry:
 
     def forwards(self) -> list[ForwardRecord]:
         """Tracked forwards in start order."""
-        return list(self._records.values())
+        with self._ops:
+            return list(self._records.values())
 
     def get(self, forward_id: int) -> ForwardRecord | None:
         """The tracked forward with ``forward_id``, or None."""
@@ -260,7 +281,8 @@ class ForwardRegistry:
         refresh() escalates to SIGKILL if it ignores the grace period, so a
         wedged kubectl can never freeze the caller (the UI event loop).
         """
-        record = self._records.pop(forward_id, None)
+        with self._ops:
+            record = self._records.pop(forward_id, None)
         if record is None:
             return None
         self._signal_stop(record)
@@ -270,9 +292,11 @@ class ForwardRegistry:
     def reattach(self, forward_id: int) -> ForwardRecord | None:
         """Restart a ``broken`` forward in place (same id, same spec).
 
-        Returns None (and changes nothing) when the id is unknown or the
+        Returns None (and changes nothing) when the id is unknown, the
         forward is still alive — re-running a live forward would just fail
-        on the occupied local port.
+        on the occupied local port — or the record was stopped or torn down
+        while the replacement was being spawned (the replacement is put
+        down, never adopted).
 
         Raises:
             OSError: when the replacement subprocess cannot be spawned.
@@ -289,13 +313,23 @@ class ForwardRegistry:
         # there instead of being orphaned by the process swap below.
         self._ensure_port_free(record.spec.local_port)
         replacement = self._spawn(record.spec)
-        # Swap under the record lock: a stale watcher that already passed its
-        # generation check must finish its guarded writes before the new
-        # process (and the reset output) are published.
-        with record._lock:
-            record._proc = replacement
-            record.last_output = ""
-            superseded = record._ready
+        superseded: threading.Event | None = None
+        # Adopt under the ops lock: a stop or teardown that won the race
+        # while the spawn was in flight must not have its outcome undone by
+        # this thread publishing a fresh process afterwards.
+        with self._ops:
+            adopted = not self._closed and self._records.get(forward_id) is record
+            if adopted:
+                # Swap under the record lock: a stale watcher that already
+                # passed its generation check must finish its guarded writes
+                # before the new process (and the reset output) are published.
+                with record._lock:
+                    record._proc = replacement
+                    record.last_output = ""
+                    superseded = record._ready
+        if not adopted:
+            self._discard_spawn(replacement)
+            return None
         if superseded is not None:
             # Resolve the previous generation's waiter right away — its
             # reader may never observe the swap (blocked on a silent
@@ -309,16 +343,20 @@ class ForwardRegistry:
         self._begin_handshake(record)
         return record
 
-    def fail_start(self, forward_id: int) -> ForwardRecord | None:
+    def fail_start(self, forward_id: int, *, keep: bool = True) -> ForwardRecord | None:
         """Abort a forward whose readiness handshake never resolved.
 
         Covers both unconfirmed outcomes: a child silent-but-running after
         the caller's wait window, and one already marked ``broken`` by its
         stream closing while the process may still run and hold the local
         port. Either way the child is signalled to exit (grace-escalated
-        like stop()) and the record is ``broken`` — it stays listed so `:pf`
-        shows the failure and offers a re-attach. No-op once the forward
-        confirmed its listener (``alive``).
+        like stop()) and the record is ``broken``. With ``keep`` it stays
+        listed so `:pf` shows the failure and offers a re-attach;
+        ``keep=False`` also unlists a start that never worked.
+
+        Returns None without touching anything when the forward confirmed
+        its listener in the meantime (``alive``) — the caller's timeout
+        snapshot lost that race and must treat the forward as ready.
         """
         record = self._records.get(forward_id)
         if record is None:
@@ -330,6 +368,9 @@ class ForwardRegistry:
             if record.status == "alive":
                 return None
             record.status = "broken"
+        if not keep:
+            with self._ops:
+                self._records.pop(forward_id, None)
         self._signal_stop(record)
         self._release_waiters(record)
         return record
@@ -352,35 +393,41 @@ class ForwardRegistry:
                 time — the spawn fails cleanly instead of blocking the
                 caller (the UI event loop) indefinitely.
         """
-        for existing in self._records.values():
-            if existing.spec.local_port != local_port:
-                continue
-            if existing.status != "broken":
-                msg = f"local port {local_port} already forwarded by #{existing.id}"
-                raise ValueError(msg)
-            proc = existing._proc
-            if (
-                proc is not None
-                and proc.poll() is None
-                and all(reaping is not proc for reaping, _, _ in self._reaping)
-            ):
-                self._signal_stop(existing)
-        remaining: list[tuple[_ForwardProcess, float, int]] = []
-        for proc, deadline, port in self._reaping:
-            if port == local_port:
-                if proc.poll() is None:
-                    proc.kill()
-                    try:
-                        proc.wait(timeout=_STOP_GRACE_SECONDS)
-                    except subprocess.TimeoutExpired as exc:
-                        # Even SIGKILL cannot reap a child stuck in the
-                        # kernel. Keep tracking it and fail this spawn
-                        # bounded rather than freezing the caller.
-                        msg = f"local port {local_port} is still being released — try again"
-                        raise ValueError(msg) from exc
+        holders: list[tuple[_ForwardProcess, float, int]] = []
+        with self._ops:
+            for existing in list(self._records.values()):
+                if existing.spec.local_port != local_port:
+                    continue
+                if existing.status != "broken":
+                    msg = f"local port {local_port} already forwarded by #{existing.id}"
+                    raise ValueError(msg)
+                proc = existing._proc
+                if (
+                    proc is not None
+                    and proc.poll() is None
+                    and all(reaping is not proc for reaping, _, _ in self._reaping)
+                ):
+                    self._signal_stop(existing)
+            remaining: list[tuple[_ForwardProcess, float, int]] = []
+            for entry in self._reaping:
+                (holders if entry[2] == local_port else remaining).append(entry)
+            self._reaping = remaining
+        # Blocking waits happen outside the ops lock so refresh()/stop() on
+        # the event loop are never stalled behind a stuck port reclaim.
+        for index, (proc, _deadline, _port) in enumerate(holders):
+            if proc.poll() is not None:
                 continue  # exited — no longer holds the port, drop the entry
-            remaining.append((proc, deadline, port))
-        self._reaping = remaining
+            proc.kill()
+            try:
+                proc.wait(timeout=_STOP_GRACE_SECONDS)
+            except subprocess.TimeoutExpired as exc:
+                # Even SIGKILL cannot reap a child stuck in the kernel. Keep
+                # tracking every unreaped holder and fail this spawn bounded
+                # rather than freezing the caller.
+                with self._ops:
+                    self._reaping.extend(holders[index:])
+                msg = f"local port {local_port} is still being released — try again"
+                raise ValueError(msg) from exc
 
     def stop_all(self) -> list[ForwardRecord]:
         """Terminate every tracked forward (app exit / context teardown).
@@ -392,8 +439,12 @@ class ForwardRegistry:
         Returns:
             The stopped records, so the caller can audit each stop.
         """
-        records = list(self._records.values())
-        self._records.clear()
+        with self._ops:
+            self._closed = True
+            records = list(self._records.values())
+            self._records.clear()
+            reaping = self._reaping
+            self._reaping = []
         for record in records:
             self._release_waiters(record)
         live = [
@@ -406,8 +457,7 @@ class ForwardRegistry:
         # Include earlier ctrl+d stops still awaiting their grace kill — a
         # stubborn forward must not outlive the session just because the
         # user exited before the next refresh() tick.
-        live.extend(proc for proc, _, _ in self._reaping if proc.poll() is None)
-        self._reaping.clear()
+        live.extend(proc for proc, _, _ in reaping if proc.poll() is None)
         deadline = monotonic() + _STOP_GRACE_SECONDS
         while any(proc.poll() is None for proc in live):
             if monotonic() > deadline:
@@ -434,7 +484,19 @@ class ForwardRegistry:
         if proc is None or proc.poll() is not None:
             return  # already exited (broken) — nothing to signal
         proc.terminate()
-        self._reaping.append((proc, monotonic() + _STOP_GRACE_SECONDS, record.spec.local_port))
+        with self._ops:
+            self._reaping.append((proc, monotonic() + _STOP_GRACE_SECONDS, record.spec.local_port))
+
+    def _discard_spawn(self, proc: _ForwardProcess) -> None:
+        """Put down a child spawned after the registry shut down.
+
+        It was never registered, so nothing else will ever reap it — kill
+        outright (no grace: teardown already spent the grace budget) and
+        wait bounded off the event loop.
+        """
+        proc.kill()
+        with suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=_STOP_GRACE_SECONDS)
 
     @staticmethod
     def _release_waiters(record: ForwardRecord) -> None:
@@ -449,15 +511,16 @@ class ForwardRegistry:
 
     def _reap(self) -> None:
         """Advance stopped processes: drop exited ones, kill deadline-breakers."""
-        remaining: list[tuple[_ForwardProcess, float, int]] = []
-        for proc, deadline, port in self._reaping:
-            if proc.poll() is not None:
-                continue  # exited; poll() reaped it
-            if monotonic() > deadline:
-                proc.kill()
-            # Keep until poll() confirms the exit so the child is reaped.
-            remaining.append((proc, deadline, port))
-        self._reaping = remaining
+        with self._ops:
+            remaining: list[tuple[_ForwardProcess, float, int]] = []
+            for proc, deadline, port in self._reaping:
+                if proc.poll() is not None:
+                    continue  # exited; poll() reaped it
+                if monotonic() > deadline:
+                    proc.kill()
+                # Keep until poll() confirms the exit so the child is reaped.
+                remaining.append((proc, deadline, port))
+            self._reaping = remaining
 
 
 def candidate_remote_ports(kind: str, manifest: dict[str, Any]) -> list[int]:
