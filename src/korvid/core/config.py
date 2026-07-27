@@ -141,7 +141,12 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_model=_opt_str(agent_raw.get("model")),
         agent_api_key_env=api_key_env,
         agent_auth_method=auth_method,
-        agent_profile=_parse_profile(agent_raw.get("profile")),
+        agent_profile=(
+            # Key presence checked here: `profile: null` is a present-but-
+            # invalid value (falls back to `full` like any other), not the
+            # unset state that lets the :ai wizard suggest `small`.
+            _parse_profile(agent_raw["profile"]) if "profile" in agent_raw else None
+        ),
         agent_ollama_num_ctx=_parse_num_ctx(ollama_raw.get("num_ctx")),
         agent_ollama_temperature=_parse_temperature(ollama_raw.get("temperature")),
         agent_ollama_seed=_parse_seed(ollama_raw.get("seed")),
@@ -259,17 +264,15 @@ def _parse_buffer_lines(value: Any) -> int:
     return lines if lines > 0 else 5000
 
 
-def _parse_profile(value: Any) -> str | None:
-    """Coerce `agent.profile` to a known profile name.
+def _parse_profile(value: Any) -> str:
+    """Coerce a present `agent.profile` value to a known profile name.
 
-    None only when the key is absent — that is the "unset" state the `:ai`
-    wizard is allowed to fill with its Ollama suggestion. A present but
-    unknown value falls back to `full` (never crashing startup) so a typo
-    keeps today's runtime behavior AND stays stable through the wizard
-    instead of silently becoming `small`.
+    An unknown or null value falls back to `full` (never crashing startup)
+    so a typo keeps today's runtime behavior AND stays stable through the
+    wizard instead of silently becoming `small`. The caller maps an absent
+    key to None — the "unset" state the `:ai` wizard is allowed to fill
+    with its Ollama suggestion.
     """
-    if value is None:
-        return None
     if isinstance(value, str) and value.strip().lower() in ("full", "small"):
         return value.strip().lower()
     return "full"

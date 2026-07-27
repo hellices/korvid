@@ -910,6 +910,16 @@ def test_agent_profile_invalid_values_fall_back_to_full(tmp_path: Path) -> None:
     assert cfg.agent_profile == "full"
 
 
+def test_agent_profile_null_is_invalid_not_unset(tmp_path: Path) -> None:
+    """`profile: null` is a present-but-invalid value: it falls back to
+    `full` like any other, rather than becoming the unset state that would
+    let the wizard silently apply the Ollama `small` suggestion."""
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  profile: null\n")
+    cfg = load_config(p)
+    assert cfg.agent_profile == "full"
+
+
 def test_save_agent_config_persists_the_small_profile(tmp_path: Path) -> None:
     """The wizard's profile suggestion must survive a restart (issue #71):
     saving `small` writes agent.profile so the next start rebuilds the same
