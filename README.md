@@ -217,8 +217,9 @@ debug:
 creates a privileged pod with the node's filesystem mounted at `/host`, it
 always passes the approval gate with the privilege escalation stated
 explicitly, and the whole action is audit-logged fail-closed like every other
-write.  korvid creates the debugger pod detached (`--attach=false -o json`)
-so it knows the exact pod it owns, waits for it to become Ready, attaches
+write.  korvid creates the debugger pod detached (`--attach=false`), parses
+the pod name from kubectl's creation message, fetches its uid with an exact
+`kubectl get pod`, waits for it to become Ready, attaches
 interactively, and deletes precisely that pod (uid precondition) when the
 shell exits — a debugger pod another operator started is never touched.
 A warning tells you where to look if the cleanup fails.

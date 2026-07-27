@@ -1359,10 +1359,13 @@ def test_build_node_debug_create_argv_defaults() -> None:
     # the approval dialog promises a privileged pod; the default profile
     # is not privileged, so sysadmin must be requested explicitly
     assert "--profile=sysadmin" in argv
-    # detached create with JSON output: korvid must learn the exact pod
-    # name/uid it created so cleanup never touches another operator's pod
+    # detached create: korvid parses the created pod's name from kubectl's
+    # message and fetches the uid with an exact get, so cleanup never
+    # touches another operator's pod. `kubectl debug` has no -o/--output —
+    # passing one would make every create fail to parse flags.
     assert "--attach=false" in argv
-    assert argv[argv.index("-o") + 1] == "json"
+    assert "-o" not in argv
+    assert "--output" not in argv
     ns_idx = argv.index("-n")
     assert argv[ns_idx + 1] == "default"
     # every kubectl flag must precede the `--` command separator
@@ -1413,3 +1416,24 @@ def test_build_pod_attach_argv() -> None:
     ]
     argv = build_pod_attach_argv("debug-ns", "node-debugger-x", context="prod")
     assert argv[argv.index("--context") + 1] == "prod"
+
+
+def test_parse_debug_pod_name() -> None:
+    from korvid.ui.shell import parse_debug_pod_name
+
+    out = (
+        "Creating debugging pod node-debugger-worker-1-abcde with container"
+        " debugger on node worker-1.\n"
+    )
+    assert parse_debug_pod_name(out) == "node-debugger-worker-1-abcde"
+    # message may be preceded by other informational lines
+    assert parse_debug_pod_name(f"some warning\n{out}") == "node-debugger-worker-1-abcde"
+
+
+def test_parse_debug_pod_name_absent_returns_none() -> None:
+    from korvid.ui.shell import parse_debug_pod_name
+
+    assert parse_debug_pod_name("") is None
+    assert parse_debug_pod_name("something unexpected") is None
+    # similar words embedded mid-line must not match the anchored message
+    assert parse_debug_pod_name("note: Creating debugging pod soon") is None

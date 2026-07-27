@@ -113,6 +113,7 @@ from korvid.ui.shell import (
     build_pod_get_argv,
     build_pod_wait_argv,
     build_probe_argv,
+    parse_debug_pod_name,
 )
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
@@ -4327,10 +4328,11 @@ class KorvidApp(App[None]):
         persist before the subprocess starts, or the shell is blocked.
         kubectl addresses the node by name only, so the approved node
         incarnation is re-verified just before creating the pod (like the
-        pod debug path). The pod is created detached (`--attach=false -o
-        json`) so korvid knows the exact name and uid of its own pod: the
-        interactive session then `kubectl attach`es to it, and cleanup
-        deletes precisely that pod with a uid precondition — a debugger
+        pod debug path). The pod is created detached (`--attach=false`); its
+        name is parsed from kubectl's creation message and its uid fetched
+        with an exact `kubectl get pod`, so korvid knows precisely which pod
+        it owns: the interactive session then `kubectl attach`es to it, and
+        cleanup deletes exactly that pod with a uid precondition — a debugger
         another operator starts meanwhile is never touched.
         """
         audit = self._audit
@@ -4548,18 +4550,8 @@ class KorvidApp(App[None]):
                 severity="error",
             )
             return f"error: pod creation failed; cleanup skipped: check namespace {namespace}"
-        try:
-            payload = json.loads(proc.stdout)
-        except ValueError:
-            payload = None
-        item_meta = payload.get("metadata") if isinstance(payload, dict) else None
-        if not isinstance(item_meta, dict):
-            # Valid JSON with an unexpected shape (e.g. metadata is a scalar)
-            # must land in the unidentifiable branch, not raise past the
-            # finalizer while a privileged pod may exist.
-            item_meta = None
-        pod_name = (item_meta or {}).get("name")
-        if not isinstance(pod_name, str) or not pod_name:
+        pod_name = parse_debug_pod_name(proc.stdout.decode(errors="replace"))
+        if pod_name is None:
             # Pod created (exit 0) but unidentifiable: refuse to guess.
             self.notify(
                 f"kubectl did not report the created pod — check {namespace} for"
@@ -4570,13 +4562,13 @@ class KorvidApp(App[None]):
                 "error: created pod could not be identified;"
                 f" cleanup skipped: check namespace {namespace}"
             )
-        uid = (item_meta or {}).get("uid")
-        if not isinstance(uid, str) or not uid:
+        uid = await self._fetch_created_pod_uid(namespace, pod_name)
+        if uid is None:
             # Without the uid the cleanup delete would lose its precondition
             # and could remove a same-name replacement pod: refuse.
             self.notify(
-                f"kubectl did not report the created pod's uid — check {namespace}"
-                " for leftover node-debugger pods",
+                f"kubectl did not report the created pod's uid — check pod"
+                f" {pod_name} in namespace {namespace}",
                 severity="error",
             )
             return (
@@ -4584,6 +4576,40 @@ class KorvidApp(App[None]):
                 f" cleanup skipped: check namespace {namespace}"
             )
         return pod_name, uid
+
+    async def _fetch_created_pod_uid(self, namespace: str, pod_name: str) -> str | None:
+        """Fetch the just-created debugger pod's uid with an exact get.
+
+        `kubectl debug` has no machine-readable output, so after parsing the
+        pod name from its message the uid — required as the cleanup delete's
+        precondition — comes from `kubectl get pod <name> -o json`. Any
+        failure (launch, timeout, non-zero exit, malformed JSON) returns
+        None: the caller treats the pod as unidentifiable rather than guess.
+        """
+        argv = build_pod_get_argv(namespace, pod_name, context=self.config.kube_context)
+        try:
+            proc = await asyncio.to_thread(subprocess.run, argv, capture_output=True, timeout=15)
+        except (subprocess.TimeoutExpired, OSError):
+            logger.warning("could not fetch created debugger pod", exc_info=True)
+            return None
+        if proc.returncode != 0:
+            logger.warning(
+                "created debugger pod fetch failed: %s",
+                proc.stderr.decode(errors="replace").strip(),
+            )
+            return None
+        try:
+            payload = json.loads(proc.stdout)
+        except ValueError:
+            return None
+        item_meta = payload.get("metadata") if isinstance(payload, dict) else None
+        if not isinstance(item_meta, dict):
+            # Valid JSON with an unexpected shape (e.g. metadata is a scalar)
+            # must land in the unidentifiable branch, not raise past the
+            # finalizer while a privileged pod may exist.
+            return None
+        uid = item_meta.get("uid")
+        return uid if isinstance(uid, str) and uid else None
 
     async def _run_kubectl_ok(self, argv: list[str], timeout: float) -> bool:
         """Run a non-interactive kubectl helper; True on exit 0."""

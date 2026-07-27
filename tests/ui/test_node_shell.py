@@ -139,13 +139,20 @@ DBG_POD = "node-debugger-worker-1-abcde"
 DBG_UID = "dbg-uid"
 
 
+def _create_msg(name: str = DBG_POD) -> bytes:
+    """`kubectl debug node/ --attach=false` output: the human-readable
+    creation message (kubectl debug has no machine-readable output mode)."""
+    return f"Creating debugging pod {name} with container debugger on node worker-1.\n".encode()
+
+
 def _pod_json(name: str = DBG_POD, uid: str = DBG_UID) -> bytes:
-    """`kubectl debug --attach=false -o json` output: the created pod."""
+    """`kubectl get pod <name> -o json` output: the created pod."""
     return json.dumps({"metadata": {"name": name, "uid": uid}}).encode()
 
 
-def _kubectl_run(create_result: Any = None, wait_rc: int = 0):  # type: ignore[no-untyped-def]  # test helper
-    """subprocess.run fake serving the detached create and the Ready wait."""
+def _kubectl_run(create_result: Any = None, wait_rc: int = 0, get_result: Any = None):  # type: ignore[no-untyped-def]  # test helper
+    """subprocess.run fake serving the detached create, the identifying
+    get, and the Ready wait."""
     calls: list[list[str]] = []
 
     def run(argv, **kwargs):  # type: ignore[no-untyped-def]  # test helper
@@ -153,6 +160,10 @@ def _kubectl_run(create_result: Any = None, wait_rc: int = 0):  # type: ignore[n
         if "debug" in argv:
             if create_result is not None:
                 return create_result
+            return SimpleNamespace(returncode=0, stdout=_create_msg(), stderr=b"")
+        if "get" in argv:
+            if get_result is not None:
+                return get_result
             return SimpleNamespace(returncode=0, stdout=_pod_json(), stderr=b"")
         return SimpleNamespace(returncode=wait_rc, stdout=b"", stderr=b"")
 
@@ -228,8 +239,10 @@ async def test_confirmed_node_shell_creates_waits_attaches_and_audits(tmp_path: 
 
             await until(pilot, _outcome_written, label="outcome audit record")
     assert run_calls[0] == build_node_debug_create_argv("worker-1", "default")
-    assert run_calls[1][:2] == ["kubectl", "wait"]
-    assert f"pod/{DBG_POD}" in run_calls[1]
+    assert run_calls[1][:3] == ["kubectl", "get", "pod"]
+    assert DBG_POD in run_calls[1]
+    assert run_calls[2][:2] == ["kubectl", "wait"]
+    assert f"pod/{DBG_POD}" in run_calls[2]
     assert call_records == [build_pod_attach_argv("default", DBG_POD)]
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     ours = [e for e in entries if e["action"] == "node-shell"]
@@ -376,7 +389,7 @@ async def test_node_shell_unidentifiable_create_output_aborts(tmp_path: Path) ->
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     run_fake, _ = _kubectl_run(
-        create_result=SimpleNamespace(returncode=0, stdout=b"not json", stderr=b"")
+        create_result=SimpleNamespace(returncode=0, stdout=b"something unexpected", stderr=b"")
     )
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test() as pilot:
@@ -574,6 +587,8 @@ async def test_node_shell_cancelled_worker_still_deletes_pod(tmp_path: Path) -> 
 
     def run_fake(argv, **kwargs):  # type: ignore[no-untyped-def]  # test helper
         if "debug" in argv:
+            return SimpleNamespace(returncode=0, stdout=_create_msg(), stderr=b"")
+        if "get" in argv:
             return SimpleNamespace(returncode=0, stdout=_pod_json(), stderr=b"")
         loop_box[0].call_soon_threadsafe(wait_entered.set)
         release.wait(timeout=10)
@@ -604,7 +619,7 @@ async def test_node_shell_create_without_uid_aborts(tmp_path: Path) -> None:
     rec = DeleteRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
     run_fake, _ = _kubectl_run(
-        create_result=SimpleNamespace(
+        get_result=SimpleNamespace(
             returncode=0,
             stdout=json.dumps({"metadata": {"name": DBG_POD}}).encode(),
             stderr=b"",
@@ -639,10 +654,12 @@ async def test_node_shell_cancelled_during_create_still_deletes_pod(tmp_path: Pa
     loop_box: list[asyncio.AbstractEventLoop] = []
 
     def run_fake(argv, **kwargs):  # type: ignore[no-untyped-def]  # test helper
-        assert "debug" in argv  # wait/attach must never run
+        if "get" in argv:  # uid fetch runs while the create settles
+            return SimpleNamespace(returncode=0, stdout=_pod_json(), stderr=b"")
+        assert "debug" in argv  # the readiness wait must never run
         loop_box[0].call_soon_threadsafe(create_entered.set)
         release.wait(timeout=10)
-        return SimpleNamespace(returncode=0, stdout=_pod_json(), stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=_create_msg(), stderr=b"")
 
     with _node_shell_env(run_fake) as call_records:
         async with app.run_test():
@@ -777,8 +794,9 @@ async def test_valid_json_with_scalar_metadata_is_unidentifiable(tmp_path: Path)
     finalizer while a privileged pod may exist."""
     app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
     async with app.run_test():
+        create_ok = SimpleNamespace(returncode=0, stdout=_create_msg(), stderr=b"")
         weird = SimpleNamespace(returncode=0, stdout=b'{"metadata": "unexpected"}', stderr=b"")
-        with patch("korvid.ui.app.subprocess.run", return_value=weird):
+        with patch("korvid.ui.app.subprocess.run", side_effect=[create_ok, weird]):
             outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == (
             "error: created pod could not be identified; cleanup skipped: check namespace default"
