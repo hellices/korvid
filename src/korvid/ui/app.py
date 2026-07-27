@@ -461,6 +461,7 @@ class KorvidApp(App[None]):
         #: the in-flight drain worker, if any - pressing the drain key again
         #: cancels it (evictions stop; the node stays cordoned).
         self._drain_worker: Worker[None] | None = None
+        self._drain_node: str | None = None
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -2970,6 +2971,16 @@ class KorvidApp(App[None]):
         issued and the node stays cordoned."""
         worker = self._drain_worker
         if worker is not None and worker.is_running:
+            _, selected = self._selected_ns_name()
+            if self._drain_node is not None and selected != self._drain_node:
+                # Cancelling is a targeted act: another node being selected
+                # must not silently kill the running drain (issue #40 review).
+                self.notify(
+                    f"drain of nodes/{self._drain_node} in progress"
+                    " - press the drain key on it to cancel",
+                    severity="warning",
+                )
+                return
             worker.cancel()
             return
         resolved = self._node_target("drain")
@@ -2991,6 +3002,7 @@ class KorvidApp(App[None]):
 
         def _done(confirmed: bool | None) -> None:
             if confirmed:
+                self._drain_node = name
                 self._drain_worker = self.run_worker(self._run_drain(ops, meta, name, uid, plan))
 
         evictable = sum(1 for t in plan.targets if t.pdb_blocked is None)

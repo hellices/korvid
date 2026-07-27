@@ -90,6 +90,7 @@ def make_app(
     *,
     readonly: bool = False,
     check_calls: list[tuple[str, str, str, str | None, str, str]] | None = None,
+    extra_nodes: tuple[str, ...] = (),
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -105,7 +106,15 @@ def make_app(
             )
         ],
         "nodes": [
-            GenericSummary(name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1")
+            GenericSummary(
+                name="worker-1", namespace="", kind="Node", created="", uid="node-uid-1"
+            ),
+            *(
+                GenericSummary(
+                    name=extra, namespace="", kind="Node", created="", uid=f"uid-{extra}"
+                )
+                for extra in extra_nodes
+            ),
         ],
     }
 
@@ -448,3 +457,33 @@ async def test_drain_aborts_when_plan_gains_unapproved_pods_after_cordon(tmp_pat
         entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert entries[-1]["outcome"] == "aborted"
         assert "sneaky-1" in entries[-1]["detail"]
+
+
+async def test_drain_key_on_other_node_does_not_cancel_running_drain(tmp_path: Path) -> None:
+    """Cancelling is targeted: pressing the drain key while a *different*
+    node is selected must warn instead of silently killing the running
+    drain."""
+    plan = DrainPlan(targets=(_target("web-1"),), skipped_daemonset=(), skipped_mirror=())
+    rec = NodeRecorder(plan=plan)
+    rec.release_evictions.clear()  # keep the drain in flight
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path, extra_nodes=("worker-2",))
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        await _confirm_typed(pilot, "worker-1")
+        await until(pilot, lambda: rec.evict_started.is_set(), label="first eviction in flight")
+        await pilot.press("down")  # select worker-2
+        await pilot.press("D")  # must NOT cancel worker-1's drain
+        await pilot.pause(0.2)
+        assert "cancelled" not in (audit_path.read_text() if audit_path.exists() else "")
+        assert app._drain_worker is not None
+        assert app._drain_worker.is_running
+        rec.release_evictions.set()
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "evicted 1" in audit_path.read_text(),
+            label="drain finished",
+        )

@@ -209,3 +209,19 @@ def test_non_controller_daemonset_reference_is_still_evicted() -> None:
     plan = build_drain_plan([pod], [])
     assert plan.skipped_daemonset == ()
     assert [t.name for t in plan.targets] == ["web-1"]
+
+
+def test_multiple_matching_pdbs_block_regardless_of_budget() -> None:
+    """The Eviction API rejects a pod matched by more than one PDB with a
+    500 even when every budget has room; the plan must warn up front."""
+    pod = _pod("web-1", uid="u1", labels={"app": "web"})
+    pdbs = [
+        _pdb("pdb-a", match_labels={"app": "web"}, disruptions_allowed=5),
+        _pdb("pdb-b", match_labels={"app": "web"}, disruptions_allowed=5),
+    ]
+    plan = build_drain_plan([pod], pdbs)
+    blocked = plan.targets[0].pdb_blocked
+    assert blocked is not None
+    assert "multiple PDBs match" in blocked
+    assert "pdb-a" in blocked
+    assert "pdb-b" in blocked

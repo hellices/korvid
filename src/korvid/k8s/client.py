@@ -733,25 +733,52 @@ class KubeClient(WriteOps):
     async def drain_plan(self, node_name: str) -> DrainPlan:
         """Impact plan for draining *node_name*: every pod scheduled there,
         classified against the cluster's PodDisruptionBudgets (see
-        ``korvid.k8s.drain``). Only a missing policy/v1 API (404) degrades
-        to an empty budget list - blocked evictions then surface as 429s
-        during execution; any other PDB-list failure (RBAC denial, auth,
-        transport) propagates so the UI aborts instead of showing a falsely
-        PDB-aware plan."""
+        ``korvid.k8s.drain``). A missing policy/v1 API (404) degrades to an
+        empty budget list - blocked evictions then surface as 429s during
+        execution; an RBAC-denied cluster-wide list (403) falls back to
+        per-namespace PDB queries so namespace-scoped users still get
+        up-front warnings; any other failure propagates so the UI aborts
+        instead of showing a falsely PDB-aware plan."""
         pods = await self._request_json(
             "/api/v1/pods",
             query_params=[("fieldSelector", f"spec.nodeName={node_name}")],
         )
+        pod_items = pods.get("items") or []
         try:
             pdbs = await self._request_json("/apis/policy/v1/poddisruptionbudgets")
+            pdb_items = pdbs.get("items") or []
         except ApiStatusError as exc:
-            if exc.status != 404:
-                # RBAC denial, auth failure or transport trouble must abort
-                # the drain rather than present a falsely PDB-aware plan.
+            if exc.status == 404:
+                logger.debug("policy/v1 PDB API absent (404); drain plan proceeds without budgets")
+                pdb_items = []
+            elif exc.status == 403:
+                pdb_items = await self._pdbs_by_namespace(pod_items)
+            else:
+                # Auth failure or transport trouble must abort the drain
+                # rather than present a falsely PDB-aware plan.
                 raise
-            logger.debug("policy/v1 PDB API absent (404); drain plan proceeds without budgets")
-            pdbs = {}
-        return build_drain_plan(pods.get("items") or [], pdbs.get("items") or [])
+        return build_drain_plan(pod_items, pdb_items)
+
+    async def _pdbs_by_namespace(self, pods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Cluster-wide PDB list was RBAC-denied: retry per namespace of the
+        pods being drained, which namespace-scoped users can usually read.
+        404 means no PDBs in that namespace's view; anything else (including
+        a per-namespace 403) propagates - see ``drain_plan``."""
+        namespaces = sorted(
+            {str((p.get("metadata") or {}).get("namespace", "")) for p in pods} - {""}
+        )
+        items: list[dict[str, Any]] = []
+        for namespace in namespaces:
+            try:
+                got = await self._request_json(
+                    f"/apis/policy/v1/namespaces/{namespace}/poddisruptionbudgets"
+                )
+            except ApiStatusError as exc:
+                if exc.status == 404:
+                    continue
+                raise
+            items.extend(got.get("items") or [])
+        return items
 
     async def _dry_run(
         self,

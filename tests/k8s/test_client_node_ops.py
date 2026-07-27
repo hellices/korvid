@@ -178,15 +178,51 @@ async def test_writeops_defaults_reject_node_ops() -> None:
 
 
 async def test_drain_plan_propagates_non_404_pdb_failure() -> None:
-    """RBAC denial (or any non-404 PDB-list failure) must abort the plan
-    rather than silently presenting a falsely PDB-aware preview."""
+    """Auth failure (or any PDB-list failure other than 404/403) must abort
+    the plan rather than silently presenting a falsely PDB-aware preview."""
     from kubernetes_asyncio.client.exceptions import ApiException
 
     client = KubeClient()
     api = MagicMock()
     pods: dict[str, Any] = {"items": []}
     api.call_api = AsyncMock(
-        side_effect=[_resp(pods), ApiException(status=403, reason="Forbidden")]
+        side_effect=[_resp(pods), ApiException(status=401, reason="Unauthorized")]
     )
-    with patch.object(client, "_api", api), pytest.raises(ApiStatusError, match="403"):
+    with patch.object(client, "_api", api), pytest.raises(ApiStatusError, match="401"):
         await client.drain_plan("worker-1")
+
+
+async def test_drain_plan_falls_back_to_namespaced_pdbs_on_403() -> None:
+    """A namespace-scoped user cannot list PDBs cluster-wide (403); the
+    plan retries per namespace of the drained pods so up-front PDB warnings
+    still work."""
+    from kubernetes_asyncio.client.exceptions import ApiException
+
+    client = KubeClient()
+    api = MagicMock()
+    pods = {
+        "items": [
+            {
+                "metadata": {"name": "web-1", "namespace": "team-a", "uid": "u1"},
+                "spec": {},
+                "status": {"phase": "Running"},
+            }
+        ]
+    }
+    pdb = {
+        "metadata": {"name": "web-pdb", "namespace": "team-a"},
+        "spec": {"selector": {}},
+        "status": {"disruptionsAllowed": 0},
+    }
+    api.call_api = AsyncMock(
+        side_effect=[
+            _resp(pods),
+            ApiException(status=403, reason="Forbidden"),
+            _resp({"items": [pdb]}),
+        ]
+    )
+    with patch.object(client, "_api", api):
+        plan = await client.drain_plan("worker-1")
+    ns_call = api.call_api.call_args_list[2]
+    assert ns_call.args[0] == "/apis/policy/v1/namespaces/team-a/poddisruptionbudgets"
+    assert plan.targets[0].pdb_blocked == "web-pdb"

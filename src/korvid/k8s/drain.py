@@ -121,23 +121,28 @@ def _selector_matches(selector: dict[str, Any], labels: dict[str, str]) -> bool:
 
 
 def _blocking_pdb(pod: dict[str, Any], pdbs: list[dict[str, Any]]) -> str | None:
-    """Name of a same-namespace PDB that matches *pod* and has no
-    disruptions left; None when the eviction is not budget-constrained."""
+    """Why evicting *pod* would currently be refused, or None. A single
+    matching PDB blocks when its budget is exhausted; more than one matching
+    PDB blocks unconditionally - the Eviction API rejects such pods with a
+    500 regardless of budget (kubectl drain fails the same way)."""
     metadata = pod.get("metadata") or {}
     if str((pod.get("status") or {}).get("phase", "")) in _TERMINAL_PHASES:
         return None
     namespace = str(metadata.get("namespace", ""))
     labels = {str(k): str(v) for k, v in (metadata.get("labels") or {}).items()}
-    for pdb in pdbs:
-        pdb_meta = pdb.get("metadata") or {}
-        if str(pdb_meta.get("namespace", "")) != namespace:
-            continue
-        selector = (pdb.get("spec") or {}).get("selector") or {}
-        if not _selector_matches(selector, labels):
-            continue
-        allowed = (pdb.get("status") or {}).get("disruptionsAllowed", 0)
+    matches = [
+        pdb
+        for pdb in pdbs
+        if str((pdb.get("metadata") or {}).get("namespace", "")) == namespace
+        and _selector_matches((pdb.get("spec") or {}).get("selector") or {}, labels)
+    ]
+    if len(matches) > 1:
+        names = ", ".join(sorted(str((m.get("metadata") or {}).get("name", "")) for m in matches))
+        return f"multiple PDBs match ({names}) - the eviction API rejects this"
+    if matches:
+        allowed = (matches[0].get("status") or {}).get("disruptionsAllowed", 0)
         if int(allowed or 0) <= 0:
-            return str(pdb_meta.get("name", ""))
+            return str((matches[0].get("metadata") or {}).get("name", ""))
     return None
 
 
