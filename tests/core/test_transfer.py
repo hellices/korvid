@@ -90,6 +90,15 @@ class TestValidateSpec:
         assert error is not None
         assert "directory" in error
 
+    @pytest.mark.parametrize("remote", ["/tmp/.", "/tmp/.."])
+    def test_dot_basenames_rejected_as_directories(self, remote: str) -> None:
+        # "/tmp/." would make tar archive the whole directory recursively;
+        # "/tmp/.." an even larger parent tree.
+        spec = TransferSpec("download", remote, "/tmp/x")
+        error = validate_spec(spec)
+        assert error is not None
+        assert "directory" in error
+
     def test_local_path_tilde_expanded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

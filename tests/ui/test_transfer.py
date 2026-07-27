@@ -520,6 +520,8 @@ async def test_progress_screen_escape_cancels_transfer(tmp_path: Path) -> None:
         )
     entries = audit_entries(audit_path)
     assert [e["outcome"] for e in entries] == ["intent", "cancelled"]
+    # Partial transfers stay auditable: the outcome records what was moved.
+    assert "bytes=7" in entries[1]["detail"]
     assert not (tmp_path / "big.bin").exists()
 
 

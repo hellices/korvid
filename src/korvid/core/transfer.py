@@ -75,13 +75,9 @@ def validate_spec(spec: TransferSpec) -> str | None:
     tar binary, permissions) surface from the stream itself with the server's
     own message, which is always more accurate than a client-side guess.
     """
-    remote = spec.remote_path.strip()
-    if not remote:
-        return "remote path is required"
-    if not posixpath.isabs(remote):
-        return "remote path must be absolute (e.g. /var/log/app.log)"
-    if remote.endswith("/"):
-        return "remote path must name a file, not a directory"
+    remote_error = _validate_remote_path(spec.remote_path.strip())
+    if remote_error is not None:
+        return remote_error
     if not spec.local_path.strip():
         return "local path is required"
     local = Path(spec.local_path).expanduser()
@@ -99,6 +95,20 @@ def validate_spec(spec: TransferSpec) -> str | None:
     parent = local.parent
     if not parent.is_dir():
         return f"local directory does not exist: {parent}"
+    return None
+
+
+def _validate_remote_path(remote: str) -> str | None:
+    if not remote:
+        return "remote path is required"
+    if not posixpath.isabs(remote):
+        return "remote path must be absolute (e.g. /var/log/app.log)"
+    if remote.endswith("/"):
+        return "remote path must name a file, not a directory"
+    if posixpath.basename(remote) in (".", ".."):
+        # "/tmp/." would hand tar the whole directory (recursive transfer is
+        # out of scope); "/tmp/.." an even larger parent tree.
+        return "remote path must name a file, not a directory"
     return None
 
 

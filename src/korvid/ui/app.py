@@ -1637,21 +1637,32 @@ class KorvidApp(App[None]):
         spec: TransferSpec,
         progress_screen: TransferProgressScreen,
     ) -> tuple[str, str]:
-        """Stream and notify; returns (audit outcome, extra audit detail)."""
+        """Stream and notify; returns (audit outcome, extra audit detail).
+
+        Cancelled and failed transfers record the bytes moved so far, so a
+        partial transfer stays auditable.
+        """
+        latest = 0
+
+        def _progress(count: int) -> None:
+            nonlocal latest
+            latest = count
+            progress_screen.update_progress(count)
+
         try:
             count = await self._stream_transfer(
-                open_pod_exec, namespace, name, container, spec, progress_screen
+                open_pod_exec, namespace, name, container, spec, _progress
             )
         except asyncio.CancelledError:
             self.notify("Transfer cancelled")
-            return "cancelled", ""
+            return "cancelled", f" bytes={latest}"
         except TransferError as exc:
             self.notify(f"Transfer failed: {exc}", severity="error")
-            return f"error: {exc}", ""
+            return f"error: {exc}", f" bytes={latest}"
         except Exception as exc:  # transport errors from aiohttp/OS surface untyped
             logger.exception("transfer failed")
             self.notify(f"Transfer failed: {exc}", severity="error")
-            return f"error: {exc}", ""
+            return f"error: {exc}", f" bytes={latest}"
         verb = "downloaded" if spec.direction == "download" else "uploaded"
         self.notify(f"{verb} {count:,} bytes ({spec.remote_path})")
         return "success", f" bytes={count}"
@@ -1663,7 +1674,7 @@ class KorvidApp(App[None]):
         name: str,
         container: str | None,
         spec: TransferSpec,
-        progress_screen: TransferProgressScreen,
+        progress: Callable[[int], None],
     ) -> int:
         """Run the tar stream as a cancellable task; returns the byte count.
 
@@ -1678,13 +1689,9 @@ class KorvidApp(App[None]):
 
         local = Path(spec.local_path).expanduser()
         if spec.direction == "download":
-            coro = transfer_download(
-                open_exec, spec.remote_path, local, progress_screen.update_progress
-            )
+            coro = transfer_download(open_exec, spec.remote_path, local, progress)
         else:
-            coro = transfer_upload(
-                open_exec, local, spec.remote_path, progress_screen.update_progress
-            )
+            coro = transfer_upload(open_exec, local, spec.remote_path, progress)
         task = asyncio.create_task(coro)
         self._transfer_task = task
         try:
