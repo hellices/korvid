@@ -15,7 +15,13 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES, cap_result
+from korvid.agent.tools import (
+    READ_TOOLS,
+    UI_TOOL_NAMES,
+    WRITE_TOOL_NAMES,
+    cap_result,
+    compact_result,
+)
 
 SYSTEM_PROMPT = (
     "You are korvid's Kubernetes diagnostic agent, embedded in a live TUI the "
@@ -124,6 +130,7 @@ class AgentRuntime:
         max_iterations: int = 15,
         max_history_chars: int = MAX_HISTORY_CHARS,
         max_result_chars: int | None = None,
+        max_tool_calls_per_iteration: int | None = None,
         cluster_context: str | None = None,
         system_prompt: str | None = None,
         ui_prompt: str | None = None,
@@ -159,6 +166,10 @@ class AgentRuntime:
         # small profile (issue #71) sizes this so one full turn of results
         # fits inside its retained-history budget.
         self._max_result_chars = max_result_chars
+        # The small profile's size bound assumes one result per iteration;
+        # prompt text alone does not enforce that, so extra parallel calls
+        # in one response are refused at dispatch (issue #71).
+        self._max_tool_calls_per_iteration = max_tool_calls_per_iteration
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
         self._total_in = 0
         self._total_out = 0
@@ -220,11 +231,23 @@ class AgentRuntime:
         tool_calls: list[dict[str, Any]],
     ) -> AsyncGenerator[AgentEvent, None]:
         """Execute each tool call; yield Started/Finished events; append results."""
-        for tc in tool_calls:
+        call_limit = self._max_tool_calls_per_iteration
+        for index, tc in enumerate(tool_calls):
             call_id = str(tc["id"])
             name = str(tc["name"])
             arguments = str(tc["arguments"])
             yield ToolCallStarted(call_id=call_id, name=name, arguments=arguments)
+            if call_limit is not None and index >= call_limit:
+                # Every call id still gets a tool message so the provider
+                # protocol stays valid; the refusal teaches the model the
+                # rule its profile prompt states.
+                result = (
+                    "ERROR: too many tool calls in one response — call one "
+                    "tool at a time and wait for its result."
+                )
+                yield ToolCallFinished(call_id=call_id, name=name, ok=False, summary=result[:120])
+                self._messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+                continue
             try:
                 parsed = json.loads(arguments or "{}")
             except json.JSONDecodeError:
@@ -242,7 +265,9 @@ class AgentRuntime:
                         # message must not bypass the limit into history.
                         result = cap_result(f"ERROR: {exc}")
             if self._max_result_chars is not None:
-                result = cap_result(result, self._max_result_chars)
+                # Head+tail compaction, not a prefix cut: reports place
+                # their evidence (events, log excerpts) last by design.
+                result = compact_result(result, self._max_result_chars)
             yield ToolCallFinished(
                 call_id=call_id,
                 name=name,

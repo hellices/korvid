@@ -552,12 +552,14 @@ agent:
 The `small` profile keeps every read and write tool (writes still pass the
 approval gate) but trims verbose tool descriptions, offers only the two
 evidence-showing UI tools (`open_logs`, `open_describe`) instead of all
-five, caps turns at 6 tool iterations with at most 3k characters per tool
-result (so one full turn always fits the retained-history budget), retains
-~24k characters of history (sized to a realistic local serving context,
-not the model's advertised window), and swaps the system prompt for a
-short one with a single worked example. `full` reproduces the default
-wiring exactly, so frontier models are unaffected.
+five, caps turns at 6 tool iterations with one tool call per response
+(extra parallel calls are refused) and at most 3k characters per tool
+result (compacted keeping head and tail, so one full turn always fits the
+retained-history budget without losing a report's trailing evidence
+sections), retains ~24k characters of history (sized to a realistic local
+serving context, not the model's advertised window), and swaps the system
+prompt for a short one with a single worked example. `full` reproduces the
+default wiring exactly, so frontier models are unaffected.
 
 The `:ai` wizard suggests `small` automatically when the provider is
 Ollama; the agent panel header shows `[small]` so you always know which

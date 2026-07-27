@@ -48,6 +48,26 @@ def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
     return result
 
 
+_MIDDLE_TRUNCATION_MARKER = "\n… [middle truncated — profile result budget]\n"
+
+
+def compact_result(result: str, limit: int) -> str:
+    """Shrink an oversized result to `limit` chars keeping BOTH ends.
+
+    Reports like diagnose_pod deliberately place Warning events and log
+    excerpts last, so a prefix-only cap would chop the most diagnostic
+    sections. The head keeps identity/context, the (larger) tail keeps the
+    evidence. The output never exceeds `limit`, which also makes the
+    function idempotent — re-applying the same limit is a no-op.
+    """
+    if len(result) <= limit:
+        return result
+    content = max(limit - len(_MIDDLE_TRUNCATION_MARKER), 0)
+    head = content * 2 // 5
+    tail = content - head
+    return result[:head] + _MIDDLE_TRUNCATION_MARKER + result[len(result) - tail :]
+
+
 READ_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",

@@ -23,7 +23,7 @@ from korvid.agent.events import (
 )
 from korvid.agent.profiles import AgentProfile, build_profile
 from korvid.agent.runtime import AgentRuntime
-from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES, cap_result
+from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES, compact_result
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Scenario
 
@@ -50,7 +50,7 @@ class _RecordingExecutor:
 
     The profile's per-result cap is applied *before* recording: grading must
     only credit evidence the model could actually have seen, so the recorded
-    content matches what reaches the conversation. `cap_result` is
+    content matches what reaches the conversation. `compact_result` is
     idempotent, so the runtime re-applying the same cap changes nothing.
     """
 
@@ -62,7 +62,7 @@ class _RecordingExecutor:
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         result: str = await self._executor.execute(name, arguments)
         if self._max_result_chars is not None:
-            result = cap_result(result, self._max_result_chars)
+            result = compact_result(result, self._max_result_chars)
         self.records.append(ToolRecord(name=name, arguments=dict(arguments), result=result))
         return result
 
@@ -256,6 +256,7 @@ async def _drive_turn(
         max_iterations=profile.max_iterations,
         max_history_chars=profile.max_history_chars,
         max_result_chars=profile.max_result_chars,
+        max_tool_calls_per_iteration=profile.max_tool_calls_per_iteration,
         system_prompt=profile.system_prompt,
     )
     tally = _TurnTally()

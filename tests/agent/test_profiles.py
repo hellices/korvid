@@ -132,3 +132,12 @@ def test_full_profile_keeps_the_executor_result_cap() -> None:
     is the pre-profile behavior."""
     profile = build_profile("full", readonly=False, resize_supported=True)
     assert profile.max_result_chars is None
+
+
+def test_small_profile_enforces_one_tool_call_per_iteration() -> None:
+    """The 6-iteration x 3k-per-result budget assumes one result per
+    iteration; the runtime must enforce it, not just the prompt text."""
+    small = build_profile("small", readonly=False, resize_supported=True)
+    assert small.max_tool_calls_per_iteration == 1
+    full = build_profile("full", readonly=False, resize_supported=True)
+    assert full.max_tool_calls_per_iteration is None

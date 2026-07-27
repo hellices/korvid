@@ -34,6 +34,11 @@ SMALL_MAX_HISTORY_CHARS = 24_000
 #: assistant text inside SMALL_MAX_HISTORY_CHARS. The full profile keeps
 #: the executor's own 8k ingest cap instead.
 SMALL_MAX_RESULT_CHARS = 3_000
+#: One result per iteration, enforced at dispatch (extra parallel calls in
+#: a response are refused with an instructive error) — the size bound
+#: below only holds if the prompt's "call one tool at a time" is a rule,
+#: not a suggestion.
+SMALL_MAX_TOOL_CALLS_PER_ITERATION = 1
 
 #: Short role statement, explicit grounding rules, and ONE worked example
 #: (question -> tool call -> result -> grounded answer) instead of the
@@ -95,7 +100,12 @@ class AgentProfile:
     max_history_chars: int
     #: When set, the runtime truncates each tool result to this many chars
     #: (below the executor's 8k cap); None keeps executor-capped results.
+    #: Oversized results are compacted keeping head AND tail — reports like
+    #: diagnose_pod place their evidence sections last by design.
     max_result_chars: int | None
+    #: When set, at most this many tool calls are executed per model
+    #: response; extra parallel calls are refused at dispatch.
+    max_tool_calls_per_iteration: int | None
     system_prompt: str
     ui_prompt: str
 
@@ -137,6 +147,7 @@ def build_profile(name: str, *, readonly: bool, resize_supported: bool) -> Agent
             max_iterations=FULL_MAX_ITERATIONS,
             max_history_chars=MAX_HISTORY_CHARS,
             max_result_chars=None,
+            max_tool_calls_per_iteration=None,
             system_prompt=SYSTEM_PROMPT,
             ui_prompt=UI_DRIVE_PROMPT,
         )
@@ -153,6 +164,7 @@ def build_profile(name: str, *, readonly: bool, resize_supported: bool) -> Agent
             max_iterations=SMALL_MAX_ITERATIONS,
             max_history_chars=SMALL_MAX_HISTORY_CHARS,
             max_result_chars=SMALL_MAX_RESULT_CHARS,
+            max_tool_calls_per_iteration=SMALL_MAX_TOOL_CALLS_PER_ITERATION,
             system_prompt=SMALL_SYSTEM_PROMPT,
             ui_prompt=SMALL_UI_PROMPT,
         )

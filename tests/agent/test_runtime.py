@@ -537,3 +537,64 @@ async def test_runtime_caps_tool_results_at_max_result_chars() -> None:
     assert len(tool_msgs) == 1
     assert len(tool_msgs[0]["content"]) <= 1_000 + len("\n… [truncated — narrow the query]")
     assert "truncated" in tool_msgs[0]["content"]
+
+
+async def test_profile_result_cap_preserves_the_tail_evidence() -> None:
+    """diagnose_pod places Warning events and log excerpts last by design;
+    a prefix-only cap would chop the most diagnostic sections. The profile
+    cap must keep both ends of an oversized result."""
+
+    class HeadTailExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "IDENTITY line\n" + "x" * 5_000 + "\nLOG EXCERPT: OOMKilled"
+
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "diagnose_pod", "arguments": "{}"},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, HeadTailExecutor(), max_result_chars=1_000)
+    await collect(runtime, "diagnose")
+    tool_msg = next(m for m in p.calls[1] if m["role"] == "tool")
+    assert "IDENTITY line" in tool_msg["content"]
+    assert "LOG EXCERPT: OOMKilled" in tool_msg["content"]
+    assert "truncated" in tool_msg["content"]
+    assert len(tool_msg["content"]) < 1_200
+
+
+async def test_tool_call_limit_per_iteration_is_enforced() -> None:
+    """The small prompt says 'call one tool at a time' but text does not
+    enforce anything: extra parallel calls must be refused (with a proper
+    tool message per call id, keeping the provider protocol valid) so one
+    iteration cannot blow the per-turn size bound."""
+    executed: list[str] = []
+
+    class SpyExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            executed.append(name)
+            return "ok"
+
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "{}"},
+                {"type": "tool_call", "id": "c2", "name": "get_events", "arguments": "{}"},
+                {"type": "tool_call", "id": "c3", "name": "get_resource", "arguments": "{}"},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, SpyExecutor(), max_tool_calls_per_iteration=1)
+    events = await collect(runtime, "go")
+    assert executed == ["get_logs"]
+    tool_msgs = [m for m in p.calls[1] if m["role"] == "tool"]
+    assert len(tool_msgs) == 3  # every call id answered
+    assert "ERROR" in tool_msgs[1]["content"]
+    assert "one tool" in tool_msgs[1]["content"]
+    finished = [e for e in events if isinstance(e, ToolCallFinished)]
+    assert [f.ok for f in finished] == [True, False, False]
