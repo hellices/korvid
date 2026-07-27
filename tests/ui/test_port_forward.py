@@ -1966,3 +1966,55 @@ async def test_forward_dialog_cancelled_when_context_switched_while_open() -> No
                 label="dialog epoch refusal",
             )
             assert procs == []
+
+
+async def test_forward_worker_cancelled_when_context_switched_mid_lookup() -> None:
+    """A forward worker whose workload lookup awaits through a completed
+    :ctx switch must not spawn: it only registers in _launching_forwards
+    after the lookup, so teardown never saw it (issue #36 review)."""
+    procs: list[_FakeProc] = []
+
+    app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
+
+    async def switching_lookup(namespace: str, name: str) -> str | None:
+        app._ctx_epoch += 1  # a switch completed while the lookup was in flight
+        return None
+
+    async with app.run_test() as pilot:
+        await _wait_rows(app, pilot)
+        app._resolve_forward_workload = switching_lookup  # type: ignore[method-assign]
+        await app._start_forward(
+            "pods", "default", "api-1", local_port=18080, remote_port=80, epoch=app._ctx_epoch
+        )
+        await until(
+            pilot,
+            lambda: any(
+                "port-forward to api-1 cancelled - the kube context changed" in n.message
+                for n in app._notifications
+            ),
+            label="forward lookup epoch refusal",
+        )
+        assert procs == []
+        assert app._launching_forwards == {}
+
+
+async def test_forward_worker_refused_when_scheduled_with_stale_epoch() -> None:
+    """A forward worker scheduled just as a switch started must refuse at
+    entry: it is not yet in _launching_forwards, so teardown could not
+    cancel it (issue #36 review)."""
+    procs: list[_FakeProc] = []
+    app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
+    async with app.run_test() as pilot:
+        await _wait_rows(app, pilot)
+        await app._start_forward(
+            "pods", "default", "api-1", local_port=18081, remote_port=80, epoch=app._ctx_epoch - 1
+        )
+        await until(
+            pilot,
+            lambda: any(
+                "port-forward to api-1 cancelled - the kube context changed" in n.message
+                for n in app._notifications
+            ),
+            label="forward entry epoch refusal",
+        )
+        assert procs == []

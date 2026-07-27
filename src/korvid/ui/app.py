@@ -2310,7 +2310,9 @@ class KorvidApp(App[None]):
                 )
                 return
             self.run_worker(
-                self._start_forward(kind, ns, name, local_port=result[0], remote_port=result[1])
+                self._start_forward(
+                    kind, ns, name, local_port=result[0], remote_port=result[1], epoch=epoch
+                )
             )
 
         await self.push_screen(
@@ -2382,13 +2384,39 @@ class KorvidApp(App[None]):
         return f"{plural}/{owner[1]}" if plural is not None else None
 
     async def _start_forward(
-        self, kind: str, namespace: str, name: str, *, local_port: int, remote_port: int
+        self,
+        kind: str,
+        namespace: str,
+        name: str,
+        *,
+        local_port: int,
+        remote_port: int,
+        epoch: int,
     ) -> None:
         """Spawn a forward from the registry, audit it, and confirm to the user."""
         registry = self._forwards
         if registry is None:  # pragma: no cover - action guard already checked
             return
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The worker was scheduled just as a switch started: it is not
+            # yet registered in _launching_forwards, so teardown could not
+            # cancel it and it would spawn against the new cluster.
+            self.notify(
+                f"port-forward to {name} cancelled - the kube context changed",
+                severity="warning",
+            )
+            return
         workload = await self._resolve_forward_workload(namespace, name) if kind == "pods" else None
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The workload lookup awaited through a switch (this coroutine
+            # registers below only after the lookup, so teardown missed it):
+            # the old-cluster pod selection must not spawn kubectl against
+            # the retargeted context.
+            self.notify(
+                f"port-forward to {name} cancelled - the kube context changed",
+                severity="warning",
+            )
+            return
         spec = ForwardSpec(
             kind=kind,
             namespace=namespace,
