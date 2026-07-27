@@ -70,5 +70,5 @@ cluster:
         Error creating: pods "batch-9d4c-x" is forbidden: exceeded quota:
         jobs-quota, requested: limits.memory=2Gi, used: limits.memory=7Gi,
         limited: limits.memory=8Gi
-      involvedObject: {kind: ReplicaSet, name: batch-9d4c, namespace: jobs}
+      involvedObject: {kind: ReplicaSet, name: batch-9d4c, namespace: jobs, uid: rs-batch-1}
   logs: {}

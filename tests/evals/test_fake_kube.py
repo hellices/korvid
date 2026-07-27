@@ -45,13 +45,23 @@ def _scenario(**overrides: Any) -> Scenario:
                 "type": "Warning",
                 "reason": "BackOff",
                 "message": "restarting failed container",
-                "involvedObject": {"kind": "Pod", "name": "api-1", "namespace": "shop"},
+                "involvedObject": {
+                    "kind": "Pod",
+                    "name": "api-1",
+                    "namespace": "shop",
+                    "uid": "u1",
+                },
             },
             {
                 "type": "Normal",
                 "reason": "Pulled",
                 "message": "pulled image",
-                "involvedObject": {"kind": "Pod", "name": "web-1", "namespace": "front"},
+                "involvedObject": {
+                    "kind": "Pod",
+                    "name": "web-1",
+                    "namespace": "front",
+                    "uid": "u2",
+                },
             },
         ),
         "logs": {
@@ -118,6 +128,11 @@ async def test_list_events_for_scopes_to_the_named_object() -> None:
 
 async def test_list_events_for_other_object_yields_nothing() -> None:
     events = await _kube().list_events_for("shop", "ghost", kind="Pod", uid=None)
+    assert events == []
+
+
+async def test_list_events_for_excludes_events_with_a_different_uid() -> None:
+    events = await _kube().list_events_for("shop", "api-1", kind="Pod", uid="other-uid")
     assert events == []
 
 

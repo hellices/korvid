@@ -44,5 +44,5 @@ cluster:
       count: 1
       lastTimestamp: "2026-07-27T07:12:00Z"
       message: "The node was low on resource: memory."
-      involvedObject: {kind: Pod, name: worker-3, namespace: jobs}
+      involvedObject: {kind: Pod, name: worker-3, namespace: jobs, uid: pod-evicted-1}
   logs: {}

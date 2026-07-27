@@ -54,11 +54,11 @@ cluster:
       count: 9
       lastTimestamp: "2026-07-27T07:27:00Z"
       message: "0/3 nodes are available: pod has unbound immediate PersistentVolumeClaims."
-      involvedObject: {kind: Pod, name: db-0, namespace: data}
+      involvedObject: {kind: Pod, name: db-0, namespace: data, uid: pod-pvc-1}
     - type: Warning
       reason: ProvisioningFailed
       count: 9
       lastTimestamp: "2026-07-27T07:28:00Z"
       message: 'storageclass.storage.k8s.io "fast-ssd" not found'
-      involvedObject: {kind: PersistentVolumeClaim, name: data-db-0, namespace: data}
+      involvedObject: {kind: PersistentVolumeClaim, name: data-db-0, namespace: data, uid: pvc-1}
   logs: {}

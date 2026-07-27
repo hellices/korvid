@@ -151,6 +151,24 @@ def test_load_scenario_rejects_unknown_log_stream_key(tmp_path: Path) -> None:
         load_scenario(_write(tmp_path, text))
 
 
+def test_load_scenario_rejects_unknown_grading_key(tmp_path: Path) -> None:
+    text = _MINIMAL.replace("  must_not_mention:", "  must_not_claim:")
+    with pytest.raises(ValueError, match="must_not_claim"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_rejects_unknown_cluster_key(tmp_path: Path) -> None:
+    text = _MINIMAL.replace("  events:", "  eventz:")
+    with pytest.raises(ValueError, match="eventz"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_rejects_unknown_top_level_key(tmp_path: Path) -> None:
+    text = _MINIMAL + "notes: scratch\n"
+    with pytest.raises(ValueError, match="notes"):
+        load_scenario(_write(tmp_path, text))
+
+
 def test_load_scenarios_loads_a_directory_sorted_by_id(tmp_path: Path) -> None:
     _write(tmp_path, _MINIMAL.replace("id: oom-killed", "id: z-last"), "b.yaml")
     _write(tmp_path, _MINIMAL, "a.yaml")

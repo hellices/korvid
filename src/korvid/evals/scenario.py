@@ -158,17 +158,31 @@ def bundled_scenarios_dir() -> Path:
     return Path(__file__).parent / "scenarios"
 
 
+_TOP_LEVEL_KEYS = frozenset({"id", "question", "screen", "root_cause", "grading", "cluster"})
+_GRADING_KEYS = frozenset({"must_mention", "must_not_mention", "expected_evidence"})
+_CLUSTER_KEYS = frozenset({"objects", "events", "logs"})
+
+
+def _reject_unknown_keys(mapping: dict[str, Any], allowed: frozenset[str], label: str) -> None:
+    unknown = sorted(set(map(str, mapping)) - allowed)
+    if unknown:
+        raise ValueError(f"{label} has unknown keys: {unknown}")
+
+
 def load_scenario(path: Path) -> Scenario:
     """Load and validate one scenario YAML file."""
     data = yaml.safe_load(path.read_text())
     if not isinstance(data, dict):
         raise ValueError(f"{path.name}: scenario file must be a YAML mapping")
+    _reject_unknown_keys(data, _TOP_LEVEL_KEYS, f"{path.name}: scenario")
     grading = data.get("grading")
     if not isinstance(grading, dict):
         raise ValueError(f"{path.name}: scenario needs a 'grading' mapping")
+    _reject_unknown_keys(grading, _GRADING_KEYS, f"{path.name}: 'grading'")
     cluster = data.get("cluster")
     if not isinstance(cluster, dict):
         raise ValueError(f"{path.name}: scenario needs a 'cluster' mapping")
+    _reject_unknown_keys(cluster, _CLUSTER_KEYS, f"{path.name}: 'cluster'")
     must_mention = _alt_groups(grading.get("must_mention"), "must_mention")
     if not must_mention:
         raise ValueError(f"{path.name}: grading needs at least one must_mention entry")

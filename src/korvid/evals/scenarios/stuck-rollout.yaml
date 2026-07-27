@@ -134,5 +134,5 @@ cluster:
       message: >-
         Failed to pull image "shop/api:v9-typo": rpc error: code = NotFound
         desc = manifest for shop/api:v9-typo not found: manifest unknown
-      involvedObject: {kind: Pod, name: api-8f6b-1, namespace: shop}
+      involvedObject: {kind: Pod, name: api-8f6b-1, namespace: shop, uid: pod-api-new-1}
   logs: {}

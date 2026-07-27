@@ -62,7 +62,12 @@ def _oom_scenario() -> Scenario:
                 "type": "Warning",
                 "reason": "BackOff",
                 "message": "back-off restarting failed container",
-                "involvedObject": {"kind": "Pod", "name": "checkout-1", "namespace": "shop"},
+                "involvedObject": {
+                    "kind": "Pod",
+                    "name": "checkout-1",
+                    "namespace": "shop",
+                    "uid": "u1",
+                },
             },
         ),
         logs={
@@ -203,6 +208,34 @@ async def test_run_scenario_captures_provider_errors() -> None:
     report = await run_scenario(
         scenario,
         provider_factory=lambda: ScriptedProvider([]),  # exhausted script raises
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    run = report.runs[0]
+    assert run.error is not None
+    assert not run.grade.diagnosis_success
+
+
+class _AnswerThenRaiseProvider(ScriptedProvider):
+    """Streams a fully correct answer, then fails before finishing the turn."""
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> Any:
+        yield {"type": "text_delta", "text": "OOMKilled with exit code 137."}
+        raise RuntimeError("connection dropped mid-stream")
+
+
+async def test_run_scenario_never_grades_an_errored_run_as_success() -> None:
+    """A correct-looking answer from a turn that errored must not count."""
+    scenario = _oom_scenario()
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: _AnswerThenRaiseProvider([]),
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )

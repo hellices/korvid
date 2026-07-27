@@ -98,6 +98,7 @@ class FakeKubeClient(ReadOps):
                 str(involved.get("name") or "") == name
                 and (kind is None or str(involved.get("kind") or "") == kind)
                 and str(involved.get("namespace") or "") == namespace
+                and (uid is None or str(involved.get("uid") or "") == uid)
             ):
                 matched.append(event)
         return matched

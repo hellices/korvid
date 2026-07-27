@@ -11,7 +11,7 @@ from __future__ import annotations
 import statistics
 import time
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, TurnComplete
@@ -34,7 +34,7 @@ class _RecordingExecutor:
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         result: str = await self._executor.execute(name, arguments)
-        self.records.append(ToolRecord(name=name, arguments=str(arguments), result=result))
+        self.records.append(ToolRecord(name=name, arguments=dict(arguments), result=result))
         return result
 
 
@@ -57,6 +57,11 @@ class _CountingProvider:
             messages, tools, stream=stream
         )
         return result
+
+    def __getattr__(self, name: str) -> Any:
+        # Pass through provider attributes the runtime may consult (e.g.
+        # a future provider.name in logging) — counting wraps complete only.
+        return getattr(self._provider, name)
 
 
 @dataclass(frozen=True)
@@ -157,8 +162,13 @@ async def _drive_turn(
         elif isinstance(event, AgentError):
             error = event.message
     wall_time = time.monotonic() - started
+    grade_result = grade(scenario, answer, executor.records)
+    if error is not None:
+        # A provider may stream a plausible answer and then fail; an
+        # errored turn never counts as a diagnostic success.
+        grade_result = replace(grade_result, diagnosis_success=False)
     return RunMetrics(
-        grade=grade(scenario, answer, executor.records),
+        grade=grade_result,
         answer=answer,
         iterations=provider.completions,
         tool_calls=tool_calls,

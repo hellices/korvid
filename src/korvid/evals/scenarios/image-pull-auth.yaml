@@ -53,11 +53,11 @@ cluster:
       message: >-
         Failed to pull image "registry.corp.local/shop/api:v3": rpc error:
         code = Unknown desc = failed to authorize: 401 Unauthorized
-      involvedObject: {kind: Pod, name: api-1, namespace: shop}
+      involvedObject: {kind: Pod, name: api-1, namespace: shop, uid: pod-pullauth-1}
     - type: Warning
       reason: BackOff
       count: 12
       lastTimestamp: "2026-07-27T07:28:00Z"
       message: Back-off pulling image "registry.corp.local/shop/api:v3"
-      involvedObject: {kind: Pod, name: api-1, namespace: shop}
+      involvedObject: {kind: Pod, name: api-1, namespace: shop, uid: pod-pullauth-1}
   logs: {}

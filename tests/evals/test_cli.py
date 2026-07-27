@@ -6,11 +6,12 @@ report serialization. The live model round-trip is by definition manual.
 
 from __future__ import annotations
 
+import argparse
 import json
 
 import pytest
 
-from korvid.evals.__main__ import provider_factory_from_env, report_payload
+from korvid.evals.__main__ import _positive_int, provider_factory_from_env, report_payload
 from korvid.evals.grader import GradeResult
 from korvid.evals.runner import RunMetrics, ScenarioReport
 from korvid.providers.openai_compat import OpenAICompatProvider
@@ -21,6 +22,16 @@ def test_provider_factory_requires_base_url_and_model() -> None:
         provider_factory_from_env({"KORVID_EVAL_MODEL": "m"})
     with pytest.raises(SystemExit, match="KORVID_EVAL_MODEL"):
         provider_factory_from_env({"KORVID_EVAL_BASE_URL": "http://localhost:1234/v1"})
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_reps_rejects_non_positive_values(value: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError, match="at least 1"):
+        _positive_int(value)
+
+
+def test_reps_accepts_positive_values() -> None:
+    assert _positive_int("3") == 3
 
 
 def test_provider_factory_builds_a_fresh_openai_compat_provider() -> None:

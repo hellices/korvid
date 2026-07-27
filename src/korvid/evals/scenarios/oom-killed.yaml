@@ -59,7 +59,7 @@ cluster:
       count: 22
       lastTimestamp: "2026-07-27T07:30:00Z"
       message: Back-off restarting failed container worker in pod worker-1_jobs
-      involvedObject: {kind: Pod, name: worker-1, namespace: jobs}
+      involvedObject: {kind: Pod, name: worker-1, namespace: jobs, uid: pod-oom-1}
   logs:
     jobs/worker-1/worker:
       current:

@@ -69,6 +69,13 @@ def report_payload(reports: list[ScenarioReport]) -> list[dict[str, Any]]:
     ]
 
 
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return number
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m korvid.evals",
@@ -82,9 +89,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--reps",
-        type=int,
+        type=_positive_int,
         default=DEFAULT_REPETITIONS,
-        help=f"repetitions per scenario (default: {DEFAULT_REPETITIONS})",
+        help=f"repetitions per scenario, at least 1 (default: {DEFAULT_REPETITIONS})",
     )
     parser.add_argument(
         "--out",

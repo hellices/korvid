@@ -69,7 +69,7 @@ cluster:
       count: 14
       lastTimestamp: "2026-07-27T07:20:00Z"
       message: Back-off restarting failed container app in pod checkout-1_shop
-      involvedObject: {kind: Pod, name: checkout-1, namespace: shop}
+      involvedObject: {kind: Pod, name: checkout-1, namespace: shop, uid: pod-crashloop-1}
   logs:
     shop/checkout-1/app:
       current:

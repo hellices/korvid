@@ -53,5 +53,5 @@ cluster:
       message: >-
         Failed to pull image "front/web:v99": rpc error: code = NotFound
         desc = manifest for front/web:v99 not found: manifest unknown
-      involvedObject: {kind: Pod, name: web-1, namespace: front}
+      involvedObject: {kind: Pod, name: web-1, namespace: front, uid: pod-pulltypo-1}
   logs: {}

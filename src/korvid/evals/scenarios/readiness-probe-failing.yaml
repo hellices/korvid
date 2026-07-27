@@ -54,7 +54,7 @@ cluster:
       count: 41
       lastTimestamp: "2026-07-27T07:29:00Z"
       message: "Readiness probe failed: HTTP probe failed with statuscode: 503"
-      involvedObject: {kind: Pod, name: payments-1, namespace: shop}
+      involvedObject: {kind: Pod, name: payments-1, namespace: shop, uid: pod-readiness-1}
   logs:
     shop/payments-1/payments:
       current:
