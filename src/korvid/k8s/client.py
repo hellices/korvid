@@ -116,6 +116,27 @@ def resolve_context_namespace(
     return str(namespace) if namespace else None
 
 
+def list_context_names(config_file: str | None = None) -> tuple[list[str], str | None]:
+    """Return all kubeconfig context names plus the active one (issue #36).
+
+    Feeds the `:ctx` picker. An unreadable kubeconfig yields `([], None)`
+    rather than raising — the picker then explains there is nothing to
+    switch to.
+    """
+    try:
+        contexts, active = k8s_config.list_kube_config_contexts(config_file=config_file)
+    except Exception:
+        return [], None
+    names = [str(c["name"]) for c in contexts if c.get("name")]
+    active_name = str(active["name"]) if active and active.get("name") else None
+    return names, active_name
+
+
+#: Bound on the `:ctx` auth probe round trip (issue #36): a wedged target
+#: cluster must fail the switch quickly instead of hanging the flow.
+_PROBE_TIMEOUT = 10.0
+
+
 class KubeClient(WriteOps):
     """Thin wrapper over kubernetes_asyncio; returns typed summaries."""
 
@@ -162,6 +183,50 @@ class KubeClient(WriteOps):
         # capability discovered against the previous one.
         self._pod_resize_supported = None
         self._provider_info = None
+
+    async def probe_context(self, context: str) -> None:
+        """Validate that *context* resolves and authenticates (issue #36).
+
+        Loads the kubeconfig into a private ``Configuration`` (never
+        persisted, never the global default) and calls the version endpoint
+        — reachable by any authenticated principal via ``system:discovery``,
+        so RBAC-limited users still pass. Raises on any failure; the live
+        connection is untouched either way, which is what lets a failed
+        `:ctx` switch leave the old context fully usable.
+        """
+        probe_configuration = k8s_client.Configuration()
+        await k8s_config.load_kube_config(
+            context=context,
+            client_configuration=probe_configuration,
+            persist_config=False,
+        )
+        api = k8s_client.ApiClient(probe_configuration)
+        try:
+            await asyncio.wait_for(k8s_client.VersionApi(api).get_code(), timeout=_PROBE_TIMEOUT)
+        finally:
+            await api.close()
+
+    async def switch_context(self, context: str | None) -> None:
+        """Retarget the live connection at *context* (issue #36).
+
+        ``None`` means the kubeconfig's current-context — the recovery path
+        needs it because the original startup context may itself have been
+        the default.
+        Call only after ``probe_context`` succeeded and all consumers of the
+        old connection (watches, pollers, log streams) are stopped: the old
+        ``ApiClient`` is closed here, which would otherwise kill their
+        streams mid-read. The kubeconfig is loaded as the global default so
+        per-session ``WsApiClient`` instances (exec/transfer) follow along.
+        """
+        old_api = self._api
+        await k8s_config.load_kube_config(context=context)
+        self._api = k8s_client.ApiClient()
+        self._core_v1 = k8s_client.CoreV1Api(self._api)
+        # Per-connection caches describe the previous cluster.
+        self._pod_resize_supported = None
+        self._provider_info = None
+        if old_api is not None:
+            await old_api.close()
 
     async def list_namespaces(self) -> list[str]:
         if self._core_v1 is None:

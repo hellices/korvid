@@ -19,7 +19,7 @@ PDB-aware impact plan; `--readonly` disables them all.
 
 | Key | Context | Action |
 |-----|---------|--------|
-| `:` | global | Open command bar — accepts `pods`, `deploy all`, `helm`, `ns <name>`, `ai`, `model`, `q` |
+| `:` | global | Open command bar — accepts `pods`, `deploy all`, `helm`, `ns <name>`, `ctx <name>`, `ai`, `model`, `q` |
 | `?` | global | Help overlay — keybindings grouped by context plus `:` commands (Esc/q/`?` closes) |
 | `/` | table | Open filter — name, `~fuzzy`, `/regex/`, `!exclude`, `-l k=v`, `-s` hide Completed (Enter keeps, Esc clears) |
 | `/` | log pane | Open inline log search |
@@ -272,6 +272,21 @@ node_shell:
   image: registry.corp.local/tools/busybox:1.36
   namespace: node-debug
 ```
+
+## Context switching
+
+`:ctx` opens a picker of kubeconfig contexts (current one marked);
+`:ctx <name>` switches directly, with tab completion. Before anything is
+torn down, korvid probes the target context — loads its credentials in
+isolation and calls the version endpoint — so a context with expired
+credentials or an unreachable API server fails with an error toast while
+you stay connected to the current cluster. Only after the probe succeeds
+does korvid stop watches, port-forwards, log streams and metrics polling,
+clear cached state, and retarget everything (resource discovery, capability
+probes like pod-resize support, cloud-provider hints, audit log context)
+at the new cluster. An open AI conversation survives the switch: the agent
+is told the context changed, and its tools operate on the new cluster from
+the next turn.
 
 ## RBAC-limited clusters
 

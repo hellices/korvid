@@ -71,6 +71,20 @@ class ShowNamespacePicker(Message):
     pass
 
 
+class ShowContextPicker(Message):
+    """Command to open the kubeconfig context picker (bare `:ctx`, issue #36)."""
+
+    pass
+
+
+class SwitchContextCommand(Message):
+    """`:ctx <name>` — switch the session to another kubeconfig context (issue #36)."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self.name = name
+
+
 class UnknownCommand(Message):
     """Command that was not recognised — future agent fallthrough hook."""
 

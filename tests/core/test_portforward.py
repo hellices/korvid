@@ -93,6 +93,17 @@ def test_start_pins_kube_context() -> None:
     assert "--context" in procs[0].argv
 
 
+def test_set_context_pins_new_forwards_to_new_context() -> None:
+    """`:ctx` switching (issue #36): forwards started after the switch must
+    target the new cluster, not the one the registry was built with."""
+    procs: list[_FakeProc] = []
+    registry = _registry(procs, context="ctx-a")
+    registry.set_context("ctx-b")
+    registry.start(_spec())
+    idx = procs[0].argv.index("--context")
+    assert procs[0].argv[idx + 1] == "ctx-b"
+
+
 def test_ids_are_unique_and_stable() -> None:
     registry = _registry([])
     first = registry.start(_spec())

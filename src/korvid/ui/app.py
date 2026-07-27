@@ -98,9 +98,11 @@ from korvid.ui.messages import (
     NavigateCommand,
     QuitCommand,
     ResourcesUpdated,
+    ShowContextPicker,
     ShowError,
     ShowNamespacePicker,
     SortCommand,
+    SwitchContextCommand,
     TransferCancelRequested,
     UnknownCommand,
 )
@@ -343,12 +345,26 @@ _UID_LOOKUP_TIMEOUT = 10.0
 #: after which it opens without a preview - a preview must never block the
 #: approval flow.
 _PREVIEW_TIMEOUT = 3.0
-
 #: Upper bound on the hint-overlay events fetch (issue #34): the trouble half
 #: comes from the status the app already holds, so a stalled API connection
 #: must not delay the overlay past this - the events are marked unavailable
 #: instead.
 _HINT_EVENTS_TIMEOUT = 3.0
+
+
+@dataclasses.dataclass(frozen=True)
+class ContextSwitchResult:
+    """What the composition root re-derived for the new cluster (issue #36).
+
+    Returned by the injected ``switch_context`` callable once the connection
+    is retargeted: capability gates and namespace fallbacks are per-cluster
+    facts the app must adopt atomically with the switch.
+    """
+
+    pod_resize_supported: bool
+    provider_hint: str | None
+    fallback_namespaces: tuple[str, ...]
+    context_namespace: str | None
 
 
 class _ReplayFilter:
@@ -499,6 +515,9 @@ class KorvidApp(App[None]):
         provider_hint: str | None = None,
         open_pod_exec: Callable[..., contextlib.AbstractAsyncContextManager[Any]] | None = None,
         fallback_namespaces: tuple[str, ...] = (),
+        list_contexts: Callable[[], tuple[list[str], str | None]] | None = None,
+        probe_context: Callable[[str], Awaitable[None]] | None = None,
+        switch_context: Callable[[str | None], Awaitable[ContextSwitchResult]] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -508,6 +527,20 @@ class KorvidApp(App[None]):
         #: RBAC-limited fallback (issue #49): configured/kubeconfig namespaces
         #: offered when cluster-wide namespace listing is forbidden.
         self._fallback_namespaces = fallback_namespaces
+        #: `:ctx` collaborators (issue #36), wired by the composition root:
+        #: kubeconfig context listing, the pre-switch auth probe, and the
+        #: connection/capability retarget. All None in builds without a
+        #: cluster connection.
+        self._list_contexts = list_contexts
+        self._probe_context = probe_context
+        self._switch_context = switch_context
+        #: True while a context switch is tearing down / retargeting;
+        #: refuses concurrent switches.
+        self._ctx_switching = False
+        #: One-shot notice injected into the agent's next screen context
+        #: after a switch, so a running conversation learns the cluster
+        #: changed under it.
+        self._ctx_switch_note: str | None = None
         self._get_manifest = get_manifest
         self._get_events = get_events
         self._stream_logs = stream_logs
@@ -632,6 +665,7 @@ class KorvidApp(App[None]):
         self._log_pane_mode: str = ""
         self._reconnect_sleep: float = 1.0
         self._ns_prefetch_task: asyncio.Task[None] | None = None
+        self._ctx_prefetch_task: asyncio.Task[None] | None = None
         self._splash_shown_at: float = monotonic()
         self._log_buffer_max_lines: int = config.log_buffer_lines
         # Kinds with a table render already queued — coalesces the per-object
@@ -710,7 +744,9 @@ class KorvidApp(App[None]):
         # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
         command_bar = self.query_one(CommandBar)
         command_bar.known = lambda a: self._canonical_kind(a) if a in self.aliases else None
-        command_bar.command_words = sorted({*self.aliases, "ns", "namespaces", "q", "quit"})
+        command_bar.command_words = sorted(
+            {*self.aliases, "ns", "namespaces", "ctx", "context", "contexts", "q", "quit"}
+        )
         # Seed session-scoped log display settings from config (logs.wrap /
         # logs.timestamps); the w/t keys toggle them from there.
         log_pane = self.query_one(LogPane)
@@ -721,6 +757,16 @@ class KorvidApp(App[None]):
             # must fire when one breaks even while :pf is closed.
             self.set_interval(_FORWARD_POLL_SECONDS, self._poll_forwards)
         self._prefetch_namespaces()
+        if self._list_contexts is not None:
+            # Kubeconfig contexts feed the `:ctx` completion; a local file
+            # read, but off-loop so a slow filesystem never blocks mount.
+            list_contexts = self._list_contexts
+
+            async def _fetch_contexts() -> None:
+                names, _ = await asyncio.to_thread(list_contexts)
+                self.query_one(CommandBar).context_words = names
+
+            self._ctx_prefetch_task = asyncio.create_task(_fetch_contexts())
         for warning in self.config.warnings:
             # Config problems (e.g. an invalid custom column) surface once at
             # startup instead of hiding in a log file (issue #45).
@@ -789,7 +835,9 @@ class KorvidApp(App[None]):
             command_bar = self.query_one(CommandBar)
         except Exception:
             return  # app is shutting down or not composed yet
-        command_bar.command_words = sorted({*self.aliases, "ns", "namespaces", "q", "quit"})
+        command_bar.command_words = sorted(
+            {*self.aliases, "ns", "namespaces", "ctx", "context", "contexts", "q", "quit"}
+        )
 
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
         self._render_pending.discard(message.kind)
@@ -1071,6 +1119,186 @@ class KorvidApp(App[None]):
         if exc.status == 403:
             msg += " Switch directly with `:ns <name>` or add `namespaces:` to config.yaml."
         self.notify(msg, title="Failed to list namespaces", severity="error")
+
+    # ------------------------------------------------------------------
+    # `:ctx` — runtime context switching (issue #36)
+    # ------------------------------------------------------------------
+
+    def on_show_context_picker(self, message: ShowContextPicker) -> None:
+        self.run_worker(self._show_context_picker(), exclusive=False)
+
+    def on_switch_context_command(self, message: SwitchContextCommand) -> None:
+        self.run_worker(self._switch_context_flow(message.name), exclusive=False)
+
+    _CURRENT_CTX_SUFFIX = " (current)"
+
+    async def _show_context_picker(self) -> None:
+        if self._list_contexts is None:
+            self.notify("Context switching unavailable in this build", severity="warning")
+            return
+        names, _ = await asyncio.to_thread(self._list_contexts)
+        if not names:
+            self.notify("No contexts found in kubeconfig", severity="warning")
+            return
+        self.query_one(CommandBar).context_words = names
+        current = self.config.kube_context
+        options = [f"{n}{self._CURRENT_CTX_SUFFIX}" if n == current else n for n in names]
+
+        def _on_pick(choice: str | None) -> None:
+            if choice is None:
+                return
+            self.post_message(SwitchContextCommand(choice.removesuffix(self._CURRENT_CTX_SUFFIX)))
+
+        self.push_screen(PickScreen("Switch context:", options), _on_pick)
+
+    async def _switch_context_flow(self, name: str) -> None:
+        """Orchestrate a context switch: guards, auth probe, teardown, swap.
+
+        The probe runs against a private client configuration first — on any
+        failure nothing has been torn down and the old context keeps working
+        (issue #36's "don't strand the user" requirement). Only a proven
+        target proceeds to teardown and retarget.
+        """
+        if self._probe_context is None or self._switch_context is None:
+            self.notify("Context switching unavailable in this build", severity="warning")
+            return
+        old = self.config.kube_context
+        if name == old:
+            self.notify(f"Already on context {name}")
+            return
+        if not await self._ctx_switch_guards_pass(name):
+            return
+        self._ctx_switching = True
+        try:
+            try:
+                await self._probe_context(name)
+            except Exception as exc:
+                self.notify(
+                    f"Cannot switch to context {name!r}: {self._describe_ctx_error(exc)}"
+                    f" — staying on {old or 'the current context'}",
+                    severity="error",
+                    timeout=10,
+                )
+                return
+            async with self._nav_lock:
+                await self._teardown_for_context_switch()
+                applied = await self._retarget_context(name, old)
+                if applied is None:
+                    return
+                await self.watch_manager.start(self.current_kind, self.current_scope)
+                await self._sync_metrics_poller()
+        finally:
+            self._ctx_switching = False
+        self.post_message(ResourcesUpdated(self.current_kind))
+        self._refresh_status()
+        self._prefetch_namespaces()
+        self.on_aliases_updated()
+        if applied == name:
+            self.notify(f"Switched to context {name} (ns: {self.current_scope})")
+
+    async def _ctx_switch_guards_pass(self, name: str) -> bool:
+        """Pre-probe refusals; each states why the switch cannot start now."""
+        if self._ctx_switching:
+            self.notify("A context switch is already in progress", severity="warning")
+            return False
+        if self._agent_task is not None and not self._agent_task.done():
+            self.notify(
+                "Agent is busy — wait for the current turn to finish before switching contexts",
+                severity="warning",
+            )
+            return False
+        if len(self.screen_stack) > 1:
+            self.notify("Close open dialogs before switching contexts", severity="warning")
+            return False
+        if self._list_contexts is not None:
+            names, _ = await asyncio.to_thread(self._list_contexts)
+            if names and name not in names:
+                self.notify(
+                    f"Unknown context {name!r} — kubeconfig has: {', '.join(names)}",
+                    severity="error",
+                )
+                return False
+        return True
+
+    @staticmethod
+    def _describe_ctx_error(exc: Exception) -> str:
+        if isinstance(exc, TimeoutError):
+            return "authentication check timed out"
+        return str(exc) or type(exc).__name__
+
+    async def _teardown_for_context_switch(self) -> None:
+        """Stop every consumer of the old cluster before the client swaps.
+
+        Order matters: streams and pollers first (they hold the old
+        connection), then session state that would otherwise leak old-cluster
+        rows, breadcrumbs, or hints into the new one.
+        """
+        await self._close_log_pane()
+        self.query_one(DescribePane).hide()
+        if self._metrics is not None:
+            await self._metrics.stop()
+        await self.watch_manager.stop_all()
+        if self._forwards is not None:
+            stopped = self._forwards.stop_all()
+            if stopped:
+                self.notify(f"Stopped {len(stopped)} port-forward(s) targeting the old cluster")
+        self._drill.clear()
+        self.store.clear_all()
+        self._hint_event_cache.clear()
+        self.filter_pattern = ""
+        self._resource_filter = parse_filter("")
+
+    async def _retarget_context(self, name: str, old: str | None) -> str | None:
+        """Swap the connection to *name*; on failure fall back to *old*.
+
+        Returns the context actually applied, or None when even the fallback
+        failed (the session then needs a restart — everything is already
+        torn down and nothing is connected).
+        """
+        try:
+            result = await self._switch_context(name)  # type: ignore[misc]  # guarded by caller
+            self._apply_context_switch(name, old, result)
+            return name
+        except Exception as exc:
+            self.notify(
+                f"Context switch to {name!r} failed mid-swap: {self._describe_ctx_error(exc)}",
+                severity="error",
+                timeout=10,
+            )
+        try:
+            result = await self._switch_context(old)  # type: ignore[misc]  # guarded by caller
+            self._apply_context_switch(old, old, result)
+            self.notify(f"Restored context {old or '(kubeconfig default)'}")
+            return old
+        except Exception as exc:
+            self.notify(
+                f"Could not restore context {old or '(kubeconfig default)'}:"
+                f" {self._describe_ctx_error(exc)} — restart korvid",
+                severity="error",
+                timeout=15,
+            )
+            return None
+
+    def _apply_context_switch(
+        self, name: str | None, old: str | None, result: ContextSwitchResult
+    ) -> None:
+        """Adopt the new cluster's identity and re-probed capabilities."""
+        self.config = dataclasses.replace(self.config, kube_context=name)
+        self._pod_resize_supported = result.pod_resize_supported
+        self._provider_hint = result.provider_hint
+        self._fallback_namespaces = result.fallback_namespaces
+        self.watch_manager.set_fallback_namespaces(result.fallback_namespaces)
+        if self._audit is not None:
+            self._audit.set_context(name)
+        if self._forwards is not None:
+            self._forwards.set_context(name)
+        self.current_kind = "pods"
+        self.current_scope = result.context_namespace or self.config.namespace or "default"
+        if name != old:
+            self._ctx_switch_note = (
+                f"kube context switched from {old or '(default)'} to {name};"
+                " all cluster state was reset"
+            )
 
     def on_quit_command(self, message: QuitCommand) -> None:
         self.exit()
@@ -5381,10 +5609,16 @@ class KorvidApp(App[None]):
             return
         panel = self.query_one(AgentPanel)
         screen_context = (
+            f"context={self.config.kube_context or '-'} "
             f"view={self.current_kind} scope={self.current_scope} "
             f"selected={self._selected_row_name() or '-'} "
             f"filter={self.filter_pattern or '-'}"
         )
+        if self._ctx_switch_note is not None:
+            # One-shot: the conversation only needs to learn about the
+            # switch once; afterwards the context= field carries the truth.
+            screen_context += f" NOTE: {self._ctx_switch_note}"
+            self._ctx_switch_note = None
         try:
             async for event in runtime.run_turn(user_text, screen_context):
                 panel.apply_event(event)

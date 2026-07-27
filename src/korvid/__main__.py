@@ -34,7 +34,12 @@ from korvid.core.config import DEFAULT_CONFIG_PATH, KorvidConfig, load_config, s
 from korvid.core.portforward import ForwardRegistry
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
-from korvid.k8s.client import KubeClient, resolve_context_name, resolve_context_namespace
+from korvid.k8s.client import (
+    KubeClient,
+    list_context_names,
+    resolve_context_name,
+    resolve_context_namespace,
+)
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
@@ -44,7 +49,7 @@ from korvid.providers.configurator import ProviderConfigurator
 from korvid.providers.ollama import OllamaOptions
 from korvid.providers.registry import create_provider
 from korvid.providers.token_store import TokenStore
-from korvid.ui.app import AppUIBridge, EventsFetcher, KorvidApp
+from korvid.ui.app import AppUIBridge, ContextSwitchResult, EventsFetcher, KorvidApp
 from korvid.ui.widgets.resource_table import sanitize_views
 
 logger = logging.getLogger(__name__)
@@ -385,16 +390,57 @@ async def _teardown(
             await leftover
 
 
-def _fallback_namespaces(config: KorvidConfig) -> tuple[str, ...]:
+def _fallback_namespaces(config: KorvidConfig, context: str | None) -> tuple[str, ...]:
     """Namespaces an RBAC-limited user can fall back to (issue #49), deduped
     in priority order: explicit `namespaces:` config, the kubeconfig
-    context's namespace, korvid's default namespace."""
+    context's namespace, korvid's default namespace. *context* is explicit
+    (not read from config) so a runtime `:ctx` switch can re-derive the set
+    for the new cluster (issue #36)."""
     candidates = [
         *config.namespaces,
-        resolve_context_namespace(config.kube_context),
+        resolve_context_namespace(context),
         config.namespace,
     ]
     return tuple(dict.fromkeys(ns for ns in candidates if ns))
+
+
+def _make_switch_context(
+    config: KorvidConfig,
+    kube: KubeClient,
+    aliases: dict[str, ResourceMeta],
+    app_box: list[KorvidApp],
+    discovery_box: list[asyncio.Task[None]],
+) -> Callable[[str | None], Awaitable[ContextSwitchResult]]:
+    """Build the `:ctx` retarget closure (issue #36).
+
+    Owns everything the composition root wired per-cluster at startup:
+    the client connection, the shared alias map (reset to the synthetic
+    base, then re-discovered in the background), and the capability
+    probes whose results gate the R keybinding and provider hints.
+    ``app_box``/``discovery_box`` are late-bound because the app and the
+    first discovery task are created after this closure.
+    """
+
+    async def switch_context(name: str | None) -> ContextSwitchResult:
+        await kube.switch_context(name)
+        old_task = discovery_box[0] if discovery_box else None
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await old_task
+        aliases.clear()
+        aliases.update(build_alias_map([PODS_META, HELM_RELEASES_META, HELM_REVISIONS_META]))
+        discovery_box[:] = [asyncio.create_task(_discover_in_background(kube, aliases, app_box[0]))]
+        pod_resize_supported = await _probe_pod_resize(kube, readonly=config.readonly)
+        provider_info = await _probe_cloud_provider(kube)
+        return ContextSwitchResult(
+            pod_resize_supported=pod_resize_supported,
+            provider_hint=provider_info.display if provider_info.known else None,
+            fallback_namespaces=_fallback_namespaces(config, name),
+            context_namespace=resolve_context_namespace(name),
+        )
+
+    return switch_context
 
 
 def _make_watch_source(
@@ -481,7 +527,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
     # RBAC-limited fallback namespaces (issue #49): the config list plus the
     # kubeconfig context's namespace and korvid's default namespace, deduped
     # in priority order. Feeds the picker and the per-namespace watch fanout.
-    fallback_namespaces = _fallback_namespaces(config)
+    fallback_namespaces = _fallback_namespaces(config, config.kube_context)
 
     def _is_namespaced(kind: str) -> bool:
         # Cluster-scoped kinds must not fan out per namespace (the source
@@ -515,6 +561,12 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
 
     mcp_controller = MCPController(_make_mcp_factory(config, kube, aliases, ui_proxy))
 
+    # `:ctx` switching (issue #36): the closure needs the app (for discovery
+    # restarts) and the live discovery task, both created below — boxes
+    # late-bind them, mirroring ui_proxy.target.
+    app_box: list[KorvidApp] = []
+    discovery_box: list[asyncio.Task[None]] = []
+
     app = KorvidApp(
         config=config,
         store=store,
@@ -538,18 +590,24 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         forwards=ForwardRegistry(context=config.kube_context),
         provider_hint=provider_info.display if provider_info.known else None,
         open_pod_exec=kube.open_pod_exec,
+        list_contexts=list_context_names,
+        probe_context=kube.probe_context,
+        switch_context=_make_switch_context(config, kube, aliases, app_box, discovery_box),
     )
+    app_box.append(app)
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.
     ui_proxy.target = AppUIBridge(app)
 
     await _start_mcp_if_enabled(config, mcp_controller)
 
-    discovery_task = asyncio.create_task(_discover_in_background(kube, aliases, app))
+    discovery_box.append(asyncio.create_task(_discover_in_background(kube, aliases, app)))
     try:
         await app.run_async()
     finally:
-        await _teardown(mcp_controller, discovery_task, provider_box[0], kube)
+        # discovery_box[0] is the *live* task: a `:ctx` switch may have
+        # replaced the one started above.
+        await _teardown(mcp_controller, discovery_box[0], provider_box[0], kube)
 
 
 def main() -> None:

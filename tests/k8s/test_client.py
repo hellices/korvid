@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from kubernetes_asyncio import client as k8s_client
+from kubernetes_asyncio import config as k8s_config
 from kubernetes_asyncio.client.exceptions import ApiException
 
 from korvid.k8s import client as client_mod
@@ -1284,3 +1285,178 @@ async def test_secrets_never_evaluate_custom_columns() -> None:
     ):
         summaries = await client.list_objects(meta, "default")
     assert summaries[0].custom == ()
+
+
+# ---------------------------------------------------------------------------
+# list_context_names — :ctx picker source (issue #36)
+# ---------------------------------------------------------------------------
+
+_TWO_CTX_KUBECONFIG = """
+apiVersion: v1
+kind: Config
+current-context: ctx-b
+clusters:
+- name: cluster-a
+  cluster: {server: "https://a.example"}
+- name: cluster-b
+  cluster: {server: "https://b.example"}
+contexts:
+- name: ctx-a
+  context: {cluster: cluster-a, user: user-a}
+- name: ctx-b
+  context: {cluster: cluster-b, user: user-b}
+users:
+- name: user-a
+  user: {}
+- name: user-b
+  user: {}
+"""
+
+
+def test_list_context_names_returns_names_and_active(tmp_path: Path) -> None:
+    from korvid.k8s.client import list_context_names
+
+    kubeconfig = tmp_path / "config"
+    kubeconfig.write_text(_TWO_CTX_KUBECONFIG)
+    names, active = list_context_names(config_file=str(kubeconfig))
+    assert names == ["ctx-a", "ctx-b"]
+    assert active == "ctx-b"
+
+
+def test_list_context_names_unreadable_returns_empty(tmp_path: Path) -> None:
+    from korvid.k8s.client import list_context_names
+
+    names, active = list_context_names(config_file=str(tmp_path / "missing"))
+    assert names == []
+    assert active is None
+
+
+# ---------------------------------------------------------------------------
+# probe_context / switch_context — runtime :ctx switching (issue #36)
+# ---------------------------------------------------------------------------
+
+
+class _FakeProbeApi:
+    """Stands in for ApiClient in probe_context tests."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class TestProbeContext:
+    async def test_success_uses_private_configuration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+
+        load_calls: list[dict[str, Any]] = []
+
+        async def fake_load(**kwargs: Any) -> None:
+            load_calls.append(kwargs)
+
+        probe_apis: list[_FakeProbeApi] = []
+
+        def fake_api(*args: Any, **kwargs: Any) -> _FakeProbeApi:
+            api = _FakeProbeApi()
+            probe_apis.append(api)
+            return api
+
+        class FakeVersionApi:
+            def __init__(self, api: Any) -> None:
+                self._api = api
+
+            async def get_code(self) -> Any:
+                return {"gitVersion": "v1.30.0"}
+
+        monkeypatch.setattr(k8s_config, "load_kube_config", fake_load)
+        monkeypatch.setattr(k8s_client, "ApiClient", fake_api)
+        monkeypatch.setattr(k8s_client, "VersionApi", FakeVersionApi)
+
+        kube = KubeClient()
+        await kube.probe_context("ctx-b")
+
+        # Probe loads into a private Configuration and never persists —
+        # the live (global) connection must stay untouched on failure.
+        assert load_calls[0]["context"] == "ctx-b"
+        assert load_calls[0]["client_configuration"] is not None
+        assert load_calls[0]["persist_config"] is False
+        assert probe_apis[0].closed is True
+
+    async def test_auth_failure_raises_and_closes_probe_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+
+        async def fake_load(**kwargs: Any) -> None:
+            return None
+
+        probe_apis: list[_FakeProbeApi] = []
+
+        def fake_api(*args: Any, **kwargs: Any) -> _FakeProbeApi:
+            api = _FakeProbeApi()
+            probe_apis.append(api)
+            return api
+
+        class FakeVersionApi:
+            def __init__(self, api: Any) -> None:
+                pass
+
+            async def get_code(self) -> Any:
+                raise k8s_client.exceptions.ApiException(status=401, reason="Unauthorized")
+
+        monkeypatch.setattr(k8s_config, "load_kube_config", fake_load)
+        monkeypatch.setattr(k8s_client, "ApiClient", fake_api)
+        monkeypatch.setattr(k8s_client, "VersionApi", FakeVersionApi)
+
+        kube = KubeClient()
+        with pytest.raises(k8s_client.exceptions.ApiException, match="Unauthorized"):
+            await kube.probe_context("ctx-b")
+        assert probe_apis[0].closed is True
+
+    async def test_unknown_context_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from kubernetes_asyncio.config import ConfigException
+
+        async def fake_load(**kwargs: Any) -> None:
+            raise ConfigException("context ctx-nope not found")
+
+        monkeypatch.setattr(k8s_config, "load_kube_config", fake_load)
+
+        kube = KubeClient()
+        with pytest.raises(ConfigException, match="not found"):
+            await kube.probe_context("ctx-nope")
+
+
+class TestSwitchContext:
+    async def test_swaps_connection_and_closes_old(self, monkeypatch: pytest.MonkeyPatch) -> None:
+
+        load_calls: list[dict[str, Any]] = []
+
+        async def fake_load(**kwargs: Any) -> None:
+            load_calls.append(kwargs)
+
+        apis: list[_FakeProbeApi] = []
+
+        def fake_api(*args: Any, **kwargs: Any) -> _FakeProbeApi:
+            api = _FakeProbeApi()
+            apis.append(api)
+            return api
+
+        monkeypatch.setattr(k8s_config, "load_kube_config", fake_load)
+        monkeypatch.setattr(k8s_client, "ApiClient", fake_api)
+        monkeypatch.setattr(k8s_client, "CoreV1Api", lambda api: api)
+
+        kube = KubeClient()
+        await kube.connect("ctx-a")
+        old_api = apis[0]
+        # Seed per-connection caches to prove the switch resets them.
+        kube._pod_resize_supported = True
+        kube._provider_info = object()  # type: ignore[assignment]  # cache reset check only
+
+        await kube.switch_context("ctx-b")
+
+        assert old_api.closed is True
+        assert apis[1].closed is False
+        assert load_calls[-1]["context"] == "ctx-b"
+        assert kube._pod_resize_supported is None
+        assert kube._provider_info is None

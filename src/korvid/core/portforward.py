@@ -143,6 +143,15 @@ class ForwardRegistry:
         #: never both pass the check and race for the same bind.
         self._claimed_ports: set[int] = set()
 
+    def set_context(self, context: str | None) -> None:
+        """Pin forwards started from now on to *context* (issue #36).
+
+        Runtime `:ctx` switching stops existing forwards (they target the
+        old cluster) and re-points the registry so new ones follow the
+        session's new context.
+        """
+        self._context = context
+
     def start(self, spec: ForwardSpec) -> ForwardRecord:
         """Spawn `kubectl port-forward` for ``spec`` and track it.
 
