@@ -91,6 +91,11 @@ def validate_spec(spec: TransferSpec) -> str | None:
         if not local.is_file():
             return f"not a regular file: {local}"
         return None
+    if local.is_dir():
+        # Caught here: after the stream this would only surface as an
+        # IsADirectoryError from the extraction step, long after the bytes
+        # were transferred.
+        return f"local path is a directory, expected a file path: {local}"
     parent = local.parent
     if not parent.is_dir():
         return f"local directory does not exist: {parent}"
@@ -183,7 +188,6 @@ class _FrameSink:
     def __init__(self) -> None:
         self.stderr = b""
         self.failure: str | None = None
-        self._error_seen = False
 
     def feed(self, data: object) -> bytes:
         """Consume one frame; returns any stdout payload it carried."""
@@ -196,7 +200,6 @@ class _FrameSink:
         if channel == _STDERR_CHANNEL:
             self.stderr = (self.stderr + payload)[-_STDERR_CAP:]
         elif channel == _ERROR_CHANNEL:
-            self._error_seen = True
             self.failure = _parse_error_channel(payload)
         return b""
 

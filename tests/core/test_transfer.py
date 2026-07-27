@@ -84,6 +84,12 @@ class TestValidateSpec:
         assert error is not None
         assert "directory" in error
 
+    def test_download_local_path_is_existing_directory(self, tmp_path: Path) -> None:
+        spec = TransferSpec("download", "/tmp/x", str(tmp_path))
+        error = validate_spec(spec)
+        assert error is not None
+        assert "directory" in error
+
     def test_local_path_tilde_expanded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
