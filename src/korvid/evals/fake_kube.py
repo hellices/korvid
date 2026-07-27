@@ -3,11 +3,18 @@
 Backs the **real** ToolExecutor so whatever tools the model chooses get
 consistent, realistic responses. Implements exactly the read surface the
 read tools touch: list_objects, get_object, list_events_for, stream_logs.
+
+Scenario timestamps are authored against a fixed instant (`SCENARIO_NOW`)
+and rebased to the wall clock at construction, so relative ages in tool
+output (`age=3h`, event recency) stay identical no matter when a benchmark
+runs — repeated runs of the same scenario see the same cluster.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from korvid.evals.scenario import Scenario
@@ -16,6 +23,25 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, summary_for
 from korvid.k8s.reads import ReadOps
+
+#: The instant scenario fixture timestamps are authored against. Every
+#: fixture timestamp must be at or before this instant.
+SCENARIO_NOW = datetime(2026, 7, 27, 8, 0, 0, tzinfo=UTC)
+
+_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+def _rebase(value: Any, delta: timedelta) -> Any:
+    """Deep-copy `value`, shifting every RFC 3339 timestamp string by `delta`."""
+    if isinstance(value, str) and _TIMESTAMP.match(value):
+        shifted = datetime.fromisoformat(value.replace("Z", "+00:00")) + delta
+        return shifted.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if isinstance(value, dict):
+        return {key: _rebase(item, delta) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_rebase(item, delta) for item in value]
+    return value
+
 
 _BUILTIN_METAS: tuple[ResourceMeta, ...] = (
     ResourceMeta("Pod", "pods", "", "v1", True, ("po",)),
@@ -59,6 +85,9 @@ class FakeKubeClient(ReadOps):
 
     def __init__(self, scenario: Scenario) -> None:
         self._scenario = scenario
+        delta = datetime.now(UTC) - SCENARIO_NOW
+        self._objects: list[dict[str, Any]] = [_rebase(obj, delta) for obj in scenario.objects]
+        self._events: list[dict[str, Any]] = [_rebase(event, delta) for event in scenario.events]
 
     def _matches(self, manifest: dict[str, Any], meta: ResourceMeta, namespace: str | None) -> bool:
         if str(manifest.get("kind") or "") != meta.kind:
@@ -71,14 +100,14 @@ class FakeKubeClient(ReadOps):
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         return [
             summary_for(meta.kind, manifest)
-            for manifest in self._scenario.objects
+            for manifest in self._objects
             if self._matches(manifest, meta, namespace)
         ]
 
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
     ) -> dict[str, Any]:
-        for manifest in self._scenario.objects:
+        for manifest in self._objects:
             metadata = manifest.get("metadata") or {}
             if self._matches(manifest, meta, namespace) and str(metadata.get("name")) == name:
                 return manifest
@@ -93,7 +122,7 @@ class FakeKubeClient(ReadOps):
         uid: str | None = None,
     ) -> list[dict[str, Any]]:
         matched: list[dict[str, Any]] = []
-        for event in self._scenario.events:
+        for event in self._events:
             involved = event.get("involvedObject") or {}
             if (
                 str(involved.get("name") or "") == name

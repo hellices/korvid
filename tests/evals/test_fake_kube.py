@@ -179,3 +179,63 @@ async def test_stream_logs_empty_container_uses_the_single_container() -> None:
         async for line in _kube().stream_logs("shop", "api-1", "", follow=False, tail_lines=10)
     ]
     assert lines == ["line 1", "line 2", "line 3"]
+
+
+def _timed_scenario() -> Scenario:
+    """Pod created 3h before SCENARIO_NOW; one event 40m before it."""
+    return _scenario(
+        objects=(
+            {
+                "kind": "Pod",
+                "apiVersion": "v1",
+                "metadata": {
+                    "name": "api-1",
+                    "namespace": "shop",
+                    "uid": "u1",
+                    "creationTimestamp": "2026-07-27T05:00:00Z",
+                },
+                "spec": {"containers": [{"name": "app"}]},
+                "status": {"phase": "Running"},
+            },
+        ),
+        events=(
+            {
+                "type": "Warning",
+                "reason": "BackOff",
+                "message": "restarting failed container",
+                "lastTimestamp": "2026-07-27T07:20:00Z",
+                "involvedObject": {
+                    "kind": "Pod",
+                    "name": "api-1",
+                    "namespace": "shop",
+                    "uid": "u1",
+                },
+            },
+        ),
+    )
+
+
+async def test_fixture_ages_are_stable_relative_to_the_real_clock() -> None:
+    """A pod authored 3h before SCENARIO_NOW reads as 3h old whenever the
+    eval runs — fixture ages must not drift with the real calendar."""
+    kube = FakeKubeClient(_timed_scenario())
+    summaries = await kube.list_objects(_pods_meta(), "shop")
+    assert summaries[0].age() == "3h"
+
+
+async def test_event_timestamps_are_rebased_to_the_real_clock() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    kube = FakeKubeClient(_timed_scenario())
+    events = await kube.list_events_for("shop", "api-1", kind="Pod")
+    parsed = datetime.fromisoformat(events[0]["lastTimestamp"].replace("Z", "+00:00"))
+    expected = datetime.now(UTC) - timedelta(minutes=40)
+    assert abs((parsed - expected).total_seconds()) < 60
+
+
+async def test_rebasing_never_mutates_the_shared_scenario() -> None:
+    scenario = _timed_scenario()
+    kube = FakeKubeClient(scenario)
+    await kube.list_objects(_pods_meta(), "shop")
+    assert scenario.objects[0]["metadata"]["creationTimestamp"] == "2026-07-27T05:00:00Z"
+    assert scenario.events[0]["lastTimestamp"] == "2026-07-27T07:20:00Z"

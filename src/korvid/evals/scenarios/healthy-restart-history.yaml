@@ -10,7 +10,7 @@ grading:
   expected_evidence:
     - tool: diagnose_pod
       args: {pod: cache-1, namespace: shop}
-      contains: "running since 2026-07-21T02:15:00Z  ready  restarts=2"
+      contains: "ready  restarts=2"
 cluster:
   objects:
     - kind: Pod
