@@ -220,3 +220,11 @@ def test_load_scenarios_rejects_duplicate_ids(tmp_path: Path) -> None:
     _write(tmp_path, _MINIMAL, "b.yaml")
     with pytest.raises(ValueError, match="duplicate"):
         load_scenarios(tmp_path)
+
+
+def test_load_scenario_rejects_non_string_mention_keywords(tmp_path: Path) -> None:
+    """YAML booleans/numbers would coerce to strings like 'False' that can
+    never match answer text, silently weakening the benchmark's assertions."""
+    text = _MINIMAL.replace('- "137"', "- 137")
+    with pytest.raises(ValueError, match="non-blank strings"):
+        load_scenario(_write(tmp_path, text))

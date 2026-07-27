@@ -5,7 +5,7 @@ root_cause: insufficient_resources
 grading:
   must_mention:
     - [cpu]
-    - [insufficient, not enough, no node, unschedulable, lacks, exceeds]
+    - [insufficient, not enough, no node, unschedulable, lacks]
   must_not_mention:
     - [image pull, crashloopbackoff, oomkilled]
   expected_evidence:

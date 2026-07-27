@@ -83,7 +83,12 @@ def _alt_groups(raw: Any, key: str) -> tuple[tuple[str, ...], ...]:
     groups: list[tuple[str, ...]] = []
     for entry in raw:
         alternatives = entry if isinstance(entry, list) else [entry]
-        group = tuple(str(alt) for alt in alternatives if str(alt).strip())
+        # These are the benchmark's pass/fail assertions: coercing YAML
+        # booleans, numbers, or mappings would silently change the grade.
+        for alt in alternatives:
+            if not isinstance(alt, str) or not alt.strip():
+                raise ValueError(f"grading field {key!r} keywords must be non-blank strings")
+        group = tuple(alternatives)
         if not group:
             raise ValueError(f"grading field {key!r} has an empty entry")
         groups.append(group)

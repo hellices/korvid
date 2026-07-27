@@ -5,7 +5,7 @@ root_cause: job_backoff_limit
 grading:
   must_mention:
     - [backofflimit, backoff limit, retries, retry limit, attempts]
-    - [exceeded, exhausted, failed, reached]
+    - [exceeded, exhausted, reached the limit, limit reached, too many]
   must_not_mention:
     - [image pull, oomkilled]
   expected_evidence:

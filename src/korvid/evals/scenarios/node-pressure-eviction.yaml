@@ -5,7 +5,7 @@ root_cause: node_memory_pressure_eviction
 grading:
   must_mention:
     - [evicted, eviction]
-    - [memory, memorypressure, node was low]
+    - [memory pressure, memorypressure, low on memory, node was low, out of memory]
   must_not_mention:
     - [exit code 137, image pull, crashloopbackoff]
   expected_evidence:
