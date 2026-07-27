@@ -173,10 +173,13 @@ When a `helm` binary is on `PATH`, the browser gains write actions
 | `u` | `:helm` | Upgrade the selected release — same wizard, pinned to that release; defaults to reusing the release's current values (`--reuse-values`) |
 | `r` | revision drill-down | Roll back the release to the selected revision |
 
-Install and upgrade always show a preview before the confirmation
-dialog: install and upgrade run `--dry-run`, and when the
+Install and upgrade render a preview before the confirmation
+dialog: install and upgrade run `--dry-run` (with `--hide-secret`, helm
+3.13+, so generated Secrets stay masked), and when the
 [helm-diff](https://github.com/databus23/helm-diff) plugin is installed,
 upgrade and rollback show a real diff against the live release instead.
+If the preview render fails or times out, the confirmation dialog still
+opens — just without a preview.
 Rollback has a preview **only** with the plugin — without it the
 confirmation dialog states the release and target revision but shows no
 manifest diff.
