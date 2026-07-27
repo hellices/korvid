@@ -7,7 +7,8 @@ root_cause: dependency_unreachable
 grading:
   must_mention:
     - [postgres, database, db]
-    - [connection refused, unreachable, cannot connect, can't connect, connect, refused]
+    - [connection refused, unreachable, cannot connect, can't connect,
+       failed to connect, refused]
   must_not_mention:
     - [oomkilled, image pull]
   expected_evidence:

@@ -6,7 +6,7 @@ screen: "resource view: pods, namespace shop, selected: shop/cache-1 (Running, r
 root_cause: none
 grading:
   must_mention:
-    - [healthy, no issues, no problems, fine, running normally, not a current problem, stable, recovered, old, past, days ago, historical]
+    - [healthy, no issues, no problems, fine, running normally, not a current problem, stable, recovered]
   expected_evidence:
     - tool: diagnose_pod
       args: {pod: cache-1, namespace: shop}

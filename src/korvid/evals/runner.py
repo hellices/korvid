@@ -115,12 +115,32 @@ _READ_REQUIRED: dict[str, frozenset[str]] = {
     for tool in READ_TOOLS
 }
 
+_READ_PROPERTY_TYPES: dict[str, dict[str, str]] = {
+    tool["function"]["name"]: {
+        prop: spec.get("type", "string")
+        for prop, spec in tool["function"]["parameters"].get("properties", {}).items()
+    }
+    for tool in READ_TOOLS
+}
+
+_JSON_TYPES: dict[str, type | tuple[type, ...]] = {"string": str, "integer": int}
+
+
+def _value_matches_schema(value: Any, json_type: str) -> bool:
+    expected = _JSON_TYPES.get(json_type)
+    if expected is None:
+        return True
+    # bool is an int subtype in Python but not an integer in JSON schema.
+    if isinstance(value, bool):
+        return json_type == "boolean"
+    return isinstance(value, expected)
+
 
 def _is_malformed(name: str, raw_arguments: str) -> bool:
     """Schema-level validation of one tool call, from the raw call the model
     emitted: undecodable or non-mapping arguments, a tool name that was never
-    offered (write tools are tracked separately as write attempts), or a
-    missing required parameter."""
+    offered (write tools are tracked separately as write attempts), a missing
+    required parameter, or a declared parameter of the wrong type."""
     try:
         parsed = json.loads(raw_arguments or "{}")
     except json.JSONDecodeError:
@@ -130,7 +150,13 @@ def _is_malformed(name: str, raw_arguments: str) -> bool:
     required = _READ_REQUIRED.get(name)
     if required is None:
         return name not in WRITE_TOOL_NAMES
-    return not required <= parsed.keys()
+    if not required <= parsed.keys():
+        return True
+    property_types = _READ_PROPERTY_TYPES[name]
+    return any(
+        key in property_types and not _value_matches_schema(value, property_types[key])
+        for key, value in parsed.items()
+    )
 
 
 async def _run_once(

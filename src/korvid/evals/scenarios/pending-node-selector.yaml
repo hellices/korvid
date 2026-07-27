@@ -7,7 +7,8 @@ root_cause: node_selector_mismatch
 grading:
   must_mention:
     - [node selector, nodeselector, node affinity, affinity, node label]
-    - [match, matches, matching, no node, unschedulable]
+    - [didn't match, did not match, doesn't match, does not match, not match,
+       mismatch, unschedulable, no node]
   must_not_mention:
     - [image pull, crashloopbackoff, oomkilled, quota]
   expected_evidence:

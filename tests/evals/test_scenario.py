@@ -116,6 +116,20 @@ def test_load_scenario_rejects_unknown_evidence_shape(tmp_path: Path) -> None:
         load_scenario(_write(tmp_path, text))
 
 
+def test_load_scenario_rejects_non_string_evidence_tool(tmp_path: Path) -> None:
+    """A list value would coerce to a string that can never match a real
+    tool name, silently making the evidence group unsatisfiable."""
+    text = _MINIMAL.replace("    - tool: diagnose_pod", "    - tool: [diagnose_pod]")
+    with pytest.raises(ValueError, match="'tool' must be a non-blank string"):
+        load_scenario(_write(tmp_path, text))
+
+
+def test_load_scenario_rejects_non_string_evidence_contains(tmp_path: Path) -> None:
+    text = _MINIMAL.replace("      contains: exit=137", "      contains: 137")
+    with pytest.raises(ValueError, match="'contains' must be a non-blank string"):
+        load_scenario(_write(tmp_path, text))
+
+
 def test_load_scenario_rejects_bad_log_key(tmp_path: Path) -> None:
     text = _MINIMAL.replace("shop/checkout-1/app:", "checkout-1-app:")
     with pytest.raises(ValueError, match="namespace/pod/container"):

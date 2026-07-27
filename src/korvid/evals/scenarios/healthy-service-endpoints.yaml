@@ -7,7 +7,7 @@ root_cause: none
 grading:
   must_mention:
     - [healthy, no issues, no problems, looks fine, running normally,
-       working as expected, nothing wrong, correctly]
+       working as expected, nothing wrong]
   expected_evidence:
     - tool: get_resource
       args: {kind: endpoints, name: search, namespace: front}

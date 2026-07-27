@@ -91,18 +91,17 @@ def _alt_groups(raw: Any, key: str) -> tuple[tuple[str, ...], ...]:
 
 
 def _evidence_entry(entry: Any) -> Evidence:
-    if (
-        not isinstance(entry, dict)
-        or not entry.get("tool")
-        or not entry.get("contains")
-        or not isinstance(entry.get("args"), dict)
-    ):
+    if not isinstance(entry, dict) or not isinstance(entry.get("args"), dict):
         raise ValueError("each expected_evidence entry needs 'tool', 'contains', and 'args' keys")
-    return Evidence(
-        tool=str(entry["tool"]),
-        contains=str(entry["contains"]),
-        args=dict(entry["args"]),
-    )
+    tool = entry.get("tool")
+    contains = entry.get("contains")
+    # Coercing arbitrary YAML values (e.g. a list) would load fine but could
+    # never match a real tool call, silently making the group unsatisfiable.
+    if not isinstance(tool, str) or not tool.strip():
+        raise ValueError("expected_evidence field 'tool' must be a non-blank string")
+    if not isinstance(contains, str) or not contains.strip():
+        raise ValueError("expected_evidence field 'contains' must be a non-blank string")
+    return Evidence(tool=tool, contains=contains, args=dict(entry["args"]))
 
 
 def _evidence(raw: Any) -> tuple[tuple[Evidence, ...], ...]:

@@ -7,7 +7,7 @@ root_cause: quota_blocked
 grading:
   must_mention:
     - [quota, resourcequota]
-    - [exceeded, forbidden, limit]
+    - [exceeded, forbidden, limit reached, reached the limit, over the limit]
   must_not_mention:
     - [image pull, crashloopbackoff, oomkilled]
   expected_evidence:

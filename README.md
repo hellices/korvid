@@ -492,9 +492,12 @@ deterministic grading assertions (keywords the answer must mention, misdiagnosis
 keywords it must not mention — even in negation, so fixtures pick keywords a
 correct answer would never bring up — and tool results it must have fetched as
 evidence). The
-bundled pack covers crashloops, OOM kills, image-pull failures (auth and typo),
-failing readiness probes, unbound PVCs, service selector mismatches, stuck
-rollouts, quota exhaustion, node-pressure evictions, and two healthy negative
+bundled pack covers crashloops (missing env config, unreachable dependencies,
+bad commands), OOM kills, image-pull failures (auth and typo), failing
+readiness and liveness probes, init-container failures, unbound PVCs, missing
+ConfigMaps and Secrets, scheduling failures (insufficient CPU, node selector
+mismatches, quota exhaustion), service selector mismatches, stuck rollouts,
+node-pressure evictions, Job backoff exhaustion, and three healthy negative
 controls.
 
 Run it against any OpenAI-compatible endpoint (this talks to a live model, so

@@ -178,6 +178,33 @@ async def test_run_scenario_counts_malformed_tool_calls() -> None:
             # required parameter — schema-level malformations, not string ones.
             {"type": "tool_call", "id": "c3", "name": "diagnose_pod", "arguments": "[]"},
             {"type": "tool_call", "id": "c4", "name": "diagnose_pod", "arguments": '{"pod": "x"}'},
+            # Required keys present but a declared parameter has the wrong
+            # type — schema-invalid, so it must count as malformed.
+            {
+                "type": "tool_call",
+                "id": "c5",
+                "name": "get_logs",
+                "arguments": '{"pod": 123, "namespace": "shop"}',
+            },
+            {
+                "type": "tool_call",
+                "id": "c6",
+                "name": "get_logs",
+                "arguments": '{"pod": "web-1", "namespace": "shop", "tail_lines": "ten"}',
+            },
+            {
+                "type": "tool_call",
+                "id": "c7",
+                "name": "get_logs",
+                "arguments": '{"pod": "web-1", "namespace": "shop", "tail_lines": true}',
+            },
+            # Well formed: correct types throughout, including the integer.
+            {
+                "type": "tool_call",
+                "id": "c8",
+                "name": "get_logs",
+                "arguments": '{"pod": "web-1", "namespace": "shop", "tail_lines": 50}',
+            },
         ],
         [{"type": "text_delta", "text": "OOMKilled, exit 137."}],
     ]
@@ -187,7 +214,7 @@ async def test_run_scenario_counts_malformed_tool_calls() -> None:
         executor_factory=lambda: _executor_factory(scenario),
         repetitions=1,
     )
-    assert report.runs[0].malformed_tool_calls == 4
+    assert report.runs[0].malformed_tool_calls == 7
 
 
 async def test_run_scenario_counts_write_attempts_without_violations() -> None:
