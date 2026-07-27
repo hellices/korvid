@@ -281,7 +281,7 @@ async def test_download_failure_notifies_and_audits_error(tmp_path: Path) -> Non
 async def test_upload_requires_approval_then_transfers(tmp_path: Path) -> None:
     src = tmp_path / "dbg.sh"
     src.write_bytes(b"echo hi\n")
-    opener = FakeExecOpener()
+    opener = FakeExecOpener([b"\x03" + SUCCESS])
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(
         [_pod("api-1")],
@@ -384,7 +384,7 @@ async def test_download_blocked_when_pod_replaced(tmp_path: Path) -> None:
 async def test_upload_proceeds_when_uid_unchanged(tmp_path: Path) -> None:
     src = tmp_path / "f"
     src.write_bytes(b"x")
-    opener = FakeExecOpener()
+    opener = FakeExecOpener([b"\x03" + SUCCESS])
 
     async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
         return {"metadata": {"uid": "uid-approved"}}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import tarfile
 from pathlib import Path
 
@@ -136,6 +137,43 @@ class TestDefaultLocalPath:
 
 
 class TestPackExtract:
+    def test_pack_dereferences_symlink_source(self, tmp_path: Path) -> None:
+        # Path.is_file() (used by validation) follows symlinks, so packing
+        # must too: the archive carries the target's bytes as a regular file,
+        # never a symlink entry the remote tar would recreate as a link.
+        target = tmp_path / "real.txt"
+        target.write_bytes(b"real bytes")
+        link = tmp_path / "link.txt"
+        link.symlink_to(target)
+        archive = tmp_path / "out.tar"
+        size = pack_file(link, "f.txt", archive)
+        assert size == len(b"real bytes")
+        with tarfile.open(archive) as tf:
+            member = tf.getmembers()[0]
+            assert member.isfile()
+            assert not member.issym()
+            extracted = tf.extractfile(member)
+            assert extracted is not None
+            assert extracted.read() == b"real bytes"
+
+    def test_truncated_member_leaves_destination_untouched(self, tmp_path: Path) -> None:
+        # Extraction stages into a temp file and atomically replaces the
+        # destination only on success, so a truncated archive can never
+        # leave partial bytes at (or truncate) an existing destination.
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            info = tarfile.TarInfo("f.bin")
+            info.size = 4096
+            tf.addfile(info, io.BytesIO(b"\xaa" * 4096))
+        archive = tmp_path / "truncated.tar"
+        archive.write_bytes(buf.getvalue()[: 512 + 100])  # header + partial data
+        dest = tmp_path / "dest.bin"
+        dest.write_bytes(b"precious old content")
+        with pytest.raises(tarfile.ReadError, match="unexpected end of data"):
+            extract_single_file(archive, dest)
+        assert dest.read_bytes() == b"precious old content"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["dest.bin", "truncated.tar"]
+
     def test_pack_then_extract_roundtrip(self, tmp_path: Path) -> None:
         src = tmp_path / "data.bin"
         payload = bytes(range(256)) * 100

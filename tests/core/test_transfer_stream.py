@@ -146,12 +146,23 @@ class TestDownload:
             await download(FakeExec(ws), "/f", tmp_path / "f")
         assert list(tmp_path.iterdir()) == []
 
+    async def test_eof_without_verdict_raises(self, tmp_path: Path) -> None:
+        # A complete-looking archive without a channel-3 status means the
+        # exec outcome is unknown (e.g. a proxy dropped the connection);
+        # never extract or report success on it.
+        archive = tar_bytes("app.log", b"data")
+        ws = FakeWs([b"\x01" + archive])  # no status frame
+        dest = tmp_path / "app.log"
+        with pytest.raises(TransferError, match="without reporting an outcome"):
+            await download(FakeExec(ws), "/var/log/app.log", dest)
+        assert not dest.exists()
+
 
 class TestUpload:
     async def test_sends_tar_on_stdin_channel(self, tmp_path: Path) -> None:
         src = tmp_path / "dbg.sh"
         src.write_bytes(b"echo hi\n")
-        ws = FakeWs([])
+        ws = FakeWs([b"\x03" + SUCCESS])
         open_exec = FakeExec(ws)
         sent_bytes = await upload(open_exec, src, "/opt/tools/dbg.sh")
         assert sent_bytes == len(b"echo hi\n")
@@ -186,6 +197,14 @@ class TestUpload:
         src = tmp_path / "f"
         src.write_bytes(b"y" * 100)
         seen: list[int] = []
-        await upload(FakeExec(FakeWs([])), src, "/tmp/f", progress=seen.append)
+        await upload(FakeExec(FakeWs([b"\x03" + SUCCESS])), src, "/tmp/f", progress=seen.append)
         assert seen
         assert seen == sorted(seen)
+
+    async def test_eof_without_verdict_raises(self, tmp_path: Path) -> None:
+        # The websocket closing without a channel-3 status leaves the exec
+        # outcome unknown; report failure rather than a blind success.
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        with pytest.raises(TransferError, match="without reporting an outcome"):
+            await upload(FakeExec(FakeWs([])), src, "/tmp/f")

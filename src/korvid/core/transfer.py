@@ -32,10 +32,16 @@ _STDOUT_CHANNEL = 1
 _STDERR_CHANNEL = 2
 _ERROR_CHANNEL = 3
 
-#: How long to keep draining server frames after the last stdin byte was
-#: sent: long enough to catch an extraction error the remote tar reports
-#: immediately, without stalling every successful upload.
+#: How long to keep draining server frames after a mid-send transport
+#: failure: long enough to catch the error the remote tar reported (its
+#: verdict beats the raw transport error), without stalling the failure path.
 _UPLOAD_DRAIN_GRACE = 0.5
+
+#: How long to wait for the channel-3 status after the whole archive was
+#: sent. The remote tar exits on the archive's end-of-archive marker (no
+#: stdin EOF needed), so the verdict normally arrives promptly; a tar that
+#: never reports leaves the outcome unknown and the upload is failed.
+_UPLOAD_VERDICT_TIMEOUT = 10.0
 
 #: Cap on buffered remote stderr; only the tail matters for diagnostics.
 _STDERR_CAP = 4096
@@ -141,10 +147,21 @@ def default_local_path(remote_path: str) -> str:
 
 def pack_file(local_path: Path, arcname: str, archive_path: Path) -> int:
     """Write a single-member tar of ``local_path`` (named ``arcname``) to
-    ``archive_path``; returns the packed file's size in bytes."""
-    with tarfile.open(archive_path, "w") as tf:
-        tf.add(str(local_path), arcname=arcname, recursive=False)
-    return local_path.stat().st_size
+    ``archive_path``; returns the packed file's size in bytes.
+
+    The source is deliberately dereferenced: validation follows symlinks
+    (``Path.is_file()``), so a symlink source must pack the target's *bytes*
+    as a regular file — never a symlink entry the remote tar would recreate
+    as a (possibly dangling) link in the container.
+    """
+    stat = local_path.stat()
+    info = tarfile.TarInfo(arcname)
+    info.size = stat.st_size
+    info.mtime = int(stat.st_mtime)
+    info.mode = stat.st_mode & 0o777
+    with tarfile.open(archive_path, "w") as tf, local_path.open("rb") as src:
+        tf.addfile(info, src)
+    return stat.st_size
 
 
 def extract_single_file(archive_path: Path, dest: Path) -> int:
@@ -152,7 +169,10 @@ def extract_single_file(archive_path: Path, dest: Path) -> int:
 
     Member names are never used as filesystem paths — the bytes are streamed
     straight into the caller-chosen ``dest`` — so hostile names like
-    ``../../evil`` in a compromised container's tar output are inert.
+    ``../../evil`` in a compromised container's tar output are inert. The
+    bytes are staged in a temp file next to ``dest`` and atomically renamed
+    over it only on success, so a truncated member or local write error can
+    never truncate or partially overwrite an existing destination.
 
     Returns the number of bytes written; raises ValueError when the archive
     contains no regular file.
@@ -164,11 +184,20 @@ def extract_single_file(archive_path: Path, dest: Path) -> int:
             src = tf.extractfile(member)
             if src is None:  # pragma: no cover - isfile() guarantees a stream
                 continue
-            written = 0
-            with src, dest.open("wb") as out:
-                while chunk := src.read(_COPY_CHUNK):
-                    out.write(chunk)
-                    written += len(chunk)
+            fd, staging_name = tempfile.mkstemp(
+                dir=dest.parent, prefix=f".{dest.name}.", suffix=".extract"
+            )
+            staging = Path(staging_name)
+            try:
+                written = 0
+                with src, os.fdopen(fd, "wb") as out:
+                    while chunk := src.read(_COPY_CHUNK):
+                        out.write(chunk)
+                        written += len(chunk)
+                os.replace(staging, dest)
+            except BaseException:
+                staging.unlink(missing_ok=True)
+                raise
             return written
     raise ValueError("archive contains no file")
 
@@ -203,6 +232,10 @@ class _FrameSink:
     def __init__(self) -> None:
         self.stderr = b""
         self.failure: str | None = None
+        #: True once a channel-3 status frame arrived. ``failure is None``
+        #: alone cannot distinguish an explicit Success from a connection
+        #: that closed before the server reported anything.
+        self.verdict = False
 
     def feed(self, data: object) -> bytes:
         """Consume one frame; returns any stdout payload it carried."""
@@ -215,6 +248,7 @@ class _FrameSink:
         if channel == _STDERR_CHANNEL:
             self.stderr = (self.stderr + payload)[-_STDERR_CAP:]
         elif channel == _ERROR_CHANNEL:
+            self.verdict = True
             self.failure = _parse_error_channel(payload)
         return b""
 
@@ -257,6 +291,15 @@ async def download(
                             progress(total)
         if sink.failure is not None:
             raise TransferError(sink.error_message("transfer failed"))
+        if not sink.verdict:
+            # No channel-3 status at all: the exec outcome is unknown (e.g.
+            # a proxy dropped the connection). Never extract what may be a
+            # truncated archive and never audit it as a success.
+            raise TransferError(
+                sink.error_message(
+                    f"connection closed without reporting an outcome for {remote_path}"
+                )
+            )
         if total == 0:
             raise TransferError(
                 sink.error_message(f"no data received for {remote_path} — does the file exist?")
@@ -276,10 +319,11 @@ async def upload(
 
     The remote side runs ``tar xf - -C <parent>``; the local file is packed
     into a single-member archive (named after the remote basename) and sent
-    over the stdin channel. The v4 exec protocol has no stdin half-close, so
-    completion is signalled by closing the websocket after a short drain
-    window — the same contract kubectl-cp-style tools rely on. Returns the
-    file's byte count.
+    over the stdin channel. tar exits once it reads the archive's
+    end-of-archive marker, after which the server reports the exec outcome
+    on the error channel — an explicit Success verdict is required before
+    the upload is reported (and audited) as successful. Returns the file's
+    byte count.
     """
     arcname = posixpath.basename(remote_path)
     with tempfile.NamedTemporaryFile(suffix=".tar") as archive:
@@ -291,6 +335,8 @@ async def upload(
             async def _drain() -> None:
                 async for msg in ws:
                     sink.feed(msg.data)
+                    if sink.verdict:
+                        return
 
             reader = asyncio.create_task(_drain())
             try:
@@ -302,9 +348,10 @@ async def upload(
                     # its verdict over the raw transport error.
                     await asyncio.wait({reader}, timeout=_UPLOAD_DRAIN_GRACE)
                     raise TransferError(sink.error_message(f"connection lost: {exc}")) from exc
-                # The remote tar only reports late errors (disk full, bad
-                # permissions) after receiving the data; give it a moment.
-                await asyncio.wait({reader}, timeout=_UPLOAD_DRAIN_GRACE)
+                # Wait for the server's verdict: tar exits on the archive's
+                # end-of-archive marker, then the status frame arrives and
+                # _drain returns (or the server closes the websocket).
+                await asyncio.wait({reader}, timeout=_UPLOAD_VERDICT_TIMEOUT)
             finally:
                 reader.cancel()
                 # Cancellation must be observed before the websocket context
@@ -312,6 +359,12 @@ async def upload(
                 await asyncio.gather(reader, return_exceptions=True)
             if sink.failure is not None:
                 raise TransferError(sink.error_message("upload failed"))
+            if not sink.verdict:
+                raise TransferError(
+                    sink.error_message(
+                        "upload sent, but the connection closed without reporting an outcome"
+                    )
+                )
     return size
 
 
