@@ -1437,3 +1437,53 @@ def test_parse_debug_pod_name_absent_returns_none() -> None:
     assert parse_debug_pod_name("something unexpected") is None
     # similar words embedded mid-line must not match the anchored message
     assert parse_debug_pod_name("note: Creating debugging pod soon") is None
+
+
+async def test_shell_refused_while_context_switching() -> None:
+    """s during a :ctx switch is refused up front: the exec would race the
+    teardown and could attach to whichever cluster wins (issue #36)."""
+    app = make_app([_pod("api-1")])
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call") as mock_call,
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            app._ctx_switching = True
+            try:
+                await pilot.press("s")
+                await until(
+                    pilot,
+                    lambda: any(
+                        "context switch is in progress" in n.message for n in app._notifications
+                    ),
+                    label="shell refusal",
+                )
+            finally:
+                app._ctx_switching = False
+            mock_call.assert_not_called()
+
+
+async def test_shell_picker_cancelled_when_context_switched_while_open() -> None:
+    """A container picker that stayed open across a completed :ctx switch
+    must not exec: the selection belongs to the old cluster while kubectl
+    would target the new one (issue #36 review round 11)."""
+    app = make_app([_multi_container_pod("web-1")])
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call") as mock_call,
+        patch.object(type(app), "suspend", return_value=_noop_cm()),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await pilot.press("s")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, PickScreen)
+            app._ctx_epoch += 1  # a context switch completed under the picker
+            await pilot.press("enter")
+            await until(
+                pilot,
+                lambda: any("kube context" in n.message for n in app._notifications),
+                label="picker epoch refusal",
+            )
+            mock_call.assert_not_called()

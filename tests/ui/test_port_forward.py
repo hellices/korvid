@@ -1922,3 +1922,47 @@ async def test_finished_replacement_does_not_promote_a_stale_confirmation(
         assert not any(n.startswith("Forwarding") for n in notices)
         await until(pilot, lambda: "superseded by re-attach" in _audit_lines(tmp_path))
         procs[0].stdout.feed(None)  # release the reader thread
+
+
+async def test_forward_refused_while_context_switching() -> None:
+    """shift+f during a :ctx switch is refused up front: the forward would
+    race the teardown and could spawn against either cluster (issue #36)."""
+    procs: list[_FakeProc] = []
+    app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            app._ctx_switching = True
+            try:
+                await pilot.press("F")
+                await until(
+                    pilot,
+                    lambda: any(
+                        "context switch is in progress" in n.message for n in app._notifications
+                    ),
+                    label="forward refusal",
+                )
+            finally:
+                app._ctx_switching = False
+            assert procs == []
+
+
+async def test_forward_dialog_cancelled_when_context_switched_while_open() -> None:
+    """A forward dialog that stayed open across a completed :ctx switch must
+    not spawn kubectl: the selection belongs to the old cluster while the
+    reopened registry targets the new one (issue #36 review round 11)."""
+    procs: list[_FakeProc] = []
+    app = make_app([_pod("api-1")], forwards=_registry(procs), get_manifest=_pod_manifest)
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            app._ctx_epoch += 1  # a context switch completed under the dialog
+            await pilot.press("enter")
+            await until(
+                pilot,
+                lambda: any("kube context" in n.message for n in app._notifications),
+                label="dialog epoch refusal",
+            )
+            assert procs == []

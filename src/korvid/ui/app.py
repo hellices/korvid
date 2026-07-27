@@ -2091,6 +2091,14 @@ class KorvidApp(App[None]):
         """
         kind = self._canonical_kind(self.current_kind)
         meta = self.aliases.get(kind)
+        if self._ctx_switching:
+            # The exec would race the teardown/retarget and could attach to
+            # whichever cluster wins — refuse up front.
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
+            return
         if meta is not None and (meta.group, meta.plural) == ("", "nodes"):
             self.run_worker(self._node_shell_flow())
             return
@@ -2098,23 +2106,10 @@ class KorvidApp(App[None]):
             self.notify("Shell is available for pods and nodes", severity="warning")
             return
 
-        table = self.query_one(ResourceTable)
-        if table.row_count == 0:
-            self.notify("No resource selected", severity="warning")
+        ns, name = self._selected_ns_name()
+        if ns is None or name is None:
             return
-
-        row_index = table.cursor_row
-        ordered = table.ordered_rows
-        if row_index >= len(ordered):
-            self.notify("No resource selected", severity="warning")
-            return
-
-        row_key = str(ordered[row_index].key.value)  # "namespace/name"
-        parts = row_key.split("/", 1)
-        if len(parts) != 2:
-            self.notify("Cannot determine resource from selection", severity="warning")
-            return
-        namespace, name = parts[0], parts[1]
+        namespace = ns
 
         if shutil.which("kubectl") is None:
             self.notify(
@@ -2125,10 +2120,22 @@ class KorvidApp(App[None]):
 
         containers = self._get_pod_containers(namespace, name)
         if len(containers) > 1:
+            epoch = self._ctx_epoch
 
             def _on_pick(container: str | None) -> None:
-                if container is not None:
-                    self._run_shell(namespace, name, container)
+                if container is None:
+                    return
+                if self._ctx_switching or epoch != self._ctx_epoch:
+                    # The picker stayed open across a context switch: the
+                    # selection belongs to the old cluster while kubectl
+                    # would now target the new one.
+                    self.notify(
+                        f"shell into {name} cancelled - the kube context"
+                        " changed while the container picker was open",
+                        severity="warning",
+                    )
+                    return
+                self._run_shell(namespace, name, container)
 
             self.push_screen(
                 PickScreen(f"Container in {name}:", list(containers)),
@@ -2143,6 +2150,15 @@ class KorvidApp(App[None]):
         if self.current_kind not in FORWARDABLE_KINDS:
             self.notify("Port-forward is only available for pods and services", severity="warning")
             return
+        if self._ctx_switching:
+            # The forward would race the teardown/retarget and could spawn
+            # against whichever cluster wins — refuse up front.
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
+            return
+        epoch = self._ctx_epoch
         if self._forwards is None:
             self.notify("Port-forward unavailable in this build", severity="warning")
             return
@@ -2168,10 +2184,22 @@ class KorvidApp(App[None]):
             return
 
         def _on_result(result: tuple[int, int] | None) -> None:
-            if result is not None:
-                self.run_worker(
-                    self._start_forward(kind, ns, name, local_port=result[0], remote_port=result[1])
+            if result is None:
+                return
+            if self._ctx_switching or epoch != self._ctx_epoch:
+                # The dialog stayed open across a context switch (or the
+                # port prefill awaited through one): the selection belongs
+                # to the old cluster while kubectl and the reopened forward
+                # registry now target the new one.
+                self.notify(
+                    f"port-forward to {name} cancelled - the kube context"
+                    " changed while the dialog was open",
+                    severity="warning",
                 )
+                return
+            self.run_worker(
+                self._start_forward(kind, ns, name, local_port=result[0], remote_port=result[1])
+            )
 
         await self.push_screen(
             PortForwardScreen(f"{kind}/{ns}/{name}", ports, restrict_remote=kind == "services"),
