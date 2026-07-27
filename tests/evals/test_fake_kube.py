@@ -239,3 +239,46 @@ async def test_rebasing_never_mutates_the_shared_scenario() -> None:
     await kube.list_objects(_pods_meta(), "shop")
     assert scenario.objects[0]["metadata"]["creationTimestamp"] == "2026-07-27T05:00:00Z"
     assert scenario.events[0]["lastTimestamp"] == "2026-07-27T07:20:00Z"
+
+
+async def test_rebasing_accepts_fractional_seconds_and_explicit_offsets() -> None:
+    """RFC 3339 allows fractional seconds and non-UTC offsets; both must be
+    rebased (not left anchored to 2026) and normalized back to UTC."""
+    from datetime import UTC, datetime, timedelta
+
+    scenario = _scenario(
+        objects=(),
+        events=(
+            {
+                "type": "Warning",
+                "reason": "BackOff",
+                "message": "restarting failed container",
+                "lastTimestamp": "2026-07-27T07:20:00.123456Z",
+                "involvedObject": {
+                    "kind": "Pod",
+                    "name": "api-1",
+                    "namespace": "shop",
+                    "uid": "u1",
+                },
+            },
+            {
+                "type": "Warning",
+                "reason": "Unhealthy",
+                "message": "probe failed",
+                "lastTimestamp": "2026-07-27T16:20:00+09:00",
+                "involvedObject": {
+                    "kind": "Pod",
+                    "name": "api-1",
+                    "namespace": "shop",
+                    "uid": "u1",
+                },
+            },
+        ),
+    )
+    events = await FakeKubeClient(scenario).list_events_for("shop", "api-1", kind="Pod")
+    expected = datetime.now(UTC) - timedelta(minutes=40)  # both authored 40m before now
+    for event in events:
+        raw = event["lastTimestamp"]
+        assert raw.endswith("Z"), raw
+        parsed = datetime.fromisoformat(raw)
+        assert abs((parsed - expected).total_seconds()) < 60

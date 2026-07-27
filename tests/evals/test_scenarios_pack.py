@@ -61,7 +61,7 @@ def _timestamps(value: object) -> list[str]:
     return []
 
 
-_TS_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_TS_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 
 
 @pytest.mark.parametrize("scenario", BUNDLED, ids=lambda s: s.id)
@@ -69,5 +69,5 @@ def test_fixture_timestamps_never_exceed_scenario_now(scenario: Scenario) -> Non
     """Rebasing maps SCENARIO_NOW to the wall clock; a fixture timestamp
     after it would land in the future and render as age '-'."""
     for raw in _timestamps([*scenario.objects, *scenario.events]):
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw)
         assert parsed <= SCENARIO_NOW, f"{scenario.id}: {raw} is after SCENARIO_NOW"

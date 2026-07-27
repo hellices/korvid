@@ -28,14 +28,15 @@ from korvid.k8s.reads import ReadOps
 #: fixture timestamp must be at or before this instant.
 SCENARIO_NOW = datetime(2026, 7, 27, 8, 0, 0, tzinfo=UTC)
 
-_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 
 
 def _rebase(value: Any, delta: timedelta) -> Any:
-    """Deep-copy `value`, shifting every RFC 3339 timestamp string by `delta`."""
+    """Deep-copy `value`, shifting every RFC 3339 timestamp string by `delta`
+    and normalizing the shifted instant to UTC."""
     if isinstance(value, str) and _TIMESTAMP.match(value):
-        shifted = datetime.fromisoformat(value.replace("Z", "+00:00")) + delta
-        return shifted.strftime("%Y-%m-%dT%H:%M:%SZ")
+        shifted = (datetime.fromisoformat(value) + delta).astimezone(UTC)
+        return shifted.isoformat().replace("+00:00", "Z")
     if isinstance(value, dict):
         return {key: _rebase(item, delta) for key, item in value.items()}
     if isinstance(value, list | tuple):
