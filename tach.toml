@@ -19,3 +19,7 @@ depends_on = []
 [[modules]]
 path = "korvid.providers"
 depends_on = ["korvid.agent"]
+
+[[modules]]
+path = "korvid.evals"
+depends_on = ["korvid.agent", "korvid.k8s", "korvid.providers"]

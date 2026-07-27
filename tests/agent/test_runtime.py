@@ -62,6 +62,23 @@ async def test_tool_call_roundtrip() -> None:
     assert p.calls[1][-1]["content"] == "result-of-get_logs"
 
 
+async def test_tool_call_with_non_mapping_arguments_is_rejected() -> None:
+    """Valid JSON that is not an argument mapping never reaches the executor."""
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "[]"},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    events = await collect(AgentRuntime(p, EchoExecutor()), "logs?")
+    finished = next(e for e in events if isinstance(e, ToolCallFinished))
+    assert not finished.ok
+    assert finished.summary == "ERROR: bad arguments"
+
+
 async def test_iteration_cap() -> None:
     turn = [{"type": "tool_call", "id": "c", "name": "t", "arguments": "{}"}, {"type": "done"}]
     p = ScriptedProvider([list(turn) for _ in range(20)])
@@ -206,6 +223,31 @@ async def test_provider_error_still_accounts_usage() -> None:
     events = await collect(runtime, "q")
     assert any(isinstance(e, AgentError) for e in events)
     assert runtime.total_tokens == (40, 7)
+
+
+async def test_provider_error_estimates_streamed_text_without_usage() -> None:
+    """A stream that dies after emitting text but before its usage event
+    still cost output tokens — the exception path must apply the same
+    estimate as the normal path, not record zero."""
+
+    class DiesMidStream(ScriptedProvider):
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "text_delta", "text": "x" * 40}
+            raise RuntimeError("connection dropped")
+
+    runtime = AgentRuntime(DiesMidStream([]), EchoExecutor())
+    events = await collect(runtime, "q")
+    assert any(isinstance(e, AgentError) for e in events)
+    in_tok, out_tok = runtime.total_tokens
+    assert out_tok == 10
+    assert in_tok > 0  # the prompt was really sent — estimated, not zero
+    assert runtime.usage_estimated is True
 
 
 async def test_usage_estimated_is_sticky() -> None:
@@ -397,3 +439,76 @@ async def test_retarget_swaps_prompt_but_preserves_history() -> None:
     assert "Azure" not in system["content"]
     history = [str(m.get("content") or "") for m in p.calls[1]]
     assert any("hello" in content for content in history)
+
+
+async def test_missing_usage_estimates_prompt_tokens_too() -> None:
+    """A provider that omits usage must not record zero input tokens: the
+    prompt was really sent, so both directions get the heuristic estimate."""
+    no_usage: list[dict[str, Any]] = [
+        {"type": "text_delta", "text": "a diagnosis long enough to estimate"},
+        {"type": "done"},
+    ]
+    runtime = AgentRuntime(ScriptedProvider([no_usage]), EchoExecutor())
+    _ = await collect(runtime, "a question long enough to estimate")
+    in_tok, out_tok = runtime.total_tokens
+    assert in_tok > 0
+    assert out_tok > 0
+    assert runtime.usage_estimated is True
+
+
+async def test_missing_usage_estimates_include_tool_schemas_and_payloads() -> None:
+    """Prompt estimates must cover the transmitted tool schemas, and output
+    estimates the generated tool-call payload — a tool-only iteration is
+    not free just because the provider omitted usage."""
+    import json
+
+    from korvid.agent.tools import READ_TOOLS
+
+    args = json.dumps({"pod": "checkout-1", "namespace": "shop", "container": "app"})
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": args},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, EchoExecutor())
+    _ = await collect(runtime, "logs?")
+    in_tok, out_tok = runtime.total_tokens
+    # The tool-call name + JSON arguments dominate the tiny "done" text.
+    assert out_tok >= (len("get_logs") + len(args)) // 4
+    # A content-only estimate is far below the serialized schema cost that
+    # every request really transmits.
+    assert in_tok > len(json.dumps(READ_TOOLS)) // 4
+    assert runtime.usage_estimated is True
+
+
+async def test_provider_error_after_tool_call_estimates_output() -> None:
+    """A stream that dies after emitting only a tool call (no text) still
+    generated output — its payload is charged, not recorded as zero."""
+
+    class DiesAfterToolCall(ScriptedProvider):
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {
+                "type": "tool_call",
+                "id": "c1",
+                "name": "get_logs",
+                "arguments": '{"pod": "checkout-1", "namespace": "shop"}',
+            }
+            raise RuntimeError("connection dropped")
+
+    runtime = AgentRuntime(DiesAfterToolCall([]), EchoExecutor())
+    events = await collect(runtime, "q")
+    assert any(isinstance(e, AgentError) for e in events)
+    in_tok, out_tok = runtime.total_tokens
+    assert out_tok > 0
+    assert in_tok > 0
+    assert runtime.usage_estimated is True

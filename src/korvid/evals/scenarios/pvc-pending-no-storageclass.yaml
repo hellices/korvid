@@ -1,0 +1,66 @@
+id: pvc-pending-no-storageclass
+question: Pod db-0 in namespace data has been Pending for 20 minutes. What is blocking it?
+screen: "resource view: pods, namespace data, selected: data/db-0 (Pending)"
+root_cause: pvc_pending_no_storageclass
+grading:
+  must_mention:
+    - [persistentvolumeclaim, pvc, claim]
+    - [storageclass, storage class, fast-ssd]
+    - [not found, does not exist, doesn't exist, missing, nonexistent,
+       non-existent, no such]
+  must_not_mention:
+    - [image pull, crashloopbackoff, oomkilled]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: db-0, namespace: data}
+      contains: "pvc data-db-0: Pending"
+    - tool: get_events
+      args: {kind: persistentvolumeclaims, namespace: data, name: data-db-0}
+      contains: storageclass.storage.k8s.io "fast-ssd" not found
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: db-0
+        namespace: data
+        uid: pod-pvc-1
+        creationTimestamp: "2026-07-27T07:05:00Z"
+        labels: {app: db}
+      spec:
+        containers:
+          - name: db
+            image: data/db:v1
+        volumes:
+          - name: data
+            persistentVolumeClaim: {claimName: data-db-0}
+      status:
+        phase: Pending
+        conditions:
+          - {type: PodScheduled, status: "False", reason: Unschedulable, message: "0/3 nodes are available: pod has unbound immediate PersistentVolumeClaims."}
+    - kind: PersistentVolumeClaim
+      apiVersion: v1
+      metadata:
+        name: data-db-0
+        namespace: data
+        uid: pvc-1
+      spec:
+        storageClassName: fast-ssd
+        resources:
+          requests: {storage: 50Gi}
+      status:
+        phase: Pending
+  events:
+    - type: Warning
+      reason: FailedScheduling
+      count: 9
+      lastTimestamp: "2026-07-27T07:27:00Z"
+      message: "0/3 nodes are available: pod has unbound immediate PersistentVolumeClaims."
+      involvedObject: {kind: Pod, name: db-0, namespace: data, uid: pod-pvc-1}
+    - type: Warning
+      reason: ProvisioningFailed
+      count: 9
+      lastTimestamp: "2026-07-27T07:28:00Z"
+      message: 'storageclass.storage.k8s.io "fast-ssd" not found'
+      involvedObject: {kind: PersistentVolumeClaim, name: data-db-0, namespace: data, uid: pvc-1}
+  logs: {}

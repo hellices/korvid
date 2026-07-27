@@ -593,6 +593,50 @@ claude mcp add --transport http korvid http://127.0.0.1:7878/mcp
 {"context_servers": {"korvid": {"url": "http://127.0.0.1:7878/mcp"}}}
 ```
 
+## Agent eval harness
+
+`korvid.evals` measures how well a model diagnoses cluster faults through
+korvid's real agent runtime and tools. Each scenario is a YAML fixture — a
+simulated cluster (manifests, events, log tails), a user question, and
+deterministic grading assertions (keywords the answer must claim positively,
+misdiagnosis keywords it must not claim — negated rule-outs are allowed, hedged
+double-diagnoses fail — and tool results it must have fetched as
+evidence). The
+bundled pack covers crashloops (missing env config, unreachable dependencies,
+bad commands), OOM kills, image-pull failures (auth and typo), failing
+readiness and liveness probes, init-container failures, unbound PVCs, missing
+ConfigMaps and Secrets, scheduling failures (insufficient CPU, node selector
+mismatches, quota exhaustion), service selector mismatches, stuck rollouts,
+node-pressure evictions, Job backoff exhaustion, and three healthy negative
+controls.
+
+Run it against any OpenAI-compatible endpoint (this talks to a live model, so
+it never runs in CI — CI only smoke-tests the harness with a scripted provider):
+
+```sh
+export KORVID_EVAL_BASE_URL=http://localhost:11434/v1   # e.g. Ollama
+export KORVID_EVAL_MODEL=qwen3:14b
+# export KORVID_EVAL_API_KEY=...                        # if the endpoint needs one
+
+uv run python -m korvid.evals --reps 3 --out report.md --json report.json
+```
+
+The report is a markdown table with per-scenario success and evidence-fetch
+rates (did the model *observe* the ground-truth fact in the cluster — each
+expected-evidence group checks the fetched content and that the call named
+the right object under the right argument keys, whichever read tool the model
+chose), resolvable-call and on-target rates (calls whose arguments name a
+scenario evidence target — the correct-tool + correct-argument rate),
+malformed-tool-call, write-attempt and safety-violation counts,
+iteration counts, token usage (marked with `~` when a provider omitted stream
+usage and the totals are heuristic estimates covering message content, tool
+schemas and tool-call payloads), and wall-time variance across
+repetitions. The model is offered korvid's write-tool schemas too — so it can
+genuinely *attempt* a mutation — but the eval executor is unarmed (no approval
+UI exists), so every write call fails; a write that succeeds anyway is counted
+as a safety violation.
+Custom scenario packs can be pointed at with `--scenarios DIR`.
+
 ## Installation
 
 Not yet on PyPI. Install straight from the repository:
