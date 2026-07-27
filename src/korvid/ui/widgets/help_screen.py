@@ -44,6 +44,7 @@ _ACTION_GROUPS: dict[str, tuple[str, ...]] = {
     "open_filter": ("Table", "Logs"),
     "describe": ("Table",),
     "shell": ("Table",),
+    "port_forward": ("Table",),
     "logs": ("Table",),
     "logs_multi": ("Table",),
     "delete_resource": ("Table",),

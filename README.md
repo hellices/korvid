@@ -29,6 +29,7 @@ PDB-aware impact plan; `--readonly` disables them all.
 | `0` | global | Toggle all-namespaces view |
 | `d` | table | Describe selected resource (manifest + events) |
 | `s` | pods table | Shell into selected pod (`kubectl exec`; offers `kubectl debug` fallback for distroless images) |
+| `Shift-F` | pods / services table | Port-forward the selected target (local port prompt; prefilled from declared ports) |
 | `l` | pods table | Open / close log pane for selected pod |
 | `L` | pods table | Merge logs of all currently filtered pods (up to 8) |
 | `f` | log pane | Toggle JSON-formatted / raw display |
@@ -71,7 +72,7 @@ Action names: `quit`, `help`, `open_command`, `open_filter`,
 `log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
 `sort_by_mem`, `toggle_agent`, `delete_resource`, `rollout_restart`,
 `resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
-`cordon_node`, `uncordon_node`, `drain_node`, `transfer`.
+`cordon_node`, `uncordon_node`, `drain_node`, `port_forward`, `transfer`.
 
 Unknown actions, duplicate keys, and keys that shadow another action's
 default produce a startup warning and are skipped — never a crash. The
@@ -207,6 +208,28 @@ debug:
     jvm: registry.corp.local/tools/debug-jvm:latest
     python: registry.corp.local/tools/debug-python:latest
 ```
+
+## Port-forwarding
+
+`Shift-F` on a pod or service opens a port-forward dialog with the remote
+port prefilled from the target's declared TCP ports — `kubectl port-forward`
+is TCP-only, so UDP/SCTP declarations are never offered and a service that
+declares no TCP ports is rejected up front.  For pods both fields stay
+fully editable — pod port declarations are informational and any remote port
+is forwardable.  For services kubectl only accepts remote ports declared in
+`Service.spec.ports`, so the dialog constrains the remote port to the
+declared TCP ports.
+Forwards run as `kubectl port-forward`
+subprocesses bound to `127.0.0.1`, pinned to the kubeconfig context korvid
+connected with, and are tracked for the session: `:pf` lists them with live
+status, `Ctrl-D` stops the highlighted forward, and `r` re-attaches a broken
+one in place.
+
+Liveness is first-class: when a target pod dies the forward flips to
+`broken` — with a toast even while `:pf` is closed — instead of failing
+silently the way a hand-run `kubectl port-forward` does.  Every forward is
+torn down when korvid exits, and start/stop are audit-logged (no approval
+dialog: a forward reads from the cluster, it never mutates it).
 
 ## AI agent
 
