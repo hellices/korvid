@@ -2,6 +2,7 @@ from typing import cast
 
 import pytest
 
+from korvid.providers.ollama import OllamaOptions, OllamaProvider
 from korvid.providers.openai_compat import OpenAICompatProvider
 from korvid.providers.registry import create_provider
 
@@ -34,7 +35,7 @@ def test_openai_compat_created(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_aliases_accepted() -> None:
-    for alias in ("openai", "ollama", "azure", "vllm", "github", "anthropic", "claude"):
+    for alias in ("openai", "azure", "vllm", "github", "anthropic", "claude"):
         p = create_provider(
             enabled=True,
             provider=alias,
@@ -44,6 +45,88 @@ def test_aliases_accepted() -> None:
             api_key_env=None,
         )
         assert isinstance(p, OpenAICompatProvider)
+
+
+def test_ollama_routes_to_native_provider() -> None:
+    p = create_provider(
+        enabled=True,
+        provider="ollama",
+        auth_method=None,
+        base_url="http://localhost:11434",
+        model="qwen3:8b",
+        api_key_env=None,
+    )
+    assert isinstance(p, OllamaProvider)
+    assert p.name == "qwen3:8b"
+
+
+def test_ollama_receives_options() -> None:
+    options = OllamaOptions(num_ctx=8192, think=True)
+    p = create_provider(
+        enabled=True,
+        provider="ollama",
+        auth_method=None,
+        base_url="http://localhost:11434",
+        model="m",
+        api_key_env=None,
+        ollama=options,
+    )
+    assert isinstance(p, OllamaProvider)
+    assert p._options == options
+
+
+def test_ollama_none_when_base_url_missing() -> None:
+    assert (
+        create_provider(
+            enabled=True,
+            provider="ollama",
+            auth_method=None,
+            base_url=None,
+            model="m",
+            api_key_env=None,
+        )
+        is None
+    )
+
+
+def test_ollama_api_key_auth_supported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLLAMA_KEY", "sk-1")
+    p = create_provider(
+        enabled=True,
+        provider="ollama",
+        auth_method="api_key",
+        base_url="http://remote:11434",
+        model="m",
+        api_key_env="OLLAMA_KEY",
+    )
+    assert isinstance(p, OllamaProvider)
+
+
+def test_ollama_bad_auth_disables_agent() -> None:
+    assert (
+        create_provider(
+            enabled=True,
+            provider="ollama",
+            auth_method="api_key",
+            base_url="http://x",
+            model="m",
+            api_key_env=None,
+        )
+        is None
+    )
+
+
+def test_openai_compat_with_ollama_base_url_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No breaking change: the shim path stays available via openai-compat."""
+    p = create_provider(
+        enabled=True,
+        provider="openai-compat",
+        auth_method=None,
+        base_url="http://localhost:11434/v1",
+        model="llama3",
+        api_key_env=None,
+    )
+    assert isinstance(p, OpenAICompatProvider)
 
 
 def test_none_when_model_missing() -> None:

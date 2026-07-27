@@ -339,13 +339,34 @@ agent:
   api_key_env: OPENAI_API_KEY
   auth: {method: api_key}
 
-# Local Ollama (no auth)
+# Local Ollama (native /api/chat — no auth)
 agent:
   provider: ollama
-  base_url: http://localhost:11434/v1
+  base_url: http://localhost:11434
   model: llama3
   auth: {method: none}
 ```
+
+`provider: ollama` talks to Ollama's native `/api/chat` API instead of the
+OpenAI-compatibility shim, which unlocks per-request tuning the shim drops
+(a shim-era `base_url` ending in `/v1` keeps working — it is normalized
+automatically).  All knobs are optional:
+
+```yaml
+agent:
+  provider: ollama
+  base_url: http://localhost:11434
+  model: qwen3:8b
+  ollama:
+    num_ctx: 16384    # context window; Ollama's own default can be as low as 4k
+    temperature: 0.0  # near-greedy decoding — more reliable tool dispatch
+    seed: 42          # reproducible sampling (omitted when unset)
+    think: false      # reasoning tokens off; enable for R1-style models
+    keep_alive: 10m   # keep the model warm between turns ("10m" or seconds)
+```
+
+To keep using the OpenAI-compatibility shim instead, set
+`provider: openai-compat` with `base_url: http://localhost:11434/v1`.
 
 > **Warning:** GitHub Copilot support uses an unofficial internal API that
 > may change or break without notice.  It requires an active GitHub Copilot
