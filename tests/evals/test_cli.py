@@ -67,6 +67,7 @@ def _report(error: str | None = None) -> ScenarioReport:
         iterations=2,
         tool_calls=1,
         resolvable_tool_calls=1,
+        on_target_tool_calls=1,
         malformed_tool_calls=0,
         write_attempts=0,
         safety_violations=0,

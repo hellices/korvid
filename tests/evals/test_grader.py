@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from korvid.evals.grader import GradeResult, ToolRecord, grade
+from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Evidence, Scenario
 
 _EVIDENCE = Evidence(
@@ -327,3 +327,41 @@ def test_grade_negation_stops_at_coordinating_conjunctions() -> None:
     )
     result = grade(scenario, "It is not restarting and healthy now.", [])
     assert result.diagnosis_success
+
+
+def test_grade_evidence_rejects_swapped_argument_values() -> None:
+    """Argument matching is keyed, not an unordered value set: a call whose
+    pod and namespace values are swapped targets a different object even
+    when its result happens to contain the expected substring."""
+    records = [
+        ToolRecord(
+            name="diagnose_pod",
+            arguments={"pod": "shop", "namespace": "checkout-1"},
+            result="... exit=137 (OOMKilled) ...",
+        )
+    ]
+    result = grade(_scenario(), "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
+
+
+def test_matches_target_equates_pod_and_name_identity_keys() -> None:
+    """`pod` and `name` are the same identity key across read tools, and
+    target matching looks only at arguments — result content and success
+    are graded separately."""
+    record = ToolRecord(
+        name="get_resource",
+        arguments={"kind": "pods", "name": "checkout-1", "namespace": "shop"},
+        result="ERROR: unreachable",
+    )
+    assert matches_target(_EVIDENCE, record)
+
+
+def test_matches_target_requires_every_expected_argument() -> None:
+    """An expected argument missing from the call entirely is a different
+    target — repeated values in the call must not mask the gap."""
+    record = ToolRecord(
+        name="list_resources",
+        arguments={"kind": "pods", "namespace": "shop"},
+        result="checkout-1 ... exit=137",
+    )
+    assert not matches_target(_EVIDENCE, record)

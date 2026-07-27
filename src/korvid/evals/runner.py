@@ -23,7 +23,7 @@ from korvid.agent.events import (
 )
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.tools import READ_TOOLS, RESIZE_TOOLS, WRITE_TOOL_NAMES, WRITE_TOOLS
-from korvid.evals.grader import GradeResult, ToolRecord, grade
+from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Scenario
 
 #: Runs per scenario per configuration (issue #69: report variance, not means).
@@ -87,9 +87,11 @@ class RunMetrics:
     tool_calls: int
     #: Read calls that were schema-valid AND resolved against the cluster
     #: without an ERROR result. Measures execution quality, not diagnostic
-    #: relevance — issue #69's fetched-the-ground-truth requirement is
-    #: graded per run by ``expected_evidence``.
+    #: relevance.
     resolvable_tool_calls: int
+    #: Calls whose arguments name a scenario evidence target — issue #69's
+    #: correct-tool + correct-argument numerator (denominator: tool_calls).
+    on_target_tool_calls: int
     #: Bad-JSON arguments or unknown tool names.
     malformed_tool_calls: int
     #: Write-tool calls attempted (they must all fail in an eval session).
@@ -253,12 +255,21 @@ async def _drive_turn(
         and not record.result.startswith("ERROR:")
         and not _is_malformed(record.name, json.dumps(record.arguments))
     )
+    # Issue #69's correct-tool + correct-argument rate: a call is on-target
+    # when its arguments name one of the scenario's evidence targets,
+    # regardless of what its result contained.
+    on_target_calls = sum(
+        1
+        for record in executor.records
+        if any(matches_target(alt, record) for group in scenario.expected_evidence for alt in group)
+    )
     return RunMetrics(
         grade=grade_result,
         answer=tally.answer,
         iterations=provider.completions,
         tool_calls=tally.tool_calls,
         resolvable_tool_calls=resolvable_calls,
+        on_target_tool_calls=on_target_calls,
         malformed_tool_calls=tally.malformed,
         write_attempts=tally.write_attempts,
         safety_violations=tally.safety_violations,
@@ -304,9 +315,9 @@ def _mean_sd(values: list[float]) -> str:
 def render_markdown(reports: list[ScenarioReport]) -> str:
     """Markdown summary table: one row per scenario, variance included."""
     lines = [
-        "| scenario | root cause | success | evidence | resolvable calls | malformed | writes | "
-        "safety | iterations | tokens in/out | wall s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "| scenario | root cause | success | evidence | resolvable calls | on-target | "
+        "malformed | writes | safety | iterations | tokens in/out | wall s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for report in reports:
         runs = report.runs
@@ -318,6 +329,8 @@ def render_markdown(reports: list[ScenarioReport]) -> str:
         # denominator has to be visible.
         rate = f" ({100 * malformed / total_calls:.1f}%)" if total_calls else ""
         resolvable_rate = f" ({100 * resolvable / total_calls:.1f}%)" if total_calls else ""
+        on_target = sum(run.on_target_tool_calls for run in runs)
+        on_target_rate = f" ({100 * on_target / total_calls:.1f}%)" if total_calls else ""
         # Attempted mutations stay visible even though the unarmed executor
         # keeps the safety column at zero.
         writes = sum(run.write_attempts for run in runs)
@@ -332,6 +345,7 @@ def render_markdown(reports: list[ScenarioReport]) -> str:
         lines.append(
             f"| {report.scenario_id} | {report.root_cause} | {report.successes}/{n} |"
             f" {report.evidence_hits}/{n} | {resolvable}/{total_calls}{resolvable_rate} |"
+            f" {on_target}/{total_calls}{on_target_rate} |"
             f" {malformed}/{total_calls}{rate} | {writes} | {safety} |"
             f" {iterations} | {token_mark}{tokens_in}/{tokens_out} | {wall} |"
         )

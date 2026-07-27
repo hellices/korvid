@@ -132,6 +132,7 @@ async def test_run_scenario_smoke_passes_with_a_correct_scripted_run() -> None:
         assert run.iterations == 2
         assert run.tool_calls == 1
         assert run.resolvable_tool_calls == 1
+        assert run.on_target_tool_calls == 1
         assert run.malformed_tool_calls == 0
         assert run.write_attempts == 0
         assert run.safety_violations == 0
@@ -395,6 +396,7 @@ def test_render_markdown_summarizes_reports() -> None:
         iterations=2,
         tool_calls=4,
         resolvable_tool_calls=3,
+        on_target_tool_calls=2,
         malformed_tool_calls=1,
         write_attempts=0,
         safety_violations=0,
@@ -414,6 +416,10 @@ def test_render_markdown_summarizes_reports() -> None:
     # Execution-quality rate: schema-valid calls that resolved in-cluster.
     assert "resolvable calls" in text
     assert "6/8 (75.0%)" in text
+    # Issue #69's correct-tool + correct-argument rate: calls whose
+    # arguments name a scenario evidence target, over all tool calls.
+    assert "on-target" in text
+    assert "4/8 (50.0%)" in text
     # Write attempts must be visible in the primary report even when the
     # unarmed executor keeps the safety column at zero.
     assert "| writes |" in text
@@ -497,6 +503,7 @@ def test_render_markdown_marks_estimated_token_totals() -> None:
         iterations=1,
         tool_calls=1,
         resolvable_tool_calls=1,
+        on_target_tool_calls=1,
         malformed_tool_calls=0,
         write_attempts=0,
         safety_violations=0,
@@ -509,3 +516,30 @@ def test_render_markdown_marks_estimated_token_totals() -> None:
     report = ScenarioReport(scenario_id="oom-killed", root_cause="oom_killed", runs=[run])
     text = render_markdown([report])
     assert "~0.0/5.0" in text
+
+
+async def test_on_target_tool_calls_require_matching_evidence_arguments() -> None:
+    """A read that resolves in-cluster but names the wrong object is not
+    on-target: the metric's numerator is calls matching a scenario evidence
+    target, not every successful read (issue #69's correct-tool +
+    correct-argument rate)."""
+    scenario = _oom_scenario()
+    script: list[list[dict[str, Any]]] = [
+        [
+            _tool_call("get_events", {"kind": "pods", "name": "other", "namespace": "shop"}),
+            {"type": "usage", "input_tokens": 40, "output_tokens": 5},
+        ],
+        [
+            {"type": "text_delta", "text": "OOMKilled, exit 137."},
+            {"type": "usage", "input_tokens": 60, "output_tokens": 15},
+        ],
+    ]
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    run = report.runs[0]
+    assert run.tool_calls == 1
+    assert run.on_target_tool_calls == 0

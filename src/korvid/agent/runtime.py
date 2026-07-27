@@ -94,6 +94,15 @@ def _message_chars(message: dict[str, Any]) -> int:
     return n
 
 
+def _stream_output_chars(state: _StreamState) -> int:
+    """Approximate one iteration's generated output: streamed text plus the
+    structured tool-call payloads — a tool-only iteration is not free."""
+    n = len(state.text)
+    for tc in state.tool_calls:
+        n += len(tc["name"]) + len(tc["arguments"])
+    return n
+
+
 @dataclass
 class _StreamState:
     text: str = ""
@@ -119,6 +128,9 @@ class AgentRuntime:
         self._provider = provider
         self._executor = executor
         self._tools = tools if tools is not None else READ_TOOLS
+        # The serialized tool schemas ride along on every request; they are
+        # part of the prompt cost when a provider omits usage.
+        self._tools_chars = len(json.dumps(self._tools))
         prompt = SYSTEM_PROMPT
         if cluster_context:
             # Detected-environment note (e.g. cloud provider, issue #30):
@@ -246,10 +258,12 @@ class AgentRuntime:
             state = _StreamState()
             # Estimate of the prompt this iteration sends — used only when
             # the provider omits usage, so token totals never read as zero
-            # input for a request that was really transmitted.
+            # input for a request that was really transmitted. Counts what
+            # actually goes over the wire: tool schemas, message content,
+            # and prior assistant tool-call arguments.
             prompt_estimate = (
-                sum(len(str(message.get("content") or "")) for message in self._messages) // 4
-            )
+                self._tools_chars + sum(_message_chars(message) for message in self._messages)
+            ) // 4
             try:
                 stream = self._provider.complete(self._messages, self._tools)
                 async for event in self._consume_stream(stream, state):
@@ -263,7 +277,7 @@ class AgentRuntime:
                 # no speculative charge.
                 if not state.has_usage and (state.text or state.tool_calls):
                     state.in_tok = prompt_estimate
-                    state.out_tok = len(state.text) // 4
+                    state.out_tok = _stream_output_chars(state) // 4
                 self._total_in += turn_in + state.in_tok
                 self._total_out += turn_out + state.out_tok
                 if usage_missing or not state.has_usage:
@@ -273,7 +287,7 @@ class AgentRuntime:
 
             if not state.has_usage:
                 state.in_tok = prompt_estimate
-                state.out_tok = len(state.text) // 4
+                state.out_tok = _stream_output_chars(state) // 4
             turn_in += state.in_tok
             turn_out += state.out_tok
             usage_missing = usage_missing or not state.has_usage

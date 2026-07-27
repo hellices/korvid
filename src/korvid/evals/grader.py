@@ -166,9 +166,16 @@ def _mentions_positively(keyword: str, answer_tokens: list[str], clause_ids: lis
     )
 
 
+#: Identity keys that name the same thing under different parameter names
+#: across read tools (`get_logs(pod=...)` vs `get_resource(name=...)`).
+_KEY_ALIASES = {"pod": "name"}
+
+
 def _canonical_args(args: dict[str, Any]) -> dict[str, str]:
-    """Lowercase argument values; canonicalize "kind" through the resource
-    alias table so `deploy`, `deployment` and `deployments` compare equal."""
+    """Lowercase argument values keyed by canonical parameter name:
+    equivalent identity keys (`pod` -> `name`) are folded together, and
+    "kind" values go through the resource alias table so `deploy`,
+    `deployment` and `deployments` compare equal."""
     canonical: dict[str, str] = {}
     for key, value in args.items():
         text = str(value).strip().lower()
@@ -176,8 +183,27 @@ def _canonical_args(args: dict[str, Any]) -> dict[str, str]:
             meta = _ALIASES.get(text)
             if meta is not None:
                 text = meta.plural
-        canonical[key] = text
+        canonical[_KEY_ALIASES.get(key, key)] = text
     return canonical
+
+
+def matches_target(evidence: Evidence, record: ToolRecord) -> bool:
+    """True when the call's arguments name the same object as the evidence.
+
+    Matching is keyed, not positional: each expected argument must appear
+    under the same canonical parameter name with the same value, so a call
+    with `pod` and `namespace` values swapped is a different target. Only
+    result-independent targeting is checked here — success and content are
+    `_satisfies`' job (the runner also uses this for its on-target rate).
+    """
+    expected = _canonical_args(evidence.args)
+    actual = _canonical_args(record.arguments)
+    # "kind" is route-specific (diagnose_pod has no kind argument), but when
+    # both sides name one they must agree: a deployment `web` is not
+    # evidence about a pod `web`.
+    if "kind" in expected and "kind" in actual and expected["kind"] != actual["kind"]:
+        return False
+    return all(actual.get(key) == value for key, value in expected.items() if key != "kind")
 
 
 def _satisfies(evidence: Evidence, record: ToolRecord) -> bool:
@@ -192,15 +218,7 @@ def _satisfies(evidence: Evidence, record: ToolRecord) -> bool:
     # expected substring (e.g. the object name in a not-found message).
     if record.result.startswith("ERROR:"):
         return False
-    expected = _canonical_args(evidence.args)
-    actual = _canonical_args(record.arguments)
-    # "kind" is route-specific (diagnose_pod has no kind argument), but when
-    # both sides name one they must agree: a deployment `web` is not
-    # evidence about a pod `web`.
-    if "kind" in expected and "kind" in actual and expected["kind"] != actual["kind"]:
-        return False
-    actual_values = set(actual.values())
-    return all(value in actual_values for key, value in expected.items() if key != "kind")
+    return matches_target(evidence, record)
 
 
 def grade(scenario: Scenario, answer: str, records: list[ToolRecord]) -> GradeResult:
