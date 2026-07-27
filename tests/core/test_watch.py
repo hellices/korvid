@@ -423,3 +423,52 @@ async def test_non_403_error_on_all_scope_does_not_fan_out() -> None:
     await asyncio.sleep(0.05)
     assert errors
     assert set(scopes_seen) == {ALL_NAMESPACES}
+
+
+async def test_cluster_scoped_kind_403_does_not_fan_out() -> None:
+    """watch_objects ignores the namespace for cluster-scoped kinds: a fanout
+    would just repeat the same forbidden cluster-wide request per namespace."""
+    store = ResourceStore()
+    errors: list[str] = []
+    scopes_seen: list[str] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        scopes_seen.append(scope)
+        raise ApiStatusError(403, "Forbidden")
+        yield ("", _ns_pod("", ""))  # pragma: no cover - async generator typing aid
+
+    mgr = WatchManager(
+        store,
+        source,
+        on_error=errors.append,
+        fallback_namespaces=("team-a",),
+        is_namespaced=lambda kind: kind != "nodes",
+        retry_delay=0,
+        max_retries=2,
+    )
+    await mgr.start("nodes", ALL_NAMESPACES)
+    await asyncio.sleep(0.05)
+    assert errors
+    assert set(scopes_seen) == {ALL_NAMESPACES}
+
+
+async def test_fanout_purges_rows_seeded_by_the_forbidden_cluster_list() -> None:
+    """The source LISTs before it WATCHes: rows can land in the ALL bucket
+    before the watch answers 403. Fanout must purge them, or rows from
+    namespaces outside the fallback set would stay visible forever."""
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        if scope == ALL_NAMESPACES:
+            yield ("ADDED", _ns_pod("stale", "other-ns"))
+            raise ApiStatusError(403, "Forbidden")
+        yield ("ADDED", _ns_pod(f"p-{scope}", scope))
+        while True:
+            await asyncio.sleep(0.01)
+
+    mgr = WatchManager(store, source, fallback_namespaces=("team-a",), retry_delay=0)
+    await mgr.start("pods", ALL_NAMESPACES)
+    await asyncio.sleep(0.1)
+    names = {(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)}
+    assert names == {("team-a", "p-team-a")}
+    await mgr.stop_all()

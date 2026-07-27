@@ -37,6 +37,7 @@ class WatchManager:
         retry_delay: float = 1.0,
         max_retries: int = 5,
         fallback_namespaces: Sequence[str] = (),
+        is_namespaced: Callable[[str], bool] | None = None,
     ) -> None:
         self._store = store
         self._source = watch_source
@@ -46,6 +47,10 @@ class WatchManager:
         self._retry_delay = retry_delay
         self._max_retries = max_retries
         self._fallback_namespaces = tuple(fallback_namespaces)
+        #: Kind -> namespaced? None assumes namespaced. Cluster-scoped kinds
+        #: must not fan out: the source ignores the namespace for them, so a
+        #: fanout would just repeat the same forbidden request per namespace.
+        self._is_namespaced = is_namespaced
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
 
     @property
@@ -71,23 +76,30 @@ class WatchManager:
             await self.stop(kind, scope)
 
     async def _run(self, kind: str, scope: str) -> None:
-        exc = await self._watch_loop(kind, scope, scope, bail_out=self._is_rbac_fanout_case(scope))
+        bail_out = self._is_rbac_fanout_case(kind, scope)
+        exc = await self._watch_loop(kind, scope, scope, bail_out=bail_out)
         if exc is not None:
-            if self._is_rbac_fanout_case(scope)(exc):
+            if bail_out(exc):
+                # The source LISTs before it WATCHes: rows may have landed in
+                # the bucket before the 403 — purge, or rows from namespaces
+                # outside the fallback set would stay visible forever.
+                self._store.clear(kind, scope)
                 await self._fan_out(kind)
             else:
                 self._report(kind, scope, exc)
         self._tasks.pop((kind, scope), None)
 
-    def _is_rbac_fanout_case(self, scope: str) -> Callable[[Exception], bool]:
+    def _is_rbac_fanout_case(self, kind: str, scope: str) -> Callable[[Exception], bool]:
         """Fanout applies only when a Forbidden answer proves an RBAC boundary
-        on the cluster scope and there are namespaces to fall back to. Network
-        flakes / server errors keep the normal retry path."""
+        on the cluster scope of a namespaced kind and there are namespaces to
+        fall back to. Network flakes / server errors keep the normal retry
+        path, and cluster-scoped kinds keep the single error path."""
 
         def check(exc: Exception) -> bool:
             return (
                 scope == ALL_NAMESPACES
                 and bool(self._fallback_namespaces)
+                and (self._is_namespaced is None or self._is_namespaced(kind))
                 and isinstance(exc, ApiStatusError)
                 and exc.status == 403
             )

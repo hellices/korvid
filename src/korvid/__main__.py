@@ -473,7 +473,19 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
     # in priority order. Feeds the picker and the per-namespace watch fanout.
     fallback_namespaces = _fallback_namespaces(config)
 
-    watch_manager = WatchManager(store, source, fallback_namespaces=fallback_namespaces)
+    def _is_namespaced(kind: str) -> bool:
+        # Cluster-scoped kinds must not fan out per namespace (the source
+        # ignores the namespace for them); unknown kinds fail the watch with
+        # a ValueError anyway, so answer False conservatively.
+        meta = aliases.get(kind)
+        return meta.namespaced if meta is not None else False
+
+    watch_manager = WatchManager(
+        store,
+        source,
+        fallback_namespaces=fallback_namespaces,
+        is_namespaced=_is_namespaced,
+    )
 
     # One bounded discovery round trip decides both the R keybinding and
     # whether the agent is offered the resize tool (issue #27).
