@@ -2,8 +2,10 @@
 Subscription (issue #29). Prefilled from the PackageManifest's install facts;
 submit validates against the known channels and approval modes."""
 
+import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Input, Select, Static
+from textual.widgets.select import InvalidSelectValueError
 
 from korvid.k8s.olm import APPROVAL_MODES, PackageInstallFacts
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
@@ -62,8 +64,16 @@ async def test_channel_and_approval_are_selects_with_known_options() -> None:
         await _opened(app, pilot)
         channel = app.screen.query_one("#install-channel", Select)
         approval = app.screen.query_one("#install-approval", Select)
-        assert [v for _, v in channel._options] == ["candidate", "stable"]
-        assert [v for _, v in approval._options] == list(APPROVAL_MODES)
+        # Public-API verification: every known value is settable, an unknown
+        # one raises - no reliance on Select internals.
+        for value in ("candidate", "stable"):
+            channel.value = value
+        for value in APPROVAL_MODES:
+            approval.value = value
+        with pytest.raises(InvalidSelectValueError, match="nightly"):
+            channel.value = "nightly"
+        with pytest.raises(InvalidSelectValueError, match="Sometimes"):
+            approval.value = "Sometimes"
 
 
 async def test_submit_returns_choices() -> None:

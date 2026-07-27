@@ -95,7 +95,8 @@ class OperatorInstallPrompt(ModalScreen["tuple[str, str, str] | None"]):
             yield Static(f"Install operator {facts.package}", classes="confirm-title", markup=False)
             yield Static(
                 f"Catalog: {facts.catalog_source or '?'}  Channels: {channels}. "
-                "Press Enter to review the Subscription manifest (Esc cancels).",
+                "Press Install (or Enter in a text field) to review the"
+                " Subscription manifest; Esc cancels.",
                 classes="confirm-hint",
                 markup=False,
             )
