@@ -1794,6 +1794,11 @@ class KorvidApp(App[None]):
         registry.refresh()
         for record in registry.forwards():
             if record.status == "broken" and record.id not in self._broken_forwards:
+                if record.id in self._current_confirmations:
+                    # A readiness confirmation is about to report this exact
+                    # failure with its specific error — the generic breakage
+                    # toast must not double it.
+                    continue
                 self._broken_forwards.add(record.id)
                 self.notify(
                     f"Port-forward localhost:{record.spec.local_port} ->"

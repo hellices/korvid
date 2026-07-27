@@ -441,20 +441,31 @@ class ForwardRegistry:
         record = self._records.get(forward_id)
         if record is None:
             return None
-        with record._lock:
-            if generation is not None and record._generation != generation:
-                return None
-            # Check and transition atomically: the reader thread flips
-            # ``starting`` to ``alive`` under the same lock, so a forward
-            # confirmed at the last instant cannot be torn down here.
-            if record.status == "alive":
-                return None
-            record.status = "broken"
-        if not keep:
-            with self._ops:
+        # The whole abort is one _ops critical section: a re-attach that
+        # would adopt a replacement (it needs _ops too) can only run before
+        # the generation check or after the teardown — never between the
+        # validation and the pop/signal, where it used to get its fresh
+        # process signalled down as the failed generation.
+        with self._ops:
+            with record._lock:
+                if generation is not None and record._generation != generation:
+                    return None
+                # Check and transition atomically: the reader thread flips
+                # ``starting`` to ``alive`` under the same lock, so a forward
+                # confirmed at the last instant cannot be torn down here.
+                if record.status == "alive":
+                    return None
+                record.status = "broken"
+                # Snapshot the validated generation's process and waiter:
+                # only these may be torn down below, whatever the record
+                # describes by then.
+                proc = record._proc
+                ready = record._ready
+            if not keep:
                 self._records.pop(forward_id, None)
-        self._signal_stop(record)
-        self._release_waiters(record)
+            self._signal_proc(proc, record.spec.local_port)
+        if ready is not None:
+            ready.set()
         return record
 
     def _ensure_port_free(self, local_port: int) -> None:
@@ -578,12 +589,14 @@ class ForwardRegistry:
         return records
 
     def _signal_stop(self, record: ForwardRecord) -> None:
-        proc = record._proc
+        self._signal_proc(record._proc, record.spec.local_port)
+
+    def _signal_proc(self, proc: _ForwardProcess | None, local_port: int) -> None:
         if proc is None or proc.poll() is not None:
             return  # already exited (broken) — nothing to signal
         proc.terminate()
         with self._ops:
-            self._reaping.append((proc, monotonic() + _STOP_GRACE_SECONDS, record.spec.local_port))
+            self._reaping.append((proc, monotonic() + _STOP_GRACE_SECONDS, local_port))
 
     def _discard_spawn(self, proc: _ForwardProcess) -> None:
         """Put down a child spawned after the registry shut down.

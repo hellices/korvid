@@ -646,6 +646,57 @@ async def test_failed_reattach_marks_breakage_as_already_reported(tmp_path: Path
             procs[1].stdout.feed(None)  # release the reader thread
 
 
+async def test_poll_stays_quiet_while_a_confirmation_reports_the_failure(tmp_path: Path) -> None:
+    """A startup failure gets its specific error toast only — the liveness
+    poll must not precede it with the generic 'target gone?' breakage toast."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    notices: list[str] = []
+    original = app.notify
+
+    def _capture(message: str, **kwargs: Any) -> Any:
+        notices.append(message)
+        return original(message, **kwargs)
+
+    with patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"):
+        async with app.run_test() as pilot:
+            app.notify = _capture  # type: ignore[method-assign]  # test spy
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")
+            await until(pilot, lambda: len(procs) == 1)
+            record = registry.forwards()[0]
+            await until(
+                pilot,
+                lambda: record.id in app._current_confirmations,
+                label="confirmation tracked",
+            )
+            # kubectl dies silently while the readiness confirmation still waits.
+            procs[0].returncode = 1
+            app._poll_forwards()  # marks it broken and wakes the waiter
+            await until(
+                pilot,
+                lambda: any("failed to start" in n for n in notices),
+                label="specific failed-start toast",
+            )
+            assert not any("target gone?" in n for n in notices)
+            procs[0].stdout.feed(None)  # release the reader thread
+
+
 async def test_forward_audit_failure_does_not_crash_app(tmp_path: Path) -> None:
     """A failing audit sink must not kill the app on a normal forward start."""
     procs: list[_FakeProc] = []

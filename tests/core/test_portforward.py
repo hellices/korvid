@@ -799,6 +799,35 @@ def test_fail_start_with_the_current_generation_still_aborts() -> None:
     procs[0].stdout.feed(None)  # release the reader thread
 
 
+def test_fail_start_racing_a_reattach_spares_the_replacement() -> None:
+    """The abort signals the generation it validated, never a just-adopted replacement."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    procs[0].stdout.feed(None)  # EOF: broken while the child still runs
+    assert registry.wait_ready(record.id, timeout=2.0) == "broken"
+    generation = registry.generation(record.id)
+    assert generation is not None
+    ambushes: list[int] = []
+
+    class _AmbushDict(dict[int, ForwardRecord]):
+        """Interleaves a re-attach right before fail_start unlists the record."""
+
+        def pop(self, key: int, default: ForwardRecord | None = None) -> ForwardRecord | None:  # type: ignore[override]  # test seam
+            if not ambushes:
+                ambushes.append(key)
+                registry.reattach(key)
+            return super().pop(key, default)
+
+    registry._records = _AmbushDict(registry._records)
+    registry.fail_start(record.id, keep=False, generation=generation)
+    assert ambushes == [record.id]
+    assert len(procs) == 2
+    assert not procs[1].terminated  # the replacement was never the abort's target
+    assert not procs[1].killed
+    procs[1].stdout.feed(None)  # release the replacement's reader thread
+
+
 def test_start_racing_teardown_never_leaks_a_child() -> None:
     """A spawn that lands after stop_all() is put down, not silently orphaned."""
     procs: list[_FakeProc] = []
