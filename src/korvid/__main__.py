@@ -30,7 +30,13 @@ from korvid.agent.tools import (
     UIBridge,
 )
 from korvid.core.audit import AuditLog, default_audit_path
-from korvid.core.config import DEFAULT_CONFIG_PATH, KorvidConfig, load_config, save_agent_config
+from korvid.core.config import (
+    DEFAULT_CONFIG_PATH,
+    KorvidConfig,
+    context_is_protected,
+    load_config,
+    save_agent_config,
+)
 from korvid.core.portforward import ForwardRegistry
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -431,6 +437,17 @@ def _build_helm(config: KorvidConfig) -> HelmCLI | None:
     return HelmCLI(binary, kube_context=config.kube_context)
 
 
+def _protected_context_name(config: KorvidConfig, context: str | None) -> str | None:
+    """The effective context's name when it matches `protected_contexts`
+    (issue #83), None otherwise. *context* is explicit (not read from config)
+    so a runtime `:ctx` switch can re-derive protection for the new cluster;
+    None falls back to the kubeconfig's active context name."""
+    effective = resolve_context_name(context)
+    if context_is_protected(effective, config.protected_contexts):
+        return effective
+    return None
+
+
 def _fallback_namespaces(config: KorvidConfig, context: str | None) -> tuple[str, ...]:
     """Namespaces an RBAC-limited user can fall back to (issue #49), deduped
     in priority order: explicit `namespaces:` config, the kubeconfig
@@ -499,6 +516,7 @@ def _make_switch_context(
             provider_hint=provider_info.display if provider_info.known else None,
             fallback_namespaces=_fallback_namespaces(effective_config, name),
             context_namespace=resolve_context_namespace(name),
+            protected_context=_protected_context_name(effective_config, name),
             # HelmCLI pins --kube-context per instance: rebuild it for the
             # new context so helm writes follow the active cluster.
             helm=_build_helm(dataclasses.replace(effective_config, kube_context=name)),
@@ -655,6 +673,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         pod_resize_supported=pod_resize_supported,
         forwards=ForwardRegistry(context=config.kube_context),
         provider_hint=provider_info.display if provider_info.known else None,
+        protected_context=_protected_context_name(config, config.kube_context),
         open_pod_exec=kube.open_pod_exec,
         list_contexts=list_context_names,
         probe_context=kube.probe_context,
