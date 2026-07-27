@@ -3647,6 +3647,11 @@ class KorvidApp(App[None]):
         audit = self._audit
         if audit is None:  # _node_target already refused; defensive re-check
             return
+        # Read-only snapshot first: it may block for up to 15s, and the UID
+        # re-verification plus intent record must sit immediately before the
+        # launch so the approved node incarnation cannot be swapped out
+        # during the listing.
+        before = await self._list_node_debugger_pods(namespace, node)
         if approved_uid is not None and not await self._node_uid_unchanged(node, approved_uid):
             return
         detail = f"privileged node shell (kubectl debug node, image {image}, namespace {namespace})"
@@ -3656,12 +3661,11 @@ class KorvidApp(App[None]):
             logger.exception("audit append failed; blocking node shell")
             self.notify("Write blocked: audit log unavailable", severity="error")
             return
-        before = await self._list_node_debugger_pods(namespace, node)
         argv = build_node_debug_argv(node, namespace, context=self.config.kube_context, image=image)
         with self.suspend():
             exit_code = self._run_interactive(argv, f"korvid node shell → {node} (exit to return)")
         self.refresh()
-        cleanup = await self._cleanup_node_debug_pods(ops, namespace, node, before)
+        cleanup, pod_created = await self._cleanup_node_debug_pods(ops, namespace, node, before)
         outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
         try:
             await asyncio.to_thread(
@@ -3670,11 +3674,15 @@ class KorvidApp(App[None]):
         except Exception:
             logger.exception("audit append failed after node shell")
             self.notify("Audit write failed for the executed node shell", severity="warning")
-        if exit_code != 0:
+        if exit_code != 0 and pod_created is False:
+            # Only when no debugger pod ever appeared: a non-zero status with
+            # a created pod is usually just the user's own shell exit code
+            # (`exit 1`, Ctrl-C) propagated by kubectl.
             self.notify(
-                f"kubectl debug node exited with status {exit_code} — the cluster"
-                " may refuse privileged pods (PodSecurity admission); try setting"
-                " node_shell.namespace to a namespace that allows them",
+                f"kubectl debug node exited with status {exit_code} and no"
+                " debugger pod was created — the cluster may refuse privileged"
+                " pods (PodSecurity admission); try setting node_shell.namespace"
+                " to a namespace that allows them",
                 severity="warning",
             )
 
@@ -3731,8 +3739,12 @@ class KorvidApp(App[None]):
 
     async def _cleanup_node_debug_pods(
         self, ops: WriteOps, namespace: str, node: str, before: dict[str, str] | None
-    ) -> str:
-        """Delete debugger pods the shell created; returns the audit note."""
+    ) -> tuple[str, bool | None]:
+        """Delete debugger pods the shell created.
+
+        Returns the audit note plus whether a new debugger pod appeared
+        (None when a failed listing makes that unknowable).
+        """
         if before is None:
             # Without the pre-launch snapshot every matching pod would look
             # new, and cleanup could delete a debugger another operator
@@ -3742,7 +3754,7 @@ class KorvidApp(App[None]):
                 f" for leftover node-debugger pods for {node}",
                 severity="warning",
             )
-            return "cleanup skipped: pre-launch pod listing failed"
+            return "cleanup skipped: pre-launch pod listing failed", None
         after = await self._list_node_debugger_pods(namespace, node)
         if after is None:
             self.notify(
@@ -3750,18 +3762,18 @@ class KorvidApp(App[None]):
                 f" namespace for leftover node-debugger pods for {node}",
                 severity="warning",
             )
-            return "cleanup skipped: pod listing failed"
+            return "cleanup skipped: pod listing failed", None
         known = set(before)
         new = {name: uid for name, uid in after.items() if name not in known}
         if not new:
-            return "cleanup: no debug pod found"
+            return "cleanup: no debug pod found", False
         pods_meta = self.aliases.get("pods")
         if pods_meta is None:
             self.notify(
                 f"Cannot delete debug pod(s) {', '.join(sorted(new))} — remove them manually",
                 severity="warning",
             )
-            return f"cleanup failed for: {', '.join(sorted(new))}"
+            return f"cleanup failed for: {', '.join(sorted(new))}", True
         failed: list[str] = []
         for pod_name, uid in new.items():
             try:
@@ -3775,8 +3787,8 @@ class KorvidApp(App[None]):
                 f" in {namespace} — remove them manually",
                 severity="warning",
             )
-            return f"cleanup failed for: {', '.join(sorted(failed))}"
-        return f"cleanup: deleted {len(new)} debug pod(s)"
+            return f"cleanup failed for: {', '.join(sorted(failed))}", True
+        return f"cleanup: deleted {len(new)} debug pod(s)", True
 
     @staticmethod
     def _audit_node_shell(audit: AuditLog, node: str, detail: str, outcome: str) -> None:

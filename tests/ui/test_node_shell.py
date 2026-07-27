@@ -68,6 +68,7 @@ def make_app(
     audit_log: AuditLog | None = None,
     extra_nodes: tuple[str, ...] = (),
     permission_gate: asyncio.Event | None = None,
+    permission_started: asyncio.Event | None = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -94,6 +95,8 @@ def make_app(
     async def check_permission(
         verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
     ) -> bool:
+        if permission_started is not None:
+            permission_started.set()
         if permission_gate is not None:
             await permission_gate.wait()
         assert permitted is not None
@@ -307,9 +310,12 @@ async def test_node_shell_refused_in_readonly(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             await _to_nodes(pilot)
             await pilot.press("s")
-            await pilot.pause(0.2)
+            await until(
+                pilot,
+                lambda: any("Read-only" in n.message for n in app._notifications),
+                label="read-only refusal",
+            )
             assert not isinstance(app.screen, ConfirmScreen)
-            assert any("Read-only" in n.message for n in app._notifications)
     assert call_records == []
 
 
@@ -322,9 +328,12 @@ async def test_node_shell_refused_without_audit(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             await _to_nodes(pilot)
             await pilot.press("s")
-            await pilot.pause(0.2)
+            await until(
+                pilot,
+                lambda: any("audit" in n.message.lower() for n in app._notifications),
+                label="audit refusal",
+            )
             assert not isinstance(app.screen, ConfirmScreen)
-            assert any("audit" in n.message.lower() for n in app._notifications)
     assert call_records == []
 
 
@@ -337,9 +346,14 @@ async def test_node_shell_rbac_denied_not_offered(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             await _to_nodes(pilot)
             await pilot.press("s")
-            await pilot.pause(0.3)
+            await until(
+                pilot,
+                lambda: any(
+                    "missing permission: create pods" in n.message for n in app._notifications
+                ),
+                label="rbac denial",
+            )
             assert not isinstance(app.screen, ConfirmScreen)
-            assert any("missing permission: create pods" in n.message for n in app._notifications)
     assert call_records == []
 
 
@@ -400,7 +414,12 @@ async def test_node_shell_listing_failure_skips_cleanup_with_warning(tmp_path: P
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
 
+    listing_calls: list[int] = []
+
     def failing_run(argv, **kwargs):  # type: ignore[no-untyped-def]  # test helper
+        listing_calls.append(1)
+        if len(listing_calls) == 1:  # pre-launch snapshot succeeds (empty)
+            return SimpleNamespace(returncode=0, stdout=_pods_json(), stderr=b"")
         return SimpleNamespace(returncode=1, stdout=b"", stderr=b"boom")
 
     with _node_shell_env(failing_run) as _calls:
@@ -418,7 +437,7 @@ async def test_node_shell_listing_failure_skips_cleanup_with_warning(tmp_path: P
     assert rec.deletes == []
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     last = [e for e in entries if e["action"] == "node-shell"][-1]
-    assert "cleanup skipped" in last["outcome"]
+    assert "cleanup skipped: pod listing failed" in last["outcome"]
 
 
 async def test_node_shell_before_listing_failure_skips_cleanup(tmp_path: Path) -> None:
@@ -521,11 +540,13 @@ async def test_node_shell_cancelled_when_selection_moves_during_rbac_check(
     cursor while the SSAR pre-check is in flight cancels the offer."""
     rec = DeleteRecorder()
     gate = asyncio.Event()
+    started = asyncio.Event()
     app = make_app(
         rec,
         tmp_path / "audit.jsonl",
         permitted=True,
         permission_gate=gate,
+        permission_started=started,
         extra_nodes=("worker-2",),
     )
     run_fake, _ = _listing_run([_pods_json()])
@@ -534,7 +555,7 @@ async def test_node_shell_cancelled_when_selection_moves_during_rbac_check(
             await pilot.pause(0.1)
             await _to_nodes(pilot)
             await pilot.press("s")
-            await pilot.pause(0.1)  # flow is now parked on the gated SSAR
+            await until(pilot, started.is_set, label="flow parked on the gated SSAR")
             await pilot.press("down")  # move to worker-2
             gate.set()
 
@@ -544,3 +565,25 @@ async def test_node_shell_cancelled_when_selection_moves_during_rbac_check(
             await until(pilot, _cancelled, label="selection-changed cancel")
             assert not isinstance(app.screen, ConfirmScreen)
     assert call_records == []
+
+
+async def test_node_shell_nonzero_exit_with_created_pod_has_no_policy_hint(
+    tmp_path: Path,
+) -> None:
+    """A debugger pod that did appear means the shell ran: a non-zero exit is
+    then the user's own shell status (exit 1, Ctrl-C), not admission refusal."""
+    rec = DeleteRecorder()
+    app = make_app(rec, tmp_path / "audit.jsonl")
+    run_fake, _ = _listing_run(
+        [_pods_json(), _pods_json(("node-debugger-worker-1-abcde", "dbg-uid", "worker-1"))]
+    )
+    with _node_shell_env(run_fake, call_exit=1) as call_records:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await pilot.press("y")
+            await until(pilot, lambda: rec.deletes, label="debug pod cleanup")
+    assert call_records != []
+    assert not any("PodSecurity" in n.message for n in app._notifications)
