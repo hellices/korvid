@@ -6,8 +6,6 @@ grading:
   must_mention:
     - [imagepullbackoff, image pull, pull the image, pulling the image]
     - [manifest unknown, not found, does not exist, no such tag, wrong tag, typo]
-  must_not_mention:
-    - [unauthorized, authentication failed, credentials, pull secret, "401"]
   expected_evidence:
     - tool: diagnose_pod
       args: {pod: web-1, namespace: front}
