@@ -52,6 +52,16 @@ from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.core.secrets import mask_secret_manifest
 from korvid.core.sorting import SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
+from korvid.core.transfer import (
+    TransferError,
+    TransferSpec,
+)
+from korvid.core.transfer import (
+    download as transfer_download,
+)
+from korvid.core.transfer import (
+    upload as transfer_upload,
+)
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
@@ -107,6 +117,7 @@ from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.secret_screen import SecretScreen
 from korvid.ui.widgets.status_bar import StatusBar
+from korvid.ui.widgets.transfer_screen import TransferProgressScreen, TransferScreen
 
 _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
     "pods": PODS_META,
@@ -386,6 +397,7 @@ class KorvidApp(App[None]):
         Binding("e", "edit_resource", "Edit", show=False, id="edit_resource"),
         Binding("i", "hint_details", "Hint details", show=False, id="hint_details"),
         Binding("I", "operator_install", "Install/Approve", show=False, id="operator_install"),
+        Binding("ctrl+t", "transfer", "Transfer", show=False, id="transfer"),
     ]
 
     # User-facing keys handled in event handlers rather than BINDINGS:
@@ -434,6 +446,7 @@ class KorvidApp(App[None]):
         metrics: MetricsPoller | None = None,
         pod_resize_supported: bool = False,
         provider_hint: str | None = None,
+        open_pod_exec: Callable[..., contextlib.AbstractAsyncContextManager[Any]] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -455,6 +468,12 @@ class KorvidApp(App[None]):
         #: detected cloud provider short name ("aks", "aws", ...) or None;
         #: drives the Service/Ingress describe footer (issue #30).
         self._provider_hint = provider_hint
+        #: KubeClient.open_pod_exec, bound at composition; None means no
+        #: cluster connection, so file transfer (issue #47) is unavailable.
+        self._open_pod_exec = open_pod_exec
+        #: the in-flight transfer stream; the progress screen's escape
+        #: cancels it (never the surrounding worker).
+        self._transfer_task: asyncio.Task[int] | None = None
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -1468,6 +1487,196 @@ class KorvidApp(App[None]):
         """
         print(f"\x1b[2J\x1b[H\x1b[2m{banner}\x1b[0m", flush=True)
         return subprocess.call(argv)
+
+    # -- File transfer (issue #47): download/upload over the exec API as a
+    # -- tar stream; uploads are approval-gated, both directions audited
+    # -- fail-closed.
+
+    def action_transfer(self) -> None:
+        """Open the ctrl+t transfer dialog for the selected pod."""
+        if self.current_kind != "pods":
+            self.notify("File transfer is only available for pods", severity="warning")
+            return
+        if self._open_pod_exec is None:
+            self.notify("File transfer unavailable (no cluster connection)", severity="warning")
+            return
+
+        table = self.query_one(ResourceTable)
+        if table.row_count == 0:
+            self.notify("No resource selected", severity="warning")
+            return
+        row_index = table.cursor_row
+        ordered = table.ordered_rows
+        if row_index >= len(ordered):
+            self.notify("No resource selected", severity="warning")
+            return
+        row_key = str(ordered[row_index].key.value)  # "namespace/name"
+        parts = row_key.split("/", 1)
+        if len(parts) != 2:
+            self.notify("Cannot determine resource from selection", severity="warning")
+            return
+        namespace, name = parts[0], parts[1]
+
+        containers = self._get_pod_containers(namespace, name)
+        if len(containers) > 1:
+
+            def _on_pick(container: str | None) -> None:
+                if container is not None:
+                    self._open_transfer_dialog(namespace, name, container)
+
+            self.push_screen(PickScreen(f"Container in {name}:", list(containers)), _on_pick)
+            return
+        self._open_transfer_dialog(namespace, name, containers[0] if containers else None)
+
+    def _open_transfer_dialog(self, namespace: str, name: str, container: str | None) -> None:
+        target = f"{namespace}/{name}" + (f" ({container})" if container else "")
+
+        def _on_spec(spec: TransferSpec | None) -> None:
+            if spec is not None:
+                self._start_transfer(namespace, name, container, spec)
+
+        self.push_screen(TransferScreen(target), _on_spec)
+
+    def _start_transfer(
+        self, namespace: str, name: str, container: str | None, spec: TransferSpec
+    ) -> None:
+        """Gate then launch: uploads write into the container filesystem, so
+        they are blocked in read-only mode and pass the approval dialog."""
+        if spec.direction == "upload":
+            if self.config.readonly:
+                self.notify("Upload disabled in read-only mode", severity="warning")
+                return
+
+            def _approved(approved: bool | None) -> None:
+                if approved:
+                    self.run_worker(self._run_transfer(namespace, name, container, spec))
+
+            self.push_screen(
+                ConfirmScreen(
+                    f"Upload file to {namespace}/{name}",
+                    f"{spec.local_path} → {container or 'pod'}:{spec.remote_path}\n"
+                    "This writes into the container filesystem.",
+                ),
+                _approved,
+            )
+            return
+        self.run_worker(self._run_transfer(namespace, name, container, spec))
+
+    async def _run_transfer(
+        self, namespace: str, name: str, container: str | None, spec: TransferSpec
+    ) -> None:
+        """Audit (fail-closed), stream with progress, audit the outcome."""
+        open_pod_exec = self._open_pod_exec
+        audit = self._audit
+        if open_pod_exec is None:
+            return
+        if audit is None:
+            # Fail-closed for downloads too: the transfer *event* is the
+            # audit requirement (issue #47), not just the write direction.
+            self.notify("Transfer blocked: no audit log configured", severity="error")
+            return
+        action = f"transfer_{spec.direction}"
+        detail = f"container={container or '-'} remote={spec.remote_path} local={spec.local_path}"
+        try:
+            await asyncio.to_thread(
+                self._audit_transfer, audit, action, namespace, name, detail, "intent"
+            )
+        except Exception:
+            logger.exception("audit append failed; blocking transfer")
+            self.notify("Transfer blocked: audit log unavailable", severity="error")
+            return
+
+        downloading = spec.direction == "download"
+        arrow = "↓ download" if downloading else "↑ upload"
+        progress_screen = TransferProgressScreen(f"{arrow}  {namespace}/{name}:{spec.remote_path}")
+        await self.push_screen(progress_screen)
+        try:
+            count = await self._stream_transfer(
+                open_pod_exec, namespace, name, container, spec, progress_screen
+            )
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            self.notify("Transfer cancelled")
+        except TransferError as exc:
+            outcome = f"error: {exc}"
+            self.notify(f"Transfer failed: {exc}", severity="error")
+        except Exception as exc:  # transport errors from aiohttp/OS surface untyped
+            logger.exception("transfer failed")
+            outcome = f"error: {exc}"
+            self.notify(f"Transfer failed: {exc}", severity="error")
+        else:
+            outcome = "success"
+            detail += f" bytes={count}"
+            verb = "downloaded" if downloading else "uploaded"
+            self.notify(f"{verb} {count:,} bytes ({spec.remote_path})")
+        finally:
+            if self.screen is progress_screen:
+                self.pop_screen()
+        try:
+            await asyncio.to_thread(
+                self._audit_transfer, audit, action, namespace, name, detail, outcome
+            )
+        except Exception:
+            logger.exception("audit append failed after transfer")
+            self.notify("Audit write failed for the executed transfer", severity="warning")
+
+    async def _stream_transfer(
+        self,
+        open_pod_exec: Callable[..., contextlib.AbstractAsyncContextManager[Any]],
+        namespace: str,
+        name: str,
+        container: str | None,
+        spec: TransferSpec,
+        progress_screen: TransferProgressScreen,
+    ) -> int:
+        """Run the tar stream as a cancellable task; returns the byte count.
+
+        The task handle is what the progress screen's escape cancels — never
+        the surrounding worker, which still has auditing left to do.
+        """
+
+        def open_exec(
+            command: list[str], stdin: bool
+        ) -> contextlib.AbstractAsyncContextManager[Any]:
+            return open_pod_exec(namespace, name, container, command, stdin=stdin)
+
+        local = Path(spec.local_path).expanduser()
+        if spec.direction == "download":
+            coro = transfer_download(
+                open_exec, spec.remote_path, local, progress_screen.update_progress
+            )
+        else:
+            coro = transfer_upload(
+                open_exec, local, spec.remote_path, progress_screen.update_progress
+            )
+        task = asyncio.create_task(coro)
+        self._transfer_task = task
+        try:
+            return await task
+        finally:
+            self._transfer_task = None
+
+    def on_transfer_progress_screen_cancel_requested(
+        self, message: TransferProgressScreen.CancelRequested
+    ) -> None:
+        message.stop()
+        if self._transfer_task is not None:
+            self._transfer_task.cancel()
+
+    @staticmethod
+    def _audit_transfer(
+        audit: AuditLog, action: str, namespace: str, name: str, detail: str, outcome: str
+    ) -> None:
+        audit.append(
+            action=action,
+            kind="pods",
+            group="",  # transfers always target a core/v1 pod
+            version="v1",
+            namespace=namespace,
+            name=name,
+            detail=detail,
+            outcome=outcome,
+        )
 
     def _run_shell(self, namespace: str, name: str, container: str | None) -> None:
         """Run kubectl exec; offer the kubectl debug fallback only if sh is missing."""

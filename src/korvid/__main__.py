@@ -482,6 +482,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         metrics=MetricsPoller(kube.list_pod_metrics),
         pod_resize_supported=pod_resize_supported,
         provider_hint=provider_info.display if provider_info.known else None,
+        open_pod_exec=kube.open_pod_exec,
     )
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.

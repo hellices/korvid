@@ -43,6 +43,7 @@ in the dialog; `--readonly` disables them all.
 | `I` | operators tables | Install the selected catalog operator (wizard + confirm dialog) or approve a pending InstallPlan |
 | `e` | table | Edit selected resource manifest in `$VISUAL`/`$EDITOR` (kubectl edit style; confirm dialog before the PUT) |
 | `i` | pods table | Open hint details overlay for a troubled pod (full container trouble + recent Warning events) |
+| `Ctrl-T` | pods table | Transfer a file to/from the selected container (exec tar stream; upload needs approval) |
 | `Ctrl-A` | global | Toggle AI agent panel |
 | `q` | global | Quit |
 | `Esc` | log pane | Close pane (or dismiss search / filter bar) |
@@ -66,7 +67,8 @@ Action names: `quit`, `help`, `open_command`, `open_filter`,
 `log_format`, `log_wrap`, `log_timestamps`, `log_save`, `log_previous`,
 `log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
 `sort_by_mem`, `toggle_agent`, `delete_resource`, `rollout_restart`,
-`resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`.
+`resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
+`transfer`.
 
 Unknown actions, duplicate keys, and keys that shadow another action's
 default produce a startup warning and are skipped — never a crash. The
@@ -151,6 +153,26 @@ five consecutive reconnect attempts without a successful line the header shows a
 error state and a notification is raised.  The in-memory ring buffer retains the
 last 5000 lines; when it overflows a one-time banner is written to the pane so you
 know older lines were dropped.
+
+## File transfer
+
+`Ctrl-T` on a pod opens a transfer dialog (multi-container pods show a
+container picker first): pick a direction, the remote path in the container,
+and a local path — leaving the local path empty on a download saves to
+`~/Downloads/<name>`.
+
+Transfers ride the exec API as a tar stream, so there is no dependency on a
+`kubectl` binary — but the container must have `tar` (the server's error is
+shown verbatim when it doesn't, e.g. distroless images). A progress modal
+shows the byte count as the stream advances; `Esc` cancels the transfer, and
+a cancelled or failed download never leaves a half-written local file.
+
+Uploads write into the container filesystem, so they are blocked in
+read-only mode and pass the same approval dialog as every other write.
+Both directions are audit-logged fail-closed (pod, container, paths,
+direction, byte count): if the audit entry cannot be written, the transfer
+does not run. Recursive directory sync is out of scope, and the agent has no
+transfer tool — transfers are always user-driven.
 
 ## Debug fallback
 
