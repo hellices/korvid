@@ -534,8 +534,8 @@ Without configuration, `Ctrl-A` shows a setup hint pointing at `:ai`.
 
 ### Capability profiles
 
-Small local models (3B–14B) handle the agent's default surface — 14 tools,
-15 iterations, ~120k characters of retained history — poorly: they are
+Small local models (3B–14B) handle the agent's default surface — up to 15
+tools, 15 iterations, ~120k characters of retained history — poorly: they are
 competitive on simple single-function calls but fall behind sharply when
 choosing among many functions, and they degrade with context length far
 below their advertised windows. `agent.profile: small` gives them a surface

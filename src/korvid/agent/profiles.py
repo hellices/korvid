@@ -1,6 +1,6 @@
 """Model-capability profiles for the agent runtime (issue #71).
 
-korvid's default surface — up to 14 tools, 15 iterations, ~120k chars of
+korvid's default surface — up to 15 tools, 15 iterations, ~120k chars of
 retained history — is tuned for frontier models. Small local models
 (3B-14B) tell a different story: BFCL shows they are competitive on
 simple single-function calls but fall behind sharply on multi-function
