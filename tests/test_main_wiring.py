@@ -631,10 +631,10 @@ async def test_ctx_switch_quiesces_discovery_before_swapping_connection() -> Non
         def __init__(self, *, running: bool) -> None:
             self.running = running
 
-        async def stop(self) -> str:
+        async def shutdown(self) -> Any:
             self.running = False
             events.append("mcp-stopped")
-            return "MCP off"
+            return None
 
         async def start(self) -> str:
             self.running = True
@@ -669,3 +669,110 @@ async def test_ctx_switch_quiesces_discovery_before_swapping_connection() -> Non
     ]
     assert "stale-crd" not in aliases  # reseeded before the swap
     assert result.mcp_status == "MCP on :4321"
+
+
+def _fake_switch_fixture() -> tuple[Any, Any, list[str], dict[str, Any]]:
+    """Shared fakes for the MCP-across-switch tests."""
+    import asyncio  # noqa: F401  (used by callers)
+    from types import SimpleNamespace
+
+    events: list[str] = []
+
+    class FakeKube:
+        def __init__(self) -> None:
+            self.fail_next_switch = False
+
+        async def switch_context(self, name: str | None) -> None:
+            if self.fail_next_switch:
+                self.fail_next_switch = False
+                raise RuntimeError("target cluster unreachable")
+            events.append("connection-swapped")
+
+        async def detect_cloud_provider(self) -> Any:
+            from korvid.k8s.csp import detect_provider
+
+            return detect_provider([])
+
+        async def discover_resources(self) -> list[Any]:
+            return []
+
+    class FakeMCP:
+        def __init__(self, *, running: bool, drainable: bool = True) -> None:
+            self.running = running
+            self.drainable = drainable
+
+        async def shutdown(self) -> Any:
+            if not self.drainable:
+                return object()  # still-pending server task
+            self.running = False
+            events.append("mcp-stopped")
+            return None
+
+        async def start(self) -> str:
+            self.running = True
+            events.append("mcp-started")
+            return "MCP on :4321"
+
+    return FakeKube(), FakeMCP(running=True), events, {"app": SimpleNamespace(agent_runtime=None)}
+
+
+async def test_mcp_restart_survives_failed_target_swap() -> None:
+    """A failed target swap re-enters the closure for recovery with the MCP
+    already stopped — the recovery invocation must still restart it."""
+    import asyncio
+    import contextlib
+
+    from korvid.__main__ import _make_switch_context
+    from korvid.core.config import KorvidConfig
+
+    kube, mcp, events, boxes = _fake_switch_fixture()
+    kube.fail_next_switch = True
+    discovery_box: list[asyncio.Task[None]] = []
+    switch = _make_switch_context(
+        KorvidConfig(namespace="default", readonly=True),
+        cast("Any", kube),
+        {},
+        cast("Any", [boxes["app"]]),
+        discovery_box,
+        lambda runtime, resize, note: None,
+        cast("Any", mcp),
+    )
+    with pytest.raises(RuntimeError, match="unreachable"):
+        await switch("ctx-b")
+    assert "mcp-started" not in events  # target swap died before restart
+
+    try:
+        result = await switch("ctx-a")  # recovery: mcp.running is False here
+    finally:
+        if discovery_box:
+            discovery_box[0].cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await discovery_box[0]
+    assert events[-1] == "mcp-started"
+    assert result.mcp_status == "MCP on :4321"
+
+
+async def test_switch_aborts_before_teardown_when_mcp_wont_drain() -> None:
+    """If even cancellation can't stop the MCP server, an in-flight tool call
+    could cross the context boundary — the switch aborts with the old
+    context fully untouched."""
+
+    from korvid.__main__ import _make_switch_context
+    from korvid.core.config import KorvidConfig
+
+    kube, mcp, events, boxes = _fake_switch_fixture()
+    mcp.drainable = False
+    discovery_box: list[asyncio.Task[None]] = []
+    switch = _make_switch_context(
+        KorvidConfig(namespace="default", readonly=True),
+        cast("Any", kube),
+        cast("Any", {"kept": object()}),
+        cast("Any", [boxes["app"]]),
+        discovery_box,
+        lambda runtime, resize, note: None,
+        cast("Any", mcp),
+    )
+    with pytest.raises(RuntimeError, match="did not stop in time"):
+        await switch("ctx-b")
+    assert events == []  # nothing was swapped or torn down
+    assert not discovery_box  # no new discovery was started

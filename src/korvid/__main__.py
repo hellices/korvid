@@ -455,14 +455,27 @@ def _make_switch_context(
     first discovery task are created after this closure.
     """
 
+    # One switch transaction may invoke the closure twice (target, then the
+    # recovery swap back): the restart intent must survive across those
+    # invocations — after a successful stop() the recovery call sees
+    # mcp.running == False, which must not erase the operator's server.
+    mcp_needs_restart = False
+
     async def switch_context(name: str | None) -> ContextSwitchResult:
+        nonlocal mcp_needs_restart
         # External MCP callers share this client and alias map: quiesce the
         # server before the swap (in-flight tool calls drain against the old
         # cluster) and restart it once the new cluster is fully retargeted,
         # so no request can observe mixed-context state.
-        mcp_was_running = mcp.running
-        if mcp_was_running:
-            await mcp.stop()
+        if mcp.running:
+            pending = await mcp.shutdown()
+            if pending is not None:
+                # Even cancellation didn't land within its deadline: an
+                # in-flight tool call could cross the context boundary.
+                # Abort before anything is torn down — the old context
+                # stays fully usable.
+                raise RuntimeError("embedded MCP server did not stop in time; switch aborted")
+            mcp_needs_restart = True
         # switch_context closes the old ApiClient — the background discovery
         # task still issues requests on it, so quiesce it (and reseed the
         # alias map it mutates) before the connection is torn down.
@@ -486,9 +499,11 @@ def _make_switch_context(
             cluster_context_note(provider_info),
         )
         mcp_status: str | None = None
-        if mcp_was_running:
+        if mcp_needs_restart:
             # Resume on the same endpoint, now serving the new cluster.
             mcp_status = await mcp.start()
+            if mcp.running:
+                mcp_needs_restart = False
         return ContextSwitchResult(
             pod_resize_supported=pod_resize_supported,
             provider_hint=provider_info.display if provider_info.known else None,

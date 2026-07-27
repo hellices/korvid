@@ -469,3 +469,24 @@ async def test_mcp_restart_status_surfaces_after_switch() -> None:
             lambda: any("MCP on :4321" in n.message for n in app._notifications),
             label="mcp restart notification",
         )
+
+
+async def test_keybinding_write_aborted_when_context_changed_during_precheck() -> None:
+    """The RBAC pre-check awaits network I/O — if a switch completes during
+    that await the prepared intent must not land on the new cluster."""
+    env = _CtxEnv()
+    app = env.app
+
+    async def permission_check_during_switch(*args: object) -> bool:
+        app._ctx_epoch += 1  # a switch was applied while we awaited
+        return True
+
+    async with app.run_test() as pilot:
+        app._check_permission = permission_check_during_switch
+        ok = await app._precheck_keybinding_write("delete", _PODS_META, "default", "pod-a")
+        assert ok is False
+        await until(
+            pilot,
+            lambda: any("context changed while preparing" in n.message for n in app._notifications),
+            label="epoch-change refusal",
+        )

@@ -580,6 +580,9 @@ class KorvidApp(App[None]):
         #: refuses concurrent switches.
         self._ctx_switching = False
         self._active_cluster_writes = 0
+        #: Bumped every time a switch is applied: pre-approval awaits capture
+        #: it and refuse to proceed if the cluster changed under them.
+        self._ctx_epoch = 0
         #: One-shot notice injected into the agent's next screen context
         #: after a switch, so a running conversation learns the cluster
         #: changed under it.
@@ -1381,6 +1384,7 @@ class KorvidApp(App[None]):
         self, name: str | None, old: str | None, result: ContextSwitchResult
     ) -> None:
         """Adopt the new cluster's identity and re-probed capabilities."""
+        self._ctx_epoch += 1
         self.config = dataclasses.replace(self.config, kube_context=name)
         self._pod_resize_supported = result.pod_resize_supported
         self._provider_hint = result.provider_hint
@@ -3636,7 +3640,17 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return False
+        epoch = self._ctx_epoch
         if not await self._permitted(action, meta, ns, name):
+            return False
+        # The permission check awaited network I/O — a switch may have
+        # started (flag) or fully completed (epoch) meanwhile; the approved
+        # intent must not land on a different cluster.
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            self.notify(
+                "The kube context changed while preparing this write — aborted",
+                severity="warning",
+            )
             return False
         return self._write_context_intact(action, meta, ns, name)
 
