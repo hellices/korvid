@@ -145,6 +145,11 @@ class OllamaProvider(LLMProvider):
                 if not line.strip():
                     continue
                 chunk: dict[str, Any] = json.loads(line)
+                # Ollama can report a failure mid-stream with HTTP 200: an
+                # {"error": ...} object after generation has started. Treat
+                # it as a hard failure instead of a truncated "success".
+                if chunk.get("error"):
+                    raise ProviderError(f"Ollama stream error: {chunk['error']}")
                 message: dict[str, Any] = chunk.get("message") or {}
                 # message.thinking is intentionally dropped: reasoning tokens
                 # are not part of the answer the runtime should render.
@@ -204,9 +209,19 @@ def _to_ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     native API requires objects, so they are parsed back. Arguments were
     serialized by this provider (or validated upstream), so a parse failure
     is defensive only and degrades to an empty object.
+
+    Tool-result messages carry only `tool_call_id`; native Ollama history
+    identifies the executed function by `tool_name` (templates may not
+    correlate generated ids), so the name is recovered from the matching
+    assistant call.
     """
     converted: list[dict[str, Any]] = []
+    call_names: dict[str, str] = {}
     for message in messages:
+        if message.get("role") == "tool":
+            name = call_names.get(str(message.get("tool_call_id", "")))
+            converted.append({**message, "tool_name": name} if name else message)
+            continue
         calls = message.get("tool_calls")
         if not calls:
             converted.append(message)
@@ -216,6 +231,9 @@ def _to_ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for call in calls
             for fn in [call.get("function") or {}]
         ]
+        for call in new_calls:
+            if call.get("id"):
+                call_names[str(call["id"])] = str(call["function"].get("name", ""))
         converted.append({**message, "tool_calls": new_calls})
     return converted
 

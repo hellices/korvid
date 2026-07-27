@@ -155,7 +155,12 @@ async def test_assistant_tool_call_arguments_converted_to_objects() -> None:
     await _events(provider, messages)
     sent = capture["json"]["messages"]
     assert sent[1]["tool_calls"][0]["function"]["arguments"] == {"pod": "web-1"}
-    assert sent[2] == {"role": "tool", "tool_call_id": "call_0", "content": "ok"}
+    assert sent[2] == {
+        "role": "tool",
+        "tool_call_id": "call_0",
+        "tool_name": "get_logs",
+        "content": "ok",
+    }
 
 
 async def test_unparsable_assistant_arguments_fall_back_to_empty_object() -> None:
@@ -219,3 +224,37 @@ async def test_aclose_closes_owned_client_only() -> None:
 def test_name_is_the_model() -> None:
     provider = OllamaProvider(base_url="http://x:11434", model="qwen3:8b")
     assert provider.name == "qwen3:8b"
+
+
+async def test_mid_stream_error_object_raises() -> None:
+    body = _ndjson(
+        {"message": {"role": "assistant", "content": "par"}, "done": False},
+        {"error": "unexpected EOF"},
+    )
+    with pytest.raises(ProviderError, match="unexpected EOF"):
+        await _events(_provider(body))
+
+
+async def test_tool_result_messages_gain_tool_name() -> None:
+    capture: dict[str, Any] = {}
+    provider = _provider(_ndjson(_done()), capture=capture)
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "get_logs", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "content": "ok"},
+        {"role": "tool", "tool_call_id": "unknown", "content": "orphan"},
+    ]
+    await _events(provider, messages)
+    sent = capture["json"]["messages"]
+    assert sent[1]["tool_name"] == "get_logs"
+    assert sent[1]["tool_call_id"] == "call_0"
+    assert "tool_name" not in sent[2]

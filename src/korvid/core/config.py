@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from os import chmod as os_chmod
 from os import fdopen as os_fdopen
 from os import fsync as os_fsync
@@ -221,7 +222,7 @@ def _parse_positive_int(value: Any) -> int | None:
         return None
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return parsed if parsed > 0 else None
 
@@ -232,9 +233,10 @@ def _parse_temperature(value: Any) -> float:
         return 0.0
     try:
         parsed = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.0
-    return parsed if parsed >= 0 else 0.0
+    # Non-finite values (.inf/.nan) would serialize as invalid JSON downstream.
+    return parsed if parsed >= 0 and isfinite(parsed) else 0.0
 
 
 def _parse_keep_alive(value: Any) -> str | int | None:

@@ -535,3 +535,16 @@ def test_ollama_non_mapping_section_is_ignored(tmp_path: Path) -> None:
     cfg = load_config(p)
     assert cfg.agent_ollama_num_ctx == 16384
     assert cfg.agent_ollama_think is False
+
+
+def test_ollama_inf_and_overflow_values_fall_back(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    huge = str(10**400)
+    p.write_text(
+        f"agent:\n  provider: ollama\n  ollama:\n    num_ctx: .inf\n    temperature: {huge}\n"
+        "    seed: .inf\n"
+    )
+    cfg = load_config(p)
+    assert cfg.agent_ollama_num_ctx == 16384
+    assert cfg.agent_ollama_temperature == 0.0
+    assert cfg.agent_ollama_seed is None
