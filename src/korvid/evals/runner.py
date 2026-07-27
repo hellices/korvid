@@ -51,7 +51,9 @@ class _RecordingExecutor:
     The profile's per-result cap is applied *before* recording: grading must
     only credit evidence the model could actually have seen, so the recorded
     content matches what reaches the conversation. `compact_result` is
-    idempotent, so the runtime re-applying the same cap changes nothing.
+    idempotent, so the runtime re-applying the same cap changes nothing;
+    the runtime's discard notice (excess parallel calls) is appended after
+    its own compaction step, so it never re-truncates the recorded content.
     """
 
     def __init__(self, executor: Any, max_result_chars: int | None = None) -> None:

@@ -8,6 +8,7 @@ cluster, and the grader scores the result — no live model involved.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
@@ -660,3 +661,57 @@ async def test_evidence_grading_sees_only_the_model_visible_capped_result() -> N
     assert "OOMKilled" not in returned
     assert recording.records[0].result == returned
     assert "OOMKilled" not in recording.records[0].result
+
+
+async def test_discard_notice_does_not_retruncate_the_recorded_result() -> None:
+    """When a response holds excess parallel calls, the runtime appends its
+    discard notice to the kept result. The notice must ride on top of the
+    already-compacted content — if the runtime re-compacted afterwards, the
+    tail the recorder captured would be cut from the model-visible message
+    and grading could credit evidence the model never saw."""
+    from korvid.agent.runtime import AgentRuntime
+    from korvid.evals.runner import _RecordingExecutor
+
+    class TailEvidenceExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "x" * 3_500 + "\nLOG EXCERPT: exit=137 OOMKilled"
+
+    class CallRecordingProvider(ScriptedProvider):
+        def __init__(self, script: list[list[dict[str, Any]]]) -> None:
+            super().__init__(script)
+            self.calls: list[list[dict[str, Any]]] = []
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            self.calls.append([dict(m) for m in messages])
+            async for event in super().complete(messages, tools, stream=stream):
+                yield event
+
+    recording = _RecordingExecutor(TailEvidenceExecutor(), max_result_chars=3_000)
+    provider = CallRecordingProvider(
+        [
+            [
+                _tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"}),
+                _tool_call("get_events", {"namespace": "shop"}),
+            ],
+            [{"type": "text_delta", "text": "OOMKilled, exit 137."}],
+        ]
+    )
+    runtime = AgentRuntime(
+        provider,
+        recording,
+        max_result_chars=3_000,
+        max_tool_calls_per_iteration=1,
+    )
+    async for _ in runtime.run_turn("why dying?", "pods view"):
+        pass
+    tool_msg = next(m for m in provider.calls[1] if m["role"] == "tool")
+    assert tool_msg["content"].startswith(recording.records[0].result)
+    assert "OOMKilled" in recording.records[0].result
+    assert "OOMKilled" in tool_msg["content"]
+    assert "discarded" in tool_msg["content"]

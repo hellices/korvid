@@ -267,17 +267,21 @@ class AgentRuntime:
                         # Same ingest cap as ToolExecutor — a huge exception
                         # message must not bypass the limit into history.
                         result = cap_result(f"ERROR: {exc}")
+            if self._max_result_chars is not None:
+                # Head+tail compaction, not a prefix cut: reports place
+                # their evidence (events, log excerpts) last by design.
+                result = compact_result(result, self._max_result_chars)
             if excess and index == len(kept) - 1:
+                # Appended after compaction, without re-compacting: the
+                # notice is a fixed-size constant carrying no evidence, so
+                # what precedes it stays byte-identical to the compacted
+                # result (the eval recorder captures exactly that content,
+                # so grading sees only model-visible evidence); the stored
+                # size bound relaxes only by the notice's constant length.
                 result += (
                     f"\n\nNOTE: {len(excess)} extra tool call(s) in this response "
                     "were discarded — call one tool at a time and wait for its result."
                 )
-            if self._max_result_chars is not None:
-                # Head+tail compaction, not a prefix cut: reports place
-                # their evidence (events, log excerpts) last by design.
-                # Applied after the notice so the bound holds strictly
-                # (the notice sits in the tail, which compaction keeps).
-                result = compact_result(result, self._max_result_chars)
             yield ToolCallFinished(
                 call_id=call_id,
                 name=name,
@@ -293,6 +297,41 @@ class AgentRuntime:
             yield ToolCallFinished(
                 call_id=str(tc["id"]), name=str(tc["name"]), ok=False, summary=summary
             )
+
+    def _over_history_budget(self, iteration: int) -> bool:
+        """True when a follow-up iteration would send a request over budget.
+
+        In-turn budget backstop: capped tool results alone do not bound
+        history growth — assistant text and kept-call arguments are stored
+        verbatim, and `_trim_history` never drops the sole current turn.
+        Never fires on the first iteration (that request must always go
+        out); the overshoot is at most one iteration's model output, which
+        the provider's own output limit bounds.
+        """
+        if not iteration:
+            return False
+        return sum(_message_chars(m) for m in self._messages) > self._max_history_chars
+
+    def _assistant_message(self, state: _StreamState) -> dict[str, Any]:
+        """The stored assistant message: text plus only the kept tool calls.
+
+        Excess parallel calls (arguments included) must not enter history,
+        and the provider protocol needs exactly one tool message per stored
+        call — `_dispatch_tools` keeps the same prefix.
+        """
+        message: dict[str, Any] = {"role": "assistant", "content": state.text}
+        if state.tool_calls:
+            limit = self._max_tool_calls_per_iteration
+            stored = state.tool_calls if limit is None else state.tool_calls[:limit]
+            message["tool_calls"] = [
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                }
+                for tc in stored
+            ]
+        return message
 
     async def run_turn(
         self,
@@ -310,7 +349,21 @@ class AgentRuntime:
         # Token counts are exact only when EVERY iteration reported usage;
         # one missing iteration makes the whole turn an estimate.
         usage_missing = False
-        for _ in range(self._max_iterations):
+        for iteration in range(self._max_iterations):
+            if self._over_history_budget(iteration):
+                self._total_in += turn_in
+                self._total_out += turn_out
+                self._estimated = self._estimated or usage_missing
+                yield AgentError(
+                    message=(
+                        f"history budget exceeded mid-turn "
+                        f"({self._max_history_chars} chars) — turn ended early"
+                    )
+                )
+                yield TurnComplete(
+                    input_tokens=turn_in, output_tokens=turn_out, estimated=usage_missing
+                )
+                return
             state = _StreamState()
             # Estimate of the prompt this iteration sends — used only when
             # the provider omits usage, so token totals never read as zero
@@ -348,22 +401,7 @@ class AgentRuntime:
             turn_out += state.out_tok
             usage_missing = usage_missing or not state.has_usage
 
-            assistant_msg: dict[str, Any] = {"role": "assistant", "content": state.text}
-            if state.tool_calls:
-                # Store only the calls _dispatch_tools will keep — excess
-                # parallel calls (arguments included) must not enter history,
-                # and the provider protocol needs exactly one tool message
-                # per stored call.
-                limit = self._max_tool_calls_per_iteration
-                stored = state.tool_calls if limit is None else state.tool_calls[:limit]
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {"name": tc["name"], "arguments": tc["arguments"]},
-                    }
-                    for tc in stored
-                ]
+            assistant_msg = self._assistant_message(state)
             self._messages.append(assistant_msg)
 
             if not state.tool_calls:

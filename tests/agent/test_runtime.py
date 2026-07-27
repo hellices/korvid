@@ -629,3 +629,32 @@ async def test_discarded_excess_calls_do_not_grow_history() -> None:
     retained = json.dumps(p.calls[1])
     assert "x" * 1_000 not in retained
     assert len(retained) < 2_000
+
+
+async def test_in_turn_history_budget_ends_the_turn_early() -> None:
+    """Capping tool results does not bound history growth by itself:
+    assistant text and kept-call arguments are stored verbatim, and
+    trimming never drops the sole current turn. A follow-up provider call
+    must not be sent once the in-turn total exceeds the history budget."""
+
+    class SpyExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    huge = json.dumps({"manifest": "x" * 30_000})
+    # A second provider call would exhaust this one-batch script and raise;
+    # the budget guard must end the turn before requesting it.
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "apply", "arguments": huge},
+                {"type": "done"},
+            ],
+        ]
+    )
+    runtime = AgentRuntime(p, SpyExecutor(), max_history_chars=10_000)
+    events = await collect(runtime, "go")
+    assert len(p.calls) == 1
+    errors = [e for e in events if isinstance(e, AgentError)]
+    assert any("budget" in e.message for e in errors)
+    assert any(isinstance(e, TurnComplete) for e in events)
