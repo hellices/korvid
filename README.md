@@ -40,6 +40,7 @@ in the dialog; `--readonly` disables them all.
 | `r` | table | Rolling restart of selected deployment / statefulset / daemonset (confirm dialog) |
 | `S` | table | Scale selected deployment / replicaset / statefulset (replica prompt + confirm dialog) |
 | `R` | pods table | In-place resize of pod CPU/memory requests/limits (Kubernetes 1.35+; prompt + confirm dialog) |
+| `I` | operators tables | Install the selected catalog operator (wizard + confirm dialog) or approve a pending InstallPlan |
 | `e` | table | Edit selected resource manifest in `$VISUAL`/`$EDITOR` (kubectl edit style; confirm dialog before the PUT) |
 | `i` | pods table | Open hint details overlay for a troubled pod (full container trouble + recent Warning events) |
 | `Ctrl-A` | global | Toggle AI agent panel |
@@ -65,7 +66,7 @@ Action names: `quit`, `help`, `open_command`, `open_filter`,
 `log_format`, `log_wrap`, `log_timestamps`, `log_save`, `log_previous`,
 `log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
 `sort_by_mem`, `toggle_agent`, `delete_resource`, `rollout_restart`,
-`resize_pod`, `scale_resource`, `edit_resource`, `hint_details`.
+`resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`.
 
 Unknown actions, duplicate keys, and keys that shadow another action's
 default produce a startup warning and are skipped — never a crash. The
@@ -113,6 +114,29 @@ revision history (newest first, like `helm history`); `d` describes a
 release or a single revision with the decoded metadata and the
 user-supplied values — the rendered manifest blob is deliberately left
 out.  This slice is read-only; install/upgrade/rollback lands separately.
+
+## Operator catalog (OLM)
+
+Where [OLM](https://olm.operatorframework.io/) is installed, `:operators`
+opens the operator catalog cluster-wide (catalog entries live in catalog
+namespaces, so the view defaults to all namespaces; `:operators <ns>`
+scopes it): every PackageManifest the cluster's catalog
+sources serve, with its catalog, default channel, and available channels.
+`:subscriptions`, `:csv`, and `:installplans` show the installed side with
+typed columns (subscription channel/state, CSV version/phase).  Without
+OLM, `:operators` explains what is missing instead of erroring.
+
+Press `I` on a catalog row to install: a wizard collects the target
+namespace, channel (validated against the package's own channel list),
+and approval mode — then the **full Subscription manifest** is shown in
+the standard approval dialog before anything is created.  On an
+InstallPlan row, `I` approves a pending manual plan (the dialog lists the
+CSVs the approval unblocks).  Everything shown comes from the cluster's
+catalog objects — korvid hardcodes no operator knowledge — and both
+writes go through the same SSAR pre-check, approval gate, and fail-closed
+audit log as every other mutation.  The AI agent gets a matching read-only
+`list_operators` tool (catalog + installed subscriptions); installing
+stays behind the UI approval gate.
 
 ## Log viewer
 

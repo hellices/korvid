@@ -854,6 +854,43 @@ async def test_replace_object_pins_uid_precondition() -> None:
     assert "uid" not in manifest["metadata"]
 
 
+async def test_create_object_posts_manifest_on_collection_path() -> None:
+    """OLM install (issue #29) creates a Subscription: POST on the
+    namespaced collection, manifest as the body."""
+    client = KubeClient()
+    api = _write_api()
+    sub_meta = ResourceMeta(
+        "Subscription", "subscriptions", "operators.coreos.com", "v1alpha1", True
+    )
+    manifest = {
+        "apiVersion": "operators.coreos.com/v1alpha1",
+        "kind": "Subscription",
+        "metadata": {"name": "cert-manager", "namespace": "operators"},
+        "spec": {"channel": "stable"},
+    }
+    with patch.object(client, "_api", api):
+        await client.create_object(sub_meta, "operators", manifest)
+    args, kwargs = api.call_api.call_args
+    assert args[0] == "/apis/operators.coreos.com/v1alpha1/namespaces/operators/subscriptions"
+    assert args[1] == "POST"
+    assert kwargs["body"] == manifest
+    assert kwargs["header_params"]["Content-Type"] == "application/json"
+
+
+async def test_create_object_rejects_bad_namespace_segment() -> None:
+    client = KubeClient()
+    api = _write_api()
+    sub_meta = ResourceMeta(
+        "Subscription", "subscriptions", "operators.coreos.com", "v1alpha1", True
+    )
+    with (
+        patch.object(client, "_api", api),
+        pytest.raises(ValueError, match="invalid URL path segment"),
+    ):
+        await client.create_object(sub_meta, "..", {"metadata": {}})
+    api.call_api.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # list_pod_metrics
 # ---------------------------------------------------------------------------
@@ -939,3 +976,39 @@ async def test_rollout_restart_with_stamp_pins_provided_stamp() -> None:
     annotations = kwargs["body"]["spec"]["template"]["metadata"]["annotations"]
     assert annotations["kubectl.kubernetes.io/restartedAt"] == "2026-07-26T00:00:00+00:00"
     assert kwargs["body"]["metadata"] == {"uid": "u-1"}
+
+
+async def test_create_object_requires_namespace_for_namespaced_kind() -> None:
+    """Kubernetes forbids cluster-wide POST on a namespaced collection:
+    reject the bad input locally instead of sending a guaranteed-invalid
+    request."""
+    client = KubeClient()
+    api = _write_api()
+    sub_meta = ResourceMeta(
+        "Subscription", "subscriptions", "operators.coreos.com", "v1alpha1", True
+    )
+    with (
+        patch.object(client, "_api", api),
+        pytest.raises(ValueError, match="requires a namespace"),
+    ):
+        await client.create_object(sub_meta, None, {"metadata": {}})
+    api.call_api.assert_not_called()
+
+
+async def test_create_object_posts_on_cluster_scoped_collection_path() -> None:
+    """create_object is a generic API: a cluster-scoped kind POSTs on the
+    bare collection path (no namespaces segment)."""
+    client = KubeClient()
+    api = _write_api()
+    og_meta = ResourceMeta("ClusterThing", "clusterthings", "example.com", "v1", False)
+    manifest = {
+        "apiVersion": "example.com/v1",
+        "kind": "ClusterThing",
+        "metadata": {"name": "global"},
+    }
+    with patch.object(client, "_api", api):
+        await client.create_object(og_meta, None, manifest)
+    args, kwargs = api.call_api.call_args
+    assert args[0] == "/apis/example.com/v1/clusterthings"
+    assert args[1] == "POST"
+    assert kwargs["body"] == manifest

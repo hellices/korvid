@@ -81,6 +81,18 @@ class WriteOps(abc.ABC):
     ) -> None:
         """PUT-replace the whole object with an edited manifest."""
 
+    async def create_object(
+        self,
+        meta: ResourceMeta,
+        namespace: str | None,
+        manifest: dict[str, Any],
+    ) -> None:
+        """POST a new object onto the collection (OLM install, issue #29).
+        Non-abstract on purpose: transports predating the feature keep
+        working, and the UI offers install only where discovery found the
+        OLM API groups."""
+        raise NotImplementedError("this transport does not support object creation")
+
     async def resize_pod(
         self,
         namespace: str,
