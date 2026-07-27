@@ -107,6 +107,12 @@ class AgentProfile:
     #: extra parallel calls are discarded at dispatch (arguments and all,
     #: so they cannot grow history).
     max_tool_calls_per_iteration: int | None
+    #: When True, the history budget is a hard bound: a turn ends early
+    #: before any follow-up request would exceed it, and an oversized
+    #: completed turn is dropped at trim time instead of resent. False
+    #: preserves the pre-profile behavior (budget enforced only across
+    #: turns, the most recent turn always retained).
+    strict_history_budget: bool
     system_prompt: str
     ui_prompt: str
 
@@ -149,6 +155,7 @@ def build_profile(name: str, *, readonly: bool, resize_supported: bool) -> Agent
             max_history_chars=MAX_HISTORY_CHARS,
             max_result_chars=None,
             max_tool_calls_per_iteration=None,
+            strict_history_budget=False,
             system_prompt=SYSTEM_PROMPT,
             ui_prompt=UI_DRIVE_PROMPT,
         )
@@ -166,6 +173,7 @@ def build_profile(name: str, *, readonly: bool, resize_supported: bool) -> Agent
             max_history_chars=SMALL_MAX_HISTORY_CHARS,
             max_result_chars=SMALL_MAX_RESULT_CHARS,
             max_tool_calls_per_iteration=SMALL_MAX_TOOL_CALLS_PER_ITERATION,
+            strict_history_budget=True,
             system_prompt=SMALL_SYSTEM_PROMPT,
             ui_prompt=SMALL_UI_PROMPT,
         )

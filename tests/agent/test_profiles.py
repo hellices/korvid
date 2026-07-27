@@ -141,3 +141,14 @@ def test_small_profile_enforces_one_tool_call_per_iteration() -> None:
     assert small.max_tool_calls_per_iteration == 1
     full = build_profile("full", readonly=False, resize_supported=True)
     assert full.max_tool_calls_per_iteration is None
+
+
+def test_strict_history_budget_is_small_only() -> None:
+    """The hard history bound (mid-turn guard, oversized-turn drop) is what
+    makes the 24k budget real for the small profile; `full` must keep the
+    pre-profile soft behavior — a full turn can legitimately hold
+    max_iterations executor-capped results."""
+    small = build_profile("small", readonly=False, resize_supported=True)
+    assert small.strict_history_budget is True
+    full = build_profile("full", readonly=False, resize_supported=True)
+    assert full.strict_history_budget is False

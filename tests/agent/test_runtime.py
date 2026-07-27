@@ -652,9 +652,63 @@ async def test_in_turn_history_budget_ends_the_turn_early() -> None:
             ],
         ]
     )
-    runtime = AgentRuntime(p, SpyExecutor(), max_history_chars=10_000)
+    runtime = AgentRuntime(p, SpyExecutor(), max_history_chars=10_000, strict_history_budget=True)
     events = await collect(runtime, "go")
     assert len(p.calls) == 1
     errors = [e for e in events if isinstance(e, AgentError)]
     assert any("budget" in e.message for e in errors)
     assert any(isinstance(e, TurnComplete) for e in events)
+
+
+async def test_history_budget_stays_soft_without_strict_mode() -> None:
+    """The full profile must reproduce the pre-profile runtime exactly: a
+    full turn can legitimately accumulate max_iterations executor-capped
+    results, so the in-turn guard is opt-in and off by default."""
+
+    class SpyExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    huge = json.dumps({"manifest": "x" * 30_000})
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "apply", "arguments": huge},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, SpyExecutor(), max_history_chars=10_000)
+    events = await collect(runtime, "go")
+    assert len(p.calls) == 2  # second iteration still requested
+    assert not any(isinstance(e, AgentError) for e in events)
+
+
+async def test_strict_trim_drops_an_oversized_sole_previous_turn() -> None:
+    """After the mid-turn guard ends a turn early, that turn is oversized
+    forever; iteration zero of the NEXT turn sends unconditionally, so
+    strict trimming must drop the oversized completed turn instead of
+    resending it (the default keeps it — most recent turn always retained)."""
+
+    class SpyExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    huge = json.dumps({"manifest": "x" * 30_000})
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "apply", "arguments": huge},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "hello"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, SpyExecutor(), max_history_chars=10_000, strict_history_budget=True)
+    await collect(runtime, "first")  # ends early over budget
+    await collect(runtime, "second")
+    first_request = json.dumps(p.calls[1])
+    assert "x" * 1_000 not in first_request  # oversized turn not resent
+    assert "second" in first_request
+    assert len(first_request) < 10_000

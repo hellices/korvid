@@ -259,6 +259,7 @@ async def _drive_turn(
         max_history_chars=profile.max_history_chars,
         max_result_chars=profile.max_result_chars,
         max_tool_calls_per_iteration=profile.max_tool_calls_per_iteration,
+        strict_history_budget=profile.strict_history_budget,
         system_prompt=profile.system_prompt,
     )
     tally = _TurnTally()

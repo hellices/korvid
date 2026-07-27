@@ -131,6 +131,7 @@ class AgentRuntime:
         max_history_chars: int = MAX_HISTORY_CHARS,
         max_result_chars: int | None = None,
         max_tool_calls_per_iteration: int | None = None,
+        strict_history_budget: bool = False,
         cluster_context: str | None = None,
         system_prompt: str | None = None,
         ui_prompt: str | None = None,
@@ -170,6 +171,10 @@ class AgentRuntime:
         # prompt text alone does not enforce that, so extra parallel calls
         # in one response are discarded at dispatch (issue #71).
         self._max_tool_calls_per_iteration = max_tool_calls_per_iteration
+        # Opt-in hard bound (small profile): budget checked mid-turn and
+        # oversized completed turns dropped at trim time. Off by default so
+        # the full profile keeps the pre-profile runtime behavior exactly.
+        self._strict_history_budget = strict_history_budget
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
         self._total_in = 0
         self._total_out = 0
@@ -198,6 +203,13 @@ class AgentRuntime:
         while sum(_message_chars(m) for m in self._messages) > self._max_history_chars:
             user_indices = [i for i, m in enumerate(self._messages) if m.get("role") == "user"]
             if len(user_indices) <= 1:
+                if self._strict_history_budget:
+                    # Strict mode: even the sole most recent turn must not
+                    # be resent when it exceeds the budget (a turn the
+                    # mid-turn guard ended early stays oversized forever —
+                    # iteration zero sends unconditionally, so this is the
+                    # only place that can stop it going over the wire).
+                    self._messages = [self._messages[0]]
                 break
             self._messages = [self._messages[0], *self._messages[user_indices[1] :]]
 
@@ -301,14 +313,17 @@ class AgentRuntime:
     def _over_history_budget(self, iteration: int) -> bool:
         """True when a follow-up iteration would send a request over budget.
 
-        In-turn budget backstop: capped tool results alone do not bound
-        history growth — assistant text and kept-call arguments are stored
-        verbatim, and `_trim_history` never drops the sole current turn.
-        Never fires on the first iteration (that request must always go
-        out); the overshoot is at most one iteration's model output, which
-        the provider's own output limit bounds.
+        Strict-mode in-turn backstop (off by default — the full profile
+        keeps its original behavior of enforcing the budget only across
+        turns): capped tool results alone do not bound history growth —
+        assistant text and kept-call arguments are stored verbatim, and
+        trimming never splits the current turn. Never fires on the first
+        iteration (that request must always go out; `_trim_history` in
+        strict mode guarantees it is under budget); the overshoot is at
+        most one iteration's model output, which the provider's own output
+        limit bounds.
         """
-        if not iteration:
+        if not self._strict_history_budget or not iteration:
             return False
         return sum(_message_chars(m) for m in self._messages) > self._max_history_chars
 

@@ -62,7 +62,11 @@ def compact_result(result: str, limit: int) -> str:
     """
     if len(result) <= limit:
         return result
-    content = max(limit - len(_MIDDLE_TRUNCATION_MARKER), 0)
+    if limit <= len(_MIDDLE_TRUNCATION_MARKER):
+        # The marker alone would exceed a tiny limit; degrade to a hard cut
+        # so the output-never-exceeds-limit contract holds for any input.
+        return result[: max(limit, 0)]
+    content = limit - len(_MIDDLE_TRUNCATION_MARKER)
     head = content * 2 // 5
     tail = content - head
     return result[:head] + _MIDDLE_TRUNCATION_MARKER + result[len(result) - tail :]
