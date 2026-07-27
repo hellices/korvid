@@ -25,6 +25,7 @@ PDB-aware impact plan; `--readonly` disables them all.
 | `/` | log pane | Open inline log search |
 | `Enter` | table | Drill down: pods → containers; deploy → replicasets (history) → pods; helm release → revisions |
 | `Esc` | table | Pop one drill-down level |
+| `Ctrl-W` `v` / `w` / `q` | table | Split workspace into two panes / focus the other pane / close the focused pane |
 | `Shift-N/A/C/M` | table | Sort by name / age / CPU / MEM (repeat flips ▲/▼; sorts on data, not rendered strings) |
 | `0` | global | Toggle all-namespaces view |
 | `d` | table | Describe selected resource (manifest + events) |
@@ -149,6 +150,17 @@ diagnoses.  Anything that does not fit folds behind `+N more (i: details)`;
 press `i` to open a read-only overlay with every troubled container (full
 message, exit code, restart count, last-seen age) and the pod's recent
 Warning events.
+
+## Split workspace
+
+`Ctrl-W` `v` splits the workspace into two side-by-side panes, each an
+independent resource view with its own kind, namespace and filter — e.g.
+deployments on the left, their pods on the right.  The focused pane (accent
+border) receives all `:` commands, filters and keybindings; `Ctrl-W` `w`
+moves focus to the other pane and `Ctrl-W` `q` closes the focused one.
+Drill-down, describe and the log pane all act on the focused pane, and the
+AI agent's screen context reports the focused view plus a one-line summary
+of the other.  The layout is session-only — korvid always starts single-pane.
 
 ## Helm release browser
 
