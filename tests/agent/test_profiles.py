@@ -116,3 +116,19 @@ def test_small_ui_prompt_names_only_the_offered_tools() -> None:
 def test_build_profile_rejects_unknown_names() -> None:
     with pytest.raises(ValueError, match="unknown agent profile"):
         build_profile("tiny", readonly=False, resize_supported=False)
+
+
+def test_small_profile_turn_fits_inside_its_history_budget() -> None:
+    """MAX_HISTORY_TURNS trimming never removes the most recent turn, so one
+    turn of tool results must fit the retained-history budget by
+    construction: iterations x per-result cap <= history chars."""
+    profile = build_profile("small", readonly=False, resize_supported=True)
+    assert profile.max_result_chars is not None
+    assert profile.max_iterations * profile.max_result_chars <= profile.max_history_chars
+
+
+def test_full_profile_keeps_the_executor_result_cap() -> None:
+    """`full` must not add a runtime-side cap: the executor's own 8k limit
+    is the pre-profile behavior."""
+    profile = build_profile("full", readonly=False, resize_supported=True)
+    assert profile.max_result_chars is None

@@ -633,6 +633,7 @@ async def test_agent_wiring_applies_the_small_profile(monkeypatch: object) -> No
     assert "drill_down" not in names
     assert runtime._max_iterations == SMALL_MAX_ITERATIONS
     assert runtime._max_history_chars == SMALL_MAX_HISTORY_CHARS
+    assert runtime._max_result_chars is not None
     assert "one tool at a time" in runtime._messages[0]["content"]
 
     # The wizard's rebuild carries its own profile choice.

@@ -21,7 +21,7 @@ from korvid.agent.events import (
     ToolCallFinished,
     ToolCallStarted,
 )
-from korvid.agent.profiles import build_profile
+from korvid.agent.profiles import AgentProfile, build_profile
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
@@ -31,7 +31,7 @@ from korvid.evals.scenario import Scenario
 DEFAULT_REPETITIONS = 3
 
 
-def _eval_tools(profile_name: str) -> list[dict[str, Any]]:
+def _eval_tools(profile: AgentProfile) -> list[dict[str, Any]]:
     """Schemas offered to the model for one capability profile (issue #71).
 
     Write schemas are included so a live structured-tool provider can
@@ -41,7 +41,6 @@ def _eval_tools(profile_name: str) -> list[dict[str, Any]]:
     for the same reason — there is no screen to drive, and the grader
     counts names outside the read/write surface as malformed.
     """
-    profile = build_profile(profile_name, readonly=False, resize_supported=True)
     return [t for t in profile.tools if t["function"]["name"] not in UI_TOOL_NAMES]
 
 
@@ -244,9 +243,10 @@ async def _drive_turn(
     runtime = AgentRuntime(
         provider,
         executor,
-        tools=_eval_tools(profile_name),
+        tools=_eval_tools(profile),
         max_iterations=profile.max_iterations,
         max_history_chars=profile.max_history_chars,
+        max_result_chars=profile.max_result_chars,
         system_prompt=profile.system_prompt,
     )
     tally = _TurnTally()

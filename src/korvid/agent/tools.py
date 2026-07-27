@@ -38,11 +38,13 @@ _MAX_CATALOG_PACKAGES = 60
 _TRUNCATION_SUFFIX = "\n… [truncated — narrow the query]"
 
 
-def cap_result(result: str) -> str:
+def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
     """Enforce the tool-result ingest cap; shared by every path that feeds
-    a result into conversation history."""
-    if len(result) > MAX_RESULT_CHARS:
-        return result[:MAX_RESULT_CHARS] + _TRUNCATION_SUFFIX
+    a result into conversation history. Profiles may pass a tighter
+    `limit` (issue #71) so a full turn of results fits their history
+    budget."""
+    if len(result) > limit:
+        return result[:limit] + _TRUNCATION_SUFFIX
     return result
 
 

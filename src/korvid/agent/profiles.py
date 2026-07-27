@@ -28,6 +28,12 @@ SMALL_MAX_ITERATIONS = 6
 #: (Ollama defaults to a 4k context under 24 GiB VRAM and silently truncates
 #: anything longer), not the model's advertised window.
 SMALL_MAX_HISTORY_CHARS = 24_000
+#: Per-tool-result cap. History trimming never removes the sole most
+#: recent turn, so one turn must fit the budget by construction:
+#: 6 iterations x 3k chars = 18k, leaving headroom for the prompt and
+#: assistant text inside SMALL_MAX_HISTORY_CHARS. The full profile keeps
+#: the executor's own 8k ingest cap instead.
+SMALL_MAX_RESULT_CHARS = 3_000
 
 #: Short role statement, explicit grounding rules, and ONE worked example
 #: (question -> tool call -> result -> grounded answer) instead of the
@@ -87,6 +93,9 @@ class AgentProfile:
     tools: list[dict[str, Any]]
     max_iterations: int
     max_history_chars: int
+    #: When set, the runtime truncates each tool result to this many chars
+    #: (below the executor's 8k cap); None keeps executor-capped results.
+    max_result_chars: int | None
     system_prompt: str
     ui_prompt: str
 
@@ -127,6 +136,7 @@ def build_profile(name: str, *, readonly: bool, resize_supported: bool) -> Agent
             tools=tools,
             max_iterations=FULL_MAX_ITERATIONS,
             max_history_chars=MAX_HISTORY_CHARS,
+            max_result_chars=None,
             system_prompt=SYSTEM_PROMPT,
             ui_prompt=UI_DRIVE_PROMPT,
         )
@@ -142,6 +152,7 @@ def build_profile(name: str, *, readonly: bool, resize_supported: bool) -> Agent
             tools=_trim(tools),
             max_iterations=SMALL_MAX_ITERATIONS,
             max_history_chars=SMALL_MAX_HISTORY_CHARS,
+            max_result_chars=SMALL_MAX_RESULT_CHARS,
             system_prompt=SMALL_SYSTEM_PROMPT,
             ui_prompt=SMALL_UI_PROMPT,
         )

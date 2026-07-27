@@ -123,6 +123,7 @@ class AgentRuntime:
         tools: list[dict[str, Any]] | None = None,
         max_iterations: int = 15,
         max_history_chars: int = MAX_HISTORY_CHARS,
+        max_result_chars: int | None = None,
         cluster_context: str | None = None,
         system_prompt: str | None = None,
         ui_prompt: str | None = None,
@@ -153,6 +154,11 @@ class AgentRuntime:
             prompt = f"{prompt} {NO_WRITE_PROMPT}"
         self._max_iterations = max_iterations
         self._max_history_chars = max_history_chars
+        # Optional per-result cap below the executor's own ingest limit —
+        # history trimming never removes the sole most-recent turn, so the
+        # small profile (issue #71) sizes this so one full turn of results
+        # fits inside its retained-history budget.
+        self._max_result_chars = max_result_chars
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
         self._total_in = 0
         self._total_out = 0
@@ -235,6 +241,8 @@ class AgentRuntime:
                         # Same ingest cap as ToolExecutor — a huge exception
                         # message must not bypass the limit into history.
                         result = cap_result(f"ERROR: {exc}")
+            if self._max_result_chars is not None:
+                result = cap_result(result, self._max_result_chars)
             yield ToolCallFinished(
                 call_id=call_id,
                 name=name,

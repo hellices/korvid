@@ -511,3 +511,29 @@ async def test_runtime_accepts_profile_prompt_overrides() -> None:
     assert system["content"].startswith("CUSTOM ROLE.")
     assert "CUSTOM UI RULES." in system["content"]
     assert NO_WRITE_PROMPT in system["content"]
+
+
+async def test_runtime_caps_tool_results_at_max_result_chars() -> None:
+    """A per-result cap below the executor's own 8k limit must bind — the
+    small profile (issue #71) sizes it so one full turn of results fits
+    inside its retained-history budget."""
+
+    class HugeExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "x" * 5_000
+
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "{}"},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, HugeExecutor(), max_result_chars=1_000)
+    await collect(runtime, "logs?")
+    tool_msgs = [m for m in p.calls[1] if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    assert len(tool_msgs[0]["content"]) <= 1_000 + len("\n… [truncated — narrow the query]")
+    assert "truncated" in tool_msgs[0]["content"]
