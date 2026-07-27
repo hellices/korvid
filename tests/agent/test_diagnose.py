@@ -364,6 +364,19 @@ def test_pvc_names_empty_spec_yields_empty() -> None:
     assert pvc_names({}) == []
 
 
+def test_pvc_names_dedupes_repeated_claims_preserving_spec_order() -> None:
+    pod = {
+        "spec": {
+            "volumes": [
+                {"name": "v1", "persistentVolumeClaim": {"claimName": "shared"}},
+                {"name": "v2", "persistentVolumeClaim": {"claimName": "logs"}},
+                {"name": "v3", "persistentVolumeClaim": {"claimName": "shared"}},
+            ]
+        }
+    }
+    assert pvc_names(pod) == ["shared", "logs"]
+
+
 def test_node_condition_line_summarizes_pressure_conditions() -> None:
     node = {
         "metadata": {"name": "node-a"},

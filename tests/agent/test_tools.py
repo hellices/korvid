@@ -928,6 +928,12 @@ def _diagnose_executor(kube: Any) -> ToolExecutor:
     return ToolExecutor(kube, _diagnose_aliases())
 
 
+def test_diagnose_pod_schema_documents_the_log_container_cap() -> None:
+    schema = next(t for t in READ_TOOLS if t["function"]["name"] == "diagnose_pod")
+    description = schema["function"]["description"]
+    assert "up to 3" in description
+
+
 async def test_diagnose_pod_reports_all_sections_in_evidence_order() -> None:
     kube = FakeDiagnoseKube()
     out = await _diagnose_executor(kube).execute(

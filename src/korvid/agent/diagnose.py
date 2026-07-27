@@ -256,18 +256,20 @@ def log_excerpt(lines: list[str], *, context: int = 5, final: int = 10) -> str:
 
 
 def pvc_names(pod: dict[str, Any]) -> list[str]:
-    """Names of PersistentVolumeClaims the pod mounts, in spec order."""
+    """Unique PersistentVolumeClaim names the pod mounts, in spec order."""
     volumes = _spec(pod).get("volumes")
     if not isinstance(volumes, list):
         return []
     names: list[str] = []
+    seen: set[str] = set()
     for volume in volumes:
         if not isinstance(volume, dict):
             continue
         claim = volume.get("persistentVolumeClaim")
         if isinstance(claim, dict):
             name = claim.get("claimName")
-            if isinstance(name, str) and name:
+            if isinstance(name, str) and name and name not in seen:
+                seen.add(name)
                 names.append(name)
     return names
 
