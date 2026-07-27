@@ -4427,6 +4427,15 @@ class KorvidApp(App[None]):
                 exit_code = self._run_interactive(
                     attach_argv, f"korvid node shell → {node} (exit to return)"
                 )
+        except SuspendNotSupported:
+            # Non-suspending drivers (e.g. Windows, web): refuse gracefully —
+            # the finalizer still deletes the pod that was just created.
+            self.notify(
+                "node shell unavailable: this environment does not support"
+                " suspending the TUI for an interactive shell",
+                severity="error",
+            )
+            outcome = "error: suspend not supported"
         except OSError as exc:
             # kubectl itself could not be launched (removed or not executable
             # since the create): keep a specific outcome and let the finalizer
@@ -4543,7 +4552,12 @@ class KorvidApp(App[None]):
             payload = json.loads(proc.stdout)
         except ValueError:
             payload = None
-        item_meta = (payload or {}).get("metadata") if isinstance(payload, dict) else None
+        item_meta = payload.get("metadata") if isinstance(payload, dict) else None
+        if not isinstance(item_meta, dict):
+            # Valid JSON with an unexpected shape (e.g. metadata is a scalar)
+            # must land in the unidentifiable branch, not raise past the
+            # finalizer while a privileged pod may exist.
+            item_meta = None
         pod_name = (item_meta or {}).get("name")
         if not isinstance(pod_name, str) or not pod_name:
             # Pod created (exit 0) but unidentifiable: refuse to guess.

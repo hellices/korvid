@@ -769,3 +769,65 @@ async def test_non_psa_rejection_omits_namespace_remediation(tmp_path: Path) -> 
             if "Could not create the debugger pod" in n.message
         )
         assert "node_shell.namespace" not in message
+
+
+async def test_valid_json_with_scalar_metadata_is_unidentifiable(tmp_path: Path) -> None:
+    """kubectl exiting 0 with valid JSON of an unexpected shape (metadata is
+    a scalar) must land in the unidentifiable branch — not raise past the
+    finalizer while a privileged pod may exist."""
+    app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
+    async with app.run_test():
+        weird = SimpleNamespace(returncode=0, stdout=b'{"metadata": "unexpected"}', stderr=b"")
+        with patch("korvid.ui.app.subprocess.run", return_value=weird):
+            outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
+        assert outcome == (
+            "error: created pod could not be identified; cleanup skipped: check namespace default"
+        )
+
+
+async def test_suspend_not_supported_refuses_gracefully_and_cleans_up(
+    tmp_path: Path,
+) -> None:
+    """Non-suspending drivers raise SuspendNotSupported when attaching: the
+    worker must survive, the user sees a graceful refusal, and the finalizer
+    still deletes the pod with a specific outcome."""
+    from textual.app import SuspendNotSupported
+
+    rec = DeleteRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    run_fake, _ = _kubectl_run()
+    call_records: list[list[str]] = []
+
+    def fake_call(argv):  # type: ignore[no-untyped-def]  # test helper
+        call_records.append(list(argv))
+        return 0
+
+    @contextmanager
+    def raising_suspend() -> Any:
+        raise SuspendNotSupported("headless")
+        yield
+
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app.subprocess.call", side_effect=fake_call),
+        patch("korvid.ui.app.subprocess.run", side_effect=run_fake),
+        patch.object(KorvidApp, "suspend", side_effect=raising_suspend),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            await _to_nodes(pilot)
+            await pilot.press("s")
+            await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
+            await pilot.press("y")
+            await until(pilot, lambda: rec.deletes, label="cleanup delete")
+
+            def _notified() -> bool:
+                return any("does not support" in n.message for n in app._notifications)
+
+            await until(pilot, _notified, label="graceful refusal notification")
+    assert call_records == []
+    assert rec.deletes == [("pods", "default", DBG_POD, DBG_UID)]
+    entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+    ours = [e for e in entries if e["action"] == "node-shell"]
+    assert ours[-1]["outcome"].startswith("error: suspend not supported")
