@@ -349,3 +349,44 @@ async def test_two_pod_panes_in_different_scopes_poll_cluster_wide() -> None:
         calls.clear()
         await until(pilot, lambda: None in calls, label="cluster-wide metrics poll")
         assert None in calls
+
+
+async def test_chord_does_not_arm_while_an_input_is_focused() -> None:
+    """`ctrl+w` while the command bar is open must not arm the chord: the
+    Input consumes the second key, which would leave the pending flag set
+    and silently swallow the next key after the bar closes."""
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await pilot.press("colon")
+        await pilot.press("ctrl+w")
+        assert app._pane_chord_pending is False
+        await pilot.press("escape")  # close the bar
+        await pilot.press("d")  # must reach describe, not be chord-swallowed
+        await pilot.pause()
+        assert len(app.query(ResourceTable)) == 1
+
+
+async def test_split_serializes_with_navigation_lock() -> None:
+    """Splitting mutates the pane list and starts a watch - it must hold
+    the same lock as navigation so a concurrent `:view`/`:ns` transition
+    never interleaves with the pane-list snapshot."""
+    import asyncio
+
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await app._nav_lock.acquire()
+        try:
+            task = asyncio.create_task(app._split_pane())
+            await pilot.pause(0.1)
+            assert len(app._panes) == 1  # blocked behind the nav lock
+        finally:
+            app._nav_lock.release()
+        await task
+        await until(pilot, lambda: len(app.query(ResourceTable)) == 2, label="split completed")
+        assert len(app._panes) == 2
+        # Flush the new pane's render/highlight messages before teardown.
+        second = app.query(ResourceTable).last()
+        await until(pilot, lambda: second.row_count == 1, label="clone rendered")
+        await pilot.pause()

@@ -3212,12 +3212,20 @@ class KorvidApp(App[None]):
         """`ctrl+w` chord state machine: the prefix always swallows the next
         key - an unmapped second key must not fall through to normal
         handling (q would quit)."""
-        event.stop()
-        event.prevent_default()
         if not self._pane_chord_pending:
+            # Arm only while a table is focused: with an Input (command/
+            # filter bar) focused the second key never reaches App.on_key,
+            # which would orphan the pending flag and silently swallow the
+            # next table keypress after the bar closes.
+            if not isinstance(self.focused, ResourceTable):
+                return
             self._pane_chord_pending = True
+            event.stop()
+            event.prevent_default()
             return
         self._pane_chord_pending = False
+        event.stop()
+        event.prevent_default()
         if event.key == "v":
             await self._split_pane()
         elif event.key in ("w", "ctrl+w"):
@@ -3230,17 +3238,23 @@ class KorvidApp(App[None]):
         if len(self._panes) >= 2:
             self.notify("workspace is already split - ctrl+w q closes a pane", severity="warning")
             return
-        source = self._pane
-        self._pane_counter += 1
-        pane = source.clone(f"pane-{self._pane_counter}")
-        table = ResourceTable(id=pane.table_id)
-        await self.query_one("#workspace", Horizontal).mount(table)
-        for pane_table in self.query(ResourceTable):
-            pane_table.add_class("split-pane")
-        self._panes.append(pane)
-        self._focused_pane = 1
-        # start() is idempotent - the clone usually shares the source's watch.
-        await self.watch_manager.start(pane.kind, pane.scope)
+        # The pane list and watch lifecycle are also mutated by navigation:
+        # take the same lock so a concurrent `:view`/`:ns` transition never
+        # interleaves with the split's pane snapshot and watch start.
+        async with self._nav_lock:
+            if len(self._panes) >= 2:
+                return  # lost the race to another split
+            source = self._pane
+            self._pane_counter += 1
+            pane = source.clone(f"pane-{self._pane_counter}")
+            table = ResourceTable(id=pane.table_id)
+            await self.query_one("#workspace", Horizontal).mount(table)
+            for pane_table in self.query(ResourceTable):
+                pane_table.add_class("split-pane")
+            self._panes.append(pane)
+            self._focused_pane = 1
+            # start() is idempotent - the clone usually shares the source's watch.
+            await self.watch_manager.start(pane.kind, pane.scope)
         self._render_table(pane.kind)
         table.focus()
         self._refresh_status()
