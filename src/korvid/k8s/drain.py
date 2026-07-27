@@ -88,7 +88,7 @@ class DrainPlan:
             lines.append("")
             lines.append(
                 f"Blocked by PodDisruptionBudget ({len(blocked)})"
-                " - evictions will be refused until the budget allows:"
+                " - the eviction API currently refuses these:"
             )
             # "~ " prefix: styled yellow, these need operator attention.
             lines.extend(

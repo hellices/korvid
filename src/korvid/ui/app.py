@@ -469,6 +469,9 @@ class KorvidApp(App[None]):
         # Bounded retry for throttled (non-PDB) 429s during eviction.
         self._evict_throttle_retries: int = 2
         self._evict_throttle_backoff: float = 1.0
+        # How long a cancelled drain waits for an in-flight eviction POST
+        # to settle before giving up on counting it.
+        self._evict_settle_timeout: float = 5.0
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -3050,17 +3053,23 @@ class KorvidApp(App[None]):
         with contextlib.suppress(Exception):
             self._refresh_status()
 
-    async def _evict_one(self, ops: WriteOps, target: DrainTarget) -> str:
+    async def _evict_one(self, ops: WriteOps, target: DrainTarget, counts: dict[str, int]) -> str:
         """Issue one eviction; returns 'evicted', 'blocked' (PDB admission
         denial - warn live and move on instead of hanging on a budget that
         may never free) or 'failed'. A 429 *without* the PDB denial markers
         is apiserver throttling (API Priority and Fairness): retried with
         bounded backoff instead of being misreported as pdb-blocked.
-        Cancellation propagates."""
+        Cancellation lets the in-flight request settle first (the POST may
+        already have reached the apiserver) so the cancellation audit
+        reports what actually happened, then propagates."""
         for attempt in range(self._evict_throttle_retries + 1):
+            request = asyncio.ensure_future(
+                ops.evict_pod(target.namespace, target.name, uid=target.uid)
+            )
             try:
-                await ops.evict_pod(target.namespace, target.name, uid=target.uid)
+                await asyncio.shield(request)
             except asyncio.CancelledError:
+                await self._settle_cancelled_eviction(request, counts)
                 raise
             except ApiStatusError as exc:
                 if is_pdb_denial(exc):
@@ -3079,6 +3088,26 @@ class KorvidApp(App[None]):
                 return "failed"
             return "evicted"
         return "failed"  # not reached: the last attempt returns above
+
+    async def _settle_cancelled_eviction(
+        self, request: asyncio.Future[None], counts: dict[str, int]
+    ) -> None:
+        """The drain was cancelled while an eviction POST was in flight -
+        the request may already have reached the apiserver. Wait (bounded)
+        for it to settle and count a landed eviction, so the cancellation
+        audit records what actually happened instead of assuming the
+        eviction never went out."""
+        try:
+            await asyncio.wait_for(asyncio.shield(request), timeout=self._evict_settle_timeout)
+        except TimeoutError:
+            request.cancel()
+            return
+        except asyncio.CancelledError:
+            request.cancel()
+            raise
+        except Exception:
+            return  # refused or failed: nothing landed
+        counts["evicted"] += 1
 
     async def _recheck_drain_plan(
         self,
@@ -3215,7 +3244,7 @@ class KorvidApp(App[None]):
         try:
             for done, target in enumerate(targets, start=1):
                 self._set_drain_progress(f"drain {name}: {done - 1}/{total}")
-                result = await self._evict_one(ops, target)
+                result = await self._evict_one(ops, target, counts)
                 if result == "evicted":
                     accepted.append(target)
                 counts[result] += 1

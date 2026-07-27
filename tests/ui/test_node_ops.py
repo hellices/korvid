@@ -327,6 +327,7 @@ async def test_drain_cancel_mid_drain_leaves_node_cordoned(tmp_path: Path) -> No
     rec.release_evictions.clear()  # first eviction blocks until released
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
+    app._evict_settle_timeout = 0.1  # the held eviction never settles
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await _to_nodes(pilot)
@@ -412,6 +413,7 @@ async def test_drain_while_drain_in_progress_cancels_instead_of_stacking(tmp_pat
     rec.release_evictions.clear()
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
+    app._evict_settle_timeout = 0.1  # the held eviction never settles
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await _to_nodes(pilot)
@@ -692,3 +694,37 @@ async def test_persistently_throttled_eviction_counts_as_failed(tmp_path: Path) 
         entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert entries[-1]["outcome"].startswith("partial")
         assert "pdb-blocked 0" in entries[-1]["detail"]
+
+
+async def test_cancelled_in_flight_eviction_that_lands_is_counted(tmp_path: Path) -> None:
+    """Cancellation can arrive after the eviction POST reached the
+    apiserver: the drain lets the in-flight request settle (bounded) so
+    the cancellation audit reports the eviction that actually landed."""
+    plan = DrainPlan(
+        targets=(_target("web-1"), _target("cache-1")),
+        skipped_daemonset=(),
+        skipped_mirror=(),
+    )
+    rec = NodeRecorder(plan=plan)
+    rec.release_evictions.clear()  # hold the first eviction in flight
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _to_nodes(pilot)
+        await pilot.press("D")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
+        await _confirm_typed(pilot, "worker-1")
+        await until(pilot, lambda: rec.evict_started.is_set(), label="first eviction in flight")
+        await pilot.press("D")  # cancel while the POST is in flight
+        await pilot.pause(0.05)
+        rec.release_evictions.set()  # ... and the in-flight eviction lands
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "cancelled" in audit_path.read_text(),
+            label="drain cancelled",
+        )
+        # The eviction that was in flight when cancel arrived is counted.
+        assert ("evict", "default", "web-1", "uid-web-1") in rec.calls
+        entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        assert "evicted 1 of 2" in entries[-1]["detail"]
