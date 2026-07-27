@@ -41,6 +41,7 @@ from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.providers.configurator import ProviderConfigurator
+from korvid.providers.ollama import OllamaOptions
 from korvid.providers.registry import create_provider
 from korvid.providers.token_store import TokenStore
 from korvid.ui.app import AppUIBridge, EventsFetcher, KorvidApp
@@ -262,6 +263,13 @@ def _build_agent_wiring(
             # model is never told about a tool the cluster cannot honor.
             agent_tools = agent_tools + RESIZE_TOOLS
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
+    ollama_options = OllamaOptions(
+        num_ctx=config.agent_ollama_num_ctx,
+        temperature=config.agent_ollama_temperature,
+        seed=config.agent_ollama_seed,
+        think=config.agent_ollama_think,
+        keep_alive=config.agent_ollama_keep_alive,
+    )
     provider = create_provider(
         enabled=config.agent_enabled,
         provider=config.agent_provider,
@@ -270,6 +278,7 @@ def _build_agent_wiring(
         model=config.agent_model,
         api_key_env=config.agent_api_key_env,
         oauth_token=oauth,
+        ollama=ollama_options,
     )
     agent_runtime = (
         AgentRuntime(
@@ -311,6 +320,10 @@ def _build_agent_wiring(
             model=settings.model,
             api_key_env=settings.api_key_env,
             oauth_token=token_store.load("github-oauth"),
+            # ollama_options is captured from startup config: the :ai wizard
+            # does not edit agent.ollama.*, so the values cannot go stale. If
+            # config reload is ever added, re-derive the options here.
+            ollama=ollama_options,
         )
         provider_box[0] = new_provider
         if new_provider is None:
