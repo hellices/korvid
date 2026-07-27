@@ -731,3 +731,17 @@ async def test_ctx_switch_fallbacks_follow_session_namespace(
                 await task
     assert "ns-b" in result_c.fallback_namespaces
     assert "startup-ns" not in result_c.fallback_namespaces
+
+
+def test_protected_context_name_glob_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_protected_context_name` resolves the effective context (kubeconfig
+    active name for None) and returns it only when a glob matches (issue #83)."""
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+
+    monkeypatch.setattr(main_mod, "resolve_context_name", lambda ctx: ctx or "prod-active")
+    config = KorvidConfig(protected_contexts=("prod-*",))
+    assert main_mod._protected_context_name(config, "prod-eu") == "prod-eu"
+    assert main_mod._protected_context_name(config, None) == "prod-active"
+    assert main_mod._protected_context_name(config, "dev") is None
+    assert main_mod._protected_context_name(KorvidConfig(), "prod-eu") is None

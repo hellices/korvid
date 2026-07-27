@@ -38,6 +38,11 @@ ConfirmScreen .confirm-title, ReplicasPrompt .confirm-title, ImagePrompt .confir
 ConfirmScreen .confirm-hint, ReplicasPrompt .confirm-hint, ImagePrompt .confirm-hint {
     color: $text-muted;
 }
+ConfirmScreen .confirm-protected {
+    color: $text;
+    background: $error;
+    text-style: bold;
+}
 """
 
 
@@ -63,7 +68,14 @@ class FreshKeysInput(Input):
 
 class ConfirmScreen(ModalScreen[bool]):
     """y/n approval dialog; with ``require_name`` the exact resource name
-    must be typed (cluster-scoped or otherwise high-blast-radius deletes)."""
+    must be typed (cluster-scoped or otherwise high-blast-radius deletes).
+
+    With ``protected_context`` (issue #83) the dialog adds a red protected
+    banner and the y/n shortcut is replaced by typing the context name —
+    the extra layer every write in a protected context must pass. When
+    ``require_name`` is also set, that resource-name gate (at least as
+    strong) stays the typed requirement.
+    """
 
     CSS = _DIALOG_CSS
 
@@ -79,6 +91,7 @@ class ConfirmScreen(ModalScreen[bool]):
         require_name: str | None = None,
         preview: list[str] | None = None,
         preview_title: str = "server dry-run preview:",
+        protected_context: str | None = None,
     ) -> None:
         super().__init__()
         self._title = title
@@ -86,6 +99,10 @@ class ConfirmScreen(ModalScreen[bool]):
         self._require_name = require_name
         self._preview = preview
         self._preview_title = preview_title
+        self._protected_context = protected_context
+        # The value the confirm input must match: the resource name when the
+        # caller demanded one, otherwise the protected context name.
+        self._typed_gate = require_name or protected_context
         # Same clock as event timestamps (Message.time): key events created
         # before this moment were buffered while the caller's pre-checks ran
         # and must never confirm an operation the user had not yet seen.
@@ -100,22 +117,33 @@ class ConfirmScreen(ModalScreen[bool]):
         # every requested change reviewable before approval.
         with VerticalScroll():
             yield Static(self._title, classes="confirm-title", markup=False)
+            if self._protected_context is not None:
+                yield Static(
+                    f" ⛨ PROTECTED CONTEXT: {self._protected_context} ",
+                    classes="confirm-protected",
+                    markup=False,
+                )
             yield Static(self._operation, classes="confirm-operation", markup=False)
             if self._preview is not None:
                 yield Static(self._preview_text(), classes="confirm-preview")
-            if self._require_name is None:
+            if self._typed_gate is None:
                 yield Static("y = confirm    n/Esc = cancel", classes="confirm-hint")
             else:
+                what = (
+                    "the resource name"
+                    if self._require_name is not None
+                    else "the protected context name"
+                )
                 yield Static(
-                    f"Type {self._require_name!r} and press Enter to confirm (Esc cancels)",
+                    f"Type {what} {self._typed_gate!r} and press Enter to confirm (Esc cancels)",
                     classes="confirm-hint",
                 )
                 yield FreshKeysInput(
-                    self._created_time, placeholder=self._require_name, id="confirm-name"
+                    self._created_time, placeholder=self._typed_gate, id="confirm-name"
                 )
 
     def on_mount(self) -> None:
-        if self._require_name is not None:
+        if self._typed_gate is not None:
             self.query_one(Input).focus()
 
     def _preview_text(self) -> Text:
@@ -135,7 +163,7 @@ class ConfirmScreen(ModalScreen[bool]):
         return text
 
     def on_key(self, event: events.Key) -> None:
-        if self._require_name is None:
+        if self._typed_gate is None:
             if event.key == "y":
                 event.stop()
                 if event.time < self._created_time:
@@ -148,11 +176,11 @@ class ConfirmScreen(ModalScreen[bool]):
     @on(Input.Submitted, "#confirm-name")
     def _check_name(self, event: Input.Submitted) -> None:
         event.stop()
-        if event.value == self._require_name:
+        if event.value == self._typed_gate:
             self.dismiss(True)
         else:
             self.notify(
-                f"Name does not match {self._require_name!r}",
+                f"Name does not match {self._typed_gate!r}",
                 severity="warning",
             )
 

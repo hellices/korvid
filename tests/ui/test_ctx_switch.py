@@ -1090,3 +1090,49 @@ async def test_logs_refused_during_switch_via_ctx_flow() -> None:
             lambda: app.config.kube_context == "ctx-b",
             label="switch completed",
         )
+
+
+async def test_switch_adopts_protection_and_clears_on_switch_back() -> None:
+    """Switching into a protected context turns the marker on and warns;
+    switching back to an unprotected one clears it (issue #83)."""
+    env = _CtxEnv(
+        result=ContextSwitchResult(
+            pod_resize_supported=False,
+            provider_hint=None,
+            fallback_namespaces=(),
+            context_namespace="ns-b",
+            protected_context="ctx-b",
+        )
+    )
+    app = env.app
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        assert app._protected_context is None
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(
+            pilot,
+            lambda: app._protected_context == "ctx-b",
+            label="protection adopted",
+        )
+        status = app.query_one(StatusBar)
+        assert "PROTECTED" in str(status.render())
+        await until(
+            pilot,
+            lambda: any("protected" in n.message.lower() for n in app._notifications),
+            label="protected warning",
+        )
+        # Back to an unprotected context: marker clears.
+        env.result = ContextSwitchResult(
+            pod_resize_supported=False,
+            provider_hint=None,
+            fallback_namespaces=(),
+            context_namespace=None,
+            protected_context=None,
+        )
+        app.post_message(SwitchContextCommand("ctx-a"))
+        await until(
+            pilot,
+            lambda: app._protected_context is None,
+            label="protection cleared",
+        )
+        assert "PROTECTED" not in str(app.query_one(StatusBar).render())

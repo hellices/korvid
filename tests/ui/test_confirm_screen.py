@@ -288,3 +288,102 @@ async def test_long_preview_body_is_scrollable() -> None:
         await pilot.pause()
         body = screen.query_one(VerticalScroll)
         assert body.allow_vertical_scroll
+
+
+# ---------------------------------------------------------------------------
+# Protected contexts (issue #83)
+# ---------------------------------------------------------------------------
+
+
+async def test_protected_context_blocks_y_shortcut() -> None:
+    """In a protected context a bare `y` must never confirm a write."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+
+        def _done(v: bool | None) -> None:
+            app.result = v
+
+        await app.push_screen(
+            ConfirmScreen("Delete pod", "delete pods/web-1", protected_context="prod-eu"), _done
+        )
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+        assert app.result == "unset"
+
+
+async def test_protected_context_confirms_on_context_name() -> None:
+    """Typing the protected context name exactly confirms the write."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+
+        def _done(v: bool | None) -> None:
+            app.result = v
+
+        await app.push_screen(
+            ConfirmScreen("Delete pod", "delete pods/web-1", protected_context="prod-eu"), _done
+        )
+        await pilot.pause()
+        for ch in "prod-eu":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result is True
+
+
+async def test_protected_context_rejects_wrong_name() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+
+        def _done(v: bool | None) -> None:
+            app.result = v
+
+        await app.push_screen(
+            ConfirmScreen("Delete pod", "delete pods/web-1", protected_context="prod-eu"), _done
+        )
+        await pilot.pause()
+        for ch in "nope":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result == "unset"
+
+
+async def test_protected_context_shows_banner() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(
+            ConfirmScreen("Delete pod", "delete pods/web-1", protected_context="prod-eu")
+        )
+        await pilot.pause()
+        texts = " ".join(str(s.content) for s in app.screen.query(Static))
+        assert "PROTECTED" in texts
+        assert "prod-eu" in texts
+
+
+async def test_protected_context_keeps_resource_name_gate() -> None:
+    """When require_name is also set, the resource name stays the typed gate
+    (already the strongest layer) and the protected banner is still shown."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+
+        def _done(v: bool | None) -> None:
+            app.result = v
+
+        await app.push_screen(
+            ConfirmScreen(
+                "Delete node",
+                "delete nodes/worker-1",
+                require_name="worker-1",
+                protected_context="prod-eu",
+            ),
+            _done,
+        )
+        await pilot.pause()
+        texts = " ".join(str(s.content) for s in app.screen.query(Static))
+        assert "PROTECTED" in texts
+        for ch in "worker-1":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.result is True
