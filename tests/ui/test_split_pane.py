@@ -524,3 +524,46 @@ async def test_highlight_in_non_focused_pane_does_not_drive_hint() -> None:
         app.query_one("#pane-0", ResourceTable).move_cursor(row=1)
         await pilot.pause()
         assert strip.display is True
+
+
+async def test_focus_change_disarms_pending_chord() -> None:
+    """An armed `ctrl+w` must not survive a focus change (e.g. a mouse
+    click into another widget): the second key would never reach the chord
+    handler, leaving the flag set to swallow the next table keypress."""
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)
+        await pilot.press("ctrl+w")
+        assert app._pane_chord_pending is True
+        app.query_one("#pane-0", ResourceTable).focus()  # simulate a click
+        await pilot.pause()
+        assert app._pane_chord_pending is False
+        await pilot.press("v")  # must not be chord-swallowed into a split
+        await pilot.pause()
+        assert len(app.query(ResourceTable)) == 2
+
+
+async def test_concurrent_closes_do_not_underflow_pane_list() -> None:
+    """Two racing closes both pass the outer guard; the loser must re-check
+    under the nav lock instead of popping an already-single pane list."""
+    import asyncio
+
+    app = make_app([_pod("api-1")])
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)
+        await app._nav_lock.acquire()
+        try:
+            first = asyncio.create_task(app._close_focused_pane())
+            second = asyncio.create_task(app._close_focused_pane())
+            # Yield until both tasks pass the outer guard and block on the lock.
+            for _ in range(10):
+                await asyncio.sleep(0)
+        finally:
+            app._nav_lock.release()
+        await first
+        await second  # without the re-check this raises IndexError
+        await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="single pane")
+        assert len(app._panes) == 1
+        await pilot.pause()

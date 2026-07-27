@@ -3305,6 +3305,8 @@ class KorvidApp(App[None]):
         if len(self._panes) < 2:
             return
         async with self._nav_lock:
+            if len(self._panes) < 2:
+                return  # lost the race to another close
             closing = self._panes.pop(self._focused_pane)
             remaining = self._panes[0]
             self._focused_pane = 0
@@ -3326,7 +3328,11 @@ class KorvidApp(App[None]):
         self._refresh_status()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
-        """Clicking a pane focuses it - command routing must follow."""
+        """Clicking a pane focuses it - command routing must follow. Any
+        focus change also disarms a pending `ctrl+w` chord: the second key
+        would go to the newly focused widget, leaving the flag set to
+        swallow a later table keypress."""
+        self._pane_chord_pending = False
         widget = event.widget
         if not isinstance(widget, ResourceTable):
             return
