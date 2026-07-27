@@ -31,15 +31,17 @@ from korvid.agent.tools import (
 )
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import DEFAULT_CONFIG_PATH, KorvidConfig, load_config, save_agent_config
+from korvid.core.portforward import ForwardRegistry
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
-from korvid.k8s.client import KubeClient, resolve_context_name
+from korvid.k8s.client import KubeClient, resolve_context_name, resolve_context_namespace
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.providers.configurator import ProviderConfigurator
+from korvid.providers.ollama import OllamaOptions
 from korvid.providers.registry import create_provider
 from korvid.providers.token_store import TokenStore
 from korvid.ui.app import AppUIBridge, EventsFetcher, KorvidApp
@@ -261,6 +263,13 @@ def _build_agent_wiring(
             # model is never told about a tool the cluster cannot honor.
             agent_tools = agent_tools + RESIZE_TOOLS
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
+    ollama_options = OllamaOptions(
+        num_ctx=config.agent_ollama_num_ctx,
+        temperature=config.agent_ollama_temperature,
+        seed=config.agent_ollama_seed,
+        think=config.agent_ollama_think,
+        keep_alive=config.agent_ollama_keep_alive,
+    )
     provider = create_provider(
         enabled=config.agent_enabled,
         provider=config.agent_provider,
@@ -269,6 +278,7 @@ def _build_agent_wiring(
         model=config.agent_model,
         api_key_env=config.agent_api_key_env,
         oauth_token=oauth,
+        ollama=ollama_options,
     )
     agent_runtime = (
         AgentRuntime(
@@ -310,6 +320,10 @@ def _build_agent_wiring(
             model=settings.model,
             api_key_env=settings.api_key_env,
             oauth_token=token_store.load("github-oauth"),
+            # ollama_options is captured from startup config: the :ai wizard
+            # does not edit agent.ollama.*, so the values cannot go stale. If
+            # config reload is ever added, re-derive the options here.
+            ollama=ollama_options,
         )
         provider_box[0] = new_provider
         if new_provider is None:
@@ -361,6 +375,18 @@ async def _teardown(
     if leftover is not None:
         with contextlib.suppress(BaseException):
             await leftover
+
+
+def _fallback_namespaces(config: KorvidConfig) -> tuple[str, ...]:
+    """Namespaces an RBAC-limited user can fall back to (issue #49), deduped
+    in priority order: explicit `namespaces:` config, the kubeconfig
+    context's namespace, korvid's default namespace."""
+    candidates = [
+        *config.namespaces,
+        resolve_context_namespace(config.kube_context),
+        config.namespace,
+    ]
+    return tuple(dict.fromkeys(ns for ns in candidates if ns))
 
 
 def _make_watch_source(
@@ -442,7 +468,24 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
 
     get_events = KubeEventsFetcher()
 
-    watch_manager = WatchManager(store, source)
+    # RBAC-limited fallback namespaces (issue #49): the config list plus the
+    # kubeconfig context's namespace and korvid's default namespace, deduped
+    # in priority order. Feeds the picker and the per-namespace watch fanout.
+    fallback_namespaces = _fallback_namespaces(config)
+
+    def _is_namespaced(kind: str) -> bool:
+        # Cluster-scoped kinds must not fan out per namespace (the source
+        # ignores the namespace for them); unknown kinds fail the watch with
+        # a ValueError anyway, so answer False conservatively.
+        meta = aliases.get(kind)
+        return meta.namespaced if meta is not None else False
+
+    watch_manager = WatchManager(
+        store,
+        source,
+        fallback_namespaces=fallback_namespaces,
+        is_namespaced=_is_namespaced,
+    )
 
     # One bounded discovery round trip decides both the R keybinding and
     # whether the agent is offered the resize tool (issue #27).
@@ -467,6 +510,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         store=store,
         watch_manager=watch_manager,
         list_namespaces=kube.list_namespaces,
+        fallback_namespaces=fallback_namespaces,
         aliases=aliases,
         get_manifest=get_manifest,
         get_events=get_events,
@@ -481,6 +525,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         mcp=mcp_controller,
         metrics=MetricsPoller(kube.list_pod_metrics),
         pod_resize_supported=pod_resize_supported,
+        forwards=ForwardRegistry(context=config.kube_context),
         provider_hint=provider_info.display if provider_info.known else None,
         open_pod_exec=kube.open_pod_exec,
     )

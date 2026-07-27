@@ -21,8 +21,9 @@ _BUILTIN_COMMAND_HELP: tuple[tuple[str, str], ...] = (
     (":ai", "Open agent setup (also :agent)"),
     (":model [name]", "Show or switch the agent model"),
     (":mcp [on|off]", "Show MCP tool state, or toggle it live"),
+    (":pf", "List port-forwards (Ctrl-D stop, r re-attach)"),
 )
-_RESERVED_BUILTINS = {"ai", "agent", "model", "mcp"}
+_RESERVED_BUILTINS = {"ai", "agent", "model", "mcp", "pf"}
 
 
 def command_help() -> list[tuple[str, str]]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from os import chmod as os_chmod
 from os import fdopen as os_fdopen
 from os import fsync as os_fsync
@@ -21,12 +22,22 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "korvid" / "config.yaml"
 class KorvidConfig:
     kube_context: str | None = None
     namespace: str | None = None
+    #: Fallback namespaces for RBAC-limited users (issue #49): used by the
+    #: namespace picker and the per-namespace watch fanout when cluster-wide
+    #: LIST/WATCH is forbidden.
+    namespaces: tuple[str, ...] = ()
     agent_enabled: bool = False
     agent_provider: str | None = None
     agent_base_url: str | None = None
     agent_model: str | None = None
     agent_api_key_env: str | None = None
     agent_auth_method: str | None = None
+    #: Native Ollama tuning (issue #72): `agent.ollama.*` in config.yaml.
+    agent_ollama_num_ctx: int = 16384
+    agent_ollama_temperature: float = 0.0
+    agent_ollama_seed: int | None = None
+    agent_ollama_think: bool = False
+    agent_ollama_keep_alive: str | int | None = None
     keybindings: dict[str, str] = field(default_factory=dict)
     log_buffer_lines: int = 5000
     log_wrap: bool = False
@@ -69,6 +80,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
             auth_method = "device-login"
         else:
             auth_method = "api_key" if api_key_env else "none"
+    ollama_value = agent_raw.get("ollama")
+    ollama_raw: dict[str, Any] = ollama_value if isinstance(ollama_value, dict) else {}
     mcp_value = raw.get("mcp")
     mcp_raw: dict[str, Any] = mcp_value if isinstance(mcp_value, dict) else {}
     logs_value = raw.get("logs")
@@ -95,12 +108,18 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
+        namespaces=_parse_namespaces(raw.get("namespaces")),
         agent_enabled=enabled,
         agent_provider=provider,
         agent_base_url=_opt_str(agent_raw.get("base_url")),
         agent_model=_opt_str(agent_raw.get("model")),
         agent_api_key_env=api_key_env,
         agent_auth_method=auth_method,
+        agent_ollama_num_ctx=_parse_num_ctx(ollama_raw.get("num_ctx")),
+        agent_ollama_temperature=_parse_temperature(ollama_raw.get("temperature")),
+        agent_ollama_seed=_parse_seed(ollama_raw.get("seed")),
+        agent_ollama_think=ollama_raw.get("think") is True,
+        agent_ollama_keep_alive=_parse_keep_alive(ollama_raw.get("keep_alive")),
         keybindings=dict(raw.get("keybindings") or {}),
         log_buffer_lines=_parse_buffer_lines(raw.get("log_buffer_lines")),
         log_wrap=logs_raw.get("wrap") is True,
@@ -205,6 +224,66 @@ def _parse_buffer_lines(value: Any) -> int:
     return lines if lines > 0 else 5000
 
 
+def _parse_num_ctx(value: Any) -> int:
+    """Coerce `agent.ollama.num_ctx` to a positive int; fall back to 16384."""
+    parsed = _parse_positive_int(value)
+    return parsed if parsed is not None else 16384
+
+
+def _parse_positive_int(value: Any) -> int | None:
+    """Coerce `agent.ollama.num_ctx` to a positive int, or None."""
+    if isinstance(value, bool):  # YAML `true` would silently become 1
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _parse_seed(value: Any) -> int | None:
+    """Coerce `agent.ollama.seed` to a non-negative int, or None.
+
+    Unlike num_ctx, `seed: 0` is a valid (reproducible) sampling seed and
+    must not fall back to the server's random default.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _parse_temperature(value: Any) -> float:
+    """Coerce `agent.ollama.temperature` to a non-negative float; fall back to 0.0."""
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    # Non-finite values (.inf/.nan) would serialize as invalid JSON downstream.
+    return parsed if parsed >= 0 and isfinite(parsed) else 0.0
+
+
+def _parse_keep_alive(value: Any) -> str | int | None:
+    """`agent.ollama.keep_alive` passthrough: duration string ("10m") or integer seconds."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) or (isinstance(value, str) and value):
+        return value
+    return None
+
+
 def _opt_str(value: Any) -> str | None:
     """Coerce value to string or None if empty."""
     return value if isinstance(value, str) and value else None
+
+
+def _parse_namespaces(value: Any) -> tuple[str, ...]:
+    """`namespaces:` fallback list (issue #49): non-empty strings only."""
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and item)

@@ -90,7 +90,7 @@ async def test_ollama_path_tests_saves_and_dismisses() -> None:
         assert isinstance(app.result, AgentSettings)
         assert app.result.provider == "ollama"
         assert app.result.auth_method == "none"
-        assert app.result.base_url == "http://localhost:11434/v1"
+        assert app.result.base_url == "http://localhost:11434"
         assert app.result.model == "llama3"
         assert _kinds(cfg) == ["list_models", "test", "save"]
 

@@ -30,6 +30,7 @@ PDB-aware impact plan; `--readonly` disables them all.
 | `d` | table | Describe selected resource (manifest + events) |
 | `s` | pods table | Shell into selected pod (`kubectl exec`; offers `kubectl debug` fallback for distroless images) |
 | `s` | nodes table | Node shell (`kubectl debug node/`; approval dialog — privileged pod with the host filesystem at `/host`, deleted on exit) |
+| `Shift-F` | pods / services table | Port-forward the selected target (local port prompt; prefilled from declared ports) |
 | `l` | pods table | Open / close log pane for selected pod |
 | `L` | pods table | Merge logs of all currently filtered pods (up to 8) |
 | `f` | log pane | Toggle JSON-formatted / raw display |
@@ -72,7 +73,7 @@ Action names: `quit`, `help`, `open_command`, `open_filter`,
 `log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
 `sort_by_mem`, `toggle_agent`, `delete_resource`, `rollout_restart`,
 `resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
-`cordon_node`, `uncordon_node`, `drain_node`, `transfer`.
+`cordon_node`, `uncordon_node`, `drain_node`, `port_forward`, `transfer`.
 
 Unknown actions, duplicate keys, and keys that shadow another action's
 default produce a startup warning and are skipped — never a crash. The
@@ -232,13 +233,64 @@ node_shell:
   namespace: node-debug
 ```
 
+## RBAC-limited clusters
+
+korvid degrades gracefully when your role only grants specific namespaces
+(no cluster-wide `list namespaces` or cluster-scope watches):
+
+- **Namespace picker** (`:ns`): when listing namespaces is forbidden, the
+  picker falls back to the `namespaces:` list from config and your
+  kubeconfig context's namespace instead of an error dead-end. `:ns <name>`
+  free-text entry always works.
+- **All-namespaces view** (`0`): if the cluster-wide list is forbidden and
+  no fallback namespaces are configured, korvid shows an inline notice and
+  stays in the current namespace rather than looping error cards.
+- **Watches**: when the cluster-scope watch answers 403 and fallback
+  namespaces are configured, korvid fans out into one watch per namespace —
+  the all-namespaces view then shows everything your RBAC grants allow.
+- **API discovery**: individual API groups that fail discovery are hidden;
+  they never fail startup.
+
+Configure your granted namespaces in `~/.config/korvid/config.yaml`:
+
+```yaml
+namespaces:
+  - team-a
+  - team-b
+```
+
+## Port-forwarding
+
+`Shift-F` on a pod or service opens a port-forward dialog with the remote
+port prefilled from the target's declared TCP ports — `kubectl port-forward`
+is TCP-only, so UDP/SCTP declarations are never offered and a service that
+declares no TCP ports is rejected up front.  For pods both fields stay
+fully editable — pod port declarations are informational and any remote port
+is forwardable.  For services kubectl only accepts remote ports declared in
+`Service.spec.ports`, so the dialog constrains the remote port to the
+declared TCP ports.
+Forwards run as `kubectl port-forward`
+subprocesses bound to `127.0.0.1`, pinned to the kubeconfig context korvid
+connected with, and are tracked for the session: `:pf` lists them with live
+status, `Ctrl-D` stops the highlighted forward, and `r` re-attaches a broken
+one in place.
+
+Liveness is first-class: when a target pod dies the forward flips to
+`broken` — with a toast even while `:pf` is closed — instead of failing
+silently the way a hand-run `kubectl port-forward` does.  Every forward is
+torn down when korvid exits, and start/stop are audit-logged (no approval
+dialog: a forward reads from the cluster, it never mutates it).
+
 ## AI agent
 
 Press `Ctrl-A` to open the agent panel — a chat sidebar that answers questions
 about the cluster you are looking at.  The agent sees your current screen
 context (view, namespace, selected resource, active filter) and inspects the
 cluster through read-only tools: fetching manifests, logs, events, and resource
-listings.  It can also drive the TUI itself — navigate views, apply filters,
+listings, plus a compound `diagnose_pod` tool that gathers a broken pod's
+container states, owner chain, warning events, and targeted log excerpts in a
+single deterministic call — projected evidence instead of raw YAML dumps, which
+is where small local models otherwise fail.  It can also drive the TUI itself — navigate views, apply filters,
 drill down, and open the log pane or describe screen — so "show me the crashing
 pod's logs" lands you in the actual log viewer instead of a text dump.
 Tool results are capped at 8,000 characters and `Secret` data is masked before
@@ -340,13 +392,34 @@ agent:
   api_key_env: OPENAI_API_KEY
   auth: {method: api_key}
 
-# Local Ollama (no auth)
+# Local Ollama (native /api/chat — no auth)
 agent:
   provider: ollama
-  base_url: http://localhost:11434/v1
+  base_url: http://localhost:11434
   model: llama3
   auth: {method: none}
 ```
+
+`provider: ollama` talks to Ollama's native `/api/chat` API instead of the
+OpenAI-compatibility shim, which unlocks per-request tuning the shim drops
+(a shim-era `base_url` ending in `/v1` keeps working — it is normalized
+automatically).  All knobs are optional:
+
+```yaml
+agent:
+  provider: ollama
+  base_url: http://localhost:11434
+  model: qwen3:8b
+  ollama:
+    num_ctx: 16384    # context window; Ollama's own default can be as low as 4k
+    temperature: 0.0  # near-greedy decoding — more reliable tool dispatch
+    seed: 42          # reproducible sampling (omitted when unset)
+    think: false      # reasoning tokens off; enable for R1-style models
+    keep_alive: 10m   # keep the model warm between turns ("10m" or seconds)
+```
+
+To keep using the OpenAI-compatibility shim instead, set
+`provider: openai-compat` with `base_url: http://localhost:11434/v1`.
 
 > **Warning:** GitHub Copilot support uses an unofficial internal API that
 > may change or break without notice.  It requires an active GitHub Copilot

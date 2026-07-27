@@ -75,13 +75,16 @@ src/korvid/
 - CI must be green: ruff, mypy, pytest (3.11/3.12/3.13), coverage ≥ 80%, tach, deptry.
 - `main` rejects direct pushes (branch ruleset) — always work on a branch and merge via PR.
 
-## Review Loop (validated over 50+ rounds)
+## Review Loop
 
 For each review round on a PR:
 
-1. Read every comment, including **suppressed low-confidence comments** hidden in the
-   review body's `<details>` block — fix those too, they are usually right.
-2. Fix with TDD: write the failing test first (RED), then the fix (GREEN).
+1. Read every comment, including suppressed low-confidence comments hidden in the
+   review body's `<details>` block. Classify each finding by confidence and impact.
+   Suppressed low-confidence findings are advisory, not automatically mandatory.
+2. Always address credible correctness, security, data-loss, architecture-invariant,
+   or required-check failures. Fix code findings with TDD: write the failing test
+   first (RED), then the fix (GREEN).
 3. Run the full gate (`make check`) before committing. If the pre-commit
    ruff-format hook rewrites files on the first attempt, `git add -A` and commit
    again — never `--amend`, never `--no-verify`.
@@ -93,9 +96,16 @@ For each review round on a PR:
    `gh api -X POST repos/OWNER/REPO/pulls/N/requested_reviewers -f 'reviewers[]=copilot-pull-request-reviewer[bot]'`
 7. Poll with GraphQL (`reviewRequests`, `reviews`, `reviewThreads(isResolved:false)`);
    reviews typically land within 5–10 minutes and may need two waits.
-8. Repeat until a round produces zero new comments. Before merging, verify
-   **every** required check: `gh pr view N --json statusCheckRollup` must be all
-   SUCCESS. Then `gh pr merge N --squash`.
+8. Track consecutive rounds that contain only suppressed low-confidence findings and
+   no unresolved blocking findings. After **2 consecutive low-confidence-only
+   rounds**, stop making speculative changes and do not request another Copilot
+   review. Any new credible blocking finding resets this counter.
+9. At the limit, resolve or document the remaining advisory findings and proceed
+   toward merge. Never use the round limit to ignore a credible blocking finding or
+   bypass a required check.
+10. Before merging, verify **every** required check:
+    `gh pr view N --json statusCheckRollup` must be all SUCCESS. Then
+    `gh pr merge N --squash`.
 
 ## Testing Gotchas
 
