@@ -78,12 +78,14 @@ class ConfirmScreen(ModalScreen[bool]):
         *,
         require_name: str | None = None,
         preview: list[str] | None = None,
+        preview_title: str = "server dry-run preview:",
     ) -> None:
         super().__init__()
         self._title = title
         self._operation = operation
         self._require_name = require_name
         self._preview = preview
+        self._preview_title = preview_title
         # Same clock as event timestamps (Message.time): key events created
         # before this moment were buffered while the caller's pre-checks ran
         # and must never confirm an operation the user had not yet seen.
@@ -117,11 +119,12 @@ class ConfirmScreen(ModalScreen[bool]):
             self.query_one(Input).focus()
 
     def _preview_text(self) -> Text:
-        """Server dry-run outcome (issue #19), one styled line per change:
-        additions green, removals red, modifications yellow. An empty diff is
-        rendered explicitly - 'the server reports no changes' is information,
-        distinct from 'no preview was available' (no widget at all)."""
-        text = Text("server dry-run preview:", style="bold")
+        """Impact preview (server dry-run diff, issue #19, or a drain plan,
+        issue #40), one styled line per change: additions green, removals
+        red, modifications yellow. An empty diff is rendered explicitly -
+        'the server reports no changes' is information, distinct from 'no
+        preview was available' (no widget at all)."""
+        text = Text(self._preview_title, style="bold")
         if not self._preview:
             text.append("\n  no changes reported", style="dim")
             return text
