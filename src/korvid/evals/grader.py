@@ -7,13 +7,14 @@ contiguous run of answer tokens. "OOM-killed", "OOMKilled", "oomkilled"
 and "oom killed" therefore all count as the same mention, while
 "unhealthy" never matches "healthy".
 
-Polarity differs by assertion kind. `must_mention` requires a *positive*
-claim: a match whose preceding tokens contain a negator ("the pod is not
-healthy") does not satisfy the group — otherwise every healthy negative
-control would credit its own over-diagnosis. `must_not_mention` stays
-mention-based: a negated mention ("this is not an image pull problem")
-still counts, so those keywords must be ones a correct answer would
-never bring up.
+Polarity applies to both assertion kinds. `must_mention` requires a
+*positive* claim: a match whose preceding tokens contain a negator ("the
+pod is not healthy") does not satisfy the group — otherwise every healthy
+negative control would credit its own over-diagnosis. `must_not_mention`
+symmetrically fails only *positive* claims of the misdiagnosis: ruling
+out the competing cause ("this is not an image pull problem") is part of
+a correct answer, while hedging both causes ("either OOM or an image
+pull failure") is not a diagnosis.
 
 Evidence assertions match raw substrings of full tool results — tool
 output is machine-formatted, so exactness is the point there — and the
@@ -52,7 +53,8 @@ class ToolRecord:
 class GradeResult:
     """Outcome of grading one run's final answer + tool trace."""
 
-    #: Every must_mention group hit and no must_not_mention keyword present.
+    #: Every must_mention group claimed positively and no must_not_mention
+    #: keyword claimed positively.
     diagnosis_success: bool
     #: Every expected_evidence group had at least one alternative fetched
     #: with the expected arguments.
@@ -65,12 +67,6 @@ class GradeResult:
 def _tokens(text: str) -> list[str]:
     split = _CAMEL_BOUNDARY.sub(" ", text)
     return [token for token in _NON_ALNUM.split(split.lower()) if token]
-
-
-def _mentions(keyword: str, answer_tokens: list[str]) -> bool:
-    """True when the keyword's concatenated tokens equal the concatenation
-    of some contiguous run of answer tokens (exact-boundary matching)."""
-    return bool(_match_starts(keyword, answer_tokens))
 
 
 #: Tokens that flip the polarity of a nearby claim. Contraction stems
@@ -170,9 +166,9 @@ def grade(scenario: Scenario, answer: str, records: list[ToolRecord]) -> GradeRe
     forbidden_mentions = tuple(
         # One violation per group: alternates are spellings of the same
         # claim, and token-run matching makes several of them hit at once.
-        next(alt for alt in group if _mentions(alt, answer_tokens))
+        next(alt for alt in group if _mentions_positively(alt, answer_tokens))
         for group in scenario.must_not_mention
-        if any(_mentions(alt, answer_tokens) for alt in group)
+        if any(_mentions_positively(alt, answer_tokens) for alt in group)
     )
     missing_evidence = tuple(
         group

@@ -226,10 +226,33 @@ def test_grade_required_mention_keywords_may_start_with_a_negator() -> None:
     assert result.diagnosis_success
 
 
-def test_grade_forbidden_mentions_still_count_when_negated() -> None:
-    """must_not_mention stays mention-based: bringing up the misdiagnosis
-    at all fails the run, even in negation."""
+def test_grade_forbidden_mentions_allow_explicit_rule_outs() -> None:
+    """Ruling out the competing cause is part of a correct diagnosis:
+    a *negated* mention of a forbidden keyword must not fail the run."""
     answer = "OOMKilled, exit 137 — this is not an image pull problem."
+    result = grade(_scenario(), answer, [_record()])
+    assert result.diagnosis_success
+    assert result.forbidden_mentions == ()
+
+
+def test_grade_forbidden_mentions_fail_on_hedged_double_diagnoses() -> None:
+    """An answer that positively claims the competing cause alongside the
+    right one is a hedge, not a diagnosis."""
+    answer = "Either OOMKilled (exit 137) or an image pull failure."
     result = grade(_scenario(), answer, [_record()])
     assert not result.diagnosis_success
     assert result.forbidden_mentions == ("image pull",)
+
+
+def test_grade_forbidden_keywords_may_contain_their_own_negator() -> None:
+    """Negative-control forbidden keywords like 'no endpoints' negate
+    themselves; the window only scans tokens *before* the match."""
+    scenario = _scenario(
+        root_cause="none",
+        must_mention=(("healthy",),),
+        must_not_mention=(("no endpoints",),),
+        expected_evidence=(),
+    )
+    result = grade(scenario, "The service looks healthy but has no endpoints.", [])
+    assert not result.diagnosis_success
+    assert result.forbidden_mentions == ("no endpoints",)

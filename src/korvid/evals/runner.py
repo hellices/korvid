@@ -231,12 +231,15 @@ async def _drive_turn(
     # error) they include tokens paid for before a mid-turn failure.
     in_tokens, out_tokens = runtime.total_tokens
     # Correct-tool + correct-argument rate (issue #69): a call counts as
-    # correct only when it is schema-valid AND its arguments resolved in
-    # the cluster (the executor returns 'ERROR: ...' otherwise).
+    # correct only when it is an offered *read* tool (a write call is a
+    # policy failure regardless of outcome), is schema-valid, AND its
+    # arguments resolved in the cluster (the executor returns 'ERROR: ...'
+    # otherwise).
     correct_calls = sum(
         1
         for record in executor.records
-        if not record.result.startswith("ERROR:")
+        if record.name in _READ_REQUIRED
+        and not record.result.startswith("ERROR:")
         and not _is_malformed(record.name, json.dumps(record.arguments))
     )
     return RunMetrics(

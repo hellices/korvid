@@ -7,6 +7,11 @@ grading:
     - [imagepullbackoff, image pull, pull the image, pulling the image]
     - [unauthorized, authentication failed, authentication failure, invalid credentials,
        missing pull secret, wrong pull secret, bad credentials, "401", access denied]
+  must_not_mention:
+    # Reciprocal to image-pull-typo: a hedged "either bad credentials or a
+    # wrong tag" answer must fail. Positive claims only — explicitly ruling
+    # out a typo still passes.
+    - [manifest unknown, wrong tag, tag typo, typo, no such tag]
   expected_evidence:
     - tool: diagnose_pod
       args: {pod: api-1, namespace: shop}

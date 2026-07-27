@@ -49,10 +49,10 @@ class Scenario:
     #: Alternative-groups: the answer must mention at least one keyword
     #: from every group (matched on normalized text).
     must_mention: tuple[tuple[str, ...], ...]
-    #: Alternative-groups of misdiagnosis keywords: **any mention** from any
-    #: group fails the run, even a negated one ("this is not an image pull
-    #: problem"). Grading is deterministic keyword matching, not assertion
-    #: parsing, so pick keywords a correct answer would never bring up.
+    #: Alternative-groups of misdiagnosis keywords: a **positive claim** of
+    #: any keyword fails the run; a negated mention ("this is not an image
+    #: pull problem") does not — ruling out the competing cause is part of
+    #: a correct diagnosis, hedging both causes is not.
     must_not_mention: tuple[tuple[str, ...], ...] = ()
     #: Alternative-groups of ground-truth locations: each group is satisfied
     #: by fetching **any one** of its alternatives — detects "answered
