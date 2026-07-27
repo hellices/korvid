@@ -22,6 +22,10 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "korvid" / "config.yaml"
 class KorvidConfig:
     kube_context: str | None = None
     namespace: str | None = None
+    #: Fallback namespaces for RBAC-limited users (issue #49): used by the
+    #: namespace picker and the per-namespace watch fanout when cluster-wide
+    #: LIST/WATCH is forbidden.
+    namespaces: tuple[str, ...] = ()
     agent_enabled: bool = False
     agent_provider: str | None = None
     agent_base_url: str | None = None
@@ -97,6 +101,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
+        namespaces=_parse_namespaces(raw.get("namespaces")),
         agent_enabled=enabled,
         agent_provider=provider,
         agent_base_url=_opt_str(agent_raw.get("base_url")),
@@ -266,3 +271,10 @@ def _parse_keep_alive(value: Any) -> str | int | None:
 def _opt_str(value: Any) -> str | None:
     """Coerce value to string or None if empty."""
     return value if isinstance(value, str) and value else None
+
+
+def _parse_namespaces(value: Any) -> tuple[str, ...]:
+    """`namespaces:` fallback list (issue #49): non-empty strings only."""
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and item)

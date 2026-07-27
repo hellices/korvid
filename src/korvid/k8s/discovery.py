@@ -16,6 +16,10 @@ class ResourceMeta:
     #: korvid-invented view kinds (e.g. the helm browser) that have no API
     #: endpoint: navigation may use them, API-path consumers must not.
     synthetic: bool = False
+    #: The real (plural, group) a synthetic view LISTs/WATCHes under the hood
+    #: (e.g. the helm browser reads Secrets). Permission probes target this;
+    #: None means the view has no backing API resource to probe.
+    backing: tuple[str, str] | None = None
 
     @property
     def api_base(self) -> str:

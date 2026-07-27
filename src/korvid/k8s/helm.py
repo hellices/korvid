@@ -49,9 +49,18 @@ def _display(value: Any) -> str:
 #: client watches Secrets and adapts - but navigation, aliasing, and
 #: drill-down all key off ResourceMeta like any real kind.
 HELM_RELEASES_META = ResourceMeta(
-    "HelmRelease", "helmreleases", "", "v1", True, ("helm",), synthetic=True
+    "HelmRelease",
+    "helmreleases",
+    "",
+    "v1",
+    True,
+    ("helm",),
+    synthetic=True,
+    backing=("secrets", ""),
 )
-HELM_REVISIONS_META = ResourceMeta("HelmRevision", "helmrevisions", "", "v1", True, synthetic=True)
+HELM_REVISIONS_META = ResourceMeta(
+    "HelmRevision", "helmrevisions", "", "v1", True, synthetic=True, backing=("secrets", "")
+)
 
 
 def release_uid(namespace: str, name: str) -> str:
