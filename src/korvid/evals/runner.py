@@ -87,8 +87,8 @@ class RunMetrics:
     tool_calls: int
     #: Read calls that were schema-valid AND resolved against the cluster
     #: without an ERROR result. Measures execution quality, not diagnostic
-    #: relevance — issue #69's correct-tool + correct-argument requirement
-    #: against ground truth is graded per run by ``expected_evidence``.
+    #: relevance — issue #69's fetched-the-ground-truth requirement is
+    #: graded per run by ``expected_evidence``.
     resolvable_tool_calls: int
     #: Bad-JSON arguments or unknown tool names.
     malformed_tool_calls: int

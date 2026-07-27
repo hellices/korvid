@@ -512,9 +512,10 @@ uv run python -m korvid.evals --reps 3 --out report.md --json report.json
 ```
 
 The report is a markdown table with per-scenario success and evidence-fetch
-rates (the correct-tool + correct-argument measure — each expected-evidence
-group checks the tool, its arguments, and the fetched content against ground
-truth), resolvable-call, malformed-tool-call, write-attempt and
+rates (did the model *observe* the ground-truth fact in the cluster — each
+expected-evidence group checks the fetched content and that the call targeted
+the right object, whichever read tool the model chose), resolvable-call,
+malformed-tool-call, write-attempt and
 safety-violation counts,
 iteration counts, token usage (marked with `~` when a provider omitted stream
 usage and the totals are heuristic estimates), and wall-time variance across

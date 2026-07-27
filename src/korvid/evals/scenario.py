@@ -39,10 +39,11 @@ class ContainerLogs:
 
 @dataclass(frozen=True)
 class Evidence:
-    """One ground-truth location: probing `tool` with `args` must yield a
-    result containing `contains`. Grading checks the substring against
-    whatever arguments the model actually used; `args` also lets the CI
-    fixture-integrity test verify the evidence really is reachable."""
+    """One ground-truth location: probing `tool` with `args` yields a result
+    containing `contains` — the CI fixture-integrity test verifies that
+    route is reachable. Grading is path-free: any successful read whose
+    result contains the substring and whose arguments target the same
+    object counts, whichever tool the model chose."""
 
     tool: str
     contains: str

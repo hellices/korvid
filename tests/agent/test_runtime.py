@@ -244,7 +244,9 @@ async def test_provider_error_estimates_streamed_text_without_usage() -> None:
     runtime = AgentRuntime(DiesMidStream([]), EchoExecutor())
     events = await collect(runtime, "q")
     assert any(isinstance(e, AgentError) for e in events)
-    assert runtime.total_tokens == (0, 10)
+    in_tok, out_tok = runtime.total_tokens
+    assert out_tok == 10
+    assert in_tok > 0  # the prompt was really sent — estimated, not zero
     assert runtime.usage_estimated is True
 
 
@@ -414,3 +416,18 @@ async def test_no_cluster_context_leaves_prompt_unchanged() -> None:
     rt = AgentRuntime(p, EchoExecutor())
     await collect(rt, "hello")
     assert "cluster runs on" not in p.calls[0][0]["content"]
+
+
+async def test_missing_usage_estimates_prompt_tokens_too() -> None:
+    """A provider that omits usage must not record zero input tokens: the
+    prompt was really sent, so both directions get the heuristic estimate."""
+    no_usage: list[dict[str, Any]] = [
+        {"type": "text_delta", "text": "a diagnosis long enough to estimate"},
+        {"type": "done"},
+    ]
+    runtime = AgentRuntime(ScriptedProvider([no_usage]), EchoExecutor())
+    _ = await collect(runtime, "a question long enough to estimate")
+    in_tok, out_tok = runtime.total_tokens
+    assert in_tok > 0
+    assert out_tok > 0
+    assert runtime.usage_estimated is True

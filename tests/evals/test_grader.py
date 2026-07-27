@@ -99,10 +99,19 @@ def test_grade_reports_unfetched_evidence() -> None:
     assert result.missing_evidence == ((_EVIDENCE,),)
 
 
-def test_grade_evidence_requires_the_matching_tool_name() -> None:
-    records = [_record(name="get_logs", result="exit=137 seen in logs")]
+def test_grade_evidence_accepts_any_route_to_the_same_fact() -> None:
+    """Provenance is the fetched fact plus its target, not the diagnostic
+    path: observing the ground-truth content through another read tool
+    aimed at the same object counts as evidence."""
+    records = [
+        ToolRecord(
+            name="get_resource",
+            arguments={"kind": "pods", "name": "checkout-1", "namespace": "shop"},
+            result="... exit=137 (OOMKilled) ...",
+        )
+    ]
     result = grade(_scenario(), "OOMKilled, exit 137.", records)
-    assert not result.evidence_fetched
+    assert result.evidence_fetched
 
 
 def test_grade_evidence_matches_raw_substrings_not_normalized_text() -> None:
@@ -265,3 +274,56 @@ def test_grade_evidence_rejects_error_results() -> None:
     result = grade(_scenario(), "OOMKilled, exit 137.", [record])
     assert not result.evidence_fetched
     assert result.missing_evidence == ((_EVIDENCE,),)
+
+
+def test_grade_evidence_rejects_another_kind_with_the_same_name() -> None:
+    """When both the expected and actual call name a kind, they must agree —
+    a deployment `web` is not evidence about a pod `web`."""
+    evidence = Evidence(
+        tool="get_resource",
+        contains="app: web",
+        args={"kind": "pods", "name": "web", "namespace": "shop"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        ToolRecord(
+            name="get_resource",
+            arguments={"kind": "deployments", "name": "web", "namespace": "shop"},
+            result="... app: web ...",
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
+
+
+def test_grade_negation_scope_covers_longer_rule_outs() -> None:
+    """A rule-out whose negator sits more than a fixed window before the
+    keyword ('no evidence of an image pull problem') is still a rule-out."""
+    answer = "OOMKilled, exit 137. There is no evidence of an image pull problem."
+    result = grade(_scenario(), answer, [_record()])
+    assert result.diagnosis_success
+    assert result.forbidden_mentions == ()
+
+
+def test_grade_negation_stops_at_sentence_boundaries() -> None:
+    """A negator in the previous sentence must not negate this one."""
+    scenario = _scenario(
+        must_mention=(("image pull",),),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    result = grade(scenario, "It is not. The image pull failed.", [])
+    assert result.diagnosis_success
+
+
+def test_grade_negation_stops_at_coordinating_conjunctions() -> None:
+    """'not restarting and healthy now' claims healthy positively — the
+    conjunction ends the negator's scope."""
+    scenario = _scenario(
+        root_cause="none",
+        must_mention=(("healthy",),),
+        must_not_mention=(),
+        expected_evidence=(),
+    )
+    result = grade(scenario, "It is not restarting and healthy now.", [])
+    assert result.diagnosis_success

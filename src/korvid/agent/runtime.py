@@ -244,6 +244,12 @@ class AgentRuntime:
         usage_missing = False
         for _ in range(self._max_iterations):
             state = _StreamState()
+            # Estimate of the prompt this iteration sends — used only when
+            # the provider omits usage, so token totals never read as zero
+            # input for a request that was really transmitted.
+            prompt_estimate = (
+                sum(len(str(message.get("content") or "")) for message in self._messages) // 4
+            )
             try:
                 stream = self._provider.complete(self._messages, self._tools)
                 async for event in self._consume_stream(stream, state):
@@ -251,9 +257,12 @@ class AgentRuntime:
             except Exception as exc:
                 # Tokens spent in earlier iterations (and the partial stream)
                 # are real cost — account for them before bailing out. A
-                # stream that died before its usage event still produced
-                # text, so apply the same estimate as the normal path.
-                if not state.has_usage:
+                # stream that produced output before dying definitely had
+                # its prompt processed, so apply the same estimates as the
+                # normal path; one that died before yielding anything gets
+                # no speculative charge.
+                if not state.has_usage and (state.text or state.tool_calls):
+                    state.in_tok = prompt_estimate
                     state.out_tok = len(state.text) // 4
                 self._total_in += turn_in + state.in_tok
                 self._total_out += turn_out + state.out_tok
@@ -263,6 +272,7 @@ class AgentRuntime:
                 return
 
             if not state.has_usage:
+                state.in_tok = prompt_estimate
                 state.out_tok = len(state.text) // 4
             turn_in += state.in_tok
             turn_out += state.out_tok

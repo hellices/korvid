@@ -5,9 +5,10 @@ root_cause: node_memory_pressure_eviction
 grading:
   must_mention:
     - [evicted, eviction]
-    - [memory pressure, memorypressure, low on memory, node was low, out of memory]
+    - [memory pressure, memorypressure, low on memory, node was low]
   must_not_mention:
     - [exit code 137, image pull, crashloopbackoff]
+    - [oomkilled, oom killed]
   expected_evidence:
     - tool: get_resource
       args: {kind: pods, name: worker-3, namespace: jobs}

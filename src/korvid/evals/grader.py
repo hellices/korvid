@@ -8,20 +8,26 @@ and "oom killed" therefore all count as the same mention, while
 "unhealthy" never matches "healthy".
 
 Polarity applies to both assertion kinds. `must_mention` requires a
-*positive* claim: a match whose preceding tokens contain a negator ("the
-pod is not healthy") does not satisfy the group — otherwise every healthy
-negative control would credit its own over-diagnosis. `must_not_mention`
+*positive* claim: a match negated by an earlier negator ("the pod is not
+healthy") does not satisfy the group — otherwise every healthy negative
+control would credit its own over-diagnosis. `must_not_mention`
 symmetrically fails only *positive* claims of the misdiagnosis: ruling
-out the competing cause ("this is not an image pull problem") is part of
-a correct answer, while hedging both causes ("either OOM or an image
-pull failure") is not a diagnosis.
+out the competing cause ("there is no evidence of an image pull
+problem") is part of a correct answer, while hedging both causes
+("either OOM or an image pull failure") is not a diagnosis. A negator's
+scope runs to the end of its clause: it stops at sentence/clause
+punctuation and at coordinating conjunctions, so "not restarting and
+healthy now" still claims "healthy" positively.
 
-Evidence assertions match raw substrings of full tool results — tool
-output is machine-formatted, so exactness is the point there — and the
-call's arguments must cover the expected ones ("kind" values are
-canonicalized through the resource alias table), so fetching the *wrong*
-object whose output happens to contain the same substring is not
-credited.
+Evidence assertions grade provenance, not the diagnostic path: any
+successful read whose full result contains the expected substring — tool
+output is machine-formatted, so exactness is the point there — and whose
+arguments target the same object (every expected argument *value* except
+the route-specific "kind" appears among the call's argument values;
+"kind" values, when both sides name one, are canonicalized through the
+resource alias table and must agree) counts, whichever tool fetched it.
+Fetching the *wrong* object whose output happens to contain the same
+substring is still not credited.
 """
 
 from __future__ import annotations
@@ -99,8 +105,24 @@ _NEGATORS = frozenset(
     }
 )
 
-#: How many tokens before a match to scan for a negator.
-_NEGATION_WINDOW = 3
+#: How a negator's scope ends: clause punctuation splits the text before
+#: tokenization, and these coordinating tokens end the scope within one.
+_CLAUSE_SPLIT = re.compile(r"[.,;:!?\n()]")
+
+_SCOPE_BREAKERS = frozenset(
+    {"and", "but", "however", "yet", "although", "though", "whereas", "while"}
+)
+
+
+def _clause_tokens(text: str) -> tuple[list[str], list[int]]:
+    """Flat token list plus, per token, the id of the clause it came from."""
+    tokens: list[str] = []
+    clause_ids: list[int] = []
+    for clause_id, clause in enumerate(_CLAUSE_SPLIT.split(text)):
+        for token in _tokens(clause):
+            tokens.append(token)
+            clause_ids.append(clause_id)
+    return tokens, clause_ids
 
 
 def _match_starts(keyword: str, answer_tokens: list[str]) -> list[int]:
@@ -120,14 +142,26 @@ def _match_starts(keyword: str, answer_tokens: list[str]) -> list[int]:
     return starts
 
 
-def _mentions_positively(keyword: str, answer_tokens: list[str]) -> bool:
-    """True when some match of the keyword is *not* preceded by a negator
-    within the negation window — "the pod is not healthy" must not satisfy
-    a required "healthy" claim (negative controls catch over-diagnosis)."""
+def _negated(start: int, answer_tokens: list[str], clause_ids: list[int]) -> bool:
+    """True when a negator precedes `start` within the same clause with no
+    scope breaker in between — its negation still covers the match."""
+    for index in range(start - 1, -1, -1):
+        if clause_ids[index] != clause_ids[start]:
+            return False
+        token = answer_tokens[index]
+        if token in _SCOPE_BREAKERS:
+            return False
+        if token in _NEGATORS:
+            return True
+    return False
+
+
+def _mentions_positively(keyword: str, answer_tokens: list[str], clause_ids: list[int]) -> bool:
+    """True when some match of the keyword is *not* under an earlier
+    negator's scope — "the pod is not healthy" must not satisfy a required
+    "healthy" claim (negative controls catch over-diagnosis)."""
     return any(
-        not any(
-            token in _NEGATORS for token in answer_tokens[max(0, start - _NEGATION_WINDOW) : start]
-        )
+        not _negated(start, answer_tokens, clause_ids)
         for start in _match_starts(keyword, answer_tokens)
     )
 
@@ -147,32 +181,42 @@ def _canonical_args(args: dict[str, Any]) -> dict[str, str]:
 
 
 def _satisfies(evidence: Evidence, record: ToolRecord) -> bool:
-    if record.name != evidence.tool or evidence.contains not in record.result:
+    """Provenance is the fetched fact plus its target, not the diagnostic
+    path: any successful call whose result contains the expected content
+    and whose arguments name the same object counts, whichever read tool
+    fetched it (`evidence.tool` documents one known-good route, verified
+    reachable by the fixture-integrity test)."""
+    if evidence.contains not in record.result:
         return False
     # A failed call is not evidence even when its error message echoes the
     # expected substring (e.g. the object name in a not-found message).
     if record.result.startswith("ERROR:"):
         return False
+    expected = _canonical_args(evidence.args)
     actual = _canonical_args(record.arguments)
-    return all(
-        actual.get(key) == expected for key, expected in _canonical_args(evidence.args).items()
-    )
+    # "kind" is route-specific (diagnose_pod has no kind argument), but when
+    # both sides name one they must agree: a deployment `web` is not
+    # evidence about a pod `web`.
+    if "kind" in expected and "kind" in actual and expected["kind"] != actual["kind"]:
+        return False
+    actual_values = set(actual.values())
+    return all(value in actual_values for key, value in expected.items() if key != "kind")
 
 
 def grade(scenario: Scenario, answer: str, records: list[ToolRecord]) -> GradeResult:
     """Grade one run: the final answer text plus the recorded tool trace."""
-    answer_tokens = _tokens(answer)
+    answer_tokens, clause_ids = _clause_tokens(answer)
     missing_mentions = tuple(
         group
         for group in scenario.must_mention
-        if not any(_mentions_positively(alt, answer_tokens) for alt in group)
+        if not any(_mentions_positively(alt, answer_tokens, clause_ids) for alt in group)
     )
     forbidden_mentions = tuple(
         # One violation per group: alternates are spellings of the same
         # claim, and token-run matching makes several of them hit at once.
-        next(alt for alt in group if _mentions_positively(alt, answer_tokens))
+        next(alt for alt in group if _mentions_positively(alt, answer_tokens, clause_ids))
         for group in scenario.must_not_mention
-        if any(_mentions_positively(alt, answer_tokens) for alt in group)
+        if any(_mentions_positively(alt, answer_tokens, clause_ids) for alt in group)
     )
     missing_evidence = tuple(
         group
