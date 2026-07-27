@@ -280,7 +280,10 @@ class ForwardListScreen(ModalScreen[None]):
         if record is None:
             return
         if record.status != "broken":
-            self.notify("Forward is still alive — nothing to re-attach", severity="warning")
+            self.notify(
+                f"Forward is {record.status} — only broken forwards can be re-attached",
+                severity="warning",
+            )
             return
         if self._target_exists is not None and not await self._target_exists(record):
             # A Deployment replaces a dead pod under a new name; a Service

@@ -569,6 +569,20 @@ def test_reattach_releases_the_previous_generations_waiter() -> None:
     procs: list[_FakeProc] = []
     registry = _piped_registry(procs)
     record = registry.start(_spec())
+
+    class _SignallingEvent(threading.Event):
+        """Readiness-event double that reports when wait() was entered."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = threading.Event()
+
+        def wait(self, timeout: float | None = None) -> bool:
+            self.entered.set()
+            return super().wait(timeout)
+
+    gate = _SignallingEvent()
+    record._ready = gate
     results: list[str] = []
 
     def _wait() -> None:
@@ -576,7 +590,7 @@ def test_reattach_releases_the_previous_generations_waiter() -> None:
 
     waiter = threading.Thread(target=_wait)
     waiter.start()
-    time.sleep(0.05)  # let the waiter block on the first generation's event
+    assert gate.entered.wait(5.0), "waiter never blocked on the first generation's event"
     # The child dies without flushing EOF — its reader thread stays blocked,
     # so only the re-attach swap can release the stranded waiter.
     procs[0].exit(1)

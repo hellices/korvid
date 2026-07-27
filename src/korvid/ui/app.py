@@ -450,10 +450,12 @@ class KorvidApp(App[None]):
         #: event order (start before stop) that per-entry workers would not.
         self._forward_audit_queue: deque[dict[str, Any]] = deque()
         self._forward_audit_worker: Worker[None] | None = None
-        #: forward id -> its in-flight readiness confirmation; a stop audit
-        #: for such a record is serialized behind the confirmation so the
-        #: start entry always reaches the log first.
-        self._confirming_forwards: dict[int, Worker[None]] = {}
+        #: forward id -> its in-flight readiness confirmations, oldest first
+        #: (a re-attach may add a new generation while a superseded one is
+        #: still waiting; the last entry is the current generation). A stop
+        #: audit for such a record is serialized behind every outstanding
+        #: confirmation so each start entry always reaches the log first.
+        self._confirming_forwards: dict[int, list[Worker[None]]] = {}
         #: stops deferred behind a pending confirmation, keyed by forward id;
         #: teardown flushes leftovers so a cancelled worker can't lose them.
         self._deferred_stop_audits: dict[int, ForwardSpec] = {}
@@ -1461,7 +1463,9 @@ class KorvidApp(App[None]):
             return
         # Popen returning only proves the child exists — success is reported
         # after kubectl confirms the listener (or fails the bind/RBAC check).
-        self._confirming_forwards[record.id] = self.run_worker(self._confirm_forward(record))
+        self._confirming_forwards.setdefault(record.id, []).append(
+            self.run_worker(self._confirm_forward(record))
+        )
 
     async def _confirm_forward(self, record: ForwardRecord, *, reattached: bool = False) -> None:
         """Toast and audit a forward start only once kubectl signals ready.
@@ -1479,7 +1483,7 @@ class KorvidApp(App[None]):
             status = await asyncio.to_thread(
                 registry.wait_ready, record.id, timeout=_FORWARD_READY_SECONDS
             )
-            if self._confirming_forwards.get(record.id) is not worker:
+            if self._current_confirmation(record.id) is not worker:
                 # A re-attach superseded this confirmation while it waited:
                 # the record was re-armed in place, so ``status`` may describe
                 # the replacement process — nothing observed here may be
@@ -1515,11 +1519,21 @@ class KorvidApp(App[None]):
                 )
             raise
         finally:
-            # Pop only this generation's entry: a re-attach may have already
-            # stored the replacement's confirmation under the same id, and
-            # removing that would detach its stop/teardown ordering.
-            if self._confirming_forwards.get(record.id) is worker:
-                del self._confirming_forwards[record.id]
+            # Drop only this generation's entry, and only once its start
+            # audit is enqueued (above) — stops defer behind every
+            # outstanding confirmation, so a superseded generation must stay
+            # tracked until its entry cannot land after a stop anymore.
+            entries = self._confirming_forwards.get(record.id)
+            if entries is not None:
+                with contextlib.suppress(ValueError):
+                    entries.remove(worker)
+                if not entries:
+                    del self._confirming_forwards[record.id]
+
+    def _current_confirmation(self, forward_id: int) -> Worker[None] | None:
+        """The forward's current-generation confirmation worker, if any."""
+        entries = self._confirming_forwards.get(forward_id)
+        return entries[-1] if entries else None
 
     def _report_failed_forward_start(
         self,
@@ -1550,15 +1564,19 @@ class KorvidApp(App[None]):
         self.notify(f"Port-forward failed to start: {detail}", severity="error")
         self._audit_forward("port-forward-start", spec, outcome=f"error: {detail}")
 
-    async def _audit_stop_after_confirm(self, pending: Worker[None], forward_id: int) -> None:
-        """Audit a stop only after the record's start confirmation resolved.
+    async def _audit_stop_after_confirm(self, pending: list[Worker[None]], forward_id: int) -> None:
+        """Audit a stop only after every outstanding confirmation resolved.
 
-        The spec lives in `_deferred_stop_audits` (popped here on success) so
-        that a shutdown cancelling this worker cannot lose the entry —
-        teardown flushes whatever is left after the confirmations settle.
+        A superseded generation may still be waiting alongside the current
+        one — each enqueues its own start entry, so the stop must defer
+        behind all of them. The spec lives in `_deferred_stop_audits`
+        (popped here on success) so that a shutdown cancelling this worker
+        cannot lose the entry — teardown flushes whatever is left after the
+        confirmations settle.
         """
-        with contextlib.suppress(Exception):  # a cancelled confirm still frees the stop
-            await pending.wait()
+        for confirm in pending:
+            with contextlib.suppress(Exception):  # a cancelled confirm still frees the stop
+                await confirm.wait()
         spec = self._deferred_stop_audits.pop(forward_id, None)
         if spec is not None:
             self._audit_forward("port-forward-stop", spec)
@@ -1623,13 +1641,13 @@ class KorvidApp(App[None]):
             # A stopped broken forward will never poll alive again — drop its
             # id so the broken set does not grow for the session's lifetime.
             self._broken_forwards.discard(record.id)
-            pending = self._confirming_forwards.get(record.id)
-            if pending is None:
+            pending = list(self._confirming_forwards.get(record.id, ()))
+            if not pending:
                 self._audit_forward("port-forward-stop", record.spec)
             else:
-                # The start entry is only enqueued once the readiness
-                # confirmation resolves — queue this stop behind it so the
-                # log never shows a stop before its start.
+                # Start entries are only enqueued as the readiness
+                # confirmations resolve — queue this stop behind all of them
+                # so the log never shows a stop before any of its starts.
                 self._deferred_stop_audits[record.id] = record.spec
                 self.run_worker(self._audit_stop_after_confirm(pending, record.id))
             self.notify(f"Stopped forward localhost:{record.spec.local_port}")
@@ -1639,8 +1657,8 @@ class KorvidApp(App[None]):
             # poll would silently swallow a breakage of the fresh process.
             self._broken_forwards.discard(record.id)
             # Same readiness handshake as a fresh start (issue #38 review).
-            self._confirming_forwards[record.id] = self.run_worker(
-                self._confirm_forward(record, reattached=True)
+            self._confirming_forwards.setdefault(record.id, []).append(
+                self.run_worker(self._confirm_forward(record, reattached=True))
             )
 
         def _on_reattach_error(record: ForwardRecord, exc: Exception) -> None:
@@ -4117,7 +4135,7 @@ class KorvidApp(App[None]):
         or reversed trail).
         """
         records = await asyncio.to_thread(registry.stop_all)
-        for confirm in list(self._confirming_forwards.values()):
+        for confirm in [w for workers in self._confirming_forwards.values() for w in workers]:
             with contextlib.suppress(Exception):
                 await confirm.wait()
         # User stops whose deferred audit worker never got to run (shutdown

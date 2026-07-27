@@ -291,10 +291,16 @@ class ForwardRegistry:
         offers a re-attach. No-op unless the forward is still ``starting``.
         """
         record = self._records.get(forward_id)
-        if record is None or record.status != "starting":
+        if record is None:
             return None
+        with record._lock:
+            # Check and transition atomically: the reader thread flips
+            # ``starting`` to ``alive`` under the same lock, so a forward
+            # confirmed at the last instant cannot be torn down here.
+            if record.status != "starting":
+                return None
+            record.status = "broken"
         self._signal_stop(record)
-        record.status = "broken"
         self._release_waiters(record)
         return record
 

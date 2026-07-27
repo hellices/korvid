@@ -1164,15 +1164,15 @@ async def test_superseded_confirmation_never_reports_success(tmp_path: Path) -> 
         # Simulate a re-attach having installed the replacement's own
         # confirmation under the same id while ours was still waiting.
         replacement = app.run_worker(asyncio.sleep(0))
-        app._confirming_forwards[record.id] = replacement
         stale = app.run_worker(app._confirm_forward(record))
+        app._confirming_forwards[record.id] = [stale, replacement]
         procs[0].stdout.feed("Forwarding from 127.0.0.1:18080 -> 80\n")
         await stale.wait()
         # The observed 'alive' belongs to the replacement generation — the
         # stale confirmation must not toast success nor stop the forward.
         assert not any(n.startswith("Forwarding") for n in notices)
         assert registry.get(record.id) is record
-        # ...and its finally must not evict the replacement's map entry.
-        assert app._confirming_forwards.get(record.id) is replacement
+        # ...and it removes only its own tracking entry on the way out.
+        assert app._confirming_forwards.get(record.id) == [replacement]
         await until(pilot, lambda: "superseded by re-attach" in _audit_lines(tmp_path))
         procs[0].stdout.feed(None)  # release the reader thread
