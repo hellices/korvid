@@ -528,3 +528,36 @@ def test_candidate_ports_skip_non_tcp_protocols() -> None:
         }
     }
     assert candidate_remote_ports("pods", pod) == [8080, 9090]
+
+
+def test_fail_start_aborts_silent_child_but_keeps_it_listed() -> None:
+    """A handshake that never resolves is failed explicitly, not guessed ready."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    assert registry.wait_ready(record.id, timeout=0.05) == "starting"
+    failed = registry.fail_start(record.id)
+    assert failed is record
+    assert record.status == "broken"
+    assert procs[0].terminated
+    # Stays listed so :pf can show the failure and offer a re-attach.
+    assert registry.get(record.id) is record
+    procs[0].stdout.feed(None)  # release the reader thread
+    revived = registry.reattach(record.id)
+    assert revived is record
+    assert revived.status == "starting"
+    procs[1].stdout.feed(None)
+
+
+def test_fail_start_leaves_resolved_forwards_alone() -> None:
+    """Only a still-``starting`` forward can be aborted by fail_start()."""
+    procs: list[_FakeProc] = []
+    registry = _piped_registry(procs)
+    record = registry.start(_spec())
+    procs[0].stdout.feed("Forwarding from 127.0.0.1:8080 -> 80\n")
+    assert registry.wait_ready(record.id, timeout=2.0) == "alive"
+    assert registry.fail_start(record.id) is None
+    assert record.status == "alive"
+    assert not procs[0].terminated
+    assert registry.fail_start(999) is None
+    procs[0].stdout.feed(None)

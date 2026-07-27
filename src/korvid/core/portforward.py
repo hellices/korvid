@@ -73,6 +73,8 @@ class ForwardRecord:
     _proc: _ForwardProcess | None = field(default=None, repr=False)
     #: Set once the handshake resolved (ready line seen, or stdout hit EOF).
     _ready: threading.Event | None = field(default=None, repr=False)
+    #: Serializes reader-thread mutations against re-attach process swaps.
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 class ForwardRegistry:
@@ -164,17 +166,22 @@ class ForwardRegistry:
         after a re-attach swaps in a fresh process, buffered output flushed
         by the dead one must not mutate the reused record (a late
         "Forwarding from" line would wrongly mark the replacement alive).
+        The generation check and the mutations it guards happen atomically
+        under the record lock, which reattach() also holds while swapping
+        the process in — a check passed against the old generation cannot
+        interleave with the swap and leak stale writes onto the new one.
         """
         try:
             for raw in stream:
-                if record._proc is not proc:
-                    return  # superseded by a re-attach — stale output
                 line = raw.strip()
-                if line:
-                    record.last_output = line
-                if record.status == "starting" and line.startswith(_READY_PREFIX):
-                    record.status = "alive"
-                    ready.set()
+                with record._lock:
+                    if record._proc is not proc:
+                        return  # superseded by a re-attach — stale output
+                    if line:
+                        record.last_output = line
+                    if record.status == "starting" and line.startswith(_READY_PREFIX):
+                        record.status = "alive"
+                        ready.set()
         except (OSError, ValueError):  # pipe closed under us mid-read
             pass
         ready.set()  # EOF — the child exited (or closed its stdout)
@@ -187,7 +194,8 @@ class ForwardRegistry:
             listener, ``broken`` when the child exited before that (the
             record keeps kubectl's last words in ``last_output``), or
             ``starting`` when the child is silent but still running after
-            ``timeout`` — optimistic: liveness polling covers a later death.
+            ``timeout`` — the caller decides whether to keep waiting or to
+            abort the unconfirmed forward via `fail_start()` / `stop()`.
         """
         record = self._records.get(forward_id)
         if record is None:
@@ -254,9 +262,32 @@ class ForwardRegistry:
         if record is None or record.status != "broken":
             return None
         self._ensure_port_free(record.spec.local_port)
-        record._proc = self._spawn(record.spec)
-        record.last_output = ""
+        replacement = self._spawn(record.spec)
+        # Swap under the record lock: a stale watcher that already passed its
+        # generation check must finish its guarded writes before the new
+        # process (and the reset output) are published.
+        with record._lock:
+            record._proc = replacement
+            record.last_output = ""
         self._begin_handshake(record)
+        return record
+
+    def fail_start(self, forward_id: int) -> ForwardRecord | None:
+        """Abort a forward whose readiness handshake never resolved.
+
+        For a child that is silent but still running after the caller's wait
+        window: it never confirmed its listener, and liveness polling could
+        not correct a false success later (it only detects exits). The child
+        is signalled to exit (grace-escalated like stop()) and the record
+        flips to ``broken`` — it stays listed so `:pf` shows the failure and
+        offers a re-attach. No-op unless the forward is still ``starting``.
+        """
+        record = self._records.get(forward_id)
+        if record is None or record.status != "starting":
+            return None
+        self._signal_stop(record)
+        record.status = "broken"
+        self._release_waiters(record)
         return record
 
     def _ensure_port_free(self, local_port: int) -> None:

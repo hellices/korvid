@@ -30,7 +30,7 @@ from textual.events import Key
 from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Static
 from textual.widgets.data_table import CellDoesNotExist
-from textual.worker import Worker
+from textual.worker import Worker, get_current_worker
 
 from korvid.agent.events import AgentError
 from korvid.agent.mcp_server import MCPController
@@ -1474,6 +1474,7 @@ class KorvidApp(App[None]):
         if registry is None:  # pragma: no cover - callers hold a registry
             return
         spec = record.spec
+        worker = get_current_worker()
         try:
             status = await asyncio.to_thread(
                 registry.wait_ready, record.id, timeout=_FORWARD_READY_SECONDS
@@ -1485,15 +1486,11 @@ class KorvidApp(App[None]):
                 # "failed to start" toast would be wrong for a deliberate stop.
                 self._audit_forward("port-forward-start", spec, outcome="stopped before ready")
                 return
-            if status == "broken":
-                detail = record.last_output or "kubectl exited before the forward was ready"
-                if not reattached:
-                    registry.stop(record.id)  # never worked — drop it from :pf
-                self.notify(f"Port-forward failed to start: {detail}", severity="error")
-                self._audit_forward("port-forward-start", spec, outcome=f"error: {detail}")
+            if status != "alive":
+                self._report_failed_forward_start(
+                    registry, record, status, worker=worker, reattached=reattached
+                )
                 return
-            # "alive" — or still "starting" after the wait window (a silent but
-            # running kubectl): optimistic, liveness polling flags a later death.
             if reattached:
                 self._audit_forward("port-forward-start", spec, outcome="reattached")
                 self.notify(f"Re-attached forward localhost:{spec.local_port}")
@@ -1513,7 +1510,44 @@ class KorvidApp(App[None]):
                 )
             raise
         finally:
-            self._confirming_forwards.pop(record.id, None)
+            # Pop only this generation's entry: a re-attach may have already
+            # stored the replacement's confirmation under the same id, and
+            # removing that would detach its stop/teardown ordering.
+            if self._confirming_forwards.get(record.id) is worker:
+                del self._confirming_forwards[record.id]
+
+    def _report_failed_forward_start(
+        self,
+        registry: ForwardRegistry,
+        record: ForwardRecord,
+        status: str,
+        *,
+        worker: Worker[None],
+        reattached: bool,
+    ) -> None:
+        """Handle a readiness handshake that did not end in ``alive``.
+
+        A ``starting`` result means kubectl stayed silent through the wait
+        window: readiness was never confirmed and liveness polling could not
+        correct a false success later (it only detects exits), so the forward
+        is failed explicitly instead of reported ready on a guess.
+        """
+        spec = record.spec
+        if status == "starting":
+            detail = f"kubectl did not confirm the forward within {_FORWARD_READY_SECONDS:g}s"
+        else:
+            detail = record.last_output or "kubectl exited before the forward was ready"
+        if self._confirming_forwards.get(record.id) is worker:
+            if reattached:
+                # A failed re-attach stays listed as broken for another try.
+                registry.fail_start(record.id)
+            else:
+                registry.stop(record.id)  # never worked — drop it from :pf
+        # else: a re-attach superseded this confirmation while the wait
+        # resolved — the record now runs a fresh process owned by a fresh
+        # confirmation, so only this generation's failure is reported.
+        self.notify(f"Port-forward failed to start: {detail}", severity="error")
+        self._audit_forward("port-forward-start", spec, outcome=f"error: {detail}")
 
     async def _audit_stop_after_confirm(self, pending: Worker[None], forward_id: int) -> None:
         """Audit a stop only after the record's start confirmation resolved.

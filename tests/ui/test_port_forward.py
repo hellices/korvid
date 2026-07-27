@@ -1081,3 +1081,49 @@ async def test_stop_during_startup_survives_immediate_exit(tmp_path: Path) -> No
     assert "port-forward-start" in lines
     assert "port-forward-stop" in lines
     assert lines.index("port-forward-start") < lines.index("port-forward-stop")
+
+
+async def test_silent_start_times_out_as_failure(tmp_path: Path) -> None:
+    """kubectl that never confirms its listener is failed, not guessed ready."""
+    procs: list[_FakeProc] = []
+
+    def _popen(argv: list[str], **_kwargs: Any) -> _FakeProc:
+        proc = _FakeProc(argv)
+        proc.stdout = _GatedStream()
+        procs.append(proc)
+        return proc
+
+    registry = ForwardRegistry(popen=_popen)
+    app = make_app(
+        [_pod("api-1")],
+        forwards=registry,
+        get_manifest=_pod_manifest,
+        audit=_audit_log(tmp_path),
+    )
+    notices: list[str] = []
+    original = app.notify
+
+    def _capture(message: str, **kwargs: Any) -> Any:
+        notices.append(message)
+        return original(message, **kwargs)
+
+    with (
+        patch("korvid.ui.app.shutil.which", return_value="/usr/bin/kubectl"),
+        patch("korvid.ui.app._FORWARD_READY_SECONDS", 0.05),
+    ):
+        async with app.run_test() as pilot:
+            app.notify = _capture  # type: ignore[method-assign]  # test spy
+            await _wait_rows(app, pilot)
+            await pilot.press("F")
+            await until(pilot, lambda: isinstance(app.screen, PortForwardScreen))
+            await pilot.press("enter")
+            await until(
+                pilot,
+                lambda: any("failed to start" in n for n in notices),
+                label="timeout failure toast",
+            )
+            assert any("did not confirm" in n for n in notices)
+            assert not any(n.startswith("Forwarding") for n in notices)
+            assert registry.forwards() == []
+            await until(pilot, lambda: "did not confirm" in _audit_lines(tmp_path))
+            procs[0].stdout.feed(None)  # release the reader thread
