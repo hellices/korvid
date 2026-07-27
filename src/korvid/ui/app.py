@@ -433,6 +433,7 @@ class KorvidApp(App[None]):
         edit_text: Callable[[str], Awaitable[str | None]] | None = None,
         metrics: MetricsPoller | None = None,
         pod_resize_supported: bool = False,
+        provider_hint: str | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -451,6 +452,9 @@ class KorvidApp(App[None]):
         #: pods/resize subresource discovered on the connected cluster
         #: (1.35 GA); gates the R keybinding and the resize agent tool.
         self._pod_resize_supported = pod_resize_supported
+        #: detected cloud provider short name ("aks", "aws", ...) or None;
+        #: drives the Service/Ingress describe footer (issue #30).
+        self._provider_hint = provider_hint
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
         self._agent_model_name = agent_model_name
@@ -1259,7 +1263,9 @@ class KorvidApp(App[None]):
             # render masked; per-key reveal is explicit and audit-logged.
             await self.push_screen(SecretScreen(title, manifest, audit=self._audit))
             return
-        await self.push_screen(DescribeScreen(title, manifest, events))
+        await self.push_screen(
+            DescribeScreen(title, manifest, events, footer_note=self._provider_footer(manifest))
+        )
 
     def on_unknown_command(self, message: UnknownCommand) -> None:
         parts = message.text.strip().split()
@@ -4135,10 +4141,26 @@ class KorvidApp(App[None]):
             # Masking pipeline (design §7): this path is agent-driven, so the
             # rendered body is LLM-adjacent — secret values must never appear.
             manifest = mask_secret_manifest(manifest)
+        footer = self._provider_footer(manifest)
         if share:
-            self.query_one(DescribePane).show(title, manifest, events)
+            self.query_one(DescribePane).show(title, manifest, events, footer_note=footer)
         else:
-            await self.push_screen(DescribeScreen(title, manifest, events))
+            await self.push_screen(DescribeScreen(title, manifest, events, footer_note=footer))
+
+    def _provider_footer(self, manifest: dict[str, Any]) -> str | None:
+        """One-line describe footer for Service/Ingress on a detected provider.
+
+        A pointer, not a catalog (issue #30): the CSP annotation knowledge
+        lives in the agent, so the footer just says where to ask.
+        """
+        if self._provider_hint is None:
+            return None
+        if manifest.get("kind") not in ("Service", "Ingress"):
+            return None
+        return (
+            f"provider: {self._provider_hint} — ask the agent about "
+            "load balancer annotations (ctrl+a)"
+        )
 
     def _refresh_empty_state(self, kind: str, visible_rows: int) -> None:
         """Show guidance instead of a silent blank table (empty ns or no filter match)."""
