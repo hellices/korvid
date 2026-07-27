@@ -138,6 +138,9 @@ async def test_switch_clears_old_cluster_state() -> None:
         await _first_pod_visible(env, pilot, "pod-a")
         app.filter_pattern = "old-filter"
         app._hint_event_cache["default/pod-a"] = (0.0, None, None)
+        from korvid.ui.widgets.command_bar import CommandBar
+
+        app.query_one(CommandBar).namespace_words = ["team-old"]
         app.post_message(SwitchContextCommand("ctx-b"))
         await until(pilot, lambda: app.config.kube_context == "ctx-b", label="switched")
         await _first_pod_visible(env, pilot, "pod-b")
@@ -147,6 +150,9 @@ async def test_switch_clears_old_cluster_state() -> None:
         assert app.filter_pattern == ""
         assert app._hint_event_cache == {}
         assert app._drill.breadcrumb() == ""
+        # Old-cluster namespace completions are purged even though no new
+        # prefetch is wired here — stale names must not linger on failure.
+        assert app.query_one(CommandBar).namespace_words == []
 
 
 async def test_switch_reattributes_audit_entries(tmp_path: Path) -> None:
@@ -372,5 +378,51 @@ async def test_keybinding_write_refused_while_switching() -> None:
                 ),
                 label="switch-in-progress refusal",
             )
+        finally:
+            app._ctx_switching = False
+
+
+async def test_write_slot_reserved_before_worker_starts() -> None:
+    """The mutation slot is claimed when the coroutine is constructed (at
+    approval time), not when the worker starts — a `:ctx` queued in between
+    must already see the write as in flight."""
+    from korvid.ui.app import _tracks_cluster_write
+
+    env = _CtxEnv()
+    app = env.app
+    started = asyncio.Event()
+
+    @_tracks_cluster_write
+    async def fake_write(self: KorvidApp) -> None:
+        await started.wait()
+
+    async with app.run_test():
+        coro = fake_write(app)
+        assert app._active_cluster_writes == 1  # reserved synchronously
+        task = asyncio.create_task(coro)
+        started.set()
+        await task
+        assert app._active_cluster_writes == 0
+
+
+async def test_agent_prompt_refused_while_switching() -> None:
+    """A prompt submitted mid-switch would run during teardown/retarget with
+    the old cluster's screen context — refuse it up front."""
+    from korvid.ui.messages import AgentPromptSubmitted
+
+    env = _CtxEnv()
+    app = env.app
+    async with app.run_test() as pilot:
+        app._ctx_switching = True
+        try:
+            app.post_message(AgentPromptSubmitted("why is pod-a failing?"))
+            await until(
+                pilot,
+                lambda: any(
+                    "context switch is in progress" in n.message for n in app._notifications
+                ),
+                label="agent-prompt refusal",
+            )
+            assert app._agent_task is None
         finally:
             app._ctx_switching = False

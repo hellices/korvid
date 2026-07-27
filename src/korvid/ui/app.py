@@ -381,14 +381,22 @@ def _tracks_cluster_write(
     cluster must never execute against another after a mid-flight retarget.
     """
 
-    async def wrapper(
+    def wrapper(
         self: KorvidApp, /, *args: _WriteParams.args, **kwargs: _WriteParams.kwargs
-    ) -> _WriteResult:
+    ) -> Coroutine[Any, Any, _WriteResult]:
+        # Reserve the slot synchronously: confirmation callbacks construct
+        # this coroutine and hand it to run_worker, which only starts it on
+        # a later event-loop iteration — a queued `:ctx` processed in that
+        # gap must already see the write as in flight.
         self._active_cluster_writes += 1
-        try:
-            return await method(self, *args, **kwargs)
-        finally:
-            self._active_cluster_writes -= 1
+
+        async def run() -> _WriteResult:
+            try:
+                return await method(self, *args, **kwargs)
+            finally:
+                self._active_cluster_writes -= 1
+
+        return run()
 
     # Not functools.wraps: its _Wrapped return type keeps the explicit
     # 'self' arg and fails the plain-Callable return annotation under
@@ -1306,6 +1314,9 @@ class KorvidApp(App[None]):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._ns_prefetch_task
             self._ns_prefetch_task = None
+        # Completions that already loaded are old-cluster names — drop them
+        # now so they aren't offered while (or if) the new prefetch fails.
+        self.query_one(CommandBar).namespace_words = []
         if self._metrics is not None:
             await self._metrics.stop()
         await self.watch_manager.stop_all()
@@ -5684,6 +5695,14 @@ class KorvidApp(App[None]):
         panel.query_one("#agent-input").focus()
 
     def on_agent_prompt_submitted(self, message: AgentPromptSubmitted) -> None:
+        if self._ctx_switching:
+            # A turn started now would run during teardown/retarget and could
+            # act on the new cluster with the old cluster's screen context.
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
+            return
         if self._agent_runtime is None:
             return
         if self._agent_task is not None and not self._agent_task.done():
