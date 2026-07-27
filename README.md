@@ -459,9 +459,11 @@ agent:
 ```
 
 While a protected context is active the status bar shows a red
-`⛨ PROTECTED` marker, and every write confirmation requires typing the
-context name instead of a single `y` — including approvals requested by the
-agent.  Protection is re-evaluated on every `:ctx` switch.  With
+`⛨ PROTECTED` marker, and every write confirmation requires typing a name
+instead of a single `y` — including approvals requested by the agent.
+Dialogs that already demand the resource name (cluster-scoped deletes,
+node drains) keep that stronger gate; all others require the context name.
+Protection is re-evaluated on every `:ctx` switch.  With
 `agent.disable_in_protected: true` the agent prompt is rejected outright in
 protected contexts.
 
