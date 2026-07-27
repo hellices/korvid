@@ -8,6 +8,7 @@ fail-closed like every other write.
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from pathlib import Path
@@ -357,14 +358,16 @@ async def test_node_shell_create_failure_warns_about_policy(tmp_path: Path) -> N
     assert rec.deletes == []
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     last = [e for e in entries if e["action"] == "node-shell"][-1]
-    assert last["outcome"] == "error: pod creation failed"
+    assert last["outcome"] == "error: pod creation rejected"
 
 
 async def test_node_shell_unidentifiable_create_output_aborts(tmp_path: Path) -> None:
     """If kubectl succeeds but the created pod cannot be identified, korvid
-    must not attach or guess at cleanup."""
+    must not attach or guess at cleanup — and the audit trail must say the
+    cleanup was skipped and where to look, not that creation failed."""
     rec = DeleteRecorder()
-    app = make_app(rec, tmp_path / "audit.jsonl")
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
     run_fake, _ = _kubectl_run(
         create_result=SimpleNamespace(returncode=0, stdout=b"not json", stderr=b"")
     )
@@ -382,6 +385,10 @@ async def test_node_shell_unidentifiable_create_output_aborts(tmp_path: Path) ->
             await until(pilot, _warned, label="unidentifiable-pod warning")
     assert call_records == []
     assert rec.deletes == []
+    entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+    last = [e for e in entries if e["action"] == "node-shell"][-1]
+    assert "could not be identified" in last["outcome"]
+    assert "cleanup skipped: check namespace default" in last["outcome"]
 
 
 async def test_node_shell_wait_failure_warns_but_still_cleans_up(tmp_path: Path) -> None:
@@ -545,3 +552,39 @@ async def test_node_shell_nonzero_attach_exit_has_no_policy_hint(tmp_path: Path)
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     last = [e for e in entries if e["action"] == "node-shell"][-1]
     assert last["outcome"].startswith("error: exit 1")
+
+
+async def test_node_shell_cancelled_worker_still_deletes_pod(tmp_path: Path) -> None:
+    """A worker cancellation while waiting for readiness must not strand the
+    privileged host-mounted pod: the finalizer deletes it and records the
+    interrupted outcome before the cancellation propagates."""
+    rec = DeleteRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
+    wait_entered = asyncio.Event()
+    release = threading.Event()
+    loop_box: list[asyncio.AbstractEventLoop] = []
+
+    def run_fake(argv, **kwargs):  # type: ignore[no-untyped-def]  # test helper
+        if "debug" in argv:
+            return SimpleNamespace(returncode=0, stdout=_pod_json(), stderr=b"")
+        loop_box[0].call_soon_threadsafe(wait_entered.set)
+        release.wait(timeout=10)
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    with _node_shell_env(run_fake) as call_records:
+        async with app.run_test():
+            loop_box.append(asyncio.get_running_loop())
+            task = asyncio.ensure_future(
+                app._run_node_shell(rec, "worker-1", "default", DEBUG_IMAGE, None)
+            )
+            await asyncio.wait_for(wait_entered.wait(), timeout=5)
+            task.cancel()
+            release.set()
+            await asyncio.wait([task])
+            assert task.cancelled()
+    assert call_records == []  # never attached
+    assert rec.deletes == [("pods", "default", DBG_POD, DBG_UID)]
+    entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+    last = [e for e in entries if e["action"] == "node-shell"][-1]
+    assert last["outcome"].startswith("error: interrupted; cleanup: deleted")

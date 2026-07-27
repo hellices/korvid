@@ -3659,31 +3659,68 @@ class KorvidApp(App[None]):
             self.notify("Write blocked: audit log unavailable", severity="error")
             return
         created = await self._create_node_debug_pod(node, namespace, image)
-        if created is None:
+        if isinstance(created, str):  # creation failed or pod unidentifiable
             try:
-                await asyncio.to_thread(
-                    self._audit_node_shell, audit, node, detail, "error: pod creation failed"
-                )
+                await asyncio.to_thread(self._audit_node_shell, audit, node, detail, created)
             except Exception:
                 logger.exception("audit append failed after node shell create failure")
             return
         pod_name, pod_uid = created
-        wait_argv = build_pod_wait_argv(namespace, pod_name, context=self.config.kube_context)
-        ready = await self._run_kubectl_ok(wait_argv, timeout=75)
-        if not ready:
-            self.notify(
-                f"Debugger pod {pod_name} did not become Ready — the shell may"
-                " fail to attach (image pull error or admission problem?)",
-                severity="warning",
+        # Everything after a successful create runs under a finalizer:
+        # a worker cancellation, an attach launch error, or Ctrl-C raising
+        # KeyboardInterrupt from subprocess.call must still delete the
+        # privileged host-mounted pod and record the outcome.
+        outcome = "error: interrupted"
+        try:
+            wait_argv = build_pod_wait_argv(namespace, pod_name, context=self.config.kube_context)
+            ready = await self._run_kubectl_ok(wait_argv, timeout=75)
+            if not ready:
+                self.notify(
+                    f"Debugger pod {pod_name} did not become Ready — the shell may"
+                    " fail to attach (image pull error or admission problem?)",
+                    severity="warning",
+                )
+            attach_argv = build_pod_attach_argv(
+                namespace, pod_name, context=self.config.kube_context
             )
-        attach_argv = build_pod_attach_argv(namespace, pod_name, context=self.config.kube_context)
-        with self.suspend():
-            exit_code = self._run_interactive(
-                attach_argv, f"korvid node shell → {node} (exit to return)"
+            with self.suspend():
+                exit_code = self._run_interactive(
+                    attach_argv, f"korvid node shell → {node} (exit to return)"
+                )
+            self.refresh()
+            outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
+        finally:
+            # Shielded + settled so a cancelled worker still deletes the pod
+            # and records the outcome: shield() raises CancelledError here on
+            # outer cancellation while the finalizer keeps running, so it is
+            # re-awaited before the cancellation propagates.
+            finalize = asyncio.ensure_future(
+                self._finalize_node_shell(
+                    ops, audit, node, namespace, pod_name, pod_uid, detail, outcome
+                )
             )
-        self.refresh()
+            try:
+                await asyncio.shield(finalize)
+            except asyncio.CancelledError:
+                await finalize
+                raise
+
+    async def _finalize_node_shell(
+        self,
+        ops: WriteOps,
+        audit: AuditLog,
+        node: str,
+        namespace: str,
+        pod_name: str,
+        pod_uid: str | None,
+        detail: str,
+        outcome: str,
+    ) -> None:
+        """Delete the debugger pod and record the outcome — always runs,
+        even when the shell worker was cancelled or interrupted. The audit
+        write is best-effort here: the cluster write already happened, so
+        failing it must not hide the cleanup."""
         cleanup = await self._delete_node_debug_pod(ops, namespace, pod_name, pod_uid)
-        outcome = "success" if exit_code == 0 else f"error: exit {exit_code}"
         try:
             await asyncio.to_thread(
                 self._audit_node_shell, audit, node, detail, f"{outcome}; {cleanup}"
@@ -3694,12 +3731,16 @@ class KorvidApp(App[None]):
 
     async def _create_node_debug_pod(
         self, node: str, namespace: str, image: str
-    ) -> tuple[str, str | None] | None:
+    ) -> tuple[str, str | None] | str:
         """Create the node-debugger pod detached; returns (name, uid).
 
-        A creation failure is where PodSecurity admission refusals surface,
-        so the hint about the shell namespace lives here — an interactive
-        shell later exiting non-zero is just the user's own exit status.
+        On failure returns the audit outcome string instead — distinct per
+        cause, because they leave different cluster states: a rejected
+        create (where PodSecurity admission refusals surface, hence the
+        namespace hint) leaves nothing behind, while a timeout or a create
+        whose output cannot be parsed may have created a pod korvid cannot
+        identify, so the audit records cleanup as skipped and names the
+        namespace to inspect.
         """
         argv = build_node_debug_create_argv(
             node, namespace, context=self.config.kube_context, image=image
@@ -3708,8 +3749,12 @@ class KorvidApp(App[None]):
             proc = await asyncio.to_thread(subprocess.run, argv, capture_output=True, timeout=30)
         except (subprocess.TimeoutExpired, OSError):
             logger.warning("node-debugger pod creation failed", exc_info=True)
-            self.notify("kubectl debug node failed to start — see logs", severity="error")
-            return None
+            self.notify(
+                f"kubectl debug node did not respond — a debugger pod may still have"
+                f" been created; check {namespace} for leftover node-debugger pods",
+                severity="error",
+            )
+            return f"error: pod creation timed out; cleanup skipped: check namespace {namespace}"
         if proc.returncode != 0:
             stderr = proc.stderr.decode(errors="replace").strip()
             logger.warning("node-debugger pod creation failed: %s", stderr)
@@ -3719,7 +3764,7 @@ class KorvidApp(App[None]):
                 " try setting node_shell.namespace to a namespace that allows them",
                 severity="error",
             )
-            return None
+            return "error: pod creation rejected"
         try:
             payload = json.loads(proc.stdout)
         except ValueError:
@@ -3727,13 +3772,16 @@ class KorvidApp(App[None]):
         item_meta = (payload or {}).get("metadata") if isinstance(payload, dict) else None
         pod_name = (item_meta or {}).get("name")
         if not isinstance(pod_name, str) or not pod_name:
-            # Pod likely created but unidentifiable: refuse to guess.
+            # Pod created (exit 0) but unidentifiable: refuse to guess.
             self.notify(
                 f"kubectl did not report the created pod — check {namespace} for"
                 " leftover node-debugger pods",
                 severity="error",
             )
-            return None
+            return (
+                "error: created pod could not be identified;"
+                f" cleanup skipped: check namespace {namespace}"
+            )
         uid = (item_meta or {}).get("uid")
         return pod_name, str(uid) if uid else None
 
