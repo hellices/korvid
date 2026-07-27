@@ -1113,3 +1113,42 @@ async def test_diagnose_pod_unbounded_messages_cannot_evict_the_log_evidence() -
     assert len(out) <= MAX_RESULT_CHARS
     assert "truncated" not in out  # budgeted by construction, not chopped by execute()
     assert "ERROR: db connection refused" in out  # the evidence survived
+
+
+async def test_diagnose_pod_finds_an_error_marker_beyond_the_line_clamp() -> None:
+    """The error marker must be searched in the raw line — clamping first
+    would hide a marker buried past the clamp in a long (e.g. JSON) line."""
+    kube = FakeDiagnoseKube()
+    kube.log_lines = [f"noise {i}" for i in range(40)]
+    kube.log_lines[19] = "context sentinel before the buried marker"
+    kube.log_lines[20] = "padding " * 40 + "ERROR: buried past the clamp"
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "context sentinel before the buried marker" in out
+
+
+async def test_diagnose_pod_budgets_each_container_block_keeping_headers() -> None:
+    """Overflow is trimmed within each container's block — a huge excerpt
+    for one container must not evict another container's header or logs."""
+    kube = FakeDiagnoseKube()
+    pod = kube.objects[("pods", "api-1")]
+    pod["spec"]["containers"] = [{"name": f"c{i}"} for i in range(3)]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": f"c{i}",
+            "ready": False,
+            "restartCount": 4,
+            "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+        }
+        for i in range(3)
+    ]
+    kube.log_lines = [f"line {j} " + "x" * 230 for j in range(60)]
+    kube.log_lines[30] = "ERROR: shared failure"
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert len(out) <= MAX_RESULT_CHARS
+    for i in range(3):  # every block keeps its attribution header
+        assert f"[c{i}] (previous instance)" in out
+    assert out.count("…") >= 3  # each over-budget block elides visibly

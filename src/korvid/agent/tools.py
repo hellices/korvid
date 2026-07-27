@@ -907,15 +907,21 @@ class ToolExecutor:
                 follow=False,
                 tail_lines=self._DIAGNOSE_LOG_TAIL,
             ):
-                tail.append(self._clamp_line(log_line.text))
+                tail.append(log_line.text)
         except Exception as exc:
             return False, f"unavailable ({exc})"
         if not tail:
             return False, "(no log output)"
-        return True, log_excerpt(tail)
+        # Search the raw lines — clamping first could hide an error marker
+        # buried past the clamp in a long (e.g. JSON) line. Only the lines
+        # selected for the report are clamped.
+        excerpt = log_excerpt(tail)
+        return True, "\n".join(self._clamp_line(seg) for seg in excerpt.splitlines())
 
-    async def _diagnose_logs(self, namespace: str, name: str, pod: dict[str, Any]) -> list[str]:
-        """Targeted excerpt per troubled container — the report's final section.
+    async def _diagnose_log_blocks(
+        self, namespace: str, name: str, pod: dict[str, Any]
+    ) -> list[list[str]]:
+        """One block (header + excerpt lines) per troubled container.
 
         A restarted container's crash evidence lives in the *previous*
         instance's logs (the current one is freshly restarted or still
@@ -924,9 +930,9 @@ class ToolExecutor:
         """
         troubled = troubled_containers(pod)
         if not troubled:
-            return ["(no troubled containers — logs skipped)"]
+            return [["(no troubled containers — logs skipped)"]]
         restarted = restarted_containers(pod)
-        lines: list[str] = []
+        blocks: list[list[str]] = []
         for container in troubled[: self._DIAGNOSE_MAX_LOG_CONTAINERS]:
             previous = container in restarted
             ok, text = await self._fetch_log_excerpt(namespace, name, container, previous=previous)
@@ -934,12 +940,11 @@ class ToolExecutor:
                 ok, text = await self._fetch_log_excerpt(namespace, name, container, previous=False)
                 previous = False
             suffix = " (previous instance)" if previous else ""
-            lines.append(f"[{container}]{suffix}")
-            lines.append(text)
+            blocks.append([f"[{container}]{suffix}", *text.splitlines()])
         skipped = troubled[self._DIAGNOSE_MAX_LOG_CONTAINERS :]
         if skipped:
-            lines.append(f"(also troubled, logs not fetched: {', '.join(skipped)})")
-        return lines
+            blocks.append([f"(also troubled, logs not fetched: {', '.join(skipped)})"])
+        return blocks
 
     @classmethod
     def _clamp_line(cls, line: str) -> str:
@@ -964,16 +969,31 @@ class ToolExecutor:
         """Drop leading lines until the joined text fits the budget.
 
         The tail is the most recent — and most diagnostic — log evidence,
-        so overflow is cut from the front, never from the end.
+        so overflow is cut from the front, never from the end, and the
+        cut is marked visibly.
         """
+        marker = "  … (earlier lines elided)"
         total = sum(len(line) + 1 for line in lines)
         if total <= budget:
             return lines
         trimmed = list(lines)
-        while len(trimmed) > 1 and total + 4 > budget:  # room for the "  …" marker
+        while len(trimmed) > 1 and total + len(marker) + 1 > budget:
             total -= len(trimmed[0]) + 1
             trimmed.pop(0)
-        return ["  …", *trimmed]
+        return [marker, *trimmed]
+
+    def _render_log_blocks(self, blocks: list[list[str]], budget: int) -> list[str]:
+        """Render container blocks within the budget, trimming *within*
+        each block — one container's huge excerpt must never evict another
+        container's header or evidence."""
+        share = budget // max(1, len(blocks))
+        lines: list[str] = []
+        for block in blocks:
+            header = f"  {block[0]}"
+            body = [f"  {segment}" for segment in block[1:]]
+            lines.append(header)
+            lines.extend(self._trim_front(body, share - len(header) - 1))
+        return lines
 
     async def _diagnose_pod(self, args: dict[str, Any]) -> str:
         """Compound read-only diagnosis (issue #70).
@@ -1009,13 +1029,9 @@ class ToolExecutor:
             clamped = [self._clamp_line(line) for line in lines]
             report.extend(f"  {line}" for line in self._budget_section(clamped))
         log_title = "LOG EXCERPTS (troubled containers)"
-        log_lines = [
-            f"  {segment}"
-            for entry in await self._diagnose_logs(namespace, name, pod)
-            for segment in (entry.splitlines() or [entry])
-        ]
+        blocks = await self._diagnose_log_blocks(namespace, name, pod)
         budget = MAX_RESULT_CHARS - sum(len(line) + 1 for line in report) - len(log_title) - 1
-        return "\n".join([*report, log_title, *self._trim_front(log_lines, budget)])
+        return "\n".join([*report, log_title, *self._render_log_blocks(blocks, budget)])
 
 
 def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
