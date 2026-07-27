@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from korvid.k8s.portforward import build_port_forward_argv
+from korvid.k8s.portforward import build_port_forward_argv, forward_target_gvr
 
 
 def test_pod_forward_argv() -> None:
@@ -62,3 +62,14 @@ def test_workload_forward_argv() -> None:
 def test_unforwardable_kind_is_rejected() -> None:
     with pytest.raises(ValueError, match="cannot port-forward"):
         build_port_forward_argv("configmaps", "default", "cm", local_port=1, remote_port=2)
+
+
+def test_forward_target_gvr_records_the_workload_group() -> None:
+    """Audit entries carry full GVRs — apps/batch workloads must not be
+    recorded as core/v1 resources."""
+    assert forward_target_gvr("pods") == ("", "v1")
+    assert forward_target_gvr("services") == ("", "v1")
+    assert forward_target_gvr("replicationcontrollers") == ("", "v1")
+    assert forward_target_gvr("deployments") == ("apps", "v1")
+    assert forward_target_gvr("statefulsets") == ("apps", "v1")
+    assert forward_target_gvr("jobs") == ("batch", "v1")

@@ -30,6 +30,26 @@ WORKLOAD_KINDS: dict[str, str] = {
 }
 
 
+#: API groups for forwardable kinds outside the core group.
+_TARGET_GROUPS: dict[str, str] = {
+    "deployments": "apps",
+    "replicasets": "apps",
+    "statefulsets": "apps",
+    "daemonsets": "apps",
+    "jobs": "batch",
+}
+
+
+def forward_target_gvr(kind: str) -> tuple[str, str]:
+    """The (group, version) of a forwardable kind, for full-GVR audit entries.
+
+    Core-group kinds (pods, services, replicationcontrollers) yield an empty
+    group; workload kinds yield their apps/batch group. All forwardable kinds
+    are v1 in supported clusters.
+    """
+    return _TARGET_GROUPS.get(kind, ""), "v1"
+
+
 def build_port_forward_argv(
     kind: str,
     namespace: str,

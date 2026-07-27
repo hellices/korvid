@@ -597,6 +597,21 @@ async def test_pf_reattach_follows_the_owning_workload_when_pod_gone(tmp_path: P
             assert "deployment/api" in procs[1].argv
             await until(pilot, lambda: record.status == "alive", label="replacement confirmed")
             assert any("deployment/api" in row for row in _forward_rows(app))
+            # The retargeted start is audited with the workload's full GVR —
+            # a deployments entry recorded as core/v1 would name the wrong
+            # resource (core/audit.py records group+version for this reason).
+            await until(
+                pilot,
+                lambda: '"outcome": "reattached"' in _audit_lines(tmp_path),
+                label="retargeted start audited",
+            )
+            reattached = next(
+                line
+                for line in _audit_lines(tmp_path).splitlines()
+                if '"outcome": "reattached"' in line
+            )
+            assert '"kind": "deployments"' in reattached
+            assert '"group": "apps"' in reattached
 
 
 async def test_teardown_audit_failure_does_not_abort_shutdown(tmp_path: Path) -> None:

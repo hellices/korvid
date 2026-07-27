@@ -66,7 +66,7 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import PodSummary
-from korvid.k8s.portforward import FORWARDABLE_KINDS
+from korvid.k8s.portforward import FORWARDABLE_KINDS, forward_target_gvr
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.ui.command import command_help
@@ -1802,13 +1802,17 @@ class KorvidApp(App[None]):
         detail = f"localhost:{spec.local_port} -> {spec.name}:{spec.remote_port}"
         if teardown:
             detail += " (session teardown)"
+        # Full GVR: a retargeted forward runs against an apps/batch workload,
+        # and the audit schema disambiguates kinds by group (core/audit.py).
+        group, version = forward_target_gvr(spec.kind)
         self._forward_audit_queue.append(
             {
                 "action": action,
                 "kind": spec.kind,
                 "namespace": spec.namespace,
                 "name": spec.name,
-                "version": "v1",
+                "group": group,
+                "version": version,
                 "detail": detail,
                 "outcome": outcome,
             }
