@@ -16,6 +16,7 @@ from kubernetes_asyncio import config as k8s_config
 from kubernetes_asyncio import watch as k8s_watch
 
 from korvid.k8s.discovery import PODS_META, ResourceMeta
+from korvid.k8s.drain import DrainPlan, build_drain_plan
 from korvid.k8s.dryrun import diff_manifests
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import (
@@ -660,6 +661,93 @@ class KubeClient(WriteOps):
             return None
         return diff_manifests(current, proposed)
 
+    @staticmethod
+    def _cordon_patch(unschedulable: bool, uid: str | None) -> dict[str, Any]:
+        """Strategic-merge-patch body for cordon/uncordon. A ``uid`` in the
+        patched metadata is an apiserver precondition (409 when the node
+        object was recreated). Shared by the real write and its dry-run
+        preview so the two can never drift apart."""
+        body: dict[str, Any] = {"spec": {"unschedulable": unschedulable}}
+        if uid:
+            body["metadata"] = {"uid": uid}
+        return body
+
+    @staticmethod
+    def _node_path(name: str) -> str:
+        return f"/api/v1/nodes/{_path_segment(name)}"
+
+    async def cordon_node(self, name: str, unschedulable: bool, *, uid: str | None = None) -> None:
+        """Cordon (or uncordon) a node by patching ``spec.unschedulable``,
+        the way kubectl does it. A ``uid`` precondition pins the exact node
+        object incarnation that was approved."""
+        await self._request_write(
+            self._node_path(name),
+            "PATCH",
+            body=self._cordon_patch(unschedulable, uid),
+            content_type="application/strategic-merge-patch+json",
+        )
+
+    async def preview_cordon(
+        self, name: str, unschedulable: bool, *, uid: str | None = None
+    ) -> list[str] | None:
+        """Diff of the node before vs after a dry-run cordon/uncordon.
+        ``uid`` semantics match ``preview_scale``; the dry run is pinned to
+        the GET snapshot's resourceVersion (see ``_pin_revision``). None on
+        any failure: a preview must never block the approval flow."""
+        path = self._node_path(name)
+        try:
+            current = await self._request_json(path)
+            proposed = await self._dry_run(
+                path,
+                "PATCH",
+                self._pin_revision(self._cordon_patch(unschedulable, uid), current),
+                "application/strategic-merge-patch+json",
+            )
+        except Exception:
+            logger.debug("cordon dry-run preview failed", exc_info=True)
+            return None
+        return diff_manifests(current, proposed)
+
+    async def evict_pod(self, namespace: str, name: str, *, uid: str | None = None) -> None:
+        """Evict one pod through the Eviction API (policy/v1) - the
+        PDB-respecting path kubectl drain uses. The server answers 429 when
+        a PodDisruptionBudget has no disruptions left (surfaced as
+        ApiStatusError, never retried here). A ``uid`` precondition pins the
+        pod incarnation captured in the drain plan."""
+        delete_options: dict[str, Any] = {}
+        if uid:
+            delete_options["preconditions"] = {"uid": uid}
+        body = {
+            "apiVersion": "policy/v1",
+            "kind": "Eviction",
+            "metadata": {"name": name, "namespace": namespace},
+            "deleteOptions": delete_options,
+        }
+        await self._request_write(
+            f"{self._object_path(PODS_META, namespace, name)}/eviction",
+            "POST",
+            body=body,
+            content_type="application/json",
+        )
+
+    async def drain_plan(self, node_name: str) -> DrainPlan:
+        """Impact plan for draining *node_name*: every pod scheduled there,
+        classified against the cluster's PodDisruptionBudgets (see
+        ``korvid.k8s.drain``). A missing policy/v1 API (or RBAC-denied PDB
+        list) degrades to an empty budget list: the plan then simply cannot
+        flag blocked evictions up front - they still surface as 429s during
+        execution."""
+        pods = await self._request_json(
+            "/api/v1/pods",
+            query_params=[("fieldSelector", f"spec.nodeName={node_name}")],
+        )
+        try:
+            pdbs = await self._request_json("/apis/policy/v1/poddisruptionbudgets")
+        except Exception:
+            logger.debug("PDB list failed; drain plan proceeds without budgets", exc_info=True)
+            pdbs = {}
+        return build_drain_plan(pods.get("items") or [], pdbs.get("items") or [])
+
     async def _dry_run(
         self,
         path: str,
@@ -958,7 +1046,9 @@ class KubeClient(WriteOps):
 
         return _watch_call
 
-    async def _request_json(self, path: str) -> dict[str, Any]:
+    async def _request_json(
+        self, path: str, query_params: list[tuple[str, str]] | None = None
+    ) -> dict[str, Any]:
         """Raw GET through the ApiClient; wraps ApiException as ApiStatusError."""
         if self._api is None:
             raise RuntimeError("connect() first")
@@ -967,6 +1057,7 @@ class KubeClient(WriteOps):
                 path,
                 "GET",
                 auth_settings=["BearerToken"],
+                query_params=query_params or [],
                 _preload_content=False,
             )
             body = await resp.read()

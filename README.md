@@ -10,9 +10,10 @@ AI-native Kubernetes TUI — a k9s-style keyboard-first cockpit with an embedded
 
 Work in progress — core TUI, log viewer, live metrics, MCP server, and agent
 runtime are functional. Read-heavy by design: cluster writes (delete / scale /
-rollout restart / edit) exist but every one is approval-gated and audited —
-delete, scale, and rollout restart additionally show a server dry-run preview
-in the dialog; `--readonly` disables them all.
+rollout restart / edit / node cordon & drain) exist but every one is
+approval-gated and audited — delete, scale, rollout restart, and cordon
+additionally show a server dry-run preview in the dialog, and drain shows a
+PDB-aware impact plan; `--readonly` disables them all.
 
 ## Keybindings
 
@@ -41,6 +42,8 @@ in the dialog; `--readonly` disables them all.
 | `S` | table | Scale selected deployment / replicaset / statefulset (replica prompt + confirm dialog) |
 | `R` | pods table | In-place resize of pod CPU/memory requests/limits (Kubernetes 1.35+; prompt + confirm dialog) |
 | `I` | operators tables | Install the selected catalog operator (wizard + confirm dialog) or approve a pending InstallPlan |
+| `c` / `u` | nodes table | Cordon / uncordon the selected node (confirm dialog with server dry-run preview) |
+| `Shift-D` | nodes table | Drain the selected node — PDB-aware impact preview (evictions, PDB-blocked pods, skipped DaemonSet/mirror pods, emptyDir warnings), typed-name confirm, live progress; press again to cancel mid-drain (node stays cordoned) |
 | `e` | table | Edit selected resource manifest in `$VISUAL`/`$EDITOR` (kubectl edit style; confirm dialog before the PUT) |
 | `i` | pods table | Open hint details overlay for a troubled pod (full container trouble + recent Warning events) |
 | `Ctrl-A` | global | Toggle AI agent panel |
@@ -66,7 +69,8 @@ Action names: `quit`, `help`, `open_command`, `open_filter`,
 `log_format`, `log_wrap`, `log_timestamps`, `log_save`, `log_previous`,
 `log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
 `sort_by_mem`, `toggle_agent`, `delete_resource`, `rollout_restart`,
-`resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`.
+`resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
+`cordon_node`, `uncordon_node`, `drain_node`.
 
 Unknown actions, duplicate keys, and keys that shadow another action's
 default produce a startup warning and are skipped — never a crash. The
@@ -211,7 +215,7 @@ write is blocked.
 
 ### Dry-run previews
 
-Before a delete, scale, resize, or rollout restart dialog opens, korvid replays the
+Before a delete, scale, resize, cordon/uncordon, or rollout restart dialog opens, korvid replays the
 write server-side with `dryRun=All` and shows the reported outcome inside the
 dialog: a compact diff for scale and restart (`~ spec.replicas: 3 -> 5`,
 additions green, removals red) and an object summary plus cascading note for
@@ -224,6 +228,14 @@ preview and execution (admission runs again then), and a uid precondition
 rejects writes against a replaced object.  If the round trip fails or
 takes longer than a few seconds, the dialog simply opens without a preview —
 a preview never blocks the approval flow.
+
+A node drain dialog shows a different kind of preview: the impact plan
+computed before any eviction is issued — pods to be evicted, pods whose
+eviction a PodDisruptionBudget currently refuses, skipped DaemonSet and
+mirror (static) pods, and emptyDir data-loss warnings. Drain executes
+through the Eviction API; PDB-refused evictions (HTTP 429) surface as live
+warnings instead of hanging, and pressing the drain key again cancels the
+remaining evictions while the node stays cordoned.
 
 ### Read-only mode
 

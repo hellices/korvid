@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.drain import DrainPlan
 
 
 def restart_stamp() -> str:
@@ -109,6 +110,27 @@ class WriteOps(abc.ABC):
         subresource exists (see ``KubeClient.supports_pod_resize``)."""
         raise NotImplementedError("this transport does not support pod resize")
 
+    async def cordon_node(self, name: str, unschedulable: bool, *, uid: str | None = None) -> None:
+        """Set or clear ``spec.unschedulable`` on a node (cordon/uncordon,
+        issue #40). Non-abstract on purpose: transports predating the
+        feature keep working, and the UI reports the action unavailable."""
+        raise NotImplementedError("this transport does not support cordon/uncordon")
+
+    async def evict_pod(self, namespace: str, name: str, *, uid: str | None = None) -> None:
+        """Evict one pod through the Eviction API (policy/v1). The server
+        refuses with 429 when a PodDisruptionBudget has no disruptions left -
+        callers surface that instead of hanging. Non-abstract on purpose:
+        see ``cordon_node``."""
+        raise NotImplementedError("this transport does not support pod eviction")
+
+    async def drain_plan(self, node_name: str) -> DrainPlan:
+        """Classify every pod on *node_name* into the eviction plan the
+        drain approval dialog shows (see ``korvid.k8s.drain``). A read, but
+        it lives here because it is inseparable from the drain write flow:
+        the plan is both the impact preview and the execution list.
+        Non-abstract on purpose: see ``cordon_node``."""
+        raise NotImplementedError("this transport does not support drain planning")
+
     # -- Dry-run previews (issue #19). Non-abstract on purpose: transports
     # -- without server-side dryRun support inherit "no preview" and the
     # -- approval dialog falls back to the synthesized operation string.
@@ -159,4 +181,11 @@ class WriteOps(abc.ABC):
     ) -> list[str] | None:
         """Diff lines a ``dryRun=All`` resize would produce; None = no
         preview. ``uid`` semantics match ``preview_scale``."""
+        return None
+
+    async def preview_cordon(
+        self, name: str, unschedulable: bool, *, uid: str | None = None
+    ) -> list[str] | None:
+        """Diff lines a ``dryRun=All`` cordon/uncordon patch would produce;
+        None = no preview. ``uid`` semantics match ``preview_scale``."""
         return None
