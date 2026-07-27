@@ -209,6 +209,32 @@ debug:
     python: registry.corp.local/tools/debug-python:latest
 ```
 
+## RBAC-limited clusters
+
+korvid degrades gracefully when your role only grants specific namespaces
+(no cluster-wide `list namespaces` or cluster-scope watches):
+
+- **Namespace picker** (`:ns`): when listing namespaces is forbidden, the
+  picker falls back to the `namespaces:` list from config and your
+  kubeconfig context's namespace instead of an error dead-end. `:ns <name>`
+  free-text entry always works.
+- **All-namespaces view** (`0`): if the cluster-wide list is forbidden and
+  no fallback namespaces are configured, korvid shows an inline notice and
+  stays in the current namespace rather than looping error cards.
+- **Watches**: when the cluster-scope watch answers 403 and fallback
+  namespaces are configured, korvid fans out into one watch per namespace —
+  the all-namespaces view then shows everything your RBAC grants allow.
+- **API discovery**: individual API groups that fail discovery are hidden;
+  they never fail startup.
+
+Configure your granted namespaces in `~/.config/korvid/config.yaml`:
+
+```yaml
+namespaces:
+  - team-a
+  - team-b
+```
+
 ## Port-forwarding
 
 `Shift-F` on a pod or service opens a port-forward dialog with the remote

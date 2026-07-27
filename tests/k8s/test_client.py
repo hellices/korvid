@@ -1129,3 +1129,57 @@ class TestOpenPodExec:
             async with kube.open_pod_exec("ns", "p", None, ["tar"], stdin=False):
                 pass
         assert closed == [True]
+
+
+# ---------------------------------------------------------------------------
+# resolve_context_namespace — kubeconfig fallback for RBAC-limited users (#49)
+# ---------------------------------------------------------------------------
+
+_KUBECONFIG_WITH_NAMESPACES = """
+apiVersion: v1
+kind: Config
+current-context: ctx-a
+clusters:
+- name: cluster-a
+  cluster: {server: "https://a.example"}
+contexts:
+- name: ctx-a
+  context: {cluster: cluster-a, user: user-a, namespace: team-a}
+- name: ctx-b
+  context: {cluster: cluster-a, user: user-a, namespace: team-b}
+- name: ctx-bare
+  context: {cluster: cluster-a, user: user-a}
+users:
+- name: user-a
+  user: {}
+"""
+
+
+def test_resolve_context_namespace_reads_active_context(tmp_path: Path) -> None:
+    from korvid.k8s.client import resolve_context_namespace
+
+    kubeconfig = tmp_path / "config"
+    kubeconfig.write_text(_KUBECONFIG_WITH_NAMESPACES)
+    assert resolve_context_namespace(None, config_file=str(kubeconfig)) == "team-a"
+
+
+def test_resolve_context_namespace_honors_named_context(tmp_path: Path) -> None:
+    from korvid.k8s.client import resolve_context_namespace
+
+    kubeconfig = tmp_path / "config"
+    kubeconfig.write_text(_KUBECONFIG_WITH_NAMESPACES)
+    assert resolve_context_namespace("ctx-b", config_file=str(kubeconfig)) == "team-b"
+
+
+def test_resolve_context_namespace_without_namespace_returns_none(tmp_path: Path) -> None:
+    from korvid.k8s.client import resolve_context_namespace
+
+    kubeconfig = tmp_path / "config"
+    kubeconfig.write_text(_KUBECONFIG_WITH_NAMESPACES)
+    assert resolve_context_namespace("ctx-bare", config_file=str(kubeconfig)) is None
+
+
+def test_resolve_context_namespace_unresolvable_returns_none(tmp_path: Path) -> None:
+    from korvid.k8s.client import resolve_context_namespace
+
+    assert resolve_context_namespace(None, config_file=str(tmp_path / "missing")) is None
