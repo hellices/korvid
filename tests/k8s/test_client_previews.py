@@ -343,18 +343,27 @@ async def test_preview_delete_dry_run_rides_in_delete_options_body() -> None:
 
 async def test_delete_object_body_never_carries_dry_run() -> None:
     """The approved (real) delete must not inherit the preview's dryRun flag:
-    the shared DeleteOptions body is copied, never mutated, by the dry run."""
+    ``_dry_run`` copies the DeleteOptions body it is handed, never mutates it.
+    Exercised on ``_dry_run`` directly with a shared body — the public
+    callers each build a fresh dict, which would mask in-place mutation."""
     client = KubeClient()
     api = MagicMock()
-    manifest = {
-        "metadata": {"name": "web", "uid": "u-1", "creationTimestamp": "t", "resourceVersion": "9"}
+    api.call_api = AsyncMock(return_value=_resp({"kind": "Status"}))
+    shared_body: dict[str, Any] = {
+        "propagationPolicy": "Background",
+        "preconditions": {"uid": "u-1"},
     }
-    api.call_api = AsyncMock(
-        side_effect=[_resp(manifest), _resp({"kind": "Status"}), _resp({"kind": "Status"})]
-    )
-    meta = _deploy_meta()
     with patch.object(client, "_api", api):
-        await client.preview_delete(meta, "default", "web", uid="u-1")
-        await client.delete_object(meta, "default", "web", uid="u-1")
-    real_body = api.call_api.call_args_list[2][1]["body"]
-    assert "dryRun" not in real_body
+        await client._dry_run(
+            "/apis/apps/v1/namespaces/default/deployments/web",
+            "DELETE",
+            shared_body,
+            "application/json",
+        )
+    sent_body = api.call_api.call_args[1]["body"]
+    assert sent_body["dryRun"] == ["All"]
+    # The caller's dict — reusable for the real delete — is untouched.
+    assert shared_body == {
+        "propagationPolicy": "Background",
+        "preconditions": {"uid": "u-1"},
+    }
