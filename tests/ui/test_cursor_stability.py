@@ -86,7 +86,9 @@ async def test_view_change_resets_cursor_to_top() -> None:
 async def test_horizontal_scroll_survives_watch_refresh() -> None:
     # The pod table is wider than the terminal; a user inspecting the
     # right-hand columns must not be yanked back to the left edge every
-    # time a watch/metrics tick re-renders the rows.
+    # time a watch/metrics tick re-renders the rows. A pod sorting *above*
+    # the existing rows cannot be expressed in place (add_row only
+    # appends), so this exercises the clear-and-restore fallback path.
     app = make_app([_pod("alpha"), _pod("beta"), _pod("gamma")])
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
@@ -94,15 +96,17 @@ async def test_horizontal_scroll_survives_watch_refresh() -> None:
         await until(pilot, lambda: table.max_scroll_x >= 10, label="table wider than viewport")
         table.scroll_to(x=10, animate=False, immediate=True, force=True)
         await until(pilot, lambda: table.scroll_x == 10, label="scrolled right")
-        app.store.apply_event("pods", "default", "ADDED", _pod("zzz-new"))
+        app.store.apply_event("pods", "default", "ADDED", _pod("aaa-first"))
         await until(pilot, lambda: table.row_count == 4, label="new pod rendered")
+        assert table.get_row_at(0)[0] == "aaa-first"
         assert table.scroll_x == 10
 
 
 async def test_vertical_viewport_survives_watch_refresh() -> None:
     # Scrolling the viewport away from the cursor (mouse wheel / page keys)
     # must survive a data refresh: the old behaviour snapped back to the
-    # cursor row on every tick.
+    # cursor row on every tick. The new pod sorts to the top, forcing the
+    # rebuild fallback rather than the in-place diff path.
     app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
@@ -110,8 +114,9 @@ async def test_vertical_viewport_survives_watch_refresh() -> None:
         await until(pilot, lambda: table.max_scroll_y >= 8, label="table taller than viewport")
         table.scroll_to(y=8, animate=False, immediate=True, force=True)
         await until(pilot, lambda: table.scroll_y == 8, label="scrolled down")
-        app.store.apply_event("pods", "default", "ADDED", _pod("zzz-new"))
+        app.store.apply_event("pods", "default", "ADDED", _pod("aaa-first"))
         await until(pilot, lambda: table.row_count == 41, label="new pod rendered")
+        assert table.get_row_at(0)[0] == "aaa-first"
         assert table.scroll_y == 8
 
 

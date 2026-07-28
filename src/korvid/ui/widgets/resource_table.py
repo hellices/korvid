@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import cast
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable
@@ -80,6 +81,11 @@ def _pod_sort_key(pod: PodSummary) -> tuple[int, str]:
 
 def _phase_cell(phase: str) -> Text:
     return Text(phase, style=phase_style(phase))
+
+
+def _cell_width(cell: str | Text) -> int:
+    """Rendered width of a table cell (single-line str or Text)."""
+    return cell.cell_len if isinstance(cell, Text) else cell_len(cell)
 
 
 def _cells_equal(a: str | Text, b: str | Text) -> bool:
@@ -403,6 +409,14 @@ class ResourceTable(DataTable[str | Text]):
             # may not be recomputed yet right after clear() — the user had
             # already reached this offset, so restore it unconditionally.
             self.scroll_to(*viewport, animate=False, immediate=True, force=True)
+            # Even with scroll=False, `watch_cursor_coordinate` schedules a
+            # deferred `_scroll_cursor_into_view` whenever the cursor index
+            # changed (e.g. a row inserted above it) — which would override
+            # the restore above. Re-assert the viewport after that deferred
+            # scroll has run.
+            self.call_after_refresh(
+                self.scroll_to, *viewport, animate=False, immediate=True, force=True
+            )
 
     def _apply_in_place(self, pending: list[tuple[str, list[str | Text]]]) -> bool:
         """Diff *pending* against the current rows and patch the table in
@@ -410,8 +424,11 @@ class ResourceTable(DataTable[str | Text]):
 
         In place is only possible when the surviving rows keep their relative
         order and new rows land at the bottom (`add_row` can only append).
-        Column widths only ever grow (`update_width=True` takes a max), so a
-        shrinking value never shifts the layout.
+        Width updates are requested only for cells wider than their column:
+        `update_width=True` is not grow-only — a narrower replacement rescans
+        and *shrinks* the column, shifting the layout this path must keep
+        still. The trade-off is that a column stays at its widest-seen size
+        until the next rebuild.
         """
         current_keys = [row.key.value for row in self.ordered_rows]
         if any(key is None for key in current_keys):
@@ -432,7 +449,8 @@ class ResourceTable(DataTable[str | Text]):
                 old_cells = self.get_row(key)
                 for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
                     if not _cells_equal(old_cell, new_cell):
-                        self.update_cell(key, column.key, new_cell, update_width=True)
+                        grew = _cell_width(new_cell) > column.content_width
+                        self.update_cell(key, column.key, new_cell, update_width=grew)
             else:
                 self.add_row(*cells, key=key)
         return True

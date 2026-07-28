@@ -121,3 +121,47 @@ def test_cells_equal_is_style_aware() -> None:
     assert _cells_equal("5m", "5m")
     assert not _cells_equal("5m", "6m")
     assert not _cells_equal(Text("5m"), "5m")
+
+
+async def test_column_width_does_not_shrink_on_in_place_update() -> None:
+    # DataTable's update_cell(update_width=True) is NOT grow-only: a
+    # narrower replacement rescans the column and shrinks content_width,
+    # shifting every column to its right — the exact jitter this diff path
+    # exists to prevent. Width updates are only requested for wider cells.
+    app = make_app([_pod("alpha", phase="CrashLoopBackOff"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        status = table.ordered_columns[2]
+        await until(
+            pilot,
+            lambda: status.content_width >= len("CrashLoopBackOff"),
+            label="status column sized to widest value",
+        )
+        wide = status.content_width
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("alpha", phase="Running"))
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/alpha")[2]) == "Running",
+            label="phase cell updated",
+        )
+        await pilot.pause()  # let on_idle run any pending width recompute
+        assert status.content_width == wide
+
+
+async def test_column_width_grows_for_wider_in_place_value() -> None:
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        status = table.ordered_columns[2]
+        assert status.content_width < len("CrashLoopBackOff")
+        app.store.apply_event(
+            "pods", "default", "MODIFIED", _pod("alpha", phase="CrashLoopBackOff")
+        )
+        await until(
+            pilot,
+            lambda: status.content_width >= len("CrashLoopBackOff"),
+            label="status column widened for new value",
+        )
+        assert status.content_width >= len("CrashLoopBackOff")
