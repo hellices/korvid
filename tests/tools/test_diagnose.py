@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from korvid.agent.diagnose import (
+from korvid.tools.diagnose import (
     condition_lines,
     container_state_lines,
     identity_lines,

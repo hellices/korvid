@@ -16,7 +16,7 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from korvid.agent.tools import (
+from korvid.tools.executor import (
     READ_TOOLS,
     UI_TOOL_NAMES,
     WRITE_TOOL_NAMES,

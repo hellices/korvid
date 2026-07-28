@@ -9,7 +9,7 @@ from typing import Any, cast
 import pytest
 
 from korvid.__main__ import _close_provider_in_background
-from korvid.agent.tools import UIBridge
+from korvid.tools.executor import UIBridge
 
 
 class _BoomProvider:
@@ -209,27 +209,33 @@ def test_agent_wiring_gates_resize_tool_on_discovery(monkeypatch: object) -> Non
     assert "resize_pod" not in [t["function"]["name"] for t in ro._tools]
 
 
-def test_mcp_factory_builds_fresh_servers() -> None:
+def test_mcp_controller_builds_fresh_servers() -> None:
     """uvicorn servers are single-use: each :mcp on must get a new one."""
-    from korvid.__main__ import _make_mcp_factory
+    from korvid.__main__ import _build_mcp_controller
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
+    from korvid.mcp.server import MCPController
 
     config = KorvidConfig(mcp_enabled=True, mcp_port=1234)
-    factory = _make_mcp_factory(config, cast("KubeClient", object()), {}, None)
+    controller = _build_mcp_controller(config, cast("KubeClient", object()), {}, None)
+    assert isinstance(controller, MCPController)
+    factory = controller._factory
     assert factory() is not factory()
 
 
-async def test_mcp_factory_exposes_read_and_ui_tools() -> None:
+async def test_mcp_controller_exposes_read_and_ui_tools() -> None:
     """The MCP surface is read + UI-drive: write tools stay with the
     built-in agent until an approval UX for external callers exists."""
-    from korvid.__main__ import _make_mcp_factory
-    from korvid.agent.tools import READ_TOOLS, UI_TOOLS
+    from korvid.__main__ import _build_mcp_controller
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
+    from korvid.mcp.server import MCPController
+    from korvid.tools.executor import READ_TOOLS, UI_TOOLS
 
     config = KorvidConfig(mcp_enabled=True, mcp_port=1234)
-    server = _make_mcp_factory(config, cast("KubeClient", object()), {}, None)()
+    controller = _build_mcp_controller(config, cast("KubeClient", object()), {}, None)
+    assert isinstance(controller, MCPController)
+    server = controller._factory()
     names = [t.name for t in await server.list_tools()]
     assert names == [t["function"]["name"] for t in READ_TOOLS + UI_TOOLS]
 
@@ -424,6 +430,7 @@ async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None
         config, kube_stub, {}, cluster_context=note
     )
     assert runtime is not None
+    assert rebuild is not None
     assert note in runtime._messages[0]["content"]
 
     from korvid.agent.setup import AgentSettings
@@ -719,6 +726,7 @@ async def test_agent_wiring_applies_the_small_profile(monkeypatch: object) -> No
     assert "one tool at a time" in runtime._messages[0]["content"]
 
     # The wizard's rebuild carries its own profile choice.
+    assert rebuild is not None
     full_runtime = rebuild(
         AgentSettings(
             provider="openai-compat",
@@ -843,3 +851,153 @@ def test_protected_context_name_glob_match(monkeypatch: pytest.MonkeyPatch) -> N
     assert main_mod._protected_context_name(config, None) == "prod-active"
     assert main_mod._protected_context_name(config, "dev") is None
     assert main_mod._protected_context_name(KorvidConfig(), "prod-eu") is None
+
+
+def _uninstall_packages(monkeypatch: pytest.MonkeyPatch, *packages: str) -> None:
+    """Simulate an install without the given third-party packages (issue #73).
+
+    The composition root probes capability with `importlib.util.find_spec`
+    (catching ImportError is unreliable: parts of an extra may arrive
+    transitively or be imported lazily), so make the probe report the
+    packages as absent.
+    """
+    import importlib.util
+
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name.partition(".")[0] in packages:
+            return None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+
+_MCP_ROOTS = ("mcp", "anyio", "starlette", "uvicorn")
+_AGENT_ROOTS = ("httpx", "keyring")
+
+
+def test_missing_mcp_extra_degrades_when_not_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the [mcp] extra and without --mcp, the TUI gets None wiring
+    (the `:mcp` command reports the feature as unavailable)."""
+    from korvid.__main__ import _build_mcp_controller
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, *_MCP_ROOTS)
+    controller = _build_mcp_controller(KorvidConfig(), cast("KubeClient", object()), {}, None)
+    assert controller is None
+
+
+def test_missing_mcp_extra_fails_actionably_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--mcp` / mcp.enabled with the extra missing must exit with an
+    install hint, never a bare ImportError traceback."""
+    from korvid.__main__ import _build_mcp_controller
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, *_MCP_ROOTS)
+    with pytest.raises(SystemExit, match=r"korvid\[mcp\]"):
+        _build_mcp_controller(
+            KorvidConfig(mcp_enabled=True), cast("KubeClient", object()), {}, None
+        )
+
+
+def test_missing_agent_extra_degrades_when_not_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the [agent] extra and without agent.provider configured,
+    the wiring is runtime-less and the retarget hook is a safe no-op."""
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
+    runtime, configurator, rebuild, retarget, provider_box, _ = _build_agent_wiring(
+        KorvidConfig(), cast("KubeClient", object()), {}
+    )
+    assert runtime is None
+    assert configurator is None
+    assert rebuild is None
+    assert provider_box == [None]
+    retarget(None, True, "ctx")  # must not raise
+
+
+def test_missing_agent_extra_fails_actionably_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """agent.provider in config.yaml with the extra missing must exit with
+    an install hint, never a bare ImportError traceback."""
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
+    with pytest.raises(SystemExit, match=r"korvid\[agent\]"):
+        _build_agent_wiring(
+            KorvidConfig(agent_enabled=True, agent_provider="ollama"),
+            cast("KubeClient", object()),
+            {},
+        )
+
+
+def test_missing_first_party_module_is_not_treated_as_missing_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a missing extra package may degrade the wiring: a broken
+    first-party module is a defect and must propagate, never be silently
+    disabled or misreported as an uninstalled extra."""
+    import builtins
+    import sys
+
+    from korvid.__main__ import _build_mcp_controller
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    for cached in list(sys.modules):
+        if cached == "korvid.mcp" or cached.startswith("korvid.mcp."):
+            monkeypatch.delitem(sys.modules, cached)
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "korvid.mcp" or name.startswith("korvid.mcp."):
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ModuleNotFoundError, match=r"korvid\.mcp"):
+        _build_mcp_controller(KorvidConfig(), cast("KubeClient", object()), {}, None)
+
+
+def test_mcp_only_install_does_not_compose_the_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An [mcp]-only install has httpx (mcp depends on it transitively) but
+    not keyring — the agent wiring must still degrade and must not load the
+    embedded-agent loop, and TokenStore's lazy keyring import must not fool
+    the capability probe."""
+    import sys
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, "keyring")  # httpx stays importable
+    for cached in list(sys.modules):
+        if cached in ("korvid.agent.runtime", "korvid.agent.profiles"):
+            monkeypatch.delitem(sys.modules, cached)
+
+    runtime, configurator, rebuild, _, provider_box, _ = _build_agent_wiring(
+        KorvidConfig(), cast("KubeClient", object()), {}
+    )
+    assert runtime is None
+    assert configurator is None
+    assert rebuild is None
+    assert provider_box == [None]
+    assert "korvid.agent.runtime" not in sys.modules
+    assert "korvid.agent.profiles" not in sys.modules

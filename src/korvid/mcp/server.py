@@ -2,7 +2,7 @@
 
 External MCP hosts (VS Code Copilot Chat, Claude Code, Cursor, Zed) connect
 over Streamable HTTP (MCP spec 2025-06-18) and drive the *running* TUI
-through the same :class:`~korvid.agent.tools.ToolExecutor` the built-in
+through the same :class:`~korvid.tools.executor.ToolExecutor` the built-in
 agent uses - navigation, filters, log panes and describe views happen on
 the screen the user is already watching.
 
@@ -36,8 +36,9 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.types import Receive, Scope, Send
 
-from korvid.agent.tools import ToolExecutor
 from korvid.core.audit import interprocess_lock
+from korvid.core.mcp import MCPControllerBase
+from korvid.tools.executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -317,7 +318,7 @@ class KorvidMCPServer:
             return
 
 
-class MCPController:
+class MCPController(MCPControllerBase):
     """Runtime lifecycle for the embedded MCP server.
 
     Backs the TUI's ``:mcp`` command and status display: start/stop the

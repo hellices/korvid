@@ -23,9 +23,9 @@ from korvid.agent.events import (
 )
 from korvid.agent.profiles import AgentProfile, build_profile
 from korvid.agent.runtime import AgentRuntime
-from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES, compact_result
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Scenario
+from korvid.tools.executor import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES, compact_result
 
 #: Runs per scenario per configuration (issue #69: report variance, not means).
 DEFAULT_REPETITIONS = 3
