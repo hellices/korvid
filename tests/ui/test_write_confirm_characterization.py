@@ -66,6 +66,27 @@ from .test_resize_flow import make_app as make_resize_app
 from .test_write_ops import Recorder, _edit_fixtures, _to_view, make_app
 from .waits import until
 
+
+async def _row_listed(pilot) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed
+    """Poll until the resource table has rendered at least one row."""
+
+    def _rendered() -> bool:
+        try:
+            table = pilot.app.query_one(ResourceTable)
+        except Exception:  # widget not mounted yet
+            return False
+        return bool(table.row_count >= 1)
+
+    await until(pilot, _rendered, label="row listed")
+
+
+async def _dialog_closed(pilot) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed
+    """Poll until the confirmation dialog has been dismissed."""
+    await until(
+        pilot, lambda: not isinstance(pilot.app.screen, ConfirmScreen), label="dialog closed"
+    )
+
+
 # --- group (a): declined confirmations make no call and write no audit ---
 
 
@@ -74,12 +95,12 @@ async def test_rollout_restart_declined_makes_no_call_and_no_audit(tmp_path: Pat
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _to_view(pilot, "deployments")
+        await _row_listed(pilot)
         await pilot.press("r")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("n")
-        await pilot.pause(0.2)
+        await _dialog_closed(pilot)
         assert rec.calls == []
         assert not audit_path.exists()
 
@@ -89,15 +110,15 @@ async def test_scale_declined_at_confirm_makes_no_call(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _to_view(pilot, "deployments")
+        await _row_listed(pilot)
         await pilot.press("S")
         await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
         await pilot.press("5")
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("n")
-        await pilot.pause(0.2)
+        await _dialog_closed(pilot)
         assert rec.calls == []
         assert not audit_path.exists()
 
@@ -111,11 +132,11 @@ async def test_edit_declined_at_confirm_makes_no_call(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _row_listed(pilot)
         await pilot.press("e")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("n")
-        await pilot.pause(0.2)
+        await _dialog_closed(pilot)
         assert rec.calls == []
         assert not audit_path.exists()
 
@@ -125,12 +146,11 @@ async def test_cordon_declined_makes_no_call(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_node_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _to_nodes(pilot)
         await pilot.press("c")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="cordon dialog")
         await pilot.press("n")
-        await pilot.pause(0.2)
+        await _dialog_closed(pilot)
         assert rec.calls == []
         assert not audit_path.exists()
 
@@ -140,7 +160,7 @@ async def test_resize_declined_at_confirm_makes_no_call(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_resize_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await _row_listed(pilot)
         await pilot.press("R")
         await until(pilot, lambda: isinstance(app.screen, ResizePrompt))
         field = app.screen.query_one("#resize-0-requests-cpu")
@@ -149,7 +169,7 @@ async def test_resize_declined_at_confirm_makes_no_call(tmp_path: Path) -> None:
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("n")
-        await pilot.pause(0.2)
+        await _dialog_closed(pilot)
         assert rec.calls == []
         assert not audit_path.exists()
 
@@ -164,7 +184,7 @@ async def test_helm_rollback_declined_makes_no_call(tmp_path: Path) -> None:
         await pilot.press("r")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
         await pilot.press("n")
-        await pilot.pause(0.2)
+        await _dialog_closed(pilot)
         assert not any(call[0] == "rollback" for call in helm.calls)
         assert not audit_path.exists()
 
@@ -185,7 +205,7 @@ async def test_approve_installplan_declined_makes_no_call(tmp_path: Path) -> Non
         await pilot.press("I")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="confirm open")
         await pilot.press("n")
-        await pilot.pause(0.2)
+        await _dialog_closed(pilot)
         assert rec.calls == []
         assert not audit_path.exists()
 
@@ -242,12 +262,11 @@ async def test_drain_declined_at_confirm_starts_no_worker(tmp_path: Path) -> Non
     audit_path = tmp_path / "audit.jsonl"
     app = make_node_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _to_nodes(pilot)
         await pilot.press("D")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="drain dialog")
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await _dialog_closed(pilot)
         assert app._drain_worker is None
         assert not any(call[0] == "cordon" for call in rec.calls)
         assert not audit_path.exists()
