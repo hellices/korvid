@@ -10,16 +10,6 @@ dependencies = [
     "kubernetes_asyncio>=32.0",
     "pyyaml>=6.0",
     "rich>=13.0",
-    "httpx>=0.27",
-    "keyring>=25.7.0",
-    # mcp 1.10.0 is the first release with mcp.server.transport_security
-    # (DNS-rebinding protection), which korvid requires at import time.
-    "mcp>=1.10,<2",
-    # Imported directly by agent/mcp_server.py, so declared directly even
-    # though mcp already pulls them in (deptry flags transitive imports).
-    "anyio>=4.5",
-    "starlette>=0.36",
-    "uvicorn>=0.30",
     "regex>=2026.7.19",
 ]
 
@@ -27,8 +17,28 @@ dependencies = [
 korvid = "korvid.__main__:main"
 
 [project.optional-dependencies]
+# Embedded AI agent: provider HTTP adapters + OS-keychain credential storage.
+agent = [
+    "httpx>=0.27",
+    "keyring>=25.7.0",
+]
+# MCP adapter: expose read + UI-drive tools to external agents.
+mcp = [
+    # mcp 1.10.0 is the first release with mcp.server.transport_security
+    # (DNS-rebinding protection), which korvid requires at import time.
+    "mcp>=1.10,<2",
+    # Imported directly by mcp/server.py, so declared directly even
+    # though mcp already pulls them in (deptry flags transitive imports).
+    "anyio>=4.5",
+    "starlette>=0.36",
+    "uvicorn>=0.30",
+]
+# Entra ID (Azure OpenAI) auth for the embedded agent.
 entra = [
     "azure-identity>=1.19",
+]
+all = [
+    "korvid[agent,mcp]",
 ]
 
 [build-system]
@@ -102,6 +112,10 @@ aks = "aks"  # Azure Kubernetes Service — not a typo of "ask"
 
 [tool.deptry]
 known_first_party = ["korvid"]
+
+[tool.deptry.per_rule_ignores]
+# The [all] extra references the project's own extras (korvid[agent,mcp]).
+DEP002 = ["korvid"]
 
 [tool.deptry.package_module_name_map]
 pyyaml = "yaml"
