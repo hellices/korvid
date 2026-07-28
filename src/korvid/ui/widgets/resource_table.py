@@ -339,6 +339,7 @@ class ResourceTable(DataTable[str | Text]):
         )
         restore = self._cursor_snapshot() if same_view else None
         if not same_view or sort != self._last_sort:
+            viewport = None
             self._active_view = view
             self.clear(columns=True)
             custom_names = tuple(column.name for column in view.columns) if view else ()
@@ -353,14 +354,27 @@ class ResourceTable(DataTable[str | Text]):
             self._last_all_namespaces = all_namespaces
             self._last_sort = sort
         else:
-            # DataTable.clear() resets the cursor to (0, 0); the snapshot
-            # above restores it after the rows are re-added.
+            # Pure data refresh (watch/metrics tick): DataTable.clear()
+            # resets the scroll offset to (0, 0), which would yank a user
+            # inspecting the right-hand columns (or a scrolled viewport)
+            # back to the top-left on every tick. Snapshot the viewport and
+            # restore it after the rows are re-added; the cursor snapshot
+            # above restores the selection.
+            viewport = (self.scroll_x, self.scroll_y)
             self.clear()
         self._render_rows(
             kind, rows, all_namespaces=all_namespaces, pattern=pattern, metrics=metrics, sort=sort
         )
         if restore is not None:
-            self._restore_cursor(*restore)
+            # A background refresh must not scroll the cursor back into
+            # view — the viewport restore below keeps the user's position.
+            self._restore_cursor(*restore, scroll=viewport is None)
+        if viewport is not None:
+            # `immediate=True` + `force=True`: the default defers via
+            # call_after_refresh, and scrollbar visibility (overflow: auto)
+            # may not be recomputed yet right after clear() — the user had
+            # already reached this offset, so restore it unconditionally.
+            self.scroll_to(*viewport, animate=False, immediate=True, force=True)
 
     def _cursor_snapshot(self) -> tuple[str, int] | None:
         """(row key, row index) under the cursor, or None on an empty table."""
@@ -369,7 +383,7 @@ class ResourceTable(DataTable[str | Text]):
         key = self.coordinate_to_cell_key(Coordinate(self.cursor_row, 0)).row_key.value
         return (key, self.cursor_row) if key is not None else None
 
-    def _restore_cursor(self, key: str, index: int) -> None:
+    def _restore_cursor(self, key: str, index: int, *, scroll: bool = True) -> None:
         """Move the cursor back to *key*; when that row is gone (deleted
         resource), clamp to the old index so the cursor stays in place
         instead of jumping to the top."""
@@ -379,7 +393,7 @@ class ResourceTable(DataTable[str | Text]):
             row = self.get_row_index(key)
         except RowDoesNotExist:
             row = min(index, self.row_count - 1)
-        self.move_cursor(row=row, animate=False, scroll=True)
+        self.move_cursor(row=row, animate=False, scroll=scroll)
 
     def _emit_row(self, obj: Summary, cells: list[str | Text], *, all_namespaces: bool) -> None:
         """Finish one row: apply the custom view (issue #45), prepend the
