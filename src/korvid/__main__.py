@@ -18,14 +18,13 @@ from typing import Any
 
 from korvid.agent.context import cluster_context_note
 from korvid.agent.mcp_server import KorvidMCPServer, MCPController, default_endpoint_path
+from korvid.agent.profiles import build_profile
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentSettings
 from korvid.agent.tools import (
     READ_TOOLS,
-    RESIZE_TOOLS,
     UI_TOOLS,
-    WRITE_TOOLS,
     ToolExecutor,
     UIBridge,
 )
@@ -250,21 +249,6 @@ async def _probe_cloud_provider(kube: KubeClient) -> ProviderInfo:
         return detect_provider([])
 
 
-def _compose_agent_tools(readonly: bool, pod_resize_supported: bool) -> list[dict[str, Any]]:
-    """Tool set for the current cluster's capabilities.
-
-    In readonly mode the model is never even told write tools exist, and
-    ``resize_pod`` is offered only when discovery found pods/resize (1.35
-    GA) — the model is never told about a tool the cluster cannot honor.
-    """
-    tools = READ_TOOLS + UI_TOOLS
-    if not readonly:
-        tools = tools + WRITE_TOOLS
-        if pod_resize_supported:
-            tools = tools + RESIZE_TOOLS
-    return tools
-
-
 def _build_agent_wiring(
     config: KorvidConfig,
     kube: KubeClient,
@@ -283,7 +267,16 @@ def _build_agent_wiring(
     """Build the initial agent runtime plus the :ai wizard's configurator/rebuild hooks."""
     token_store = TokenStore()
     ui_proxy = _UIBridgeProxy()
-    agent_tools = _compose_agent_tools(config.readonly, pod_resize_supported)
+    # Model-capability profile (issue #71): tool surface, budgets, and
+    # prompts come from one place so the initial build and every wizard
+    # rebuild stay consistent. In readonly mode the model is never even
+    # told write tools exist; resize is offered only when discovery found
+    # pods/resize (1.35 GA).
+    profile = build_profile(
+        config.agent_profile or "full",
+        readonly=config.readonly,
+        resize_supported=pod_resize_supported,
+    )
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
     ollama_options = OllamaOptions(
         num_ctx=config.agent_ollama_num_ctx,
@@ -306,7 +299,14 @@ def _build_agent_wiring(
         AgentRuntime(
             provider,
             ToolExecutor(kube, aliases, ui=ui_proxy),
-            tools=agent_tools,
+            tools=profile.tools,
+            max_iterations=profile.max_iterations,
+            max_history_chars=profile.max_history_chars,
+            max_result_chars=profile.max_result_chars,
+            max_tool_calls_per_iteration=profile.max_tool_calls_per_iteration,
+            strict_history_budget=profile.strict_history_budget,
+            system_prompt=profile.system_prompt,
+            ui_prompt=profile.ui_prompt,
             cluster_context=cluster_context,
         )
         if provider
@@ -317,8 +317,10 @@ def _build_agent_wiring(
     provider_box: list[LLMProvider | None] = [provider]
     # Per-cluster agent inputs: a `:ctx` switch replaces both, so a wizard
     # rebuild after the switch must not resurrect the old cluster's prompt
-    # note or capability-gated tool set.
-    tools_box: list[list[dict[str, Any]]] = [agent_tools]
+    # note or capability-gated tool set. The profile name rides along so a
+    # retarget recomposes the same profile's surface (issue #71).
+    profile_box: list[str] = [profile.name]
+    resize_box: list[bool] = [pod_resize_supported]
     note_box: list[str | None] = [cluster_context]
 
     def persist(settings: AgentSettings) -> None:
@@ -329,6 +331,7 @@ def _build_agent_wiring(
             base_url=settings.base_url,
             model=settings.model,
             api_key_env=settings.api_key_env,
+            profile=settings.profile,
         )
 
     configurator = ProviderConfigurator(token_store, persist)
@@ -355,10 +358,27 @@ def _build_agent_wiring(
         provider_box[0] = new_provider
         if new_provider is None:
             return None
+        # The wizard's rebuild carries its own profile choice (e.g. small
+        # when the provider is ollama), composed against the *current*
+        # cluster's capabilities and prompt note — a rebuild after a `:ctx`
+        # switch must not resurrect the old cluster's tool set.
+        new_profile = build_profile(
+            settings.profile,
+            readonly=config.readonly,
+            resize_supported=resize_box[0],
+        )
+        profile_box[0] = new_profile.name
         return AgentRuntime(
             new_provider,
             ToolExecutor(kube, aliases, ui=ui_proxy),
-            tools=tools_box[0],
+            tools=new_profile.tools,
+            max_iterations=new_profile.max_iterations,
+            max_history_chars=new_profile.max_history_chars,
+            max_result_chars=new_profile.max_result_chars,
+            max_tool_calls_per_iteration=new_profile.max_tool_calls_per_iteration,
+            strict_history_budget=new_profile.strict_history_budget,
+            system_prompt=new_profile.system_prompt,
+            ui_prompt=new_profile.ui_prompt,
             cluster_context=note_box[0],
         )
 
@@ -369,16 +389,21 @@ def _build_agent_wiring(
     ) -> None:
         """Re-arm the agent for a new cluster (issue #36, `:ctx`).
 
-        Recomposes the tool set with the new cluster's capabilities and
-        updates the live runtime's system prompt in place — conversation
-        history survives the switch, but later turns must describe the new
-        environment, not the one the runtime was built against.
+        Recomposes the active profile's tool surface with the new cluster's
+        capabilities and updates the live runtime's system prompt in place —
+        conversation history survives the switch, but later turns must
+        describe the new environment, not the one the runtime was built
+        against.
         """
-        tools = _compose_agent_tools(config.readonly, pod_resize_supported)
-        tools_box[0] = tools
+        resize_box[0] = pod_resize_supported
         note_box[0] = cluster_context
         if runtime is not None:
-            runtime.retarget(tools=tools, cluster_context=cluster_context)
+            retarget_profile = build_profile(
+                profile_box[0],
+                readonly=config.readonly,
+                resize_supported=pod_resize_supported,
+            )
+            runtime.retarget(tools=retarget_profile.tools, cluster_context=cluster_context)
 
     return agent_runtime, configurator, rebuild_agent, retarget_agent, provider_box, ui_proxy
 

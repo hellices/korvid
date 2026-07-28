@@ -877,6 +877,85 @@ def test_views_non_mapping_top_level_warned(tmp_path: Path) -> None:
     assert any(w.startswith("views") and "mapping" in w for w in config.warnings)
 
 
+def test_agent_profile_unset_is_none(tmp_path: Path) -> None:
+    """Unset stays distinguishable from an explicit `profile: full` so the
+    `:ai` wizard only suggests `small` for Ollama when the user never chose."""
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n")
+    cfg = load_config(p)
+    assert cfg.agent_profile is None
+
+
+def test_agent_profile_parsed(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  profile: small\n")
+    cfg = load_config(p)
+    assert cfg.agent_profile == "small"
+
+
+def test_agent_profile_explicit_full_is_preserved(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  profile: full\n")
+    cfg = load_config(p)
+    assert cfg.agent_profile == "full"
+
+
+def test_agent_profile_invalid_values_fall_back_to_full(tmp_path: Path) -> None:
+    """A present-but-unknown profile must not crash startup or half-configure
+    the agent — it falls back to `full` (not unset) so a typo keeps today's
+    runtime behavior and the wizard never silently turns it into `small`."""
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  profile: tiny\n")
+    cfg = load_config(p)
+    assert cfg.agent_profile == "full"
+
+
+def test_agent_profile_null_is_invalid_not_unset(tmp_path: Path) -> None:
+    """`profile: null` is a present-but-invalid value: it falls back to
+    `full` like any other, rather than becoming the unset state that would
+    let the wizard silently apply the Ollama `small` suggestion."""
+    p = tmp_path / "config.yaml"
+    p.write_text("agent:\n  provider: ollama\n  profile: null\n")
+    cfg = load_config(p)
+    assert cfg.agent_profile == "full"
+
+
+def test_save_agent_config_persists_the_small_profile(tmp_path: Path) -> None:
+    """The wizard's profile suggestion must survive a restart (issue #71):
+    saving `small` writes agent.profile so the next start rebuilds the same
+    reduced surface the user just tested."""
+    p = tmp_path / "c.yaml"
+    save_agent_config(
+        p,
+        provider="ollama",
+        auth_method="none",
+        base_url="http://localhost:11434",
+        model="qwen3:8b",
+        api_key_env=None,
+        profile="small",
+    )
+    assert load_config(p).agent_profile == "small"
+
+
+def test_save_agent_config_writes_full_explicitly(tmp_path: Path) -> None:
+    """Saving `full` writes the key: after the wizard runs the profile is a
+    deliberate choice, and an explicit `full` must survive so reopening
+    `:ai` never re-suggests `small` over it."""
+    p = tmp_path / "c.yaml"
+    p.write_text("agent:\n  provider: ollama\n  model: qwen3:8b\n  profile: small\n")
+    save_agent_config(
+        p,
+        provider="openai-compat",
+        auth_method="api_key",
+        base_url="https://api.openai.com/v1",
+        model="gpt-4o-mini",
+        api_key_env="OPENAI_API_KEY",
+        profile="full",
+    )
+    assert load_config(p).agent_profile == "full"
+    assert "profile: full" in p.read_text()
+
+
 # ---------------------------------------------------------------------------
 # Protected contexts (issue #83)
 # ---------------------------------------------------------------------------

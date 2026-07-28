@@ -18,6 +18,8 @@ class AgentSettings:
     base_url: str | None
     model: str
     api_key_env: str | None = None
+    #: Model-capability profile (issue #71): `full` or `small`.
+    profile: str = "full"
 
 
 @dataclass(frozen=True)

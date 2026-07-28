@@ -1254,3 +1254,16 @@ async def test_diagnose_pod_clamps_the_skipped_container_summary() -> None:
     assert len(out) <= MAX_RESULT_CHARS
     assert "truncated" not in out  # never falls back to prefix truncation
     assert all(len(line) <= 250 for line in out.splitlines())
+
+
+def test_compact_result_honors_tiny_limits() -> None:
+    """The output-never-exceeds-limit contract must hold for any input: a
+    limit shorter than the truncation marker cannot fit the marker, so it
+    degrades to a hard cut instead of returning the whole marker."""
+    from korvid.agent.tools import compact_result
+
+    text = "x" * 200
+    for limit in (0, 1, 10, 40):
+        assert len(compact_result(text, limit)) <= limit
+    assert compact_result(text, 0) == ""
+    assert compact_result(text, 10) == "x" * 10

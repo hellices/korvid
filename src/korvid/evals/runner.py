@@ -21,31 +21,50 @@ from korvid.agent.events import (
     ToolCallFinished,
     ToolCallStarted,
 )
+from korvid.agent.profiles import AgentProfile, build_profile
 from korvid.agent.runtime import AgentRuntime
-from korvid.agent.tools import READ_TOOLS, RESIZE_TOOLS, WRITE_TOOL_NAMES, WRITE_TOOLS
+from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES, compact_result
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Scenario
 
 #: Runs per scenario per configuration (issue #69: report variance, not means).
 DEFAULT_REPETITIONS = 3
 
-#: Schemas offered to the model. Write schemas are included so a live
-#: structured-tool provider can actually *choose* a write (making the
-#: write-attempt/safety metrics meaningful); safety comes from the executor,
-#: which has no UI bridge in eval runs, so every write call fails at dispatch.
-_EVAL_TOOLS: list[dict[str, Any]] = READ_TOOLS + WRITE_TOOLS + RESIZE_TOOLS
+
+def _eval_tools(profile: AgentProfile) -> list[dict[str, Any]]:
+    """Schemas offered to the model for one capability profile (issue #71).
+
+    Write schemas are included so a live structured-tool provider can
+    actually *choose* a write (making the write-attempt/safety metrics
+    meaningful); safety comes from the executor, which has no UI bridge in
+    eval runs, so every write call fails at dispatch. UI tools are excluded
+    for the same reason — there is no screen to drive, and the grader
+    counts names outside the read/write surface as malformed.
+    """
+    return [t for t in profile.tools if t["function"]["name"] not in UI_TOOL_NAMES]
 
 
 class _RecordingExecutor:
     """Wraps the real executor to keep full tool results for evidence grading
-    (the runtime's ToolCallFinished summary is truncated to 120 chars)."""
+    (the runtime's ToolCallFinished summary is truncated to 120 chars).
 
-    def __init__(self, executor: Any) -> None:
+    The profile's per-result cap is applied *before* recording: grading must
+    only credit evidence the model could actually have seen, so the recorded
+    content matches what reaches the conversation. `compact_result` is
+    idempotent, so the runtime re-applying the same cap changes nothing;
+    the runtime's discard notice (excess parallel calls) is appended after
+    its own compaction step, so it never re-truncates the recorded content.
+    """
+
+    def __init__(self, executor: Any, max_result_chars: int | None = None) -> None:
         self._executor = executor
+        self._max_result_chars = max_result_chars
         self.records: list[ToolRecord] = []
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         result: str = await self._executor.execute(name, arguments)
+        if self._max_result_chars is not None:
+            result = compact_result(result, self._max_result_chars)
         self.records.append(ToolRecord(name=name, arguments=dict(arguments), result=result))
         return result
 
@@ -179,10 +198,11 @@ async def _run_once(
     scenario: Scenario,
     provider_factory: Callable[[], Any],
     executor_factory: Callable[[], Any],
+    profile_name: str = "full",
 ) -> RunMetrics:
     raw_provider = provider_factory()
     try:
-        return await _drive_turn(scenario, raw_provider, executor_factory())
+        return await _drive_turn(scenario, raw_provider, executor_factory(), profile_name)
     finally:
         # Live providers own an httpx client; close it per repetition or a
         # full pack run leaks one client per run (the app calls aclose()
@@ -226,10 +246,22 @@ async def _drive_turn(
     scenario: Scenario,
     raw_provider: Any,
     raw_executor: Any,
+    profile_name: str = "full",
 ) -> RunMetrics:
     provider = _CountingProvider(raw_provider)
-    executor = _RecordingExecutor(raw_executor)
-    runtime = AgentRuntime(provider, executor, tools=_EVAL_TOOLS)
+    profile = build_profile(profile_name, readonly=False, resize_supported=True)
+    executor = _RecordingExecutor(raw_executor, max_result_chars=profile.max_result_chars)
+    runtime = AgentRuntime(
+        provider,
+        executor,
+        tools=_eval_tools(profile),
+        max_iterations=profile.max_iterations,
+        max_history_chars=profile.max_history_chars,
+        max_result_chars=profile.max_result_chars,
+        max_tool_calls_per_iteration=profile.max_tool_calls_per_iteration,
+        strict_history_budget=profile.strict_history_budget,
+        system_prompt=profile.system_prompt,
+    )
     tally = _TurnTally()
     started = time.monotonic()
     async for event in runtime.run_turn(scenario.question, scenario.screen):
@@ -292,10 +324,12 @@ async def run_scenario(
     provider_factory: Callable[[], Any],
     executor_factory: Callable[[], Any],
     repetitions: int = DEFAULT_REPETITIONS,
+    profile: str = "full",
 ) -> ScenarioReport:
     """Run one scenario ``repetitions`` times with fresh state per run."""
     runs = [
-        await _run_once(scenario, provider_factory, executor_factory) for _ in range(repetitions)
+        await _run_once(scenario, provider_factory, executor_factory, profile)
+        for _ in range(repetitions)
     ]
     return ScenarioReport(scenario_id=scenario.id, root_cause=scenario.root_cause, runs=runs)
 

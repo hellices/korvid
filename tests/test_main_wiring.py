@@ -676,6 +676,104 @@ def test_build_helm_returns_none_without_binary(monkeypatch: pytest.MonkeyPatch)
     assert _build_helm(KorvidConfig()) is None
 
 
+async def test_agent_wiring_applies_the_small_profile(monkeypatch: object) -> None:
+    """`agent.profile: small` shrinks the tool surface, budgets, and prompt
+    at the composition root (issue #71); rebuilds after the :ai wizard honor
+    the wizard's profile choice."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.profiles import SMALL_MAX_HISTORY_CHARS, SMALL_MAX_ITERATIONS
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+        agent_profile="small",
+    )
+    kube_stub = cast("Any", object())
+    runtime, _, rebuild, _, _, _ = _build_agent_wiring(
+        config, kube_stub, {}, pod_resize_supported=True
+    )
+    assert runtime is not None
+    names = [t["function"]["name"] for t in runtime._tools]
+    assert "diagnose_pod" in names
+    assert "open_logs" in names
+    assert "delete_resource" in names  # writes stay available (approval-gated)
+    assert "resize_pod" in names
+    assert "navigate" not in names
+    assert "set_filter" not in names
+    assert "drill_down" not in names
+    assert runtime._max_iterations == SMALL_MAX_ITERATIONS
+    assert runtime._max_history_chars == SMALL_MAX_HISTORY_CHARS
+    assert runtime._max_result_chars is not None
+    assert "one tool at a time" in runtime._messages[0]["content"]
+
+    # The wizard's rebuild carries its own profile choice.
+    full_runtime = rebuild(
+        AgentSettings(
+            provider="openai-compat",
+            auth_method="api_key",
+            base_url="http://localhost:9999/v1",
+            model="m",
+            api_key_env="KORVID_TEST_KEY",
+            profile="full",
+        )
+    )
+    assert full_runtime is not None
+    full_names = [t["function"]["name"] for t in full_runtime._tools]
+    assert "navigate" in full_names
+    assert full_runtime._max_iterations != SMALL_MAX_ITERATIONS
+
+
+async def test_ctx_retarget_keeps_the_small_profile_surface(monkeypatch: object) -> None:
+    """A `:ctx` switch recomposes the tool set from the *active* profile
+    (issues #36 + #71): retargeting a small-profile runtime picks up the new
+    cluster's capabilities (resize) without resurrecting the full surface or
+    resetting the small system prompt."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+        agent_profile="small",
+    )
+    kube_stub = cast("Any", object())
+    runtime, _, _, retarget, _, _ = _build_agent_wiring(
+        config, kube_stub, {}, pod_resize_supported=False
+    )
+    assert runtime is not None
+    assert "resize_pod" not in [t["function"]["name"] for t in runtime._tools]
+
+    retarget(runtime, True, "The cluster runs on AWS EKS.")
+    names = [t["function"]["name"] for t in runtime._tools]
+    assert "resize_pod" in names  # new cluster's capability picked up
+    assert "navigate" not in names  # still the small surface
+    prompt = runtime._messages[0]["content"]
+    assert "one tool at a time" in prompt  # still the small system prompt
+    assert "AWS EKS" in prompt  # new cluster's environment note
+
+
 async def test_ctx_switch_fallbacks_follow_session_namespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

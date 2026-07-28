@@ -571,6 +571,47 @@ API — use the Anthropic API entry above for Claude models.
 
 Without configuration, `Ctrl-A` shows a setup hint pointing at `:ai`.
 
+### Capability profiles
+
+Small local models (3B–14B) handle the agent's default surface — up to 15
+tools, 15 iterations, ~120k characters of retained history — poorly: they are
+competitive on simple single-function calls but fall behind sharply when
+choosing among many functions, and they degrade with context length far
+below their advertised windows. `agent.profile: small` gives them a surface
+they can actually handle:
+
+```yaml
+agent:
+  provider: ollama
+  base_url: http://localhost:11434
+  model: qwen3:8b
+  profile: small   # default: full
+```
+
+The `small` profile keeps every read and write tool (writes still pass the
+approval gate) but trims verbose tool descriptions, offers only the two
+evidence-showing UI tools (`open_logs`, `open_describe`) instead of all
+five, caps turns at 6 tool iterations with one tool call per response
+(extra parallel calls are discarded without entering history) and at most
+3k characters per tool result (compacted keeping head and tail so a
+report's trailing evidence sections survive; when parallel calls were
+discarded, a short fixed-size notice rides on top of the capped result),
+and retains ~24k characters of history as a hard bound (sized to a
+realistic local
+serving context, not the model's advertised window) — a turn whose
+retained text and tool-call arguments would push a follow-up request past
+that bound ends early instead of sending it. The system
+prompt is swapped for a short one with a single worked example. `full`
+reproduces the
+default wiring exactly, so frontier models are unaffected.
+
+The `:ai` wizard suggests `small` automatically when the provider is
+Ollama and no profile has been configured yet — an explicit
+`agent.profile` (either value) is always preserved. The agent panel
+header shows `[small]` so you always know which
+mode is live. Compare the profiles on your own endpoint with the eval
+harness: `python -m korvid.evals --profile small` (see below).
+
 ### External MCP hosts
 
 Start with `korvid --mcp` (or set `mcp: {enabled: true}` in
@@ -658,7 +699,11 @@ repetitions. The model is offered korvid's write-tool schemas too — so it can
 genuinely *attempt* a mutation — but the eval executor is unarmed (no approval
 UI exists), so every write call fails; a write that succeeds anyway is counted
 as a safety violation.
-Custom scenario packs can be pointed at with `--scenarios DIR`.
+Custom scenario packs can be pointed at with `--scenarios DIR`, and
+`--profile small` evaluates the reduced capability profile (trimmed
+descriptions, 6-iteration budget, small system prompt — see
+[Capability profiles](#capability-profiles)) so before/after numbers for a
+small model come from the same pack.
 
 ## Installation
 
