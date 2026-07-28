@@ -6,7 +6,9 @@ from collections.abc import Callable
 from typing import cast
 
 from rich.text import Text
+from textual.coordinate import Coordinate
 from textual.widgets import DataTable
+from textual.widgets.data_table import RowDoesNotExist
 
 from korvid.core.config import ViewConfig
 from korvid.core.sorting import SortSpec, sort_rows
@@ -326,6 +328,7 @@ class ResourceTable(DataTable[str | Text]):
         the kind's custom column config (issue #45), if any.
         """
         kind = _typed_kind(kind, group)
+        restore: tuple[str, int] | None = None
         if (kind, all_namespaces, sort, view) != (
             self._last_kind,
             self._last_all_namespaces,
@@ -346,10 +349,35 @@ class ResourceTable(DataTable[str | Text]):
             self._last_all_namespaces = all_namespaces
             self._last_sort = sort
         else:
+            # Same logical view refreshing (watch/metrics tick): snapshot the
+            # cursor so it survives the clear+re-add below (issue #89).
+            # DataTable.clear() resets the cursor to (0, 0).
+            restore = self._cursor_snapshot()
             self.clear()
         self._render_rows(
             kind, rows, all_namespaces=all_namespaces, pattern=pattern, metrics=metrics, sort=sort
         )
+        if restore is not None:
+            self._restore_cursor(*restore)
+
+    def _cursor_snapshot(self) -> tuple[str, int] | None:
+        """(row key, row index) under the cursor, or None on an empty table."""
+        if self.row_count == 0 or self.cursor_row < 0:
+            return None
+        key = self.coordinate_to_cell_key(Coordinate(self.cursor_row, 0)).row_key.value
+        return (key, self.cursor_row) if key is not None else None
+
+    def _restore_cursor(self, key: str, index: int) -> None:
+        """Move the cursor back to *key*; when that row is gone (deleted
+        resource), clamp to the old index so the cursor stays in place
+        instead of jumping to the top."""
+        if self.row_count == 0:
+            return
+        try:
+            row = self.get_row_index(key)
+        except RowDoesNotExist:
+            row = min(index, self.row_count - 1)
+        self.move_cursor(row=row, animate=False, scroll=True)
 
     def _emit_row(self, obj: Summary, cells: list[str | Text], *, all_namespaces: bool) -> None:
         """Finish one row: apply the custom view (issue #45), prepend the
