@@ -960,6 +960,47 @@ class KorvidApp(App[None]):
     def _focused_table(self) -> ResourceTable:
         return self.query_one(f"#{self._pane.table_id}", ResourceTable)
 
+    # -- Typed root-widget accessors (issue #91 U2): these widgets are
+    # composed once and stay mounted for the app's lifetime, so the hot
+    # call sites read them through one named property each instead of
+    # repeating raw `query_one(Class)` lookups. The accessors raise
+    # `NoMatches` exactly like a raw query, so the intentional
+    # startup/shutdown guards around them keep working unchanged.
+
+    @property
+    def _log_pane(self) -> LogPane:
+        return self.query_one(LogPane)
+
+    @property
+    def _describe_pane(self) -> DescribePane:
+        return self.query_one(DescribePane)
+
+    @property
+    def _command_bar(self) -> CommandBar:
+        return self.query_one(CommandBar)
+
+    @property
+    def _filter_bar(self) -> FilterBar:
+        return self.query_one(FilterBar)
+
+    @property
+    def _namespace_picker(self) -> NamespacePicker:
+        return self.query_one(NamespacePicker)
+
+    @property
+    def _hint_strip(self) -> HintStrip:
+        return self.query_one(HintStrip)
+
+    @property
+    def _status_bar(self) -> StatusBar:
+        return self.query_one(StatusBar)
+
+    @property
+    def _agent_panel(self) -> AgentPanel:
+        """Composed only when the agent is available; raises `NoMatches`
+        otherwise, matching the guarded call sites' expectations."""
+        return self.query_one(AgentPanel)
+
     def compose(self) -> ComposeResult:
         # Footer is docked top (see CSS): the key legend replaces the stock
         # Header so shortcuts are visible where users look first.
@@ -1025,14 +1066,14 @@ class KorvidApp(App[None]):
         self.query_one("#pane-0", ResourceTable).focus()
         self._apply_keybindings()
         # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
-        command_bar = self.query_one(CommandBar)
+        command_bar = self._command_bar
         command_bar.known = lambda a: self._canonical_kind(a) if a in self.aliases else None
         command_bar.command_words = sorted(
             {*self.aliases, "ns", "namespaces", "ctx", "context", "contexts", "q", "quit"}
         )
         # Seed session-scoped log display settings from config (logs.wrap /
         # logs.timestamps); the w/t keys toggle them from there.
-        log_pane = self.query_one(LogPane)
+        log_pane = self._log_pane
         log_pane.wrap_lines = self.config.log_wrap
         log_pane.show_timestamps = self.config.log_timestamps
         if self._forwards is not None:
@@ -1047,7 +1088,7 @@ class KorvidApp(App[None]):
 
             async def _fetch_contexts() -> None:
                 names, _ = await asyncio.to_thread(list_contexts)
-                self.query_one(CommandBar).context_words = names
+                self._command_bar.context_words = names
 
             self._ctx_prefetch_task = asyncio.create_task(_fetch_contexts())
         for warning in self.config.warnings:
@@ -1117,7 +1158,7 @@ class KorvidApp(App[None]):
     def on_aliases_updated(self) -> None:
         """Refresh command autocompletion after background resource discovery."""
         try:
-            command_bar = self.query_one(CommandBar)
+            command_bar = self._command_bar
         except Exception:
             return  # app is shutting down or not composed yet
         command_bar.command_words = sorted(
@@ -1139,7 +1180,7 @@ class KorvidApp(App[None]):
             except Exception:
                 logger.debug("namespace prefetch for completion failed", exc_info=True)
                 return
-            self.query_one(CommandBar).namespace_words = namespaces
+            self._command_bar.namespace_words = namespaces
 
         self._ns_prefetch_task = asyncio.create_task(_fetch())
 
@@ -1199,7 +1240,7 @@ class KorvidApp(App[None]):
         # else (view switch, table now empty) must not leave a stale hint.
         if pane is self._pane and (kind != "pods" or table.row_count == 0):
             with contextlib.suppress(NoMatches):  # shutdown race, same as the table guard
-                self.query_one(HintStrip).clear_hint()
+                self._hint_strip.clear_hint()
 
     def on_show_error(self, message: ShowError) -> None:
         self.notify(message.detail, title=message.title, severity="error")
@@ -1231,23 +1272,23 @@ class KorvidApp(App[None]):
 
     def action_open_command(self) -> None:
         # Dismiss the filter bar first so no invisible filter stays active.
-        self.query_one(FilterBar).dismiss_bar()
-        self.query_one(CommandBar).open()
+        self._filter_bar.dismiss_bar()
+        self._command_bar.open()
 
     def action_open_filter(self) -> None:
         # When the describe pane is open, / searches inside it (issue #42).
-        describe_pane = self.query_one(DescribePane)
+        describe_pane = self._describe_pane
         if describe_pane.display:
             describe_pane.open_search()
             return
         # When the log pane is open, / opens the pane's inline search instead.
-        log_pane = self.query_one(LogPane)
+        log_pane = self._log_pane
         if log_pane.display:
             log_pane.open_search()
             return
         # Dismiss the command bar first to enforce mutual exclusion.
-        self.query_one(CommandBar).dismiss_bar()
-        self.query_one(FilterBar).open()
+        self._command_bar.dismiss_bar()
+        self._filter_bar.open()
 
     def on_filter_command(self, message: FilterCommand) -> None:
         self.filter_pattern = message.pattern
@@ -1338,7 +1379,7 @@ class KorvidApp(App[None]):
         # A describe pane covering the table would show a stale manifest
         # over the new view — dismiss it on any navigation, even when the
         # requested kind/scope already matches.
-        self.query_one(DescribePane).hide()
+        self._describe_pane.hide()
         new_kind = view if view is not None else pane.kind
         new_scope = namespace if namespace is not None else pane.scope
         if new_kind != pane.kind or new_scope != pane.scope:
@@ -1464,8 +1505,8 @@ class KorvidApp(App[None]):
         if not namespaces:
             self.notify("No namespaces visible (check RBAC)", severity="warning")
             return
-        self.query_one(CommandBar).namespace_words = namespaces
-        self.query_one(NamespacePicker).open(namespaces)
+        self._command_bar.namespace_words = namespaces
+        self._namespace_picker.open(namespaces)
 
     def _ctx_switch_crossed(self, epoch: int) -> bool:
         """True when a :ctx switch started or completed since *epoch* was taken."""
@@ -1497,8 +1538,8 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             fallback = list(self._fallback_namespaces)
-            self.query_one(CommandBar).namespace_words = fallback
-            self.query_one(NamespacePicker).open(fallback)
+            self._command_bar.namespace_words = fallback
+            self._namespace_picker.open(fallback)
             return
         msg = explain_api_error(exc.status, exc.reason, "namespaces", None)
         if exc.status == 403:
@@ -1525,7 +1566,7 @@ class KorvidApp(App[None]):
         if not names:
             self.notify("No contexts found in kubeconfig", severity="warning")
             return
-        self.query_one(CommandBar).context_words = names
+        self._command_bar.context_words = names
         # Sessions started from the kubeconfig current-context have no
         # explicit config value — fall back to what the kubeconfig reports.
         current = self.config.kube_context or active
@@ -1670,7 +1711,7 @@ class KorvidApp(App[None]):
             # The inline namespace picker is not a screen: its old-cluster
             # options would survive teardown and a later selection would
             # navigate the new cluster to a namespace picked from the old.
-            if self.query_one(NamespacePicker).display:
+            if self._namespace_picker.display:
                 return "Close the namespace picker before switching contexts"
         except NoMatches:  # widget tree not composed (shutdown/startup)
             pass
@@ -1706,7 +1747,7 @@ class KorvidApp(App[None]):
         rows, breadcrumbs, or hints into the new one.
         """
         await self._close_log_pane()
-        self.query_one(DescribePane).hide()
+        self._describe_pane.hide()
         # Every pane's kind/scope/filter/drill describes the old cluster: a
         # surviving second pane would keep stale-but-actionable rows on
         # screen, so the switch collapses the split back to a single view.
@@ -1720,7 +1761,7 @@ class KorvidApp(App[None]):
             self._ns_prefetch_task = None
         # Completions that already loaded are old-cluster names — drop them
         # now so they aren't offered while (or if) the new prefetch fails.
-        self.query_one(CommandBar).namespace_words = []
+        self._command_bar.namespace_words = []
         if self._metrics is not None:
             await self._metrics.stop()
             # The poller is gone: drop the served-target cache too, or a
@@ -1852,7 +1893,7 @@ class KorvidApp(App[None]):
             return
         try:
             if self.current_kind != "pods" or event.row_key is None:
-                self.query_one(HintStrip).clear_hint()
+                self._hint_strip.clear_hint()
                 return
             self._show_hint_for_row(str(event.row_key.value))
         except NoMatches:
@@ -1863,7 +1904,7 @@ class KorvidApp(App[None]):
     def _show_hint_for_row(self, row_key: str) -> None:
         """Render the hint for one pod row: cached event line when fresh,
         otherwise the status-derived hint plus a background event fetch."""
-        strip = self.query_one(HintStrip)
+        strip = self._hint_strip
         summary = self._find_pod_summary(row_key)
         if summary is None or not _pod_needs_hint(summary):
             strip.clear_hint()
@@ -1921,7 +1962,7 @@ class KorvidApp(App[None]):
         showing deployments or a healthy pod.
         """
         try:
-            strip = self.query_one(HintStrip)
+            strip = self._hint_strip
         except NoMatches:  # focus restored during shutdown/teardown
             return
         row_key = self._cursor_row_key() if self.current_kind == "pods" else None
@@ -2004,12 +2045,12 @@ class KorvidApp(App[None]):
             return
         self._schedule_hint_refresh(row_key)
         if not _pod_needs_hint(fresh):
-            self.query_one(HintStrip).clear_hint()
+            self._hint_strip.clear_hint()
             return
         if fresh.trouble or line:
-            self.query_one(HintStrip).show_trouble(fresh.trouble, event=line)
+            self._hint_strip.show_trouble(fresh.trouble, event=line)
         else:
-            self.query_one(HintStrip).clear_hint()
+            self._hint_strip.clear_hint()
 
     def _store_hint_event(
         self, cache_key: str, line: str | None, event_ts: datetime | None
@@ -2474,7 +2515,7 @@ class KorvidApp(App[None]):
         # explicit choice — reopening :ai must preserve it.
         self._configured_agent_profile = settings.profile
         self._refresh_status()
-        panel = self.query_one(AgentPanel)
+        panel = self._agent_panel
         agent_input = panel.query_one("#agent-input")
         # Always re-enable: the hint may have disabled it while the panel was
         # open earlier; only focus/header rendering depends on visibility.
@@ -3948,12 +3989,12 @@ class KorvidApp(App[None]):
             return
         if event.key != "escape":
             return
-        filter_bar = self.query_one(FilterBar)
-        command_bar = self.query_one(CommandBar)
-        namespace_picker = self.query_one(NamespacePicker)
+        filter_bar = self._filter_bar
+        command_bar = self._command_bar
+        namespace_picker = self._namespace_picker
         if filter_bar.display or command_bar.display or namespace_picker.display:
             return  # bars and pickers own Escape while open
-        describe_pane = self.query_one(DescribePane)
+        describe_pane = self._describe_pane
         if describe_pane.display:
             # An active pane search (input open or submitted hits) consumes
             # Escape first; a second Escape closes the pane itself.
@@ -3961,7 +4002,7 @@ class KorvidApp(App[None]):
                 describe_pane.hide()
             event.stop()
             return
-        log_pane = self.query_one(LogPane)
+        log_pane = self._log_pane
         if log_pane.display:
             await self._close_log_pane()
             event.stop()
@@ -4149,7 +4190,7 @@ class KorvidApp(App[None]):
             return
         epoch = self._ctx_epoch
 
-        log_pane = self.query_one(LogPane)
+        log_pane = self._log_pane
         if log_pane.display and self._log_pane_mode != "l":
             # L (multi-stream) and p (previous) modes don't accumulate.
             await self._close_log_pane()
@@ -4235,7 +4276,7 @@ class KorvidApp(App[None]):
             self.notify("No pods to stream", severity="warning")
             return
 
-        if self.query_one(LogPane).display:
+        if self._log_pane.display:
             await self._close_log_pane()
 
         self._log_pane_mode = "L"
@@ -6577,7 +6618,7 @@ class KorvidApp(App[None]):
         self._current_log_force_prefix = force_prefix
         self._log_pane_owner = self._pane
 
-        log_pane = self.query_one(LogPane)
+        log_pane = self._log_pane
         self._log_buffer = LogBuffer(self._log_buffer_max_lines)
         log_pane.open(sources, force_prefix=force_prefix, log_buffer=self._log_buffer)
 
@@ -6626,7 +6667,7 @@ class KorvidApp(App[None]):
         ``_ReplayFilter`` drops the ones already displayed so reconnects
         don't duplicate output.
         """
-        log_pane = self.query_one(LogPane)
+        log_pane = self._log_pane
         current = asyncio.current_task()
         consecutive_failures = 0
         replay = _ReplayFilter()
@@ -6699,7 +6740,7 @@ class KorvidApp(App[None]):
         stream_logs: Callable[..., AsyncIterator[LogLine]],
     ) -> None:
         """One-shot previous-container-log stream (follow=False, no reconnect)."""
-        log_pane = self.query_one(LogPane)
+        log_pane = self._log_pane
         current = asyncio.current_task()
         try:
             async for line in stream_logs(namespace, pod, container, previous=True, follow=False):
@@ -6781,7 +6822,7 @@ class KorvidApp(App[None]):
         self._log_pane_mode = ""
         self._log_pane_owner = None
         with contextlib.suppress(Exception):
-            self.query_one(LogPane).close()
+            self._log_pane.close()
 
     def _refresh_status(self) -> None:
         # Availability comes from the actual runtime, not the config flag —
@@ -6791,7 +6832,7 @@ class KorvidApp(App[None]):
         if self._agent_runtime is not None and self._agent_blocked_in_protected():
             label = "AI blocked"
         mcp_label = self._mcp.status() if self._mcp is not None else ""
-        self.query_one(StatusBar).update_status(
+        self._status_bar.update_status(
             self.config.kube_context,
             self.current_scope,
             label,
@@ -6852,7 +6893,7 @@ class KorvidApp(App[None]):
         overflow), so every toggle must funnel through here instead of
         clearing panels ad hoc.
         """
-        log_pane = self.query_one(LogPane)
+        log_pane = self._log_pane
         if not log_pane.display:
             return
         toggle(log_pane)
@@ -6861,7 +6902,7 @@ class KorvidApp(App[None]):
 
     def action_log_save(self) -> None:
         """Save the current log buffer to a generated file (``ctrl+s``)."""
-        log_pane = self.query_one(LogPane)
+        log_pane = self._log_pane
         if not log_pane.display or self._log_buffer is None:
             return
         lines = self._log_buffer.lines()
@@ -6877,7 +6918,7 @@ class KorvidApp(App[None]):
 
     async def action_log_previous(self) -> None:
         """Re-open the same streams in previous-container-log mode (``p`` key)."""
-        log_pane = self.query_one(LogPane)
+        log_pane = self._log_pane
         if not log_pane.display:
             return
         if not self._current_log_triples:
@@ -6899,21 +6940,21 @@ class KorvidApp(App[None]):
 
     def action_log_search_next(self) -> None:
         """Advance to the next search hit (``n`` key)."""
-        describe_pane = self.query_one(DescribePane)
+        describe_pane = self._describe_pane
         if describe_pane.display:
             describe_pane.search_next()
             return
-        log_pane = self.query_one(LogPane)
+        log_pane = self._log_pane
         if log_pane.display:
             log_pane.search_next()
 
     def action_log_search_prev(self) -> None:
         """Previous search hit in an open pane; sort by name otherwise (``N``)."""
-        describe_pane = self.query_one(DescribePane)
+        describe_pane = self._describe_pane
         if describe_pane.display:
             describe_pane.search_prev()
             return
-        log_pane = self.query_one(LogPane)
+        log_pane = self._log_pane
         if log_pane.display:
             log_pane.search_prev()
             return
@@ -7002,7 +7043,7 @@ class KorvidApp(App[None]):
         """Toggle the agent chat panel; show setup hint when unconfigured."""
         if not self._agent_available:
             return
-        panel = self.query_one(AgentPanel)
+        panel = self._agent_panel
         if panel.display:
             panel.display = False
             self._focused_table().focus()
@@ -7045,7 +7086,7 @@ class KorvidApp(App[None]):
             return
         if self._agent_task is not None and not self._agent_task.done():
             return
-        panel = self.query_one(AgentPanel)
+        panel = self._agent_panel
         panel.begin_turn(message.text)
         self._agent_task = asyncio.create_task(self._run_agent_turn(message.text))
 
@@ -7077,7 +7118,7 @@ class KorvidApp(App[None]):
         runtime = self._agent_runtime
         if runtime is None:
             return
-        panel = self.query_one(AgentPanel)
+        panel = self._agent_panel
         screen_context = self._screen_context()
         if self._ctx_switch_note is not None:
             # One-shot: the conversation only needs to learn about the
@@ -7672,7 +7713,7 @@ class KorvidApp(App[None]):
             manifest = mask_secret_manifest(manifest)
         footer = self._provider_footer(manifest)
         if share:
-            self.query_one(DescribePane).show(title, manifest, events, footer_note=footer)
+            self._describe_pane.show(title, manifest, events, footer_note=footer)
         else:
             await self.push_screen(DescribeScreen(title, manifest, events, footer_note=footer))
 
