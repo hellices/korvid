@@ -37,6 +37,7 @@ from starlette.routing import Mount
 from starlette.types import Receive, Scope, Send
 
 from korvid.core.audit import interprocess_lock
+from korvid.core.mcp import MCPControllerBase
 from korvid.tools.executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -317,7 +318,7 @@ class KorvidMCPServer:
             return
 
 
-class MCPController:
+class MCPController(MCPControllerBase):
     """Runtime lifecycle for the embedded MCP server.
 
     Backs the TUI's ``:mcp`` command and status display: start/stop the

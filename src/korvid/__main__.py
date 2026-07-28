@@ -14,12 +14,9 @@ import contextlib
 import dataclasses
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from korvid.agent.context import cluster_context_note
-from korvid.agent.profiles import build_profile
-from korvid.agent.provider import LLMProvider
-from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
@@ -29,6 +26,7 @@ from korvid.core.config import (
     load_config,
     save_agent_config,
 )
+from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import ForwardRegistry
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -55,9 +53,15 @@ from korvid.ui.app import (
     ContextSwitchResult,
     EventsFetcher,
     KorvidApp,
-    MCPControllerLike,
 )
 from korvid.ui.widgets.resource_table import sanitize_views
+
+if TYPE_CHECKING:
+    # Embedded-agent types appear only in annotations here: an MCP-only or
+    # base install must never import the agent runtime or provider ABC at
+    # startup (issue #73 acceptance criterion).
+    from korvid.agent.provider import LLMProvider
+    from korvid.agent.runtime import AgentRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +77,25 @@ _AGENT_INSTALL_HINT = (
     "dependencies are not installed — install them with: pip install 'korvid[agent]'"
 )
 
+#: Top-level packages each extra provides. A ModuleNotFoundError is only
+#: treated as "extra not installed" when its missing module is rooted in
+#: one of these; anything else (a missing first-party module, a broken
+#: transitive dependency) is a defect and must propagate.
+_MCP_EXTRA_ROOTS = frozenset({"mcp", "anyio", "starlette", "uvicorn"})
+_AGENT_EXTRA_ROOTS = frozenset({"httpx", "keyring"})
+
+
+def _is_missing_extra(exc: ModuleNotFoundError, extra_roots: frozenset[str]) -> bool:
+    """True when the import failed because the given extra is not installed."""
+    return (exc.name or "").partition(".")[0] in extra_roots
+
 
 def _build_mcp_controller(
     config: KorvidConfig,
     kube: KubeClient,
     aliases: dict[str, ResourceMeta],
     ui: UIBridge | None,
-) -> MCPControllerLike | None:
+) -> MCPControllerBase | None:
     """Import and wire the MCP adapter only when its extra is installed.
 
     Base installations get None (the `:mcp` command reports the feature as
@@ -92,6 +108,8 @@ def _build_mcp_controller(
     try:
         from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
     except ModuleNotFoundError as exc:
+        if not _is_missing_extra(exc, _MCP_EXTRA_ROOTS):
+            raise
         if config.mcp_enabled:
             raise SystemExit(f"korvid: {_MCP_INSTALL_HINT}") from exc
         logger.info("MCP adapter not installed; :mcp disabled (%s)", exc)
@@ -273,6 +291,35 @@ async def _probe_cloud_provider(kube: KubeClient) -> ProviderInfo:
         return detect_provider([])
 
 
+def _agent_unavailable_wiring(
+    config: KorvidConfig, exc: ModuleNotFoundError, ui_proxy: _UIBridgeProxy
+) -> tuple[
+    None,
+    None,
+    None,
+    Callable[[AgentRuntime | None, bool, str | None], None],
+    list[LLMProvider | None],
+    _UIBridgeProxy,
+]:
+    """Runtime-less wiring for installs without the [agent] extra.
+
+    An explicitly enabled agent fails with an actionable install hint; an
+    unrequested one degrades to a wiring the app renders as "unavailable".
+    """
+    if config.agent_enabled:
+        raise SystemExit(f"korvid: {_AGENT_INSTALL_HINT}") from exc
+    logger.info("embedded-agent providers not installed; :ai disabled (%s)", exc)
+
+    def _retarget_noop(
+        runtime: AgentRuntime | None,
+        pod_resize_supported: bool,
+        cluster_context: str | None,
+    ) -> None:
+        return None
+
+    return None, None, None, _retarget_noop, [None], ui_proxy
+
+
 def _build_agent_wiring(
     config: KorvidConfig,
     kube: KubeClient,
@@ -297,23 +344,19 @@ def _build_agent_wiring(
     """
     ui_proxy = _UIBridgeProxy()
     try:
+        # Deferred with the provider stack: the embedded-agent loop is only
+        # composed when this wiring is actually built (issue #73 requires
+        # MCP-only startups not to import AgentRuntime at all).
+        from korvid.agent.profiles import build_profile
+        from korvid.agent.runtime import AgentRuntime
         from korvid.providers.configurator import ProviderConfigurator
         from korvid.providers.ollama import OllamaOptions
         from korvid.providers.registry import create_provider
         from korvid.providers.token_store import TokenStore
     except ModuleNotFoundError as exc:
-        if config.agent_enabled:
-            raise SystemExit(f"korvid: {_AGENT_INSTALL_HINT}") from exc
-        logger.info("embedded-agent providers not installed; :ai disabled (%s)", exc)
-
-        def _retarget_noop(
-            runtime: AgentRuntime | None,
-            pod_resize_supported: bool,
-            cluster_context: str | None,
-        ) -> None:
-            return None
-
-        return None, None, None, _retarget_noop, [None], ui_proxy
+        if not _is_missing_extra(exc, _AGENT_EXTRA_ROOTS):
+            raise
+        return _agent_unavailable_wiring(config, exc, ui_proxy)
 
     token_store = TokenStore()
     # Model-capability profile (issue #71): tool surface, budgets, and
@@ -478,7 +521,7 @@ def _load_startup_config(readonly: bool, mcp: bool = False) -> KorvidConfig:
     return config
 
 
-async def _start_mcp_if_enabled(config: KorvidConfig, controller: MCPControllerLike | None) -> None:
+async def _start_mcp_if_enabled(config: KorvidConfig, controller: MCPControllerBase | None) -> None:
     if not config.mcp_enabled or controller is None:
         return
     startup_msg = await controller.start()
@@ -487,7 +530,7 @@ async def _start_mcp_if_enabled(config: KorvidConfig, controller: MCPControllerL
 
 
 async def _teardown(
-    controller: MCPControllerLike | None,
+    controller: MCPControllerBase | None,
     discovery_task: asyncio.Task[None],
     provider: LLMProvider | None,
     kube: KubeClient,
@@ -742,6 +785,9 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         agent_model_name=config.agent_model,
         agent_configurator=configurator,
         rebuild_agent=rebuild_agent,
+        # The wiring returns no configurator only when the [agent] extra is
+        # absent — the app then hides the agent panel and its commands.
+        agent_available=configurator is not None,
         mcp=mcp_controller,
         metrics=MetricsPoller(kube.list_pod_metrics),
         pod_resize_supported=pod_resize_supported,

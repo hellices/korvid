@@ -20,7 +20,13 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any, ClassVar, Concatenate, Literal, ParamSpec, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar
+
+if TYPE_CHECKING:
+    # Annotation-only: the base TUI must not import the embedded-agent
+    # runtime at startup (issue #73) — the composition root injects it
+    # only when the [agent] extra is installed and wired.
+    from korvid.agent.runtime import AgentRuntime
 
 import yaml
 from rich.text import Text
@@ -35,7 +41,6 @@ from textual.widgets.data_table import CellDoesNotExist
 from textual.worker import Worker, get_current_worker
 
 from korvid.agent.events import AgentError
-from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig, ViewConfig
@@ -51,6 +56,7 @@ from korvid.core.filters import ResourceFilter, parse_filter
 from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
+from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import (
     ForwardRecord,
     ForwardRegistry,
@@ -175,37 +181,6 @@ _APPROVAL_TIMEOUT = 120.0
 #: endpoint must never hang a binding handler or an agent turn. On timeout
 #: the check fails open (writes stay approval-gated and audited).
 _PERMISSION_CHECK_TIMEOUT = 10.0
-
-
-class MCPControllerLike(Protocol):
-    """Structural contract for the MCP controller (`korvid.mcp.server`).
-
-    The UI drives MCP through this protocol so the base TUI never imports
-    the optional MCP adapter or its third-party dependencies (issue #73);
-    the concrete controller is injected by the composition root only when
-    the `mcp` extra is installed.
-    """
-
-    @property
-    def running(self) -> bool:
-        """True while the MCP server is serving."""
-        ...
-
-    def status(self) -> str:
-        """One-line human-readable server state for the status bar."""
-        ...
-
-    async def start(self) -> str:
-        """Start the server; returns a user-facing status message."""
-        ...
-
-    async def stop(self) -> str:
-        """Stop the server; returns a user-facing status message."""
-        ...
-
-    async def shutdown(self) -> asyncio.Task[None] | None:
-        """Begin a graceful stop; returns any still-pending teardown task."""
-        ...
 
 
 def _event_timestamp(event: dict[str, Any]) -> datetime | None:
@@ -658,11 +633,12 @@ class KorvidApp(App[None]):
         agent_model_name: str | None = None,
         agent_configurator: AgentConfigurator | None = None,
         rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None = None,
+        agent_available: bool = True,
         write_ops: WriteOps | None = None,
         audit: AuditLog | None = None,
         check_permission: Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
         | None = None,
-        mcp: MCPControllerLike | None = None,
+        mcp: MCPControllerBase | None = None,
         edit_text: Callable[[str], Awaitable[str | None]] | None = None,
         metrics: MetricsPoller | None = None,
         pod_resize_supported: bool = False,
@@ -789,6 +765,9 @@ class KorvidApp(App[None]):
         self._agent_model_name = agent_model_name
         self._agent_configurator = agent_configurator
         self._rebuild_agent = rebuild_agent
+        #: False when the [agent] extra is absent (issue #73): the agent
+        #: panel is not mounted and :ai/:model/Ctrl-A are not offered.
+        self._agent_available = agent_available
         self._agent_settings: AgentSettings | None = None
         #: capability profile of the live runtime (issue #71); shown in the
         #: agent panel header so users know which mode the agent runs in.
@@ -880,9 +859,10 @@ class KorvidApp(App[None]):
         yield empty_state
         yield LogPane()
         yield DescribePane()
-        agent_panel = AgentPanel()
-        agent_panel.display = False
-        yield agent_panel
+        if self._agent_available:
+            agent_panel = AgentPanel()
+            agent_panel.display = False
+            yield agent_panel
         yield CommandBar()
         yield FilterBar()
         yield NamespacePicker()
@@ -2104,10 +2084,10 @@ class KorvidApp(App[None]):
     def on_unknown_command(self, message: UnknownCommand) -> None:
         parts = message.text.strip().split()
         head = parts[0] if parts else ""
-        if head in {"ai", "agent"}:
+        if head in {"ai", "agent"} and self._agent_available:
             self._open_agent_setup()
             return
-        if head == "model":
+        if head == "model" and self._agent_available:
             self._handle_model_command(parts[1:])
             return
         if head == "mcp":
@@ -6649,8 +6629,14 @@ class KorvidApp(App[None]):
         would let the user's next y/Enter approve an unexpected write."""
         return self._agent_panel_expanded() and len(self.screen_stack) == 1
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Hide agent actions entirely when the [agent] extra is absent."""
+        return not (action == "toggle_agent" and not self._agent_available)
+
     def action_toggle_agent(self) -> None:
         """Toggle the agent chat panel; show setup hint when unconfigured."""
+        if not self._agent_available:
+            return
         panel = self.query_one(AgentPanel)
         if panel.display:
             panel.display = False

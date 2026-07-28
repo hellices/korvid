@@ -853,20 +853,39 @@ def test_protected_context_name_glob_match(monkeypatch: pytest.MonkeyPatch) -> N
     assert main_mod._protected_context_name(KorvidConfig(), "prod-eu") is None
 
 
-def _block_imports(monkeypatch: pytest.MonkeyPatch, *prefixes: str) -> None:
-    """Make importing the given module trees raise ModuleNotFoundError,
-    simulating a base install without the optional extra (issue #73)."""
+def _uninstall_extra(
+    monkeypatch: pytest.MonkeyPatch, roots: tuple[str, ...], first_party: str
+) -> None:
+    """Simulate a base install without an optional extra (issue #73).
+
+    Blocks the extra's third-party root packages (the composition root only
+    treats those as "extra missing") and evicts the cached first-party
+    consumer modules so their imports re-execute and actually hit the block.
+    """
     import builtins
+    import sys
+
+    for cached in list(sys.modules):
+        if cached == first_party or cached.startswith(first_party + "."):
+            monkeypatch.delitem(sys.modules, cached)
+    for root in roots:
+        for cached in list(sys.modules):
+            if cached == root or cached.startswith(root + "."):
+                monkeypatch.delitem(sys.modules, cached)
 
     real_import = builtins.__import__
 
     def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        for prefix in prefixes:
-            if name == prefix or name.startswith(prefix + "."):
-                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        root = name.partition(".")[0]
+        if root in roots:
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+_MCP_ROOTS = ("mcp", "anyio", "starlette", "uvicorn")
+_AGENT_ROOTS = ("httpx", "keyring")
 
 
 def test_missing_mcp_extra_degrades_when_not_requested(
@@ -878,7 +897,7 @@ def test_missing_mcp_extra_degrades_when_not_requested(
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
-    _block_imports(monkeypatch, "korvid.mcp")
+    _uninstall_extra(monkeypatch, _MCP_ROOTS, "korvid.mcp")
     controller = _build_mcp_controller(KorvidConfig(), cast("KubeClient", object()), {}, None)
     assert controller is None
 
@@ -892,7 +911,7 @@ def test_missing_mcp_extra_fails_actionably_when_requested(
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
-    _block_imports(monkeypatch, "korvid.mcp")
+    _uninstall_extra(monkeypatch, _MCP_ROOTS, "korvid.mcp")
     with pytest.raises(SystemExit, match=r"korvid\[mcp\]"):
         _build_mcp_controller(
             KorvidConfig(mcp_enabled=True), cast("KubeClient", object()), {}, None
@@ -908,7 +927,7 @@ def test_missing_agent_extra_degrades_when_not_enabled(
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
-    _block_imports(monkeypatch, "korvid.providers")
+    _uninstall_extra(monkeypatch, _AGENT_ROOTS, "korvid.providers")
     runtime, configurator, rebuild, retarget, provider_box, _ = _build_agent_wiring(
         KorvidConfig(), cast("KubeClient", object()), {}
     )
@@ -928,10 +947,39 @@ def test_missing_agent_extra_fails_actionably_when_enabled(
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
-    _block_imports(monkeypatch, "korvid.providers")
+    _uninstall_extra(monkeypatch, _AGENT_ROOTS, "korvid.providers")
     with pytest.raises(SystemExit, match=r"korvid\[agent\]"):
         _build_agent_wiring(
             KorvidConfig(agent_enabled=True, agent_provider="ollama"),
             cast("KubeClient", object()),
             {},
         )
+
+
+def test_missing_first_party_module_is_not_treated_as_missing_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a missing extra package may degrade the wiring: a broken
+    first-party module is a defect and must propagate, never be silently
+    disabled or misreported as an uninstalled extra."""
+    import builtins
+    import sys
+
+    from korvid.__main__ import _build_mcp_controller
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    for cached in list(sys.modules):
+        if cached == "korvid.mcp" or cached.startswith("korvid.mcp."):
+            monkeypatch.delitem(sys.modules, cached)
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "korvid.mcp" or name.startswith("korvid.mcp."):
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ModuleNotFoundError, match=r"korvid\.mcp"):
+        _build_mcp_controller(KorvidConfig(), cast("KubeClient", object()), {}, None)

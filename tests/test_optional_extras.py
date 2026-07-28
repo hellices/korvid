@@ -14,7 +14,7 @@ import sys
 import pytest
 
 #: Top-level third-party modules that only the optional extras may pull in.
-_MCP_MODULES = ("mcp", "starlette", "uvicorn")
+_MCP_MODULES = ("mcp", "anyio", "starlette", "uvicorn")
 _AGENT_MODULES = ("httpx", "keyring")
 
 _PROBE = """
@@ -55,9 +55,28 @@ def test_mcp_adapter_is_the_only_mcp_stack_consumer() -> None:
     probe = (
         "import sys\n"
         "import korvid.mcp.server  # noqa: F401\n"
-        "missing = [m for m in ('mcp', 'starlette', 'uvicorn') if m not in sys.modules]\n"
+        "missing = [m for m in ('mcp', 'anyio', 'starlette', 'uvicorn') if m not in sys.modules]\n"
         "if missing:\n"
         "    raise SystemExit(f'expected the MCP stack to load: {missing}')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("module", ["korvid.__main__", "korvid.ui.app"])
+def test_base_import_does_not_load_the_agent_loop(module: str) -> None:
+    """MCP-only/base startups must not import the embedded-agent loop or the
+    provider ABC (issue #73 acceptance criterion) — those load only when the
+    agent wiring is actually composed."""
+    probe = (
+        "import sys\n"
+        f"import {module}  # noqa: F401\n"
+        "watched = ('korvid.agent.runtime', 'korvid.agent.provider', 'korvid.agent.profiles')\n"
+        "leaked = [m for m in watched if m in sys.modules]\n"
+        "if leaked:\n"
+        "    raise SystemExit(f'embedded-agent loop leaked into base import: {leaked}')\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
