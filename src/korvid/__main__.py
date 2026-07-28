@@ -44,11 +44,10 @@ from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
 from korvid.tools.executor import (
-    READ_TOOLS,
-    UI_TOOLS,
     ToolExecutor,
     UIBridge,
 )
+from korvid.tools.registry import mcp_tool_schemas
 from korvid.ui.app import (
     AppUIBridge,
     ContextSwitchResult,
@@ -119,7 +118,7 @@ def _build_mcp_controller(
     def factory() -> KorvidMCPServer:
         return KorvidMCPServer(
             ToolExecutor(kube, aliases, ui=ui),
-            READ_TOOLS + UI_TOOLS,
+            mcp_tool_schemas(),
             port=config.mcp_port,
             endpoint_path=default_endpoint_path(),
         )

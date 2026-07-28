@@ -1,0 +1,676 @@
+"""Validated tool metadata registry (issue #91 Finding A).
+
+Single source of tool metadata. Each `ToolDef` models the policy
+dimensions independently — identity (name + OpenAI function schema),
+dispatch target, cluster effect, approval policy, capability gate, and
+exposure surfaces — so a misplaced tool fails validation at import time
+instead of silently widening a surface.
+
+The registry deliberately does **not** store bound handler methods:
+definitions are instance-independent, and dispatch resolves the validated
+method name against the executor/bridge instance at call time.
+
+External plugin loading (the documented `korvid.tool` entry-point group)
+is explicitly out of scope here; plugin trust, collision, exposure, and
+approval policy need their own threat model.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Literal
+
+Effect = Literal["cluster_read", "ui_only", "cluster_write"]
+Approval = Literal["none", "user_confirmation"]
+Capability = Literal["none", "pod_resize"]
+Surface = Literal["full_agent", "small_agent", "mcp"]
+
+_EFFECTS = ("cluster_read", "ui_only", "cluster_write")
+_APPROVALS = ("none", "user_confirmation")
+_CAPABILITIES = ("none", "pod_resize")
+_SURFACES = ("full_agent", "small_agent", "mcp")
+
+
+@dataclass(frozen=True)
+class ToolDef:
+    """One tool's complete metadata; validated by `validate_tool_defs`."""
+
+    #: Unique tool name; must equal ``schema["function"]["name"]``.
+    name: str
+    #: OpenAI function-calling schema, ``{"type": "function", ...}``.
+    schema: dict[str, Any]
+    #: What the tool touches: the cluster (read/write) or only the screen.
+    effect: Effect
+    #: Dispatch key: a ``ToolExecutor`` method name for cluster reads, or a
+    #: ``UIBridge`` method name for screen/write tools. Validated against
+    #: the real classes by `validate_dispatch_targets`.
+    dispatch: str
+    #: Which derived surfaces offer this tool to callers.
+    surfaces: frozenset[Surface]
+    #: Cluster writes always require the user-confirmation approval gate.
+    approval: Approval = "none"
+    #: Cluster capability the tool depends on; gated at surface derivation.
+    capability: Capability = "none"
+    #: Action keyword passed to ``UIBridge.agent_request_write``; required
+    #: for (and only valid on) cluster writes.
+    write_action: str | None = None
+
+
+def validate_tool_defs(defs: list[ToolDef]) -> None:
+    """Reject inconsistent definitions at import time (issue #91 rules).
+
+    Raises:
+        ValueError: on duplicate names, schema/name disagreement, a missing
+            dispatch key, a cluster write without the user-confirmation
+            approval or a write action, a write action or approval gate on
+            a non-write, an unknown enum value, or an MCP-exposed write.
+    """
+    seen: set[str] = set()
+    for d in defs:
+        if d.name in seen:
+            raise ValueError(f"duplicate tool name {d.name!r}")
+        seen.add(d.name)
+        _validate_one(d)
+
+
+def _validate_one(d: ToolDef) -> None:
+    schema_name = d.schema.get("function", {}).get("name")
+    if d.schema.get("type") != "function" or schema_name != d.name:
+        raise ValueError(f"tool {d.name!r}: schema name {schema_name!r} disagrees")
+    if not d.dispatch:
+        raise ValueError(f"tool {d.name!r} has no dispatch target")
+    _validate_enums(d)
+    _validate_write_policy(d)
+
+
+def _validate_enums(d: ToolDef) -> None:
+    if d.effect not in _EFFECTS:
+        raise ValueError(f"tool {d.name!r}: unknown effect {d.effect!r}")
+    if d.approval not in _APPROVALS:
+        raise ValueError(f"tool {d.name!r}: unknown approval {d.approval!r}")
+    if d.capability not in _CAPABILITIES:
+        raise ValueError(f"tool {d.name!r}: unknown capability {d.capability!r}")
+    unknown = set(d.surfaces) - set(_SURFACES)
+    if unknown:
+        raise ValueError(f"tool {d.name!r}: unknown surfaces {sorted(unknown)}")
+
+
+def _validate_write_policy(d: ToolDef) -> None:
+    if d.effect == "cluster_write":
+        if d.approval != "user_confirmation":
+            raise ValueError(f"cluster write {d.name!r} requires the approval gate")
+        if not d.write_action:
+            raise ValueError(f"cluster write {d.name!r} requires a write_action")
+        if "mcp" in d.surfaces:
+            raise ValueError(f"cluster write {d.name!r} must not be exposed on mcp")
+    else:
+        if d.write_action is not None:
+            raise ValueError(f"tool {d.name!r}: write_action is only valid on cluster writes")
+        if d.approval != "none":
+            raise ValueError(f"tool {d.name!r}: approval gate is only valid on cluster writes")
+
+
+def validate_dispatch_targets(defs: list[ToolDef], *, executor_cls: type, bridge_cls: type) -> None:
+    """Verify every dispatch key names a method on the executor or bridge.
+
+    Called from the executor module at import time so a typo'd handler
+    fails startup/tests, not a live tool call.
+
+    Raises:
+        ValueError: when a dispatch key resolves on neither class.
+    """
+    for d in defs:
+        if not callable(getattr(executor_cls, d.dispatch, None)) and not callable(
+            getattr(bridge_cls, d.dispatch, None)
+        ):
+            raise ValueError(
+                f"tool {d.name!r}: dispatch target {d.dispatch!r} is not a "
+                "method of the executor or the UI bridge"
+            )
+
+
+def agent_tool_schemas(
+    surface: str, *, readonly: bool, resize_supported: bool
+) -> list[dict[str, Any]]:
+    """Derive one agent surface's schema list, in registry order.
+
+    Args:
+        surface: `full_agent` or `small_agent`.
+        readonly: when True, write tools are omitted entirely — the model
+            is never even told they exist.
+        resize_supported: whether discovery found pods/resize; the resize
+            tool is offered only when the cluster can honor it.
+
+    Raises:
+        ValueError: for a surface other than the two agent surfaces.
+    """
+    if surface not in ("full_agent", "small_agent"):
+        raise ValueError(f"unknown surface {surface!r}")
+    schemas: list[dict[str, Any]] = []
+    for d in TOOL_DEFS:
+        if surface not in d.surfaces:
+            continue
+        if d.effect == "cluster_write" and readonly:
+            continue
+        if d.capability == "pod_resize" and not resize_supported:
+            continue
+        schemas.append(d.schema)
+    return schemas
+
+
+def mcp_tool_schemas() -> list[dict[str, Any]]:
+    """The MCP exposure surface: read + UI-drive tools only.
+
+    Write tools stay with the built-in agent until an approval UX for
+    external callers is designed (issue #11 non-goal); `validate_tool_defs`
+    rejects any MCP-exposed cluster write independent of list placement.
+    """
+    return [d.schema for d in TOOL_DEFS if "mcp" in d.surfaces]
+
+
+_ALL_SURFACES: frozenset[Surface] = frozenset({"full_agent", "small_agent", "mcp"})
+_FULL_AND_MCP: frozenset[Surface] = frozenset({"full_agent", "mcp"})
+_AGENT_SURFACES: frozenset[Surface] = frozenset({"full_agent", "small_agent"})
+
+
+TOOL_DEFS: list[ToolDef] = [
+    ToolDef(
+        name="list_resources",
+        effect="cluster_read",
+        dispatch="_list_resources",
+        surfaces=_ALL_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "list_resources",
+                "description": (
+                    "List all resources of a given kind, optionally filtered by namespace."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "description": (
+                                "Resource kind or alias (e.g. 'pods', 'deployments', 'svc')."
+                            ),
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Kubernetes namespace. Omit for all namespaces.",
+                        },
+                    },
+                    "required": ["kind"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="get_resource",
+        effect="cluster_read",
+        dispatch="_get_resource",
+        surfaces=_ALL_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "get_resource",
+                "description": ("Fetch the full YAML manifest for a single Kubernetes resource."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "description": "Resource kind or alias.",
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Resource name.",
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": (
+                                "Kubernetes namespace (required for namespaced resources)."
+                            ),
+                        },
+                    },
+                    "required": ["kind", "name"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="get_logs",
+        effect="cluster_read",
+        dispatch="_get_logs",
+        surfaces=_ALL_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "get_logs",
+                "description": "Retrieve recent log lines from a pod container.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pod": {
+                            "type": "string",
+                            "description": "Pod name.",
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Kubernetes namespace the pod lives in.",
+                        },
+                        "container": {
+                            "type": "string",
+                            "description": "Container name. Defaults to the first container.",
+                        },
+                        "tail_lines": {
+                            "type": "integer",
+                            "description": "Number of log lines to fetch (1-500, default 100).",
+                        },
+                    },
+                    "required": ["pod", "namespace"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="get_events",
+        effect="cluster_read",
+        dispatch="_get_events",
+        surfaces=_ALL_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "get_events",
+                "description": "List Kubernetes events for a specific resource.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "description": "Resource kind, e.g. 'pods' or 'deployment'.",
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Kubernetes namespace.",
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the resource whose events to fetch.",
+                        },
+                    },
+                    "required": ["kind", "namespace", "name"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="list_operators",
+        effect="cluster_read",
+        dispatch="_list_operators",
+        surfaces=_ALL_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "list_operators",
+                "description": (
+                    "List OLM operators: available packages from the cluster's"
+                    " operator catalog plus installed subscriptions with their"
+                    " status. Read-only; installing an operator is done by the"
+                    " user through the UI. Explains itself when OLM is absent."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {
+                            "type": "string",
+                            "description": (
+                                "Namespace to scope installed subscriptions to."
+                                " Omit for all namespaces."
+                            ),
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="diagnose_pod",
+        effect="cluster_read",
+        dispatch="_diagnose_pod",
+        surfaces=_ALL_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "diagnose_pod",
+                "description": (
+                    "Compound diagnostic for a broken pod: one call gathers the"
+                    " pod's identity and owner chain, per-container states"
+                    " (waiting reasons, exit codes, restart counts), failing"
+                    " conditions, recent Warning events, node and PVC context,"
+                    " and a targeted log excerpt from up to 3 of the troubled"
+                    " containers (any further troubled containers are named but"
+                    " their logs are not fetched; use get_logs for those)."
+                    " Prefer this over chaining"
+                    " get_resource/get_events/get_logs when investigating why a"
+                    " pod is failing."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pod": {
+                            "type": "string",
+                            "description": "Pod name.",
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Kubernetes namespace the pod lives in.",
+                        },
+                    },
+                    "required": ["pod", "namespace"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="navigate",
+        effect="ui_only",
+        dispatch="agent_navigate",
+        surfaces=_FULL_AND_MCP,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "navigate",
+                "description": (
+                    "Switch the korvid main table to a resource view the user can see, "
+                    "optionally scoping to a namespace. Screen-only; changes nothing "
+                    "in the cluster."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "view": {
+                            "type": "string",
+                            "description": (
+                                "Resource kind or alias to display (e.g. 'pods', 'deploy')."
+                            ),
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": (
+                                "Namespace scope. Pass 'all' for the all-namespaces "
+                                "scope. Omit to keep the current scope."
+                            ),
+                        },
+                    },
+                    "required": ["view"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="set_filter",
+        effect="ui_only",
+        dispatch="agent_set_filter",
+        surfaces=_FULL_AND_MCP,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "set_filter",
+                "description": (
+                    "Apply a filter expression to the visible resource table. "
+                    "Space-separated tokens are AND-combined: plain text is a "
+                    "case-insensitive substring on the resource name; '~pat' is a "
+                    "fuzzy subsequence match; '/pat/' or 're:pat' is a regex; "
+                    "'!' before any name token negates it; '-l key=value[,k2=v2]' "
+                    "is a label selector (a bare key tests existence); '-s' hides "
+                    "Succeeded/Completed pods. Pass an empty pattern to clear."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": (
+                                "Filter expression (grammar in the tool "
+                                "description); '' clears the filter."
+                            ),
+                        },
+                    },
+                    "required": ["pattern"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="open_logs",
+        effect="ui_only",
+        dispatch="agent_open_logs",
+        surfaces=_ALL_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "open_logs",
+                "description": (
+                    "Open the live log pane for a pod so the user can watch the logs "
+                    "on screen alongside your analysis. At most 8 container panels "
+                    "fit on screen; the result reports which containers are shown "
+                    "if the pod has more."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pod": {"type": "string", "description": "Pod name."},
+                        "namespace": {"type": "string", "description": "Pod namespace."},
+                        "container": {
+                            "type": "string",
+                            "description": "Container name. Omit to show all containers.",
+                        },
+                    },
+                    "required": ["pod", "namespace"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="open_describe",
+        effect="ui_only",
+        dispatch="agent_open_describe",
+        surfaces=_ALL_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "open_describe",
+                "description": (
+                    "Open the describe screen (manifest + events) for a resource so the "
+                    "user sees the evidence you are citing."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "description": "Resource kind or alias."},
+                        "name": {"type": "string", "description": "Resource name."},
+                        "namespace": {
+                            "type": "string",
+                            "description": "Namespace (required for namespaced resources).",
+                        },
+                    },
+                    "required": ["kind", "name"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="drill_down",
+        effect="ui_only",
+        dispatch="agent_drill_down",
+        surfaces=_FULL_AND_MCP,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "drill_down",
+                "description": (
+                    "Drill into a row of the visible table following the ownership "
+                    "chain the user sees on screen: a deployment opens its replicaset "
+                    "revision history, a replicaset opens its pods, and a helm "
+                    "release opens its revision history. Screen-only."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the row in the current view to drill into.",
+                        },
+                    },
+                    "required": ["name"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="delete_resource",
+        effect="cluster_write",
+        approval="user_confirmation",
+        write_action="delete",
+        dispatch="agent_request_write",
+        surfaces=_AGENT_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "delete_resource",
+                "description": (
+                    "Request deletion of a resource. This does NOT delete anything "
+                    "directly: it opens an approval dialog in the TUI and the "
+                    "operation runs only if the user approves it with a keystroke."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "description": "Resource kind or alias."},
+                        "name": {"type": "string", "description": "Resource name."},
+                        "namespace": {
+                            "type": "string",
+                            "description": "Namespace (required for namespaced resources).",
+                        },
+                    },
+                    "required": ["kind", "name"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="scale_resource",
+        effect="cluster_write",
+        approval="user_confirmation",
+        write_action="scale",
+        dispatch="agent_request_write",
+        surfaces=_AGENT_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "scale_resource",
+                "description": (
+                    "Request scaling a deployment/replicaset/statefulset to a replica "
+                    "count. Runs only after the user approves the request in the TUI "
+                    "approval dialog."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "description": "Resource kind or alias."},
+                        "name": {"type": "string", "description": "Resource name."},
+                        "namespace": {
+                            "type": "string",
+                            "description": "Namespace of the workload.",
+                        },
+                        "replicas": {
+                            "type": "integer",
+                            "description": "Desired replica count (>= 0).",
+                        },
+                    },
+                    # scalable kinds are all namespaced apps/* workloads, so a
+                    # call without a namespace can never succeed
+                    "required": ["kind", "name", "namespace", "replicas"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="rollout_restart",
+        effect="cluster_write",
+        approval="user_confirmation",
+        write_action="rollout_restart",
+        dispatch="agent_request_write",
+        surfaces=_AGENT_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "rollout_restart",
+                "description": (
+                    "Request a rolling restart of a deployment/statefulset/daemonset. "
+                    "Runs only after the user approves the request in the TUI "
+                    "approval dialog."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "description": "Resource kind or alias."},
+                        "name": {"type": "string", "description": "Resource name."},
+                        "namespace": {
+                            "type": "string",
+                            "description": "Namespace of the workload.",
+                        },
+                    },
+                    # restartable kinds are all namespaced apps/* workloads, so a
+                    # call without a namespace can never succeed
+                    "required": ["kind", "name", "namespace"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="resize_pod",
+        effect="cluster_write",
+        approval="user_confirmation",
+        capability="pod_resize",
+        write_action="resize",
+        dispatch="agent_request_write",
+        surfaces=_AGENT_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "resize_pod",
+                "description": (
+                    "Request an in-place resize of a running pod's CPU/memory "
+                    "requests and limits without recreating the pod (Kubernetes "
+                    "1.35+; containers whose resizePolicy is RestartContainer "
+                    "are restarted in place). Runs only after the user approves "
+                    "the request in the TUI approval dialog."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Pod name."},
+                        "namespace": {"type": "string", "description": "Namespace of the pod."},
+                        "resources": {
+                            "type": "object",
+                            "description": (
+                                "Container name -> {'requests'/'limits' -> "
+                                "{'cpu'/'memory' -> quantity}}. Only the "
+                                "quantities present are changed, e.g. "
+                                '{"app": {"requests": {"cpu": "200m"}}}.'
+                            ),
+                        },
+                    },
+                    "required": ["name", "namespace", "resources"],
+                },
+            },
+        },
+    ),
+]
+
+TOOLS_BY_NAME: dict[str, ToolDef] = {d.name: d for d in TOOL_DEFS}
+
+validate_tool_defs(TOOL_DEFS)
