@@ -113,6 +113,29 @@ async def test_scroll_untouched_by_in_place_update() -> None:
         assert table.scroll_x == 10
 
 
+async def test_viewport_survives_in_place_delete_above_cursor() -> None:
+    # Deleting a row above the cursor slides the cursor index up; even with
+    # move_cursor(scroll=False) Textual's cursor watcher schedules a
+    # deferred _scroll_cursor_into_view, which would snap a vertically
+    # scrolled viewport back to the cursor row on the in-place path.
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        table.focus()
+        for _ in range(30):
+            await pilot.press("down")
+        await until(pilot, lambda: table.cursor_row == 30, label="cursor below the fold")
+        table.scroll_to(y=0, animate=False, immediate=True, force=True)
+        await until(pilot, lambda: table.scroll_y == 0, label="viewport back at top")
+        calls = _spy_clear(table)
+        app.store.apply_event("pods", "default", "DELETED", _pod("pod-00"))
+        await until(pilot, lambda: table.row_count == 39, label="row removed")
+        assert calls == []
+        assert table.cursor_row == 29  # cursor followed pod-30 up one slot
+        assert table.scroll_y == 0
+
+
 def test_cells_equal_is_style_aware() -> None:
     # rich.Text.__eq__ compares plain text only — a phase flipping color
     # with the same wording must still count as a change.

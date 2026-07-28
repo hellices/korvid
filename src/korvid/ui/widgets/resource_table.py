@@ -370,9 +370,17 @@ class ResourceTable(DataTable[str | Text]):
         pending, self._pending_rows = self._pending_rows, []
         if same_view and sort == self._last_sort and self._apply_in_place(pending):
             # Nothing was cleared, so the scroll offset never moved; only
-            # the cursor may have slid when rows above it were removed.
+            # the cursor may have slid when rows above it were removed —
+            # and even with scroll=False, Textual's cursor watcher schedules
+            # a deferred _scroll_cursor_into_view on an index change, so the
+            # viewport must be re-asserted after it (same as the rebuild
+            # path below).
             if restore is not None:
+                offset = (self.scroll_x, self.scroll_y)
                 self._restore_cursor(*restore, scroll=False)
+                self.call_after_refresh(
+                    self.scroll_to, *offset, animate=False, immediate=True, force=True
+                )
             return
         if not same_view or sort != self._last_sort:
             viewport = None
