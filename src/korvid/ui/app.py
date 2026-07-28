@@ -4617,6 +4617,48 @@ class KorvidApp(App[None]):
             logger.debug("dry-run preview failed; dialog opens without it", exc_info=True)
             return None
 
+    async def _push_write_confirmation(
+        self,
+        title: str,
+        operation: str,
+        *,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        op_factory: Callable[[], Awaitable[None]],
+        detail: str = "",
+        require_name: str | None = None,
+        preview: list[str] | None = None,
+        preview_title: str = "server dry-run preview:",
+    ) -> None:
+        """The standard write-approval flow (issue #91 U1): push a confirm
+        dialog and, on approval, launch `_run_write` on an app-owned worker.
+
+        Takes an operation *factory*, not a coroutine: a declined dialog
+        must never construct the mutation coroutine (nothing to leak
+        unawaited, no side effects before approval). Flows with extra
+        semantics — operator install's in-callback UID recheck, drain's
+        dedicated worker, the agent gate's approval future — stay explicit.
+        """
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_write(action, meta, namespace, name, op_factory(), detail=detail)
+                )
+
+        await self.push_screen(
+            self._confirm_screen(
+                title,
+                operation,
+                require_name=require_name,
+                preview=preview,
+                preview_title=preview_title,
+            ),
+            _done,
+        )
+
     async def action_delete_resource(self) -> None:
         """Ctrl-D: delete the selected resource behind a layered confirmation
         (cluster-scoped kinds require typing the resource name)."""
@@ -4638,23 +4680,16 @@ class KorvidApp(App[None]):
             return
         operation = f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}"
         require = None if meta.namespaced else name
-
-        def _done(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(
-                    self._run_write(
-                        "delete", meta, ns, name, ops.delete_object(meta, ns, name, uid=uid)
-                    )
-                )
-
-        await self.push_screen(
-            self._confirm_screen(
-                f"Delete {self._gvr_label(meta)}/{name}?",
-                operation,
-                require_name=require,
-                preview=preview,
-            ),
-            _done,
+        await self._push_write_confirmation(
+            f"Delete {self._gvr_label(meta)}/{name}?",
+            operation,
+            action="delete",
+            meta=meta,
+            namespace=ns,
+            name=name,
+            op_factory=lambda: ops.delete_object(meta, ns, name, uid=uid),
+            require_name=require,
+            preview=preview,
         )
 
     async def action_rollout_restart(self) -> None:
@@ -4691,26 +4726,18 @@ class KorvidApp(App[None]):
         ):
             return
 
-        def _done(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(
-                    self._run_write(
-                        "rollout_restart",
-                        meta,
-                        ns,
-                        name,
-                        ops.rollout_restart_with_stamp(meta, ns, name, uid=uid, restarted_at=stamp),
-                    )
-                )
-
-        await self.push_screen(
-            self._confirm_screen(
-                f"Rollout restart {self._gvr_label(meta)}/{name}?",
-                f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
-                f"{self._write_locus(ns)}",
-                preview=preview,
+        await self._push_write_confirmation(
+            f"Rollout restart {self._gvr_label(meta)}/{name}?",
+            f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
+            f"{self._write_locus(ns)}",
+            action="rollout_restart",
+            meta=meta,
+            namespace=ns,
+            name=name,
+            op_factory=lambda: ops.rollout_restart_with_stamp(
+                meta, ns, name, uid=uid, restarted_at=stamp
             ),
-            _done,
+            preview=preview,
         )
 
     async def _fetch_manifest_for_edit(
@@ -4775,28 +4802,17 @@ class KorvidApp(App[None]):
         ):
             return
         detail = self._edit_detail(manifest, edited)
-
-        def _done(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(
-                    self._run_write(
-                        "edit",
-                        meta,
-                        ns,
-                        name,
-                        ops.replace_object(meta, ns, name, edited, uid=uid),
-                        detail=detail,
-                    )
-                )
-
-        await self.push_screen(
-            self._confirm_screen(
-                f"Apply edited {label}?",
-                # Issue #21: the approval dialog summarizes the change, not
-                # just the target and verb.
-                f"PUT {label}{self._write_locus(ns)} - {detail}",
-            ),
-            _done,
+        await self._push_write_confirmation(
+            f"Apply edited {label}?",
+            # Issue #21: the approval dialog summarizes the change, not
+            # just the target and verb.
+            f"PUT {label}{self._write_locus(ns)} - {detail}",
+            action="edit",
+            meta=meta,
+            namespace=ns,
+            name=name,
+            op_factory=lambda: ops.replace_object(meta, ns, name, edited, uid=uid),
+            detail=detail,
         )
 
     def _parse_edited_manifest(
@@ -4974,28 +4990,18 @@ class KorvidApp(App[None]):
         ):
             return
 
-        def _done(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(
-                    self._run_write(
-                        "scale",
-                        meta,
-                        ns,
-                        name,
-                        ops.scale_object(meta, ns, name, replicas, uid=uid),
-                        detail=f"replicas -> {replicas}",
-                    )
-                )
-
         shown = "?" if current is None else current
-        await self.push_screen(
-            self._confirm_screen(
-                f"Scale {self._gvr_label(meta)}/{name}?",
-                f"PATCH {self._gvr_label(meta)}/{name}/scale: replicas {shown} -> {replicas}"
-                f"{self._write_locus(ns)}",
-                preview=preview,
-            ),
-            _done,
+        await self._push_write_confirmation(
+            f"Scale {self._gvr_label(meta)}/{name}?",
+            f"PATCH {self._gvr_label(meta)}/{name}/scale: replicas {shown} -> {replicas}"
+            f"{self._write_locus(ns)}",
+            action="scale",
+            meta=meta,
+            namespace=ns,
+            name=name,
+            op_factory=lambda: ops.scale_object(meta, ns, name, replicas, uid=uid),
+            detail=f"replicas -> {replicas}",
+            preview=preview,
         )
 
     async def action_resize_pod(self) -> None:
@@ -5108,27 +5114,16 @@ class KorvidApp(App[None]):
         ):
             return
         summary = self._resize_summary(resources)
-
-        def _done(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(
-                    self._run_write(
-                        "resize",
-                        meta,
-                        ns,
-                        name,
-                        ops.resize_pod(namespace, name, resources, uid=uid),
-                        detail=summary,
-                    )
-                )
-
-        await self.push_screen(
-            self._confirm_screen(
-                f"Resize pods/{name}?",
-                f"PATCH pods/{name}/resize: {summary}{self._write_locus(ns)}",
-                preview=preview,
-            ),
-            _done,
+        await self._push_write_confirmation(
+            f"Resize pods/{name}?",
+            f"PATCH pods/{name}/resize: {summary}{self._write_locus(ns)}",
+            action="resize",
+            meta=meta,
+            namespace=ns,
+            name=name,
+            op_factory=lambda: ops.resize_pod(namespace, name, resources, uid=uid),
+            detail=summary,
+            preview=preview,
         )
 
     def _node_target(self, action: str) -> tuple[WriteOps, ResourceMeta, str, str | None] | None:
@@ -5188,27 +5183,16 @@ class KorvidApp(App[None]):
         ):
             return
         flag = "true" if unschedulable else "false"
-
-        def _done(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(
-                    self._run_write(
-                        action,
-                        meta,
-                        None,
-                        name,
-                        ops.cordon_node(name, unschedulable, uid=uid),
-                        detail=f"spec.unschedulable={flag}",
-                    )
-                )
-
-        await self.push_screen(
-            self._confirm_screen(
-                f"{action.capitalize()} nodes/{name}?",
-                f"PATCH nodes/{name} spec.unschedulable={flag}",
-                preview=preview,
-            ),
-            _done,
+        await self._push_write_confirmation(
+            f"{action.capitalize()} nodes/{name}?",
+            f"PATCH nodes/{name} spec.unschedulable={flag}",
+            action=action,
+            meta=meta,
+            namespace=None,
+            name=name,
+            op_factory=lambda: ops.cordon_node(name, unschedulable, uid=uid),
+            detail=f"spec.unschedulable={flag}",
+            preview=preview,
         )
 
     async def action_drain_node(self) -> None:
@@ -6129,22 +6113,15 @@ class KorvidApp(App[None]):
             f"REPLACE installplans/{name} with spec.approved=true"
             f"{self._write_locus(ns)}\ninstalls: {csvs}"
         )
-
-        def _done(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(
-                    self._run_write(
-                        "approve",
-                        meta,
-                        ns,
-                        name,
-                        ops.replace_object(meta, ns, name, updated, uid=uid),
-                        detail=f"installs: {csvs}",
-                    )
-                )
-
-        await self.push_screen(
-            self._confirm_screen(f"Approve installplans/{name}?", operation), _done
+        await self._push_write_confirmation(
+            f"Approve installplans/{name}?",
+            operation,
+            action="approve",
+            meta=meta,
+            namespace=ns,
+            name=name,
+            op_factory=lambda: ops.replace_object(meta, ns, name, updated, uid=uid),
+            detail=f"installs: {csvs}",
         )
 
     def _approvable_plan_spec(self, manifest: dict[str, Any], name: str) -> dict[str, Any] | None:
@@ -6342,24 +6319,20 @@ class KorvidApp(App[None]):
         )
         detail = f"chart={hit.name} version={version_label} values={values_detail}"
 
-        def _done(confirmed: bool | None) -> None:
-            if not confirmed:
-                return
-            self.run_worker(
-                self._run_write(
-                    action,
-                    HELM_RELEASES_META,
-                    choices.namespace,
-                    choices.release,
-                    self._helm_apply_change(helm, hit, choices, values_text, upgrade=upgrade),
-                    detail=detail,
-                )
-            )
-
         title = f"{'Upgrade' if upgrade else 'Install'} {choices.release}?"
-        await self.push_screen(
-            self._confirm_screen(title, operation, preview=preview, preview_title=preview_title),
-            _done,
+        await self._push_write_confirmation(
+            title,
+            operation,
+            action=action,
+            meta=HELM_RELEASES_META,
+            namespace=choices.namespace,
+            name=choices.release,
+            op_factory=lambda: self._helm_apply_change(
+                helm, hit, choices, values_text, upgrade=upgrade
+            ),
+            detail=detail,
+            preview=preview,
+            preview_title=preview_title,
         )
 
     def _helm_context_after_preview(
@@ -6504,28 +6477,19 @@ class KorvidApp(App[None]):
             f"HELM ROLLBACK {row.release} to revision {row.revision} in namespace {namespace}"
         )
 
-        def _done(confirmed: bool | None) -> None:
-            if not confirmed:
-                return
-            self.run_worker(
-                self._run_write(
-                    "helm-rollback",
-                    HELM_RELEASES_META,
-                    namespace,
-                    row.release,
-                    self._helm_apply_rollback(helm, row.release, row.revision, namespace),
-                    detail=f"revision={row.revision}",
-                )
-            )
-
-        await self.push_screen(
-            self._confirm_screen(
-                f"Rollback {row.release} to revision {row.revision}?",
-                operation,
-                preview=preview,
-                preview_title="helm diff rollback preview:",
+        await self._push_write_confirmation(
+            f"Rollback {row.release} to revision {row.revision}?",
+            operation,
+            action="helm-rollback",
+            meta=HELM_RELEASES_META,
+            namespace=namespace,
+            name=row.release,
+            op_factory=lambda: self._helm_apply_rollback(
+                helm, row.release, row.revision, namespace
             ),
-            _done,
+            detail=f"revision={row.revision}",
+            preview=preview,
+            preview_title="helm diff rollback preview:",
         )
 
     async def _helm_apply_rollback(
