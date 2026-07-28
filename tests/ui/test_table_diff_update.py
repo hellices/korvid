@@ -147,6 +147,16 @@ def test_cell_width_measures_str_cells_as_rendered_markup() -> None:
     assert _cell_width(Text("Running", style="green")) == 7
 
 
+def test_cell_width_measures_multiline_cells_by_widest_line() -> None:
+    # Text.cell_len sums every line, but DataTable sizes multiline cells by
+    # the widest rendered line. Custom annotation/JSONPath values can carry
+    # newlines: summing would falsely report growth and request a
+    # column-shrinking width rescan.
+    assert _cell_width("abcdefghij\nk") == 10
+    assert _cell_width(Text("abcdefghij\nk")) == 10
+    assert _cell_width("") == 0
+
+
 def test_cells_equal_is_style_aware() -> None:
     # rich.Text.__eq__ compares plain text only — a phase flipping color
     # with the same wording must still count as a change.
