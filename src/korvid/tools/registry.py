@@ -17,6 +17,7 @@ approval policy need their own threat model.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -172,7 +173,10 @@ def agent_tool_schemas(
             continue
         if d.capability == "pod_resize" and not resize_supported:
             continue
-        schemas.append(d.schema)
+        # Deep copies (issue #97): providers are plugins, and the schema
+        # dicts they receive ride along on every request — a caller
+        # mutating one must not corrupt the registry for other surfaces.
+        schemas.append(copy.deepcopy(d.schema))
     return schemas
 
 
@@ -182,8 +186,10 @@ def mcp_tool_schemas() -> list[dict[str, Any]]:
     Write tools stay with the built-in agent until an approval UX for
     external callers is designed (issue #11 non-goal); `validate_tool_defs`
     rejects any MCP-exposed cluster write independent of list placement.
+    Returns deep copies so a caller mutating a schema cannot corrupt the
+    registry (issue #97).
     """
-    return [d.schema for d in TOOL_DEFS if "mcp" in d.surfaces]
+    return [copy.deepcopy(d.schema) for d in TOOL_DEFS if "mcp" in d.surfaces]
 
 
 _ALL_SURFACES: frozenset[Surface] = frozenset({"full_agent", "small_agent", "mcp"})
