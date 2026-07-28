@@ -1305,3 +1305,51 @@ async def test_ui_dispatch_without_adapter_is_an_error_not_a_fallthrough(
     out = await make_ui_executor(bridge).execute("odd_ui", {"kind": "pods", "name": "x"})
     assert "no argument adapter" in out
     assert bridge.calls == []
+
+
+async def test_write_resize_path_routes_by_write_action_not_tool_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resize-specific behavior (implicit pods kind, resource validation)
+    keys off the registry's `write_action`, not the literal tool name: a
+    valid resize definition under another name must take the resize path."""
+    fake = ToolDef(
+        name="shrink_pod",
+        schema={"type": "function", "function": {"name": "shrink_pod", "parameters": {}}},
+        effect="cluster_write",
+        dispatch="agent_request_write",
+        surfaces=frozenset({"full_agent"}),
+        approval="user_confirmation",
+        write_action="resize",
+    )
+    monkeypatch.setitem(TOOLS_BY_NAME, "shrink_pod", fake)
+    bridge = FakeBridge()
+    resources = {"app": {"requests": {"cpu": "100m"}}}
+    out = await make_ui_executor(bridge).execute(
+        "shrink_pod", {"name": "web-1", "namespace": "d", "resources": resources}
+    )
+    assert "must be a string" not in out
+    assert bridge.calls[0][0] == "request_write"
+    assert bridge.calls[0][1]["action"] == "resize"
+    assert bridge.calls[0][1]["kind"] == "pods"
+
+
+async def test_write_resize_path_still_validates_resources_under_any_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = ToolDef(
+        name="shrink_pod",
+        schema={"type": "function", "function": {"name": "shrink_pod", "parameters": {}}},
+        effect="cluster_write",
+        dispatch="agent_request_write",
+        surfaces=frozenset({"full_agent"}),
+        approval="user_confirmation",
+        write_action="resize",
+    )
+    monkeypatch.setitem(TOOLS_BY_NAME, "shrink_pod", fake)
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute(
+        "shrink_pod", {"name": "web-1", "namespace": "d", "resources": {"app": {"bad": {}}}}
+    )
+    assert out.startswith("ERROR:")
+    assert bridge.calls == []

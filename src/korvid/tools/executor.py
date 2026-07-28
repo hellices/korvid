@@ -293,8 +293,9 @@ class ToolExecutor:
         # Tool schemas are not runtime validation: reject wrong-typed values
         # instead of coercing them (str(123) would show the user a target the
         # model never named; int(1.9) an operation it never asked for).
-        # resize_pod targets pods by definition, so its schema has no 'kind'.
-        kind = "pods" if tool.name == "resize_pod" else args.get("kind")
+        # The resize action targets pods by definition, so its schema has no
+        # 'kind'; keyed off the registry's write_action, not the tool name.
+        kind = "pods" if action == "resize" else args.get("kind")
         target = args.get("name")
         namespace = args.get("namespace")
         if not isinstance(kind, str):
@@ -307,7 +308,7 @@ class ToolExecutor:
         if replicas is not None and (isinstance(replicas, bool) or not isinstance(replicas, int)):
             raise ValueError(f"'replicas' must be an integer, got {replicas!r}")
         resources = args.get("resources")
-        if tool.name == "resize_pod":
+        if action == "resize":
             resources = _validated_resources(resources)
         # The validated dispatch key names the approval-gated bridge
         # entrypoint; the registry rejects writes routed anywhere else.
