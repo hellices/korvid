@@ -678,3 +678,73 @@ async def test_pane_focus_switch_reevaluates_hint() -> None:
         # And back to the deployments pane: the pods warning must not linger.
         await pilot.press("ctrl+w", "w")
         await until(pilot, lambda: not strip.display, label="hint cleared for deploy pane")
+
+
+async def test_navigation_queued_behind_lock_lands_in_initiating_pane() -> None:
+    """A navigation that queues behind the nav lock must still land in the
+    pane that initiated it: capturing the pane only after acquiring the
+    lock would clear pane A's drill stack (drill_op binds early) while
+    navigating whichever pane got focused in the meantime."""
+    import asyncio
+
+    from korvid.ui.messages import NavigateCommand
+    from korvid.ui.navigation import DrillLevel
+
+    app = make_app([_pod("api-1")], extra_data={"deployments": [_deploy("web")]})
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)  # focused: pane index 1
+        app._panes[1].drill.push(DrillLevel("deployments", "web", "default", "dep-1", "pods"))
+        release = asyncio.Event()
+
+        async def hold() -> None:
+            async with app._nav_lock:
+                await release.wait()
+
+        holder = asyncio.create_task(hold())
+        for _ in range(10):
+            await asyncio.sleep(0)
+        nav = asyncio.create_task(app.on_navigate_command(NavigateCommand("deployments", None)))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        app._focused_pane = 0  # the user flips focus while nav waits for the lock
+        release.set()
+        await nav
+        await holder
+        assert app._panes[1].kind == "deployments"  # initiating pane transitioned
+        assert not app._panes[1].drill.active  # and its stack was the one cleared
+        assert app._panes[0].kind == "pods"  # newly focused pane untouched
+
+
+async def test_drill_pop_queued_behind_lock_pops_initiating_pane() -> None:
+    """Escape in pane A that queues behind the nav lock must pop pane A's
+    drill stack even when focus moves to pane B before the lock frees."""
+    import asyncio
+
+    from korvid.ui.navigation import DrillLevel
+
+    app = make_app([_pod("api-1")], extra_data={"deployments": [_deploy("web")]})
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)  # focused: pane index 1
+        for pane in app._panes:
+            pane.drill.push(DrillLevel("deployments", "web", "default", "dep-1", "pods"))
+            pane.kind = "pods"
+        release = asyncio.Event()
+
+        async def hold() -> None:
+            async with app._nav_lock:
+                await release.wait()
+
+        holder = asyncio.create_task(hold())
+        for _ in range(10):
+            await asyncio.sleep(0)
+        pop = asyncio.create_task(app._pop_drill())
+        for _ in range(10):
+            await asyncio.sleep(0)
+        app._focused_pane = 0  # focus flips while the pop waits for the lock
+        release.set()
+        assert await pop is True
+        await holder
+        assert not app._panes[1].drill.active  # initiating pane popped
+        assert app._panes[0].drill.active  # other pane's stack untouched

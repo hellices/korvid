@@ -1316,12 +1316,15 @@ class KorvidApp(App[None]):
         # navigate always lands last. ``drill_op`` mutates the drill stack
         # inside the same critical section so stack and view transition as
         # one transaction.
+        # Capture the pane identity before waiting on the lock: the user may
+        # switch pane focus while this navigation queues behind another, or
+        # during `_navigate_locked`'s watch/log/metrics awaits - the
+        # transition (and drill_op, which callers bind to the same pane's
+        # stack at call time) must land in the pane that initiated it.
+        pane = self._pane
         async with self._nav_lock:
-            # Capture the pane identity up front: `_navigate_locked` awaits
-            # watch/log/metrics operations, and the user may switch pane
-            # focus during those awaits - the transition must land in the
-            # pane that initiated it, not whichever pane is focused later.
-            pane = self._pane
+            if pane not in self._panes:
+                return  # the initiating pane was closed while queued
             if drill_op is not None:
                 drill_op()
             await self._navigate_locked(pane, view, self._default_scope_for(view, namespace))
@@ -2196,8 +2199,12 @@ class KorvidApp(App[None]):
         # a concurrent :view/agent navigate can then never observe (or
         # strand) a pushed level without its matching child view. If the
         # transition itself fails, the pushed level is rolled back.
+        # Capture before waiting on the lock: focus may move (or the pane may
+        # close) while this drill queues behind another navigation.
+        pane = self._pane
         async with self._nav_lock:
-            pane = self._pane  # capture: focus may move during the awaits below
+            if pane not in self._panes:
+                return None  # the initiating pane was closed while queued
             pane.drill.push(level)
             try:
                 await self._navigate_locked(pane, child, None)
@@ -2212,8 +2219,12 @@ class KorvidApp(App[None]):
         """Pop one drill level and navigate back to its parent kind as one
         transaction under the navigation lock. Returns False when the stack
         was empty (nothing to pop)."""
+        # Capture before waiting on the lock: focus may move (or the pane may
+        # close) while this pop queues behind another navigation.
+        pane = self._pane
         async with self._nav_lock:
-            pane = self._pane  # capture: focus may move during the awaits below
+            if pane not in self._panes:
+                return False  # the initiating pane was closed while queued
             popped = pane.drill.pop()
             if popped is None:
                 return False
