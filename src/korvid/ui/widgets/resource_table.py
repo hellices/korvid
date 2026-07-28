@@ -389,13 +389,16 @@ class ResourceTable(DataTable[str | Text]):
             # and even with scroll=False, Textual's cursor watcher schedules
             # a deferred _scroll_cursor_into_view on an index change, so the
             # viewport must be re-asserted after it (same as the rebuild
-            # path below).
+            # path below). When the index is unchanged no deferred scroll
+            # was scheduled — re-asserting anyway would yank back a user
+            # scroll that lands before the callback runs.
             if restore is not None:
                 offset = (self.scroll_x, self.scroll_y)
                 self._restore_cursor(*restore, scroll=False)
-                self.call_after_refresh(
-                    self.scroll_to, *offset, animate=False, immediate=True, force=True
-                )
+                if self.cursor_row != restore[1]:
+                    self.call_after_refresh(
+                        self.scroll_to, *offset, animate=False, immediate=True, force=True
+                    )
             return
         if not same_view or sort != self._last_sort:
             viewport = None

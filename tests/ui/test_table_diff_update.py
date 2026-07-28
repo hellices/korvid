@@ -160,6 +160,33 @@ def test_cell_width_measures_multiline_cells_by_widest_line() -> None:
     assert _cell_width("") == 0
 
 
+async def test_no_deferred_scroll_scheduled_when_cursor_unchanged() -> None:
+    # The deferred viewport re-assert exists only to counter Textual's
+    # deferred _scroll_cursor_into_view, which is scheduled solely on a
+    # cursor-index change. Scheduling it on every in-place refresh opens a
+    # window where a user scroll landing before the callback is yanked
+    # back to the stale captured offset.
+    app = make_app([_pod("alpha"), _pod("beta"), _pod("gamma")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 3, label="pods loaded")
+        scheduled: list[Any] = []
+        original = table.call_after_refresh
+
+        def spy(callback: Any, *args: Any, **kwargs: Any) -> Any:
+            scheduled.append(callback)
+            return original(callback, *args, **kwargs)
+
+        table.call_after_refresh = spy  # type: ignore[method-assign]  # test spy
+        app.store.apply_event("pods", "default", "MODIFIED", _pod("beta", phase="Pending"))
+        await until(
+            pilot,
+            lambda: str(table.get_row("default/beta")[2]) == "Pending",
+            label="phase cell updated",
+        )
+        assert table.scroll_to not in scheduled
+
+
 def test_cells_equal_is_style_aware() -> None:
     # rich.Text.__eq__ compares plain text only — a phase flipping color
     # with the same wording must still count as a change.
