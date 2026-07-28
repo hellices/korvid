@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import json
 import logging
@@ -1029,10 +1030,11 @@ class KubeClient(ReadOps, WriteOps):
         decodes DeleteOptions from the *body only* and ignores URL query
         parameters entirely (apiserver ``delete.go``), so a query-only
         ``dryRun`` would silently execute the real delete. The flag therefore
-        also rides inside a copy of the options body — the caller's body (and
-        the real delete built from it) is never mutated."""
+        also rides inside a deep copy of the options body — the caller's body
+        (and the real delete built from it), nested dicts included, is never
+        mutated."""
         if method == "DELETE" and body is not None:
-            body = {**body, "dryRun": ["All"]}
+            body = {**copy.deepcopy(body), "dryRun": ["All"]}
         raw = await self._request_write(
             path,
             method,

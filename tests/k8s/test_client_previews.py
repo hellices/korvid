@@ -367,3 +367,6 @@ async def test_delete_object_body_never_carries_dry_run() -> None:
         "propagationPolicy": "Background",
         "preconditions": {"uid": "u-1"},
     }
+    # Deep isolation: nested dicts are copies too, so a future edit to the
+    # dry-run body can never leak into a caller-reused real delete.
+    assert sent_body["preconditions"] is not shared_body["preconditions"]
