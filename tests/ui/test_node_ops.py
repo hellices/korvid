@@ -327,7 +327,7 @@ async def test_drain_cancel_mid_drain_leaves_node_cordoned(tmp_path: Path) -> No
     rec.release_evictions.clear()  # first eviction blocks until released
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
-    app._evict_settle_timeout = 0.1  # the held eviction never settles
+    app._drain.settle_timeout = 0.1  # the held eviction never settles
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await _to_nodes(pilot)
@@ -413,7 +413,7 @@ async def test_drain_while_drain_in_progress_cancels_instead_of_stacking(tmp_pat
     rec.release_evictions.clear()
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
-    app._evict_settle_timeout = 0.1  # the held eviction never settles
+    app._drain.settle_timeout = 0.1  # the held eviction never settles
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await _to_nodes(pilot)
@@ -552,8 +552,8 @@ async def test_drain_reports_pods_that_never_finish_terminating(tmp_path: Path) 
     rec = LingeringRecorder(plan=plan)
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
-    app._drain_wait_timeout = 0.3
-    app._drain_wait_poll = 0.05
+    app._drain.wait_timeout = 0.3
+    app._drain.wait_poll = 0.05
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await _to_nodes(pilot)
@@ -652,7 +652,7 @@ async def test_throttled_429_eviction_is_retried_not_reported_pdb_blocked(
     rec = ThrottlingRecorder(plan)
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
-    app._evict_throttle_backoff = 0.01
+    app._drain.throttle_backoff = 0.01
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await _to_nodes(pilot)
@@ -678,8 +678,8 @@ async def test_persistently_throttled_eviction_counts_as_failed(tmp_path: Path) 
     )
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path)
-    app._evict_throttle_retries = 1
-    app._evict_throttle_backoff = 0.01
+    app._drain.throttle_retries = 1
+    app._drain.throttle_backoff = 0.01
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         await _to_nodes(pilot)
