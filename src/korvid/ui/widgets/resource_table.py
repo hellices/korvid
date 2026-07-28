@@ -440,10 +440,16 @@ class ResourceTable(DataTable[str | Text]):
         fresh = [key for key in new_keys if key not in current_set]
         if new_keys != [*survivors, *fresh]:
             return False
+        columns = self.ordered_columns
+        if any(len(cells) != len(columns) for _, cells in pending):
+            # A malformed row (e.g. a custom view filling a different number
+            # of extras per row) must not blow up the refresh tick with a
+            # ValueError from zip(strict=True)/add_row: let the rebuild path
+            # repaint the whole table instead.
+            return False
         for key in current_keys:
             if key not in new_set:
                 self.remove_row(cast(str, key))
-        columns = self.ordered_columns
         for key, cells in pending:
             if key in current_set:
                 old_cells = self.get_row(key)

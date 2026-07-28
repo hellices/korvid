@@ -165,3 +165,15 @@ async def test_column_width_grows_for_wider_in_place_value() -> None:
             label="status column widened for new value",
         )
         assert status.content_width >= len("CrashLoopBackOff")
+
+
+async def test_cell_count_mismatch_falls_back_to_rebuild() -> None:
+    # A row whose cell count disagrees with the column count must not blow
+    # up the refresh tick (zip(strict=True) / add_row would raise): the
+    # diff declines and the rebuild path repaints the table instead.
+    app = make_app([_pod("alpha"), _pod("beta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        short: list[str | Text] = ["alpha", "1/1"]
+        assert table._apply_in_place([("default/alpha", short), ("default/beta", short)]) is False
