@@ -369,6 +369,7 @@ dialog: a forward reads from the cluster, it never mutates it).
 
 ## AI agent
 
+Requires the `[agent]` extra (see [Installation](#installation)).
 Press `Ctrl-A` to open the agent panel — a chat sidebar that answers questions
 about the cluster you are looking at.  The agent sees your current screen
 context (view, namespace, selected resource, active filter) and inspects the
@@ -614,6 +615,7 @@ harness: `python -m korvid.evals --profile small` (see below).
 
 ### External MCP hosts
 
+Requires the `[mcp]` extra (see [Installation](#installation)).
 Start with `korvid --mcp` (or set `mcp: {enabled: true}` in
 `~/.config/korvid/config.yaml`) to expose the read and UI-drive tools to
 external agents — VS Code Copilot Chat, Claude Code, Cursor, Zed — over a
@@ -720,12 +722,26 @@ Or run it ad hoc without installing:
 uvx --from git+https://github.com/hellices/korvid korvid
 ```
 
+The base install is the TUI alone. The embedded AI agent and the MCP
+server are optional extras — add them when you want those features:
+
+```sh
+uv tool install 'korvid[agent] @ git+https://github.com/hellices/korvid'  # :ai / Ctrl-A
+uv tool install 'korvid[mcp] @ git+https://github.com/hellices/korvid'   # korvid --mcp
+uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'   # both
+```
+
+Without the extra installed, `:ai` and `:mcp` report the feature as
+unavailable with the matching install hint; explicitly enabling a feature
+whose extra is missing (`--mcp`, `agent.provider` in config) fails at
+startup with the same hint. `[entra]` adds Entra ID auth for Azure OpenAI.
+
 ### Development
 
 ```sh
 git clone https://github.com/hellices/korvid && cd korvid
-uv sync --dev          # create .venv with locked deps
-uv run korvid          # run against your current kubeconfig context
-make check             # lint + mypy --strict + tach + tests
+uv sync --dev --all-extras   # create .venv with locked deps + all extras
+uv run korvid                # run against your current kubeconfig context
+make check                   # lint + mypy --strict + tach + tests
 ```
 
