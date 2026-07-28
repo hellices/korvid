@@ -328,13 +328,17 @@ class ResourceTable(DataTable[str | Text]):
         the kind's custom column config (issue #45), if any.
         """
         kind = _typed_kind(kind, group)
-        restore: tuple[str, int] | None = None
-        if (kind, all_namespaces, sort, view) != (
+        # Same logical view (kind/scope/columns) means the cursor should
+        # survive the re-render — including a sort change, where the selected
+        # resource moves with its row key (issue #89). Only a different
+        # resource set resets to the top.
+        same_view = (kind, all_namespaces, view) == (
             self._last_kind,
             self._last_all_namespaces,
-            self._last_sort,
             self._active_view,
-        ):
+        )
+        restore = self._cursor_snapshot() if same_view else None
+        if not same_view or sort != self._last_sort:
             self._active_view = view
             self.clear(columns=True)
             custom_names = tuple(column.name for column in view.columns) if view else ()
@@ -349,10 +353,8 @@ class ResourceTable(DataTable[str | Text]):
             self._last_all_namespaces = all_namespaces
             self._last_sort = sort
         else:
-            # Same logical view refreshing (watch/metrics tick): snapshot the
-            # cursor so it survives the clear+re-add below (issue #89).
-            # DataTable.clear() resets the cursor to (0, 0).
-            restore = self._cursor_snapshot()
+            # DataTable.clear() resets the cursor to (0, 0); the snapshot
+            # above restores it after the rows are re-added.
             self.clear()
         self._render_rows(
             kind, rows, all_namespaces=all_namespaces, pattern=pattern, metrics=metrics, sort=sort

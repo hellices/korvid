@@ -81,3 +81,24 @@ async def test_view_change_resets_cursor_to_top() -> None:
         )
         await pilot.pause()
         assert table.cursor_row == 0
+
+
+async def test_cursor_follows_row_across_sort_toggle() -> None:
+    # Issue #89 acceptance: a sort-order change keeps the cursor on the same
+    # row key — it moves with the resource, not the row index.
+    app = make_app([_pod("alpha"), _pod("bravo"), _pod("charlie"), _pod("delta")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 4, label="pods loaded")
+        table.focus()
+        await pilot.press("down")
+        await until(pilot, lambda: _cursor_key(table) == "default/bravo", label="cursor on bravo")
+        await pilot.press("N")  # name ascending: same order, cursor must hold
+        await until(pilot, lambda: _cursor_key(table) == "default/bravo", label="held ascending")
+        await pilot.press("N")  # name descending: bravo shifts from index 1 to 2
+        await until(
+            pilot,
+            lambda: table.get_row_at(0)[0] == "delta",
+            label="descending order rendered",
+        )
+        assert _cursor_key(table) == "default/bravo"
