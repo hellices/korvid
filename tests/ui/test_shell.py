@@ -19,6 +19,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
+from korvid.ui.debug import DebugController
 from korvid.ui.shell import (
     DEBUG_IMAGE,
     build_debug_argv,
@@ -1080,7 +1081,7 @@ async def test_debug_pull_failure_detected_on_final_poll_at_deadline(tmp_path: P
         patch("korvid.ui.app.subprocess.call", return_value=1),
         patch("korvid.ui.app.subprocess.run", side_effect=_pull_failure_run(DEBUG_IMAGE)),
         # Deadline elapses immediately: the first timed wait is also the last.
-        patch.object(type(app), "_PULL_CHECK_DEADLINE", 0.0),
+        patch.object(DebugController, "PULL_CHECK_DEADLINE", 0.0),
         patch.object(type(app), "suspend", side_effect=lambda: _noop_cm()),
     ):
         async with app.run_test() as pilot:
