@@ -12,7 +12,8 @@ from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.models import ContainerTrouble, PodSummary
-from korvid.ui.app import EventsFetcher, KorvidApp
+from korvid.ui.app import KorvidApp
+from korvid.ui.hints import EventsFetcher
 from korvid.ui.widgets.hint_strip import HintStrip
 from korvid.ui.widgets.resource_table import ResourceTable
 
@@ -314,7 +315,7 @@ async def test_recovered_pod_is_not_rendered_with_stale_trouble() -> None:
 
 
 def test_event_timestamp_prefers_series_last_observed_time() -> None:
-    from korvid.ui.app import _newest_warning
+    from korvid.ui.hints import newest_warning as _newest_warning
 
     events: list[dict[str, Any]] = [
         {
@@ -337,7 +338,7 @@ def test_event_timestamp_prefers_series_last_observed_time() -> None:
 
 
 def test_abnormal_phase_without_trouble_needs_hint() -> None:
-    from korvid.ui.app import _pod_needs_hint
+    from korvid.ui.hints import pod_needs_hint as _pod_needs_hint
 
     def pod(phase: str, ready: str = "1/1") -> PodSummary:
         return PodSummary(
@@ -405,7 +406,7 @@ async def test_recreated_pod_uid_change_mid_fetch_does_not_render_old_hint() -> 
 
 
 def test_undated_event_suppressed_when_status_is_dated() -> None:
-    from korvid.ui.app import _event_line_fresh
+    from korvid.ui.hints import event_line_fresh as _event_line_fresh
 
     dated = _pod("web-1", (_CRASH,))  # _CRASH has no finished_at
     crash_dated = ContainerTrouble(
@@ -437,7 +438,7 @@ async def test_failed_fetch_is_retried_after_ttl_while_parked() -> None:
         aliases=dict(_DEFAULT_TEST_ALIASES),
         get_events=_FnFetcher(failing),
     )
-    app._HINT_EVENT_TTL = 0.1  # shrink the TTL so the retry fits in a test
+    app._hints.ttl = 0.1  # shrink the TTL so the retry fits in a test
     async with app.run_test() as pilot:
         await until(pilot, lambda: len(attempts) >= 2, label="fetch retried after TTL")
         assert len(attempts) >= 2
@@ -456,7 +457,7 @@ async def test_hint_strip_sits_above_status_bar() -> None:
 
 
 def test_event_timestamp_falls_back_to_first_and_creation_timestamp() -> None:
-    from korvid.ui.app import _event_timestamp
+    from korvid.ui.hints import event_timestamp as _event_timestamp
 
     first_only = {"firstTimestamp": "2026-07-26T08:00:00Z"}
     creation_only = {"metadata": {"creationTimestamp": "2026-07-26T07:00:00Z"}}
@@ -469,7 +470,7 @@ def test_event_timestamp_falls_back_to_first_and_creation_timestamp() -> None:
 
 
 def test_event_older_than_ready_transition_is_stale_for_event_only_hint() -> None:
-    from korvid.ui.app import _event_line_fresh
+    from korvid.ui.hints import event_line_fresh as _event_line_fresh
 
     base = _pod("web-1", ())
     not_ready = PodSummary(

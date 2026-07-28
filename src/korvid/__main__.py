@@ -51,9 +51,9 @@ from korvid.tools.registry import mcp_tool_schemas
 from korvid.ui.app import (
     AppUIBridge,
     ContextSwitchResult,
-    EventsFetcher,
     KorvidApp,
 )
+from korvid.ui.hints import EventsFetcher
 from korvid.ui.widgets.resource_table import sanitize_views
 
 if TYPE_CHECKING:
