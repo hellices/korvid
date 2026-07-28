@@ -140,7 +140,7 @@ def test_cell_width_measures_str_cells_as_rendered_markup() -> None:
     # DataTable renders str cells through Text.from_markup, so the width
     # guard must measure the rendered text, not the raw markup: otherwise a
     # markup-valued custom column (issue #45) like "[red]x[/red]" measures
-    # 13 here, requests update_width=True, and Textual's rescan shrinks the
+    # 12 here, requests update_width=True, and Textual's rescan shrinks the
     # column to 1 — the exact layout jump the guard exists to prevent.
     assert _cell_width("[red]x[/red]") == 1
     assert _cell_width("plain") == 5
@@ -148,12 +148,15 @@ def test_cell_width_measures_str_cells_as_rendered_markup() -> None:
 
 
 def test_cell_width_measures_multiline_cells_by_widest_line() -> None:
-    # Text.cell_len sums every line, but DataTable sizes multiline cells by
-    # the widest rendered line. Custom annotation/JSONPath values can carry
-    # newlines: summing would falsely report growth and request a
-    # column-shrinking width rescan.
+    # For height-1 rows DataTable truncates str cells at the first newline
+    # before measuring, but measures Text cells by their widest rendered
+    # line. Mismatched measurement would falsely report growth and request
+    # a column-shrinking width rescan.
     assert _cell_width("abcdefghij\nk") == 10
+    assert _cell_width("x\nvery-wide") == 1
+    assert _cell_width("abc\n") == 3
     assert _cell_width(Text("abcdefghij\nk")) == 10
+    assert _cell_width(Text("x\nvery-wide")) == 9
     assert _cell_width("") == 0
 
 

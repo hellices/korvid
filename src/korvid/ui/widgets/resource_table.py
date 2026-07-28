@@ -86,13 +86,20 @@ def _phase_cell(phase: str) -> Text:
 def _cell_width(cell: str | Text) -> int:
     """Rendered width of a table cell, matching DataTable's measurement.
 
-    DataTable renders `str` cells through `Text.from_markup` and sizes
-    multiline cells by the widest rendered line — custom-column values
-    (issue #45) can carry markup or newlines. Measuring the raw string (or
-    `Text.cell_len`, which sums lines) would overestimate and trigger a
-    column-shrinking width rescan.
+    For height-1 rows, DataTable's `default_cell_formatter` truncates a
+    `str` cell at its first newline, then renders it through
+    `Text.from_markup`; a `Text` cell is measured by its widest rendered
+    line. Custom-column values (issue #45) can carry markup or newlines, so
+    any other measurement would overestimate and trigger a column-shrinking
+    width rescan.
     """
-    text = cell if isinstance(cell, Text) else Text.from_markup(cell, end="")
+    if isinstance(cell, Text):
+        text = cell
+    else:
+        newline = cell.find("\n")
+        if newline != -1 and newline != len(cell) - 1:
+            cell = cell[:newline]
+        text = Text.from_markup(cell, end="")
     return max((cell_len(line) for line in text.plain.splitlines()), default=0)
 
 
