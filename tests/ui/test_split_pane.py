@@ -633,3 +633,48 @@ async def test_sorting_applies_to_focused_pane_only() -> None:
         )
         assert [first.get_row_at(i)[0] for i in range(3)] == before
         assert app._panes[0].sorts == {}  # pane 1 carries no sort state
+
+
+async def test_pane_focus_switch_reevaluates_hint() -> None:
+    """`ctrl+w w` re-targets command routing: the hint strip must follow the
+    newly focused pane's selection, not keep showing the old pane's warning
+    (e.g. trouble pod focused, then switching into a deployments pane)."""
+    from korvid.k8s.models import ContainerTrouble, PodSummary
+    from korvid.ui.widgets.hint_strip import HintStrip
+
+    crash = ContainerTrouble(
+        container="app",
+        reason="CrashLoopBackOff",
+        message="back-off restarting failed container",
+        exit_code=137,
+        exit_reason="OOMKilled",
+        restarts=3,
+    )
+    bad = PodSummary(
+        name="a-bad",
+        namespace="default",
+        phase="CrashLoopBackOff",
+        ready="0/1",
+        restarts=3,
+        node=None,
+        uid="uid-bad",
+        trouble=(crash,),
+    )
+    app = make_app([bad], extra_data={"deployments": [_deploy("web")]})
+    async with app.run_test() as pilot:
+        await _first_render(app, pilot)
+        await _split(app, pilot)
+        second = app.query_one("#pane-1", ResourceTable)
+        await until(pilot, lambda: second.row_count == 1, label="clone rendered")
+        strip = app.query_one(HintStrip)
+        await until(pilot, lambda: strip.display, label="hint for trouble pod")
+        await _type_command(pilot, "deploy")  # focused pane now shows deployments
+        await until(pilot, lambda: app.current_kind == "deployments", label="deploy view")
+        await until(pilot, lambda: not strip.display, label="hint cleared on non-pod view")
+        # Switch back to the pods pane: the warning must return without
+        # requiring a cursor move.
+        await pilot.press("ctrl+w", "w")
+        await until(pilot, lambda: strip.display, label="hint restored for pods pane")
+        # And back to the deployments pane: the pods warning must not linger.
+        await pilot.press("ctrl+w", "w")
+        await until(pilot, lambda: not strip.display, label="hint cleared for deploy pane")

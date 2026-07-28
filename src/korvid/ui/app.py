@@ -1901,6 +1901,24 @@ class KorvidApp(App[None]):
             return None
         return None if key is None else str(key.value)
 
+    def _refresh_hint_for_focus(self) -> None:
+        """Re-evaluate the hint strip for the focused pane's selection.
+
+        Focus changes re-target command routing without moving any cursor,
+        so the highlight-driven handler never fires — without this, a
+        warning from the previously focused pane would linger over a pane
+        showing deployments or a healthy pod.
+        """
+        try:
+            strip = self.query_one(HintStrip)
+        except NoMatches:  # focus restored during shutdown/teardown
+            return
+        row_key = self._cursor_row_key() if self.current_kind == "pods" else None
+        if row_key is None:
+            strip.clear_hint()
+            return
+        self._show_hint_for_row(row_key)
+
     def _schedule_hint_refresh(self, row_key: str, *, delay: float | None = None) -> None:
         """Re-evaluate a parked cursor when the cache entry expires; without
         this a cursor that never moves would show the same event forever."""
@@ -4011,6 +4029,7 @@ class KorvidApp(App[None]):
         self._focused_pane = 1 - self._focused_pane
         self._update_pane_focus_classes()
         self._focused_table().focus()
+        self._refresh_hint_for_focus()
         self._refresh_status()
 
     async def _close_focused_pane(self) -> None:
@@ -4042,6 +4061,7 @@ class KorvidApp(App[None]):
         table = self._focused_table()
         self._refresh_empty_state(remaining.kind, table.row_count)
         table.focus()
+        self._refresh_hint_for_focus()
         self._refresh_status()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
@@ -4058,6 +4078,7 @@ class KorvidApp(App[None]):
                 if index != self._focused_pane:
                     self._focused_pane = index
                     self._update_pane_focus_classes()
+                    self._refresh_hint_for_focus()
                     self._refresh_status()
                 return
 
