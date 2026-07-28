@@ -15,10 +15,9 @@ import subprocess
 import tempfile
 import threading
 import weakref
-from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar
@@ -37,7 +36,6 @@ from textual.containers import Horizontal
 from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
 from textual.events import DescendantBlur, DescendantFocus, Key
-from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Static
 from textual.widgets.data_table import CellDoesNotExist
 from textual.worker import Worker, get_current_worker
@@ -83,7 +81,7 @@ from korvid.k8s.helm import (
 from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
-from korvid.k8s.models import PodSummary
+from korvid.k8s.models import ContainerTrouble, PodSummary
 from korvid.k8s.olm import (
     OPERATORS_GROUP,
     PACKAGES_GROUP,
@@ -97,6 +95,7 @@ from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.tools.executor import UIBridge
 from korvid.ui.command import command_help
+from korvid.ui.hints import EventsFetcher, HintController, pod_needs_hint
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
@@ -135,7 +134,7 @@ from korvid.ui.widgets.filter_bar import FilterBar
 from korvid.ui.widgets.helm_install import HelmInstallPrompt, HelmReleaseChoices
 from korvid.ui.widgets.help_screen import HelpScreen, collect_help
 from korvid.ui.widgets.hint_detail import HintDetailScreen
-from korvid.ui.widgets.hint_strip import HintStrip, parse_rfc3339
+from korvid.ui.widgets.hint_strip import HintStrip
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
@@ -175,120 +174,6 @@ _APPROVAL_TIMEOUT = 120.0
 #: endpoint must never hang a binding handler or an agent turn. On timeout
 #: the check fails open (writes stay approval-gated and audited).
 _PERMISSION_CHECK_TIMEOUT = 10.0
-
-
-def _event_timestamp(event: dict[str, Any]) -> datetime | None:
-    """Absolute time of the event's latest occurrence.
-
-    Repeating events record it in `series.lastObservedTime`; `lastTimestamp`
-    (core v1) and `eventTime` (events.k8s.io initial observation) are
-    fallbacks for non-series events, then the deprecated `firstTimestamp`
-    and finally `metadata.creationTimestamp` — a valid event may carry
-    only those, and treating it as undated would misorder or suppress it.
-    """
-    series = event.get("series") or {}
-    raw = (
-        series.get("lastObservedTime")
-        or event.get("lastTimestamp")
-        or event.get("eventTime")
-        or event.get("firstTimestamp")
-        or (event.get("metadata") or {}).get("creationTimestamp")
-        or ""
-    )
-    return parse_rfc3339(str(raw))
-
-
-def _newest_warning(events: list[dict[str, Any]]) -> tuple[str, datetime | None] | None:
-    """(line, timestamp) of the most recent Warning event, or None.
-
-    Timestamps are parsed before comparing: RFC 3339 strings do not sort
-    chronologically once fractional seconds or offsets differ.
-    """
-    warnings = [e for e in events if e.get("type") == "Warning"]
-    if not warnings:
-        return None
-    epoch = datetime.min.replace(tzinfo=UTC)
-    newest = max(warnings, key=lambda e: _event_timestamp(e) or epoch)
-    reason = str(newest.get("reason") or "Warning")
-    message = str(newest.get("message") or "").strip()
-    line = f"{reason}: {message}" if message else reason
-    return line, _event_timestamp(newest)
-
-
-class EventsFetcher(ABC):
-    """Events for one object — layer-boundary interface (AGENTS.md: `abc.ABC`).
-
-    The concrete adapter wraps the k8s client and is wired in `__main__.py`.
-    `uid` narrows the query so earlier same-named incarnations are excluded.
-    """
-
-    @abstractmethod
-    async def fetch(
-        self, namespace: str, name: str, *, uid: str | None = None
-    ) -> list[dict[str, Any]]: ...
-
-
-#: Display phases that are routine on their own — no hint without other signals.
-_ROUTINE_PHASES = frozenset(
-    {
-        "Running",
-        "Succeeded",
-        "Completed",
-        "Pending",
-        "ContainerCreating",
-        "PodInitializing",
-        "Terminating",
-    }
-)
-
-
-def _pod_needs_hint(summary: PodSummary) -> bool:
-    """Abnormal rows: captured trouble, an abnormal display phase (Unknown,
-    status-only Failed), or a Running pod that is not fully ready.
-
-    The latter two carry no container trouble — the explanation lives only
-    in Warning events (e.g. `Unhealthy` for a failing readiness probe), so
-    they still qualify for an event-only hint.
-    """
-    if summary.trouble:
-        return True
-    if summary.phase.startswith("Init:"):
-        # Routine init progress renders as Init:i/n; actual init failures
-        # already surface as trouble entries above.
-        return False
-    if summary.phase not in _ROUTINE_PHASES:
-        return True
-    if summary.phase != "Running":
-        # Routine startup/finish/deletion phases are legitimately not-ready
-        # (Pending 0/1, Completed 0/N, Terminating): no hint, no event fetch.
-        return False
-    ready, _, desired = summary.ready.partition("/")
-    return bool(desired) and ready != desired
-
-
-def _event_line_fresh(event_ts: datetime | None, summary: PodSummary) -> bool:
-    """Whether a Warning may explain the *current* status.
-
-    An event older than the last termination or the last Ready-condition
-    flip explains a previous failure; an undated event cannot be proven
-    fresher than a dated status (timestamp fields are optional). Both are
-    suppressed. Since nearly every pod carries a Ready condition, an
-    undated Warning is in practice always suppressed — a deliberate trade:
-    real Warnings virtually always carry a timestamp, and a wrong "cause"
-    is worse than none.
-    """
-    cutoffs = [
-        ts
-        for t in summary.trouble
-        if t.finished_at and (ts := parse_rfc3339(t.finished_at)) is not None
-    ]
-    if summary.ready_transition_at:
-        ready_ts = parse_rfc3339(summary.ready_transition_at)
-        if ready_ts is not None:
-            cutoffs.append(ready_ts)
-    if not cutoffs:
-        return True
-    return event_ts is not None and event_ts >= max(cutoffs)
 
 
 def _looks_like_admission_rejection(stderr: str) -> bool:
@@ -881,10 +766,21 @@ class KorvidApp(App[None]):
         # Kinds with a table render already queued — coalesces the per-object
         # notifications of a LIST seed into a single rebuild (see _on_store_update).
         self._render_pending: set[str] = set()
-        # Hint strip event cache: "ns/name" -> (fetched_at, newest warning line
-        # or None). Short TTL so a lingering cursor eventually sees new events.
-        self._hint_event_cache: dict[str, tuple[float, str | None, datetime | None]] = {}
-        self._hint_refresh_timer: Timer | None = None
+        # Hint-strip lifecycle (issue #97 U3b): the controller owns the event
+        # cache and the parked-cursor refresh timer; widget access and worker
+        # scheduling stay here, injected as narrow callables.
+        self._hints = HintController(
+            find_pod_summary=self._find_pod_summary,
+            cursor_row_key=self._cursor_row_key,
+            on_pods_view=lambda: self.current_kind == "pods",
+            get_events=lambda: self._get_events,
+            show_trouble=self._hint_show_trouble,
+            clear_hint=self._hint_clear,
+            start_fetch=lambda coro: self.run_worker(coro, exclusive=True, group="hint-events"),
+            set_timer=self.set_timer,
+            ctx_epoch=lambda: self._ctx_epoch,
+            ctx_crossed=self._ctx_switch_crossed,
+        )
 
     # -- Focused-pane delegation (issue #48): the pane list is the single
     # source of view state; these properties keep the whole action surface
@@ -1787,10 +1683,7 @@ class KorvidApp(App[None]):
         # timer) before the cache is cleared, so no late result or retry can
         # resurrect old-cluster hints.
         self.workers.cancel_group(self, "hint-events")
-        if self._hint_refresh_timer is not None:
-            self._hint_refresh_timer.stop()
-            self._hint_refresh_timer = None
-        self._hint_event_cache.clear()
+        self._hints.teardown()
         self.filter_pattern = ""
         self._resource_filter = parse_filter("")
 
@@ -1874,10 +1767,6 @@ class KorvidApp(App[None]):
     def on_quit_command(self, message: QuitCommand) -> None:
         self.exit()
 
-    #: Seconds a fetched warning-event line stays cached per pod. Short enough
-    #: that a cursor parked on a crashing pod eventually sees fresh events.
-    _HINT_EVENT_TTL = 15.0
-
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         """Cursor movement drives the ops hint strip (pods view only)."""
         if not isinstance(event.data_table, ResourceTable):
@@ -1887,53 +1776,26 @@ class KorvidApp(App[None]):
             # re-render moving its cursor): the hint strip reflects the
             # focused pane's selection only.
             return
-        try:
-            if self.current_kind != "pods" or event.row_key is None:
-                self._hint_strip.clear_hint()
-                return
-            self._show_hint_for_row(str(event.row_key.value))
-        except NoMatches:
-            # A highlight event dispatched during shutdown/teardown can
-            # arrive after the strip is unmounted; nothing to render then.
-            pass
+        if self.current_kind != "pods" or event.row_key is None:
+            self._hint_clear()
+            return
+        self._hints.show_for_row(str(event.row_key.value))
 
-    def _show_hint_for_row(self, row_key: str) -> None:
-        """Render the hint for one pod row: cached event line when fresh,
-        otherwise the status-derived hint plus a background event fetch."""
-        strip = self._hint_strip
-        summary = self._find_pod_summary(row_key)
-        if summary is None or not _pod_needs_hint(summary):
-            strip.clear_hint()
-            return
-        # uid in the cache key: a recreated pod must not inherit the cached
-        # event line of its previous incarnation.
-        cache_key = f"{row_key}#{summary.uid}"
-        cached = self._hint_event_cache.get(cache_key)
-        if cached is not None and (age := monotonic() - cached[0]) < self._HINT_EVENT_TTL:
-            _at, line, event_ts = cached
-            if line is not None and not _event_line_fresh(event_ts, summary):
-                # A newer termination arrived since the line was cached.
-                line = None
-            if summary.trouble or line:
-                strip.show_trouble(summary.trouble, event=line)
-            else:
-                strip.clear_hint()
-            # Keep the parked-cursor refresh armed for the entry's remaining
-            # life — switching rows and back must not strand it timerless.
-            self._schedule_hint_refresh(row_key, delay=self._HINT_EVENT_TTL - age)
-            return
-        if summary.trouble:
-            strip.show_trouble(summary.trouble)
-        else:
-            # Event-only hint (e.g. Running but not ready): nothing to show
-            # until the warning event arrives.
-            strip.clear_hint()
-        if self._get_events is not None:
-            self.run_worker(
-                self._fetch_hint_event(row_key, cache_key, summary),
-                exclusive=True,
-                group="hint-events",
-            )
+    def _hint_show_trouble(
+        self, trouble: tuple[ContainerTrouble, ...], *, event: str | None = None
+    ) -> None:
+        """Strip adapter for the hint controller (widget access stays here).
+
+        A render dispatched during shutdown/teardown can arrive after the
+        strip is unmounted; nothing to render then.
+        """
+        with contextlib.suppress(NoMatches):
+            self._hint_strip.show_trouble(trouble, event=event)
+
+    def _hint_clear(self) -> None:
+        """Strip adapter for the hint controller (widget access stays here)."""
+        with contextlib.suppress(NoMatches):  # strip unmounted during shutdown/teardown
+            self._hint_strip.clear_hint()
 
     def _cursor_row_key(self) -> str | None:
         """Row key under the table cursor, or None (empty table / no cursor)."""
@@ -1949,39 +1811,6 @@ class KorvidApp(App[None]):
             return None
         return None if key is None else str(key.value)
 
-    def _refresh_hint_for_focus(self) -> None:
-        """Re-evaluate the hint strip for the focused pane's selection.
-
-        Focus changes re-target command routing without moving any cursor,
-        so the highlight-driven handler never fires — without this, a
-        warning from the previously focused pane would linger over a pane
-        showing deployments or a healthy pod.
-        """
-        try:
-            strip = self._hint_strip
-        except NoMatches:  # focus restored during shutdown/teardown
-            return
-        row_key = self._cursor_row_key() if self.current_kind == "pods" else None
-        if row_key is None:
-            strip.clear_hint()
-            return
-        self._show_hint_for_row(row_key)
-
-    def _schedule_hint_refresh(self, row_key: str, *, delay: float | None = None) -> None:
-        """Re-evaluate a parked cursor when the cache entry expires; without
-        this a cursor that never moves would show the same event forever."""
-        if self._hint_refresh_timer is not None:
-            self._hint_refresh_timer.stop()
-
-        def _refresh() -> None:
-            self._hint_refresh_timer = None
-            if self.current_kind == "pods" and self._cursor_row_key() == row_key:
-                self._show_hint_for_row(row_key)
-
-        self._hint_refresh_timer = self.set_timer(
-            max(0.05, delay if delay is not None else self._HINT_EVENT_TTL), _refresh
-        )
-
     def _find_pod_summary(self, row_key: str) -> PodSummary | None:
         parts = row_key.split("/", 1)
         if len(parts) != 2:
@@ -1991,78 +1820,6 @@ class KorvidApp(App[None]):
             if obj.namespace == namespace and obj.name == name and isinstance(obj, PodSummary):
                 return obj
         return None
-
-    async def _fetch_hint_event(self, row_key: str, cache_key: str, summary: PodSummary) -> None:
-        """Best-effort: append the newest warning event to the visible strip."""
-        if self._get_events is None:  # caller guards; satisfy the type checker
-            return
-        epoch = self._ctx_epoch
-        try:
-            events = await self._get_events.fetch(
-                summary.namespace, summary.name, uid=summary.uid or None
-            )
-        except Exception:  # events are decoration; the status-derived hint already shows
-            if self._ctx_switching or epoch != self._ctx_epoch:
-                # The fetch failed because the context switch closed the old
-                # client — recaching / rescheduling would resurrect
-                # old-cluster hints after teardown cleared them.
-                return
-            self._store_hint_event(cache_key, None, None)
-            # Retry once the TTL passes: a transient API failure must not
-            # hide the hint forever while the cursor stays parked.
-            if self.current_kind == "pods" and self._cursor_row_key() == row_key:
-                self._schedule_hint_refresh(row_key)
-            return
-        if self._ctx_switching or epoch != self._ctx_epoch:
-            # A late success from the old cluster must not be cached against
-            # (or rendered over) a same-keyed row on the new one.
-            return
-        self._apply_hint_events(row_key, cache_key, summary, events)
-
-    def _apply_hint_events(
-        self, row_key: str, cache_key: str, summary: PodSummary, events: list[dict[str, Any]]
-    ) -> None:
-        """Cache the fetched events and render them if the cursor still fits."""
-        # The snapshot taken at highlight time may be stale after the await:
-        # re-read the store and filter/render against the *current* status.
-        fresh = self._find_pod_summary(row_key)
-        if fresh is None or fresh.uid != summary.uid:
-            # Deleted or recreated mid-fetch: the results describe the old
-            # incarnation. Re-evaluate the row so the new one gets its own pass.
-            if self.current_kind == "pods" and self._cursor_row_key() == row_key:
-                self._show_hint_for_row(row_key)
-            return
-        found = _newest_warning(events)
-        line, event_ts = found if found is not None else (None, None)
-        if line is not None and not _event_line_fresh(event_ts, fresh):
-            line, event_ts = None, None
-        self._store_hint_event(cache_key, line, event_ts)
-        if self.current_kind != "pods" or self._cursor_row_key() != row_key:
-            return
-        self._schedule_hint_refresh(row_key)
-        if not _pod_needs_hint(fresh):
-            self._hint_strip.clear_hint()
-            return
-        if fresh.trouble or line:
-            self._hint_strip.show_trouble(fresh.trouble, event=line)
-        else:
-            self._hint_strip.clear_hint()
-
-    def _store_hint_event(
-        self, cache_key: str, line: str | None, event_ts: datetime | None
-    ) -> None:
-        """Cache the fetched line (with its occurrence time, so cache hits can
-        re-apply freshness); expired entries are swept on every write so the
-        cache cannot grow without bound in a long-running session."""
-        now = monotonic()
-        expired = [
-            k
-            for k, (at, _line, _ts) in self._hint_event_cache.items()
-            if now - at >= self._HINT_EVENT_TTL
-        ]
-        for k in expired:
-            del self._hint_event_cache[k]
-        self._hint_event_cache[cache_key] = (now, line, event_ts)
 
     def action_hint_details(self) -> None:
         """Open the read-only detail overlay for the hinted pod row (issue #34):
@@ -2079,7 +1836,7 @@ class KorvidApp(App[None]):
         if row_key is None:
             return
         summary = self._find_pod_summary(row_key)
-        if summary is None or not _pod_needs_hint(summary):
+        if summary is None or not pod_needs_hint(summary):
             return
         self.run_worker(
             self._open_hint_details(row_key, summary), exclusive=True, group="hint-detail"
@@ -2110,7 +1867,7 @@ class KorvidApp(App[None]):
         fresh = self._find_pod_summary(row_key)
         if fresh is None or fresh.uid != summary.uid:
             return  # deleted or recreated mid-fetch
-        if not _pod_needs_hint(fresh):
+        if not pod_needs_hint(fresh):
             return  # recovered mid-fetch: the strip is gone, details would be noise
         await self.push_screen(
             HintDetailScreen(
@@ -3957,7 +3714,7 @@ class KorvidApp(App[None]):
         self._focused_pane = 1 - self._focused_pane
         self._update_pane_focus_classes()
         self._focused_table().focus()
-        self._refresh_hint_for_focus()
+        self._hints.refresh_for_focus()
         self._refresh_status()
 
     async def _close_focused_pane(self) -> None:
@@ -3989,7 +3746,7 @@ class KorvidApp(App[None]):
         table = self._focused_table()
         self._refresh_empty_state(remaining.kind, table.row_count)
         table.focus()
-        self._refresh_hint_for_focus()
+        self._hints.refresh_for_focus()
         self._refresh_status()
 
     async def _collapse_split(self) -> None:
@@ -4023,7 +3780,7 @@ class KorvidApp(App[None]):
                 if index != self._focused_pane:
                     self._focused_pane = index
                     self._update_pane_focus_classes()
-                    self._refresh_hint_for_focus()
+                    self._hints.refresh_for_focus()
                     self._refresh_status()
                 return
 

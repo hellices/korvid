@@ -11,7 +11,8 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
-from korvid.ui.app import EventsFetcher, KorvidApp
+from korvid.ui.app import KorvidApp
+from korvid.ui.hints import EventsFetcher
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 
