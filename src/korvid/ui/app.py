@@ -20,7 +20,13 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar
+
+if TYPE_CHECKING:
+    # Annotation-only: the base TUI must not import the embedded-agent
+    # runtime at startup (issue #73) — the composition root injects it
+    # only when the [agent] extra is installed and wired.
+    from korvid.agent.runtime import AgentRuntime
 
 import yaml
 from rich.text import Text
@@ -35,10 +41,7 @@ from textual.widgets.data_table import CellDoesNotExist
 from textual.worker import Worker, get_current_worker
 
 from korvid.agent.events import AgentError
-from korvid.agent.mcp_server import MCPController
-from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
-from korvid.agent.tools import UIBridge
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.debugimage import (
@@ -53,6 +56,7 @@ from korvid.core.filters import ResourceFilter, parse_filter
 from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
+from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import (
     ForwardRecord,
     ForwardRegistry,
@@ -98,6 +102,7 @@ from korvid.k8s.olm import (
 from korvid.k8s.portforward import FORWARDABLE_KINDS, forward_target_gvr
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
+from korvid.tools.executor import UIBridge
 from korvid.ui.command import command_help
 from korvid.ui.messages import (
     AgentPromptSubmitted,
@@ -628,11 +633,12 @@ class KorvidApp(App[None]):
         agent_model_name: str | None = None,
         agent_configurator: AgentConfigurator | None = None,
         rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None = None,
+        agent_available: bool = True,
         write_ops: WriteOps | None = None,
         audit: AuditLog | None = None,
         check_permission: Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
         | None = None,
-        mcp: MCPController | None = None,
+        mcp: MCPControllerBase | None = None,
         edit_text: Callable[[str], Awaitable[str | None]] | None = None,
         metrics: MetricsPoller | None = None,
         pod_resize_supported: bool = False,
@@ -759,6 +765,9 @@ class KorvidApp(App[None]):
         self._agent_model_name = agent_model_name
         self._agent_configurator = agent_configurator
         self._rebuild_agent = rebuild_agent
+        #: False when the [agent] extra is absent (issue #73): the agent
+        #: panel is not mounted and :ai/:model/Ctrl-A are not offered.
+        self._agent_available = agent_available
         self._agent_settings: AgentSettings | None = None
         #: capability profile of the live runtime (issue #71); shown in the
         #: agent panel header so users know which mode the agent runs in.
@@ -850,9 +859,10 @@ class KorvidApp(App[None]):
         yield empty_state
         yield LogPane()
         yield DescribePane()
-        agent_panel = AgentPanel()
-        agent_panel.display = False
-        yield agent_panel
+        if self._agent_available:
+            agent_panel = AgentPanel()
+            agent_panel.display = False
+            yield agent_panel
         yield CommandBar()
         yield FilterBar()
         yield NamespacePicker()
@@ -1061,8 +1071,18 @@ class KorvidApp(App[None]):
             (group, overrides.get(action, key) if action else key, description)
             for group, key, description, action in self.HANDLER_KEY_HELP
         ]
+        # The static BINDINGS list bypasses check_action, so drop entries
+        # whose action is unavailable in this composition (e.g. Ctrl-A
+        # without the [agent] extra, issue #73).
+        app_bindings = [
+            binding
+            for binding in (
+                raw if isinstance(raw, Binding) else Binding(*raw) for raw in self.BINDINGS
+            )
+            if self.check_action(binding.action, ()) is not False
+        ]
         groups = collect_help(
-            list(self.BINDINGS),
+            app_bindings,
             list(DescribeScreen.BINDINGS),
             handler_keys=handler_keys,
             overrides=overrides,
@@ -2074,10 +2094,10 @@ class KorvidApp(App[None]):
     def on_unknown_command(self, message: UnknownCommand) -> None:
         parts = message.text.strip().split()
         head = parts[0] if parts else ""
-        if head in {"ai", "agent"}:
+        if head in {"ai", "agent"} and self._agent_available:
             self._open_agent_setup()
             return
-        if head == "model":
+        if head == "model" and self._agent_available:
             self._handle_model_command(parts[1:])
             return
         if head == "mcp":
@@ -2110,7 +2130,10 @@ class KorvidApp(App[None]):
 
     def _open_agent_setup(self) -> None:
         if self._agent_configurator is None:
-            self.notify("Agent setup unavailable in this build", severity="warning")
+            self.notify(
+                "Agent setup unavailable — install with: pip install 'korvid[agent]'",
+                severity="warning",
+            )
             return
         # The wizard applies the settings itself (via apply_settings) before
         # persisting, so a refused swap keeps the wizard open and unsaved.
@@ -2163,7 +2186,10 @@ class KorvidApp(App[None]):
         """`:mcp` shows server state; `:mcp on` / `:mcp off` toggle it live."""
         mcp = self._mcp
         if mcp is None:
-            self.notify("MCP unavailable in this build", severity="warning")
+            self.notify(
+                "MCP unavailable — install with: pip install 'korvid[mcp]'",
+                severity="warning",
+            )
             return
         if not args:
             self.notify(mcp.status())
@@ -2208,7 +2234,10 @@ class KorvidApp(App[None]):
         and False is returned; the swap is also refused while a turn is live.
         """
         if self._rebuild_agent is None:
-            self.notify("Agent rebuild unavailable in this build", severity="warning")
+            self.notify(
+                "Agent rebuild unavailable — install with: pip install 'korvid[agent]'",
+                severity="warning",
+            )
             return False
         if self._agent_task is not None and not self._agent_task.done():
             self.notify("Agent is busy — wait for the current turn to finish", severity="warning")
@@ -6610,8 +6639,14 @@ class KorvidApp(App[None]):
         would let the user's next y/Enter approve an unexpected write."""
         return self._agent_panel_expanded() and len(self.screen_stack) == 1
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Hide agent actions entirely when the [agent] extra is absent."""
+        return not (action == "toggle_agent" and not self._agent_available)
+
     def action_toggle_agent(self) -> None:
         """Toggle the agent chat panel; show setup hint when unconfigured."""
+        if not self._agent_available:
+            return
         panel = self.query_one(AgentPanel)
         if panel.display:
             panel.display = False

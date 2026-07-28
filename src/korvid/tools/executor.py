@@ -9,7 +9,14 @@ from typing import Any, ClassVar
 
 import yaml
 
-from korvid.agent.diagnose import (
+from korvid.core.portforward import controller_owner
+from korvid.core.secrets import mask_secret_manifest
+from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.models import parse_quantity
+from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
+from korvid.k8s.reads import ReadOps
+from korvid.tools.diagnose import (
     condition_lines,
     container_state_lines,
     identity_lines,
@@ -20,13 +27,6 @@ from korvid.agent.diagnose import (
     troubled_containers,
     warning_event_lines,
 )
-from korvid.core.portforward import controller_owner
-from korvid.core.secrets import mask_secret_manifest
-from korvid.k8s.discovery import ResourceMeta
-from korvid.k8s.errors import ApiStatusError
-from korvid.k8s.models import parse_quantity
-from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
-from korvid.k8s.reads import ReadOps
 
 MAX_RESULT_CHARS = 8000
 

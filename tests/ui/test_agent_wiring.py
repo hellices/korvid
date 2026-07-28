@@ -669,3 +669,29 @@ async def test_mcp_command_without_controller_does_not_crash() -> None:
         await pilot.pause()
         msgs = [str(n.message) for n in app._notifications]
         assert any("MCP unavailable" in m for m in msgs)
+
+
+async def test_agent_unavailable_mounts_no_panel_and_hides_the_binding() -> None:
+    """A base install (no [agent] extra) shows no agent surface at all
+    (issue #73): no panel in the DOM and Ctrl-A does nothing."""
+    app = make_app(agent_available=False)
+    async with app.run_test() as pilot:
+        assert not app.query(AgentPanel)
+        assert app.check_action("toggle_agent", ()) is False
+        await pilot.press("ctrl+a")  # must be a no-op, not a NoMatches crash
+        assert not app.query(AgentPanel)
+
+
+async def test_agent_unavailable_makes_ai_and_model_unknown_commands() -> None:
+    """`:ai` / `:model` are not registered without the [agent] extra —
+    they fall through to the unknown-command message (issue #73)."""
+    app = make_app(agent_available=False)
+    async with app.run_test():
+        msgs: list[str] = []
+        app.notify = lambda msg, **kw: msgs.append(str(msg))  # type: ignore[method-assign]
+        from korvid.ui.messages import UnknownCommand
+
+        app.on_unknown_command(UnknownCommand("ai"))
+        app.on_unknown_command(UnknownCommand("model"))
+        assert len(msgs) == 2
+        assert all("Unknown resource or command" in m for m in msgs)
