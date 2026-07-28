@@ -1704,6 +1704,10 @@ class KorvidApp(App[None]):
         """
         await self._close_log_pane()
         self.query_one(DescribePane).hide()
+        # Every pane's kind/scope/filter/drill describes the old cluster: a
+        # surviving second pane would keep stale-but-actionable rows on
+        # screen, so the switch collapses the split back to a single view.
+        await self._collapse_split()
         # An old-cluster namespace prefetch still in flight could land after
         # the new cluster's and overwrite its completions — cancel it first.
         if self._ns_prefetch_task is not None:
@@ -1716,6 +1720,10 @@ class KorvidApp(App[None]):
         self.query_one(CommandBar).namespace_words = []
         if self._metrics is not None:
             await self._metrics.stop()
+            # The poller is gone: drop the served-target cache too, or a
+            # same-namespace switch would look already-served to
+            # _sync_metrics_poller and metrics would never restart.
+            self._metrics_target = None
         await self.watch_manager.stop_all()
         if self._forwards is not None:
             # Same quiesce-stop-audit sequence as app exit: in-flight
@@ -4063,6 +4071,23 @@ class KorvidApp(App[None]):
         table.focus()
         self._refresh_hint_for_focus()
         self._refresh_status()
+
+    async def _collapse_split(self) -> None:
+        """Fold the workspace back to a single pane (context-switch teardown).
+
+        The caller already holds the nav lock and stops all watches
+        wholesale right after, so this only removes the extra pane's state
+        and table widget. The survivor is pane 0; the switch resets its
+        kind/scope/filter afterwards, so which pane survives is cosmetic.
+        """
+        if len(self._panes) < 2:
+            return
+        closing = self._panes.pop(1)
+        self._focused_pane = 0
+        remaining = self._panes[0]
+        await self.query_one(f"#{closing.table_id}", ResourceTable).remove()
+        self.query_one(f"#{remaining.table_id}", ResourceTable).remove_class("split-pane")
+        self._update_pane_focus_classes()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         """Clicking a pane focuses it - command routing must follow. Any
