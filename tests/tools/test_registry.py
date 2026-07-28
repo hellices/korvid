@@ -295,12 +295,31 @@ def test_mcp_surface_schemas_are_isolated_from_the_registry() -> None:
     assert canonical["function"]["name"] == name
 
 
+def _mutable_ids(obj: Any) -> set[int]:
+    """ids of every mutable container reachable from *obj*: a shallow
+    `.copy()` still shares the nested function/parameters dicts, and this
+    test must catch that."""
+    ids: set[int] = set()
+    if isinstance(obj, dict):
+        ids.add(id(obj))
+        for value in obj.values():
+            ids |= _mutable_ids(value)
+    elif isinstance(obj, list):
+        ids.add(id(obj))
+        for item in obj:
+            ids |= _mutable_ids(item)
+    return ids
+
+
 def test_executor_surface_lists_are_isolated_from_the_registry() -> None:
     """The module-level executor lists ride into AgentRuntime by default;
-    their dicts must be copies, not references into TOOL_DEFS."""
+    their dicts must be deep copies: no mutable descendant may be shared
+    with TOOL_DEFS."""
     from korvid.tools.executor import READ_TOOLS, RESIZE_TOOLS, UI_TOOLS, WRITE_TOOLS
 
-    canonical_ids = {id(d.schema) for d in TOOL_DEFS}
+    canonical_ids: set[int] = set()
+    for d in TOOL_DEFS:
+        canonical_ids |= _mutable_ids(d.schema)
     for surface in (READ_TOOLS, UI_TOOLS, WRITE_TOOLS, RESIZE_TOOLS):
         for schema in surface:
-            assert id(schema) not in canonical_ids
+            assert _mutable_ids(schema).isdisjoint(canonical_ids)
