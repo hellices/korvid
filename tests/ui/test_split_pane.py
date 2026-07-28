@@ -289,12 +289,19 @@ async def test_navigation_lands_in_initiating_pane_after_focus_switch() -> None:
     async with app.run_test() as pilot:
         await _first_render(app, pilot)
         await _split(app, pilot)  # focused: pane 2
+        # _navigate_locked only closes the log pane when the initiating pane
+        # owns it - mark it as the owner so the seam below actually runs.
+        app._log_pane_owner = app._panes[1]
+        flipped = False
 
         async def flip_focus_mid_navigation() -> None:
+            nonlocal flipped
+            flipped = True
             app._focused_pane = 0  # the user switches panes during the await
 
         app._close_log_pane = flip_focus_mid_navigation  # type: ignore[method-assign]  # test seam
         await app.on_navigate_command(NavigateCommand("deployments", None))
+        assert flipped  # the focus switch really happened mid-navigation
         assert app._panes[1].kind == "deployments"  # initiating pane transitioned
         assert app._panes[0].kind == "pods"  # newly focused pane untouched
 
