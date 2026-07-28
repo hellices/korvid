@@ -41,6 +41,8 @@ drain worker ownership and mid-drain cancel (test_node_ops).
 from dataclasses import replace
 from pathlib import Path
 
+from textual.css.query import NoMatches
+
 from korvid.k8s.drain import DrainPlan
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ReplicasPrompt
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
@@ -67,17 +69,23 @@ from .test_write_ops import Recorder, _edit_fixtures, _to_view, make_app
 from .waits import until
 
 
-async def _row_listed(pilot) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed
-    """Poll until the resource table has rendered at least one row."""
+async def _row_listed(pilot, kind: str) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed
+    """Poll until the app shows `kind` and its table has rendered a row.
+
+    Checking `current_kind` guards against matching a stale row from the
+    previous view while `:view` navigation is still completing.
+    """
 
     def _rendered() -> bool:
+        if pilot.app.current_kind != kind:
+            return False
         try:
             table = pilot.app.query_one(ResourceTable)
-        except Exception:  # widget not mounted yet
+        except NoMatches:  # widget not mounted yet
             return False
         return bool(table.row_count >= 1)
 
-    await until(pilot, _rendered, label="row listed")
+    await until(pilot, _rendered, label=f"{kind} row listed")
 
 
 async def _dialog_closed(pilot) -> None:  # type: ignore[no-untyped-def]  # Pilot's app type isn't exposed
@@ -96,7 +104,7 @@ async def test_rollout_restart_declined_makes_no_call_and_no_audit(tmp_path: Pat
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
         await _to_view(pilot, "deployments")
-        await _row_listed(pilot)
+        await _row_listed(pilot, "deployments")
         await pilot.press("r")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("n")
@@ -111,7 +119,7 @@ async def test_scale_declined_at_confirm_makes_no_call(tmp_path: Path) -> None:
     app = make_app(rec, audit_path)
     async with app.run_test() as pilot:
         await _to_view(pilot, "deployments")
-        await _row_listed(pilot)
+        await _row_listed(pilot, "deployments")
         await pilot.press("S")
         await until(pilot, lambda: isinstance(app.screen, ReplicasPrompt))
         await pilot.press("5")
@@ -132,7 +140,7 @@ async def test_edit_declined_at_confirm_makes_no_call(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
     async with app.run_test() as pilot:
-        await _row_listed(pilot)
+        await _row_listed(pilot, "pods")
         await pilot.press("e")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("n")
@@ -160,7 +168,7 @@ async def test_resize_declined_at_confirm_makes_no_call(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
     app = make_resize_app(rec, audit_path)
     async with app.run_test() as pilot:
-        await _row_listed(pilot)
+        await _row_listed(pilot, "pods")
         await pilot.press("R")
         await until(pilot, lambda: isinstance(app.screen, ResizePrompt))
         field = app.screen.query_one("#resize-0-requests-cpu")
