@@ -9,7 +9,7 @@ from typing import Any
 
 from rich.text import Text
 
-from korvid.ui.widgets.resource_table import ResourceTable, _cells_equal
+from korvid.ui.widgets.resource_table import ResourceTable, _cell_width, _cells_equal
 
 from .test_app import _pod, make_app
 from .waits import until
@@ -134,6 +134,17 @@ async def test_viewport_survives_in_place_delete_above_cursor() -> None:
         assert calls == []
         assert table.cursor_row == 29  # cursor followed pod-30 up one slot
         assert table.scroll_y == 0
+
+
+def test_cell_width_measures_str_cells_as_rendered_markup() -> None:
+    # DataTable renders str cells through Text.from_markup, so the width
+    # guard must measure the rendered text, not the raw markup: otherwise a
+    # markup-valued custom column (issue #45) like "[red]x[/red]" measures
+    # 13 here, requests update_width=True, and Textual's rescan shrinks the
+    # column to 1 — the exact layout jump the guard exists to prevent.
+    assert _cell_width("[red]x[/red]") == 1
+    assert _cell_width("plain") == 5
+    assert _cell_width(Text("Running", style="green")) == 7
 
 
 def test_cells_equal_is_style_aware() -> None:

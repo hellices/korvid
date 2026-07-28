@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import cast
 
-from rich.cells import cell_len
 from rich.text import Text
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable
@@ -84,8 +83,16 @@ def _phase_cell(phase: str) -> Text:
 
 
 def _cell_width(cell: str | Text) -> int:
-    """Rendered width of a table cell (single-line str or Text)."""
-    return cell.cell_len if isinstance(cell, Text) else cell_len(cell)
+    """Rendered width of a table cell (single-line str or Text).
+
+    DataTable renders `str` cells through `Text.from_markup`, so raw markup
+    (possible in custom-column values, issue #45) must be measured the same
+    way — measuring the raw string would overestimate and trigger a
+    column-shrinking width rescan.
+    """
+    if isinstance(cell, Text):
+        return cell.cell_len
+    return Text.from_markup(cell, end="").cell_len
 
 
 def _cells_equal(a: str | Text, b: str | Text) -> bool:
