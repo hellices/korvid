@@ -242,12 +242,28 @@ async def test_column_width_grows_for_wider_in_place_value() -> None:
 
 
 async def test_cell_count_mismatch_falls_back_to_rebuild() -> None:
-    # A row whose cell count disagrees with the column count must not blow
-    # up the refresh tick (zip(strict=True) / add_row would raise): the
-    # diff declines and the rebuild path repaints the table instead.
+    # A row with fewer cells than columns would raise ValueError from the
+    # diff's zip(strict=True) mid-update. The eligibility guard declines
+    # before touching the table and delegates to the rebuild path, where
+    # add_row pads short rows. (Overlong rows cannot occur: _emit_row sizes
+    # custom extras to the view's column count.)
     app = make_app([_pod("alpha"), _pod("beta")])
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="pods loaded")
         short: list[str | Text] = ["alpha", "1/1"]
         assert table._apply_in_place([("default/alpha", short), ("default/beta", short)]) is False
+
+
+async def test_bulk_removal_falls_back_to_rebuild() -> None:
+    # DataTable.remove_row rebuilds its whole row-location map per call, so
+    # removing rows one by one is O(rows x removals). A filter change can
+    # drop most of a large list in one show() — that must take the linear
+    # rebuild path, keeping in-place for small watch-sized deletions.
+    app = make_app([_pod(f"pod-{i:02d}") for i in range(40)])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 40, label="pods loaded")
+        keep = [row.key.value for row in table.ordered_rows][:2]
+        pending = [(key, list(table.get_row(key))) for key in keep if key is not None]
+        assert table._apply_in_place(pending) is False

@@ -83,6 +83,12 @@ def _phase_cell(phase: str) -> Text:
     return Text(phase, style=phase_style(phase))
 
 
+# In-place removals cost O(rows) each (DataTable.remove_row rebuilds its
+# row-location map); cap them so a bulk drop (e.g. a narrowing filter) takes
+# the linear rebuild path instead of a quadratic remove loop.
+_MAX_IN_PLACE_REMOVALS = 8
+
+
 def _cell_width(cell: str | Text) -> int:
     """Rendered width of a table cell, matching DataTable's measurement.
 
@@ -444,38 +450,57 @@ class ResourceTable(DataTable[str | Text]):
                 self.scroll_to, *viewport, animate=False, immediate=True, force=True
             )
 
-    def _apply_in_place(self, pending: list[tuple[str, list[str | Text]]]) -> bool:
-        """Diff *pending* against the current rows and patch the table in
-        place; returns False when the update needs the rebuild path.
+    def _in_place_plan(
+        self, pending: list[tuple[str, list[str | Text]]]
+    ) -> tuple[list[str], set[str | None]] | None:
+        """Eligibility guards for the in-place diff.
 
-        In place is only possible when the surviving rows keep their relative
-        order and new rows land at the bottom (`add_row` can only append).
-        Width updates are requested only for cells wider than their column:
-        `update_width=True` is not grow-only — a narrower replacement rescans
-        and *shrinks* the column, shifting the layout this path must keep
-        still. The trade-off is that a column stays at its widest-seen size
-        until the next rebuild.
+        Returns (keys to remove, current key set), or None when the update
+        needs the rebuild path: unkeyed rows, surviving rows changing
+        relative order, new rows not landing at the bottom (`add_row` can
+        only append), a bulk removal (DataTable.remove_row rebuilds its
+        whole row-location map per call, so a narrowing filter dropping
+        most of a large list would go quadratic — watch-sized deletions
+        stay in place), or a row with fewer cells than columns (would raise
+        ValueError from zip(strict=True) mid-update; the rebuild path's
+        add_row pads short rows).
         """
         current_keys = [row.key.value for row in self.ordered_rows]
         if any(key is None for key in current_keys):
-            return False
+            return None
         new_keys = [key for key, _ in pending]
         current_set = set(current_keys)
         new_set = set(new_keys)
         survivors = [key for key in current_keys if key in new_set]
         fresh = [key for key in new_keys if key not in current_set]
         if new_keys != [*survivors, *fresh]:
+            return None
+        doomed = [cast(str, key) for key in current_keys if key not in new_set]
+        if len(doomed) > _MAX_IN_PLACE_REMOVALS:
+            return None
+        column_count = len(self.ordered_columns)
+        if any(len(cells) != column_count for _, cells in pending):
+            return None
+        return doomed, current_set
+
+    def _apply_in_place(self, pending: list[tuple[str, list[str | Text]]]) -> bool:
+        """Diff *pending* against the current rows and patch the table in
+        place; returns False when the update needs the rebuild path (see
+        `_in_place_plan` for the eligibility rules).
+
+        Width updates are requested only for cells wider than their column:
+        `update_width=True` is not grow-only — a narrower replacement rescans
+        and *shrinks* the column, shifting the layout this path must keep
+        still. The trade-off is that a column stays at its widest-seen size
+        until the next rebuild.
+        """
+        plan = self._in_place_plan(pending)
+        if plan is None:
             return False
+        doomed, current_set = plan
+        for key in doomed:
+            self.remove_row(key)
         columns = self.ordered_columns
-        if any(len(cells) != len(columns) for _, cells in pending):
-            # A malformed row (e.g. a custom view filling a different number
-            # of extras per row) must not blow up the refresh tick with a
-            # ValueError from zip(strict=True)/add_row: let the rebuild path
-            # repaint the whole table instead.
-            return False
-        for key in current_keys:
-            if key not in new_set:
-                self.remove_row(cast(str, key))
         for key, cells in pending:
             if key in current_set:
                 old_cells = self.get_row(key)
