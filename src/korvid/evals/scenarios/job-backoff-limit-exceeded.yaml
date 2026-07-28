@@ -1,0 +1,76 @@
+id: job-backoff-limit-exceeded
+question: The nightly-report job in namespace jobs shows Failed. What happened to it?
+screen: "resource view: jobs, namespace jobs, selected: jobs/nightly-report (Failed)"
+root_cause: job_backoff_limit
+grading:
+  must_mention:
+    - [backofflimit, backoff limit, retries, retry limit, attempts]
+    - [exceeded, exhausted, reached the limit, limit reached, too many]
+  must_not_mention:
+    - [image pull, oomkilled]
+  expected_evidence:
+    - - tool: get_resource
+        args: {kind: jobs, name: nightly-report, namespace: jobs}
+        contains: BackoffLimitExceeded
+      - tool: get_events
+        args: {kind: jobs, namespace: jobs, name: nightly-report}
+        contains: "Job has reached the specified backoff limit"
+cluster:
+  objects:
+    - kind: Job
+      apiVersion: batch/v1
+      metadata:
+        name: nightly-report
+        namespace: jobs
+        uid: job-report-1
+      spec:
+        backoffLimit: 4
+      status:
+        failed: 5
+        conditions:
+          - type: Failed
+            status: "True"
+            reason: BackoffLimitExceeded
+            message: "Job has reached the specified backoff limit"
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: nightly-report-x7k2p
+        namespace: jobs
+        uid: pod-report-1
+        creationTimestamp: "2026-07-27T02:00:00Z"
+        labels: {job-name: nightly-report}
+        ownerReferences:
+          - {kind: Job, name: nightly-report, controller: true}
+      spec:
+        nodeName: node-a
+        containers:
+          - name: report
+            image: jobs/report:v1
+      status:
+        phase: Failed
+        containerStatuses:
+          - name: report
+            ready: false
+            restartCount: 0
+            state:
+              terminated: {exitCode: 2, reason: Error}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+  events:
+    - type: Warning
+      reason: BackoffLimitExceeded
+      count: 1
+      lastTimestamp: "2026-07-27T02:40:00Z"
+      message: "Job has reached the specified backoff limit"
+      involvedObject: {kind: Job, name: nightly-report, namespace: jobs, uid: job-report-1}
+  logs:
+    jobs/nightly-report-x7k2p/report:
+      current:
+        - "generating nightly report"
+        - "error: upstream export API returned 500"
+        - "giving up after 3 attempts"

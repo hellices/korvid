@@ -5,7 +5,7 @@ korvid is an AI-native Kubernetes TUI (Python 3.11+, Textual). Design doc: `docs
 ## Quick Setup
 
 ```bash
-uv sync --dev
+uv sync --dev --all-extras
 ```
 
 ## Development Commands
@@ -34,16 +34,20 @@ src/korvid/
 ├── __main__.py     # composition root — ALL wiring (constructor injection) happens here
 ├── ui/             # Textual App/Screens/Widgets + ui/messages.py (UI Bus messages)
 ├── core/           # pure Python: ResourceStore, WatchManager, ActionExecutor, AuditLog
+├── tools/          # pure Python: tool schemas, ToolExecutor, UIBridge, diagnose
 ├── agent/          # pure Python: agentic loop, ToolRegistry, LLMProvider ABC
+├── mcp/            # MCP adapter (optional extra: korvid[mcp])
 ├── k8s/            # pure Python: kubernetes.aio wrapper
-└── providers/      # concrete LLMProvider implementations
+└── providers/      # concrete LLMProvider implementations (optional extra: korvid[agent])
 ```
 
 | Layer | May import | Textual imports allowed? |
 |---|---|---|
-| `ui/` | core, agent, k8s | **Yes — only here** |
+| `ui/` | core, agent, k8s, tools | **Yes — only here** |
 | `core/` | k8s | No |
-| `agent/` | core, k8s | No |
+| `tools/` | core, k8s | No |
+| `agent/` | core, k8s, tools | No |
+| `mcp/` | core, tools | No |
 | `k8s/` | (stdlib + kubernetes client) | No |
 | `providers/` | agent | No |
 
@@ -51,6 +55,7 @@ src/korvid/
 - No DI containers, no service locators. Dependencies are injected via constructors, wired once in `__main__.py`.
 - The UI Bus is Textual `Message` subclasses defined in `ui/messages.py`. `core/`/`agent/` expose plain async functions; `ui/` workers translate results into Messages.
 - Plugins/providers register via `importlib.metadata.entry_points` groups: `korvid.provider`, `korvid.panel`, `korvid.tool`.
+- **Optional extras**: `mcp/`'s stack (mcp/anyio/starlette/uvicorn) ships in the `[mcp]` extra; `providers/`'s stack (httpx/keyring) in `[agent]`. `__main__.py` imports both lazily — a missing extra degrades to a None wiring unless the feature was explicitly requested, in which case startup fails with an install hint. Import-graph tests in `tests/test_optional_extras.py` pin this boundary.
 
 ## Style Rules
 
@@ -111,7 +116,7 @@ For each review round on a PR:
 
 - Run a single test file without the tach plugin: `uv run pytest -p no:tach <path>`.
 - New `UIBridge` method or parameter? Update every fake in the same change:
-  `tests/agent/test_tools.py::FakeBridge`, `tests/agent/test_write_tools.py` fakes,
+  `tests/tools/test_executor.py::FakeBridge`, `tests/tools/test_write_tools.py` fakes,
   `tests/test_main_wiring.py::_FakeApp`, the in-app bridge adapter in `ui/app.py`,
   and `__main__.py`'s bridge proxy.
 - `WriteOps` fakes: keyword-only params must match exactly (e.g. `*, uid: str | None = None`).

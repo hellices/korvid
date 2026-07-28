@@ -1,0 +1,70 @@
+id: oom-killed
+question: Why does the worker pod in namespace jobs keep dying?
+screen: "resource view: pods, namespace jobs, selected: jobs/worker-1 (CrashLoopBackOff)"
+root_cause: oom_killed
+grading:
+  must_mention:
+    - [oomkilled, oom killed, out of memory, oom]
+    - ["137", memory limit]
+  must_not_mention:
+    - [image pull, imagepull]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: worker-1, namespace: jobs}
+      contains: exit=137
+    - tool: diagnose_pod
+      args: {pod: worker-1, namespace: jobs}
+      contains: OOMKilled
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: worker-1
+        namespace: jobs
+        uid: pod-oom-1
+        creationTimestamp: "2026-07-27T05:00:00Z"
+        labels: {app: worker}
+      spec:
+        nodeName: node-b
+        containers:
+          - name: worker
+            image: jobs/worker:v4
+            resources:
+              limits: {memory: 256Mi}
+      status:
+        phase: Running
+        conditions:
+          - {type: Ready, status: "False", reason: ContainersNotReady}
+        containerStatuses:
+          - name: worker
+            ready: false
+            restartCount: 9
+            state:
+              waiting:
+                reason: CrashLoopBackOff
+                message: back-off 5m0s restarting failed container worker
+            lastState:
+              terminated: {exitCode: 137, reason: OOMKilled}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-b}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+          - {type: MemoryPressure, status: "False"}
+  events:
+    - type: Warning
+      reason: BackOff
+      count: 22
+      lastTimestamp: "2026-07-27T07:30:00Z"
+      message: Back-off restarting failed container worker in pod worker-1_jobs
+      involvedObject: {kind: Pod, name: worker-1, namespace: jobs, uid: pod-oom-1}
+  logs:
+    jobs/worker-1/worker:
+      current:
+        - "worker v4 starting"
+      previous:
+        - "worker v4 starting"
+        - "loading batch of 50000 records into memory"
+        - "resizing in-memory cache to 512MiB"

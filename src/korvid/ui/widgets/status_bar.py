@@ -5,6 +5,12 @@ from textual.widgets import Static
 
 
 class StatusBar(Static):
+    DEFAULT_CSS = """
+    StatusBar.protected {
+        background: $error 25%;
+    }
+    """
+
     def update_status(
         self,
         context: str | None,
@@ -14,6 +20,7 @@ class StatusBar(Static):
         mcp_label: str = "",
         filter_label: str = "",
         progress_label: str = "",
+        protected: bool = False,
     ) -> None:
         ctx = context or "(current)"
         trail = f"  {breadcrumb}" if breadcrumb else ""
@@ -21,4 +28,11 @@ class StatusBar(Static):
         flt = f"  ▼{filter_label}" if filter_label else ""
         prog = f"  ⏳{progress_label}" if progress_label else ""
         # Text keeps user-entered filter text literal (never Rich markup).
-        self.update(Text(f"ctx:{ctx}  ns:{namespace}  ⚡{agent_label}{mcp}{flt}{prog}{trail}"))
+        line = Text()
+        if protected:
+            # Protected contexts (issue #83): loud red marker + tinted bar.
+            line.append(" ⛨ PROTECTED ", style="bold white on red")
+            line.append("  ")
+        line.append(f"ctx:{ctx}  ns:{namespace}  ⚡{agent_label}{mcp}{flt}{prog}{trail}")
+        self.set_class(protected, "protected")
+        self.update(line)

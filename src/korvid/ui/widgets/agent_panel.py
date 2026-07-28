@@ -26,7 +26,7 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from korvid.agent.tools import UI_TOOL_NAMES, WRITE_TOOL_NAMES
+from korvid.tools.executor import UI_TOOL_NAMES, WRITE_TOOL_NAMES
 from korvid.ui.messages import AgentPromptSubmitted
 
 _SETUP_HINT = (
@@ -167,6 +167,7 @@ class AgentPanel(Vertical):
     def __init__(self) -> None:
         super().__init__()
         self._model = "agent"
+        self._profile = "full"
         self._tok_in = 0
         self._tok_out = 0
         self._estimated = False
@@ -202,14 +203,20 @@ class AgentPanel(Vertical):
         input_tokens: int,
         output_tokens: int,
         estimated: bool,
+        profile: str = "full",
     ) -> None:
         self._model = model
+        self._profile = profile
         self._tok_in = input_tokens
         self._tok_out = output_tokens
         self._estimated = estimated
         prefix = "~" if estimated else ""
+        # The capability profile is visible so users know which mode the
+        # agent runs in (issue #71); full stays unmarked. The bracket is
+        # escaped so Rich does not read it as a markup tag.
+        label = model if profile == "full" else f"{model} \\[{profile}]"
         self.query_one("#agent-header", Static).update(
-            f"⚡ {model} · {prefix}↑{_fmt_tokens(input_tokens)} ↓{_fmt_tokens(output_tokens)} tok"
+            f"⚡ {label} · {prefix}↑{_fmt_tokens(input_tokens)} ↓{_fmt_tokens(output_tokens)} tok"
         )
 
     # --- conversation -----------------------------------------------------
@@ -279,6 +286,7 @@ class AgentPanel(Vertical):
                 self._tok_in + event.input_tokens,
                 self._tok_out + event.output_tokens,
                 self._estimated or event.estimated,
+                profile=self._profile,
             )
 
     # --- internals ----------------------------------------------------------

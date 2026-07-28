@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from math import isfinite
 from os import chmod as os_chmod
 from os import fdopen as os_fdopen
@@ -45,6 +46,12 @@ class KorvidConfig:
     agent_model: str | None = None
     agent_api_key_env: str | None = None
     agent_auth_method: str | None = None
+    #: Model-capability profile (issue #71): `agent.profile` — `full` keeps
+    #: the frontier surface; `small` reduces tools, budgets and prompt for
+    #: 3B-14B local models. None means unset: the runtime treats it as
+    #: `full`, but the `:ai` wizard may still suggest `small` for Ollama
+    #: (an explicit `full` is never overridden by that suggestion).
+    agent_profile: str | None = None
     #: Native Ollama tuning (issue #72): `agent.ollama.*` in config.yaml.
     agent_ollama_num_ctx: int = 16384
     agent_ollama_temperature: float = 0.0
@@ -56,6 +63,13 @@ class KorvidConfig:
     log_wrap: bool = False
     log_timestamps: bool = False
     readonly: bool = False
+    #: Contexts (kubeconfig names or fnmatch globs, issue #83) where every
+    #: write demands typing the context name and the status bar shows a red
+    #: protected marker. Re-evaluated on every `:ctx` switch.
+    protected_contexts: tuple[str, ...] = ()
+    #: `agent.disable_in_protected` (issue #83): refuse agent prompts entirely
+    #: while a protected context is active.
+    agent_disable_in_protected: bool = False
     mcp_enabled: bool = False
     mcp_port: int = 7878
     #: kubectl debug image overrides (issue #52): air-gapped / private registry.
@@ -135,6 +149,12 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_model=_opt_str(agent_raw.get("model")),
         agent_api_key_env=api_key_env,
         agent_auth_method=auth_method,
+        agent_profile=(
+            # Key presence checked here: `profile: null` is a present-but-
+            # invalid value (falls back to `full` like any other), not the
+            # unset state that lets the :ai wizard suggest `small`.
+            _parse_profile(agent_raw["profile"]) if "profile" in agent_raw else None
+        ),
         agent_ollama_num_ctx=_parse_num_ctx(ollama_raw.get("num_ctx")),
         agent_ollama_temperature=_parse_temperature(ollama_raw.get("temperature")),
         agent_ollama_seed=_parse_seed(ollama_raw.get("seed")),
@@ -145,6 +165,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         log_wrap=logs_raw.get("wrap") is True,
         log_timestamps=logs_raw.get("timestamps") is True,
         readonly=raw.get("readonly") is True,
+        protected_contexts=_parse_protected_contexts(raw.get("protected_contexts")),
+        agent_disable_in_protected=agent_raw.get("disable_in_protected") is True,
         mcp_enabled=mcp_raw.get("enabled") is True,
         mcp_port=_parse_port(mcp_raw.get("port")),
         debug_default_image=_opt_str(debug_raw.get("default_image")),
@@ -164,6 +186,7 @@ def save_agent_config(
     base_url: str | None,
     model: str,
     api_key_env: str | None,
+    profile: str = "full",
 ) -> None:
     """Persist managed agent fields, preserving unrelated keys (read-modify-write)."""
     raw: dict[str, Any] = {}
@@ -173,6 +196,11 @@ def save_agent_config(
     agent: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
     agent["provider"] = provider
     agent["model"] = model
+    # The capability profile is managed alongside the model choice and is
+    # always written explicitly: after the wizard runs, the profile is a
+    # deliberate choice (preserved or suggested), and an explicit `full`
+    # must survive so reopening `:ai` never re-suggests `small` over it.
+    agent["profile"] = profile
     # Merge into any existing auth mapping: only `method` is managed here,
     # unrelated nested keys must survive the read-modify-write.
     existing_auth = agent.get("auth")
@@ -246,6 +274,20 @@ def _parse_buffer_lines(value: Any) -> int:
     return lines if lines > 0 else 5000
 
 
+def _parse_profile(value: Any) -> str:
+    """Coerce a present `agent.profile` value to a known profile name.
+
+    An unknown or null value falls back to `full` (never crashing startup)
+    so a typo keeps today's runtime behavior AND stays stable through the
+    wizard instead of silently becoming `small`. The caller maps an absent
+    key to None — the "unset" state the `:ai` wizard is allowed to fill
+    with its Ollama suggestion.
+    """
+    if isinstance(value, str) and value.strip().lower() in ("full", "small"):
+        return value.strip().lower()
+    return "full"
+
+
 def _parse_num_ctx(value: Any) -> int:
     """Coerce `agent.ollama.num_ctx` to a positive int; fall back to 16384."""
     parsed = _parse_positive_int(value)
@@ -309,6 +351,25 @@ def _parse_namespaces(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(item for item in value if isinstance(item, str) and item)
+
+
+def _parse_protected_contexts(value: Any) -> tuple[str, ...]:
+    """`protected_contexts:` list (issue #83): non-empty string globs only."""
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and item)
+
+
+def context_is_protected(context: str | None, patterns: tuple[str, ...]) -> bool:
+    """Whether *context* matches any protected-context pattern (issue #83).
+
+    Patterns are `fnmatch` globs (e.g. `prod-*`) or literal context names.
+    An unresolvable context name (None) is never treated as protected — the
+    marker exists to make known-dangerous clusters loud, not to guess.
+    """
+    if context is None:
+        return False
+    return any(fnmatchcase(context, pattern) for pattern in patterns)
 
 
 def _parse_column(kind: str, entry: Any) -> tuple[CustomColumn | None, str | None]:

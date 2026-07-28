@@ -8,7 +8,7 @@ ConfirmScreen the *user* must approve with a real keystroke.
 from typing import Any
 
 from korvid.agent.runtime import SYSTEM_PROMPT, WRITE_PROMPT, AgentRuntime
-from korvid.agent.tools import (
+from korvid.tools.executor import (
     READ_TOOLS,
     UI_TOOLS,
     WRITE_TOOL_NAMES,
@@ -206,7 +206,7 @@ def test_write_prompt_enumerates_armed_write_tools() -> None:
     """The system instruction must list exactly the write tools that were
     armed: enumerating a fixed trio steers the model away from resize_pod
     on clusters that support it."""
-    from korvid.agent.tools import RESIZE_TOOLS
+    from korvid.tools.executor import RESIZE_TOOLS
 
     runtime = AgentRuntime(
         _NullProvider(),

@@ -14,13 +14,20 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import weakref
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar
+
+if TYPE_CHECKING:
+    # Annotation-only: the base TUI must not import the embedded-agent
+    # runtime at startup (issue #73) — the composition root injects it
+    # only when the [agent] extra is installed and wired.
+    from korvid.agent.runtime import AgentRuntime
 
 import yaml
 from rich.text import Text
@@ -36,10 +43,7 @@ from textual.widgets.data_table import CellDoesNotExist
 from textual.worker import Worker, get_current_worker
 
 from korvid.agent.events import AgentError
-from korvid.agent.mcp_server import MCPController
-from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
-from korvid.agent.tools import UIBridge
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.debugimage import (
@@ -54,6 +58,7 @@ from korvid.core.filters import ResourceFilter, parse_filter
 from korvid.core.keybindings import plan_keybindings, shift_alias_keys
 from korvid.core.logbuffer import LogBuffer
 from korvid.core.logexport import default_log_export_dir, export_log_lines
+from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import (
     ForwardRecord,
     ForwardRegistry,
@@ -99,6 +104,7 @@ from korvid.k8s.olm import (
 from korvid.k8s.portforward import FORWARDABLE_KINDS, forward_target_gvr
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
+from korvid.tools.executor import UIBridge
 from korvid.ui.command import command_help
 from korvid.ui.messages import (
     AgentPromptSubmitted,
@@ -107,9 +113,11 @@ from korvid.ui.messages import (
     NavigateCommand,
     QuitCommand,
     ResourcesUpdated,
+    ShowContextPicker,
     ShowError,
     ShowNamespacePicker,
     SortCommand,
+    SwitchContextCommand,
     TransferCancelRequested,
     UnknownCommand,
 )
@@ -370,6 +378,80 @@ _HELM_PREVIEW_MAX_LINES = 60
 _HINT_EVENTS_TIMEOUT = 3.0
 
 
+@dataclasses.dataclass(frozen=True)
+class ContextSwitchResult:
+    """What the composition root re-derived for the new cluster (issue #36).
+
+    Returned by the injected ``switch_context`` callable once the connection
+    is retargeted: capability gates and namespace fallbacks are per-cluster
+    facts the app must adopt atomically with the switch.
+    """
+
+    pod_resize_supported: bool
+    provider_hint: str | None
+    fallback_namespaces: tuple[str, ...]
+    context_namespace: str | None
+    #: helm CLI wrapper rebound to the new context (issue #31 x #36): the
+    #: startup HelmCLI pins --kube-context, so keeping it across a switch
+    #: would send approval-gated helm writes to the OLD cluster.
+    helm: HelmCLI | None = None
+    #: The new context's name when it matches `protected_contexts` (issue
+    #: #83), None otherwise — the marker is re-derived on every switch.
+    protected_context: str | None = None
+
+
+_WriteParams = ParamSpec("_WriteParams")
+_WriteResult = TypeVar("_WriteResult")
+
+
+def _tracks_cluster_write(
+    method: Callable[Concatenate[KorvidApp, _WriteParams], Awaitable[_WriteResult]],
+) -> Callable[Concatenate[KorvidApp, _WriteParams], Coroutine[Any, Any, _WriteResult]]:
+    """Count in-flight cluster mutations on the app (issue #36).
+
+    An approved write worker is neither an open dialog nor the agent task,
+    so `:ctx` switching checks this counter: a mutation approved for one
+    cluster must never execute against another after a mid-flight retarget.
+    """
+
+    def wrapper(
+        self: KorvidApp, /, *args: _WriteParams.args, **kwargs: _WriteParams.kwargs
+    ) -> Coroutine[Any, Any, _WriteResult]:
+        # Reserve the slot synchronously: confirmation callbacks construct
+        # this coroutine and hand it to run_worker, which only starts it on
+        # a later event-loop iteration — a queued `:ctx` processed in that
+        # gap must already see the write as in flight.
+        self._active_cluster_writes += 1
+        released = False
+
+        def release() -> None:
+            # Idempotent: normally fired by run()'s finally, but also by the
+            # GC finalizer when the coroutine is closed or collected without
+            # ever running (worker cancelled before start, app shutdown) —
+            # a leaked +1 would block every future `:ctx` switch.
+            nonlocal released
+            if not released:
+                released = True
+                self._active_cluster_writes -= 1
+
+        async def run() -> _WriteResult:
+            try:
+                return await method(self, *args, **kwargs)
+            finally:
+                release()
+
+        coro = run()
+        weakref.finalize(coro, release)
+        return coro
+
+    # Not functools.wraps: its _Wrapped return type keeps the explicit
+    # 'self' arg and fails the plain-Callable return annotation under
+    # mypy --strict; worker/log names only need these two attributes.
+    wrapper.__name__ = method.__name__
+    wrapper.__qualname__ = method.__qualname__
+    return wrapper
+
+
 def _chart_base(chart: str) -> str:
     """`"nginx-18.1.0"` -> `"nginx"`: strip the version suffix helm appends
     to a release's chart field, so an upgrade can pre-filter the chart search
@@ -599,18 +681,23 @@ class KorvidApp(App[None]):
         agent_model_name: str | None = None,
         agent_configurator: AgentConfigurator | None = None,
         rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None = None,
+        agent_available: bool = True,
         write_ops: WriteOps | None = None,
         audit: AuditLog | None = None,
         check_permission: Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
         | None = None,
-        mcp: MCPController | None = None,
+        mcp: MCPControllerBase | None = None,
         edit_text: Callable[[str], Awaitable[str | None]] | None = None,
         metrics: MetricsPoller | None = None,
         pod_resize_supported: bool = False,
         forwards: ForwardRegistry | None = None,
         provider_hint: str | None = None,
+        protected_context: str | None = None,
         open_pod_exec: Callable[..., contextlib.AbstractAsyncContextManager[Any]] | None = None,
         fallback_namespaces: tuple[str, ...] = (),
+        list_contexts: Callable[[], tuple[list[str], str | None]] | None = None,
+        probe_context: Callable[[str], Awaitable[None]] | None = None,
+        switch_context: Callable[[str | None], Awaitable[ContextSwitchResult]] | None = None,
         helm: HelmCLI | None = None,
     ) -> None:
         super().__init__()
@@ -621,6 +708,24 @@ class KorvidApp(App[None]):
         #: RBAC-limited fallback (issue #49): configured/kubeconfig namespaces
         #: offered when cluster-wide namespace listing is forbidden.
         self._fallback_namespaces = fallback_namespaces
+        #: `:ctx` collaborators (issue #36), wired by the composition root:
+        #: kubeconfig context listing, the pre-switch auth probe, and the
+        #: connection/capability retarget. All None in builds without a
+        #: cluster connection.
+        self._list_contexts = list_contexts
+        self._probe_context = probe_context
+        self._switch_context = switch_context
+        #: True while a context switch is tearing down / retargeting;
+        #: refuses concurrent switches.
+        self._ctx_switching = False
+        self._active_cluster_writes = 0
+        #: Bumped every time a switch is applied: pre-approval awaits capture
+        #: it and refuse to proceed if the cluster changed under them.
+        self._ctx_epoch = 0
+        #: One-shot notice injected into the agent's next screen context
+        #: after a switch, so a running conversation learns the cluster
+        #: changed under it.
+        self._ctx_switch_note: str | None = None
         self._get_manifest = get_manifest
         self._get_events = get_events
         self._stream_logs = stream_logs
@@ -689,6 +794,10 @@ class KorvidApp(App[None]):
         #: detected cloud provider short name ("aks", "aws", ...) or None;
         #: drives the Service/Ingress describe footer (issue #30).
         self._provider_hint = provider_hint
+        #: Active context's name when it matches `protected_contexts` (issue
+        #: #83); None otherwise. Drives the red status marker, the extra
+        #: type-the-context-name confirm layer, and the optional agent block.
+        self._protected_context = protected_context
         #: KubeClient.open_pod_exec, bound at composition; None means no
         #: cluster connection, so file transfer (issue #47) is unavailable.
         self._open_pod_exec = open_pod_exec
@@ -708,7 +817,16 @@ class KorvidApp(App[None]):
         self._agent_model_name = agent_model_name
         self._agent_configurator = agent_configurator
         self._rebuild_agent = rebuild_agent
+        #: False when the [agent] extra is absent (issue #73): the agent
+        #: panel is not mounted and :ai/:model/Ctrl-A are not offered.
+        self._agent_available = agent_available
         self._agent_settings: AgentSettings | None = None
+        #: capability profile of the live runtime (issue #71); shown in the
+        #: agent panel header so users know which mode the agent runs in.
+        self._agent_profile = config.agent_profile or "full"
+        #: profile as explicitly configured (None = unset) — the `:ai`
+        #: wizard only suggests `small` for Ollama when this is unset.
+        self._configured_agent_profile = config.agent_profile
         # A runtime built from config.yaml at startup must seed the settings
         # snapshot so :model works without running the :ai wizard first.
         if agent_runtime is not None and config.agent_provider and config.agent_model:
@@ -718,6 +836,7 @@ class KorvidApp(App[None]):
                 base_url=config.agent_base_url,
                 model=config.agent_model,
                 api_key_env=config.agent_api_key_env,
+                profile=config.agent_profile or "full",
             )
         self._agent_task: asyncio.Task[None] | None = None
         # Serializes view/scope switches: keyboard NavigateCommands and the
@@ -760,6 +879,7 @@ class KorvidApp(App[None]):
         self._log_pane_owner: PaneState | None = None
         self._reconnect_sleep: float = 1.0
         self._ns_prefetch_task: asyncio.Task[None] | None = None
+        self._ctx_prefetch_task: asyncio.Task[None] | None = None
         self._splash_shown_at: float = monotonic()
         self._log_buffer_max_lines: int = config.log_buffer_lines
         # Kinds with a table render already queued — coalesces the per-object
@@ -823,6 +943,12 @@ class KorvidApp(App[None]):
         return self._pane.drill
 
     @property
+    def agent_runtime(self) -> AgentRuntime | None:
+        """The live runtime — the :ai wizard may have replaced the initial
+        one, so per-cluster retargeting (issue #36) must read it here."""
+        return self._agent_runtime
+
+    @property
     def current_namespace(self) -> str:
         """Alias for current_scope; kept for backward-compatible test access."""
         return self.current_scope
@@ -851,9 +977,10 @@ class KorvidApp(App[None]):
         yield empty_state
         yield LogPane()
         yield DescribePane()
-        agent_panel = AgentPanel()
-        agent_panel.display = False
-        yield agent_panel
+        if self._agent_available:
+            agent_panel = AgentPanel()
+            agent_panel.display = False
+            yield agent_panel
         yield CommandBar()
         yield FilterBar()
         yield NamespacePicker()
@@ -900,7 +1027,9 @@ class KorvidApp(App[None]):
         # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
         command_bar = self.query_one(CommandBar)
         command_bar.known = lambda a: self._canonical_kind(a) if a in self.aliases else None
-        command_bar.command_words = sorted({*self.aliases, "ns", "namespaces", "q", "quit"})
+        command_bar.command_words = sorted(
+            {*self.aliases, "ns", "namespaces", "ctx", "context", "contexts", "q", "quit"}
+        )
         # Seed session-scoped log display settings from config (logs.wrap /
         # logs.timestamps); the w/t keys toggle them from there.
         log_pane = self.query_one(LogPane)
@@ -911,6 +1040,16 @@ class KorvidApp(App[None]):
             # must fire when one breaks even while :pf is closed.
             self.set_interval(_FORWARD_POLL_SECONDS, self._poll_forwards)
         self._prefetch_namespaces()
+        if self._list_contexts is not None:
+            # Kubeconfig contexts feed the `:ctx` completion; a local file
+            # read, but off-loop so a slow filesystem never blocks mount.
+            list_contexts = self._list_contexts
+
+            async def _fetch_contexts() -> None:
+                names, _ = await asyncio.to_thread(list_contexts)
+                self.query_one(CommandBar).context_words = names
+
+            self._ctx_prefetch_task = asyncio.create_task(_fetch_contexts())
         for warning in self.config.warnings:
             # Config problems (e.g. an invalid custom column) surface once at
             # startup instead of hiding in a log file (issue #45).
@@ -981,7 +1120,9 @@ class KorvidApp(App[None]):
             command_bar = self.query_one(CommandBar)
         except Exception:
             return  # app is shutting down or not composed yet
-        command_bar.command_words = sorted({*self.aliases, "ns", "namespaces", "q", "quit"})
+        command_bar.command_words = sorted(
+            {*self.aliases, "ns", "namespaces", "ctx", "context", "contexts", "q", "quit"}
+        )
 
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
         self._render_pending.discard(message.kind)
@@ -1070,8 +1211,18 @@ class KorvidApp(App[None]):
             (group, overrides.get(action, key) if action else key, description)
             for group, key, description, action in self.HANDLER_KEY_HELP
         ]
+        # The static BINDINGS list bypasses check_action, so drop entries
+        # whose action is unavailable in this composition (e.g. Ctrl-A
+        # without the [agent] extra, issue #73).
+        app_bindings = [
+            binding
+            for binding in (
+                raw if isinstance(raw, Binding) else Binding(*raw) for raw in self.BINDINGS
+            )
+            if self.check_action(binding.action, ()) is not False
+        ]
         groups = collect_help(
-            list(self.BINDINGS),
+            app_bindings,
             list(DescribeScreen.BINDINGS),
             handler_keys=handler_keys,
             overrides=overrides,
@@ -1282,19 +1433,55 @@ class KorvidApp(App[None]):
         if self._list_namespaces is None:
             self.notify("Namespace listing unavailable", severity="warning")
             return
+        # The listing would race the client swap and could return either
+        # cluster's namespaces — refuse up front.
+        if not self._ctx_reads_allowed():
+            return
+        epoch = self._ctx_epoch
         try:
             namespaces = await self._list_namespaces()
         except ApiStatusError as exc:  # API failures get the actionable mapping (§5-5)
+            if self._ctx_switch_crossed(epoch):
+                return  # a stale old-cluster error is not worth surfacing
             self._handle_namespace_list_error(exc)
             return
         except Exception as exc:  # surface any other listing failure to the user
+            if self._ctx_switch_crossed(epoch):
+                return
             self.notify(str(exc), title="Failed to list namespaces", severity="error")
+            return
+        if self._ctx_switch_crossed(epoch):
+            # The listing awaited through a :ctx switch: opening the picker
+            # now would offer old-cluster namespaces to the new session.
+            self.notify(
+                "Namespace picker cancelled - the kube context changed",
+                severity="warning",
+            )
             return
         if not namespaces:
             self.notify("No namespaces visible (check RBAC)", severity="warning")
             return
         self.query_one(CommandBar).namespace_words = namespaces
         self.query_one(NamespacePicker).open(namespaces)
+
+    def _ctx_switch_crossed(self, epoch: int) -> bool:
+        """True when a :ctx switch started or completed since *epoch* was taken."""
+        return self._ctx_switching or epoch != self._ctx_epoch
+
+    def _ctx_reads_allowed(self) -> bool:
+        """Refuse read actions that spawn cluster streams during a :ctx switch.
+
+        Streams started mid-swap would attach to whichever cluster wins the
+        switch while still labeled with the old selection (issue #84).
+        Returns True when it is safe to proceed.
+        """
+        if self._ctx_switching:
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
+            return False
+        return True
 
     def _handle_namespace_list_error(self, exc: ApiStatusError) -> None:
         """RBAC-limited fallback for the picker (issue #49): a forbidden
@@ -1315,6 +1502,327 @@ class KorvidApp(App[None]):
             msg += " Switch directly with `:ns <name>` or add `namespaces:` to config.yaml."
         self.notify(msg, title="Failed to list namespaces", severity="error")
 
+    # ------------------------------------------------------------------
+    # `:ctx` — runtime context switching (issue #36)
+    # ------------------------------------------------------------------
+
+    def on_show_context_picker(self, message: ShowContextPicker) -> None:
+        self.run_worker(self._show_context_picker(), exclusive=False)
+
+    def on_switch_context_command(self, message: SwitchContextCommand) -> None:
+        self.run_worker(self._switch_context_flow(message.name), exclusive=False)
+
+    _CURRENT_CTX_SUFFIX = " (current)"
+
+    async def _show_context_picker(self) -> None:
+        if self._list_contexts is None:
+            self.notify("Context switching unavailable in this build", severity="warning")
+            return
+        names, active = await asyncio.to_thread(self._list_contexts)
+        if not names:
+            self.notify("No contexts found in kubeconfig", severity="warning")
+            return
+        self.query_one(CommandBar).context_words = names
+        # Sessions started from the kubeconfig current-context have no
+        # explicit config value — fall back to what the kubeconfig reports.
+        current = self.config.kube_context or active
+        # Explicit display->name mapping: decoding the label (suffix strip)
+        # would corrupt a real context whose name ends in " (current)".
+        labels: dict[str, str] = {}
+        for n in names:
+            label = f"{n}{self._CURRENT_CTX_SUFFIX}" if n == current else n
+            if label != n and (label in names or label in labels):
+                label = n  # marker collides with another context's name
+            labels[label] = n
+
+        def _on_pick(choice: str | None) -> None:
+            if choice is None:
+                return
+            self.post_message(SwitchContextCommand(labels.get(choice, choice)))
+
+        self.push_screen(PickScreen("Switch context:", list(labels)), _on_pick)
+
+    async def _switch_context_flow(self, name: str) -> None:
+        """Orchestrate a context switch: guards, auth probe, teardown, swap.
+
+        The probe runs against a private client configuration first — on any
+        failure nothing has been torn down and the old context keeps working
+        (issue #36's "don't strand the user" requirement). Only a proven
+        target proceeds to teardown and retarget.
+        """
+        if self._probe_context is None or self._switch_context is None:
+            self.notify("Context switching unavailable in this build", severity="warning")
+            return
+        # Claim before the first await: two queued SwitchContextCommands
+        # must not both pass the guards and race the teardown.
+        if self._ctx_switching:
+            self.notify("A context switch is already in progress", severity="warning")
+            return
+        self._ctx_switching = True
+        try:
+            await self._switch_context_locked(name)
+        finally:
+            self._ctx_switching = False
+
+    async def _switch_context_locked(self, name: str) -> None:
+        """The body of `_switch_context_flow`; runs with the claim held."""
+        old = self.config.kube_context
+        if await self._is_ctx_noop(name, old):
+            self.notify(f"Already on context {name}")
+            return
+        if not await self._ctx_switch_guards_pass(name):
+            return
+        try:
+            await self._probe_context(name)  # type: ignore[misc]  # guarded by caller
+        except Exception as exc:
+            self.notify(
+                f"Cannot switch to context {name!r}: {self._describe_ctx_error(exc)}"
+                f" — staying on {old or 'the current context'}",
+                severity="error",
+                timeout=10,
+            )
+            return
+        async with self._nav_lock:
+            # The probe awaited network I/O — an agent turn or a dialog may
+            # have started meanwhile; re-check before anything is torn down.
+            blocker = self._ctx_switch_blocker()
+            if blocker is not None:
+                self.notify(blocker, severity="warning")
+                return
+            # Quiesce the embedded MCP server BEFORE any teardown: external
+            # callers share the client and alias map being swapped, and an
+            # undrainable server must abort while the old context is still
+            # fully usable (watches, forwards, store all intact).
+            mcp_restart = await self._quiesce_mcp_for_switch()
+            if mcp_restart is None:
+                return
+            await self._teardown_for_context_switch()
+            ok, applied = await self._retarget_context(name, old)
+            if not ok:
+                if mcp_restart:
+                    self.notify(
+                        "Embedded MCP server was stopped for the switch —"
+                        " restart it with :mcp on once reconnected",
+                        severity="warning",
+                        timeout=15,
+                    )
+                return
+            if mcp_restart and self._mcp is not None:
+                # Resume on the same endpoint, now serving whichever context
+                # was actually applied (target, or the restored old one).
+                msg = await self._mcp.start()
+                self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
+            await self.watch_manager.start(self.current_kind, self.current_scope)
+            await self._sync_metrics_poller()
+        self.post_message(ResourcesUpdated(self.current_kind))
+        self._refresh_status()
+        self._prefetch_namespaces()
+        self.on_aliases_updated()
+        if applied == name:
+            self.notify(f"Switched to context {name} (ns: {self.current_scope})")
+
+    async def _quiesce_mcp_for_switch(self) -> bool | None:
+        """Drain and stop the embedded MCP server ahead of a context switch.
+
+        Returns True when a restart is owed after the switch, False when the
+        server was not running, and None when the server could not be drained
+        in time — the switch must then abort with nothing torn down.
+        """
+        if self._mcp is None or not self._mcp.running:
+            return False
+        pending = await self._mcp.shutdown()
+        if pending is not None:
+            # Even cancellation didn't land within its deadline: an in-flight
+            # tool call could cross the context boundary if we proceeded.
+            self.notify(
+                "Embedded MCP server did not stop in time — context"
+                " switch aborted (old context untouched)",
+                severity="error",
+                timeout=10,
+            )
+            return None
+        return True
+
+    async def _is_ctx_noop(self, name: str, old: str | None) -> bool:
+        """True when *name* is already the active context — explicitly, or as
+        the kubeconfig's active context for sessions started without
+        -c/--context (old stays None there for the recovery path)."""
+        effective = old
+        if effective is None and self._list_contexts is not None:
+            with contextlib.suppress(Exception):
+                _, effective = await asyncio.to_thread(self._list_contexts)
+        return name == effective
+
+    def _ctx_switch_blocker(self) -> str | None:
+        """Why a switch cannot proceed right now, or None when it can."""
+        if self._agent_task is not None and not self._agent_task.done():
+            return "Agent is busy — wait for the current turn to finish before switching contexts"
+        if self._active_cluster_writes:
+            return (
+                "A cluster write is in progress — wait for it to finish before switching contexts"
+            )
+        if len(self.screen_stack) > 1:
+            return "Close open dialogs before switching contexts"
+        try:
+            # The inline namespace picker is not a screen: its old-cluster
+            # options would survive teardown and a later selection would
+            # navigate the new cluster to a namespace picked from the old.
+            if self.query_one(NamespacePicker).display:
+                return "Close the namespace picker before switching contexts"
+        except NoMatches:  # widget tree not composed (shutdown/startup)
+            pass
+        return None
+
+    async def _ctx_switch_guards_pass(self, name: str) -> bool:
+        """Pre-probe refusals; each states why the switch cannot start now."""
+        blocker = self._ctx_switch_blocker()
+        if blocker is not None:
+            self.notify(blocker, severity="warning")
+            return False
+        if self._list_contexts is not None:
+            names, _ = await asyncio.to_thread(self._list_contexts)
+            if names and name not in names:
+                self.notify(
+                    f"Unknown context {name!r} — kubeconfig has: {', '.join(names)}",
+                    severity="error",
+                )
+                return False
+        return True
+
+    @staticmethod
+    def _describe_ctx_error(exc: Exception) -> str:
+        if isinstance(exc, TimeoutError):
+            return "authentication check timed out"
+        return str(exc) or type(exc).__name__
+
+    async def _teardown_for_context_switch(self) -> None:
+        """Stop every consumer of the old cluster before the client swaps.
+
+        Order matters: streams and pollers first (they hold the old
+        connection), then session state that would otherwise leak old-cluster
+        rows, breadcrumbs, or hints into the new one.
+        """
+        await self._close_log_pane()
+        self.query_one(DescribePane).hide()
+        # An old-cluster namespace prefetch still in flight could land after
+        # the new cluster's and overwrite its completions — cancel it first.
+        if self._ns_prefetch_task is not None:
+            self._ns_prefetch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._ns_prefetch_task
+            self._ns_prefetch_task = None
+        # Completions that already loaded are old-cluster names — drop them
+        # now so they aren't offered while (or if) the new prefetch fails.
+        self.query_one(CommandBar).namespace_words = []
+        if self._metrics is not None:
+            await self._metrics.stop()
+        await self.watch_manager.stop_all()
+        if self._forwards is not None:
+            # Same quiesce-stop-audit sequence as app exit: in-flight
+            # launches land first, stop_all runs off-loop (it polls up to
+            # the grace deadline), and every stop is enqueued for audit.
+            stopped = await self._teardown_forwards(self._forwards)
+            if stopped:
+                self.notify(f"Stopped {len(stopped)} port-forward(s) targeting the old cluster")
+        # Old-cluster audit entries resolve their context only at append();
+        # flush them before _apply_context_switch re-points the audit log,
+        # or they would be written as belonging to the new cluster.
+        worker = self._forward_audit_worker
+        if worker is not None and not worker.is_finished:
+            with contextlib.suppress(Exception):
+                await worker.wait()
+        await self._drain_forward_audits()
+        self._drill.clear()
+        self.store.clear_all()
+        # The hint-events worker holds the old client and its exception path
+        # re-populates the cache — cancel it (and the parked-cursor refresh
+        # timer) before the cache is cleared, so no late result or retry can
+        # resurrect old-cluster hints.
+        self.workers.cancel_group(self, "hint-events")
+        if self._hint_refresh_timer is not None:
+            self._hint_refresh_timer.stop()
+            self._hint_refresh_timer = None
+        self._hint_event_cache.clear()
+        self.filter_pattern = ""
+        self._resource_filter = parse_filter("")
+
+    async def _retarget_context(self, name: str, old: str | None) -> tuple[bool, str | None]:
+        """Swap the connection to *name*; on failure fall back to *old*.
+
+        Returns ``(ok, applied)``: ``ok`` is False only when even the
+        fallback failed (the session then needs a restart — everything is
+        already torn down and nothing is connected). ``applied`` is the
+        context actually in effect, which may legitimately be None (the
+        kubeconfig default) — that is why success is a separate flag.
+        """
+        try:
+            result = await self._switch_context(name)  # type: ignore[misc]  # guarded by caller
+            self._apply_context_switch(name, old, result)
+            return True, name
+        except Exception as exc:
+            self.notify(
+                f"Context switch to {name!r} failed mid-swap: {self._describe_ctx_error(exc)}",
+                severity="error",
+                timeout=10,
+            )
+        try:
+            result = await self._switch_context(old)  # type: ignore[misc]  # guarded by caller
+            self._apply_context_switch(old, old, result)
+            self.notify(f"Restored context {old or '(kubeconfig default)'}")
+            return True, old
+        except Exception as exc:
+            self.notify(
+                f"Could not restore context {old or '(kubeconfig default)'}:"
+                f" {self._describe_ctx_error(exc)} — restart korvid",
+                severity="error",
+                timeout=15,
+            )
+            return False, None
+
+    def _apply_context_switch(
+        self, name: str | None, old: str | None, result: ContextSwitchResult
+    ) -> None:
+        """Adopt the new cluster's identity and re-probed capabilities."""
+        self._ctx_epoch += 1
+        # Adopt the target context's kubeconfig namespace as the session
+        # default too: `ns` toggle-back and the helm/operator namespace
+        # fallbacks read config.namespace, and jumping to the *startup*
+        # context's namespace after a switch would cross clusters.
+        self.config = dataclasses.replace(
+            self.config,
+            kube_context=name,
+            namespace=result.context_namespace or self.config.namespace,
+        )
+        self._pod_resize_supported = result.pod_resize_supported
+        self._provider_hint = result.provider_hint
+        self._protected_context = result.protected_context
+        if result.protected_context is not None:
+            self.notify(
+                f"Context {result.protected_context!r} is protected — writes"
+                " require typing the context name",
+                severity="warning",
+                timeout=10,
+            )
+        self._fallback_namespaces = result.fallback_namespaces
+        self.watch_manager.set_fallback_namespaces(result.fallback_namespaces)
+        if self._audit is not None:
+            self._audit.set_context(name)
+        if self._forwards is not None:
+            # Reopen the registry that _teardown_forwards latched closed;
+            # forwards started from now on target the new cluster.
+            self._forwards.retarget(name)
+            self._forwards_closing = False
+        self.current_kind = "pods"
+        self.current_scope = self.config.namespace or "default"
+        # Rebind the helm wrapper: it pins --kube-context per instance, and
+        # helm writes must follow the active cluster (None when helm is off).
+        self._helm = result.helm
+        if name != old:
+            self._ctx_switch_note = (
+                f"kube context switched from {old or '(default)'} to {name};"
+                " all cluster state was reset"
+            )
+
     def on_quit_command(self, message: QuitCommand) -> None:
         self.exit()
 
@@ -1331,10 +1839,15 @@ class KorvidApp(App[None]):
             # re-render moving its cursor): the hint strip reflects the
             # focused pane's selection only.
             return
-        if self.current_kind != "pods" or event.row_key is None:
-            self.query_one(HintStrip).clear_hint()
-            return
-        self._show_hint_for_row(str(event.row_key.value))
+        try:
+            if self.current_kind != "pods" or event.row_key is None:
+                self.query_one(HintStrip).clear_hint()
+                return
+            self._show_hint_for_row(str(event.row_key.value))
+        except NoMatches:
+            # A highlight event dispatched during shutdown/teardown can
+            # arrive after the strip is unmounted; nothing to render then.
+            pass
 
     def _show_hint_for_row(self, row_key: str) -> None:
         """Render the hint for one pod row: cached event line when fresh,
@@ -1417,17 +1930,33 @@ class KorvidApp(App[None]):
         """Best-effort: append the newest warning event to the visible strip."""
         if self._get_events is None:  # caller guards; satisfy the type checker
             return
+        epoch = self._ctx_epoch
         try:
             events = await self._get_events.fetch(
                 summary.namespace, summary.name, uid=summary.uid or None
             )
         except Exception:  # events are decoration; the status-derived hint already shows
+            if self._ctx_switching or epoch != self._ctx_epoch:
+                # The fetch failed because the context switch closed the old
+                # client — recaching / rescheduling would resurrect
+                # old-cluster hints after teardown cleared them.
+                return
             self._store_hint_event(cache_key, None, None)
             # Retry once the TTL passes: a transient API failure must not
             # hide the hint forever while the cursor stays parked.
             if self.current_kind == "pods" and self._cursor_row_key() == row_key:
                 self._schedule_hint_refresh(row_key)
             return
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # A late success from the old cluster must not be cached against
+            # (or rendered over) a same-keyed row on the new one.
+            return
+        self._apply_hint_events(row_key, cache_key, summary, events)
+
+    def _apply_hint_events(
+        self, row_key: str, cache_key: str, summary: PodSummary, events: list[dict[str, Any]]
+    ) -> None:
+        """Cache the fetched events and render them if the cursor still fits."""
         # The snapshot taken at highlight time may be stale after the await:
         # re-read the store and filter/render against the *current* status.
         fresh = self._find_pod_summary(row_key)
@@ -1544,15 +2073,35 @@ class KorvidApp(App[None]):
         parts = row_key.split("/", 1)
         if len(parts) != 2:
             return
-        namespace, name = parts[0], parts[1]
+        await self._open_containers_screen(parts[0], parts[1])
 
+    async def _open_containers_screen(self, namespace: str, name: str) -> None:
+        """Push the containers screen for a pod; shell/logs run per pick.
+
+        The row fetch and the open screen both span awaited gaps, so the
+        context epoch captured here cancels stale picks: a shell or log
+        stream started after a completed switch would target the new cluster
+        with the old cluster's pod selection.
+        """
+        epoch = self._ctx_epoch
         rows = await self._build_container_rows(namespace, name)
         if not rows:
             self.notify("No containers found for this pod", severity="warning")
             return
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The row fetch awaited through a context switch: the selection
+            # belongs to the old cluster.
+            return
 
         def _on_pick(result: tuple[str, str] | None) -> None:
             if result is None:
+                return
+            if self._ctx_switching or epoch != self._ctx_epoch:
+                self.notify(
+                    f"container action on {name} cancelled - the kube context"
+                    " changed while the containers screen was open",
+                    severity="warning",
+                )
                 return
             action, container = result
             if action == "shell":
@@ -1667,25 +2216,15 @@ class KorvidApp(App[None]):
         if self._get_manifest is None:
             self.notify("Describe unavailable", severity="warning")
             return
-
-        table = self._focused_table()
-        if table.row_count == 0:
-            self.notify("No resource selected", severity="warning")
+        # The fetch would race the client swap and could render either
+        # cluster's manifest — refuse up front.
+        if not self._ctx_reads_allowed():
             return
+        epoch = self._ctx_epoch
 
-        # cursor_row is the index; ordered_rows gives us Row objects with .key
-        row_index = table.cursor_row
-        ordered = table.ordered_rows
-        if row_index >= len(ordered):
-            self.notify("No resource selected", severity="warning")
+        namespace, name = self._selected_ns_name()
+        if namespace is None or name is None:
             return
-
-        row_key = str(ordered[row_index].key.value)  # "namespace/name"
-        parts = row_key.split("/", 1)
-        if len(parts) != 2:
-            self.notify("Cannot determine resource from selection", severity="warning")
-            return
-        namespace, name = parts[0], parts[1]
         ns: str | None = namespace if namespace else None
 
         try:
@@ -1709,6 +2248,15 @@ class KorvidApp(App[None]):
                 msg = explain_api_error(exc.status, exc.reason, "events", namespace)
                 self.notify(msg, severity="warning")
 
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The fetches awaited through a context switch: the manifest (or
+            # a mixed manifest/events pair) describes the old cluster and
+            # must not be pushed over the new session.
+            self.notify(
+                f"describe {name} cancelled - the kube context changed during the fetch",
+                severity="warning",
+            )
+            return
         title = f"{self.current_kind}/{namespace}/{name}"
         if manifest.get("kind") == "Secret":
             # Secrets get the dedicated masked viewer (spec §5 #9): values
@@ -1722,10 +2270,10 @@ class KorvidApp(App[None]):
     def on_unknown_command(self, message: UnknownCommand) -> None:
         parts = message.text.strip().split()
         head = parts[0] if parts else ""
-        if head in {"ai", "agent"}:
+        if head in {"ai", "agent"} and self._agent_available:
             self._open_agent_setup()
             return
-        if head == "model":
+        if head == "model" and self._agent_available:
             self._handle_model_command(parts[1:])
             return
         if head == "mcp":
@@ -1758,12 +2306,19 @@ class KorvidApp(App[None]):
 
     def _open_agent_setup(self) -> None:
         if self._agent_configurator is None:
-            self.notify("Agent setup unavailable in this build", severity="warning")
+            self.notify(
+                "Agent setup unavailable — install with: pip install 'korvid[agent]'",
+                severity="warning",
+            )
             return
         # The wizard applies the settings itself (via apply_settings) before
         # persisting, so a refused swap keeps the wizard open and unsaved.
         self.push_screen(
-            AgentSetupScreen(self._agent_configurator, apply_settings=self._apply_agent_settings)
+            AgentSetupScreen(
+                self._agent_configurator,
+                apply_settings=self._apply_agent_settings,
+                current_profile=self._configured_agent_profile,
+            )
         )
 
     def _handle_model_command(self, args: list[str]) -> None:
@@ -1807,7 +2362,10 @@ class KorvidApp(App[None]):
         """`:mcp` shows server state; `:mcp on` / `:mcp off` toggle it live."""
         mcp = self._mcp
         if mcp is None:
-            self.notify("MCP unavailable in this build", severity="warning")
+            self.notify(
+                "MCP unavailable — install with: pip install 'korvid[mcp]'",
+                severity="warning",
+            )
             return
         if not args:
             self.notify(mcp.status())
@@ -1816,9 +2374,30 @@ class KorvidApp(App[None]):
         if action not in ("on", "off"):
             self.notify("Usage: :mcp [on|off]", severity="warning")
             return
+        if self._ctx_switching:
+            # The switch quiesced the server before swapping the client and
+            # alias map; a toggle landing mid-swap could restart it against
+            # state that is being replaced.
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
+            return
 
         async def _switch() -> None:
-            msg = await (mcp.start() if action == "on" else mcp.stop())
+            # Serialize with the `:ctx` flow (which holds _nav_lock through
+            # quiesce/teardown/retarget) and re-check inside the lock: a
+            # toggle queued just before the switch claimed _ctx_switching
+            # could otherwise start the server against the client/alias map
+            # mid-swap, or have its stop undone by the switch's restart.
+            async with self._nav_lock:
+                if self._ctx_switching:
+                    self.notify(
+                        "A context switch is in progress — try again once it completes",
+                        severity="warning",
+                    )
+                    return
+                msg = await (mcp.start() if action == "on" else mcp.stop())
             self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
             self._refresh_status()
 
@@ -1831,7 +2410,10 @@ class KorvidApp(App[None]):
         and False is returned; the swap is also refused while a turn is live.
         """
         if self._rebuild_agent is None:
-            self.notify("Agent rebuild unavailable in this build", severity="warning")
+            self.notify(
+                "Agent rebuild unavailable — install with: pip install 'korvid[agent]'",
+                severity="warning",
+            )
             return False
         if self._agent_task is not None and not self._agent_task.done():
             self.notify("Agent is busy — wait for the current turn to finish", severity="warning")
@@ -1850,6 +2432,10 @@ class KorvidApp(App[None]):
         self._agent_runtime = runtime
         self._agent_model_name = settings.model
         self._agent_settings = settings
+        self._agent_profile = settings.profile
+        # Once applied (and persisted by the wizard) the profile is an
+        # explicit choice — reopening :ai must preserve it.
+        self._configured_agent_profile = settings.profile
         self._refresh_status()
         panel = self.query_one(AgentPanel)
         agent_input = panel.query_one("#agent-input")
@@ -1858,7 +2444,13 @@ class KorvidApp(App[None]):
         agent_input.disabled = False
         if panel.display:
             in_tok, out_tok = runtime.total_tokens
-            panel.set_header(settings.model, in_tok, out_tok, estimated=runtime.usage_estimated)
+            panel.set_header(
+                settings.model,
+                in_tok,
+                out_tok,
+                estimated=runtime.usage_estimated,
+                profile=settings.profile,
+            )
             agent_input.focus()
         return True
 
@@ -1873,6 +2465,10 @@ class KorvidApp(App[None]):
         """
         kind = self._canonical_kind(self.current_kind)
         meta = self.aliases.get(kind)
+        # The exec would race the teardown/retarget and could attach to
+        # whichever cluster wins — refuse up front.
+        if not self._ctx_reads_allowed():
+            return
         if meta is not None and (meta.group, meta.plural) == ("", "nodes"):
             self.run_worker(self._node_shell_flow())
             return
@@ -1880,23 +2476,10 @@ class KorvidApp(App[None]):
             self.notify("Shell is available for pods and nodes", severity="warning")
             return
 
-        table = self._focused_table()
-        if table.row_count == 0:
-            self.notify("No resource selected", severity="warning")
+        ns, name = self._selected_ns_name()
+        if ns is None or name is None:
             return
-
-        row_index = table.cursor_row
-        ordered = table.ordered_rows
-        if row_index >= len(ordered):
-            self.notify("No resource selected", severity="warning")
-            return
-
-        row_key = str(ordered[row_index].key.value)  # "namespace/name"
-        parts = row_key.split("/", 1)
-        if len(parts) != 2:
-            self.notify("Cannot determine resource from selection", severity="warning")
-            return
-        namespace, name = parts[0], parts[1]
+        namespace = ns
 
         if shutil.which("kubectl") is None:
             self.notify(
@@ -1907,10 +2490,22 @@ class KorvidApp(App[None]):
 
         containers = self._get_pod_containers(namespace, name)
         if len(containers) > 1:
+            epoch = self._ctx_epoch
 
             def _on_pick(container: str | None) -> None:
-                if container is not None:
-                    self._run_shell(namespace, name, container)
+                if container is None:
+                    return
+                if self._ctx_switching or epoch != self._ctx_epoch:
+                    # The picker stayed open across a context switch: the
+                    # selection belongs to the old cluster while kubectl
+                    # would now target the new one.
+                    self.notify(
+                        f"shell into {name} cancelled - the kube context"
+                        " changed while the container picker was open",
+                        severity="warning",
+                    )
+                    return
+                self._run_shell(namespace, name, container)
 
             self.push_screen(
                 PickScreen(f"Container in {name}:", list(containers)),
@@ -1925,6 +2520,11 @@ class KorvidApp(App[None]):
         if self.current_kind not in FORWARDABLE_KINDS:
             self.notify("Port-forward is only available for pods and services", severity="warning")
             return
+        # The forward would race the teardown/retarget and could spawn
+        # against whichever cluster wins — refuse up front.
+        if not self._ctx_reads_allowed():
+            return
+        epoch = self._ctx_epoch
         if self._forwards is None:
             self.notify("Port-forward unavailable in this build", severity="warning")
             return
@@ -1950,10 +2550,24 @@ class KorvidApp(App[None]):
             return
 
         def _on_result(result: tuple[int, int] | None) -> None:
-            if result is not None:
-                self.run_worker(
-                    self._start_forward(kind, ns, name, local_port=result[0], remote_port=result[1])
+            if result is None:
+                return
+            if self._ctx_switching or epoch != self._ctx_epoch:
+                # The dialog stayed open across a context switch (or the
+                # port prefill awaited through one): the selection belongs
+                # to the old cluster while kubectl and the reopened forward
+                # registry now target the new one.
+                self.notify(
+                    f"port-forward to {name} cancelled - the kube context"
+                    " changed while the dialog was open",
+                    severity="warning",
                 )
+                return
+            self.run_worker(
+                self._start_forward(
+                    kind, ns, name, local_port=result[0], remote_port=result[1], epoch=epoch
+                )
+            )
 
         await self.push_screen(
             PortForwardScreen(f"{kind}/{ns}/{name}", ports, restrict_remote=kind == "services"),
@@ -2024,13 +2638,39 @@ class KorvidApp(App[None]):
         return f"{plural}/{owner[1]}" if plural is not None else None
 
     async def _start_forward(
-        self, kind: str, namespace: str, name: str, *, local_port: int, remote_port: int
+        self,
+        kind: str,
+        namespace: str,
+        name: str,
+        *,
+        local_port: int,
+        remote_port: int,
+        epoch: int,
     ) -> None:
         """Spawn a forward from the registry, audit it, and confirm to the user."""
         registry = self._forwards
         if registry is None:  # pragma: no cover - action guard already checked
             return
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The worker was scheduled just as a switch started: it is not
+            # yet registered in _launching_forwards, so teardown could not
+            # cancel it and it would spawn against the new cluster.
+            self.notify(
+                f"port-forward to {name} cancelled - the kube context changed",
+                severity="warning",
+            )
+            return
         workload = await self._resolve_forward_workload(namespace, name) if kind == "pods" else None
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The workload lookup awaited through a switch (this coroutine
+            # registers below only after the lookup, so teardown missed it):
+            # the old-cluster pod selection must not spawn kubectl against
+            # the retargeted context.
+            self.notify(
+                f"port-forward to {name} cancelled - the kube context changed",
+                severity="warning",
+            )
+            return
         spec = ForwardSpec(
             kind=kind,
             namespace=namespace,
@@ -2497,22 +3137,16 @@ class KorvidApp(App[None]):
         if self._transfer_in_flight:
             self.notify("A transfer is already in progress", severity="warning")
             return
+        # The stream would race the teardown/retarget and could address
+        # whichever cluster wins — refuse up front.
+        if not self._ctx_reads_allowed():
+            return
+        epoch = self._ctx_epoch
 
-        table = self._focused_table()
-        if table.row_count == 0:
-            self.notify("No resource selected", severity="warning")
+        ns, name = self._selected_ns_name()
+        if ns is None or name is None:
             return
-        row_index = table.cursor_row
-        ordered = table.ordered_rows
-        if row_index >= len(ordered):
-            self.notify("No resource selected", severity="warning")
-            return
-        row_key = str(ordered[row_index].key.value)  # "namespace/name"
-        parts = row_key.split("/", 1)
-        if len(parts) != 2:
-            self.notify("Cannot determine resource from selection", severity="warning")
-            return
-        namespace, name = parts[0], parts[1]
+        namespace = ns
 
         summary = self._find_pod(namespace, name)
         containers = summary.containers if summary is not None else ()
@@ -2525,20 +3159,22 @@ class KorvidApp(App[None]):
 
             def _on_pick(container: str | None) -> None:
                 if container is not None:
-                    self._open_transfer_dialog(namespace, name, container, uid)
+                    self._open_transfer_dialog(namespace, name, container, uid, epoch)
 
             self.push_screen(PickScreen(f"Container in {name}:", list(containers)), _on_pick)
             return
-        self._open_transfer_dialog(namespace, name, containers[0] if containers else None, uid)
+        self._open_transfer_dialog(
+            namespace, name, containers[0] if containers else None, uid, epoch
+        )
 
     def _open_transfer_dialog(
-        self, namespace: str, name: str, container: str | None, uid: str | None
+        self, namespace: str, name: str, container: str | None, uid: str | None, epoch: int
     ) -> None:
         target = f"{namespace}/{name}" + (f" ({container})" if container else "")
 
         def _on_spec(spec: TransferSpec | None) -> None:
             if spec is not None:
-                self._start_transfer(namespace, name, container, spec, uid)
+                self._start_transfer(namespace, name, container, spec, uid, epoch)
 
         self.push_screen(TransferScreen(target), _on_spec)
 
@@ -2549,20 +3185,40 @@ class KorvidApp(App[None]):
         container: str | None,
         spec: TransferSpec,
         uid: str | None,
+        epoch: int,
     ) -> None:
         """Gate then launch: uploads write into the container filesystem, so
         they are blocked in read-only mode and pass the approval dialog."""
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The picker/transfer dialogs stayed open across a context
+            # switch: the pod selection (and its uid, which fails open when
+            # missing) belongs to the old cluster while the shared exec
+            # client now targets the new one.
+            self.notify(
+                f"transfer to {namespace}/{name} cancelled - the kube context"
+                " changed while the dialog was open",
+                severity="warning",
+            )
+            return
         if spec.direction == "upload":
             if self.config.readonly:
                 self.notify("Upload disabled in read-only mode", severity="warning")
                 return
 
             def _approved(approved: bool | None) -> None:
-                if approved:
-                    self.run_worker(self._run_transfer(namespace, name, container, spec, uid))
+                if not approved:
+                    return
+                if self._ctx_switching or epoch != self._ctx_epoch:
+                    self.notify(
+                        f"transfer to {namespace}/{name} cancelled - the kube"
+                        " context changed while the approval was open",
+                        severity="warning",
+                    )
+                    return
+                self.run_worker(self._run_transfer(namespace, name, container, spec, uid))
 
             self.push_screen(
-                ConfirmScreen(
+                self._confirm_screen(
                     f"Upload file to {namespace}/{name}",
                     f"{spec.local_path} → {container or 'pod'}:{spec.remote_path}\n"
                     "This writes into the container filesystem.",
@@ -2572,6 +3228,7 @@ class KorvidApp(App[None]):
             return
         self.run_worker(self._run_transfer(namespace, name, container, spec, uid))
 
+    @_tracks_cluster_write
     async def _run_transfer(
         self,
         namespace: str,
@@ -2741,6 +3398,7 @@ class KorvidApp(App[None]):
 
     def _run_shell(self, namespace: str, name: str, container: str | None) -> None:
         """Run kubectl exec; offer the kubectl debug fallback only if sh is missing."""
+        epoch = self._ctx_epoch
         argv = build_exec_argv(namespace, name, container, context=self.config.kube_context)
         target = f"{name}/{container}" if container else name
         with self.suspend():
@@ -2765,19 +3423,21 @@ class KorvidApp(App[None]):
                 shell_exists = False  # inconclusive — keep offering the fallback
             if shell_exists:
                 return
-            self.call_from_thread(self._schedule_debug_offer, namespace, name, container, exit_code)
+            self.call_from_thread(
+                self._schedule_debug_offer, namespace, name, container, exit_code, epoch
+            )
 
         self.run_worker(_probe_and_maybe_offer, thread=True)
 
     def _schedule_debug_offer(
-        self, namespace: str, name: str, container: str | None, exit_code: int
+        self, namespace: str, name: str, container: str | None, exit_code: int, epoch: int
     ) -> None:
         """Sync shim for call_from_thread: the offer itself is async because
         it awaits the RBAC pre-check."""
-        self.run_worker(self._offer_debug_fallback(namespace, name, container, exit_code))
+        self.run_worker(self._offer_debug_fallback(namespace, name, container, exit_code, epoch))
 
     async def _offer_debug_fallback(
-        self, namespace: str, name: str, container: str | None, exit_code: int
+        self, namespace: str, name: str, container: str | None, exit_code: int, epoch: int
     ) -> None:
         """Ask whether to attach a kubectl debug container after a failed shell."""
         if self.config.readonly or self._audit is None:
@@ -2818,6 +3478,15 @@ class KorvidApp(App[None]):
         if manifest is not None:
             raw_uid = (manifest.get("metadata") or {}).get("uid")
             approved_uid = str(raw_uid) if raw_uid else None
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The probe/RBAC/manifest awaits crossed a context switch: the
+            # offer describes an old-cluster pod while kubectl debug would
+            # now target the new context.
+            self.notify(
+                f"Debug fallback for {target} cancelled - the kube context changed",
+                severity="warning",
+            )
+            return
         if len(self.screen_stack) > 1:
             # The probe/RBAC pre-check ran concurrently with user input: never
             # stack the offer over a dialog that opened meanwhile.
@@ -2827,7 +3496,9 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return
-        self._pick_debug_image(namespace, name, container, exit_code, approved_uid, manifest or {})
+        self._pick_debug_image(
+            namespace, name, container, exit_code, approved_uid, manifest or {}, epoch
+        )
 
     def _pick_debug_image(
         self,
@@ -2837,6 +3508,7 @@ class KorvidApp(App[None]):
         exit_code: int,
         approved_uid: str | None,
         manifest: dict[str, Any],
+        epoch: int,
     ) -> None:
         """Debug image picker (issue #52): runtime-aware recommendation first,
         alternatives after, plus a custom-image prompt."""
@@ -2858,13 +3530,13 @@ class KorvidApp(App[None]):
                 def _on_custom(image: str | None) -> None:
                     if image:
                         self._confirm_debug(
-                            namespace, name, container, exit_code, approved_uid, image
+                            namespace, name, container, exit_code, approved_uid, image, epoch
                         )
 
                 self.push_screen(ImagePrompt(target), _on_custom)
                 return
             self._confirm_debug(
-                namespace, name, container, exit_code, approved_uid, prompts[choice]
+                namespace, name, container, exit_code, approved_uid, prompts[choice], epoch
             )
 
         # Choosing an image is read-only: even if input buffered before this
@@ -2923,6 +3595,7 @@ class KorvidApp(App[None]):
         exit_code: int,
         approved_uid: str | None,
         image: str,
+        epoch: int,
     ) -> None:
         """Approval gate for the debug fallback with the chosen image.
 
@@ -2933,11 +3606,21 @@ class KorvidApp(App[None]):
         target = f"{name}/{container}" if container else name
 
         def _on_choice(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_worker(self._run_debug(namespace, name, container, approved_uid, image))
+            if not confirmed:
+                return
+            if self._ctx_switching or epoch != self._ctx_epoch:
+                # The image picker / approval stayed open across a context
+                # switch: kubectl debug would mutate a same-named pod on the
+                # new cluster (the uid re-check fails open without a uid).
+                self.notify(
+                    f"Debug fallback for {target} cancelled - the kube context changed",
+                    severity="warning",
+                )
+                return
+            self.run_worker(self._run_debug(namespace, name, container, approved_uid, image))
 
         self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Shell failed in {target} (exit {exit_code})",
                 f"kubectl debug: attach a {image} debug container to pod"
                 f" {name}{self._write_locus(namespace)} - the target image likely"
@@ -2947,6 +3630,7 @@ class KorvidApp(App[None]):
             _on_choice,
         )
 
+    @_tracks_cluster_write
     async def _run_debug(
         self,
         namespace: str,
@@ -3196,7 +3880,7 @@ class KorvidApp(App[None]):
                 self.run_worker(self._run_debug(namespace, name, container, approved_uid, fallback))
 
         self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Image pull failed for {image} ({reason})",
                 f"Retry kubectl debug on {target}{self._write_locus(namespace)} with"
                 f" {fallback}? Note: the failed ephemeral container entry cannot be"
@@ -3404,6 +4088,9 @@ class KorvidApp(App[None]):
         if self.current_kind != "pods":
             self.notify("Logs are only available for pods", severity="warning")
             return
+        if not self._ctx_reads_allowed():
+            return
+        epoch = self._ctx_epoch
 
         log_pane = self.query_one(LogPane)
         if log_pane.display and self._log_pane_mode != "l":
@@ -3420,12 +4107,14 @@ class KorvidApp(App[None]):
             return
 
         if log_pane.display:
-            await self._toggle_log_pod(ns, name)
+            await self._toggle_log_pod(ns, name, epoch)
             return
 
         self._log_pane_mode = "l"
         triples = self._pod_triples(ns, name)
-        await self._open_log_pane(ns, [(pod, ctr) for _, pod, ctr in triples], triples=triples)
+        await self._open_log_pane(
+            ns, [(pod, ctr) for _, pod, ctr in triples], triples=triples, epoch=epoch
+        )
 
     def _pod_triples(self, namespace: str, name: str) -> list[tuple[str, str, str]]:
         """Return (ns, pod, container) triples for one pod (one per container)."""
@@ -3434,7 +4123,7 @@ class KorvidApp(App[None]):
             return [(namespace, name, ctr) for ctr in containers]
         return [(namespace, name, "")]
 
-    async def _toggle_log_pod(self, namespace: str, name: str) -> None:
+    async def _toggle_log_pod(self, namespace: str, name: str, epoch: int) -> None:
         """Add or remove *namespace/name* from the accumulated live-log panels."""
         existing = list(self._current_log_triples)
         pods: list[tuple[str, str]] = []
@@ -3464,13 +4153,16 @@ class KorvidApp(App[None]):
 
         await self._cancel_log_tasks()
         sources = [(pod, ctr) for _, pod, ctr in triples]
-        await self._open_log_pane(triples[0][0], sources, triples=triples)
+        await self._open_log_pane(triples[0][0], sources, triples=triples, epoch=epoch)
 
     async def action_logs_multi(self) -> None:
         """Stream all filtered pods' containers (``L`` binding); cap at 8."""
         if self.current_kind != "pods":
             self.notify("Logs are only available for pods", severity="warning")
             return
+        if not self._ctx_reads_allowed():
+            return
+        epoch = self._ctx_epoch
 
         if self._stream_logs is None:
             self.notify("Log streaming unavailable", severity="warning")
@@ -3492,7 +4184,11 @@ class KorvidApp(App[None]):
         self._log_pane_mode = "L"
         ns0 = triples[0][0]
         await self._open_log_pane(
-            ns0, [(pod, ctr) for _, pod, ctr in triples], triples=triples, force_prefix=True
+            ns0,
+            [(pod, ctr) for _, pod, ctr in triples],
+            triples=triples,
+            force_prefix=True,
+            epoch=epoch,
         )
 
     def _build_multi_stream_triples(self, table: ResourceTable) -> list[tuple[str, str, str]]:
@@ -3663,15 +4359,27 @@ class KorvidApp(App[None]):
         meta: ResourceMeta,
         ns: str | None,
         name: str,
+        *,
         phase: str = "the permission check",
+        epoch: int,
     ) -> bool:
-        """Re-validate after an awaited gap (the RBAC round-trip, or an
-        editor session - named by ``phase`` so cancellation messages state
-        the true cause), before pushing a dialog: the user may have opened
-        another screen or moved the selection meanwhile - and keystrokes
-        typed during the await must never land on a confirmation they did
-        not see. Abort (with a notification) unless the base screen is still
-        on top and the same row is still selected."""
+        """Re-validate after an awaited gap (the RBAC round-trip, a dry-run
+        preview, or an editor session - named by ``phase`` so cancellation
+        messages state the true cause), before pushing a dialog: the user may
+        have opened another screen or moved the selection meanwhile - and
+        keystrokes typed during the await must never land on a confirmation
+        they did not see. ``epoch`` (captured when the write flow began) also
+        aborts on a context switch that started - or fully completed - during
+        the gap: a same-named row on the new cluster would otherwise satisfy
+        the selection checks. Abort (with a notification) unless everything
+        still matches."""
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            self.notify(
+                f"{action} {self._gvr_label(meta)}/{name} cancelled -"
+                f" the kube context changed during {phase}",
+                severity="warning",
+            )
+            return False
         if len(self.screen_stack) > 1:
             self.notify(
                 f"{action} {self._gvr_label(meta)}/{name} cancelled -"
@@ -3704,9 +4412,21 @@ class KorvidApp(App[None]):
         """RBAC pre-check plus post-await re-validation for binding handlers:
         the check is an API round trip, so confirm the screen and selection
         are unchanged before any dialog is pushed."""
+        if self._ctx_switching:
+            # The write would race the teardown/retarget and could execute
+            # against whichever cluster wins — refuse up front.
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
+            return False
+        epoch = self._ctx_epoch
         if not await self._permitted(action, meta, ns, name):
             return False
-        return self._write_context_intact(action, meta, ns, name)
+        # The permission check awaited network I/O — a switch may have
+        # started (flag) or fully completed (epoch) meanwhile; the approved
+        # intent must not land on a different cluster.
+        return self._write_context_intact(action, meta, ns, name, epoch=epoch)
 
     async def _permitted(
         self, action: str, meta: ResourceMeta, namespace: str | None, name: str
@@ -3767,6 +4487,7 @@ class KorvidApp(App[None]):
             )
         )
 
+    @_tracks_cluster_write
     async def _run_write(
         self,
         action: str,
@@ -3850,10 +4571,13 @@ class KorvidApp(App[None]):
         if target is None:
             return
         meta, ns, name, uid = target
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("delete", meta, ns, name):
             return
         preview = await self._dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
-        if not self._write_context_intact("delete", meta, ns, name, phase="the dry-run preview"):
+        if not self._write_context_intact(
+            "delete", meta, ns, name, phase="the dry-run preview", epoch=epoch
+        ):
             return
         operation = f"DELETE {self._gvr_label(meta)}/{name}{self._write_locus(ns)}"
         require = None if meta.namespaced else name
@@ -3867,7 +4591,7 @@ class KorvidApp(App[None]):
                 )
 
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Delete {self._gvr_label(meta)}/{name}?",
                 operation,
                 require_name=require,
@@ -3896,6 +4620,7 @@ class KorvidApp(App[None]):
                 f"rollout restart does not apply to {self._gvr_label(meta)}", severity="warning"
             )
             return
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("rollout_restart", meta, ns, name):
             return
         # One stamp per approval: the previewed request and the executed
@@ -3905,7 +4630,7 @@ class KorvidApp(App[None]):
             ops.preview_rollout_restart(meta, ns, name, uid=uid, restarted_at=stamp)
         )
         if not self._write_context_intact(
-            "rollout_restart", meta, ns, name, phase="the dry-run preview"
+            "rollout_restart", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
             return
 
@@ -3922,7 +4647,7 @@ class KorvidApp(App[None]):
                 )
 
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Rollout restart {self._gvr_label(meta)}/{name}?",
                 f"PATCH {self._gvr_label(meta)}/{name} pod template (restartedAt annotation)"
                 f"{self._write_locus(ns)}",
@@ -3932,7 +4657,12 @@ class KorvidApp(App[None]):
         )
 
     async def _fetch_manifest_for_edit(
-        self, label: str, meta: ResourceMeta, ns: str | None, name: str
+        self,
+        label: str,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        epoch: int,
     ) -> dict[str, Any] | None:
         """Fetch the manifest for an edit; None (with a notification) aborts.
         The fetch is another awaited round-trip: a selection change while it
@@ -3945,7 +4675,9 @@ class KorvidApp(App[None]):
         except Exception as exc:
             self.notify(f"edit {label} failed: {exc}", severity="error")
             return None
-        if not self._write_context_intact("edit", meta, ns, name, phase="the manifest fetch"):
+        if not self._write_context_intact(
+            "edit", meta, ns, name, phase="the manifest fetch", epoch=epoch
+        ):
             return None
         # managedFields is server-side bookkeeping noise; kubectl edit hides
         # it too. resourceVersion stays so concurrent modifications 409.
@@ -3965,10 +4697,11 @@ class KorvidApp(App[None]):
         if target is None:
             return
         meta, ns, name, uid = target
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("edit", meta, ns, name):
             return
         label = f"{self._gvr_label(meta)}/{name}"
-        manifest = await self._fetch_manifest_for_edit(label, meta, ns, name)
+        manifest = await self._fetch_manifest_for_edit(label, meta, ns, name, epoch=epoch)
         if manifest is None:
             return
         original_text = yaml.safe_dump(manifest, sort_keys=False)
@@ -3980,7 +4713,9 @@ class KorvidApp(App[None]):
             return
         # The editor round-trip is arbitrarily long: re-validate that the
         # same row is still selected before pushing the confirmation.
-        if not self._write_context_intact("edit", meta, ns, name, phase="the editor session"):
+        if not self._write_context_intact(
+            "edit", meta, ns, name, phase="the editor session", epoch=epoch
+        ):
             return
         detail = self._edit_detail(manifest, edited)
 
@@ -3998,7 +4733,7 @@ class KorvidApp(App[None]):
                 )
 
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Apply edited {label}?",
                 # Issue #21: the approval dialog summarizes the change, not
                 # just the target and verb.
@@ -4143,6 +4878,7 @@ class KorvidApp(App[None]):
         if (meta.group, meta.plural) not in self._SCALABLE:
             self.notify(f"scale does not apply to {self._gvr_label(meta)}", severity="warning")
             return
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("scale", meta, ns, name):
             return
         current = self._current_replicas(ns, name)
@@ -4152,7 +4888,7 @@ class KorvidApp(App[None]):
                 return
             # The dry-run round trip must not run inside a screen callback:
             # a worker fetches the preview, revalidates, then confirms.
-            self.run_worker(self._confirm_scale(meta, ns, name, uid, current, replicas))
+            self.run_worker(self._confirm_scale(meta, ns, name, uid, current, replicas, epoch))
 
         await self.push_screen(
             ReplicasPrompt(f"{self._gvr_label(meta)}/{name}", current=current), _on_replicas
@@ -4166,6 +4902,7 @@ class KorvidApp(App[None]):
         uid: str | None,
         current: int | None,
         replicas: int,
+        epoch: int,
     ) -> None:
         """Dry-run preview + approval dialog for a scale, after the replica
         count is known. Revalidates the selection after the preview round
@@ -4175,7 +4912,9 @@ class KorvidApp(App[None]):
         if ops is None:
             return
         preview = await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
-        if not self._write_context_intact("scale", meta, ns, name, phase="the dry-run preview"):
+        if not self._write_context_intact(
+            "scale", meta, ns, name, phase="the dry-run preview", epoch=epoch
+        ):
             return
 
         def _done(confirmed: bool | None) -> None:
@@ -4193,7 +4932,7 @@ class KorvidApp(App[None]):
 
         shown = "?" if current is None else current
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Scale {self._gvr_label(meta)}/{name}?",
                 f"PATCH {self._gvr_label(meta)}/{name}/scale: replicas {shown} -> {replicas}"
                 f"{self._write_locus(ns)}",
@@ -4224,12 +4963,15 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("resize", meta, ns, name):
             return
         containers = await self._pod_container_resources(ns, name)
         if containers is None:
             return
-        if not self._write_context_intact("resize", meta, ns, name, phase="the manifest fetch"):
+        if not self._write_context_intact(
+            "resize", meta, ns, name, phase="the manifest fetch", epoch=epoch
+        ):
             return
 
         def _on_resources(resources: dict[str, dict[str, dict[str, str]]] | None) -> None:
@@ -4237,7 +4979,7 @@ class KorvidApp(App[None]):
                 return
             # The dry-run round trip must not run inside a screen callback:
             # a worker fetches the preview, revalidates, then confirms.
-            self.run_worker(self._confirm_resize(meta, ns, name, uid, resources))
+            self.run_worker(self._confirm_resize(meta, ns, name, uid, resources, epoch))
 
         await self.push_screen(
             ResizePrompt(f"{self._gvr_label(meta)}/{name}", containers=containers), _on_resources
@@ -4291,6 +5033,7 @@ class KorvidApp(App[None]):
         name: str,
         uid: str | None,
         resources: dict[str, dict[str, dict[str, str]]],
+        epoch: int,
     ) -> None:
         """Dry-run preview + approval dialog for an in-place pod resize.
         Revalidates the selection after the preview round trip: keystrokes
@@ -4303,7 +5046,9 @@ class KorvidApp(App[None]):
         preview = await self._dry_run_preview(
             ops.preview_resize(namespace, name, resources, uid=uid)
         )
-        if not self._write_context_intact("resize", meta, ns, name, phase="the dry-run preview"):
+        if not self._write_context_intact(
+            "resize", meta, ns, name, phase="the dry-run preview", epoch=epoch
+        ):
             return
         summary = self._resize_summary(resources)
 
@@ -4321,7 +5066,7 @@ class KorvidApp(App[None]):
                 )
 
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Resize pods/{name}?",
                 f"PATCH pods/{name}/resize: {summary}{self._write_locus(ns)}",
                 preview=preview,
@@ -4377,10 +5122,13 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write(action, meta, None, name):
             return
         preview = await self._dry_run_preview(ops.preview_cordon(name, unschedulable, uid=uid))
-        if not self._write_context_intact(action, meta, None, name, phase="the dry-run preview"):
+        if not self._write_context_intact(
+            action, meta, None, name, phase="the dry-run preview", epoch=epoch
+        ):
             return
         flag = "true" if unschedulable else "false"
 
@@ -4398,7 +5146,7 @@ class KorvidApp(App[None]):
                 )
 
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"{action.capitalize()} nodes/{name}?",
                 f"PATCH nodes/{name} spec.unschedulable={flag}",
                 preview=preview,
@@ -4435,6 +5183,7 @@ class KorvidApp(App[None]):
         if resolved is None:
             return
         ops, meta, name, uid = resolved
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("drain", meta, None, name):
             return
         try:
@@ -4445,7 +5194,9 @@ class KorvidApp(App[None]):
                 severity="error",
             )
             return
-        if not self._write_context_intact("drain", meta, None, name, phase="the drain plan"):
+        if not self._write_context_intact(
+            "drain", meta, None, name, phase="the drain plan", epoch=epoch
+        ):
             return
 
         def _done(confirmed: bool | None) -> None:
@@ -4456,7 +5207,7 @@ class KorvidApp(App[None]):
         blocked_now = sum(1 for t in plan.targets if t.pdb_blocked is not None)
         note = f"; {blocked_now} currently PDB-blocked" if blocked_now else ""
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Drain nodes/{name}?",
                 f"Cordon nodes/{name}, then attempt eviction of {len(plan.targets)} pods"
                 f" via the Eviction API{note}"
@@ -4572,6 +5323,7 @@ class KorvidApp(App[None]):
             return None
         return fresh.targets
 
+    @_tracks_cluster_write
     async def _run_drain(
         self,
         ops: WriteOps,
@@ -4720,12 +5472,13 @@ class KorvidApp(App[None]):
         image = self.config.node_shell_image or DEBUG_IMAGE
         shell_ns = self.config.node_shell_namespace or "default"
         pods_meta = self.aliases.get("pods")
+        epoch = self._ctx_epoch
         if pods_meta is None:
             # Fail-open like the pod-debug pre-check, but never silently.
             logger.warning("pods alias missing; skipping node-shell RBAC pre-check (fail-open)")
         elif not await self._permitted("node-shell", pods_meta, shell_ns, ""):
             return
-        if not self._write_context_intact("node shell", meta, None, name):
+        if not self._write_context_intact("node shell", meta, None, name, epoch=epoch):
             # The RBAC round-trip ran concurrently with user input: the
             # approval must stay bound to the selection that initiated it,
             # and never stack over a dialog that opened meanwhile.
@@ -4736,7 +5489,7 @@ class KorvidApp(App[None]):
                 self.run_worker(self._run_node_shell(ops, name, shell_ns, image, uid))
 
         self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Node shell on {name}",
                 f"kubectl debug node/{name}: creates a privileged debug pod"
                 f" (image {image}) in namespace {shell_ns} with the node's"
@@ -4747,6 +5500,7 @@ class KorvidApp(App[None]):
             _on_choice,
         )
 
+    @_tracks_cluster_write
     async def _run_node_shell(
         self, ops: WriteOps, node: str, namespace: str, image: str, approved_uid: str | None
     ) -> None:
@@ -5143,6 +5897,7 @@ class KorvidApp(App[None]):
         if self._get_manifest is None:
             self.notify("Install unavailable: no manifest source", severity="warning")
             return
+        epoch = self._ctx_epoch
         try:
             # Fetch by the canonical view kind (which may be a group-qualified
             # alias), as the edit path does: a bare plural would resolve to a
@@ -5163,7 +5918,7 @@ class KorvidApp(App[None]):
             return
         facts = package_install_facts(manifest)
         if not self._write_context_intact(
-            "install", pkg_meta, ns, name, phase="the manifest fetch"
+            "install", pkg_meta, ns, name, phase="the manifest fetch", epoch=epoch
         ):
             return
 
@@ -5173,7 +5928,7 @@ class KorvidApp(App[None]):
             # The SSAR round trip must not run inside a screen callback:
             # a worker re-checks, revalidates, then confirms.
             self.run_worker(
-                self._confirm_operator_install(pkg_meta, sub_meta, ns, uid, facts, choices)
+                self._confirm_operator_install(pkg_meta, sub_meta, ns, uid, facts, choices, epoch)
             )
 
         # The row namespace is where the catalog lives (e.g. "olm"), not
@@ -5199,6 +5954,7 @@ class KorvidApp(App[None]):
         uid: str | None,
         facts: PackageInstallFacts,
         choices: tuple[str, str, str],
+        epoch: int,
     ) -> None:
         """Approval dialog for an operator install: the full Subscription
         manifest is shown before it is created (issue #29 requirement)."""
@@ -5226,7 +5982,7 @@ class KorvidApp(App[None]):
         if not await self._permitted("install", sub_meta, namespace, ""):
             return
         if not self._write_context_intact(
-            "install", pkg_meta, ns, facts.package, phase="the install wizard"
+            "install", pkg_meta, ns, facts.package, phase="the install wizard", epoch=epoch
         ):
             return
         if uid and self._selected_uid(ns, facts.package) != uid:
@@ -5270,7 +6026,7 @@ class KorvidApp(App[None]):
             )
 
         await self.push_screen(
-            ConfirmScreen(f"Install operator {facts.package}?", operation), _done
+            self._confirm_screen(f"Install operator {facts.package}?", operation), _done
         )
 
     async def _start_installplan_approve(
@@ -5282,6 +6038,7 @@ class KorvidApp(App[None]):
         ops = self._write_ops
         if ops is None:
             return
+        epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("approve", meta, ns, name):
             return
         if self._get_manifest is None:
@@ -5304,7 +6061,9 @@ class KorvidApp(App[None]):
         spec = self._approvable_plan_spec(manifest, name)
         if spec is None:
             return
-        if not self._write_context_intact("approve", meta, ns, name, phase="the manifest fetch"):
+        if not self._write_context_intact(
+            "approve", meta, ns, name, phase="the manifest fetch", epoch=epoch
+        ):
             return
         updated = dict(manifest)
         updated["spec"] = {**spec, "approved": True}
@@ -5327,7 +6086,9 @@ class KorvidApp(App[None]):
                     )
                 )
 
-        await self.push_screen(ConfirmScreen(f"Approve installplans/{name}?", operation), _done)
+        await self.push_screen(
+            self._confirm_screen(f"Approve installplans/{name}?", operation), _done
+        )
 
     def _approvable_plan_spec(self, manifest: dict[str, Any], name: str) -> dict[str, Any] | None:
         """The plan's spec if it is a pending Manual plan, else None (with
@@ -5407,6 +6168,7 @@ class KorvidApp(App[None]):
         helm = self._helm_gate()
         if helm is None:
             return
+        epoch = self._ctx_epoch
         hits = await self._helm_search(helm, "")
         if hits is None:
             return
@@ -5421,7 +6183,9 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return
-        self._helm_pick_chart(hits, release=None, namespace=self._helm_view_namespace())
+        self._helm_pick_chart(
+            hits, release=None, namespace=self._helm_view_namespace(), epoch=epoch
+        )
 
     async def _helm_upgrade_flow(self) -> None:
         """Upgrade (the `uncordon_node` key on a release row): the same
@@ -5430,6 +6194,7 @@ class KorvidApp(App[None]):
         helm = self._helm_gate()
         if helm is None:
             return
+        epoch = self._ctx_epoch
         ns, name = self._selected_ns_name()
         if name is None:
             return
@@ -5439,14 +6204,14 @@ class KorvidApp(App[None]):
         if hits is None:
             return
         if not self._write_context_intact(
-            "helm-upgrade", HELM_RELEASES_META, ns, name, phase="the chart search"
+            "helm-upgrade", HELM_RELEASES_META, ns, name, phase="the chart search", epoch=epoch
         ):
             return
         namespace = ns or (row.namespace if row is not None else self._helm_view_namespace())
-        self._helm_pick_chart(hits, release=name, namespace=namespace)
+        self._helm_pick_chart(hits, release=name, namespace=namespace, epoch=epoch)
 
     def _helm_pick_chart(
-        self, hits: list[ChartHit], *, release: str | None, namespace: str
+        self, hits: list[ChartHit], *, release: str | None, namespace: str, epoch: int
     ) -> None:
         """Chart picker feeding the install/upgrade wizard; everything
         offered comes from `helm search repo`, nothing is hardcoded."""
@@ -5465,7 +6230,9 @@ class KorvidApp(App[None]):
                 if choices is None:
                     return
                 self.run_worker(
-                    self._helm_confirm_change(hit, choices, upgrade=release is not None),
+                    self._helm_confirm_change(
+                        hit, choices, upgrade=release is not None, epoch=epoch
+                    ),
                     exclusive=True,
                     group="helm-write",
                 )
@@ -5476,7 +6243,7 @@ class KorvidApp(App[None]):
         self.push_screen(PickScreen(title, list(labels)), _picked)
 
     async def _helm_confirm_change(
-        self, hit: ChartHit, choices: HelmReleaseChoices, *, upgrade: bool
+        self, hit: ChartHit, choices: HelmReleaseChoices, *, upgrade: bool, epoch: int
     ) -> None:
         """Optional values editing, dry-run/diff preview, then the standard
         approval dialog; the mutation itself runs through `_run_write`, so
@@ -5500,7 +6267,7 @@ class KorvidApp(App[None]):
             values_text = text if meaningful else None
         rendered = await self._helm_change_preview(helm, hit, choices, values_text, upgrade=upgrade)
         action = "helm-upgrade" if upgrade else "helm-install"
-        if not self._helm_context_after_preview(action, choices, upgrade=upgrade):
+        if not self._helm_context_after_preview(action, choices, upgrade=upgrade, epoch=epoch):
             return
         preview, preview_title = rendered if rendered is not None else (None, "")
         verb = "UPGRADE" if upgrade else "INSTALL"
@@ -5534,12 +6301,12 @@ class KorvidApp(App[None]):
 
         title = f"{'Upgrade' if upgrade else 'Install'} {choices.release}?"
         await self.push_screen(
-            ConfirmScreen(title, operation, preview=preview, preview_title=preview_title),
+            self._confirm_screen(title, operation, preview=preview, preview_title=preview_title),
             _done,
         )
 
     def _helm_context_after_preview(
-        self, action: str, choices: HelmReleaseChoices, *, upgrade: bool
+        self, action: str, choices: HelmReleaseChoices, *, upgrade: bool, epoch: int
     ) -> bool:
         """The preview runs over the interactive table: the state the user
         approves must still be the state that was previewed."""
@@ -5551,7 +6318,17 @@ class KorvidApp(App[None]):
                 choices.namespace,
                 choices.release,
                 phase="the preview render",
+                epoch=epoch,
             )
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            # The helm wrapper this flow captured is bound to the old
+            # cluster's --kube-context: a switch completed during the wizard
+            # or preview must cancel before an approval can open.
+            self.notify(
+                "helm install cancelled - the kube context changed during the preview",
+                severity="warning",
+            )
+            return False
         if len(self.screen_stack) > 1:  # another dialog opened during the preview
             return False
         if self._canonical_kind(self.current_kind) != HELM_RELEASES_META.plural:
@@ -5652,6 +6429,7 @@ class KorvidApp(App[None]):
         helm = self._helm_gate()
         if helm is None:
             return
+        epoch = self._ctx_epoch
         ns, name = self._selected_ns_name()
         if name is None:
             return
@@ -5662,7 +6440,7 @@ class KorvidApp(App[None]):
         namespace = ns or row.namespace
         preview = await self._helm_rollback_preview(helm, row.release, row.revision, namespace)
         if not self._write_context_intact(
-            "helm-rollback", HELM_REVISIONS_META, ns, name, phase="the diff preview"
+            "helm-rollback", HELM_REVISIONS_META, ns, name, phase="the diff preview", epoch=epoch
         ):
             return
         operation = (
@@ -5684,7 +6462,7 @@ class KorvidApp(App[None]):
             )
 
         await self.push_screen(
-            ConfirmScreen(
+            self._confirm_screen(
                 f"Rollback {row.release} to revision {row.revision}?",
                 operation,
                 preview=preview,
@@ -5743,8 +6521,22 @@ class KorvidApp(App[None]):
         triples: list[tuple[str, str, str]] | None = None,
         force_prefix: bool = False,
         previous: bool = False,
+        epoch: int | None = None,
     ) -> None:
-        """Show log pane and spawn one streaming task per (pod, container)."""
+        """Show log pane and spawn one streaming task per (pod, container).
+
+        *epoch* is the `_ctx_epoch` captured when the user triggered the
+        action; when a :ctx switch started or completed since (issue #84),
+        the open is dropped — the streams would attach to the new cluster
+        while labeled with the old selection. Callers without an awaited
+        gap (epoch=None) are still refused while a switch is in flight.
+        """
+        if self._ctx_switch_crossed(self._ctx_epoch if epoch is None else epoch):
+            self.notify(
+                "Log streaming cancelled - the kube context changed",
+                severity="warning",
+            )
+            return
         self._log_pane_gen += 1
         # Resolve triples before saving so _current_log_triples is always complete.
         if triples is None:
@@ -5975,6 +6767,8 @@ class KorvidApp(App[None]):
         # create_provider may return None (unknown provider, missing base_url/
         # model) while agent_enabled is still true in config.
         label = "AI on" if self._agent_runtime is not None else "AI off"
+        if self._agent_runtime is not None and self._agent_blocked_in_protected():
+            label = "AI blocked"
         mcp_label = self._mcp.status() if self._mcp is not None else ""
         self.query_one(StatusBar).update_status(
             self.config.kube_context,
@@ -5984,6 +6778,34 @@ class KorvidApp(App[None]):
             mcp_label=mcp_label,
             filter_label=self._resource_filter.describe(),
             progress_label=self._drain_progress,
+            protected=self._protected_context is not None,
+        )
+
+    def _agent_blocked_in_protected(self) -> bool:
+        """`agent.disable_in_protected` (issue #83): agent turns are refused
+        entirely while a protected context is active."""
+        return self._protected_context is not None and self.config.agent_disable_in_protected
+
+    def _confirm_screen(
+        self,
+        title: str,
+        operation: str,
+        *,
+        require_name: str | None = None,
+        preview: list[str] | None = None,
+        preview_title: str = "server dry-run preview:",
+    ) -> ConfirmScreen:
+        """Build every write-approval dialog through one place so the
+        protected-context layer (issue #83) can never be forgotten: while a
+        protected context is active, all confirms carry the red banner and
+        demand a typed name instead of `y`."""
+        return ConfirmScreen(
+            title,
+            operation,
+            require_name=require_name,
+            preview=preview,
+            preview_title=preview_title,
+            protected_context=self._protected_context,
         )
 
     # ------------------------------------------------------------------
@@ -6039,6 +6861,9 @@ class KorvidApp(App[None]):
             return
         if not self._current_log_triples:
             return
+        if not self._ctx_reads_allowed():
+            return
+        epoch = self._ctx_epoch
         triples = list(self._current_log_triples)
         force_prefix = self._current_log_force_prefix
         sources = [(pod, ctr) for _, pod, ctr in triples]
@@ -6048,7 +6873,7 @@ class KorvidApp(App[None]):
         # Re-open with previous=True (clears RichLog, writes banner, spawns tasks).
         ns0 = triples[0][0]
         await self._open_log_pane(
-            ns0, sources, triples=triples, force_prefix=force_prefix, previous=True
+            ns0, sources, triples=triples, force_prefix=force_prefix, previous=True, epoch=epoch
         )
 
     def action_log_search_next(self) -> None:
@@ -6148,8 +6973,14 @@ class KorvidApp(App[None]):
         would let the user's next y/Enter approve an unexpected write."""
         return self._agent_panel_expanded() and len(self.screen_stack) == 1
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Hide agent actions entirely when the [agent] extra is absent."""
+        return not (action == "toggle_agent" and not self._agent_available)
+
     def action_toggle_agent(self) -> None:
         """Toggle the agent chat panel; show setup hint when unconfigured."""
+        if not self._agent_available:
+            return
         panel = self.query_one(AgentPanel)
         if panel.display:
             panel.display = False
@@ -6163,11 +6994,32 @@ class KorvidApp(App[None]):
             runtime = self._agent_runtime
             in_tok, out_tok = runtime.total_tokens
             panel.set_header(
-                self._agent_model_name, in_tok, out_tok, estimated=runtime.usage_estimated
+                self._agent_model_name,
+                in_tok,
+                out_tok,
+                estimated=runtime.usage_estimated,
+                profile=self._agent_profile,
             )
         panel.query_one("#agent-input").focus()
 
     def on_agent_prompt_submitted(self, message: AgentPromptSubmitted) -> None:
+        if self._agent_blocked_in_protected():
+            # agent.disable_in_protected (issue #83): in protected contexts
+            # the agent must not run at all, not merely gate its writes.
+            self.notify(
+                f"Agent is disabled in protected context {self._protected_context!r}"
+                " (agent.disable_in_protected)",
+                severity="warning",
+            )
+            return
+        if self._ctx_switching:
+            # A turn started now would run during teardown/retarget and could
+            # act on the new cluster with the old cluster's screen context.
+            self.notify(
+                "A context switch is in progress — try again once it completes",
+                severity="warning",
+            )
+            return
         if self._agent_runtime is None:
             return
         if self._agent_task is not None and not self._agent_task.done():
@@ -6190,6 +7042,7 @@ class KorvidApp(App[None]):
         detail plus a one-line summary of the other pane (issue #48), so
         context stays bounded in a split workspace."""
         context = (
+            f"context={self.config.kube_context or '-'} "
             f"view={self.current_kind} scope={self.current_scope} "
             f"selected={self._selected_row_name() or '-'} "
             f"filter={self.filter_pattern or '-'}"
@@ -6205,6 +7058,11 @@ class KorvidApp(App[None]):
             return
         panel = self.query_one(AgentPanel)
         screen_context = self._screen_context()
+        if self._ctx_switch_note is not None:
+            # One-shot: the conversation only needs to learn about the
+            # switch once; afterwards the context= field carries the truth.
+            screen_context += f" NOTE: {self._ctx_switch_note}"
+            self._ctx_switch_note = None
         try:
             async for event in runtime.run_turn(user_text, screen_context):
                 panel.apply_event(event)
@@ -6754,7 +7612,7 @@ class KorvidApp(App[None]):
             if not fut.done():
                 fut.set_result(bool(confirmed))
 
-        screen = ConfirmScreen(title, operation, require_name=require_name, preview=preview)
+        screen = self._confirm_screen(title, operation, require_name=require_name, preview=preview)
         await self.push_screen(screen, _done)
         # Recheck after mounting: surfacing the dialog (or push_screen itself)
         # can consume the last of the budget, and a fixed minimum here would
@@ -6826,8 +7684,8 @@ class KorvidApp(App[None]):
         empty.update(Text(message))
         empty.display = True
 
-    async def _teardown_forwards(self, registry: ForwardRegistry) -> None:
-        """Stop every forward at app exit and audit each stop in order.
+    async def _teardown_forwards(self, registry: ForwardRegistry) -> list[ForwardRecord]:
+        """Stop every forward (app exit / `:ctx` switch), auditing in order.
 
         Session-scoped by design (issue #38): forwards never outlive the
         app that started them. stop_all() polls synchronously up to the
@@ -6836,6 +7694,9 @@ class KorvidApp(App[None]):
         promptly; they are awaited before the stops are enqueued so an exit
         during startup still logs the start entry first (never a stop-only
         or reversed trail).
+
+        Returns:
+            The stopped records, so a context switch can report the count.
         """
         self._forwards_closing = True
         # Launches and re-attaches whose spawn is still off-loop must land
@@ -6860,11 +7721,14 @@ class KorvidApp(App[None]):
         for record in records:
             if self._audit is not None:
                 self._enqueue_forward_audit("port-forward-stop", record.spec, teardown=True)
+        return records
 
     async def on_unmount(self) -> None:
         # Cancel any active log stream tasks before the event loop shuts down.
         if self._ns_prefetch_task is not None:
             self._ns_prefetch_task.cancel()
+        if self._ctx_prefetch_task is not None:
+            self._ctx_prefetch_task.cancel()
         if self._agent_task is not None:
             self._agent_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

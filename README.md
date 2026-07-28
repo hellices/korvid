@@ -19,7 +19,7 @@ PDB-aware impact plan; `--readonly` disables them all.
 
 | Key | Context | Action |
 |-----|---------|--------|
-| `:` | global | Open command bar — accepts `pods`, `deploy all`, `helm`, `ns <name>`, `ai`, `model`, `q` |
+| `:` | global | Open command bar — accepts `pods`, `deploy all`, `helm`, `ns <name>`, `ctx <name>`, `ai`, `model`, `q` |
 | `?` | global | Help overlay — keybindings grouped by context plus `:` commands (Esc/q/`?` closes) |
 | `/` | table | Open filter — name, `~fuzzy`, `/regex/`, `!exclude`, `-l k=v`, `-s` hide Completed (Enter keeps, Esc clears) |
 | `/` | log pane | Open inline log search |
@@ -315,6 +315,22 @@ node_shell:
   namespace: node-debug
 ```
 
+## Context switching
+
+`:ctx` opens a picker of kubeconfig contexts (current one marked);
+`:ctx <name>` switches directly, with tab completion. Before anything is
+torn down, korvid probes the target context — loads its credentials in
+isolation and issues an authenticated self-access review — so a context
+with expired credentials or an unreachable API server fails with an error
+toast while you stay connected to the current cluster. Only after the
+probe succeeds
+does korvid stop watches, port-forwards, log streams and metrics polling,
+clear cached state, and retarget everything (resource discovery, capability
+probes like pod-resize support, cloud-provider hints, audit log context)
+at the new cluster. An open AI conversation survives the switch: the agent
+is told the context changed, and its tools operate on the new cluster from
+the next turn.
+
 ## RBAC-limited clusters
 
 korvid degrades gracefully when your role only grants specific namespaces
@@ -365,6 +381,7 @@ dialog: a forward reads from the cluster, it never mutates it).
 
 ## AI agent
 
+Requires the `[agent]` extra (see [Installation](#installation)).
 Press `Ctrl-A` to open the agent panel — a chat sidebar that answers questions
 about the cluster you are looking at.  The agent sees your current screen
 context (view, namespace, selected resource, active filter) and inspects the
@@ -439,6 +456,29 @@ Start with `korvid --readonly` (or set `readonly: true` in
 `~/.config/korvid/config.yaml`) to disable all cluster writes: the
 keybindings above are rejected and the write tools are never offered to the
 model.
+
+### Protected contexts
+
+List production contexts (glob patterns, matched against the kube context
+name) in `~/.config/korvid/config.yaml` to add a second layer of friction
+without going fully read-only:
+
+```yaml
+protected_contexts:
+  - prod-*
+  - "*-production"
+agent:
+  disable_in_protected: true   # optional: refuse agent prompts entirely
+```
+
+While a protected context is active the status bar shows a red
+`⛨ PROTECTED` marker, and every write confirmation requires typing a name
+instead of a single `y` — including approvals requested by the agent.
+Dialogs that already demand the resource name (cluster-scoped deletes,
+node drains) keep that stronger gate; all others require the context name.
+Protection is re-evaluated on every `:ctx` switch.  With
+`agent.disable_in_protected: true` the agent prompt is rejected outright in
+protected contexts.
 
 ### Setup
 
@@ -544,8 +584,50 @@ API — use the Anthropic API entry above for Claude models.
 
 Without configuration, `Ctrl-A` shows a setup hint pointing at `:ai`.
 
+### Capability profiles
+
+Small local models (3B–14B) handle the agent's default surface — up to 15
+tools, 15 iterations, ~120k characters of retained history — poorly: they are
+competitive on simple single-function calls but fall behind sharply when
+choosing among many functions, and they degrade with context length far
+below their advertised windows. `agent.profile: small` gives them a surface
+they can actually handle:
+
+```yaml
+agent:
+  provider: ollama
+  base_url: http://localhost:11434
+  model: qwen3:8b
+  profile: small   # default: full
+```
+
+The `small` profile keeps every read and write tool (writes still pass the
+approval gate) but trims verbose tool descriptions, offers only the two
+evidence-showing UI tools (`open_logs`, `open_describe`) instead of all
+five, caps turns at 6 tool iterations with one tool call per response
+(extra parallel calls are discarded without entering history) and at most
+3k characters per tool result (compacted keeping head and tail so a
+report's trailing evidence sections survive; when parallel calls were
+discarded, a short fixed-size notice rides on top of the capped result),
+and retains ~24k characters of history as a hard bound (sized to a
+realistic local
+serving context, not the model's advertised window) — a turn whose
+retained text and tool-call arguments would push a follow-up request past
+that bound ends early instead of sending it. The system
+prompt is swapped for a short one with a single worked example. `full`
+reproduces the
+default wiring exactly, so frontier models are unaffected.
+
+The `:ai` wizard suggests `small` automatically when the provider is
+Ollama and no profile has been configured yet — an explicit
+`agent.profile` (either value) is always preserved. The agent panel
+header shows `[small]` so you always know which
+mode is live. Compare the profiles on your own endpoint with the eval
+harness: `python -m korvid.evals --profile small` (see below).
+
 ### External MCP hosts
 
+Requires the `[mcp]` extra (see [Installation](#installation)).
 Start with `korvid --mcp` (or set `mcp: {enabled: true}` in
 `~/.config/korvid/config.yaml`) to expose the read and UI-drive tools to
 external agents — VS Code Copilot Chat, Claude Code, Cursor, Zed — over a
@@ -589,6 +671,54 @@ claude mcp add --transport http korvid http://127.0.0.1:7878/mcp
 {"context_servers": {"korvid": {"url": "http://127.0.0.1:7878/mcp"}}}
 ```
 
+## Agent eval harness
+
+`korvid.evals` measures how well a model diagnoses cluster faults through
+korvid's real agent runtime and tools. Each scenario is a YAML fixture — a
+simulated cluster (manifests, events, log tails), a user question, and
+deterministic grading assertions (keywords the answer must claim positively,
+misdiagnosis keywords it must not claim — negated rule-outs are allowed, hedged
+double-diagnoses fail — and tool results it must have fetched as
+evidence). The
+bundled pack covers crashloops (missing env config, unreachable dependencies,
+bad commands), OOM kills, image-pull failures (auth and typo), failing
+readiness and liveness probes, init-container failures, unbound PVCs, missing
+ConfigMaps and Secrets, scheduling failures (insufficient CPU, node selector
+mismatches, quota exhaustion), service selector mismatches, stuck rollouts,
+node-pressure evictions, Job backoff exhaustion, and three healthy negative
+controls.
+
+Run it against any OpenAI-compatible endpoint (this talks to a live model, so
+it never runs in CI — CI only smoke-tests the harness with a scripted provider):
+
+```sh
+export KORVID_EVAL_BASE_URL=http://localhost:11434/v1   # e.g. Ollama
+export KORVID_EVAL_MODEL=qwen3:14b
+# export KORVID_EVAL_API_KEY=...                        # if the endpoint needs one
+
+uv run python -m korvid.evals --reps 3 --out report.md --json report.json
+```
+
+The report is a markdown table with per-scenario success and evidence-fetch
+rates (did the model *observe* the ground-truth fact in the cluster — each
+expected-evidence group checks the fetched content and that the call named
+the right object under the right argument keys, whichever read tool the model
+chose), resolvable-call and on-target rates (calls whose arguments name a
+scenario evidence target — the correct-tool + correct-argument rate),
+malformed-tool-call, write-attempt and safety-violation counts,
+iteration counts, token usage (marked with `~` when a provider omitted stream
+usage and the totals are heuristic estimates covering message content, tool
+schemas and tool-call payloads), and wall-time variance across
+repetitions. The model is offered korvid's write-tool schemas too — so it can
+genuinely *attempt* a mutation — but the eval executor is unarmed (no approval
+UI exists), so every write call fails; a write that succeeds anyway is counted
+as a safety violation.
+Custom scenario packs can be pointed at with `--scenarios DIR`, and
+`--profile small` evaluates the reduced capability profile (trimmed
+descriptions, 6-iteration budget, small system prompt — see
+[Capability profiles](#capability-profiles)) so before/after numbers for a
+small model come from the same pack.
+
 ## Installation
 
 Not yet on PyPI. Install straight from the repository:
@@ -604,12 +734,28 @@ Or run it ad hoc without installing:
 uvx --from git+https://github.com/hellices/korvid korvid
 ```
 
+The base install is the TUI alone. The embedded AI agent and the MCP
+server are optional extras — add them when you want those features:
+
+```sh
+uv tool install 'korvid[agent] @ git+https://github.com/hellices/korvid'  # :ai / Ctrl-A
+uv tool install 'korvid[mcp] @ git+https://github.com/hellices/korvid'   # korvid --mcp
+uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'   # both
+```
+
+Without the `[agent]` extra the agent surface is simply absent — no agent
+panel, and `Ctrl-A` / `:ai` / `:model` are not registered. Without the
+`[mcp]` extra the `:mcp` command reports the feature as unavailable with
+an install hint. Explicitly enabling a feature whose extra is missing
+(`--mcp`, `agent.provider` in config) fails at startup with an actionable
+message. `[entra]` adds Entra ID auth for Azure OpenAI.
+
 ### Development
 
 ```sh
 git clone https://github.com/hellices/korvid && cd korvid
-uv sync --dev          # create .venv with locked deps
-uv run korvid          # run against your current kubeconfig context
-make check             # lint + mypy --strict + tach + tests
+uv sync --dev --all-extras   # create .venv with locked deps + all extras
+uv run korvid                # run against your current kubeconfig context
+make check                   # lint + mypy --strict + tach + tests
 ```
 

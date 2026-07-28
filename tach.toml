@@ -2,7 +2,7 @@ source_roots = ["src"]
 
 [[modules]]
 path = "korvid.ui"
-depends_on = ["korvid.core", "korvid.agent", "korvid.k8s"]
+depends_on = ["korvid.core", "korvid.agent", "korvid.k8s", "korvid.tools"]
 
 [[modules]]
 path = "korvid.core"
@@ -10,7 +10,15 @@ depends_on = ["korvid.k8s"]
 
 [[modules]]
 path = "korvid.agent"
+depends_on = ["korvid.core", "korvid.k8s", "korvid.tools"]
+
+[[modules]]
+path = "korvid.tools"
 depends_on = ["korvid.core", "korvid.k8s"]
+
+[[modules]]
+path = "korvid.mcp"
+depends_on = ["korvid.core", "korvid.tools"]
 
 [[modules]]
 path = "korvid.k8s"
@@ -19,3 +27,7 @@ depends_on = []
 [[modules]]
 path = "korvid.providers"
 depends_on = ["korvid.agent"]
+
+[[modules]]
+path = "korvid.evals"
+depends_on = ["korvid.agent", "korvid.k8s", "korvid.providers", "korvid.tools"]

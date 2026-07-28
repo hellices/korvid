@@ -9,7 +9,7 @@ from typing import Any, cast
 import pytest
 
 from korvid.__main__ import _close_provider_in_background
-from korvid.agent.tools import UIBridge
+from korvid.tools.executor import UIBridge
 
 
 class _BoomProvider:
@@ -152,7 +152,7 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
         agent_api_key_env="KORVID_TEST_KEY",
     )
     kube_stub = cast("Any", object())  # wiring never touches kube before a tool call
-    runtime, _, _, _, proxy = _build_agent_wiring(config, kube_stub, {})
+    runtime, _, _, _, _, proxy = _build_agent_wiring(config, kube_stub, {})
     assert runtime is not None
     names = [t["function"]["name"] for t in runtime._tools]
     assert "navigate" in names
@@ -162,7 +162,7 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
     assert executor._ui is proxy
 
     # readonly strips every write tool: the model is never told they exist.
-    ro_runtime, _, _, _, _ = _build_agent_wiring(
+    ro_runtime, _, _, _, _, _ = _build_agent_wiring(
         dataclasses.replace(config, readonly=True), kube_stub, {}
     )
     assert ro_runtime is not None
@@ -194,42 +194,48 @@ def test_agent_wiring_gates_resize_tool_on_discovery(monkeypatch: object) -> Non
     )
     kube_stub = cast("Any", object())
 
-    runtime, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=True)
+    runtime, _, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=True)
     assert runtime is not None
     assert "resize_pod" in [t["function"]["name"] for t in runtime._tools]
 
-    gated, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
+    gated, _, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
     assert gated is not None
     assert "resize_pod" not in [t["function"]["name"] for t in gated._tools]
 
-    ro, _, _, _, _ = _build_agent_wiring(
+    ro, _, _, _, _, _ = _build_agent_wiring(
         dataclasses.replace(config, readonly=True), kube_stub, {}, pod_resize_supported=True
     )
     assert ro is not None
     assert "resize_pod" not in [t["function"]["name"] for t in ro._tools]
 
 
-def test_mcp_factory_builds_fresh_servers() -> None:
+def test_mcp_controller_builds_fresh_servers() -> None:
     """uvicorn servers are single-use: each :mcp on must get a new one."""
-    from korvid.__main__ import _make_mcp_factory
+    from korvid.__main__ import _build_mcp_controller
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
+    from korvid.mcp.server import MCPController
 
     config = KorvidConfig(mcp_enabled=True, mcp_port=1234)
-    factory = _make_mcp_factory(config, cast("KubeClient", object()), {}, None)
+    controller = _build_mcp_controller(config, cast("KubeClient", object()), {}, None)
+    assert isinstance(controller, MCPController)
+    factory = controller._factory
     assert factory() is not factory()
 
 
-async def test_mcp_factory_exposes_read_and_ui_tools() -> None:
+async def test_mcp_controller_exposes_read_and_ui_tools() -> None:
     """The MCP surface is read + UI-drive: write tools stay with the
     built-in agent until an approval UX for external callers exists."""
-    from korvid.__main__ import _make_mcp_factory
-    from korvid.agent.tools import READ_TOOLS, UI_TOOLS
+    from korvid.__main__ import _build_mcp_controller
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
+    from korvid.mcp.server import MCPController
+    from korvid.tools.executor import READ_TOOLS, UI_TOOLS
 
     config = KorvidConfig(mcp_enabled=True, mcp_port=1234)
-    server = _make_mcp_factory(config, cast("KubeClient", object()), {}, None)()
+    controller = _build_mcp_controller(config, cast("KubeClient", object()), {}, None)
+    assert isinstance(controller, MCPController)
+    server = controller._factory()
     names = [t.name for t in await server.list_tools()]
     assert names == [t["function"]["name"] for t in READ_TOOLS + UI_TOOLS]
 
@@ -420,8 +426,11 @@ async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None
     )
     kube_stub = cast("Any", object())
     note = "This cluster runs on Azure (AKS managed)."
-    runtime, _, rebuild, _, _ = _build_agent_wiring(config, kube_stub, {}, cluster_context=note)
+    runtime, _, rebuild, retarget, _, _ = _build_agent_wiring(
+        config, kube_stub, {}, cluster_context=note
+    )
     assert runtime is not None
+    assert rebuild is not None
     assert note in runtime._messages[0]["content"]
 
     from korvid.agent.setup import AgentSettings
@@ -437,6 +446,26 @@ async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None
     )
     assert rebuilt is not None
     assert note in rebuilt._messages[0]["content"]
+
+    # `:ctx` switch (issue #36): the live runtime is re-armed in place and
+    # any later wizard rebuild uses the new cluster's note and tool set.
+    new_note = "This cluster runs on AWS (EKS managed)."
+    retarget(rebuilt, True, new_note)
+    assert new_note in rebuilt._messages[0]["content"]
+    assert note not in rebuilt._messages[0]["content"]
+    assert "resize_pod" in [t["function"]["name"] for t in rebuilt._tools]
+    rebuilt_after = rebuild(
+        AgentSettings(
+            provider="openai",
+            auth_method="api_key",
+            base_url="http://localhost:9999/v1",
+            model="m",
+            api_key_env="KORVID_TEST_KEY",
+        )
+    )
+    assert rebuilt_after is not None
+    assert new_note in rebuilt_after._messages[0]["content"]
+    assert "resize_pod" in [t["function"]["name"] for t in rebuilt_after._tools]
 
 
 async def test_cloud_provider_probe_is_bounded(monkeypatch: object) -> None:
@@ -571,6 +600,66 @@ async def test_discovery_preserves_olm_metas_under_group_qualified_aliases() -> 
     assert aliases["packagemanifests.packages.operators.coreos.com"] is pkg
 
 
+async def test_ctx_switch_quiesces_discovery_before_swapping_connection() -> None:
+    """switch_context closes the old ApiClient — the background discovery
+    task issuing requests on it must be cancelled (and the alias map reseeded)
+    before the connection swap, not after (issue #36 review)."""
+    import asyncio
+    import contextlib
+    from types import SimpleNamespace
+
+    from korvid.__main__ import _make_switch_context
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.csp import detect_provider
+
+    events: list[str] = []
+
+    class FakeKube:
+        async def switch_context(self, name: str | None) -> None:
+            events.append("connection-swapped")
+
+        async def detect_cloud_provider(self) -> Any:
+            return detect_provider([])
+
+        async def discover_resources(self) -> list[Any]:
+            return []
+
+    async def _old_discovery() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("discovery-cancelled")
+            raise
+
+    old_task = asyncio.create_task(_old_discovery())
+    await asyncio.sleep(0)  # let it start so cancellation unwinds it
+
+    aliases: dict[str, Any] = {"stale-crd": object()}
+    discovery_box: list[asyncio.Task[None]] = [old_task]
+    startup_config = KorvidConfig(namespace="default", readonly=True)
+    switch = _make_switch_context(
+        startup_config,
+        cast("Any", FakeKube()),
+        aliases,
+        cast("Any", [SimpleNamespace(agent_runtime=None, config=startup_config)]),  # app_box
+        discovery_box,
+        lambda runtime, resize, note: None,
+    )
+    try:
+        await switch("ctx-b")
+    finally:
+        discovery_box[0].cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await discovery_box[0]
+
+    # The stale discovery task drains before the connection is retargeted.
+    assert events == [
+        "discovery-cancelled",
+        "connection-swapped",
+    ]
+    assert "stale-crd" not in aliases  # reseeded before the swap
+
+
 def test_build_helm_wires_binary_and_context(monkeypatch: pytest.MonkeyPatch) -> None:
     """A detected helm binary becomes a HelmCLI bound to the configured context."""
     import korvid.__main__ as main_mod
@@ -592,3 +681,323 @@ def test_build_helm_returns_none_without_binary(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(main_mod, "find_helm", lambda: None)
     assert _build_helm(KorvidConfig()) is None
+
+
+async def test_agent_wiring_applies_the_small_profile(monkeypatch: object) -> None:
+    """`agent.profile: small` shrinks the tool surface, budgets, and prompt
+    at the composition root (issue #71); rebuilds after the :ai wizard honor
+    the wizard's profile choice."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.profiles import SMALL_MAX_HISTORY_CHARS, SMALL_MAX_ITERATIONS
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+        agent_profile="small",
+    )
+    kube_stub = cast("Any", object())
+    runtime, _, rebuild, _, _, _ = _build_agent_wiring(
+        config, kube_stub, {}, pod_resize_supported=True
+    )
+    assert runtime is not None
+    names = [t["function"]["name"] for t in runtime._tools]
+    assert "diagnose_pod" in names
+    assert "open_logs" in names
+    assert "delete_resource" in names  # writes stay available (approval-gated)
+    assert "resize_pod" in names
+    assert "navigate" not in names
+    assert "set_filter" not in names
+    assert "drill_down" not in names
+    assert runtime._max_iterations == SMALL_MAX_ITERATIONS
+    assert runtime._max_history_chars == SMALL_MAX_HISTORY_CHARS
+    assert runtime._max_result_chars is not None
+    assert "one tool at a time" in runtime._messages[0]["content"]
+
+    # The wizard's rebuild carries its own profile choice.
+    assert rebuild is not None
+    full_runtime = rebuild(
+        AgentSettings(
+            provider="openai-compat",
+            auth_method="api_key",
+            base_url="http://localhost:9999/v1",
+            model="m",
+            api_key_env="KORVID_TEST_KEY",
+            profile="full",
+        )
+    )
+    assert full_runtime is not None
+    full_names = [t["function"]["name"] for t in full_runtime._tools]
+    assert "navigate" in full_names
+    assert full_runtime._max_iterations != SMALL_MAX_ITERATIONS
+
+
+async def test_ctx_retarget_keeps_the_small_profile_surface(monkeypatch: object) -> None:
+    """A `:ctx` switch recomposes the tool set from the *active* profile
+    (issues #36 + #71): retargeting a small-profile runtime picks up the new
+    cluster's capabilities (resize) without resurrecting the full surface or
+    resetting the small system prompt."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+        agent_profile="small",
+    )
+    kube_stub = cast("Any", object())
+    runtime, _, _, retarget, _, _ = _build_agent_wiring(
+        config, kube_stub, {}, pod_resize_supported=False
+    )
+    assert runtime is not None
+    assert "resize_pod" not in [t["function"]["name"] for t in runtime._tools]
+
+    retarget(runtime, True, "The cluster runs on AWS EKS.")
+    names = [t["function"]["name"] for t in runtime._tools]
+    assert "resize_pod" in names  # new cluster's capability picked up
+    assert "navigate" not in names  # still the small surface
+    prompt = runtime._messages[0]["content"]
+    assert "one tool at a time" in prompt  # still the small system prompt
+    assert "AWS EKS" in prompt  # new cluster's environment note
+
+
+async def test_ctx_switch_fallbacks_follow_session_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sequential switches derive fallbacks from the app's evolving session
+    default, not the startup snapshot: A -> B(ns-b) -> C(no kubeconfig
+    namespace) must keep ns-b in C's fallback set (issue #36 review)."""
+    import asyncio
+    import contextlib
+    import dataclasses
+    from types import SimpleNamespace
+
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _make_switch_context
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.csp import detect_provider
+
+    class FakeKube:
+        async def switch_context(self, name: str | None) -> None:
+            pass
+
+        async def detect_cloud_provider(self) -> Any:
+            return detect_provider([])
+
+        async def discover_resources(self) -> list[Any]:
+            return []
+
+    ctx_namespaces = {"ctx-b": "ns-b", "ctx-c": None}
+    monkeypatch.setattr(main_mod, "resolve_context_namespace", ctx_namespaces.get)
+
+    startup = KorvidConfig(namespace="startup-ns", readonly=True)
+    app_stub = SimpleNamespace(agent_runtime=None, config=startup)
+    discovery_box: list[asyncio.Task[None]] = []
+    switch = _make_switch_context(
+        startup,
+        cast("Any", FakeKube()),
+        {},
+        cast("Any", [app_stub]),
+        discovery_box,
+        lambda runtime, resize, note: None,
+    )
+    try:
+        result_b = await switch("ctx-b")
+        assert "ns-b" in result_b.fallback_namespaces
+        # Mimic KorvidApp._apply_context_switch adopting ns-b as the default.
+        app_stub.config = dataclasses.replace(
+            startup, kube_context="ctx-b", namespace=result_b.context_namespace
+        )
+        result_c = await switch("ctx-c")
+    finally:
+        for task in discovery_box:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+    assert "ns-b" in result_c.fallback_namespaces
+    assert "startup-ns" not in result_c.fallback_namespaces
+
+
+def test_protected_context_name_glob_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_protected_context_name` resolves the effective context (kubeconfig
+    active name for None) and returns it only when a glob matches (issue #83)."""
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+
+    monkeypatch.setattr(main_mod, "resolve_context_name", lambda ctx: ctx or "prod-active")
+    config = KorvidConfig(protected_contexts=("prod-*",))
+    assert main_mod._protected_context_name(config, "prod-eu") == "prod-eu"
+    assert main_mod._protected_context_name(config, None) == "prod-active"
+    assert main_mod._protected_context_name(config, "dev") is None
+    assert main_mod._protected_context_name(KorvidConfig(), "prod-eu") is None
+
+
+def _uninstall_packages(monkeypatch: pytest.MonkeyPatch, *packages: str) -> None:
+    """Simulate an install without the given third-party packages (issue #73).
+
+    The composition root probes capability with `importlib.util.find_spec`
+    (catching ImportError is unreliable: parts of an extra may arrive
+    transitively or be imported lazily), so make the probe report the
+    packages as absent.
+    """
+    import importlib.util
+
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name.partition(".")[0] in packages:
+            return None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+
+_MCP_ROOTS = ("mcp", "anyio", "starlette", "uvicorn")
+_AGENT_ROOTS = ("httpx", "keyring")
+
+
+def test_missing_mcp_extra_degrades_when_not_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the [mcp] extra and without --mcp, the TUI gets None wiring
+    (the `:mcp` command reports the feature as unavailable)."""
+    from korvid.__main__ import _build_mcp_controller
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, *_MCP_ROOTS)
+    controller = _build_mcp_controller(KorvidConfig(), cast("KubeClient", object()), {}, None)
+    assert controller is None
+
+
+def test_missing_mcp_extra_fails_actionably_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--mcp` / mcp.enabled with the extra missing must exit with an
+    install hint, never a bare ImportError traceback."""
+    from korvid.__main__ import _build_mcp_controller
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, *_MCP_ROOTS)
+    with pytest.raises(SystemExit, match=r"korvid\[mcp\]"):
+        _build_mcp_controller(
+            KorvidConfig(mcp_enabled=True), cast("KubeClient", object()), {}, None
+        )
+
+
+def test_missing_agent_extra_degrades_when_not_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the [agent] extra and without agent.provider configured,
+    the wiring is runtime-less and the retarget hook is a safe no-op."""
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
+    runtime, configurator, rebuild, retarget, provider_box, _ = _build_agent_wiring(
+        KorvidConfig(), cast("KubeClient", object()), {}
+    )
+    assert runtime is None
+    assert configurator is None
+    assert rebuild is None
+    assert provider_box == [None]
+    retarget(None, True, "ctx")  # must not raise
+
+
+def test_missing_agent_extra_fails_actionably_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """agent.provider in config.yaml with the extra missing must exit with
+    an install hint, never a bare ImportError traceback."""
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
+    with pytest.raises(SystemExit, match=r"korvid\[agent\]"):
+        _build_agent_wiring(
+            KorvidConfig(agent_enabled=True, agent_provider="ollama"),
+            cast("KubeClient", object()),
+            {},
+        )
+
+
+def test_missing_first_party_module_is_not_treated_as_missing_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a missing extra package may degrade the wiring: a broken
+    first-party module is a defect and must propagate, never be silently
+    disabled or misreported as an uninstalled extra."""
+    import builtins
+    import sys
+
+    from korvid.__main__ import _build_mcp_controller
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    for cached in list(sys.modules):
+        if cached == "korvid.mcp" or cached.startswith("korvid.mcp."):
+            monkeypatch.delitem(sys.modules, cached)
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "korvid.mcp" or name.startswith("korvid.mcp."):
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ModuleNotFoundError, match=r"korvid\.mcp"):
+        _build_mcp_controller(KorvidConfig(), cast("KubeClient", object()), {}, None)
+
+
+def test_mcp_only_install_does_not_compose_the_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An [mcp]-only install has httpx (mcp depends on it transitively) but
+    not keyring — the agent wiring must still degrade and must not load the
+    embedded-agent loop, and TokenStore's lazy keyring import must not fool
+    the capability probe."""
+    import sys
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, "keyring")  # httpx stays importable
+    for cached in list(sys.modules):
+        if cached in ("korvid.agent.runtime", "korvid.agent.profiles"):
+            monkeypatch.delitem(sys.modules, cached)
+
+    runtime, configurator, rebuild, _, provider_box, _ = _build_agent_wiring(
+        KorvidConfig(), cast("KubeClient", object()), {}
+    )
+    assert runtime is None
+    assert configurator is None
+    assert rebuild is None
+    assert provider_box == [None]
+    assert "korvid.agent.runtime" not in sys.modules
+    assert "korvid.agent.profiles" not in sys.modules

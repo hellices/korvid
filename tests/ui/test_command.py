@@ -153,3 +153,53 @@ def test_sort_extra_args_is_unknown_even_with_sort_alias() -> None:
     known = {"sort": "sorts", **_KNOWN}.get
     msg = parse_command("sort TEAM extra", known)
     assert isinstance(msg, UnknownCommand)
+
+
+# ---------------------------------------------------------------------------
+# :ctx — runtime context switching (issue #36)
+# ---------------------------------------------------------------------------
+
+
+def test_bare_ctx_requests_context_picker() -> None:
+    from korvid.ui.messages import ShowContextPicker
+
+    assert isinstance(parse_command("ctx", _known), ShowContextPicker)
+    assert isinstance(parse_command("context", _known), ShowContextPicker)
+    assert isinstance(parse_command("contexts", _known), ShowContextPicker)
+
+
+def test_ctx_with_name_switches() -> None:
+    from korvid.ui.messages import SwitchContextCommand
+
+    msg = parse_command("ctx staging", _known)
+    assert isinstance(msg, SwitchContextCommand)
+    assert msg.name == "staging"
+
+
+def test_ctx_is_reserved_never_navigates() -> None:
+    """A cluster CRD alias named `ctx` must not shadow the builtin, and a
+    malformed :ctx must not fall through to alias navigation."""
+
+    def known_with_ctx(alias: str) -> str | None:
+        return "ctxes" if alias == "ctx" else _known(alias)
+
+    from korvid.ui.messages import ShowContextPicker
+
+    assert isinstance(parse_command("ctx", known_with_ctx), ShowContextPicker)
+
+
+def test_ctx_accepts_names_with_spaces() -> None:
+    """Kubeconfig context names are arbitrary strings: the whole remainder
+    after :ctx is the name, so `dev west` is switchable directly."""
+    from korvid.ui.messages import SwitchContextCommand
+
+    msg = parse_command("ctx dev west", _known)
+    assert isinstance(msg, SwitchContextCommand)
+    assert msg.name == "dev west"
+
+
+def test_command_help_lists_ctx() -> None:
+    from korvid.ui.command import command_help
+
+    commands = [cmd for cmd, _ in command_help()]
+    assert any("ctx" in cmd for cmd in commands)

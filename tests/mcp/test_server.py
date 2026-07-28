@@ -11,9 +11,9 @@ from typing import Any
 
 import pytest
 
-from korvid.agent.mcp_server import KorvidMCPServer, MCPController, default_endpoint_path
-from korvid.agent.tools import READ_TOOLS, UI_TOOLS, ToolExecutor
 from korvid.k8s.discovery import PODS_META
+from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
+from korvid.tools.executor import READ_TOOLS, UI_TOOLS, ToolExecutor
 
 
 class RecordingExecutor(ToolExecutor):
@@ -82,7 +82,7 @@ async def test_list_tools_exposes_agent_tool_surface() -> None:
 async def test_write_tools_are_not_exposed() -> None:
     """The MCP surface is read + UI-drive only: external hosts must not see
     cluster write tools until the approval UX for external callers exists."""
-    from korvid.agent.tools import WRITE_TOOL_NAMES
+    from korvid.tools.executor import WRITE_TOOL_NAMES
 
     server = make_server()
     names = {t.name for t in await server.list_tools()}

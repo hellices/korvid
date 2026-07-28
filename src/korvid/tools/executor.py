@@ -9,7 +9,14 @@ from typing import Any, ClassVar
 
 import yaml
 
-from korvid.agent.diagnose import (
+from korvid.core.portforward import controller_owner
+from korvid.core.secrets import mask_secret_manifest
+from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.models import parse_quantity
+from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
+from korvid.k8s.reads import ReadOps
+from korvid.tools.diagnose import (
     condition_lines,
     container_state_lines,
     identity_lines,
@@ -20,13 +27,6 @@ from korvid.agent.diagnose import (
     troubled_containers,
     warning_event_lines,
 )
-from korvid.core.portforward import controller_owner
-from korvid.core.secrets import mask_secret_manifest
-from korvid.k8s.client import KubeClient
-from korvid.k8s.discovery import ResourceMeta
-from korvid.k8s.errors import ApiStatusError
-from korvid.k8s.models import parse_quantity
-from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
 
 MAX_RESULT_CHARS = 8000
 
@@ -38,12 +38,38 @@ _MAX_CATALOG_PACKAGES = 60
 _TRUNCATION_SUFFIX = "\n… [truncated — narrow the query]"
 
 
-def cap_result(result: str) -> str:
+def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
     """Enforce the tool-result ingest cap; shared by every path that feeds
-    a result into conversation history."""
-    if len(result) > MAX_RESULT_CHARS:
-        return result[:MAX_RESULT_CHARS] + _TRUNCATION_SUFFIX
+    a result into conversation history. Profiles may pass a tighter
+    `limit` (issue #71) so a full turn of results fits their history
+    budget."""
+    if len(result) > limit:
+        return result[:limit] + _TRUNCATION_SUFFIX
     return result
+
+
+_MIDDLE_TRUNCATION_MARKER = "\n… [middle truncated — profile result budget]\n"
+
+
+def compact_result(result: str, limit: int) -> str:
+    """Shrink an oversized result to `limit` chars keeping BOTH ends.
+
+    Reports like diagnose_pod deliberately place Warning events and log
+    excerpts last, so a prefix-only cap would chop the most diagnostic
+    sections. The head keeps identity/context, the (larger) tail keeps the
+    evidence. The output never exceeds `limit`, which also makes the
+    function idempotent — re-applying the same limit is a no-op.
+    """
+    if len(result) <= limit:
+        return result
+    if limit <= len(_MIDDLE_TRUNCATION_MARKER):
+        # The marker alone would exceed a tiny limit; degrade to a hard cut
+        # so the output-never-exceeds-limit contract holds for any input.
+        return result[: max(limit, 0)]
+    content = limit - len(_MIDDLE_TRUNCATION_MARKER)
+    head = content * 2 // 5
+    tail = content - head
+    return result[:head] + _MIDDLE_TRUNCATION_MARKER + result[len(result) - tail :]
 
 
 READ_TOOLS: list[dict[str, Any]] = [
@@ -595,7 +621,7 @@ class ToolExecutor:
 
     def __init__(
         self,
-        kube: KubeClient,
+        kube: ReadOps,
         aliases: Mapping[str, ResourceMeta],
         ui: UIBridge | None = None,
     ) -> None:

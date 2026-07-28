@@ -1,0 +1,71 @@
+id: init-container-failing
+question: Pod api-1 in namespace shop is stuck in Init:CrashLoopBackOff. Why does it never start?
+screen: "resource view: pods, namespace shop, selected: shop/api-1 (Init:CrashLoopBackOff)"
+root_cause: init_container_failing
+grading:
+  must_mention:
+    - [init container, init-container, migrate, migration]
+    - [failing, failed, crash, error, exit]
+  must_not_mention:
+    - [oomkilled, image pull]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: api-1, namespace: shop}
+      contains: "migration failed: relation \"orders\" already exists"
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: api-1
+        namespace: shop
+        uid: pod-init-1
+        creationTimestamp: "2026-07-27T06:30:00Z"
+        labels: {app: api}
+      spec:
+        nodeName: node-a
+        initContainers:
+          - name: migrate
+            image: shop/migrate:v5
+        containers:
+          - name: api
+            image: shop/api:v5
+      status:
+        phase: Pending
+        conditions:
+          - {type: Ready, status: "False", reason: ContainersNotReady}
+        initContainerStatuses:
+          - name: migrate
+            ready: false
+            restartCount: 6
+            state:
+              waiting: {reason: CrashLoopBackOff, message: "back-off 2m40s restarting failed container"}
+            lastState:
+              terminated: {exitCode: 1, reason: Error}
+        containerStatuses:
+          - name: api
+            ready: false
+            restartCount: 0
+            state:
+              waiting: {reason: PodInitializing}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+  events:
+    - type: Warning
+      reason: BackOff
+      count: 14
+      lastTimestamp: "2026-07-27T07:18:00Z"
+      message: "Back-off restarting failed container migrate in pod api-1_shop"
+      involvedObject: {kind: Pod, name: api-1, namespace: shop, uid: pod-init-1}
+  logs:
+    shop/api-1/migrate:
+      current:
+        - "running schema migrations"
+      previous:
+        - "running schema migrations"
+        - "applying 0042_add_orders_table.sql"
+        - "migration failed: relation \"orders\" already exists"

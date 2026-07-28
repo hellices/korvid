@@ -830,6 +830,20 @@ async def test_command_bar_completes_namespace_argument() -> None:
         assert bar.value == "ns kube-system"
 
 
+def test_command_bar_completes_context_argument() -> None:
+    """Every `:ctx` alias completes its second token from context_words."""
+    from korvid.ui.widgets.command_bar import CommandBar
+
+    bar = CommandBar()
+    bar.command_words = ["ctx", "context", "contexts"]
+    bar.context_words = ["dev-cluster", "prod-cluster"]
+    for head in ("ctx", "context", "contexts"):
+        assert bar.complete(f"{head} de") == f"{head} dev-cluster"
+        assert bar.complete(f"{head} pr") == f"{head} prod-cluster"
+    assert bar.complete("ctx zzz") is None
+    assert bar.complete("ctx dev-cluster") is None  # already complete
+
+
 def test_command_bar_complete_no_match_returns_none() -> None:
     from korvid.ui.widgets.command_bar import CommandBar
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -15,7 +16,15 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from korvid.agent.tools import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES, cap_result
+from korvid.tools.executor import (
+    READ_TOOLS,
+    UI_TOOL_NAMES,
+    WRITE_TOOL_NAMES,
+    cap_result,
+    compact_result,
+)
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are korvid's Kubernetes diagnostic agent, embedded in a live TUI the "
@@ -94,6 +103,15 @@ def _message_chars(message: dict[str, Any]) -> int:
     return n
 
 
+def _stream_output_chars(state: _StreamState) -> int:
+    """Approximate one iteration's generated output: streamed text plus the
+    structured tool-call payloads — a tool-only iteration is not free."""
+    n = len(state.text)
+    for tc in state.tool_calls:
+        n += len(tc["name"]) + len(tc["arguments"])
+    return n
+
+
 @dataclass
 class _StreamState:
     text: str = ""
@@ -101,6 +119,48 @@ class _StreamState:
     in_tok: int = 0
     out_tok: int = 0
     has_usage: bool = False
+
+
+def _estimate_missing_usage(state: _StreamState, prompt_estimate: int) -> None:
+    """Fill in token estimates when the provider omitted usage — totals must
+    never read as zero for a request that was really transmitted."""
+    if not state.has_usage:
+        state.in_tok = prompt_estimate
+        state.out_tok = _stream_output_chars(state) // 4
+
+
+def _compose_system_prompt(
+    tools: list[dict[str, Any]],
+    cluster_context: str | None,
+    *,
+    system_prompt: str | None = None,
+    ui_prompt: str | None = None,
+) -> str:
+    """System prompt for the armed tool set and detected environment.
+
+    Shared by ``__init__`` and ``retarget`` so a runtime that survives a
+    `:ctx` switch describes the *new* cluster and tool set, not the one it
+    was built against. Capability profiles (issue #71) swap the role
+    statement and the UI-drive instruction via `system_prompt`/`ui_prompt`;
+    the write/no-write clause stays conditional on what is actually armed,
+    whichever profile.
+    """
+    prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
+    if cluster_context:
+        # Detected-environment note (e.g. cloud provider, issue #30):
+        # placed right after the role statement so provider-specific
+        # requests are grounded before any tool instructions.
+        prompt = f"{prompt} {cluster_context}"
+    armed = {t.get("function", {}).get("name") for t in tools}
+    if armed & UI_TOOL_NAMES:
+        prompt = f"{prompt} {ui_prompt if ui_prompt is not None else UI_DRIVE_PROMPT}"
+    armed_writes = sorted(armed & WRITE_TOOL_NAMES)
+    if armed_writes:
+        names = ", ".join(armed_writes)
+        prompt = f"{prompt} You can request cluster writes with {names}. {WRITE_PROMPT}"
+    else:
+        prompt = f"{prompt} {NO_WRITE_PROMPT}"
+    return prompt
 
 
 class AgentRuntime:
@@ -114,32 +174,70 @@ class AgentRuntime:
         tools: list[dict[str, Any]] | None = None,
         max_iterations: int = 15,
         max_history_chars: int = MAX_HISTORY_CHARS,
+        max_result_chars: int | None = None,
+        max_tool_calls_per_iteration: int | None = None,
+        strict_history_budget: bool = False,
         cluster_context: str | None = None,
+        system_prompt: str | None = None,
+        ui_prompt: str | None = None,
     ) -> None:
         self._provider = provider
         self._executor = executor
         self._tools = tools if tools is not None else READ_TOOLS
-        prompt = SYSTEM_PROMPT
-        if cluster_context:
-            # Detected-environment note (e.g. cloud provider, issue #30):
-            # placed right after the role statement so provider-specific
-            # requests are grounded before any tool instructions.
-            prompt = f"{prompt} {cluster_context}"
-        armed = {t.get("function", {}).get("name") for t in self._tools}
-        if armed & UI_TOOL_NAMES:
-            prompt = f"{prompt} {UI_DRIVE_PROMPT}"
-        armed_writes = sorted(armed & WRITE_TOOL_NAMES)
-        if armed_writes:
-            names = ", ".join(armed_writes)
-            prompt = f"{prompt} You can request cluster writes with {names}. {WRITE_PROMPT}"
-        else:
-            prompt = f"{prompt} {NO_WRITE_PROMPT}"
+        # The serialized tool schemas ride along on every request; they are
+        # part of the prompt cost when a provider omits usage.
+        self._tools_chars = len(json.dumps(self._tools))
+        # Remembered for retarget(): a `:ctx` switch recomposes the system
+        # prompt and must keep the active profile's role statement and
+        # UI-drive instruction (issue #71), not reset them to the defaults.
+        self._system_prompt_override = system_prompt
+        self._ui_prompt_override = ui_prompt
+        prompt = _compose_system_prompt(
+            self._tools,
+            cluster_context,
+            system_prompt=system_prompt,
+            ui_prompt=ui_prompt,
+        )
         self._max_iterations = max_iterations
         self._max_history_chars = max_history_chars
+        # Optional per-result cap below the executor's own ingest limit —
+        # history trimming never removes the sole most-recent turn, so the
+        # small profile (issue #71) sizes this so one full turn of results
+        # fits inside its retained-history budget.
+        self._max_result_chars = max_result_chars
+        # The small profile's size bound assumes one result per iteration;
+        # prompt text alone does not enforce that, so extra parallel calls
+        # in one response are discarded at dispatch (issue #71).
+        self._max_tool_calls_per_iteration = max_tool_calls_per_iteration
+        # Opt-in hard bound (small profile): budget checked mid-turn and
+        # oversized completed turns dropped at trim time. Off by default so
+        # the full profile keeps the pre-profile runtime behavior exactly.
+        self._strict_history_budget = strict_history_budget
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
         self._total_in = 0
         self._total_out = 0
         self._estimated = False
+
+    def retarget(self, *, tools: list[dict[str, Any]], cluster_context: str | None) -> None:
+        """Re-arm the runtime for a new cluster (issue #36, `:ctx`).
+
+        Conversation history survives — the system prompt is recomposed in
+        place so later turns describe the new environment (cloud provider
+        note) and the new capability-gated tool set (e.g. ``resize_pod``),
+        instead of the cluster the runtime was originally built against.
+        """
+        self._tools = tools
+        # Keep the omitted-usage estimate honest for the new tool set.
+        self._tools_chars = len(json.dumps(self._tools))
+        self._messages[0] = {
+            "role": "system",
+            "content": _compose_system_prompt(
+                tools,
+                cluster_context,
+                system_prompt=self._system_prompt_override,
+                ui_prompt=self._ui_prompt_override,
+            ),
+        }
 
     @property
     def total_tokens(self) -> tuple[int, int]:
@@ -154,6 +252,7 @@ class AgentRuntime:
     def _trim_history(self) -> None:
         """Keep the system prompt plus at most MAX_HISTORY_TURNS-1 recent turns,
         then drop oldest complete turns until within the character budget."""
+        before = len(self._messages)
         user_indices = [i for i, m in enumerate(self._messages) if m.get("role") == "user"]
         if len(user_indices) >= MAX_HISTORY_TURNS:
             cut = user_indices[-(MAX_HISTORY_TURNS - 1)]
@@ -166,6 +265,15 @@ class AgentRuntime:
             if len(user_indices) <= 1:
                 break
             self._messages = [self._messages[0], *self._messages[user_indices[1] :]]
+        if len(self._messages) < before:
+            # Dropped context makes the agent "forget" earlier exchanges;
+            # leave a trace so such reports are debuggable.
+            logger.info(
+                "trimmed agent history: dropped %d message(s), %d retained (budget %d chars)",
+                before - len(self._messages),
+                len(self._messages),
+                self._max_history_chars,
+            )
 
     async def _consume_stream(
         self,
@@ -196,8 +304,23 @@ class AgentRuntime:
         self,
         tool_calls: list[dict[str, Any]],
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Execute each tool call; yield Started/Finished events; append results."""
-        for tc in tool_calls:
+        """Execute the kept tool calls; yield Started/Finished events; append results.
+
+        Excess parallel calls (beyond `max_tool_calls_per_iteration`) are
+        discarded entirely: they are never executed and never stored — not
+        even a refusal message — because retaining their arguments would
+        let a parallel-call-happy model grow history past the profile
+        budget mid-turn (trimming never drops the newest turn). The
+        assistant message stores only the kept calls (see `run_turn`), so
+        the provider protocol stays valid with one tool message per kept
+        call. The model learns the rule from a fixed-size notice appended
+        to the last kept result; the UI still sees a Finished(ok=False)
+        event per discarded call.
+        """
+        call_limit = self._max_tool_calls_per_iteration
+        kept = tool_calls if call_limit is None else tool_calls[:call_limit]
+        excess = [] if call_limit is None else tool_calls[call_limit:]
+        for index, tc in enumerate(kept):
             call_id = str(tc["id"])
             name = str(tc["name"])
             arguments = str(tc["arguments"])
@@ -207,12 +330,32 @@ class AgentRuntime:
             except json.JSONDecodeError:
                 result = "ERROR: bad arguments"
             else:
-                try:
-                    result = await self._executor.execute(name, parsed)
-                except Exception as exc:  # defensive: executor contract is never-raise
-                    # Same ingest cap as ToolExecutor — a huge exception
-                    # message must not bypass the limit into history.
-                    result = cap_result(f"ERROR: {exc}")
+                if not isinstance(parsed, dict):
+                    # The executor contract takes an argument mapping; valid
+                    # JSON of any other shape is equally bad arguments.
+                    result = "ERROR: bad arguments"
+                else:
+                    try:
+                        result = await self._executor.execute(name, parsed)
+                    except Exception as exc:  # defensive: executor contract is never-raise
+                        # Same ingest cap as ToolExecutor — a huge exception
+                        # message must not bypass the limit into history.
+                        result = cap_result(f"ERROR: {exc}")
+            if self._max_result_chars is not None:
+                # Head+tail compaction, not a prefix cut: reports place
+                # their evidence (events, log excerpts) last by design.
+                result = compact_result(result, self._max_result_chars)
+            if excess and index == len(kept) - 1:
+                # Appended after compaction, without re-compacting: the
+                # notice is a fixed-size constant carrying no evidence, so
+                # what precedes it stays byte-identical to the compacted
+                # result (the eval recorder captures exactly that content,
+                # so grading sees only model-visible evidence); the stored
+                # size bound relaxes only by the notice's constant length.
+                result += (
+                    f"\n\nNOTE: {len(excess)} extra tool call(s) in this response "
+                    "were discarded — call one tool at a time and wait for its result."
+                )
             yield ToolCallFinished(
                 call_id=call_id,
                 name=name,
@@ -220,6 +363,68 @@ class AgentRuntime:
                 summary=result[:120],
             )
             self._messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+        for tc in excess:
+            summary = "discarded: too many tool calls in one response"
+            yield ToolCallStarted(
+                call_id=str(tc["id"]), name=str(tc["name"]), arguments=str(tc["arguments"])
+            )
+            yield ToolCallFinished(
+                call_id=str(tc["id"]), name=str(tc["name"]), ok=False, summary=summary
+            )
+
+    def _over_history_budget(self, iteration: int) -> bool:
+        """True when a follow-up iteration would send a request over budget.
+
+        Strict-mode in-turn backstop (off by default — the full profile
+        keeps its original behavior of enforcing the budget only across
+        turns): capped tool results alone do not bound history growth —
+        assistant text and kept-call arguments are stored verbatim, and
+        trimming never splits the current turn. Never fires on the first
+        iteration — the strict pre-flight has already trimmed and, if
+        needed, rejected that request; the overshoot is at
+        most one iteration's model output, which the provider's own output
+        limit bounds.
+        """
+        if not self._strict_history_budget or not iteration:
+            return False
+        return sum(_message_chars(m) for m in self._messages) > self._max_history_chars
+
+    def _assistant_message(self, state: _StreamState) -> dict[str, Any]:
+        """The stored assistant message: text plus only the kept tool calls.
+
+        Excess parallel calls (arguments included) must not enter history,
+        and the provider protocol needs exactly one tool message per stored
+        call — `_dispatch_tools` keeps the same prefix.
+        """
+        message: dict[str, Any] = {"role": "assistant", "content": state.text}
+        if state.tool_calls:
+            limit = self._max_tool_calls_per_iteration
+            stored = state.tool_calls if limit is None else state.tool_calls[:limit]
+            message["tool_calls"] = [
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                }
+                for tc in stored
+            ]
+        return message
+
+    def _strict_preflight_over_budget(self) -> bool:
+        """Strict mode: bring history within budget after the new user
+        message was appended, and report a prompt that cannot fit.
+
+        Trimming runs again here because the pre-append trim cannot see
+        the new user message: a retained turn just below the cap plus the
+        new prompt would otherwise go over the wire on iteration zero.
+        Once appended, the previous turn is no longer the newest, so the
+        normal trim drops it; True means even that was not enough — the
+        request cannot fit by itself and must be rejected, not sent.
+        """
+        if not self._strict_history_budget:
+            return False
+        self._trim_history()
+        return sum(_message_chars(m) for m in self._messages) > self._max_history_chars
 
     async def run_turn(
         self,
@@ -231,21 +436,66 @@ class AgentRuntime:
         self._messages.append(
             {"role": "user", "content": f"[screen] {screen_context}\n\n{user_text}"}
         )
+        if self._strict_preflight_over_budget():
+            # Drop the unfittable prompt so it cannot poison later turns.
+            self._messages.pop()
+            logger.warning(
+                "strict history budget: rejected a prompt that cannot fit by itself "
+                "(budget %d chars)",
+                self._max_history_chars,
+            )
+            yield AgentError(
+                message=(
+                    f"request too large for the history budget "
+                    f"({self._max_history_chars} chars) — shorten the question"
+                )
+            )
+            yield TurnComplete(input_tokens=0, output_tokens=0, estimated=False)
+            return
 
         turn_in = 0
         turn_out = 0
         # Token counts are exact only when EVERY iteration reported usage;
         # one missing iteration makes the whole turn an estimate.
         usage_missing = False
-        for _ in range(self._max_iterations):
+        for iteration in range(self._max_iterations):
+            if self._over_history_budget(iteration):
+                self._total_in += turn_in
+                self._total_out += turn_out
+                self._estimated = self._estimated or usage_missing
+                yield AgentError(
+                    message=(
+                        f"history budget exceeded mid-turn "
+                        f"({self._max_history_chars} chars) — turn ended early"
+                    )
+                )
+                yield TurnComplete(
+                    input_tokens=turn_in, output_tokens=turn_out, estimated=usage_missing
+                )
+                return
             state = _StreamState()
+            # Estimate of the prompt this iteration sends — used only when
+            # the provider omits usage, so token totals never read as zero
+            # input for a request that was really transmitted. Counts what
+            # actually goes over the wire: tool schemas, message content,
+            # and prior assistant tool-call arguments.
+            prompt_estimate = (
+                self._tools_chars + sum(_message_chars(message) for message in self._messages)
+            ) // 4
             try:
                 stream = self._provider.complete(self._messages, self._tools)
                 async for event in self._consume_stream(stream, state):
                     yield event
             except Exception as exc:
                 # Tokens spent in earlier iterations (and the partial stream)
-                # are real cost — account for them before bailing out.
+                # are real cost — account for them before bailing out. A
+                # stream that produced output before dying definitely had
+                # its prompt processed, so apply the same estimates as the
+                # normal path; one that died before yielding anything gets
+                # no speculative charge.
+                if not state.has_usage and (state.text or state.tool_calls):
+                    state.in_tok = prompt_estimate
+                    state.out_tok = _stream_output_chars(state) // 4
                 self._total_in += turn_in + state.in_tok
                 self._total_out += turn_out + state.out_tok
                 if usage_missing or not state.has_usage:
@@ -253,22 +503,12 @@ class AgentRuntime:
                 yield AgentError(message=str(exc))
                 return
 
-            if not state.has_usage:
-                state.out_tok = len(state.text) // 4
+            _estimate_missing_usage(state, prompt_estimate)
             turn_in += state.in_tok
             turn_out += state.out_tok
             usage_missing = usage_missing or not state.has_usage
 
-            assistant_msg: dict[str, Any] = {"role": "assistant", "content": state.text}
-            if state.tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {"name": tc["name"], "arguments": tc["arguments"]},
-                    }
-                    for tc in state.tool_calls
-                ]
+            assistant_msg = self._assistant_message(state)
             self._messages.append(assistant_msg)
 
             if not state.tool_calls:

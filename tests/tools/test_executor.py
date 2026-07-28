@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from korvid.agent.tools import MAX_RESULT_CHARS, READ_TOOLS, UI_TOOLS, ToolExecutor, UIBridge
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
+from korvid.tools.executor import MAX_RESULT_CHARS, READ_TOOLS, UI_TOOLS, ToolExecutor, UIBridge
 
 
 class FakeKube:
@@ -464,7 +464,7 @@ async def test_ui_tool_bridge_exception_is_error_result() -> None:
 
 
 def test_resize_tools_schema() -> None:
-    from korvid.agent.tools import RESIZE_TOOLS
+    from korvid.tools.executor import RESIZE_TOOLS
 
     assert [t["function"]["name"] for t in RESIZE_TOOLS] == ["resize_pod"]
     fn = RESIZE_TOOLS[0]["function"]
@@ -726,8 +726,8 @@ async def test_list_operators_without_olm_explains() -> None:
 async def test_list_operators_installed_first_and_catalog_capped_sorted() -> None:
     """Installed state leads (a huge catalog must not push it past the
     result cap), the catalog is sorted, and overflow is summarized."""
-    from korvid.agent.tools import _MAX_CATALOG_PACKAGES
     from korvid.k8s.models import OLMSubscriptionSummary, PackageManifestSummary
+    from korvid.tools.executor import _MAX_CATALOG_PACKAGES
 
     class BigCatalogKube:
         async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
@@ -1254,3 +1254,16 @@ async def test_diagnose_pod_clamps_the_skipped_container_summary() -> None:
     assert len(out) <= MAX_RESULT_CHARS
     assert "truncated" not in out  # never falls back to prefix truncation
     assert all(len(line) <= 250 for line in out.splitlines())
+
+
+def test_compact_result_honors_tiny_limits() -> None:
+    """The output-never-exceeds-limit contract must hold for any input: a
+    limit shorter than the truncation marker cannot fit the marker, so it
+    degrades to a hard cut instead of returning the whole marker."""
+    from korvid.tools.executor import compact_result
+
+    text = "x" * 200
+    for limit in (0, 1, 10, 40):
+        assert len(compact_result(text, limit)) <= limit
+    assert compact_result(text, 0) == ""
+    assert compact_result(text, 10) == "x" * 10

@@ -1,0 +1,83 @@
+id: crashloop-app-panic
+question: checkout-1 in namespace shop keeps restarting. What is wrong with it?
+screen: "resource view: pods, namespace shop, selected: shop/checkout-1 (CrashLoopBackOff)"
+root_cause: crashloop_app_error
+grading:
+  must_mention:
+    - [crashloopbackoff, crash loop, crashloop, crashing, keeps restarting]
+    - [panic, nil map, crash in the application, application bug, application error, code bug]
+  must_not_mention:
+    - [image pull, imagepull, oomkilled, out of memory]
+  expected_evidence:
+    - tool: diagnose_pod
+      args: {pod: checkout-1, namespace: shop}
+      contains: CrashLoopBackOff
+    - tool: diagnose_pod
+      args: {pod: checkout-1, namespace: shop}
+      contains: "panic: assignment to entry in nil map"
+cluster:
+  objects:
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: checkout-1
+        namespace: shop
+        uid: pod-crashloop-1
+        creationTimestamp: "2026-07-27T06:00:00Z"
+        labels: {app: checkout}
+        ownerReferences:
+          - {kind: ReplicaSet, name: checkout-5f9d, controller: true}
+      spec:
+        nodeName: node-a
+        containers:
+          - name: app
+            image: shop/checkout:v12
+      status:
+        phase: Running
+        conditions:
+          - {type: Ready, status: "False", reason: ContainersNotReady}
+          - {type: PodScheduled, status: "True"}
+        containerStatuses:
+          - name: app
+            ready: false
+            restartCount: 6
+            state:
+              waiting:
+                reason: CrashLoopBackOff
+                message: back-off 2m40s restarting failed container app
+            lastState:
+              terminated: {exitCode: 2, reason: Error}
+    - kind: ReplicaSet
+      apiVersion: apps/v1
+      metadata:
+        name: checkout-5f9d
+        namespace: shop
+        uid: rs-checkout-1
+        ownerReferences:
+          - {kind: Deployment, name: checkout, controller: true}
+      spec: {replicas: 1}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+          - {type: MemoryPressure, status: "False"}
+  events:
+    - type: Warning
+      reason: BackOff
+      count: 14
+      lastTimestamp: "2026-07-27T07:20:00Z"
+      message: Back-off restarting failed container app in pod checkout-1_shop
+      involvedObject: {kind: Pod, name: checkout-1, namespace: shop, uid: pod-crashloop-1}
+  logs:
+    shop/checkout-1/app:
+      current:
+        - "starting checkout service v12"
+      previous:
+        - "starting checkout service v12"
+        - "loading promo rules"
+        - "panic: assignment to entry in nil map"
+        - "goroutine 1 [running]:"
+        - "main.applyPromo(0x0?)"
+        - "\t/src/promo.go:42 +0x18"

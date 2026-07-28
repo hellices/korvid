@@ -134,14 +134,31 @@ class ForwardRegistry:
         #: run off the UI event loop while refresh()/stop()/stop_all() run on
         #: it. Held only for fast mutations — never across a blocking wait.
         self._ops = threading.RLock()
-        #: Set (permanently) by stop_all(): a spawn that lands afterwards is
-        #: discarded instead of registered, so no child outlives teardown.
+        #: Set by stop_all(): a spawn that lands afterwards is discarded
+        #: instead of registered, so no child outlives teardown. retarget()
+        #: reopens the latch for runtime context switches; _generation
+        #: guards the gap — a spawn from before the teardown that lands
+        #: after the reopen is still discarded (it targets the old cluster).
         self._closed = False
+        self._generation = 0
         #: Ports with a spawn in flight: claimed atomically with the free
         #: check in _ensure_port_free(), released once the forward is
         #: registered (or the start failed) — two concurrent starts can
         #: never both pass the check and race for the same bind.
         self._claimed_ports: set[int] = set()
+
+    def retarget(self, context: str | None) -> None:
+        """Reopen the registry against *context* (issue #36, `:ctx`).
+
+        Call only after ``stop_all()`` returned — the old cluster's children
+        are reaped by then. Forwards started from now on run against the new
+        context; a spawn that was already in flight when the switch began is
+        still discarded at registration (generation mismatch), because its
+        kubectl was launched with the old context's arguments.
+        """
+        with self._ops:
+            self._context = context
+            self._closed = False
 
     def start(self, spec: ForwardSpec) -> ForwardRecord:
         """Spawn `kubectl port-forward` for ``spec`` and track it.
@@ -154,6 +171,7 @@ class ForwardRegistry:
                 or the registry has been shut down by stop_all().
         """
         self.refresh()  # a just-died forward must not hold its local port
+        generation = self._generation
         self._ensure_port_free(spec.local_port)  # claims the port on success
         # try/finally, not an OSError catch: _spawn also raises ValueError
         # for an unforwardable kind, and *any* failure escaping with the
@@ -167,7 +185,7 @@ class ForwardRegistry:
                 self._release_claim(spec.local_port)
         with self._ops:
             self._claimed_ports.discard(spec.local_port)
-            closed = self._closed
+            closed = self._closed or self._generation != generation
             if not closed:
                 record = ForwardRecord(id=self._next_id, spec=spec, _proc=proc)
                 # Prepared before publication: nothing may observe the
@@ -638,6 +656,7 @@ class ForwardRegistry:
         """
         with self._ops:
             self._closed = True
+            self._generation += 1
             records = list(self._records.values())
             self._records.clear()
             reaping = self._reaping

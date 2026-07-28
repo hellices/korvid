@@ -1497,3 +1497,113 @@ async def _overflow_stream(
         yield LogLine(pod=pod, container=container, text=f"line{i}")
     if follow:
         await asyncio.Event().wait()
+
+
+async def _pod_row_ready(app: KorvidApp, pilot: Any) -> None:
+    """Poll until the watch has delivered the pod row (no fixed startup pause)."""
+    await until(
+        pilot,
+        lambda: app.query_one(ResourceTable).row_count > 0,
+        label="pod row visible",
+    )
+
+
+def _refusal_notified(app: KorvidApp) -> bool:
+    return any("context switch is in progress" in n.message for n in app._notifications)
+
+
+async def test_l_refused_while_context_switching() -> None:
+    """`l` during a :ctx switch must not spawn streams: they would attach to
+    whichever cluster wins the swap while labeled with the old selection
+    (issue #84)."""
+    fake = FakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
+    async with app.run_test() as pilot:
+        await _pod_row_ready(app, pilot)
+        app._ctx_switching = True
+        try:
+            await pilot.press("l")
+            await until(pilot, lambda: _refusal_notified(app), label="refusal notification")
+        finally:
+            app._ctx_switching = False
+        assert app.query_one(LogPane).display is False
+
+
+async def test_multi_logs_refused_while_context_switching() -> None:
+    """`L` (multi-stream) during a :ctx switch is refused up front (issue #84)."""
+    fake = FakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
+    async with app.run_test() as pilot:
+        await _pod_row_ready(app, pilot)
+        app._ctx_switching = True
+        try:
+            await pilot.press("L")
+            await until(pilot, lambda: _refusal_notified(app), label="refusal notification")
+        finally:
+            app._ctx_switching = False
+        assert app.query_one(LogPane).display is False
+
+
+async def test_previous_logs_refused_while_context_switching() -> None:
+    """`p` during a :ctx switch must not respawn streams: teardown is about
+    to close the pane and the re-opened tasks would race the client swap
+    (issue #84)."""
+    fake = FakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
+    async with app.run_test() as pilot:
+        await _pod_row_ready(app, pilot)
+        await pilot.press("l")
+        await until(
+            pilot,
+            lambda: app.query_one(LogPane).display and app._log_tasks,
+            label="log pane streaming",
+        )
+        app._ctx_switching = True
+        try:
+            await pilot.press("p")
+            await until(pilot, lambda: _refusal_notified(app), label="refusal notification")
+        finally:
+            app._ctx_switching = False
+        assert app._log_pane_mode == "l"  # previous mode never engaged
+
+
+async def test_previous_logs_dropped_when_epoch_moves_in_awaited_gap() -> None:
+    """A :ctx switch crossing the awaited gap inside `p` (between the epoch
+    capture and the pane re-open) must drop the open — this exercises the
+    action-level epoch threading, not just the `_open_log_pane` check
+    (issue #84)."""
+    fake = FakeStream()
+    app = make_app([_pod("myapp", containers=("main",))], stream_logs=fake)
+    async with app.run_test() as pilot:
+        await _pod_row_ready(app, pilot)
+        await pilot.press("l")
+        await until(
+            pilot,
+            lambda: app.query_one(LogPane).display and app._log_tasks,
+            label="log pane streaming",
+        )
+
+        # Hold action_log_previous inside its _cancel_log_tasks await, bump
+        # the epoch as a completed switch would, then release the action.
+        real_cancel = app._cancel_log_tasks
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked_cancel() -> None:
+            entered.set()
+            await release.wait()
+            await real_cancel()
+
+        app._cancel_log_tasks = blocked_cancel  # type: ignore[method-assign]
+        try:
+            action = asyncio.create_task(app.action_log_previous())
+            await until(pilot, entered.is_set, label="action blocked in cancel")
+            app._ctx_epoch += 1
+            release.set()
+            await action
+        finally:
+            app._cancel_log_tasks = real_cancel  # type: ignore[method-assign]
+
+        assert not app._log_tasks  # no previous-log streams were spawned
+        msgs = [n.message for n in app._notifications]
+        assert any("kube context changed" in m for m in msgs)
