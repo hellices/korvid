@@ -186,6 +186,7 @@ async def test_preview_delete_pins_uid_precondition() -> None:
     assert kwargs["body"] == {
         "propagationPolicy": "Background",
         "preconditions": {"uid": "u-1"},
+        "dryRun": ["All"],
     }
     assert kwargs["header_params"]["Content-Type"] == "application/json"
 
@@ -315,3 +316,45 @@ async def test_preview_delete_binds_dry_run_to_get_snapshot() -> None:
     assert lines is not None
     body = api.call_api.call_args_list[1][1]["body"]
     assert body["preconditions"] == {"uid": "u-1", "resourceVersion": "9"}
+
+
+async def test_preview_delete_dry_run_rides_in_delete_options_body() -> None:
+    """The apiserver's DELETE handler decodes DeleteOptions from the request
+    *body* whenever one is present and ignores URL query parameters entirely
+    (apiserver delete.go): a dry-run DELETE that carries an options body but
+    only a ``?dryRun=All`` query executes the REAL delete before the approval
+    dialog opens. The dry-run flag must ride inside the body itself."""
+    client = KubeClient()
+    api = MagicMock()
+    manifest = {
+        "metadata": {"name": "web", "uid": "u-1", "creationTimestamp": "t", "resourceVersion": "9"}
+    }
+    api.call_api = AsyncMock(side_effect=[_resp(manifest), _resp({"kind": "Status"})])
+    with patch.object(client, "_api", api):
+        await client.preview_delete(_deploy_meta(), "default", "web", uid="u-1")
+    args, kwargs = api.call_api.call_args_list[1]
+    assert args[1] == "DELETE"
+    body = kwargs["body"]
+    assert body["dryRun"] == ["All"]
+    # The rest of the DeleteOptions still replays the exact approved delete.
+    assert body["propagationPolicy"] == "Background"
+    assert body["preconditions"]["uid"] == "u-1"
+
+
+async def test_delete_object_body_never_carries_dry_run() -> None:
+    """The approved (real) delete must not inherit the preview's dryRun flag:
+    the shared DeleteOptions body is copied, never mutated, by the dry run."""
+    client = KubeClient()
+    api = MagicMock()
+    manifest = {
+        "metadata": {"name": "web", "uid": "u-1", "creationTimestamp": "t", "resourceVersion": "9"}
+    }
+    api.call_api = AsyncMock(
+        side_effect=[_resp(manifest), _resp({"kind": "Status"}), _resp({"kind": "Status"})]
+    )
+    meta = _deploy_meta()
+    with patch.object(client, "_api", api):
+        await client.preview_delete(meta, "default", "web", uid="u-1")
+        await client.delete_object(meta, "default", "web", uid="u-1")
+    real_body = api.call_api.call_args_list[2][1]["body"]
+    assert "dryRun" not in real_body

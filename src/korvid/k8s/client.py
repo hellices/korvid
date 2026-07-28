@@ -1023,7 +1023,16 @@ class KubeClient(ReadOps, WriteOps):
         content_type: str | None,
     ) -> dict[str, Any]:
         """Replay a write with ``dryRun=All`` and parse the would-be result.
-        Admission webhooks and validation run server-side; nothing persists."""
+        Admission webhooks and validation run server-side; nothing persists.
+
+        DELETE is special-cased: when a request body is present the apiserver
+        decodes DeleteOptions from the *body only* and ignores URL query
+        parameters entirely (apiserver ``delete.go``), so a query-only
+        ``dryRun`` would silently execute the real delete. The flag therefore
+        also rides inside a copy of the options body — the caller's body (and
+        the real delete built from it) is never mutated."""
+        if method == "DELETE" and body is not None:
+            body = {**body, "dryRun": ["All"]}
         raw = await self._request_write(
             path,
             method,
