@@ -144,7 +144,7 @@ async def test_switch_clears_old_cluster_state() -> None:
     async with app.run_test() as pilot:
         await _first_pod_visible(env, pilot, "pod-a")
         app.filter_pattern = "old-filter"
-        app._hint_event_cache["default/pod-a"] = (0.0, None, None)
+        app._hints.cache["default/pod-a"] = (0.0, None, None)
         from korvid.ui.widgets.command_bar import CommandBar
 
         app.query_one(CommandBar).namespace_words = ["team-old"]
@@ -155,7 +155,7 @@ async def test_switch_clears_old_cluster_state() -> None:
         assert [p.name for p in rows] == ["pod-b"]
         assert app.store.get("pods", "default") == []  # old bucket purged
         assert app.filter_pattern == ""
-        assert app._hint_event_cache == {}
+        assert app._hints.cache == {}
         assert app._drill.breadcrumb() == ""
         # Old-cluster namespace completions are purged even though no new
         # prefetch is wired here — stale names must not linger on failure.
@@ -752,8 +752,8 @@ async def test_hint_fetch_result_dropped_when_context_switches() -> None:
         summary = _pod("pod-a")
         for error in (False, True):
             app._get_events = cast("Any", _BumpingEvents(error=error))
-            await app._fetch_hint_event("default/pod-a", "default/pod-a#u1", summary)
-            assert app._hint_event_cache == {}
+            await app._hints.fetch_event("default/pod-a", "default/pod-a#u1", summary)
+            assert app._hints.cache == {}
 
 
 async def test_switch_cancels_hint_refresh_timer() -> None:
@@ -763,10 +763,10 @@ async def test_switch_cancels_hint_refresh_timer() -> None:
     app = env.app
     async with app.run_test() as pilot:
         await _first_pod_visible(env, pilot, "pod-a")
-        app._hint_refresh_timer = app.set_timer(60, lambda: None)
+        app._hints.timer = app.set_timer(60, lambda: None)
         app.post_message(SwitchContextCommand("ctx-b"))
         await until(pilot, lambda: app.config.kube_context == "ctx-b", label="switched")
-        assert app._hint_refresh_timer is None
+        assert app._hints.timer is None
 
 
 async def test_mcp_toggle_refused_while_switching() -> None:
