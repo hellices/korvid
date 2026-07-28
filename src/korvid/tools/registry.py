@@ -111,21 +111,26 @@ def _validate_write_policy(d: ToolDef) -> None:
 
 
 def validate_dispatch_targets(defs: list[ToolDef], *, executor_cls: type, bridge_cls: type) -> None:
-    """Verify every dispatch key names a method on the executor or bridge.
+    """Verify every dispatch key names a method on the class its effect uses.
 
-    Called from the executor module at import time so a typo'd handler
-    fails startup/tests, not a live tool call.
+    Cluster reads dispatch on the executor; UI-only tools and cluster
+    writes dispatch on the UI bridge (writes through the approval-gated
+    entrypoint). Called from the executor module at import time so a
+    typo'd or wrong-class handler fails startup/tests, not a live call.
 
     Raises:
-        ValueError: when a dispatch key resolves on neither class.
+        ValueError: when a dispatch key does not resolve on the class
+            required by the tool's effect.
     """
     for d in defs:
-        if not callable(getattr(executor_cls, d.dispatch, None)) and not callable(
-            getattr(bridge_cls, d.dispatch, None)
-        ):
+        if d.effect == "cluster_read":
+            cls, role = executor_cls, "executor"
+        else:
+            cls, role = bridge_cls, "UI bridge"
+        if not callable(getattr(cls, d.dispatch, None)):
             raise ValueError(
-                f"tool {d.name!r}: dispatch target {d.dispatch!r} is not a "
-                "method of the executor or the UI bridge"
+                f"tool {d.name!r} ({d.effect}): dispatch target "
+                f"{d.dispatch!r} is not a method of the {role}"
             )
 
 

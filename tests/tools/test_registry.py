@@ -184,3 +184,60 @@ def test_validate_dispatch_targets_rejects_unknown_handler() -> None:
     bad = _tool("a", dispatch="_missing_handler")
     with pytest.raises(ValueError, match="_missing_handler"):
         validate_dispatch_targets([bad], executor_cls=_Empty, bridge_cls=_Empty)
+
+
+def test_validate_dispatch_targets_rejects_read_tool_naming_bridge_method() -> None:
+    """Rule: a cluster read must dispatch to the executor — a bridge-only
+    method name (here `agent_navigate`) must fail import-time validation,
+    not surface later as a runtime AttributeError."""
+    bad = _tool("a", dispatch="agent_navigate")
+    with pytest.raises(ValueError, match="executor"):
+        validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
+
+
+def test_validate_dispatch_targets_rejects_ui_tool_naming_executor_method() -> None:
+    bad = _tool("a", effect="ui_only", dispatch="_list_resources")
+    with pytest.raises(ValueError, match="bridge"):
+        validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
+
+
+def test_validate_dispatch_targets_rejects_write_tool_naming_executor_method() -> None:
+    bad = _tool(
+        "a",
+        effect="cluster_write",
+        approval="user_confirmation",
+        write_action="delete",
+        dispatch="_list_resources",
+    )
+    with pytest.raises(ValueError, match="bridge"):
+        validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
+
+
+# --- golden surface order (pre-registry literals) ------------------------
+
+_READ_ORDER = [
+    "list_resources",
+    "get_resource",
+    "get_logs",
+    "get_events",
+    "list_operators",
+    "diagnose_pod",
+]
+_UI_ORDER = ["navigate", "set_filter", "open_logs", "open_describe", "drill_down"]
+_WRITE_ORDER = ["delete_resource", "scale_resource", "rollout_restart"]
+
+
+def test_full_agent_surface_matches_golden_order() -> None:
+    """Byte-identical-order criterion pinned against literals, not against
+    lists derived from the same registry (which would move together)."""
+    schemas = agent_tool_schemas("full_agent", readonly=False, resize_supported=True)
+    assert _names(schemas) == _READ_ORDER + _UI_ORDER + _WRITE_ORDER + ["resize_pod"]
+
+
+def test_small_agent_surface_matches_golden_order() -> None:
+    schemas = agent_tool_schemas("small_agent", readonly=True, resize_supported=False)
+    assert _names(schemas) == [*_READ_ORDER, "open_logs", "open_describe"]
+
+
+def test_mcp_surface_matches_golden_order() -> None:
+    assert _names(mcp_tool_schemas()) == _READ_ORDER + _UI_ORDER

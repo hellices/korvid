@@ -27,7 +27,7 @@ from korvid.tools.diagnose import (
     troubled_containers,
     warning_event_lines,
 )
-from korvid.tools.registry import TOOL_DEFS, TOOLS_BY_NAME, validate_dispatch_targets
+from korvid.tools.registry import TOOL_DEFS, TOOLS_BY_NAME, ToolDef, validate_dispatch_targets
 
 MAX_RESULT_CHARS = 8000
 
@@ -147,8 +147,21 @@ RESIZE_TOOLS: list[dict[str, Any]] = [d.schema for d in TOOL_DEFS if d.capabilit
 
 WRITE_TOOL_NAMES = frozenset(d.name for d in TOOL_DEFS if d.effect == "cluster_write")
 
-#: tool name -> action keyword passed to UIBridge.agent_request_write.
-_WRITE_ACTIONS = {d.name: d.write_action for d in TOOL_DEFS if d.write_action is not None}
+#: UI dispatch key -> argument adapter unpacking the model's JSON arguments
+#: into the bridge call. Keyed by the registry's validated dispatch target
+#: (not the tool name) so a definition can never silently invoke a
+#: different handler; coverage is enforced at import time below.
+_UI_ARG_ADAPTERS: dict[str, Callable[[UIBridge, dict[str, Any]], Awaitable[str]]] = {
+    "agent_navigate": lambda ui, a: ui.agent_navigate(str(a["view"]), a.get("namespace")),
+    "agent_set_filter": lambda ui, a: ui.agent_set_filter(str(a["pattern"])),
+    "agent_open_logs": lambda ui, a: ui.agent_open_logs(
+        str(a["pod"]), str(a["namespace"]), a.get("container")
+    ),
+    "agent_open_describe": lambda ui, a: ui.agent_open_describe(
+        str(a["kind"]), str(a["name"]), a.get("namespace")
+    ),
+    "agent_drill_down": lambda ui, a: ui.agent_drill_down(str(a["name"])),
+}
 
 
 #: RFC 1123 DNS label: lowercase alphanumerics and hyphens, alphanumeric
@@ -248,44 +261,40 @@ class ToolExecutor:
 
     async def _dispatch(self, name: str, arguments: dict[str, Any]) -> str:
         # Routing derives from the registry's validated metadata: the
-        # effect picks the route and cluster reads resolve their executor
-        # handler by the validated dispatch key (issue #91) — an unknown
-        # or misregistered tool fails import-time validation, not here.
+        # effect picks the route and every handler resolves through the
+        # validated dispatch key (issue #91) — an unknown or misregistered
+        # tool fails import-time validation, not here.
         tool = TOOLS_BY_NAME.get(name)
         if tool is None:
             raise ValueError(f"unknown tool: {name!r}")
         if tool.effect == "ui_only":
-            return await self._dispatch_ui(name, arguments)
+            return await self._dispatch_ui(tool, arguments)
         if tool.effect == "cluster_write":
-            return await self._dispatch_write(name, arguments)
+            return await self._dispatch_write(tool, arguments)
         handler: Callable[[dict[str, Any]], Awaitable[str]] = getattr(self, tool.dispatch)
         return await handler(arguments)
 
-    async def _dispatch_ui(self, name: str, args: dict[str, Any]) -> str:
+    async def _dispatch_ui(self, tool: ToolDef, args: dict[str, Any]) -> str:
         if self._ui is None:
             raise ValueError("UI control unavailable in this session")
-        if name == "navigate":
-            return await self._ui.agent_navigate(str(args["view"]), args.get("namespace"))
-        if name == "set_filter":
-            return await self._ui.agent_set_filter(str(args["pattern"]))
-        if name == "open_logs":
-            return await self._ui.agent_open_logs(
-                str(args["pod"]), str(args["namespace"]), args.get("container")
+        adapter = _UI_ARG_ADAPTERS.get(tool.dispatch)
+        if adapter is None:
+            raise ValueError(
+                f"tool {tool.name!r}: no argument adapter for UI dispatch {tool.dispatch!r}"
             )
-        if name == "drill_down":
-            return await self._ui.agent_drill_down(str(args["name"]))
-        return await self._ui.agent_open_describe(
-            str(args["kind"]), str(args["name"]), args.get("namespace")
-        )
+        return await adapter(self._ui, args)
 
-    async def _dispatch_write(self, name: str, args: dict[str, Any]) -> str:
+    async def _dispatch_write(self, tool: ToolDef, args: dict[str, Any]) -> str:
         if self._ui is None:
             raise ValueError("write actions require the interactive TUI session")
+        action = tool.write_action
+        if action is None:  # registry validation guarantees this; defensive
+            raise ValueError(f"tool {tool.name!r} has no write action")
         # Tool schemas are not runtime validation: reject wrong-typed values
         # instead of coercing them (str(123) would show the user a target the
         # model never named; int(1.9) an operation it never asked for).
         # resize_pod targets pods by definition, so its schema has no 'kind'.
-        kind = "pods" if name == "resize_pod" else args.get("kind")
+        kind = "pods" if tool.name == "resize_pod" else args.get("kind")
         target = args.get("name")
         namespace = args.get("namespace")
         if not isinstance(kind, str):
@@ -298,10 +307,13 @@ class ToolExecutor:
         if replicas is not None and (isinstance(replicas, bool) or not isinstance(replicas, int)):
             raise ValueError(f"'replicas' must be an integer, got {replicas!r}")
         resources = args.get("resources")
-        if name == "resize_pod":
+        if tool.name == "resize_pod":
             resources = _validated_resources(resources)
-        return await self._ui.agent_request_write(
-            _WRITE_ACTIONS[name],
+        # The validated dispatch key names the approval-gated bridge
+        # entrypoint; the registry rejects writes routed anywhere else.
+        request_write: Callable[..., Awaitable[str]] = getattr(self._ui, tool.dispatch)
+        return await request_write(
+            action,
             kind,
             target,
             namespace,
@@ -702,3 +714,12 @@ def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 # Fail at import time (startup/tests), not at a live tool call, when a
 # registry dispatch key stops matching a real handler (issue #91 rule 3).
 validate_dispatch_targets(TOOL_DEFS, executor_cls=ToolExecutor, bridge_cls=UIBridge)
+
+# Same import-time guarantee for argument adapters: every registered UI
+# dispatch key must have an adapter, so an accepted definition cannot fall
+# through to a different handler at call time.
+for _tool_def in TOOL_DEFS:
+    if _tool_def.effect == "ui_only" and _tool_def.dispatch not in _UI_ARG_ADAPTERS:
+        raise ValueError(
+            f"tool {_tool_def.name!r}: no argument adapter for UI dispatch {_tool_def.dispatch!r}"
+        )

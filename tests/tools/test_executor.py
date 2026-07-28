@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.tools.executor import MAX_RESULT_CHARS, READ_TOOLS, UI_TOOLS, ToolExecutor, UIBridge
+from korvid.tools.registry import TOOLS_BY_NAME, ToolDef
 
 
 class FakeKube:
@@ -1267,3 +1270,38 @@ def test_compact_result_honors_tiny_limits() -> None:
         assert len(compact_result(text, limit)) <= limit
     assert compact_result(text, 0) == ""
     assert compact_result(text, 10) == "x" * 10
+
+
+def _ui_def(name: str, dispatch: str) -> ToolDef:
+    return ToolDef(
+        name=name,
+        schema={"type": "function", "function": {"name": name, "parameters": {}}},
+        effect="ui_only",
+        dispatch=dispatch,
+        surfaces=frozenset({"full_agent"}),
+    )
+
+
+async def test_ui_dispatch_follows_registry_dispatch_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registry's validated dispatch key — not the tool name — picks the
+    bridge handler: a new UI definition targeting `agent_set_filter` must call
+    set_filter, never fall through to open_describe."""
+    monkeypatch.setitem(TOOLS_BY_NAME, "weird_filter", _ui_def("weird_filter", "agent_set_filter"))
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute("weird_filter", {"pattern": "web"})
+    assert out == "filter set to 'web'"
+    assert bridge.calls == [("set_filter", {"pattern": "web"})]
+
+
+async def test_ui_dispatch_without_adapter_is_an_error_not_a_fallthrough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A UI dispatch key with no argument adapter must produce an explicit
+    error instead of silently invoking a different handler."""
+    monkeypatch.setitem(TOOLS_BY_NAME, "odd_ui", _ui_def("odd_ui", "agent_request_write"))
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute("odd_ui", {"kind": "pods", "name": "x"})
+    assert "no argument adapter" in out
+    assert bridge.calls == []
