@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
@@ -76,7 +77,11 @@ def compact_result(result: str, limit: int) -> str:
 #: Derived surfaces (issue #91): the registry in `korvid.tools.registry`
 #: is the single source of tool metadata; these lists are kept as the
 #: public module API for the agent runtime, profiles, evals, and tests.
-READ_TOOLS: list[dict[str, Any]] = [d.schema for d in TOOL_DEFS if d.effect == "cluster_read"]
+#: Built from deep copies (issue #97): the lists ride into provider
+#: plugins by default, and a mutation there must not corrupt the registry.
+READ_TOOLS: list[dict[str, Any]] = [
+    copy.deepcopy(d.schema) for d in TOOL_DEFS if d.effect == "cluster_read"
+]
 
 
 class UIBridge(ABC):
@@ -127,7 +132,9 @@ class UIBridge(ABC):
         ...
 
 
-UI_TOOLS: list[dict[str, Any]] = [d.schema for d in TOOL_DEFS if d.effect == "ui_only"]
+UI_TOOLS: list[dict[str, Any]] = [
+    copy.deepcopy(d.schema) for d in TOOL_DEFS if d.effect == "ui_only"
+]
 
 UI_TOOL_NAMES = frozenset(d.name for d in TOOL_DEFS if d.effect == "ui_only")
 
@@ -135,7 +142,9 @@ UI_TOOL_NAMES = frozenset(d.name for d in TOOL_DEFS if d.effect == "ui_only")
 #: UIBridge.agent_request_write, which shows the user an approval dialog;
 #: the tool result reports whether the user approved and what happened.
 WRITE_TOOLS: list[dict[str, Any]] = [
-    d.schema for d in TOOL_DEFS if d.effect == "cluster_write" and d.capability == "none"
+    copy.deepcopy(d.schema)
+    for d in TOOL_DEFS
+    if d.effect == "cluster_write" and d.capability == "none"
 ]
 
 #: In-place pod resize (issue #27), kept out of WRITE_TOOLS so the
@@ -143,7 +152,9 @@ WRITE_TOOLS: list[dict[str, Any]] = [
 #: subresource (1.35 GA) - the model is never told about a tool the cluster
 #: cannot honor. Dispatch below still recognizes it unconditionally: an
 #: unregistered tool call fails in the UI gate, not with "unknown tool".
-RESIZE_TOOLS: list[dict[str, Any]] = [d.schema for d in TOOL_DEFS if d.capability == "pod_resize"]
+RESIZE_TOOLS: list[dict[str, Any]] = [
+    copy.deepcopy(d.schema) for d in TOOL_DEFS if d.capability == "pod_resize"
+]
 
 WRITE_TOOL_NAMES = frozenset(d.name for d in TOOL_DEFS if d.effect == "cluster_write")
 

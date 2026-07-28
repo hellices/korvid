@@ -256,3 +256,51 @@ def test_validate_dispatch_targets_rejects_write_bypassing_approval_entrypoint()
     )
     with pytest.raises(ValueError, match="agent_request_write"):
         validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
+
+
+# --- schema isolation (issue #97, from the #91 revalidation) ------------
+
+
+def _first_schema(schemas: list[dict[str, Any]]) -> dict[str, Any]:
+    assert schemas, "surface derivation returned no schemas"
+    return schemas[0]
+
+
+def test_agent_surface_schemas_are_isolated_from_the_registry() -> None:
+    """Providers are plugins: a provider mutating a schema it was handed
+    must not corrupt the registry (the single source of tool metadata)."""
+    exported = _first_schema(
+        agent_tool_schemas("full_agent", readonly=False, resize_supported=True)
+    )
+    name = exported["function"]["name"]
+    canonical = next(d.schema for d in TOOL_DEFS if d.name == name)
+    exported["function"]["name"] = "tampered"
+    exported["function"]["parameters"]["properties"]["injected"] = {"type": "string"}
+    assert canonical["function"]["name"] == name
+    assert "injected" not in canonical["function"]["parameters"]["properties"]
+
+
+def test_agent_surface_schemas_are_fresh_per_call() -> None:
+    first = _first_schema(agent_tool_schemas("full_agent", readonly=False, resize_supported=True))
+    first["function"]["description"] = "tampered"
+    second = _first_schema(agent_tool_schemas("full_agent", readonly=False, resize_supported=True))
+    assert second["function"]["description"] != "tampered"
+
+
+def test_mcp_surface_schemas_are_isolated_from_the_registry() -> None:
+    exported = _first_schema(mcp_tool_schemas())
+    name = exported["function"]["name"]
+    canonical = next(d.schema for d in TOOL_DEFS if d.name == name)
+    exported["function"]["name"] = "tampered"
+    assert canonical["function"]["name"] == name
+
+
+def test_executor_surface_lists_are_isolated_from_the_registry() -> None:
+    """The module-level executor lists ride into AgentRuntime by default;
+    their dicts must be copies, not references into TOOL_DEFS."""
+    from korvid.tools.executor import READ_TOOLS, RESIZE_TOOLS, UI_TOOLS, WRITE_TOOLS
+
+    canonical_ids = {id(d.schema) for d in TOOL_DEFS}
+    for surface in (READ_TOOLS, UI_TOOLS, WRITE_TOOLS, RESIZE_TOOLS):
+        for schema in surface:
+            assert id(schema) not in canonical_ids
