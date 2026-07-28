@@ -46,6 +46,7 @@ class _CtxEnv:
         audit_path: Path | None = None,
         stream_logs: Any = None,
         probe_gate: asyncio.Event | None = None,
+        metrics: Any = None,
     ) -> None:
         self.probe_calls: list[str] = []
         self.switch_calls: list[str | None] = []
@@ -95,6 +96,7 @@ class _CtxEnv:
             probe_context=probe,
             switch_context=switch,
             stream_logs=stream_logs,
+            metrics=metrics,
         )
 
 
@@ -1136,3 +1138,56 @@ async def test_switch_adopts_protection_and_clears_on_switch_back() -> None:
             label="protection cleared",
         )
         assert "PROTECTED" not in str(app.query_one(StatusBar).render())
+
+
+async def test_switch_collapses_split_workspace() -> None:
+    """A context switch resets *all* cluster state. The non-focused pane's
+    kind/scope/filter/drill and its watch belong to the old cluster: keeping
+    the split would leave its rows stale-but-actionable, so the switch
+    collapses back to a single pane on the new cluster's default view."""
+    env = _CtxEnv()
+    app = env.app
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        await pilot.press("ctrl+w", "v")
+        await until(pilot, lambda: len(app.query(ResourceTable)) == 2, label="split")
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(pilot, lambda: app.config.kube_context == "ctx-b", label="switched")
+        await until(pilot, lambda: len(app.query(ResourceTable)) == 1, label="single pane")
+        assert len(app._panes) == 1
+        assert app._focused_pane == 0
+        assert app.current_kind == "pods"
+        await _first_pod_visible(env, pilot, "pod-b")
+
+
+async def test_switch_restarts_metrics_for_same_namespace() -> None:
+    """`_metrics_target` caches the running poll target; the switch teardown
+    stops the poller, so a stale cache would make `_sync_metrics_poller`
+    treat the new (same-namespace) target as already served and never
+    restart metrics on the new cluster."""
+    from korvid.k8s.metrics import MetricsPoller, PodMetrics
+
+    calls: list[str | None] = []
+
+    async def fetch(namespace: str | None) -> list[PodMetrics]:
+        calls.append(namespace)
+        return []
+
+    env = _CtxEnv(
+        result=ContextSwitchResult(
+            pod_resize_supported=True,
+            provider_hint=None,
+            fallback_namespaces=(),
+            context_namespace="default",  # same namespace as before the switch
+        ),
+        metrics=MetricsPoller(fetch, interval=0.05),
+    )
+    app = env.app
+    async with app.run_test() as pilot:
+        await _first_pod_visible(env, pilot, "pod-a")
+        await until(pilot, lambda: len(calls) > 0, label="poller running before switch")
+        app.post_message(SwitchContextCommand("ctx-b"))
+        await until(pilot, lambda: app.config.kube_context == "ctx-b", label="switched")
+        calls.clear()
+        await until(pilot, lambda: len(calls) > 0, label="poller restarted after switch")
+        assert calls

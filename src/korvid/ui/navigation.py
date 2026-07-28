@@ -40,6 +40,13 @@ class NavigationStack:
     def push(self, level: DrillLevel) -> None:
         self._levels.append(level)
 
+    def copy(self) -> NavigationStack:
+        """Independent stack starting at the same position (pane split
+        clones the focused view; the two drills then evolve separately)."""
+        clone = NavigationStack()
+        clone._levels = list(self._levels)
+        return clone
+
     def pop(self) -> DrillLevel | None:
         """Remove the top level; the popped parent_kind is the view to show."""
         return self._levels.pop() if self._levels else None

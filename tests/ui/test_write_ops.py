@@ -395,7 +395,11 @@ async def test_y_queued_during_stalled_check_cannot_approve(
         assert isinstance(app.screen, ConfirmScreen)  # discarded: still open
         assert rec.calls == []
         await pilot.press("y")  # a fresh keystroke still confirms
-        await pilot.pause(0.2)
+        await until(
+            pilot,
+            lambda: rec.calls == [("delete", "pods", "default", "web-1")],
+            label="fresh keystroke approves the delete",
+        )
         assert rec.calls == [("delete", "pods", "default", "web-1")]
 
 

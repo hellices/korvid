@@ -1248,6 +1248,51 @@ async def test_pending_forward_audit_flushed_on_exit(tmp_path: Path) -> None:
     assert lines.count("port-forward-stop") == 1
 
 
+async def test_drain_cancelled_mid_write_does_not_duplicate(tmp_path: Path) -> None:
+    """Cancelling the drain while a write is in flight must not re-log it.
+
+    An `asyncio.to_thread` thread outlives its cancelled await: if the entry
+    were popped only after the await returned, the unmount flush would append
+    the same entry a second time (a duplicate stop line in the audit log).
+    """
+    audit = _audit_log(tmp_path)
+    app = make_app([_pod("api-1")], audit=audit)
+    app._enqueue_forward_audit(
+        "port-forward-stop",
+        ForwardSpec(
+            kind="pods", namespace="default", name="api-1", local_port=8080, remote_port=80
+        ),
+    )
+    started = threading.Event()
+    release = threading.Event()
+    finished: list[threading.Event] = []
+    real_append = audit.append
+
+    def gated_append(**kwargs: Any) -> None:
+        evt = threading.Event()
+        finished.append(evt)
+        started.set()
+        assert release.wait(timeout=5)
+        real_append(**kwargs)
+        evt.set()
+
+    with patch.object(audit, "append", gated_append):
+        drain = asyncio.create_task(app._drain_forward_audits())
+        # The write must be in flight before the cancel, or this test would
+        # pass without exercising the duplicate window at all.
+        assert await asyncio.to_thread(started.wait, 5)
+        drain.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await drain
+        release.set()
+        # The unmount-path flush must serialize behind the lingering write
+        # thread and skip the entry it already committed.
+        await app._drain_forward_audits()
+    for evt in list(finished):
+        assert await asyncio.to_thread(evt.wait, 5)
+    assert _audit_lines(tmp_path).count("port-forward-stop") == 1
+
+
 async def test_reattach_port_conflict_shows_clear_error() -> None:
     """Re-attaching onto a port claimed by a live forward must toast clearly."""
     procs: list[_FakeProc] = []

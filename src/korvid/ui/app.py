@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import weakref
 from abc import ABC, abstractmethod
 from collections import deque
@@ -32,9 +33,10 @@ import yaml
 from rich.text import Text
 from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
+from textual.containers import Horizontal
 from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
-from textual.events import Key
+from textual.events import DescendantBlur, DescendantFocus, Key
 from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Static
 from textual.widgets.data_table import CellDoesNotExist
@@ -535,6 +537,36 @@ class _ReplayFilter:
             self._last_ts_count = 1
 
 
+class PaneState:
+    """One workspace pane's independent view state (issue #48).
+
+    The app keeps one of these per pane; `current_kind` and friends
+    delegate to the focused pane, so every existing action and command
+    naturally targets the pane the user is working in.
+    """
+
+    def __init__(self, kind: str, scope: str, table_id: str = "pane-0") -> None:
+        self.kind = kind
+        self.scope = scope
+        self.table_id = table_id  # the ResourceTable widget this pane renders into
+        self.filter_pattern = ""
+        self.resource_filter: ResourceFilter = parse_filter("")
+        self.drill = NavigationStack()
+        #: Per-kind sort state - view state like the filter, so it belongs
+        #: to the pane: sorting one pane must not reorder the other.
+        self.sorts: dict[str, SortSpec] = {}
+
+    def clone(self, table_id: str) -> PaneState:
+        """A split starts as a clone of the focused view: same kind, scope,
+        filter and drill position - with independent state from then on."""
+        pane = PaneState(self.kind, self.scope, table_id)
+        pane.filter_pattern = self.filter_pattern
+        pane.resource_filter = parse_filter(self.filter_pattern)
+        pane.drill = self.drill.copy()
+        pane.sorts = dict(self.sorts)
+        return pane
+
+
 class KorvidApp(App[None]):
     # Every binding carries an ``id`` so the `keybindings:` config section
     # can remap it via Textual's keymap (issue #35); uppercase duplicates
@@ -600,6 +632,9 @@ class KorvidApp(App[None]):
     HANDLER_KEY_HELP: ClassVar[tuple[tuple[str, str, str, str], ...]] = (
         ("Table", "enter", "Drill down (pods → containers, deploy → rs → pods)", ""),
         ("Table", "escape", "Pop one drill-down level", ""),
+        ("Table", "ctrl+w v", "Split workspace into two panes", ""),
+        ("Table", "ctrl+w w", "Focus the other pane", ""),
+        ("Table", "ctrl+w q", "Close the focused pane", ""),
         ("Logs", "escape", "Close pane (or dismiss search)", ""),
         ("Helm", "i", "Install a chart (helm view; needs helm on PATH)", "hint_details"),
         ("Helm", "u", "Upgrade the selected release (helm view)", "uncordon_node"),
@@ -607,8 +642,21 @@ class KorvidApp(App[None]):
     )
 
     DEFAULT_CSS = """
-    ResourceTable {
+    #workspace {
         height: 1fr;
+    }
+    #workspace ResourceTable {
+        width: 1fr;
+        height: 1fr;
+    }
+    ResourceTable.split-pane {
+        border: round $panel;
+    }
+    /* A class, not `:focus`: the accent border marks the command-routing
+       target (`_focused_pane`), which must stay visible while an Input
+       (command/filter bar, agent panel) owns keyboard focus. */
+    ResourceTable.split-pane.focused-pane {
+        border: round $accent;
     }
     """
 
@@ -692,6 +740,10 @@ class KorvidApp(App[None]):
         #: FIFO of pending forward audit entries; a single drainer preserves
         #: event order (start before stop) that per-entry workers would not.
         self._forward_audit_queue: deque[dict[str, Any]] = deque()
+        # Serializes write+dequeue across drain threads: a cancelled drain's
+        # lingering `to_thread` must finish its pop before another drain
+        # (e.g. the unmount flush) may look at the queue head.
+        self._forward_audit_io_lock = threading.Lock()
         self._forward_audit_worker: Worker[None] | None = None
         #: forward id -> its in-flight readiness confirmations, oldest first
         #: (a re-attach may add a new generation while a superseded one is
@@ -794,23 +846,26 @@ class KorvidApp(App[None]):
         self.aliases: dict[str, ResourceMeta] = (
             aliases if aliases is not None else dict(_DEFAULT_ALIASES)
         )
-        self.current_kind: str = "pods"
-        self.current_scope: str = config.namespace or "default"
-        self.filter_pattern = ""
-        #: Parsed form of filter_pattern (label selector / regex / fuzzy /
-        #: inverse / hide-completed — issue #44); single matcher shared by
-        #: the table render and the agent's view of "what the user sees".
-        self._resource_filter: ResourceFilter = parse_filter("")
+        # Workspace panes (issue #48): each holds an independent view
+        # (kind/scope/filter/drill); `current_kind` & co. delegate to the
+        # focused pane so commands and keybindings target it naturally.
+        self._panes: list[PaneState] = [PaneState("pods", config.namespace or "default")]
+        self._focused_pane: int = 0
+        #: Monotonic id source for split-pane table widgets: a survivor keeps
+        #: its widget (and cursor/scroll state) when the other pane closes,
+        #: so ids must stay unique across split/close cycles.
+        self._pane_counter: int = 0
+        #: Scope the metrics poller currently serves (None = stopped); a
+        #: restart drops collected data, so equal targets are skipped.
+        self._metrics_target: tuple[str | None] | None = None
+        #: `ctrl+w` pressed, waiting for the chord's second key (v/w/q).
+        self._pane_chord_pending: bool = False
         #: Validated `keybindings:` overrides (action → key), applied via the
         #: keymap in on_mount; the help overlay renders these keys (issue #35).
         self._keybinding_overrides: dict[str, str] = {}
         #: Active sort per view kind (issue #37): the choice survives watch
         #: updates (every render re-applies it) and switching views restores
-        #: each kind's own sort.
-        self._sorts: dict[str, SortSpec] = {}
-        # Drill-down levels (deploy -> rs -> pods); single source for the
-        # breadcrumb line and the owner-uid filter on the current table.
-        self._drill = NavigationStack()
+        #: each kind's own sort. Lives in PaneState (see `_sorts` property).
         self._log_tasks: set[asyncio.Task[None]] = set()
         self._log_buffer: LogBuffer | None = None
         self._log_error: bool = False
@@ -818,6 +873,10 @@ class KorvidApp(App[None]):
         self._log_pane_gen: int = 0
         self._current_log_force_prefix: bool = False
         self._log_pane_mode: str = ""
+        #: Pane whose selection opened the log pane: only that pane's
+        #: navigation (or close) tears the stream down - the split workflow
+        #: is watching one pane while tailing logs from the other.
+        self._log_pane_owner: PaneState | None = None
         self._reconnect_sleep: float = 1.0
         self._ns_prefetch_task: asyncio.Task[None] | None = None
         self._ctx_prefetch_task: asyncio.Task[None] | None = None
@@ -830,6 +889,58 @@ class KorvidApp(App[None]):
         # or None). Short TTL so a lingering cursor eventually sees new events.
         self._hint_event_cache: dict[str, tuple[float, str | None, datetime | None]] = {}
         self._hint_refresh_timer: Timer | None = None
+
+    # -- Focused-pane delegation (issue #48): the pane list is the single
+    # source of view state; these properties keep the whole action surface
+    # (and tests) working against "the view the user is focused on".
+
+    @property
+    def _pane(self) -> PaneState:
+        return self._panes[self._focused_pane]
+
+    @property
+    def current_kind(self) -> str:
+        return self._pane.kind
+
+    @current_kind.setter
+    def current_kind(self, value: str) -> None:
+        self._pane.kind = value
+
+    @property
+    def current_scope(self) -> str:
+        return self._pane.scope
+
+    @current_scope.setter
+    def current_scope(self, value: str) -> None:
+        self._pane.scope = value
+
+    @property
+    def filter_pattern(self) -> str:
+        return self._pane.filter_pattern
+
+    @filter_pattern.setter
+    def filter_pattern(self, value: str) -> None:
+        self._pane.filter_pattern = value
+
+    @property
+    def _resource_filter(self) -> ResourceFilter:
+        """Parsed form of filter_pattern (issue #44); single matcher shared
+        by the table render and the agent's view of "what the user sees"."""
+        return self._pane.resource_filter
+
+    @_resource_filter.setter
+    def _resource_filter(self, value: ResourceFilter) -> None:
+        self._pane.resource_filter = value
+
+    @property
+    def _sorts(self) -> dict[str, SortSpec]:
+        """Per-kind sort state of the focused pane (view state, issue #37)."""
+        return self._pane.sorts
+
+    @property
+    def _drill(self) -> NavigationStack:
+        """Drill-down levels (deploy -> rs -> pods) of the focused pane."""
+        return self._pane.drill
 
     @property
     def agent_runtime(self) -> AgentRuntime | None:
@@ -846,14 +957,21 @@ class KorvidApp(App[None]):
     def current_namespace(self, value: str) -> None:
         self.current_scope = value
 
+    def _focused_table(self) -> ResourceTable:
+        return self.query_one(f"#{self._pane.table_id}", ResourceTable)
+
     def compose(self) -> ComposeResult:
         # Footer is docked top (see CSS): the key legend replaces the stock
         # Header so shortcuts are visible where users look first.
         yield Footer()
         yield SplashLogo()
-        table = ResourceTable()
+        # The workspace hosts one or two side-by-side panes (issue #48);
+        # pane 1 is composed here, pane 2 mounts on `ctrl+w v`.
+        table = ResourceTable(id="pane-0")
         table.display = False  # hidden behind the splash until first data
-        yield table
+        workspace = Horizontal(table, id="workspace")
+        workspace.display = False
+        yield workspace
         empty_state = Static(id="empty-state")
         empty_state.display = False  # hidden until the first store notification
         yield empty_state
@@ -902,6 +1020,9 @@ class KorvidApp(App[None]):
             self.notify(warning, title="Keybindings", severity="warning")
 
     async def on_mount(self) -> None:
+        # AUTO_FOCUS skips the hidden #workspace container: the table must
+        # take initial focus explicitly or keys land on the CommandBar.
+        self.query_one("#pane-0", ResourceTable).focus()
         self._apply_keybindings()
         # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
         command_bar = self.query_one(CommandBar)
@@ -978,7 +1099,8 @@ class KorvidApp(App[None]):
     def _dismiss_splash(self) -> None:
         try:
             splash = self.query_one(SplashLogo)
-            table = self.query_one(ResourceTable)
+            workspace = self.query_one("#workspace")
+            table = self.query_one("#pane-0", ResourceTable)
         except NoMatches:
             return  # app is shutting down; a queued render must not crash
         if not splash.display:
@@ -989,6 +1111,7 @@ class KorvidApp(App[None]):
                 self.set_timer(remaining, self._dismiss_splash)
                 return
         splash.display = False
+        workspace.display = True
         table.display = True
 
     def on_aliases_updated(self) -> None:
@@ -1020,20 +1143,36 @@ class KorvidApp(App[None]):
 
         self._ns_prefetch_task = asyncio.create_task(_fetch())
 
-    def _render_table(self, kind: str) -> None:
-        """Single choke point: table rows and empty-state always update together."""
+    def _render_table(self, kind: str, *, only: PaneState | None = None) -> None:
+        """Single choke point: every pane showing `kind` re-renders, and the
+        empty-state stays in step (single-pane only - a split has its own
+        per-pane content as guidance).
+
+        `only` restricts the render to the initiating pane: view-state
+        changes (filter, navigation) must not repaint the other pane -
+        `show()` clears and rebuilds, resetting its cursor/scroll. Store
+        and metrics updates fan out to every pane (data really changed).
+        """
         # First store notification: replace the startup splash with real content.
         self._dismiss_splash()
-        try:
-            table = self.query_one(ResourceTable)
-        except NoMatches:
-            return  # shutdown race: a queued render after widgets are removed
-        rows = self.store.get(kind, self.current_scope)
-        drill_uid = self._drill.parent_uid
-        if drill_uid is not None and kind == self._drill.child_kind:
+        for pane in self._panes:
+            if pane.kind != kind or (only is not None and pane is not only):
+                continue
+            try:
+                table = self.query_one(f"#{pane.table_id}", ResourceTable)
+            except NoMatches:
+                return  # shutdown race: a queued render after widgets are removed
+            self._render_pane(kind, pane, table, empty_state=len(self._panes) == 1)
+
+    def _render_pane(
+        self, kind: str, pane: PaneState, table: ResourceTable, *, empty_state: bool
+    ) -> None:
+        rows = self.store.get(kind, pane.scope)
+        drill_uid = pane.drill.parent_uid
+        if drill_uid is not None and kind == pane.drill.child_kind:
             rows = [r for r in rows if owned_by(r, drill_uid)]
-        rows = self._filtered_rows(rows)
-        all_namespaces = self.current_scope == ALL_NAMESPACES
+        rows = self._filtered_rows(rows, pane.resource_filter)
+        all_namespaces = pane.scope == ALL_NAMESPACES
         metrics = None
         if kind == "pods" and self._metrics is not None and self._metrics.available:
             metrics = self._metrics.get
@@ -1051,13 +1190,14 @@ class KorvidApp(App[None]):
             pattern="",
             metrics=metrics,
             group=meta.group if meta is not None else "",
-            sort=self._sorts.get(kind),
+            sort=pane.sorts.get(kind),
             view=self.config.views.get(plural),
         )
-        self._refresh_empty_state(kind, table.row_count)
+        if empty_state:
+            self._refresh_empty_state(kind, table.row_count)
         # The strip is driven by RowHighlighted on the pods view; anything
         # else (view switch, table now empty) must not leave a stale hint.
-        if kind != "pods" or table.row_count == 0:
+        if pane is self._pane and (kind != "pods" or table.row_count == 0):
             with contextlib.suppress(NoMatches):  # shutdown race, same as the table guard
                 self.query_one(HintStrip).clear_hint()
 
@@ -1112,18 +1252,20 @@ class KorvidApp(App[None]):
     def on_filter_command(self, message: FilterCommand) -> None:
         self.filter_pattern = message.pattern
         self._resource_filter = parse_filter(message.pattern)
-        self.post_message(ResourcesUpdated(self.current_kind))
+        self._render_table(self.current_kind, only=self._pane)
         self._refresh_status()
 
     def on_clear_filter(self, message: ClearFilter) -> None:
         self.filter_pattern = ""
         self._resource_filter = parse_filter("")
-        self.post_message(ResourcesUpdated(self.current_kind))
+        self._render_table(self.current_kind, only=self._pane)
         self._refresh_status()
 
-    def _filtered_rows(self, rows: list[Summary]) -> list[Summary]:
+    def _filtered_rows(
+        self, rows: list[Summary], resource_filter: ResourceFilter | None = None
+    ) -> list[Summary]:
         """Apply the active filter the way the table renders it (issue #44)."""
-        flt = self._resource_filter
+        flt = resource_filter if resource_filter is not None else self._resource_filter
         if not flt.active:
             return rows
         return [
@@ -1174,42 +1316,72 @@ class KorvidApp(App[None]):
         # navigate always lands last. ``drill_op`` mutates the drill stack
         # inside the same critical section so stack and view transition as
         # one transaction.
+        # Capture the pane identity before waiting on the lock: the user may
+        # switch pane focus while this navigation queues behind another, or
+        # during `_navigate_locked`'s watch/log/metrics awaits - the
+        # transition (and drill_op, which callers bind to the same pane's
+        # stack at call time) must land in the pane that initiated it.
+        pane = self._pane
         async with self._nav_lock:
+            if pane not in self._panes:
+                return  # the initiating pane was closed while queued
             if drill_op is not None:
                 drill_op()
-            await self._navigate_locked(view, self._default_scope_for(view, namespace))
-        self.post_message(ResourcesUpdated(self.current_kind))
+            await self._navigate_locked(pane, view, self._default_scope_for(view, namespace))
+        self._render_table(pane.kind, only=pane)
         self._refresh_status()
 
-    async def _navigate_locked(self, view: str | None, namespace: str | None) -> None:
+    async def _navigate_locked(
+        self, pane: PaneState, view: str | None, namespace: str | None
+    ) -> None:
         """Kind/scope transition body; caller must hold ``_nav_lock``."""
         # A describe pane covering the table would show a stale manifest
         # over the new view — dismiss it on any navigation, even when the
         # requested kind/scope already matches.
         self.query_one(DescribePane).hide()
-        new_kind = view if view is not None else self.current_kind
-        new_scope = namespace if namespace is not None else self.current_scope
-        if new_kind != self.current_kind or new_scope != self.current_scope:
-            await self._close_log_pane()
-            await self.watch_manager.stop(self.current_kind, self.current_scope)
-            self.current_kind = new_kind
-            self.current_scope = new_scope
-            await self.watch_manager.start(self.current_kind, self.current_scope)
+        new_kind = view if view is not None else pane.kind
+        new_scope = namespace if namespace is not None else pane.scope
+        if new_kind != pane.kind or new_scope != pane.scope:
+            if self._log_pane_owner is pane:
+                # Only the owning pane's navigation closes the logs: the
+                # other pane must keep its stream (issue #48 workflow).
+                await self._close_log_pane()
+            old = (pane.kind, pane.scope)
+            # Another pane may still be watching the old (kind, scope):
+            # stopping it would freeze that pane's view (issue #48).
+            others = {(p.kind, p.scope) for p in self._panes if p is not pane}
+            if old not in others:
+                await self.watch_manager.stop(*old)
+            pane.kind = new_kind
+            pane.scope = new_scope
+            await self.watch_manager.start(new_kind, new_scope)
             await self._sync_metrics_poller()
 
     async def _sync_metrics_poller(self) -> None:
-        """Poll metrics only while the pods view is on screen, in its scope.
+        """Poll metrics only while a pods view is on screen, in its scope.
 
         metrics.k8s.io has no watch support, so this poller is the one
         recurring request the app makes - stopping it off the pods view
-        keeps background load at zero for other kinds.
+        keeps background load at zero for other kinds. With a split
+        workspace the poller serves every pod pane, not just the focused
+        one; two pod panes in different scopes poll cluster-wide so
+        neither goes stale. A restart drops collected data, so a target
+        the poller already serves is left running untouched.
         """
         if self._metrics is None:
             return
-        if self.current_kind != "pods":
-            await self._metrics.stop()
+        scopes = {p.scope for p in self._panes if p.kind == "pods"}
+        if not scopes:
+            if self._metrics_target is not None:
+                self._metrics_target = None
+                await self._metrics.stop()
             return
-        namespace = None if self.current_scope == ALL_NAMESPACES else self.current_scope
+        scope = scopes.pop() if len(scopes) == 1 else ALL_NAMESPACES
+        namespace = None if scope == ALL_NAMESPACES else scope
+        target = (namespace,)
+        if target == self._metrics_target:
+            return
+        self._metrics_target = target
         await self._metrics.start(namespace)
 
     async def action_toggle_all_namespaces(self) -> None:
@@ -1535,6 +1707,10 @@ class KorvidApp(App[None]):
         """
         await self._close_log_pane()
         self.query_one(DescribePane).hide()
+        # Every pane's kind/scope/filter/drill describes the old cluster: a
+        # surviving second pane would keep stale-but-actionable rows on
+        # screen, so the switch collapses the split back to a single view.
+        await self._collapse_split()
         # An old-cluster namespace prefetch still in flight could land after
         # the new cluster's and overwrite its completions — cancel it first.
         if self._ns_prefetch_task is not None:
@@ -1547,6 +1723,10 @@ class KorvidApp(App[None]):
         self.query_one(CommandBar).namespace_words = []
         if self._metrics is not None:
             await self._metrics.stop()
+            # The poller is gone: drop the served-target cache too, or a
+            # same-namespace switch would look already-served to
+            # _sync_metrics_poller and metrics would never restart.
+            self._metrics_target = None
         await self.watch_manager.stop_all()
         if self._forwards is not None:
             # Same quiesce-stop-audit sequence as app exit: in-flight
@@ -1665,6 +1845,11 @@ class KorvidApp(App[None]):
         """Cursor movement drives the ops hint strip (pods view only)."""
         if not isinstance(event.data_table, ResourceTable):
             return
+        if event.data_table.id != self._pane.table_id:
+            # Highlight from the non-focused pane (e.g. a watch-driven
+            # re-render moving its cursor): the hint strip reflects the
+            # focused pane's selection only.
+            return
         try:
             if self.current_kind != "pods" or event.row_key is None:
                 self.query_one(HintStrip).clear_hint()
@@ -1716,7 +1901,7 @@ class KorvidApp(App[None]):
     def _cursor_row_key(self) -> str | None:
         """Row key under the table cursor, or None (empty table / no cursor)."""
         try:
-            table = self.query_one(ResourceTable)
+            table = self._focused_table()
         except NoMatches:  # timer fired while the app is shutting down
             return None
         if table.cursor_row < 0:
@@ -1726,6 +1911,24 @@ class KorvidApp(App[None]):
         except CellDoesNotExist:
             return None
         return None if key is None else str(key.value)
+
+    def _refresh_hint_for_focus(self) -> None:
+        """Re-evaluate the hint strip for the focused pane's selection.
+
+        Focus changes re-target command routing without moving any cursor,
+        so the highlight-driven handler never fires — without this, a
+        warning from the previously focused pane would linger over a pane
+        showing deployments or a healthy pod.
+        """
+        try:
+            strip = self.query_one(HintStrip)
+        except NoMatches:  # focus restored during shutdown/teardown
+            return
+        row_key = self._cursor_row_key() if self.current_kind == "pods" else None
+        if row_key is None:
+            strip.clear_hint()
+            return
+        self._show_hint_for_row(row_key)
 
     def _schedule_hint_refresh(self, row_key: str, *, delay: float | None = None) -> None:
         """Re-evaluate a parked cursor when the cache entry expires; without
@@ -1996,14 +2199,19 @@ class KorvidApp(App[None]):
         # a concurrent :view/agent navigate can then never observe (or
         # strand) a pushed level without its matching child view. If the
         # transition itself fails, the pushed level is rolled back.
+        # Capture before waiting on the lock: focus may move (or the pane may
+        # close) while this drill queues behind another navigation.
+        pane = self._pane
         async with self._nav_lock:
-            self._drill.push(level)
+            if pane not in self._panes:
+                return None  # the initiating pane was closed while queued
+            pane.drill.push(level)
             try:
-                await self._navigate_locked(child, None)
+                await self._navigate_locked(pane, child, None)
             except BaseException:
-                self._drill.pop()
+                pane.drill.pop()
                 raise
-        self.post_message(ResourcesUpdated(self.current_kind))
+        self._render_table(pane.kind, only=pane)
         self._refresh_status()
         return None
 
@@ -2011,12 +2219,17 @@ class KorvidApp(App[None]):
         """Pop one drill level and navigate back to its parent kind as one
         transaction under the navigation lock. Returns False when the stack
         was empty (nothing to pop)."""
+        # Capture before waiting on the lock: focus may move (or the pane may
+        # close) while this pop queues behind another navigation.
+        pane = self._pane
         async with self._nav_lock:
-            popped = self._drill.pop()
+            if pane not in self._panes:
+                return False  # the initiating pane was closed while queued
+            popped = pane.drill.pop()
             if popped is None:
                 return False
-            await self._navigate_locked(popped.parent_kind, None)
-        self.post_message(ResourcesUpdated(self.current_kind))
+            await self._navigate_locked(pane, popped.parent_kind, None)
+        self._render_table(pane.kind, only=pane)
         self._refresh_status()
         return True
 
@@ -2810,23 +3023,32 @@ class KorvidApp(App[None]):
     async def _drain_forward_audits(self) -> None:
         """Write queued forward audit entries strictly in enqueue order.
 
-        All queue operations happen on the event loop (single consumer), so
-        a quick start → Ctrl-D can never land in the log reversed. Entries
-        are popped only after the append so a cancelled drain leaves them
-        for the unmount flush — a rare duplicate beats a lost record.
+        Entries are enqueued only on the event loop, and each write+dequeue
+        runs atomically inside a single worker thread under
+        `_forward_audit_io_lock`: even if the awaiting drain is cancelled
+        mid-write, the thread finishes the pop, so a later flush (the
+        unmount path) can neither duplicate the entry nor lose it.
         Append failures are best-effort by design (read-only risk profile):
         a full disk must not kill the app or block the forward.
         """
         audit = self._audit
         if audit is None:
             return
-        while self._forward_audit_queue:
-            entry = self._forward_audit_queue[0]
-            try:
-                await asyncio.to_thread(audit.append, **entry)
-            except OSError as exc:
-                logger.warning("forward audit (%s) failed: %s", entry["action"], exc)
-            self._forward_audit_queue.popleft()
+        queue = self._forward_audit_queue
+
+        def _write_head() -> None:
+            with self._forward_audit_io_lock:
+                if not queue:
+                    return
+                entry = queue[0]
+                try:
+                    audit.append(**entry)
+                except OSError as exc:
+                    logger.warning("forward audit (%s) failed: %s", entry["action"], exc)
+                queue.popleft()
+
+        while queue:
+            await asyncio.to_thread(_write_head)
 
     def _open_forward_list(self) -> None:
         """`:pf` — the active-forwards screen with stop / re-attach keys."""
@@ -3719,7 +3941,11 @@ class KorvidApp(App[None]):
         )
 
     async def on_key(self, event: Key) -> None:
-        """Escape closes describe/log panes, then pops one drill-down level."""
+        """Pane chords (`ctrl+w` v/w/q) and Escape (closes describe/log
+        panes, then pops one drill-down level)."""
+        if self._pane_chord_pending or event.key == "ctrl+w":
+            await self._handle_pane_chord(event)
+            return
         if event.key != "escape":
             return
         filter_bar = self.query_one(FilterBar)
@@ -3743,6 +3969,169 @@ class KorvidApp(App[None]):
         popped = await self._pop_drill()
         if popped:
             event.stop()
+
+    # -- 2-pane split workspace (issue #48) ---------------------------------
+
+    async def _handle_pane_chord(self, event: Key) -> None:
+        """`ctrl+w` chord state machine: the prefix always swallows the next
+        key - an unmapped second key must not fall through to normal
+        handling (q would quit)."""
+        if not self._pane_chord_pending:
+            # Arm only while a table is focused: with an Input (command/
+            # filter bar) focused the second key never reaches App.on_key,
+            # which would orphan the pending flag and silently swallow the
+            # next table keypress after the bar closes.
+            if not isinstance(self.focused, ResourceTable):
+                return
+            self._pane_chord_pending = True
+            event.stop()
+            event.prevent_default()
+            return
+        self._pane_chord_pending = False
+        event.stop()
+        event.prevent_default()
+        if event.key == "v":
+            await self._split_pane()
+        elif event.key in ("w", "ctrl+w"):
+            self._focus_other_pane()
+        elif event.key == "q":
+            await self._close_focused_pane()
+
+    async def _split_pane(self) -> None:
+        """`ctrl+w v`: clone the focused view into a second pane and focus it."""
+        if len(self._panes) >= 2:
+            self.notify("workspace is already split - ctrl+w q closes a pane", severity="warning")
+            return
+        # The pane list and watch lifecycle are also mutated by navigation:
+        # take the same lock so a concurrent `:view`/`:ns` transition never
+        # interleaves with the split's pane snapshot and watch start.
+        async with self._nav_lock:
+            if len(self._panes) >= 2:
+                return  # lost the race to another split
+            source = self._pane
+            self._pane_counter += 1
+            pane = source.clone(f"pane-{self._pane_counter}")
+            table = ResourceTable(id=pane.table_id)
+            await self.query_one("#workspace", Horizontal).mount(table)
+            for pane_table in self.query(ResourceTable):
+                pane_table.add_class("split-pane")
+            self._panes.append(pane)
+            self._focused_pane = 1
+            # start() is idempotent - the clone usually shares the source's watch.
+            await self.watch_manager.start(pane.kind, pane.scope)
+        # A single-pane empty-state overlay must not linger over the split;
+        # each pane's own content is the guidance now.
+        self.query_one("#empty-state", Static).display = False
+        # Render only the new pane: the source is already current, and a
+        # repaint would reset its cursor/scroll.
+        self._render_table(pane.kind, only=pane)
+        self._update_pane_focus_classes()
+        table.focus()
+        self._refresh_status()
+
+    def _update_pane_focus_classes(self) -> None:
+        """Mark the command-routing target with `focused-pane`. A class, not
+        `:focus`: opening the command/filter bar or agent panel moves keyboard
+        focus to an Input, but `_focused_pane` still decides where the command
+        goes - the indicator must not vanish at that moment."""
+        for index, pane in enumerate(self._panes):
+            try:
+                table = self.query_one(f"#{pane.table_id}", ResourceTable)
+            except NoMatches:
+                continue
+            table.set_class(len(self._panes) > 1 and index == self._focused_pane, "focused-pane")
+
+    def _focus_other_pane(self) -> None:
+        """`ctrl+w w`: move focus (commands, filters, keybindings) across."""
+        if len(self._panes) < 2:
+            return
+        self._focused_pane = 1 - self._focused_pane
+        self._update_pane_focus_classes()
+        self._focused_table().focus()
+        self._refresh_hint_for_focus()
+        self._refresh_status()
+
+    async def _close_focused_pane(self) -> None:
+        """`ctrl+w q`: back to the single view; the other pane survives."""
+        if len(self._panes) < 2:
+            return
+        async with self._nav_lock:
+            if len(self._panes) < 2:
+                return  # lost the race to another close
+            closing = self._panes.pop(self._focused_pane)
+            remaining = self._panes[0]
+            self._focused_pane = 0
+            if self._log_pane_owner is closing:
+                # The pane whose selection drove the stream is gone: don't
+                # leave orphaned logs pinned over the survivor's view.
+                await self._close_log_pane()
+            if (closing.kind, closing.scope) != (remaining.kind, remaining.scope):
+                await self.watch_manager.stop(closing.kind, closing.scope)
+            # The survivor keeps its own table widget - and with it the
+            # cursor/scroll state the user had in that pane.
+            await self.query_one(f"#{closing.table_id}", ResourceTable).remove()
+            self.query_one(f"#{remaining.table_id}", ResourceTable).remove_class("split-pane")
+            await self._sync_metrics_poller()
+        self._update_pane_focus_classes()
+        # No repaint: `show()` clears and re-adds rows, which would reset the
+        # survivor's cursor/scroll; its table is already current. The
+        # single-pane empty-state does need a refresh (an empty survivor
+        # must show guidance, and a stale overlay must clear).
+        table = self._focused_table()
+        self._refresh_empty_state(remaining.kind, table.row_count)
+        table.focus()
+        self._refresh_hint_for_focus()
+        self._refresh_status()
+
+    async def _collapse_split(self) -> None:
+        """Fold the workspace back to a single pane (context-switch teardown).
+
+        The caller already holds the nav lock and stops all watches
+        wholesale right after, so this only removes the extra pane's state
+        and table widget. The survivor is pane 0; the switch resets its
+        kind/scope/filter afterwards, so which pane survives is cosmetic.
+        """
+        if len(self._panes) < 2:
+            return
+        closing = self._panes.pop(1)
+        self._focused_pane = 0
+        remaining = self._panes[0]
+        await self.query_one(f"#{closing.table_id}", ResourceTable).remove()
+        self.query_one(f"#{remaining.table_id}", ResourceTable).remove_class("split-pane")
+        self._update_pane_focus_classes()
+
+    def on_descendant_focus(self, event: DescendantFocus) -> None:
+        """Clicking a pane focuses it - command routing must follow. Any
+        focus change also disarms a pending `ctrl+w` chord: the second key
+        would go to the newly focused widget, leaving the flag set to
+        swallow a later table keypress."""
+        self._pane_chord_pending = False
+        widget = event.widget
+        if not isinstance(widget, ResourceTable):
+            return
+        for index, pane in enumerate(self._panes):
+            if pane.table_id == widget.id:
+                if index != self._focused_pane:
+                    self._focused_pane = index
+                    self._update_pane_focus_classes()
+                    self._refresh_hint_for_focus()
+                    self._refresh_status()
+                return
+
+    def on_descendant_blur(self, event: DescendantBlur) -> None:
+        """Overlay widgets (command/filter bars, describe/log panes) hide
+        themselves while focused. The tables now live inside #workspace, so
+        Textual's sibling-fallback in `_reset_focus` finds nothing focusable
+        and focus drops to None - restore it to the focused pane's table."""
+        del event
+        self.call_later(self._restore_table_focus)
+
+    def _restore_table_focus(self) -> None:
+        """Refocus the focused pane's table when nothing else holds focus."""
+        if self.focused is not None or len(self.screen_stack) != 1:
+            return
+        if self.query(ResourceTable):
+            self._focused_table().focus()
 
     async def action_logs(self) -> None:
         """Open logs for the selected pod, or toggle it in/out of the pane (``l``).
@@ -3836,7 +4225,7 @@ class KorvidApp(App[None]):
             self.notify("Log streaming unavailable", severity="warning")
             return
 
-        table = self.query_one(ResourceTable)
+        table = self._focused_table()
         if table.row_count == 0:
             self.notify("No resource selected", severity="warning")
             return
@@ -3884,7 +4273,7 @@ class KorvidApp(App[None]):
 
     def _selected_ns_name(self) -> tuple[str | None, str | None]:
         """Return (namespace, name) of the currently selected row or (None, None) + warn."""
-        table = self.query_one(ResourceTable)
+        table = self._focused_table()
         if table.row_count == 0:
             self.notify("No resource selected", severity="warning")
             return None, None
@@ -6222,6 +6611,7 @@ class KorvidApp(App[None]):
 
         self._current_log_triples = list(triples)
         self._current_log_force_prefix = force_prefix
+        self._log_pane_owner = self._pane
 
         log_pane = self.query_one(LogPane)
         self._log_buffer = LogBuffer(self._log_buffer_max_lines)
@@ -6425,6 +6815,7 @@ class KorvidApp(App[None]):
         self._current_log_triples = []
         self._current_log_force_prefix = False
         self._log_pane_mode = ""
+        self._log_pane_owner = None
         with contextlib.suppress(Exception):
             self.query_one(LogPane).close()
 
@@ -6587,7 +6978,7 @@ class KorvidApp(App[None]):
             # column would reorder rows with no indicator, so ignore it.
             return
         self._sorts[kind] = toggle_sort(self._sorts.get(kind), column)
-        self._render_table(kind)
+        self._render_table(kind, only=self._pane)
 
     def action_sort_by_age(self) -> None:
         self._toggle_sort("age")
@@ -6603,7 +6994,7 @@ class KorvidApp(App[None]):
         kind = self.current_kind
         if message.column is None:
             self._sorts.pop(kind, None)
-            self._render_table(kind)
+            self._render_table(kind, only=self._pane)
             return
         requested = message.column
         view = self._view_for(kind)
@@ -6621,7 +7012,7 @@ class KorvidApp(App[None]):
             )
             return
         self._sorts[kind] = toggle_sort(self._sorts.get(kind), matched)
-        self._render_table(kind)
+        self._render_table(kind, only=self._pane)
 
     # ------------------------------------------------------------------
     # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,
@@ -6650,7 +7041,7 @@ class KorvidApp(App[None]):
         panel = self.query_one(AgentPanel)
         if panel.display:
             panel.display = False
-            self.query_one(ResourceTable).focus()
+            self._focused_table().focus()
             return
         panel.display = True
         if self._agent_runtime is None:
@@ -6695,7 +7086,7 @@ class KorvidApp(App[None]):
         self._agent_task = asyncio.create_task(self._run_agent_turn(message.text))
 
     def _selected_row_name(self) -> str | None:
-        table = self.query_one(ResourceTable)
+        table = self._focused_table()
         if table.row_count == 0:
             return None
         ordered = table.ordered_rows
@@ -6703,17 +7094,27 @@ class KorvidApp(App[None]):
             return None
         return str(ordered[table.cursor_row].key.value)
 
-    async def _run_agent_turn(self, user_text: str) -> None:
-        runtime = self._agent_runtime
-        if runtime is None:
-            return
-        panel = self.query_one(AgentPanel)
-        screen_context = (
+    def _screen_context(self) -> str:
+        """What the agent is told about the screen: the focused pane in
+        detail plus a one-line summary of the other pane (issue #48), so
+        context stays bounded in a split workspace."""
+        context = (
             f"context={self.config.kube_context or '-'} "
             f"view={self.current_kind} scope={self.current_scope} "
             f"selected={self._selected_row_name() or '-'} "
             f"filter={self.filter_pattern or '-'}"
         )
+        if len(self._panes) == 2:
+            other = self._panes[1 - self._focused_pane]
+            context += f" other_pane={other.kind} other_scope={other.scope}"
+        return context
+
+    async def _run_agent_turn(self, user_text: str) -> None:
+        runtime = self._agent_runtime
+        if runtime is None:
+            return
+        panel = self.query_one(AgentPanel)
+        screen_context = self._screen_context()
         if self._ctx_switch_note is not None:
             # One-shot: the conversation only needs to learn about the
             # switch once; afterwards the context= field carries the truth.
