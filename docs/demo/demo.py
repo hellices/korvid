@@ -132,7 +132,7 @@ async def list_namespaces() -> list[str]:
     return ["shop", "monitoring", "kube-system", "default"]
 
 
-MANIFEST: dict[str, Any] = {
+POD_MANIFEST: dict[str, Any] = {
     "apiVersion": "v1",
     "kind": "Pod",
     "metadata": {
@@ -161,10 +161,64 @@ MANIFEST: dict[str, Any] = {
     },
 }
 
+DEPLOY_MANIFEST: dict[str, Any] = {
+    "apiVersion": "apps/v1",
+    "kind": "Deployment",
+    "metadata": {
+        "name": "payment-worker",
+        "namespace": "shop",
+        "labels": {"app": "payment-worker", "tier": "backend"},
+    },
+    "spec": {
+        "replicas": 1,
+        "selector": {"matchLabels": {"app": "payment-worker"}},
+        "strategy": {
+            "type": "RollingUpdate",
+            "rollingUpdate": {"maxSurge": 1, "maxUnavailable": 0},
+        },
+        "template": {
+            "metadata": {"labels": {"app": "payment-worker", "tier": "backend"}},
+            "spec": {
+                "containers": [
+                    {
+                        "name": "app",
+                        "image": "registry.example.com/shop/payment-worker:2.4.1",
+                    }
+                ]
+            },
+        },
+    },
+    "status": {"replicas": 1, "updatedReplicas": 1, "unavailableReplicas": 1},
+}
+
+SVC_MANIFEST: dict[str, Any] = {
+    "apiVersion": "v1",
+    "kind": "Service",
+    "metadata": {
+        "name": "payment-worker",
+        "namespace": "shop",
+        "labels": {"app": "payment-worker"},
+    },
+    "spec": {
+        "type": "ClusterIP",
+        "clusterIP": "10.96.114.23",
+        "selector": {"app": "payment-worker"},
+        "ports": [{"name": "http", "port": 80, "targetPort": 8080, "protocol": "TCP"}],
+    },
+    "status": {"loadBalancer": {}},
+}
+
+_MANIFESTS: dict[str, dict[str, Any]] = {
+    "pods": POD_MANIFEST,
+    "deployments": DEPLOY_MANIFEST,
+    "services": SVC_MANIFEST,
+}
+
 
 async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
-    manifest = dict(MANIFEST)
-    metadata = dict(MANIFEST["metadata"])
+    base = _MANIFESTS.get(ALIASES[kind].plural if kind in ALIASES else kind, POD_MANIFEST)
+    manifest = dict(base)
+    metadata = dict(base["metadata"])
     metadata["name"] = name
     if namespace:
         metadata["namespace"] = namespace
@@ -177,19 +231,30 @@ class DemoEvents(EventsFetcher):
         self, namespace: str, name: str, *, uid: str | None = None
     ) -> list[dict[str, Any]]:
         now = datetime.now(UTC)
+        if name.startswith("payment-worker-"):
+            # The crashlooping demo pod.
+            return [
+                {
+                    "type": "Warning",
+                    "reason": "BackOff",
+                    "lastTimestamp": (now - timedelta(minutes=2)).isoformat(),
+                    "message": "Back-off restarting failed container app in pod " + name,
+                    "involvedObject": {"name": name},
+                },
+                {
+                    "type": "Normal",
+                    "reason": "Pulled",
+                    "lastTimestamp": (now - timedelta(minutes=3)).isoformat(),
+                    "message": 'Container image "payment-worker:2.4.1" already present on machine',
+                    "involvedObject": {"name": name},
+                },
+            ]
         return [
             {
-                "type": "Warning",
-                "reason": "BackOff",
-                "lastTimestamp": (now - timedelta(minutes=2)).isoformat(),
-                "message": "Back-off restarting failed container app in pod " + name,
-                "involvedObject": {"name": name},
-            },
-            {
                 "type": "Normal",
-                "reason": "Pulled",
-                "lastTimestamp": (now - timedelta(minutes=3)).isoformat(),
-                "message": 'Container image "payment-worker:2.4.1" already present on machine',
+                "reason": "ScalingReplicaSet",
+                "lastTimestamp": (now - timedelta(hours=4)).isoformat(),
+                "message": f"Scaled up replica set {name}-7d4b9c to 2",
                 "involvedObject": {"name": name},
             },
         ]
