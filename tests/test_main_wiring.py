@@ -9,7 +9,7 @@ from typing import Any, cast
 import pytest
 
 from korvid.__main__ import _close_provider_in_background
-from korvid.agent.tools import UIBridge
+from korvid.tools.executor import UIBridge
 
 
 class _BoomProvider:
@@ -224,9 +224,9 @@ async def test_mcp_factory_exposes_read_and_ui_tools() -> None:
     """The MCP surface is read + UI-drive: write tools stay with the
     built-in agent until an approval UX for external callers exists."""
     from korvid.__main__ import _make_mcp_factory
-    from korvid.agent.tools import READ_TOOLS, UI_TOOLS
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
+    from korvid.tools.executor import READ_TOOLS, UI_TOOLS
 
     config = KorvidConfig(mcp_enabled=True, mcp_port=1234)
     server = _make_mcp_factory(config, cast("KubeClient", object()), {}, None)()

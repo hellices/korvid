@@ -26,7 +26,7 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from korvid.agent.tools import UI_TOOL_NAMES, WRITE_TOOL_NAMES
+from korvid.tools.executor import UI_TOOL_NAMES, WRITE_TOOL_NAMES
 from korvid.ui.messages import AgentPromptSubmitted
 
 _SETUP_HINT = (

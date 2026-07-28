@@ -24,7 +24,6 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from korvid.agent.tools import ToolExecutor
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.runner import (
     DEFAULT_REPETITIONS,
@@ -35,6 +34,7 @@ from korvid.evals.runner import (
 from korvid.evals.scenario import Scenario, bundled_scenarios_dir, load_scenarios
 from korvid.providers.openai_compat import OpenAICompatProvider
 from korvid.providers.static_creds import StaticHeaderSource
+from korvid.tools.executor import ToolExecutor
 
 
 def provider_factory_from_env(env: Mapping[str, str]) -> Callable[[], Any]:

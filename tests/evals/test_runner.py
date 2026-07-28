@@ -111,7 +111,7 @@ def _good_script() -> list[list[dict[str, Any]]]:
 
 
 def _executor_factory(scenario: Scenario) -> Any:
-    from korvid.agent.tools import ToolExecutor
+    from korvid.tools.executor import ToolExecutor
 
     return ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
 

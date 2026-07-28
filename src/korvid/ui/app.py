@@ -38,7 +38,6 @@ from korvid.agent.events import AgentError
 from korvid.agent.mcp_server import MCPController
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
-from korvid.agent.tools import UIBridge
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.debugimage import (
@@ -98,6 +97,7 @@ from korvid.k8s.olm import (
 from korvid.k8s.portforward import FORWARDABLE_KINDS, forward_target_gvr
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
+from korvid.tools.executor import UIBridge
 from korvid.ui.command import command_help
 from korvid.ui.messages import (
     AgentPromptSubmitted,

@@ -14,9 +14,9 @@ from datetime import datetime
 
 import pytest
 
-from korvid.agent.tools import ToolExecutor
 from korvid.evals.fake_kube import SCENARIO_NOW, FakeKubeClient, builtin_aliases
 from korvid.evals.scenario import Scenario, bundled_scenarios_dir, load_scenarios
+from korvid.tools.executor import ToolExecutor
 
 BUNDLED = load_scenarios(bundled_scenarios_dir())
 

@@ -22,12 +22,6 @@ from korvid.agent.profiles import build_profile
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentSettings
-from korvid.agent.tools import (
-    READ_TOOLS,
-    UI_TOOLS,
-    ToolExecutor,
-    UIBridge,
-)
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
@@ -55,6 +49,12 @@ from korvid.providers.configurator import ProviderConfigurator
 from korvid.providers.ollama import OllamaOptions
 from korvid.providers.registry import create_provider
 from korvid.providers.token_store import TokenStore
+from korvid.tools.executor import (
+    READ_TOOLS,
+    UI_TOOLS,
+    ToolExecutor,
+    UIBridge,
+)
 from korvid.ui.app import AppUIBridge, ContextSwitchResult, EventsFetcher, KorvidApp
 from korvid.ui.widgets.resource_table import sanitize_views
 

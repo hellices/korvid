@@ -309,7 +309,7 @@ async def test_history_trimmed_by_char_budget() -> None:
 
 async def test_executor_exception_result_is_capped() -> None:
     """A defensive fallback with a huge message must respect the ingest cap."""
-    from korvid.agent.tools import MAX_RESULT_CHARS
+    from korvid.tools.executor import MAX_RESULT_CHARS
 
     class LoudExecutor:
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
@@ -355,7 +355,7 @@ async def test_runtime_passes_injected_tools_to_provider() -> None:
 
 
 async def test_runtime_defaults_to_read_tools() -> None:
-    from korvid.agent.tools import READ_TOOLS
+    from korvid.tools.executor import READ_TOOLS
 
     seen: list[list[dict[str, Any]]] = []
 
@@ -386,7 +386,7 @@ async def test_system_prompt_omits_ui_driving_without_ui_tools() -> None:
 
 
 async def test_system_prompt_advertises_ui_driving_with_ui_tools() -> None:
-    from korvid.agent.tools import READ_TOOLS, UI_TOOLS
+    from korvid.tools.executor import READ_TOOLS, UI_TOOLS
 
     p = ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
     await collect(AgentRuntime(p, EchoExecutor(), tools=READ_TOOLS + UI_TOOLS), "go")
@@ -463,7 +463,7 @@ async def test_missing_usage_estimates_include_tool_schemas_and_payloads() -> No
     not free just because the provider omitted usage."""
     import json
 
-    from korvid.agent.tools import READ_TOOLS
+    from korvid.tools.executor import READ_TOOLS
 
     args = json.dumps({"pod": "checkout-1", "namespace": "shop", "container": "app"})
     p = ScriptedProvider(
@@ -518,7 +518,7 @@ async def test_provider_error_after_tool_call_estimates_output() -> None:
 async def test_runtime_accepts_profile_prompt_overrides() -> None:
     """A capability profile replaces the role statement and the UI-drive
     instruction; the conditional write/no-write clause still applies."""
-    from korvid.agent.tools import UI_TOOLS
+    from korvid.tools.executor import UI_TOOLS
 
     open_logs = next(t for t in UI_TOOLS if t["function"]["name"] == "open_logs")
     p = ScriptedProvider([[{"type": "text_delta", "text": "hi"}, {"type": "done"}]])

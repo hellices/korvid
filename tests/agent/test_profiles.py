@@ -11,7 +11,7 @@ from korvid.agent.profiles import (
     build_profile,
 )
 from korvid.agent.runtime import MAX_HISTORY_CHARS, SYSTEM_PROMPT, UI_DRIVE_PROMPT
-from korvid.agent.tools import READ_TOOLS, RESIZE_TOOLS, UI_TOOLS, WRITE_TOOLS
+from korvid.tools.executor import READ_TOOLS, RESIZE_TOOLS, UI_TOOLS, WRITE_TOOLS
 
 
 def _names(tools: list[dict[str, object]]) -> list[str]:
