@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -512,3 +513,253 @@ async def test_provider_error_after_tool_call_estimates_output() -> None:
     assert out_tok > 0
     assert in_tok > 0
     assert runtime.usage_estimated is True
+
+
+async def test_runtime_accepts_profile_prompt_overrides() -> None:
+    """A capability profile replaces the role statement and the UI-drive
+    instruction; the conditional write/no-write clause still applies."""
+    from korvid.agent.tools import UI_TOOLS
+
+    open_logs = next(t for t in UI_TOOLS if t["function"]["name"] == "open_logs")
+    p = ScriptedProvider([[{"type": "text_delta", "text": "hi"}, {"type": "done"}]])
+    runtime = AgentRuntime(
+        p,
+        EchoExecutor(),
+        tools=[open_logs],
+        system_prompt="CUSTOM ROLE.",
+        ui_prompt="CUSTOM UI RULES.",
+    )
+    _ = await collect(runtime, "q")
+    system = p.calls[0][0]
+    assert system["role"] == "system"
+    assert system["content"].startswith("CUSTOM ROLE.")
+    assert "CUSTOM UI RULES." in system["content"]
+    assert NO_WRITE_PROMPT in system["content"]
+
+
+async def test_runtime_caps_tool_results_at_max_result_chars() -> None:
+    """A per-result cap below the executor's own 8k limit must bind — the
+    small profile (issue #71) sizes it so one full turn of results fits
+    inside its retained-history budget."""
+
+    class HugeExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "x" * 5_000
+
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "{}"},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, HugeExecutor(), max_result_chars=1_000)
+    await collect(runtime, "logs?")
+    tool_msgs = [m for m in p.calls[1] if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    assert len(tool_msgs[0]["content"]) <= 1_000 + len("\n… [truncated — narrow the query]")
+    assert "truncated" in tool_msgs[0]["content"]
+
+
+async def test_profile_result_cap_preserves_the_tail_evidence() -> None:
+    """diagnose_pod places Warning events and log excerpts last by design;
+    a prefix-only cap would chop the most diagnostic sections. The profile
+    cap must keep both ends of an oversized result."""
+
+    class HeadTailExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "IDENTITY line\n" + "x" * 5_000 + "\nLOG EXCERPT: OOMKilled"
+
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "diagnose_pod", "arguments": "{}"},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, HeadTailExecutor(), max_result_chars=1_000)
+    await collect(runtime, "diagnose")
+    tool_msg = next(m for m in p.calls[1] if m["role"] == "tool")
+    assert "IDENTITY line" in tool_msg["content"]
+    assert "LOG EXCERPT: OOMKilled" in tool_msg["content"]
+    assert "truncated" in tool_msg["content"]
+    assert len(tool_msg["content"]) < 1_200
+
+
+async def test_tool_call_limit_per_iteration_is_enforced() -> None:
+    """The small prompt says 'call one tool at a time' but text does not
+    enforce anything: extra parallel calls must be discarded so one
+    iteration cannot blow the per-turn size bound."""
+    executed: list[str] = []
+
+    class SpyExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            executed.append(name)
+            return "ok"
+
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "{}"},
+                {"type": "tool_call", "id": "c2", "name": "get_events", "arguments": "{}"},
+                {"type": "tool_call", "id": "c3", "name": "get_resource", "arguments": "{}"},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, SpyExecutor(), max_tool_calls_per_iteration=1)
+    events = await collect(runtime, "go")
+    assert executed == ["get_logs"]
+    assistant = next(m for m in p.calls[1] if m["role"] == "assistant")
+    assert len(assistant["tool_calls"]) == 1  # excess calls never enter history
+    tool_msgs = [m for m in p.calls[1] if m["role"] == "tool"]
+    assert len(tool_msgs) == 1  # matches the stored assistant tool calls
+    assert "2 extra tool call" in tool_msgs[0]["content"]
+    assert "one tool at a time" in tool_msgs[0]["content"]
+    finished = [e for e in events if isinstance(e, ToolCallFinished)]
+    assert [f.ok for f in finished] == [True, False, False]
+
+
+async def test_discarded_excess_calls_do_not_grow_history() -> None:
+    """Refusing execution is not enough: the arguments of excess parallel
+    calls (and per-call refusal messages) must not be retained either, or a
+    model emitting many large parallel calls each iteration still exceeds
+    the history budget mid-turn (trimming never drops the newest turn)."""
+
+    class SpyExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    huge = json.dumps({"manifest": "x" * 50_000})
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "{}"},
+                {"type": "tool_call", "id": "c2", "name": "apply", "arguments": huge},
+                {"type": "tool_call", "id": "c3", "name": "apply", "arguments": huge},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, SpyExecutor(), max_tool_calls_per_iteration=1)
+    await collect(runtime, "go")
+    retained = json.dumps(p.calls[1])
+    assert "x" * 1_000 not in retained
+    assert len(retained) < 2_000
+
+
+async def test_in_turn_history_budget_ends_the_turn_early() -> None:
+    """Capping tool results does not bound history growth by itself:
+    assistant text and kept-call arguments are stored verbatim, and
+    trimming never drops the sole current turn. A follow-up provider call
+    must not be sent once the in-turn total exceeds the history budget."""
+
+    class SpyExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    huge = json.dumps({"manifest": "x" * 30_000})
+    # A second provider call would exhaust this one-batch script and raise;
+    # the budget guard must end the turn before requesting it.
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "apply", "arguments": huge},
+                {"type": "done"},
+            ],
+        ]
+    )
+    runtime = AgentRuntime(p, SpyExecutor(), max_history_chars=10_000, strict_history_budget=True)
+    events = await collect(runtime, "go")
+    assert len(p.calls) == 1
+    errors = [e for e in events if isinstance(e, AgentError)]
+    assert any("budget" in e.message for e in errors)
+    assert any(isinstance(e, TurnComplete) for e in events)
+
+
+async def test_history_budget_stays_soft_without_strict_mode() -> None:
+    """The full profile must reproduce the pre-profile runtime exactly: a
+    full turn can legitimately accumulate max_iterations executor-capped
+    results, so the in-turn guard is opt-in and off by default."""
+
+    class SpyExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    huge = json.dumps({"manifest": "x" * 30_000})
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "apply", "arguments": huge},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, SpyExecutor(), max_history_chars=10_000)
+    events = await collect(runtime, "go")
+    assert len(p.calls) == 2  # second iteration still requested
+    assert not any(isinstance(e, AgentError) for e in events)
+
+
+async def test_strict_trim_drops_an_oversized_sole_previous_turn() -> None:
+    """After the mid-turn guard ends a turn early, that turn is oversized
+    forever; iteration zero of the NEXT turn sends unconditionally, so
+    strict trimming must drop the oversized completed turn instead of
+    resending it (the default keeps it — most recent turn always retained)."""
+
+    class SpyExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    huge = json.dumps({"manifest": "x" * 30_000})
+    p = ScriptedProvider(
+        [
+            [
+                {"type": "tool_call", "id": "c1", "name": "apply", "arguments": huge},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "hello"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, SpyExecutor(), max_history_chars=10_000, strict_history_budget=True)
+    await collect(runtime, "first")  # ends early over budget
+    await collect(runtime, "second")
+    first_request = json.dumps(p.calls[1])
+    assert "x" * 1_000 not in first_request  # oversized turn not resent
+    assert "second" in first_request
+    assert len(first_request) < 10_000
+
+
+async def test_strict_mode_rejects_a_prompt_that_cannot_fit() -> None:
+    """Iteration zero sends unconditionally, so strict mode must catch an
+    over-budget first request before it goes over the wire: after trimming
+    with the new user message in place, a prompt that cannot fit by itself
+    is rejected — and dropped, so it cannot poison later turns."""
+
+    class SpyExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    p = ScriptedProvider(
+        [
+            [{"type": "text_delta", "text": "hi"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(p, SpyExecutor(), max_history_chars=5_000, strict_history_budget=True)
+    events = await collect(runtime, "x" * 10_000)
+    assert len(p.calls) == 0  # never sent
+    errors = [e for e in events if isinstance(e, AgentError)]
+    assert any("too large" in e.message for e in errors)
+    assert any(isinstance(e, TurnComplete) for e in events)
+    # The rejected prompt was dropped: a normal follow-up works cleanly.
+    events2 = await collect(runtime, "hello")
+    assert len(p.calls) == 1
+    assert "x" * 1_000 not in json.dumps(p.calls[0])
+    assert not any(isinstance(e, AgentError) for e in events2)

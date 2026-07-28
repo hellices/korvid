@@ -8,6 +8,7 @@ cluster, and the grader scores the result — no live model involved.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
@@ -571,3 +572,146 @@ async def test_write_attempts_are_never_counted_on_target() -> None:
     run = report.runs[0]
     assert run.write_attempts == 1
     assert run.on_target_tool_calls == 0
+
+
+class _SchemaProbeProvider(ScriptedProvider):
+    """Records the full tool schemas offered on the first request."""
+
+    def __init__(self, script: list[list[dict[str, Any]]]) -> None:
+        super().__init__(script)
+        self.tools: list[dict[str, Any]] = []
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> Any:
+        if not self.tools:
+            self.tools = list(tools)
+        return super().complete(messages, tools, stream=stream)
+
+
+async def test_small_profile_evaluates_the_trimmed_surface() -> None:
+    """`--profile small` (issue #71) must measure what the small profile
+    actually ships — trimmed descriptions, no UI tools (the grader counts
+    unknown names as malformed), writes still offered for safety metrics."""
+    scenario = _oom_scenario()
+    provider = _SchemaProbeProvider(_good_script())
+    await run_scenario(
+        scenario,
+        provider_factory=lambda: provider,
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+        profile="small",
+    )
+    names = [t["function"]["name"] for t in provider.tools]
+    assert "diagnose_pod" in names
+    assert "delete_resource" in names
+    assert "resize_pod" in names
+    assert "open_logs" not in names
+    assert "navigate" not in names
+    diagnose = next(t for t in provider.tools if t["function"]["name"] == "diagnose_pod")
+    assert diagnose["function"]["description"].startswith("One-call diagnosis")
+
+
+async def test_small_profile_applies_the_iteration_budget() -> None:
+    """The small profile's iteration cap must bind in eval runs, or the
+    reported iteration counts would not reflect real small-profile behavior."""
+    from korvid.agent.profiles import SMALL_MAX_ITERATIONS
+
+    scenario = _oom_scenario()
+    loop = [
+        [_tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"})]
+        for _ in range(SMALL_MAX_ITERATIONS + 4)
+    ]
+    script = [*loop, [{"type": "text_delta", "text": "OOMKilled, exit 137."}]]
+    report = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+        profile="small",
+    )
+    assert report.runs[0].iterations <= SMALL_MAX_ITERATIONS
+    full = await run_scenario(
+        scenario,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    assert full.runs[0].iterations > SMALL_MAX_ITERATIONS
+
+
+async def test_evidence_grading_sees_only_the_model_visible_capped_result() -> None:
+    """The small profile compacts tool results at the runtime (keeping head
+    and tail); evidence in the dropped middle must not count as fetched —
+    the model never received it — and the record must equal what the model
+    saw."""
+    from korvid.evals.runner import _RecordingExecutor
+
+    class MiddleEvidenceExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "x" * 1_500 + "OOMKilled" + "y" * 1_995
+
+    recording = _RecordingExecutor(MiddleEvidenceExecutor(), max_result_chars=3_000)
+    returned = await recording.execute("diagnose_pod", {"pod": "checkout-1"})
+    assert len(returned) <= 3_000
+    assert "OOMKilled" not in returned
+    assert recording.records[0].result == returned
+    assert "OOMKilled" not in recording.records[0].result
+
+
+async def test_discard_notice_does_not_retruncate_the_recorded_result() -> None:
+    """When a response holds excess parallel calls, the runtime appends its
+    discard notice to the kept result. The notice must ride on top of the
+    already-compacted content — if the runtime re-compacted afterwards, the
+    tail the recorder captured would be cut from the model-visible message
+    and grading could credit evidence the model never saw."""
+    from korvid.agent.runtime import AgentRuntime
+    from korvid.evals.runner import _RecordingExecutor
+
+    class TailEvidenceExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "x" * 3_500 + "\nLOG EXCERPT: exit=137 OOMKilled"
+
+    class CallRecordingProvider(ScriptedProvider):
+        def __init__(self, script: list[list[dict[str, Any]]]) -> None:
+            super().__init__(script)
+            self.calls: list[list[dict[str, Any]]] = []
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            self.calls.append([dict(m) for m in messages])
+            async for event in super().complete(messages, tools, stream=stream):
+                yield event
+
+    recording = _RecordingExecutor(TailEvidenceExecutor(), max_result_chars=3_000)
+    provider = CallRecordingProvider(
+        [
+            [
+                _tool_call("diagnose_pod", {"pod": "checkout-1", "namespace": "shop"}),
+                _tool_call("get_events", {"namespace": "shop"}),
+            ],
+            [{"type": "text_delta", "text": "OOMKilled, exit 137."}],
+        ]
+    )
+    runtime = AgentRuntime(
+        provider,
+        recording,
+        max_result_chars=3_000,
+        max_tool_calls_per_iteration=1,
+    )
+    async for _ in runtime.run_turn("why dying?", "pods view"):
+        pass
+    tool_msg = next(m for m in provider.calls[1] if m["role"] == "tool")
+    assert tool_msg["content"].startswith(recording.records[0].result)
+    assert "OOMKilled" in recording.records[0].result
+    assert "OOMKilled" in tool_msg["content"]
+    assert "discarded" in tool_msg["content"]

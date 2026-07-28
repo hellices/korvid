@@ -46,6 +46,12 @@ class KorvidConfig:
     agent_model: str | None = None
     agent_api_key_env: str | None = None
     agent_auth_method: str | None = None
+    #: Model-capability profile (issue #71): `agent.profile` — `full` keeps
+    #: the frontier surface; `small` reduces tools, budgets and prompt for
+    #: 3B-14B local models. None means unset: the runtime treats it as
+    #: `full`, but the `:ai` wizard may still suggest `small` for Ollama
+    #: (an explicit `full` is never overridden by that suggestion).
+    agent_profile: str | None = None
     #: Native Ollama tuning (issue #72): `agent.ollama.*` in config.yaml.
     agent_ollama_num_ctx: int = 16384
     agent_ollama_temperature: float = 0.0
@@ -143,6 +149,12 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_model=_opt_str(agent_raw.get("model")),
         agent_api_key_env=api_key_env,
         agent_auth_method=auth_method,
+        agent_profile=(
+            # Key presence checked here: `profile: null` is a present-but-
+            # invalid value (falls back to `full` like any other), not the
+            # unset state that lets the :ai wizard suggest `small`.
+            _parse_profile(agent_raw["profile"]) if "profile" in agent_raw else None
+        ),
         agent_ollama_num_ctx=_parse_num_ctx(ollama_raw.get("num_ctx")),
         agent_ollama_temperature=_parse_temperature(ollama_raw.get("temperature")),
         agent_ollama_seed=_parse_seed(ollama_raw.get("seed")),
@@ -174,6 +186,7 @@ def save_agent_config(
     base_url: str | None,
     model: str,
     api_key_env: str | None,
+    profile: str = "full",
 ) -> None:
     """Persist managed agent fields, preserving unrelated keys (read-modify-write)."""
     raw: dict[str, Any] = {}
@@ -183,6 +196,11 @@ def save_agent_config(
     agent: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
     agent["provider"] = provider
     agent["model"] = model
+    # The capability profile is managed alongside the model choice and is
+    # always written explicitly: after the wizard runs, the profile is a
+    # deliberate choice (preserved or suggested), and an explicit `full`
+    # must survive so reopening `:ai` never re-suggests `small` over it.
+    agent["profile"] = profile
     # Merge into any existing auth mapping: only `method` is managed here,
     # unrelated nested keys must survive the read-modify-write.
     existing_auth = agent.get("auth")
@@ -254,6 +272,20 @@ def _parse_buffer_lines(value: Any) -> int:
     except (TypeError, ValueError):
         return 5000
     return lines if lines > 0 else 5000
+
+
+def _parse_profile(value: Any) -> str:
+    """Coerce a present `agent.profile` value to a known profile name.
+
+    An unknown or null value falls back to `full` (never crashing startup)
+    so a typo keeps today's runtime behavior AND stays stable through the
+    wizard instead of silently becoming `small`. The caller maps an absent
+    key to None — the "unset" state the `:ai` wizard is allowed to fill
+    with its Ollama suggestion.
+    """
+    if isinstance(value, str) and value.strip().lower() in ("full", "small"):
+        return value.strip().lower()
+    return "full"
 
 
 def _parse_num_ctx(value: Any) -> int:

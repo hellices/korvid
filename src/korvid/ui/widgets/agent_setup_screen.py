@@ -75,10 +75,15 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
         self,
         configurator: AgentConfigurator,
         apply_settings: Callable[[AgentSettings], bool] | None = None,
+        current_profile: str | None = None,
     ) -> None:
         super().__init__()
         self._configurator = configurator
         self._apply_settings = apply_settings
+        # Explicitly configured capability profile (None = unset): an
+        # explicit choice is preserved; only an unset profile receives the
+        # Ollama `small` suggestion (issue #71).
+        self._current_profile = current_profile
         self._provider = ""
         self._auth_method = ""
         self._base_url: str | None = None
@@ -235,6 +240,10 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
             base_url=self._base_url,
             model=model,
             api_key_env=self._api_key_env,
+            # An explicitly configured profile always wins; otherwise local
+            # Ollama endpoints usually serve 3B-14B models, so suggest the
+            # reduced capability profile (issue #71).
+            profile=self._current_profile or ("small" if self._provider == "ollama" else "full"),
         )
 
     def _show_model_step(self, models: list[str]) -> None:
