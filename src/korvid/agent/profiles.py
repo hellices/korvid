@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from korvid.agent.runtime import MAX_HISTORY_CHARS, SYSTEM_PROMPT, UI_DRIVE_PROMPT
-from korvid.tools.executor import READ_TOOLS, RESIZE_TOOLS, UI_TOOLS, WRITE_TOOLS
+from korvid.tools.registry import agent_tool_schemas
 
 PROFILE_NAMES = ("full", "small")
 
@@ -67,7 +67,8 @@ SMALL_UI_PROMPT = (
     "the screen carries the detail."
 )
 
-_SMALL_UI_TOOL_NAMES = ("open_logs", "open_describe")
+#: The two evidence-showing UI tools the small profile offers are encoded
+#: in the registry's `small_agent` surface (korvid.tools.registry).
 
 #: Concise description overrides for schemas that are verbose in the full
 #: profile — every request retransmits the schemas, so on a 4k-token
@@ -143,11 +144,9 @@ def build_profile(name: str, *, readonly: bool, resize_supported: bool) -> Agent
         ValueError: for a profile name other than `full` or `small`.
     """
     if name == "full":
-        tools = READ_TOOLS + UI_TOOLS
-        if not readonly:
-            tools = tools + WRITE_TOOLS
-            if resize_supported:
-                tools = tools + RESIZE_TOOLS
+        tools = agent_tool_schemas(
+            "full_agent", readonly=readonly, resize_supported=resize_supported
+        )
         return AgentProfile(
             name="full",
             tools=tools,
@@ -160,12 +159,9 @@ def build_profile(name: str, *, readonly: bool, resize_supported: bool) -> Agent
             ui_prompt=UI_DRIVE_PROMPT,
         )
     if name == "small":
-        small_ui = [t for t in UI_TOOLS if t["function"]["name"] in _SMALL_UI_TOOL_NAMES]
-        tools = READ_TOOLS + small_ui
-        if not readonly:
-            tools = tools + WRITE_TOOLS
-            if resize_supported:
-                tools = tools + RESIZE_TOOLS
+        tools = agent_tool_schemas(
+            "small_agent", readonly=readonly, resize_supported=resize_supported
+        )
         return AgentProfile(
             name="small",
             tools=_trim(tools),

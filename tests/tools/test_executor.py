@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.tools.executor import MAX_RESULT_CHARS, READ_TOOLS, UI_TOOLS, ToolExecutor, UIBridge
+from korvid.tools.registry import TOOLS_BY_NAME, ToolDef
 
 
 class FakeKube:
@@ -1267,3 +1270,86 @@ def test_compact_result_honors_tiny_limits() -> None:
         assert len(compact_result(text, limit)) <= limit
     assert compact_result(text, 0) == ""
     assert compact_result(text, 10) == "x" * 10
+
+
+def _ui_def(name: str, dispatch: str) -> ToolDef:
+    return ToolDef(
+        name=name,
+        schema={"type": "function", "function": {"name": name, "parameters": {}}},
+        effect="ui_only",
+        dispatch=dispatch,
+        surfaces=frozenset({"full_agent"}),
+    )
+
+
+async def test_ui_dispatch_follows_registry_dispatch_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registry's validated dispatch key — not the tool name — picks the
+    bridge handler: a new UI definition targeting `agent_set_filter` must call
+    set_filter, never fall through to open_describe."""
+    monkeypatch.setitem(TOOLS_BY_NAME, "weird_filter", _ui_def("weird_filter", "agent_set_filter"))
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute("weird_filter", {"pattern": "web"})
+    assert out == "filter set to 'web'"
+    assert bridge.calls == [("set_filter", {"pattern": "web"})]
+
+
+async def test_ui_dispatch_without_adapter_is_an_error_not_a_fallthrough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A UI dispatch key with no argument adapter must produce an explicit
+    error instead of silently invoking a different handler."""
+    monkeypatch.setitem(TOOLS_BY_NAME, "odd_ui", _ui_def("odd_ui", "agent_request_write"))
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute("odd_ui", {"kind": "pods", "name": "x"})
+    assert "no argument adapter" in out
+    assert bridge.calls == []
+
+
+async def test_write_resize_path_routes_by_write_action_not_tool_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resize-specific behavior (implicit pods kind, resource validation)
+    keys off the registry's `write_action`, not the literal tool name: a
+    valid resize definition under another name must take the resize path."""
+    fake = ToolDef(
+        name="shrink_pod",
+        schema={"type": "function", "function": {"name": "shrink_pod", "parameters": {}}},
+        effect="cluster_write",
+        dispatch="agent_request_write",
+        surfaces=frozenset({"full_agent"}),
+        approval="user_confirmation",
+        write_action="resize",
+    )
+    monkeypatch.setitem(TOOLS_BY_NAME, "shrink_pod", fake)
+    bridge = FakeBridge()
+    resources = {"app": {"requests": {"cpu": "100m"}}}
+    out = await make_ui_executor(bridge).execute(
+        "shrink_pod", {"name": "web-1", "namespace": "d", "resources": resources}
+    )
+    assert "must be a string" not in out
+    assert bridge.calls[0][0] == "request_write"
+    assert bridge.calls[0][1]["action"] == "resize"
+    assert bridge.calls[0][1]["kind"] == "pods"
+
+
+async def test_write_resize_path_still_validates_resources_under_any_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = ToolDef(
+        name="shrink_pod",
+        schema={"type": "function", "function": {"name": "shrink_pod", "parameters": {}}},
+        effect="cluster_write",
+        dispatch="agent_request_write",
+        surfaces=frozenset({"full_agent"}),
+        approval="user_confirmation",
+        write_action="resize",
+    )
+    monkeypatch.setitem(TOOLS_BY_NAME, "shrink_pod", fake)
+    bridge = FakeBridge()
+    out = await make_ui_executor(bridge).execute(
+        "shrink_pod", {"name": "web-1", "namespace": "d", "resources": {"app": {"bad": {}}}}
+    )
+    assert out.startswith("ERROR:")
+    assert bridge.calls == []
