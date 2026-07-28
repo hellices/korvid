@@ -853,35 +853,24 @@ def test_protected_context_name_glob_match(monkeypatch: pytest.MonkeyPatch) -> N
     assert main_mod._protected_context_name(KorvidConfig(), "prod-eu") is None
 
 
-def _uninstall_extra(
-    monkeypatch: pytest.MonkeyPatch, roots: tuple[str, ...], first_party: str
-) -> None:
-    """Simulate a base install without an optional extra (issue #73).
+def _uninstall_packages(monkeypatch: pytest.MonkeyPatch, *packages: str) -> None:
+    """Simulate an install without the given third-party packages (issue #73).
 
-    Blocks the extra's third-party root packages (the composition root only
-    treats those as "extra missing") and evicts the cached first-party
-    consumer modules so their imports re-execute and actually hit the block.
+    The composition root probes capability with `importlib.util.find_spec`
+    (catching ImportError is unreliable: parts of an extra may arrive
+    transitively or be imported lazily), so make the probe report the
+    packages as absent.
     """
-    import builtins
-    import sys
+    import importlib.util
 
-    for cached in list(sys.modules):
-        if cached == first_party or cached.startswith(first_party + "."):
-            monkeypatch.delitem(sys.modules, cached)
-    for root in roots:
-        for cached in list(sys.modules):
-            if cached == root or cached.startswith(root + "."):
-                monkeypatch.delitem(sys.modules, cached)
+    real_find_spec = importlib.util.find_spec
 
-    real_import = builtins.__import__
+    def fake_find_spec(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name.partition(".")[0] in packages:
+            return None
+        return real_find_spec(name, *args, **kwargs)
 
-    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        root = name.partition(".")[0]
-        if root in roots:
-            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
 
 
 _MCP_ROOTS = ("mcp", "anyio", "starlette", "uvicorn")
@@ -897,7 +886,7 @@ def test_missing_mcp_extra_degrades_when_not_requested(
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
-    _uninstall_extra(monkeypatch, _MCP_ROOTS, "korvid.mcp")
+    _uninstall_packages(monkeypatch, *_MCP_ROOTS)
     controller = _build_mcp_controller(KorvidConfig(), cast("KubeClient", object()), {}, None)
     assert controller is None
 
@@ -911,7 +900,7 @@ def test_missing_mcp_extra_fails_actionably_when_requested(
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
-    _uninstall_extra(monkeypatch, _MCP_ROOTS, "korvid.mcp")
+    _uninstall_packages(monkeypatch, *_MCP_ROOTS)
     with pytest.raises(SystemExit, match=r"korvid\[mcp\]"):
         _build_mcp_controller(
             KorvidConfig(mcp_enabled=True), cast("KubeClient", object()), {}, None
@@ -927,7 +916,7 @@ def test_missing_agent_extra_degrades_when_not_enabled(
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
-    _uninstall_extra(monkeypatch, _AGENT_ROOTS, "korvid.providers")
+    _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
     runtime, configurator, rebuild, retarget, provider_box, _ = _build_agent_wiring(
         KorvidConfig(), cast("KubeClient", object()), {}
     )
@@ -947,7 +936,7 @@ def test_missing_agent_extra_fails_actionably_when_enabled(
     from korvid.core.config import KorvidConfig
     from korvid.k8s.client import KubeClient
 
-    _uninstall_extra(monkeypatch, _AGENT_ROOTS, "korvid.providers")
+    _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
     with pytest.raises(SystemExit, match=r"korvid\[agent\]"):
         _build_agent_wiring(
             KorvidConfig(agent_enabled=True, agent_provider="ollama"),
@@ -983,3 +972,32 @@ def test_missing_first_party_module_is_not_treated_as_missing_extra(
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(ModuleNotFoundError, match=r"korvid\.mcp"):
         _build_mcp_controller(KorvidConfig(), cast("KubeClient", object()), {}, None)
+
+
+def test_mcp_only_install_does_not_compose_the_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An [mcp]-only install has httpx (mcp depends on it transitively) but
+    not keyring — the agent wiring must still degrade and must not load the
+    embedded-agent loop, and TokenStore's lazy keyring import must not fool
+    the capability probe."""
+    import sys
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    _uninstall_packages(monkeypatch, "keyring")  # httpx stays importable
+    for cached in list(sys.modules):
+        if cached in ("korvid.agent.runtime", "korvid.agent.profiles"):
+            monkeypatch.delitem(sys.modules, cached)
+
+    runtime, configurator, rebuild, _, provider_box, _ = _build_agent_wiring(
+        KorvidConfig(), cast("KubeClient", object()), {}
+    )
+    assert runtime is None
+    assert configurator is None
+    assert rebuild is None
+    assert provider_box == [None]
+    assert "korvid.agent.runtime" not in sys.modules
+    assert "korvid.agent.profiles" not in sys.modules

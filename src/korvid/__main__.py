@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import contextlib
 import dataclasses
+import importlib.util
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any
@@ -77,17 +78,18 @@ _AGENT_INSTALL_HINT = (
     "dependencies are not installed — install them with: pip install 'korvid[agent]'"
 )
 
-#: Top-level packages each extra provides. A ModuleNotFoundError is only
-#: treated as "extra not installed" when its missing module is rooted in
-#: one of these; anything else (a missing first-party module, a broken
-#: transitive dependency) is a defect and must propagate.
+#: Top-level packages each extra provides, probed explicitly before any
+#: feature module is imported. Detection cannot rely on catching
+#: ModuleNotFoundError: parts of an extra may arrive transitively (mcp
+#: installs httpx) or be imported lazily (TokenStore falls back when
+#: keyring is absent), which would misreport the capability as installed.
 _MCP_EXTRA_ROOTS = frozenset({"mcp", "anyio", "starlette", "uvicorn"})
 _AGENT_EXTRA_ROOTS = frozenset({"httpx", "keyring"})
 
 
-def _is_missing_extra(exc: ModuleNotFoundError, extra_roots: frozenset[str]) -> bool:
-    """True when the import failed because the given extra is not installed."""
-    return (exc.name or "").partition(".")[0] in extra_roots
+def _missing_extra_packages(extra_roots: frozenset[str]) -> list[str]:
+    """The extra's packages that are not installed (empty = extra present)."""
+    return sorted(pkg for pkg in extra_roots if importlib.util.find_spec(pkg) is None)
 
 
 def _build_mcp_controller(
@@ -105,15 +107,14 @@ def _build_mcp_controller(
     The surface is read + UI-drive tools only - write tools stay with the
     built-in agent until an approval UX for external callers is designed
     (issue #11 non-goal)."""
-    try:
-        from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
-    except ModuleNotFoundError as exc:
-        if not _is_missing_extra(exc, _MCP_EXTRA_ROOTS):
-            raise
+    missing = _missing_extra_packages(_MCP_EXTRA_ROOTS)
+    if missing:
         if config.mcp_enabled:
-            raise SystemExit(f"korvid: {_MCP_INSTALL_HINT}") from exc
-        logger.info("MCP adapter not installed; :mcp disabled (%s)", exc)
+            raise SystemExit(f"korvid: {_MCP_INSTALL_HINT}")
+        logger.info("MCP adapter not installed; :mcp disabled (missing %s)", ", ".join(missing))
         return None
+
+    from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
 
     def factory() -> KorvidMCPServer:
         return KorvidMCPServer(
@@ -292,7 +293,7 @@ async def _probe_cloud_provider(kube: KubeClient) -> ProviderInfo:
 
 
 def _agent_unavailable_wiring(
-    config: KorvidConfig, exc: ModuleNotFoundError, ui_proxy: _UIBridgeProxy
+    config: KorvidConfig, missing: list[str], ui_proxy: _UIBridgeProxy
 ) -> tuple[
     None,
     None,
@@ -307,8 +308,10 @@ def _agent_unavailable_wiring(
     unrequested one degrades to a wiring the app renders as "unavailable".
     """
     if config.agent_enabled:
-        raise SystemExit(f"korvid: {_AGENT_INSTALL_HINT}") from exc
-    logger.info("embedded-agent providers not installed; :ai disabled (%s)", exc)
+        raise SystemExit(f"korvid: {_AGENT_INSTALL_HINT}")
+    logger.info(
+        "embedded-agent providers not installed; :ai disabled (missing %s)", ", ".join(missing)
+    )
 
     def _retarget_noop(
         runtime: AgentRuntime | None,
@@ -343,20 +346,19 @@ def _build_agent_wiring(
     agent fails with an actionable install hint.
     """
     ui_proxy = _UIBridgeProxy()
-    try:
-        # Deferred with the provider stack: the embedded-agent loop is only
-        # composed when this wiring is actually built (issue #73 requires
-        # MCP-only startups not to import AgentRuntime at all).
-        from korvid.agent.profiles import build_profile
-        from korvid.agent.runtime import AgentRuntime
-        from korvid.providers.configurator import ProviderConfigurator
-        from korvid.providers.ollama import OllamaOptions
-        from korvid.providers.registry import create_provider
-        from korvid.providers.token_store import TokenStore
-    except ModuleNotFoundError as exc:
-        if not _is_missing_extra(exc, _AGENT_EXTRA_ROOTS):
-            raise
-        return _agent_unavailable_wiring(config, exc, ui_proxy)
+    missing = _missing_extra_packages(_AGENT_EXTRA_ROOTS)
+    if missing:
+        return _agent_unavailable_wiring(config, missing, ui_proxy)
+
+    # Deferred behind the capability probe: the embedded-agent loop is only
+    # composed when this wiring is actually built (issue #73 requires
+    # MCP-only startups not to import AgentRuntime at all).
+    from korvid.agent.profiles import build_profile
+    from korvid.agent.runtime import AgentRuntime
+    from korvid.providers.configurator import ProviderConfigurator
+    from korvid.providers.ollama import OllamaOptions
+    from korvid.providers.registry import create_provider
+    from korvid.providers.token_store import TokenStore
 
     token_store = TokenStore()
     # Model-capability profile (issue #71): tool surface, budgets, and

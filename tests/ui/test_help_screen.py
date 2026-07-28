@@ -284,3 +284,29 @@ def test_help_screen_is_modal() -> None:
     from textual.screen import ModalScreen
 
     assert issubclass(HelpScreen, ModalScreen)
+
+
+async def test_help_hides_agent_binding_when_agent_unavailable() -> None:
+    """A base/MCP-only install must not advertise Ctrl-A in the help
+    overlay: the static BINDINGS list bypasses check_action, so action_help
+    filters unavailable actions explicitly (issue #73)."""
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        yield ("ADDED", _pod("myapp"))
+        while True:
+            await asyncio.sleep(0.01)
+
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, source),
+        agent_available=False,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await until(pilot, lambda: isinstance(app.screen, HelpScreen), label="help open")
+        text = _help_text(app)
+        assert "Ctrl-A" not in text
+        assert "Global" in text  # the rest of the overlay is intact

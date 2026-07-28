@@ -731,10 +731,12 @@ uv tool install 'korvid[mcp] @ git+https://github.com/hellices/korvid'   # korvi
 uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'   # both
 ```
 
-Without the extra installed, `:ai` and `:mcp` report the feature as
-unavailable with the matching install hint; explicitly enabling a feature
-whose extra is missing (`--mcp`, `agent.provider` in config) fails at
-startup with the same hint. `[entra]` adds Entra ID auth for Azure OpenAI.
+Without the `[agent]` extra the agent surface is simply absent — no agent
+panel, and `Ctrl-A` / `:ai` / `:model` are not registered. Without the
+`[mcp]` extra the `:mcp` command reports the feature as unavailable with
+an install hint. Explicitly enabling a feature whose extra is missing
+(`--mcp`, `agent.provider` in config) fails at startup with an actionable
+message. `[entra]` adds Entra ID auth for Azure OpenAI.
 
 ### Development
 

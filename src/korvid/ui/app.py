@@ -1071,8 +1071,18 @@ class KorvidApp(App[None]):
             (group, overrides.get(action, key) if action else key, description)
             for group, key, description, action in self.HANDLER_KEY_HELP
         ]
+        # The static BINDINGS list bypasses check_action, so drop entries
+        # whose action is unavailable in this composition (e.g. Ctrl-A
+        # without the [agent] extra, issue #73).
+        app_bindings = [
+            binding
+            for binding in (
+                raw if isinstance(raw, Binding) else Binding(*raw) for raw in self.BINDINGS
+            )
+            if self.check_action(binding.action, ()) is not False
+        ]
         groups = collect_help(
-            list(self.BINDINGS),
+            app_bindings,
             list(DescribeScreen.BINDINGS),
             handler_keys=handler_keys,
             overrides=overrides,
