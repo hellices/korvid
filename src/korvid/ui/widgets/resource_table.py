@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import cast
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable
@@ -80,6 +81,46 @@ def _pod_sort_key(pod: PodSummary) -> tuple[int, str]:
 
 def _phase_cell(phase: str) -> Text:
     return Text(phase, style=phase_style(phase))
+
+
+# In-place removals cost O(rows) each (DataTable.remove_row rebuilds its
+# row-location map); cap them so a bulk drop (e.g. a narrowing filter) takes
+# the linear rebuild path instead of a quadratic remove loop.
+_MAX_IN_PLACE_REMOVALS = 8
+
+
+def _cell_width(cell: str | Text) -> int:
+    """Rendered width of a table cell, matching DataTable's measurement.
+
+    For height-1 rows, DataTable's `default_cell_formatter` truncates a
+    `str` cell at its first newline, then renders it through
+    `Text.from_markup`; a `Text` cell is measured by its widest rendered
+    line. Custom-column values (issue #45) can carry markup or newlines, so
+    any other measurement would overestimate and trigger a column-shrinking
+    width rescan.
+    """
+    if isinstance(cell, Text):
+        text = cell
+    else:
+        newline = cell.find("\n")
+        if newline != -1 and newline != len(cell) - 1:
+            cell = cell[:newline]
+        text = Text.from_markup(cell, end="")
+    return max((cell_len(line) for line in text.plain.splitlines()), default=0)
+
+
+def _cells_equal(a: str | Text, b: str | Text) -> bool:
+    """Style-aware cell comparison for the in-place diff.
+
+    `Text.__eq__` compares plain text only — a phase flipping color with the
+    same wording (e.g. Running turning yellow) is still a visible change and
+    must not be skipped.
+    """
+    if isinstance(a, Text) or isinstance(b, Text):
+        if not (isinstance(a, Text) and isinstance(b, Text)):
+            return False
+        return a.plain == b.plain and str(a.style) == str(b.style)
+    return a == b
 
 
 def _helm_status_cell(status: str) -> Text:
@@ -308,6 +349,7 @@ class ResourceTable(DataTable[str | Text]):
         self._last_all_namespaces = None
         self._last_sort = None
         self._active_view = None
+        self._pending_rows: list[tuple[str, list[str | Text]]] = []
 
     def show(
         self,
@@ -338,8 +380,34 @@ class ResourceTable(DataTable[str | Text]):
             self._active_view,
         )
         restore = self._cursor_snapshot() if same_view else None
+        # Build the desired rows first (the builders only fill
+        # `_pending_rows`), so a pure data refresh can be diffed against the
+        # current table instead of clearing and rebuilding it.
+        self._active_view = view
+        self._pending_rows = []
+        self._render_rows(
+            kind, rows, all_namespaces=all_namespaces, pattern=pattern, metrics=metrics, sort=sort
+        )
+        pending, self._pending_rows = self._pending_rows, []
+        if same_view and sort == self._last_sort and self._apply_in_place(pending):
+            # Nothing was cleared, so the scroll offset never moved; only
+            # the cursor may have slid when rows above it were removed —
+            # and even with scroll=False, Textual's cursor watcher schedules
+            # a deferred _scroll_cursor_into_view on an index change, so the
+            # viewport must be re-asserted after it (same as the rebuild
+            # path below). When the index is unchanged no deferred scroll
+            # was scheduled — re-asserting anyway would yank back a user
+            # scroll that lands before the callback runs.
+            if restore is not None:
+                offset = (self.scroll_x, self.scroll_y)
+                self._restore_cursor(*restore, scroll=False)
+                if self.cursor_row != restore[1]:
+                    self.call_after_refresh(
+                        self.scroll_to, *offset, animate=False, immediate=True, force=True
+                    )
+            return
         if not same_view or sort != self._last_sort:
-            self._active_view = view
+            viewport = None
             self.clear(columns=True)
             custom_names = tuple(column.name for column in view.columns) if view else ()
             self.add_columns(
@@ -353,14 +421,96 @@ class ResourceTable(DataTable[str | Text]):
             self._last_all_namespaces = all_namespaces
             self._last_sort = sort
         else:
-            # DataTable.clear() resets the cursor to (0, 0); the snapshot
-            # above restores it after the rows are re-added.
+            # Reorder fallback (e.g. a pod inserted mid-table — add_row can
+            # only append): DataTable.clear() resets the scroll offset to
+            # (0, 0), which would yank a user inspecting the right-hand
+            # columns (or a scrolled viewport) back to the top-left. Snapshot
+            # the viewport and restore it after the rows are re-added; the
+            # cursor snapshot above restores the selection.
+            viewport = (self.scroll_x, self.scroll_y)
             self.clear()
-        self._render_rows(
-            kind, rows, all_namespaces=all_namespaces, pattern=pattern, metrics=metrics, sort=sort
-        )
+        for key, cells in pending:
+            self.add_row(*cells, key=key)
         if restore is not None:
-            self._restore_cursor(*restore)
+            # A background refresh must not scroll the cursor back into
+            # view — the viewport restore below keeps the user's position.
+            self._restore_cursor(*restore, scroll=viewport is None)
+        if viewport is not None:
+            # `immediate=True` + `force=True`: the default defers via
+            # call_after_refresh, and scrollbar visibility (overflow: auto)
+            # may not be recomputed yet right after clear() — the user had
+            # already reached this offset, so restore it unconditionally.
+            self.scroll_to(*viewport, animate=False, immediate=True, force=True)
+            # Even with scroll=False, `watch_cursor_coordinate` schedules a
+            # deferred `_scroll_cursor_into_view` whenever the cursor index
+            # changed (e.g. a row inserted above it) — which would override
+            # the restore above. Re-assert the viewport after that deferred
+            # scroll has run.
+            self.call_after_refresh(
+                self.scroll_to, *viewport, animate=False, immediate=True, force=True
+            )
+
+    def _in_place_plan(
+        self, pending: list[tuple[str, list[str | Text]]]
+    ) -> tuple[list[str], set[str | None]] | None:
+        """Eligibility guards for the in-place diff.
+
+        Returns (keys to remove, current key set), or None when the update
+        needs the rebuild path: unkeyed rows, surviving rows changing
+        relative order, new rows not landing at the bottom (`add_row` can
+        only append), a bulk removal (DataTable.remove_row rebuilds its
+        whole row-location map per call, so a narrowing filter dropping
+        most of a large list would go quadratic — watch-sized deletions
+        stay in place), or a row with fewer cells than columns (would raise
+        ValueError from zip(strict=True) mid-update; the rebuild path's
+        add_row pads short rows).
+        """
+        current_keys = [row.key.value for row in self.ordered_rows]
+        if any(key is None for key in current_keys):
+            return None
+        new_keys = [key for key, _ in pending]
+        current_set = set(current_keys)
+        new_set = set(new_keys)
+        survivors = [key for key in current_keys if key in new_set]
+        fresh = [key for key in new_keys if key not in current_set]
+        if new_keys != [*survivors, *fresh]:
+            return None
+        doomed = [cast(str, key) for key in current_keys if key not in new_set]
+        if len(doomed) > _MAX_IN_PLACE_REMOVALS:
+            return None
+        column_count = len(self.ordered_columns)
+        if any(len(cells) != column_count for _, cells in pending):
+            return None
+        return doomed, current_set
+
+    def _apply_in_place(self, pending: list[tuple[str, list[str | Text]]]) -> bool:
+        """Diff *pending* against the current rows and patch the table in
+        place; returns False when the update needs the rebuild path (see
+        `_in_place_plan` for the eligibility rules).
+
+        Width updates are requested only for cells wider than their column:
+        `update_width=True` is not grow-only — a narrower replacement rescans
+        and *shrinks* the column, shifting the layout this path must keep
+        still. The trade-off is that a column stays at its widest-seen size
+        until the next rebuild.
+        """
+        plan = self._in_place_plan(pending)
+        if plan is None:
+            return False
+        doomed, current_set = plan
+        for key in doomed:
+            self.remove_row(key)
+        columns = self.ordered_columns
+        for key, cells in pending:
+            if key in current_set:
+                old_cells = self.get_row(key)
+                for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
+                    if not _cells_equal(old_cell, new_cell):
+                        grew = _cell_width(new_cell) > column.content_width
+                        self.update_cell(key, column.key, new_cell, update_width=grew)
+            else:
+                self.add_row(*cells, key=key)
+        return True
 
     def _cursor_snapshot(self) -> tuple[str, int] | None:
         """(row key, row index) under the cursor, or None on an empty table."""
@@ -369,7 +519,7 @@ class ResourceTable(DataTable[str | Text]):
         key = self.coordinate_to_cell_key(Coordinate(self.cursor_row, 0)).row_key.value
         return (key, self.cursor_row) if key is not None else None
 
-    def _restore_cursor(self, key: str, index: int) -> None:
+    def _restore_cursor(self, key: str, index: int, *, scroll: bool = True) -> None:
         """Move the cursor back to *key*; when that row is gone (deleted
         resource), clamp to the old index so the cursor stays in place
         instead of jumping to the top."""
@@ -379,11 +529,12 @@ class ResourceTable(DataTable[str | Text]):
             row = self.get_row_index(key)
         except RowDoesNotExist:
             row = min(index, self.row_count - 1)
-        self.move_cursor(row=row, animate=False, scroll=True)
+        self.move_cursor(row=row, animate=False, scroll=scroll)
 
     def _emit_row(self, obj: Summary, cells: list[str | Text], *, all_namespaces: bool) -> None:
         """Finish one row: apply the custom view (issue #45), prepend the
-        namespace in all-namespaces mode, and add it keyed by ns/name.
+        namespace in all-namespaces mode, and buffer it keyed by ns/name for
+        `show()` to diff or add.
 
         *cells* is the kind's default cell list without the namespace. Rows
         whose summaries carry fewer custom values than configured (e.g.
@@ -398,7 +549,7 @@ class ResourceTable(DataTable[str | Text]):
             cells = [cells[0], *extras] if view.replace else [*cells, *extras]
         if all_namespaces:
             cells.insert(0, obj.namespace)
-        self.add_row(*cells, key=f"{obj.namespace}/{obj.name}")
+        self._pending_rows.append((f"{obj.namespace}/{obj.name}", cells))
 
     def _render_rows(
         self,
