@@ -209,7 +209,7 @@ def test_validate_dispatch_targets_rejects_write_tool_naming_executor_method() -
         write_action="delete",
         dispatch="_list_resources",
     )
-    with pytest.raises(ValueError, match="bridge"):
+    with pytest.raises(ValueError, match="agent_request_write"):
         validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
 
 
@@ -241,3 +241,18 @@ def test_small_agent_surface_matches_golden_order() -> None:
 
 def test_mcp_surface_matches_golden_order() -> None:
     assert _names(mcp_tool_schemas()) == _READ_ORDER + _UI_ORDER
+
+
+def test_validate_dispatch_targets_rejects_write_bypassing_approval_entrypoint() -> None:
+    """Security invariant: every agent write routes through the
+    approval-gated `agent_request_write` — any other bridge method, even a
+    callable one, must be rejected at import time."""
+    bad = _tool(
+        "a",
+        effect="cluster_write",
+        approval="user_confirmation",
+        write_action="delete",
+        dispatch="agent_navigate",
+    )
+    with pytest.raises(ValueError, match="agent_request_write"):
+        validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)

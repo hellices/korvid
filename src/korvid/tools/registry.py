@@ -30,6 +30,10 @@ _APPROVALS = ("none", "user_confirmation")
 _CAPABILITIES = ("none", "pod_resize")
 _SURFACES = ("full_agent", "small_agent", "mcp")
 
+#: The only bridge method allowed to receive a cluster write: the
+#: user-confirmation approval gate (design doc security invariant).
+_WRITE_ENTRYPOINT = "agent_request_write"
+
 
 @dataclass(frozen=True)
 class ToolDef:
@@ -113,16 +117,25 @@ def _validate_write_policy(d: ToolDef) -> None:
 def validate_dispatch_targets(defs: list[ToolDef], *, executor_cls: type, bridge_cls: type) -> None:
     """Verify every dispatch key names a method on the class its effect uses.
 
-    Cluster reads dispatch on the executor; UI-only tools and cluster
-    writes dispatch on the UI bridge (writes through the approval-gated
-    entrypoint). Called from the executor module at import time so a
-    typo'd or wrong-class handler fails startup/tests, not a live call.
+    Cluster reads dispatch on the executor; UI-only tools dispatch on the
+    UI bridge; cluster writes must dispatch on the bridge's approval-gated
+    `agent_request_write` entrypoint — no other bridge method, however
+    callable, may receive a write (security invariant). Called from the
+    executor module at import time so a typo'd or wrong-class handler
+    fails startup/tests, not a live call.
 
     Raises:
         ValueError: when a dispatch key does not resolve on the class
-            required by the tool's effect.
+            required by the tool's effect, or a write dispatches anywhere
+            but the approval-gated entrypoint.
     """
     for d in defs:
+        if d.effect == "cluster_write" and d.dispatch != _WRITE_ENTRYPOINT:
+            raise ValueError(
+                f"tool {d.name!r} (cluster_write): dispatch target "
+                f"{d.dispatch!r} bypasses the approval-gated "
+                f"{_WRITE_ENTRYPOINT!r} entrypoint"
+            )
         if d.effect == "cluster_read":
             cls, role = executor_cls, "executor"
         else:
