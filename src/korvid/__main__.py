@@ -17,7 +17,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from korvid.agent.context import cluster_context_note
-from korvid.agent.mcp_server import KorvidMCPServer, MCPController, default_endpoint_path
 from korvid.agent.profiles import build_profile
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
@@ -45,6 +44,7 @@ from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
+from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
 from korvid.providers.configurator import ProviderConfigurator
 from korvid.providers.ollama import OllamaOptions
 from korvid.providers.registry import create_provider

@@ -11,8 +11,8 @@ from typing import Any
 
 import pytest
 
-from korvid.agent.mcp_server import KorvidMCPServer, MCPController, default_endpoint_path
 from korvid.k8s.discovery import PODS_META
+from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
 from korvid.tools.executor import READ_TOOLS, UI_TOOLS, ToolExecutor
 
 

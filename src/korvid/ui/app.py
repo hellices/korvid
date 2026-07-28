@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar
+from typing import Any, ClassVar, Concatenate, Literal, ParamSpec, Protocol, TypeVar
 
 import yaml
 from rich.text import Text
@@ -35,7 +35,6 @@ from textual.widgets.data_table import CellDoesNotExist
 from textual.worker import Worker, get_current_worker
 
 from korvid.agent.events import AgentError
-from korvid.agent.mcp_server import MCPController
 from korvid.agent.runtime import AgentRuntime
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
@@ -176,6 +175,37 @@ _APPROVAL_TIMEOUT = 120.0
 #: endpoint must never hang a binding handler or an agent turn. On timeout
 #: the check fails open (writes stay approval-gated and audited).
 _PERMISSION_CHECK_TIMEOUT = 10.0
+
+
+class MCPControllerLike(Protocol):
+    """Structural contract for the MCP controller (`korvid.mcp.server`).
+
+    The UI drives MCP through this protocol so the base TUI never imports
+    the optional MCP adapter or its third-party dependencies (issue #73);
+    the concrete controller is injected by the composition root only when
+    the `mcp` extra is installed.
+    """
+
+    @property
+    def running(self) -> bool:
+        """True while the MCP server is serving."""
+        ...
+
+    def status(self) -> str:
+        """One-line human-readable server state for the status bar."""
+        ...
+
+    async def start(self) -> str:
+        """Start the server; returns a user-facing status message."""
+        ...
+
+    async def stop(self) -> str:
+        """Stop the server; returns a user-facing status message."""
+        ...
+
+    async def shutdown(self) -> asyncio.Task[None] | None:
+        """Begin a graceful stop; returns any still-pending teardown task."""
+        ...
 
 
 def _event_timestamp(event: dict[str, Any]) -> datetime | None:
@@ -632,7 +662,7 @@ class KorvidApp(App[None]):
         audit: AuditLog | None = None,
         check_permission: Callable[[str, str, str, str | None, str, str], Awaitable[bool]]
         | None = None,
-        mcp: MCPController | None = None,
+        mcp: MCPControllerLike | None = None,
         edit_text: Callable[[str], Awaitable[str | None]] | None = None,
         metrics: MetricsPoller | None = None,
         pod_resize_supported: bool = False,
