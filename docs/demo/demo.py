@@ -302,7 +302,6 @@ def main() -> None:
         get_manifest=get_manifest,
         get_events=DemoEvents(),
         stream_logs=stream_logs,
-        provider_hint="demo",
     )
     app.run()
 
