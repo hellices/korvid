@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, ClassVar
 
 import yaml
@@ -27,6 +27,7 @@ from korvid.tools.diagnose import (
     troubled_containers,
     warning_event_lines,
 )
+from korvid.tools.registry import TOOL_DEFS, TOOLS_BY_NAME, ToolDef, validate_dispatch_targets
 
 MAX_RESULT_CHARS = 8000
 
@@ -72,167 +73,10 @@ def compact_result(result: str, limit: int) -> str:
     return result[:head] + _MIDDLE_TRUNCATION_MARKER + result[len(result) - tail :]
 
 
-READ_TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "list_resources",
-            "description": "List all resources of a given kind, optionally filtered by namespace.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "description": (
-                            "Resource kind or alias (e.g. 'pods', 'deployments', 'svc')."
-                        ),
-                    },
-                    "namespace": {
-                        "type": "string",
-                        "description": "Kubernetes namespace. Omit for all namespaces.",
-                    },
-                },
-                "required": ["kind"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_resource",
-            "description": "Fetch the full YAML manifest for a single Kubernetes resource.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "description": "Resource kind or alias.",
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Resource name.",
-                    },
-                    "namespace": {
-                        "type": "string",
-                        "description": "Kubernetes namespace (required for namespaced resources).",
-                    },
-                },
-                "required": ["kind", "name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_logs",
-            "description": "Retrieve recent log lines from a pod container.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pod": {
-                        "type": "string",
-                        "description": "Pod name.",
-                    },
-                    "namespace": {
-                        "type": "string",
-                        "description": "Kubernetes namespace the pod lives in.",
-                    },
-                    "container": {
-                        "type": "string",
-                        "description": "Container name. Defaults to the first container.",
-                    },
-                    "tail_lines": {
-                        "type": "integer",
-                        "description": "Number of log lines to fetch (1-500, default 100).",
-                    },
-                },
-                "required": ["pod", "namespace"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_events",
-            "description": "List Kubernetes events for a specific resource.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "description": "Resource kind, e.g. 'pods' or 'deployment'.",
-                    },
-                    "namespace": {
-                        "type": "string",
-                        "description": "Kubernetes namespace.",
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Name of the resource whose events to fetch.",
-                    },
-                },
-                "required": ["kind", "namespace", "name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_operators",
-            "description": (
-                "List OLM operators: available packages from the cluster's"
-                " operator catalog plus installed subscriptions with their"
-                " status. Read-only; installing an operator is done by the"
-                " user through the UI. Explains itself when OLM is absent."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "namespace": {
-                        "type": "string",
-                        "description": (
-                            "Namespace to scope installed subscriptions to."
-                            " Omit for all namespaces."
-                        ),
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "diagnose_pod",
-            "description": (
-                "Compound diagnostic for a broken pod: one call gathers the"
-                " pod's identity and owner chain, per-container states"
-                " (waiting reasons, exit codes, restart counts), failing"
-                " conditions, recent Warning events, node and PVC context,"
-                " and a targeted log excerpt from up to 3 of the troubled"
-                " containers (any further troubled containers are named but"
-                " their logs are not fetched; use get_logs for those)."
-                " Prefer this over chaining"
-                " get_resource/get_events/get_logs when investigating why a"
-                " pod is failing."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pod": {
-                        "type": "string",
-                        "description": "Pod name.",
-                    },
-                    "namespace": {
-                        "type": "string",
-                        "description": "Kubernetes namespace the pod lives in.",
-                    },
-                },
-                "required": ["pod", "namespace"],
-            },
-        },
-    },
-]
+#: Derived surfaces (issue #91): the registry in `korvid.tools.registry`
+#: is the single source of tool metadata; these lists are kept as the
+#: public module API for the agent runtime, profiles, evals, and tests.
+READ_TOOLS: list[dict[str, Any]] = [d.schema for d in TOOL_DEFS if d.effect == "cluster_read"]
 
 
 class UIBridge(ABC):
@@ -283,216 +127,15 @@ class UIBridge(ABC):
         ...
 
 
-UI_TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "navigate",
-            "description": (
-                "Switch the korvid main table to a resource view the user can see, "
-                "optionally scoping to a namespace. Screen-only; changes nothing "
-                "in the cluster."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "view": {
-                        "type": "string",
-                        "description": "Resource kind or alias to display (e.g. 'pods', 'deploy').",
-                    },
-                    "namespace": {
-                        "type": "string",
-                        "description": (
-                            "Namespace scope. Pass 'all' for the all-namespaces "
-                            "scope. Omit to keep the current scope."
-                        ),
-                    },
-                },
-                "required": ["view"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_filter",
-            "description": (
-                "Apply a filter expression to the visible resource table. "
-                "Space-separated tokens are AND-combined: plain text is a "
-                "case-insensitive substring on the resource name; '~pat' is a "
-                "fuzzy subsequence match; '/pat/' or 're:pat' is a regex; "
-                "'!' before any name token negates it; '-l key=value[,k2=v2]' "
-                "is a label selector (a bare key tests existence); '-s' hides "
-                "Succeeded/Completed pods. Pass an empty pattern to clear."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": (
-                            "Filter expression (grammar in the tool "
-                            "description); '' clears the filter."
-                        ),
-                    },
-                },
-                "required": ["pattern"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open_logs",
-            "description": (
-                "Open the live log pane for a pod so the user can watch the logs "
-                "on screen alongside your analysis. At most 8 container panels "
-                "fit on screen; the result reports which containers are shown "
-                "if the pod has more."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pod": {"type": "string", "description": "Pod name."},
-                    "namespace": {"type": "string", "description": "Pod namespace."},
-                    "container": {
-                        "type": "string",
-                        "description": "Container name. Omit to show all containers.",
-                    },
-                },
-                "required": ["pod", "namespace"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open_describe",
-            "description": (
-                "Open the describe screen (manifest + events) for a resource so the "
-                "user sees the evidence you are citing."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "description": "Resource kind or alias."},
-                    "name": {"type": "string", "description": "Resource name."},
-                    "namespace": {
-                        "type": "string",
-                        "description": "Namespace (required for namespaced resources).",
-                    },
-                },
-                "required": ["kind", "name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "drill_down",
-            "description": (
-                "Drill into a row of the visible table following the ownership "
-                "chain the user sees on screen: a deployment opens its replicaset "
-                "revision history, a replicaset opens its pods, and a helm "
-                "release opens its revision history. Screen-only."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Name of the row in the current view to drill into.",
-                    },
-                },
-                "required": ["name"],
-            },
-        },
-    },
-]
+UI_TOOLS: list[dict[str, Any]] = [d.schema for d in TOOL_DEFS if d.effect == "ui_only"]
 
-UI_TOOL_NAMES = frozenset(t["function"]["name"] for t in UI_TOOLS)
+UI_TOOL_NAMES = frozenset(d.name for d in TOOL_DEFS if d.effect == "ui_only")
 
 #: Cluster mutations (spec §6.2). Every call routes through
 #: UIBridge.agent_request_write, which shows the user an approval dialog;
 #: the tool result reports whether the user approved and what happened.
 WRITE_TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_resource",
-            "description": (
-                "Request deletion of a resource. This does NOT delete anything "
-                "directly: it opens an approval dialog in the TUI and the "
-                "operation runs only if the user approves it with a keystroke."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "description": "Resource kind or alias."},
-                    "name": {"type": "string", "description": "Resource name."},
-                    "namespace": {
-                        "type": "string",
-                        "description": "Namespace (required for namespaced resources).",
-                    },
-                },
-                "required": ["kind", "name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "scale_resource",
-            "description": (
-                "Request scaling a deployment/replicaset/statefulset to a replica "
-                "count. Runs only after the user approves the request in the TUI "
-                "approval dialog."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "description": "Resource kind or alias."},
-                    "name": {"type": "string", "description": "Resource name."},
-                    "namespace": {
-                        "type": "string",
-                        "description": "Namespace of the workload.",
-                    },
-                    "replicas": {
-                        "type": "integer",
-                        "description": "Desired replica count (>= 0).",
-                    },
-                },
-                # scalable kinds are all namespaced apps/* workloads, so a
-                # call without a namespace can never succeed
-                "required": ["kind", "name", "namespace", "replicas"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "rollout_restart",
-            "description": (
-                "Request a rolling restart of a deployment/statefulset/daemonset. "
-                "Runs only after the user approves the request in the TUI "
-                "approval dialog."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "description": "Resource kind or alias."},
-                    "name": {"type": "string", "description": "Resource name."},
-                    "namespace": {
-                        "type": "string",
-                        "description": "Namespace of the workload.",
-                    },
-                },
-                # restartable kinds are all namespaced apps/* workloads, so a
-                # call without a namespace can never succeed
-                "required": ["kind", "name", "namespace"],
-            },
-        },
-    },
+    d.schema for d in TOOL_DEFS if d.effect == "cluster_write" and d.capability == "none"
 ]
 
 #: In-place pod resize (issue #27), kept out of WRITE_TOOLS so the
@@ -500,47 +143,24 @@ WRITE_TOOLS: list[dict[str, Any]] = [
 #: subresource (1.35 GA) - the model is never told about a tool the cluster
 #: cannot honor. Dispatch below still recognizes it unconditionally: an
 #: unregistered tool call fails in the UI gate, not with "unknown tool".
-RESIZE_TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "resize_pod",
-            "description": (
-                "Request an in-place resize of a running pod's CPU/memory "
-                "requests and limits without recreating the pod (Kubernetes "
-                "1.35+; containers whose resizePolicy is RestartContainer "
-                "are restarted in place). Runs only after the user approves "
-                "the request in the TUI approval dialog."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Pod name."},
-                    "namespace": {"type": "string", "description": "Namespace of the pod."},
-                    "resources": {
-                        "type": "object",
-                        "description": (
-                            "Container name -> {'requests'/'limits' -> "
-                            "{'cpu'/'memory' -> quantity}}. Only the "
-                            "quantities present are changed, e.g. "
-                            '{"app": {"requests": {"cpu": "200m"}}}.'
-                        ),
-                    },
-                },
-                "required": ["name", "namespace", "resources"],
-            },
-        },
-    },
-]
+RESIZE_TOOLS: list[dict[str, Any]] = [d.schema for d in TOOL_DEFS if d.capability == "pod_resize"]
 
-WRITE_TOOL_NAMES = frozenset(t["function"]["name"] for t in WRITE_TOOLS + RESIZE_TOOLS)
+WRITE_TOOL_NAMES = frozenset(d.name for d in TOOL_DEFS if d.effect == "cluster_write")
 
-#: tool name -> action keyword passed to UIBridge.agent_request_write.
-_WRITE_ACTIONS = {
-    "delete_resource": "delete",
-    "scale_resource": "scale",
-    "rollout_restart": "rollout_restart",
-    "resize_pod": "resize",
+#: UI dispatch key -> argument adapter unpacking the model's JSON arguments
+#: into the bridge call. Keyed by the registry's validated dispatch target
+#: (not the tool name) so a definition can never silently invoke a
+#: different handler; coverage is enforced at import time below.
+_UI_ARG_ADAPTERS: dict[str, Callable[[UIBridge, dict[str, Any]], Awaitable[str]]] = {
+    "agent_navigate": lambda ui, a: ui.agent_navigate(str(a["view"]), a.get("namespace")),
+    "agent_set_filter": lambda ui, a: ui.agent_set_filter(str(a["pattern"])),
+    "agent_open_logs": lambda ui, a: ui.agent_open_logs(
+        str(a["pod"]), str(a["namespace"]), a.get("container")
+    ),
+    "agent_open_describe": lambda ui, a: ui.agent_open_describe(
+        str(a["kind"]), str(a["name"]), a.get("namespace")
+    ),
+    "agent_drill_down": lambda ui, a: ui.agent_drill_down(str(a["name"])),
 }
 
 
@@ -640,49 +260,42 @@ class ToolExecutor:
         return cap_result(result)
 
     async def _dispatch(self, name: str, arguments: dict[str, Any]) -> str:
-        if name in UI_TOOL_NAMES:
-            return await self._dispatch_ui(name, arguments)
-        if name in WRITE_TOOL_NAMES:
-            return await self._dispatch_write(name, arguments)
-        if name == "list_resources":
-            return await self._list_resources(arguments)
-        if name == "get_resource":
-            return await self._get_resource(arguments)
-        if name == "get_logs":
-            return await self._get_logs(arguments)
-        if name == "get_events":
-            return await self._get_events(arguments)
-        if name == "list_operators":
-            return await self._list_operators(arguments)
-        if name == "diagnose_pod":
-            return await self._diagnose_pod(arguments)
-        raise ValueError(f"unknown tool: {name!r}")
+        # Routing derives from the registry's validated metadata: the
+        # effect picks the route and every handler resolves through the
+        # validated dispatch key (issue #91) — an unknown or misregistered
+        # tool fails import-time validation, not here.
+        tool = TOOLS_BY_NAME.get(name)
+        if tool is None:
+            raise ValueError(f"unknown tool: {name!r}")
+        if tool.effect == "ui_only":
+            return await self._dispatch_ui(tool, arguments)
+        if tool.effect == "cluster_write":
+            return await self._dispatch_write(tool, arguments)
+        handler: Callable[[dict[str, Any]], Awaitable[str]] = getattr(self, tool.dispatch)
+        return await handler(arguments)
 
-    async def _dispatch_ui(self, name: str, args: dict[str, Any]) -> str:
+    async def _dispatch_ui(self, tool: ToolDef, args: dict[str, Any]) -> str:
         if self._ui is None:
             raise ValueError("UI control unavailable in this session")
-        if name == "navigate":
-            return await self._ui.agent_navigate(str(args["view"]), args.get("namespace"))
-        if name == "set_filter":
-            return await self._ui.agent_set_filter(str(args["pattern"]))
-        if name == "open_logs":
-            return await self._ui.agent_open_logs(
-                str(args["pod"]), str(args["namespace"]), args.get("container")
+        adapter = _UI_ARG_ADAPTERS.get(tool.dispatch)
+        if adapter is None:
+            raise ValueError(
+                f"tool {tool.name!r}: no argument adapter for UI dispatch {tool.dispatch!r}"
             )
-        if name == "drill_down":
-            return await self._ui.agent_drill_down(str(args["name"]))
-        return await self._ui.agent_open_describe(
-            str(args["kind"]), str(args["name"]), args.get("namespace")
-        )
+        return await adapter(self._ui, args)
 
-    async def _dispatch_write(self, name: str, args: dict[str, Any]) -> str:
+    async def _dispatch_write(self, tool: ToolDef, args: dict[str, Any]) -> str:
         if self._ui is None:
             raise ValueError("write actions require the interactive TUI session")
+        action = tool.write_action
+        if action is None:  # registry validation guarantees this; defensive
+            raise ValueError(f"tool {tool.name!r} has no write action")
         # Tool schemas are not runtime validation: reject wrong-typed values
         # instead of coercing them (str(123) would show the user a target the
         # model never named; int(1.9) an operation it never asked for).
-        # resize_pod targets pods by definition, so its schema has no 'kind'.
-        kind = "pods" if name == "resize_pod" else args.get("kind")
+        # The resize action targets pods by definition, so its schema has no
+        # 'kind'; keyed off the registry's write_action, not the tool name.
+        kind = "pods" if action == "resize" else args.get("kind")
         target = args.get("name")
         namespace = args.get("namespace")
         if not isinstance(kind, str):
@@ -695,10 +308,13 @@ class ToolExecutor:
         if replicas is not None and (isinstance(replicas, bool) or not isinstance(replicas, int)):
             raise ValueError(f"'replicas' must be an integer, got {replicas!r}")
         resources = args.get("resources")
-        if name == "resize_pod":
+        if action == "resize":
             resources = _validated_resources(resources)
-        return await self._ui.agent_request_write(
-            _WRITE_ACTIONS[name],
+        # The validated dispatch key names the approval-gated bridge
+        # entrypoint; the registry rejects writes routed anywhere else.
+        request_write: Callable[..., Awaitable[str]] = getattr(self._ui, tool.dispatch)
+        return await request_write(
+            action,
             kind,
             target,
             namespace,
@@ -1094,3 +710,17 @@ def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     if manifest.get("kind") == "Secret":
         return mask_secret_manifest(manifest)
     return manifest
+
+
+# Fail at import time (startup/tests), not at a live tool call, when a
+# registry dispatch key stops matching a real handler (issue #91 rule 3).
+validate_dispatch_targets(TOOL_DEFS, executor_cls=ToolExecutor, bridge_cls=UIBridge)
+
+# Same import-time guarantee for argument adapters: every registered UI
+# dispatch key must have an adapter, so an accepted definition cannot fall
+# through to a different handler at call time.
+for _tool_def in TOOL_DEFS:
+    if _tool_def.effect == "ui_only" and _tool_def.dispatch not in _UI_ARG_ADAPTERS:
+        raise ValueError(
+            f"tool {_tool_def.name!r}: no argument adapter for UI dispatch {_tool_def.dispatch!r}"
+        )

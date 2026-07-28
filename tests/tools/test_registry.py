@@ -1,0 +1,258 @@
+"""Validated tool metadata registry (issue #91 Finding A).
+
+The registry is the single source of tool metadata: identity, dispatch,
+effect, approval policy, capability gate, and exposure surfaces. These
+tests pin the validation rules and that every derived surface matches the
+pre-registry lists exactly.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from korvid.tools.executor import ToolExecutor, UIBridge
+from korvid.tools.registry import (
+    TOOL_DEFS,
+    ToolDef,
+    agent_tool_schemas,
+    mcp_tool_schemas,
+    validate_dispatch_targets,
+    validate_tool_defs,
+)
+
+
+def _names(schemas: list[dict[str, Any]]) -> list[str]:
+    return [t["function"]["name"] for t in schemas]
+
+
+# --- registry contents -------------------------------------------------
+
+
+def test_tool_names_unique() -> None:
+    names = [d.name for d in TOOL_DEFS]
+    assert len(names) == len(set(names))
+
+
+def test_schema_names_agree_with_tool_names() -> None:
+    for d in TOOL_DEFS:
+        assert d.schema["type"] == "function"
+        assert d.schema["function"]["name"] == d.name
+
+
+def test_every_tool_has_a_dispatch_target() -> None:
+    """Rule 3: dispatch keys resolve against the real executor/bridge
+    classes — a typo'd handler name must fail here, not at call time."""
+    validate_dispatch_targets(TOOL_DEFS, executor_cls=ToolExecutor, bridge_cls=UIBridge)
+    for d in TOOL_DEFS:
+        assert d.dispatch
+
+
+def test_cluster_writes_require_confirmation_and_write_action() -> None:
+    for d in TOOL_DEFS:
+        if d.effect == "cluster_write":
+            assert d.approval == "user_confirmation"
+            assert d.write_action
+        else:
+            assert d.approval == "none"
+            assert d.write_action is None
+
+
+def test_no_mcp_tool_has_cluster_write_effect() -> None:
+    """Independent of list placement: the MCP surface can never contain a
+    cluster write or an approval-gated tool (issue #11 non-goal)."""
+    for d in TOOL_DEFS:
+        if "mcp" in d.surfaces:
+            assert d.effect != "cluster_write"
+            assert d.approval == "none"
+
+
+def test_resize_is_capability_gated() -> None:
+    resize = next(d for d in TOOL_DEFS if d.name == "resize_pod")
+    assert resize.capability == "pod_resize"
+    others = [d for d in TOOL_DEFS if d.name != "resize_pod"]
+    assert all(d.capability == "none" for d in others)
+
+
+# --- derived surfaces ---------------------------------------------------
+
+
+def test_full_agent_surface_matches_pre_registry_order() -> None:
+    from korvid.tools.executor import READ_TOOLS, RESIZE_TOOLS, UI_TOOLS, WRITE_TOOLS
+
+    schemas = agent_tool_schemas("full_agent", readonly=False, resize_supported=True)
+    assert schemas == READ_TOOLS + UI_TOOLS + WRITE_TOOLS + RESIZE_TOOLS
+
+
+def test_full_agent_surface_readonly_omits_writes() -> None:
+    from korvid.tools.executor import READ_TOOLS, UI_TOOLS
+
+    schemas = agent_tool_schemas("full_agent", readonly=True, resize_supported=True)
+    assert schemas == READ_TOOLS + UI_TOOLS
+
+
+def test_full_agent_surface_gates_resize_on_capability() -> None:
+    schemas = agent_tool_schemas("full_agent", readonly=False, resize_supported=False)
+    assert "resize_pod" not in _names(schemas)
+    assert "delete_resource" in _names(schemas)
+
+
+def test_small_agent_surface_offers_two_ui_tools() -> None:
+    from korvid.tools.executor import READ_TOOLS
+
+    schemas = agent_tool_schemas("small_agent", readonly=True, resize_supported=False)
+    assert _names(schemas) == [*_names(READ_TOOLS), "open_logs", "open_describe"]
+
+
+def test_mcp_surface_is_read_plus_ui_drive() -> None:
+    from korvid.tools.executor import READ_TOOLS, UI_TOOLS
+
+    assert mcp_tool_schemas() == READ_TOOLS + UI_TOOLS
+
+
+def test_unknown_surface_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown surface"):
+        agent_tool_schemas("mcp", readonly=False, resize_supported=False)
+
+
+# --- validation of malformed definitions --------------------------------
+
+
+def _tool(name: str, **overrides: Any) -> ToolDef:
+    fields: dict[str, Any] = {
+        "name": name,
+        "schema": {"type": "function", "function": {"name": name, "parameters": {}}},
+        "effect": "cluster_read",
+        "dispatch": "_handler",
+        "surfaces": frozenset({"full_agent"}),
+    }
+    fields.update(overrides)
+    return ToolDef(**fields)
+
+
+def test_validate_rejects_duplicate_names() -> None:
+    with pytest.raises(ValueError, match="duplicate tool name"):
+        validate_tool_defs([_tool("a"), _tool("a")])
+
+
+def test_validate_rejects_schema_name_mismatch() -> None:
+    bad = _tool("a", schema={"type": "function", "function": {"name": "b", "parameters": {}}})
+    with pytest.raises(ValueError, match="schema name"):
+        validate_tool_defs([bad])
+
+
+def test_validate_rejects_missing_dispatch() -> None:
+    with pytest.raises(ValueError, match="dispatch"):
+        validate_tool_defs([_tool("a", dispatch="")])
+
+
+def test_validate_rejects_write_without_action() -> None:
+    bad = _tool("a", effect="cluster_write", approval="user_confirmation")
+    with pytest.raises(ValueError, match="write_action"):
+        validate_tool_defs([bad])
+
+
+def test_validate_rejects_unapproved_write() -> None:
+    bad = _tool("a", effect="cluster_write", write_action="delete")
+    with pytest.raises(ValueError, match="approval"):
+        validate_tool_defs([bad])
+
+
+def test_validate_rejects_write_action_on_non_write() -> None:
+    bad = _tool("a", write_action="delete")
+    with pytest.raises(ValueError, match="write_action"):
+        validate_tool_defs([bad])
+
+
+def test_validate_rejects_mcp_exposed_write() -> None:
+    bad = _tool(
+        "a",
+        effect="cluster_write",
+        approval="user_confirmation",
+        write_action="delete",
+        surfaces=frozenset({"full_agent", "mcp"}),
+    )
+    with pytest.raises(ValueError, match="mcp"):
+        validate_tool_defs([bad])
+
+
+def test_validate_dispatch_targets_rejects_unknown_handler() -> None:
+    class _Empty:
+        pass
+
+    bad = _tool("a", dispatch="_missing_handler")
+    with pytest.raises(ValueError, match="_missing_handler"):
+        validate_dispatch_targets([bad], executor_cls=_Empty, bridge_cls=_Empty)
+
+
+def test_validate_dispatch_targets_rejects_read_tool_naming_bridge_method() -> None:
+    """Rule: a cluster read must dispatch to the executor — a bridge-only
+    method name (here `agent_navigate`) must fail import-time validation,
+    not surface later as a runtime AttributeError."""
+    bad = _tool("a", dispatch="agent_navigate")
+    with pytest.raises(ValueError, match="executor"):
+        validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
+
+
+def test_validate_dispatch_targets_rejects_ui_tool_naming_executor_method() -> None:
+    bad = _tool("a", effect="ui_only", dispatch="_list_resources")
+    with pytest.raises(ValueError, match="bridge"):
+        validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
+
+
+def test_validate_dispatch_targets_rejects_write_tool_naming_executor_method() -> None:
+    bad = _tool(
+        "a",
+        effect="cluster_write",
+        approval="user_confirmation",
+        write_action="delete",
+        dispatch="_list_resources",
+    )
+    with pytest.raises(ValueError, match="agent_request_write"):
+        validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
+
+
+# --- golden surface order (pre-registry literals) ------------------------
+
+_READ_ORDER = [
+    "list_resources",
+    "get_resource",
+    "get_logs",
+    "get_events",
+    "list_operators",
+    "diagnose_pod",
+]
+_UI_ORDER = ["navigate", "set_filter", "open_logs", "open_describe", "drill_down"]
+_WRITE_ORDER = ["delete_resource", "scale_resource", "rollout_restart"]
+
+
+def test_full_agent_surface_matches_golden_order() -> None:
+    """Byte-identical-order criterion pinned against literals, not against
+    lists derived from the same registry (which would move together)."""
+    schemas = agent_tool_schemas("full_agent", readonly=False, resize_supported=True)
+    assert _names(schemas) == _READ_ORDER + _UI_ORDER + _WRITE_ORDER + ["resize_pod"]
+
+
+def test_small_agent_surface_matches_golden_order() -> None:
+    schemas = agent_tool_schemas("small_agent", readonly=True, resize_supported=False)
+    assert _names(schemas) == [*_READ_ORDER, "open_logs", "open_describe"]
+
+
+def test_mcp_surface_matches_golden_order() -> None:
+    assert _names(mcp_tool_schemas()) == _READ_ORDER + _UI_ORDER
+
+
+def test_validate_dispatch_targets_rejects_write_bypassing_approval_entrypoint() -> None:
+    """Security invariant: every agent write routes through the
+    approval-gated `agent_request_write` — any other bridge method, even a
+    callable one, must be rejected at import time."""
+    bad = _tool(
+        "a",
+        effect="cluster_write",
+        approval="user_confirmation",
+        write_action="delete",
+        dispatch="agent_navigate",
+    )
+    with pytest.raises(ValueError, match="agent_request_write"):
+        validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
