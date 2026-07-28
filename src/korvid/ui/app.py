@@ -2140,7 +2140,10 @@ class KorvidApp(App[None]):
 
     def _open_agent_setup(self) -> None:
         if self._agent_configurator is None:
-            self.notify("Agent setup unavailable in this build", severity="warning")
+            self.notify(
+                "Agent setup unavailable — install with: pip install 'korvid[agent]'",
+                severity="warning",
+            )
             return
         # The wizard applies the settings itself (via apply_settings) before
         # persisting, so a refused swap keeps the wizard open and unsaved.
@@ -2193,7 +2196,10 @@ class KorvidApp(App[None]):
         """`:mcp` shows server state; `:mcp on` / `:mcp off` toggle it live."""
         mcp = self._mcp
         if mcp is None:
-            self.notify("MCP unavailable in this build", severity="warning")
+            self.notify(
+                "MCP unavailable — install with: pip install 'korvid[mcp]'",
+                severity="warning",
+            )
             return
         if not args:
             self.notify(mcp.status())
@@ -2238,7 +2244,10 @@ class KorvidApp(App[None]):
         and False is returned; the swap is also refused while a turn is live.
         """
         if self._rebuild_agent is None:
-            self.notify("Agent rebuild unavailable in this build", severity="warning")
+            self.notify(
+                "Agent rebuild unavailable — install with: pip install 'korvid[agent]'",
+                severity="warning",
+            )
             return False
         if self._agent_task is not None and not self._agent_task.done():
             self.notify("Agent is busy — wait for the current turn to finish", severity="warning")

@@ -20,7 +20,7 @@ from korvid.agent.context import cluster_context_note
 from korvid.agent.profiles import build_profile
 from korvid.agent.provider import LLMProvider
 from korvid.agent.runtime import AgentRuntime
-from korvid.agent.setup import AgentSettings
+from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog, default_audit_path
 from korvid.core.config import (
     DEFAULT_CONFIG_PATH,
@@ -44,34 +44,58 @@ from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
-from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
-from korvid.providers.configurator import ProviderConfigurator
-from korvid.providers.ollama import OllamaOptions
-from korvid.providers.registry import create_provider
-from korvid.providers.token_store import TokenStore
 from korvid.tools.executor import (
     READ_TOOLS,
     UI_TOOLS,
     ToolExecutor,
     UIBridge,
 )
-from korvid.ui.app import AppUIBridge, ContextSwitchResult, EventsFetcher, KorvidApp
+from korvid.ui.app import (
+    AppUIBridge,
+    ContextSwitchResult,
+    EventsFetcher,
+    KorvidApp,
+    MCPControllerLike,
+)
 from korvid.ui.widgets.resource_table import sanitize_views
 
 logger = logging.getLogger(__name__)
 
+#: Actionable install hints (issue #73): an explicitly requested feature
+#: whose extra is missing must fail with instructions, never degrade
+#: silently or dump an ImportError traceback.
+_MCP_INSTALL_HINT = (
+    "MCP support was requested (--mcp or mcp.enabled) but its dependencies "
+    "are not installed — install them with: pip install 'korvid[mcp]'"
+)
+_AGENT_INSTALL_HINT = (
+    "the embedded agent is enabled (agent.provider in config.yaml) but its "
+    "dependencies are not installed — install them with: pip install 'korvid[agent]'"
+)
 
-def _make_mcp_factory(
+
+def _build_mcp_controller(
     config: KorvidConfig,
     kube: KubeClient,
     aliases: dict[str, ResourceMeta],
     ui: UIBridge | None,
-) -> Callable[[], KorvidMCPServer]:
-    """Factory the :mcp controller uses to build a fresh server per start.
+) -> MCPControllerLike | None:
+    """Import and wire the MCP adapter only when its extra is installed.
+
+    Base installations get None (the `:mcp` command reports the feature as
+    unavailable); a config that explicitly enables MCP fails with an
+    actionable install hint instead of silently degrading.
 
     The surface is read + UI-drive tools only - write tools stay with the
     built-in agent until an approval UX for external callers is designed
     (issue #11 non-goal)."""
+    try:
+        from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
+    except ModuleNotFoundError as exc:
+        if config.mcp_enabled:
+            raise SystemExit(f"korvid: {_MCP_INSTALL_HINT}") from exc
+        logger.info("MCP adapter not installed; :mcp disabled (%s)", exc)
+        return None
 
     def factory() -> KorvidMCPServer:
         return KorvidMCPServer(
@@ -81,7 +105,7 @@ def _make_mcp_factory(
             endpoint_path=default_endpoint_path(),
         )
 
-    return factory
+    return MCPController(factory)
 
 
 async def _shutdown(
@@ -258,15 +282,40 @@ def _build_agent_wiring(
     cluster_context: str | None = None,
 ) -> tuple[
     AgentRuntime | None,
-    ProviderConfigurator,
-    Callable[[AgentSettings], AgentRuntime | None],
+    AgentConfigurator | None,
+    Callable[[AgentSettings], AgentRuntime | None] | None,
     Callable[[AgentRuntime | None, bool, str | None], None],
     list[LLMProvider | None],
     _UIBridgeProxy,
 ]:
-    """Build the initial agent runtime plus the :ai wizard's configurator/rebuild hooks."""
-    token_store = TokenStore()
+    """Build the initial agent runtime plus the :ai wizard's configurator/rebuild hooks.
+
+    Provider adapters and credential storage are optional (issue #73): a
+    base installation gets a runtime-less wiring whose `:ai` command reports
+    the feature as unavailable, while a config that explicitly enables the
+    agent fails with an actionable install hint.
+    """
     ui_proxy = _UIBridgeProxy()
+    try:
+        from korvid.providers.configurator import ProviderConfigurator
+        from korvid.providers.ollama import OllamaOptions
+        from korvid.providers.registry import create_provider
+        from korvid.providers.token_store import TokenStore
+    except ModuleNotFoundError as exc:
+        if config.agent_enabled:
+            raise SystemExit(f"korvid: {_AGENT_INSTALL_HINT}") from exc
+        logger.info("embedded-agent providers not installed; :ai disabled (%s)", exc)
+
+        def _retarget_noop(
+            runtime: AgentRuntime | None,
+            pod_resize_supported: bool,
+            cluster_context: str | None,
+        ) -> None:
+            return None
+
+        return None, None, None, _retarget_noop, [None], ui_proxy
+
+    token_store = TokenStore()
     # Model-capability profile (issue #71): tool surface, budgets, and
     # prompts come from one place so the initial build and every wizard
     # rebuild stay consistent. In readonly mode the model is never even
@@ -429,8 +478,8 @@ def _load_startup_config(readonly: bool, mcp: bool = False) -> KorvidConfig:
     return config
 
 
-async def _start_mcp_if_enabled(config: KorvidConfig, controller: MCPController) -> None:
-    if not config.mcp_enabled:
+async def _start_mcp_if_enabled(config: KorvidConfig, controller: MCPControllerLike | None) -> None:
+    if not config.mcp_enabled or controller is None:
         return
     startup_msg = await controller.start()
     if startup_msg.startswith("ERROR"):
@@ -438,7 +487,7 @@ async def _start_mcp_if_enabled(config: KorvidConfig, controller: MCPController)
 
 
 async def _teardown(
-    controller: MCPController,
+    controller: MCPControllerLike | None,
     discovery_task: asyncio.Task[None],
     provider: LLMProvider | None,
     kube: KubeClient,
@@ -447,7 +496,7 @@ async def _teardown(
     only *after* the critical provider/kube cleanup, matching what
     asyncio.run()'s final task-gathering would do anyway - but explicitly,
     with the exception consumed instead of swallowed."""
-    leftover = await controller.shutdown()
+    leftover = await controller.shutdown() if controller is not None else None
     await _shutdown(discovery_task, provider, kube)
     if leftover is not None:
         with contextlib.suppress(BaseException):
@@ -668,7 +717,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         )
     )
 
-    mcp_controller = MCPController(_make_mcp_factory(config, kube, aliases, ui_proxy))
+    mcp_controller = _build_mcp_controller(config, kube, aliases, ui_proxy)
 
     # `:ctx` switching (issue #36): the closure needs the app (for discovery
     # restarts) and the live discovery task, both created below — boxes
