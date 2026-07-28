@@ -6,6 +6,10 @@ AI-native Kubernetes TUI — a k9s-style keyboard-first cockpit with an embedded
 
 *Corvids are the only birds known to use tools. So does this one.*
 
+![korvid demo — browsing pods, filtering, describe, live logs, and the help overlay](docs/assets/demo.gif)
+
+*Recorded against canned demo data — see [docs/demo](docs/demo) to regenerate or run it yourself.*
+
 ## Status
 
 Work in progress — core TUI, log viewer, live metrics, MCP server, and agent
