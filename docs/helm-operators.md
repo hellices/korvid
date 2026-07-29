@@ -1,8 +1,9 @@
 # Helm and operators
 
 Package-manager views: the Helm release browser (with install / upgrade /
-rollback) and the OLM operator catalog. All writes here run the same
-[safety pipeline](ops.md#the-safety-model) as every other mutation.
+rollback / uninstall) and the OLM operator catalog. All writes here run
+the same [safety pipeline](ops.md#the-safety-model) as every other
+mutation.
 
 ## Helm release browser
 
@@ -17,7 +18,7 @@ release or a single revision with the decoded metadata and the
 user-supplied values — the rendered manifest blob is deliberately left
 out.
 
-## Helm install / upgrade / rollback
+## Helm install / upgrade / rollback / uninstall
 
 When a `helm` binary is on `PATH`, the browser gains write actions
 (without one the keys explain what's missing and nothing else changes):
@@ -27,6 +28,7 @@ When a `helm` binary is on `PATH`, the browser gains write actions
 | `i` | `:helm` | Install: search-first chart picker (`helm search repo` per keyword), release/version/namespace wizard, optional values in `$EDITOR` |
 | `u` | `:helm` | Upgrade the selected release — same wizard, pinned to that release; the picker pre-searches the release's chart name; defaults to reusing the release's current values (`--reuse-values`) |
 | `r` | revision drill-down | Roll back the release to the selected revision |
+| `Ctrl-D` | `:helm` | Uninstall the selected release (`helm uninstall`) |
 | `Ctrl-R` | chart picker | Manage chart repositories: list configured repos, add one (name + URL), refresh indexes (`helm repo update`) |
 
 The chart picker opens instantly and fetches charts per keyword — an
@@ -50,6 +52,36 @@ dialog, and every run is audit-logged like any other write — no audit
 log, no writes.  Values entered through `$EDITOR` are passed via a
 private temp file that is deleted as soon as helm returns.  OCI registry
 auth stays outside korvid — configure it with the helm CLI itself.
+
+Uninstall (`Ctrl-D` on a release row) previews the removal with
+`helm uninstall --dry-run` and, because it destroys every resource the
+release owns, requires **typing the release name** in the confirmation
+dialog before it runs.  Release history is removed with the release
+(helm's default); the revision drill-down stays read-only apart from
+rollback — uninstall only works from the release list.
+
+## Operator uninstall
+
+`Ctrl-D` on a **Subscription** row starts the OLM uninstall flow.  The
+approval dialog spells out exactly what will happen before you confirm:
+
+- the Subscription is deleted first,
+- then its installed CSV (`status.installedCSV`, uid-pinned so a
+  replaced operator is never deleted by mistake) — deleting the CSV is
+  what removes the operator's Deployment and RBAC through OLM's garbage
+  collection,
+- **CRDs and custom resources are kept** — korvid never deletes them, so
+  your workloads' custom objects survive the uninstall.
+
+If the Subscription delete fails, the CSV is left untouched (deleting
+the CSV alone would just make OLM reinstall it).  Both deletes are
+separately audit-logged.
+
+`Ctrl-D` on a **CSV** row redirects to the same flow when korvid can
+find the owning Subscription (visit `:subscriptions` first so it is
+known); deleting a CSV that still has a Subscription would only trigger
+a reinstall.  A CSV with no known Subscription falls back to a plain
+resource delete.
 
 ## Operator catalog (OLM)
 

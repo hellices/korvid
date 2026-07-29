@@ -286,6 +286,32 @@ class HelmCLI:
         """`helm rollback` - a cluster write; callers gate it behind approval."""
         return await self._run("rollback", release, str(revision), "--namespace", namespace)
 
+    @staticmethod
+    def _uninstall_args(release: str, namespace: str, keep_history: bool) -> list[str]:
+        args = ["uninstall", release, "--namespace", namespace]
+        if keep_history:
+            args.append("--keep-history")
+        return args
+
+    async def uninstall(self, release: str, namespace: str, *, keep_history: bool = False) -> str:
+        """`helm uninstall` - deletes every resource the release owns.
+
+        `keep_history` retains the release Secrets so `helm rollback` can
+        resurrect it later; the default mirrors helm's (history removed).
+        Callers gate this behind the approval dialog and fail-closed audit.
+        """
+        return await self._run(*self._uninstall_args(release, namespace, keep_history))
+
+    async def dry_run_uninstall(
+        self, release: str, namespace: str, *, keep_history: bool = False
+    ) -> str:
+        """`helm uninstall --dry-run`: simulates the uninstall, nothing deleted.
+
+        Output is helm's uninstall summary (hooks and the would-be-removed
+        release), which the approval dialog shows as the preview.
+        """
+        return await self._run(*self._uninstall_args(release, namespace, keep_history), "--dry-run")
+
     async def diff_rollback(self, release: str, revision: int, namespace: str) -> str:
         """`helm diff rollback` (plugin): live-vs-revision diff for previews."""
         return await self._run("diff", "rollback", release, str(revision), "--namespace", namespace)

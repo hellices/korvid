@@ -75,9 +75,9 @@ Full key reference: [docs/keybindings.md](docs/keybindings.md).
   plans, port-forwarding with liveness tracking, file transfer over the
   exec API, distroless debug fallback, and node shells.
 - **[Helm and operators](docs/helm-operators.md)** — a release browser that
-  needs no helm binary, search-first chart install / upgrade / rollback
-  wizards with dry-run previews, chart repo management, and the OLM
-  operator catalog with approval-gated installs.
+  needs no helm binary, search-first chart install / upgrade / rollback /
+  uninstall wizards with dry-run previews, chart repo management, and the
+  OLM operator catalog with approval-gated installs and uninstalls.
 - **[AI agent](docs/agent.md)** — screen-context awareness, UI-driving
   tools, `diagnose_pod`, cloud-provider awareness (AKS / EKS / GKE),
   provider setup (`:ai` wizard), capability profiles for small local
