@@ -361,7 +361,7 @@ async def test_install_key_walks_wizard_confirm_and_creates_subscription(
         )
 
 
-async def test_install_key_outside_catalog_view_warns(tmp_path: Path) -> None:
+async def test_install_key_outside_catalog_view_is_inert(tmp_path: Path) -> None:
     rec = Recorder()
     app = make_app(
         {"subscriptions": [_subscription("cert-manager")]},
@@ -372,7 +372,14 @@ async def test_install_key_outside_catalog_view_warns(tmp_path: Path) -> None:
         await _navigate(pilot, "subscriptions", "subscriptions")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="subscription listed")
+        # Off the OLM views the binding is gated (issue #114): the key is
+        # inert — no wizard, no warning, and certainly no write.
         await pilot.press("I")
+        await pilot.pause()
+        assert len(app.screen_stack) == 1
+        assert rec.calls == []
+        # A direct invocation (bypassing the key gate) still explains itself.
+        await app.action_operator_install()
         await until(
             pilot,
             lambda: any("does not apply" in str(n.message) for n in app._notifications),

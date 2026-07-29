@@ -493,7 +493,7 @@ class KorvidApp(App[None]):
         Binding("M", "sort_by_mem", "Sort MEM", show=False, id="sort_by_mem--alt"),
         Binding("ctrl+a", "toggle_agent", "AI", priority=True, id="toggle_agent"),
         Binding("ctrl+d", "delete_resource", "Delete", id="delete_resource"),
-        Binding("r", "rollout_restart", "Restart", show=False, id="rollout_restart"),
+        Binding("r", "rollout_restart", "Restart", id="rollout_restart"),
         Binding(
             "R",
             "resize_pod",
@@ -501,24 +501,30 @@ class KorvidApp(App[None]):
             show=False,
             id="resize_pod",
         ),
-        Binding("S", "scale_resource", "Scale", show=False, id="scale_resource"),
+        Binding("S", "scale_resource", "Scale", id="scale_resource"),
         Binding("e", "edit_resource", "Edit", show=False, id="edit_resource"),
         Binding("i", "hint_details", "Hint details", show=False, id="hint_details"),
         Binding(
             "I",
             "operator_install",
             "Install operator / approve InstallPlan",
-            show=False,
             id="operator_install",
         ),
         # Real terminals deliver Shift+F as "F" (see shift+l above).
-        Binding("shift+f", "port_forward", "Port-forward", show=False, id="port_forward"),
+        Binding("shift+f", "port_forward", "Port-forward", id="port_forward"),
         Binding("F", "port_forward", "Port-forward", show=False, id="port_forward--alt"),
         # Node ops (issue #40): cordon / uncordon / drain, nodes view only.
-        Binding("c", "cordon_node", "Cordon", show=False, id="cordon_node"),
-        Binding("u", "uncordon_node", "Uncordon", show=False, id="uncordon_node"),
-        Binding("shift+d", "drain_node", "Drain", show=False, id="drain_node"),
+        Binding("c", "cordon_node", "Cordon", id="cordon_node"),
+        Binding("u", "uncordon_node", "Uncordon", id="uncordon_node"),
+        Binding("shift+d", "drain_node", "Drain", id="drain_node"),
         Binding("D", "drain_node", "Drain", show=False, id="drain_node--alt"),
+        # Helm ops (issues #31/#114): dedicated per-view bindings so the
+        # overloaded i/u/r keys carry the right footer label and remain
+        # independently remappable; `check_action` routes each key to the
+        # binding whose view is on screen.
+        Binding("i", "helm_install", "Install chart", id="helm_install"),
+        Binding("u", "helm_upgrade", "Upgrade", id="helm_upgrade"),
+        Binding("r", "helm_rollback", "Rollback", id="helm_rollback"),
         Binding("ctrl+t", "transfer", "Transfer", show=False, id="transfer"),
     ]
 
@@ -537,9 +543,6 @@ class KorvidApp(App[None]):
         ("Table", "ctrl+w w", "Focus the other pane", ""),
         ("Table", "ctrl+w q", "Close the focused pane", ""),
         ("Logs", "escape", "Close pane (or dismiss search)", ""),
-        ("Helm", "i", "Install a chart (helm view; needs helm on PATH)", "hint_details"),
-        ("Helm", "u", "Upgrade the selected release (helm view)", "uncordon_node"),
-        ("Helm", "r", "Rollback to the selected revision (drill-down)", "rollout_restart"),
     )
 
     DEFAULT_CSS = """
@@ -838,6 +841,9 @@ class KorvidApp(App[None]):
     @current_kind.setter
     def current_kind(self, value: str) -> None:
         self._pane.kind = value
+        # The footer legend is view-scoped (issue #114): Textual cannot see
+        # internal kind switches, so prompt it to re-evaluate check_action.
+        self.refresh_bindings()
 
     @property
     def current_scope(self) -> str:
@@ -1196,13 +1202,14 @@ class KorvidApp(App[None]):
         ]
         # The static BINDINGS list bypasses check_action, so drop entries
         # whose action is unavailable in this composition (e.g. Ctrl-A
-        # without the [agent] extra, issue #73).
+        # without the [agent] extra, issue #73). View-gated actions stay:
+        # the overlay documents every view, not just the current one.
         app_bindings = [
             binding
             for binding in (
                 raw if isinstance(raw, Binding) else Binding(*raw) for raw in self.BINDINGS
             )
-            if self.check_action(binding.action, ()) is not False
+            if self._action_available(binding.action)
         ]
         groups = collect_help(
             app_bindings,
@@ -1337,6 +1344,8 @@ class KorvidApp(App[None]):
                 await self.watch_manager.stop(*old)
             pane.kind = new_kind
             pane.scope = new_scope
+            # The footer legend follows the focused pane's kind (issue #114).
+            self.refresh_bindings()
             await self.watch_manager.start(new_kind, new_scope)
             await self._sync_metrics_poller()
 
@@ -1875,13 +1884,6 @@ class KorvidApp(App[None]):
         """Open the read-only detail overlay for the hinted pod row (issue #34):
         the full trouble list plus recent Warning events - everything the
         two-line strip folded away."""
-        if self._canonical_kind(self.current_kind) == "helmreleases":
-            # Same key, different view: on the helm browser `i` starts the
-            # chart install wizard (issue #31). Synchronous: the picker must
-            # open with the keypress, before any buffered navigation input
-            # could change the view the namespace is derived from.
-            self._helm_install_flow()
-            return
         if self.current_kind != "pods":
             return
         row_key = self._cursor_row_key()
@@ -3564,6 +3566,10 @@ class KorvidApp(App[None]):
             except NoMatches:
                 continue
             table.set_class(len(self._panes) > 1 and index == self._focused_pane, "focused-pane")
+        # Every focused-pane change funnels through here; the panes may show
+        # different kinds, so the view-scoped footer legend must follow the
+        # focus (issue #114).
+        self.refresh_bindings()
 
     def _focus_other_pane(self) -> None:
         """`ctrl+w w`: move focus (commands, filters, keybindings) across."""
@@ -4217,32 +4223,7 @@ class KorvidApp(App[None]):
         )
 
     async def action_rollout_restart(self) -> None:
-        """r: rolling restart of the selected deployment/statefulset/daemonset;
-        on the helm revision drill-down the same key rolls the release back
-        to the selected revision (issue #31)."""
-        if self._canonical_kind(self.current_kind) == "helmrevisions":
-            # Target captured synchronously with the keypress; only the slow
-            # preview + confirmation run in a worker (the diff render can
-            # block for up to _HELM_PREVIEW_TIMEOUT and must not freeze the
-            # message pump, or the status-bar progress could never paint).
-            helm = self._helm_gate()
-            if helm is None:
-                return
-            epoch = self._ctx_epoch
-            ns, name = self._selected_ns_name()
-            if name is None:
-                return
-            row = self._helm_revision_row(ns, name)
-            if row is None:
-                self.notify("no helm revision selected", severity="warning")
-                return
-            namespace = ns or row.namespace
-            self.run_worker(
-                self._helm_rollback_flow(helm, row, ns, name, namespace, epoch),
-                exclusive=True,
-                group="helm-write",
-            )
-            return
+        """r: rolling restart of the selected deployment/statefulset/daemonset."""
         ops = self._write_ops
         if ops is None:
             self.notify("Rollout restart unavailable in this session", severity="warning")
@@ -4692,15 +4673,46 @@ class KorvidApp(App[None]):
         await self._cordon_action(unschedulable=True)
 
     async def action_uncordon_node(self) -> None:
-        """u: mark the selected node schedulable again (kubectl uncordon);
-        on the helm browser the same key upgrades the selected release
-        (issue #31)."""
-        if self._canonical_kind(self.current_kind) == "helmreleases":
-            # Synchronous: the picker opens with the keypress; buffered
-            # cursor keys must not retarget the upgrade.
-            self._helm_upgrade_flow()
-            return
+        """u: mark the selected node schedulable again (kubectl uncordon)."""
         await self._cordon_action(unschedulable=False)
+
+    def action_helm_install(self) -> None:
+        """i on the helm browser: start the chart install wizard (issue #31).
+        Synchronous: the picker must open with the keypress, before any
+        buffered navigation input could change the view the namespace is
+        derived from."""
+        self._helm_install_flow()
+
+    def action_helm_upgrade(self) -> None:
+        """u on the helm browser: upgrade the selected release (issue #31).
+        Synchronous: the picker opens with the keypress; buffered cursor
+        keys must not retarget the upgrade."""
+        self._helm_upgrade_flow()
+
+    def action_helm_rollback(self) -> None:
+        """r on the helm revision drill-down: roll the release back to the
+        selected revision (issue #31). Target captured synchronously with
+        the keypress; only the slow preview + confirmation run in a worker
+        (the diff render can block for up to _HELM_PREVIEW_TIMEOUT and must
+        not freeze the message pump, or the status-bar progress could never
+        paint)."""
+        helm = self._helm_gate()
+        if helm is None:
+            return
+        epoch = self._ctx_epoch
+        ns, name = self._selected_ns_name()
+        if name is None:
+            return
+        row = self._helm_revision_row(ns, name)
+        if row is None:
+            self.notify("no helm revision selected", severity="warning")
+            return
+        namespace = ns or row.namespace
+        self.run_worker(
+            self._helm_rollback_flow(helm, row, ns, name, namespace, epoch),
+            exclusive=True,
+            group="helm-write",
+        )
 
     async def _cordon_action(self, *, unschedulable: bool) -> None:
         """Shared cordon/uncordon flow: SSAR pre-check, dry-run preview,
@@ -5552,7 +5564,7 @@ class KorvidApp(App[None]):
         )
 
     def _helm_upgrade_flow(self) -> None:
-        """Upgrade (the `uncordon_node` key on a release row): the same
+        """Upgrade (the `helm_upgrade` key on a release row): the same
         wizard with the release name and namespace fixed to the selected
         row's facts; the picker pre-searches the release's chart name.
         Synchronous by design: no await may separate the keypress from the
@@ -6340,9 +6352,64 @@ class KorvidApp(App[None]):
         would let the user's next y/Enter approve an unexpected write."""
         return self._agent_panel_expanded() and len(self.screen_stack) == 1
 
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Hide agent actions entirely when the [agent] extra is absent."""
+    #: Resource identities — (group, plural), see `_RESTARTABLE` — where each
+    #: view-specific action applies; actions absent from the map work on
+    #: every view. `check_action` consults this so the footer legend shows
+    #: only the current view's keys and overloaded keys (i/u/r) dispatch to
+    #: the binding whose view is on screen (issue #114). Identity, not the
+    #: kind string: a foreign CRD claiming a bare plural (e.g.
+    #: `packagemanifests`) must not surface another view's actions.
+    #: `log_search_next`/`log_search_prev` stay unlisted on purpose: they
+    #: also serve the describe pane's search (any view) and the
+    #: sort-by-name fallback.
+    _ACTION_VIEWS: ClassVar[dict[str, frozenset[tuple[str, str]]]] = {
+        "shell": frozenset({("", "pods"), ("", "nodes")}),
+        "logs": frozenset({("", "pods")}),
+        "logs_multi": frozenset({("", "pods")}),
+        "log_format": frozenset({("", "pods")}),
+        "log_wrap": frozenset({("", "pods")}),
+        "log_timestamps": frozenset({("", "pods")}),
+        "log_save": frozenset({("", "pods")}),
+        "log_previous": frozenset({("", "pods")}),
+        "hint_details": frozenset({("", "pods")}),
+        "resize_pod": frozenset({("", "pods")}),
+        "transfer": frozenset({("", "pods")}),
+        # Core-group identities of FORWARDABLE_KINDS (pods, services).
+        "port_forward": frozenset(("", plural) for plural in FORWARDABLE_KINDS),
+        "cordon_node": frozenset({("", "nodes")}),
+        "uncordon_node": frozenset({("", "nodes")}),
+        "drain_node": frozenset({("", "nodes")}),
+        "rollout_restart": _RESTARTABLE,
+        "scale_resource": _SCALABLE,
+        "operator_install": frozenset(
+            {(PACKAGES_GROUP, "packagemanifests"), (OPERATORS_GROUP, "installplans")}
+        ),
+        # The synthetic helm views (group "", client-side plurals).
+        "helm_install": frozenset({(HELM_RELEASES_META.group, HELM_RELEASES_META.plural)}),
+        "helm_upgrade": frozenset({(HELM_RELEASES_META.group, HELM_RELEASES_META.plural)}),
+        "helm_rollback": frozenset({(HELM_REVISIONS_META.group, HELM_REVISIONS_META.plural)}),
+    }
+
+    def _action_available(self, action: str) -> bool:
+        """Composition availability, independent of the current view: the
+        help overlay filters on this alone so off-view keys stay documented
+        (issues #73, #114)."""
         return not (action == "toggle_agent" and not self._agent_available)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Gate bindings on composition availability and the current view.
+
+        Returning False both hides the binding from the footer and skips it
+        during key dispatch, so overloaded keys fall through to the binding
+        whose view is on screen (issue #114).
+        """
+        if not self._action_available(action):
+            return False
+        views = self._ACTION_VIEWS.get(action)
+        if views is None:
+            return True
+        meta = self.aliases.get(self._canonical_kind(self.current_kind))
+        return meta is not None and (meta.group, meta.plural) in views
 
     def action_toggle_agent(self) -> None:
         """Toggle the agent chat panel; show setup hint when unconfigured."""
