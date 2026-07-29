@@ -498,9 +498,17 @@ class MCPController(MCPControllerBase):
             if not done:
                 return task
         self._consume_result(task)
-        self._server = None
-        self._task = None
+        # Clear ownership only while it still points at *this* run: a
+        # concurrent start() may have installed a fresh server while the old
+        # task was awaited, and wiping its references would orphan a live
+        # run behind a `running == False` report.
+        if self._task is task:
+            self._server = None
+            self._task = None
         return None
+
+    def pending_task(self) -> asyncio.Task[None] | None:
+        return self._task if self._task is not None and not self._task.done() else None
 
     @staticmethod
     def _consume_result(task: asyncio.Task[None] | None) -> None:

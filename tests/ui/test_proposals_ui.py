@@ -315,6 +315,32 @@ async def test_pending_proposals_show_in_the_status_bar(tmp_path: Path) -> None:
         await until(pilot, lambda: "proposal" in str(app._status_bar.render()))
 
 
+async def test_multiple_pending_proposals_keep_source_and_target_in_the_label(
+    tmp_path: Path,
+) -> None:
+    """The persistent indicator names source and target; queueing a second
+    proposal must not reduce it to a bare count — the next reviewable
+    proposal's caller and target stay visible."""
+    store = ProposalStore()
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store)
+    async with app.run_test():
+        await _submit(app)
+        await app.agent_submit_write_proposal(
+            "delete",
+            "deployments",
+            "web-2",
+            "default",
+            session_id="sess-2",
+            client_name="other-agent",
+            client_version="1.0",
+        )
+        label = app._proposals_label()
+    assert "2 proposals" in label
+    assert "claude-code" in label
+    assert "deployments/web" in label
+    assert ":proposals" in label
+
+
 async def test_shutdown_expires_pending_proposals(tmp_path: Path) -> None:
     store = ProposalStore()
     app = make_app(Recorder(), tmp_path / "a.jsonl", store)
@@ -648,16 +674,21 @@ async def test_a_failed_context_switch_still_expires_pending_proposals(tmp_path:
 
 class SlowStopMCP(FakeMCP):
     """`stop()` times out (the run keeps dying in the background); only the
-    follow-up `shutdown()` observes completion."""
+    teardown task captured at stop time observes completion."""
 
     def __init__(self) -> None:
         super().__init__(running=True)
         self.late_submit: ProposalStore | None = None
+        self._task: asyncio.Task[None] | None = None
 
     async def stop(self) -> str:
+        self._task = asyncio.create_task(self._die())
         return "MCP stopping (cleanup is taking long)"  # is_on stays True
 
-    async def shutdown(self) -> None:
+    def pending_task(self) -> asyncio.Task[None] | None:
+        return self._task
+
+    async def _die(self) -> None:
         if self.late_submit is not None:
             # An in-flight old-run submission lands while teardown drags on.
             self.late_submit.submit(
@@ -711,7 +742,7 @@ class RestartRacingMCP(SlowStopMCP):
     """While the old run's teardown drags on, a racing `:mcp on` completes a
     fresh run and that run accepts a new proposal."""
 
-    async def shutdown(self) -> None:
+    async def _die(self) -> None:
         if self.late_submit is not None:
             # The new run's proposal, submitted after the restart.
             self.late_submit.submit(

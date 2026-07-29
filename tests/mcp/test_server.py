@@ -365,6 +365,63 @@ async def test_controller_shutdown_survives_cancellation(tmp_path: Path) -> None
     assert not controller.running
 
 
+async def test_controller_shutdown_leaves_a_freshly_started_run_untouched() -> None:
+    """A shutdown bound to the old run must not wipe ownership of a fresh
+    run installed while it awaited that old task: `running` would report
+    False for a live server, and follow-up sweeps would treat the fresh
+    run's proposals as stale."""
+    from types import SimpleNamespace
+
+    controller = MCPController(make_server)  # factory is never called here
+    release = asyncio.Event()
+
+    async def old_run() -> None:
+        await release.wait()
+
+    old = asyncio.create_task(old_run())
+    controller._server = SimpleNamespace(request_shutdown=lambda: None)  # type: ignore[assignment]  # test double
+    controller._task = old
+    forever = asyncio.Event()
+
+    async def fresh_run() -> None:
+        await forever.wait()
+
+    async def swap_in_fresh_run() -> asyncio.Task[None]:
+        # Runs while shutdown() awaits the old task: a racing start().
+        fresh = asyncio.create_task(fresh_run())
+        controller._server = SimpleNamespace(request_shutdown=lambda: None)  # type: ignore[assignment]  # test double
+        controller._task = fresh
+        release.set()
+        return fresh
+
+    swap = asyncio.create_task(swap_in_fresh_run())
+    try:
+        result = await asyncio.wait_for(controller.shutdown(), timeout=10)
+        fresh = await swap
+        assert result is None
+        assert controller.running, "old-run shutdown wiped the fresh run's ownership"
+        assert controller._task is fresh
+    finally:
+        (await swap).cancel()
+
+
+async def test_controller_pending_task_reports_the_live_run() -> None:
+    """`pending_task()` is the snapshot the app captures under its lock so a
+    follow-up teardown wait binds to this exact run."""
+    controller = MCPController(make_server)
+    assert controller.pending_task() is None
+
+    async def run() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(run())
+    controller._task = task
+    try:
+        assert controller.pending_task() is task
+    finally:
+        task.cancel()
+
+
 async def test_remove_endpoint_preserves_other_live_instances(tmp_path: Path) -> None:
     """The discovery file is a pid-keyed registry: instance B exiting must
     drop only its own entry, leaving instance A's record discoverable."""

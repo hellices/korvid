@@ -2323,29 +2323,35 @@ class KorvidApp(App[None]):
                         else "the MCP server was restarted"
                     )
                     await self._expire_proposals_audited(reason)
+                # Captured under the lock: the follow-up wait below must
+                # bind to *this* dying run, never to whichever run the
+                # controller owns once the lock is released.
+                old_task = mcp.pending_task() if stopped and mcp.running else None
             self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
             self._refresh_status()
-            if action == "off" and mcp.running:
+            if old_task is not None:
                 # The bounded stop timed out and the old run is still dying
                 # in the background: wait it out, then sweep again so an
                 # in-flight submission that raced the teardown cannot
                 # outlive its server run.
-                await self._sweep_after_mcp_shutdown(mcp)
+                await self._sweep_after_mcp_teardown(mcp, old_task)
 
         self.run_worker(_switch(), exclusive=False)
 
-    async def _sweep_after_mcp_shutdown(self, mcp: MCPControllerBase) -> None:
+    async def _sweep_after_mcp_teardown(
+        self, mcp: MCPControllerBase, task: asyncio.Task[None]
+    ) -> None:
         """Final proposal sweep once a dragged-out MCP teardown completes.
 
         `stop()`'s bounded wait can return while the old server run is still
         dying; an in-flight proposal call on that run may land *after* the
-        stop-time sweep. Wait for the run to actually end, then expire again
-        so nothing submitted under the dead run's capability stays pending.
+        stop-time sweep. *task* is the old run's server task, captured under
+        `_nav_lock` before it was released: the follow-up wait binds to that
+        exact run, so a fresh server started by a racing `:mcp on` is never
+        the one waited on or torn down here.
         """
         with contextlib.suppress(Exception):
-            pending = await mcp.shutdown()
-            if pending is not None:
-                await asyncio.wait({pending})
+            await asyncio.wait({task})
         # Serialize the sweep decision against a racing `:mcp on`: if a
         # fresh run came up while the old teardown dragged on, pending
         # proposals belong to that live run (its start transition already
@@ -6227,11 +6233,12 @@ class KorvidApp(App[None]):
         pending = store.pending()
         if not pending:
             return ""
+        p = pending[0]  # oldest — the next proposal a review would surface
+        source = p.client_name or "mcp"
+        target = f"{p.action} {p.kind}/{p.name}"
         if len(pending) == 1:
-            p = pending[0]
-            source = p.client_name or "mcp"
-            return f"1 proposal from {source}: {p.action} {p.kind}/{p.name} — :proposals"
-        return f"{len(pending)} proposals — :proposals"
+            return f"1 proposal from {source}: {target} — :proposals"
+        return f"{len(pending)} proposals (next from {source}: {target}) — :proposals"
 
     def on_external_proposals_changed(self, message: ExternalProposalsChanged) -> None:
         self._refresh_status()
