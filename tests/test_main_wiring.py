@@ -285,6 +285,18 @@ async def test_mcp_controller_exposes_proposal_tools_when_configured() -> None:
     assert other._capability_token != token
 
 
+def test_proposal_store_wired_only_when_enabled() -> None:
+    """One ProposalStore is built when mcp.write_proposals is on; base
+    installs get None (the app then reports the feature as disabled)."""
+    from korvid.__main__ import _build_proposal_store
+    from korvid.core.config import KorvidConfig
+    from korvid.tools.proposals import ProposalStore
+
+    assert _build_proposal_store(KorvidConfig()) is None
+    store = _build_proposal_store(KorvidConfig(mcp_write_proposals=True))
+    assert isinstance(store, ProposalStore)
+
+
 async def test_mcp_controller_omits_proposal_tools_by_default() -> None:
     from korvid.__main__ import _build_mcp_controller
     from korvid.core.config import KorvidConfig
