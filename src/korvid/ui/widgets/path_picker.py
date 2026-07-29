@@ -11,6 +11,7 @@ manual path entry the dialog already has.
 from __future__ import annotations
 
 import posixpath
+import unicodedata
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import ClassVar
@@ -26,6 +27,19 @@ from textual.widgets.option_list import Option
 from korvid.core.transfer import RemoteEntry, TransferError
 
 RemoteLister = Callable[[str], Awaitable[list[RemoteEntry]]]
+
+
+def _display_name(name: str) -> str:
+    """Escape control and format characters for display.
+
+    ESC sequences, bidi controls, CR, and other non-printing characters can
+    render invisibly or reorder text, making two different remote paths look
+    identical in the listing. Selection keeps the raw `RemoteEntry` name.
+    """
+    return "".join(
+        repr(ch)[1:-1] if unicodedata.category(ch) in ("Cc", "Cf") else ch for ch in name
+    )
+
 
 _PICKER_CSS = """
 LocalPathPickerScreen, RemotePathPickerScreen {
@@ -177,8 +191,10 @@ class RemotePathPickerScreen(ModalScreen[str | None]):
         for entry in entries:
             # Literal Text: names are cluster-controlled, so markup-enabled
             # strings would let "[red]secret[/red]" display as "secret" and
-            # transfer a path other than the one the user sees.
-            options.add_option(Option(Text(f"{entry.name}/" if entry.is_dir else entry.name)))
+            # transfer a path other than the one the user sees. Control and
+            # format characters are escaped for the same reason (_display_name).
+            label = _display_name(entry.name)
+            options.add_option(Option(Text(f"{label}/" if entry.is_dir else label)))
         if options.option_count:
             options.highlighted = 0
         self.query_one(".picker-title", Static).update(f"Remote: {path}")

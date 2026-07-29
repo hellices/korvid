@@ -548,6 +548,34 @@ class TestMarkupSafety:
             assert isinstance(prompt, Text)
             assert prompt.plain == "[red]secret[/red]"
 
+    async def test_control_characters_in_filenames_rendered_escaped(self) -> None:
+        # ESC / bidi / CR are invisible or reorder rendered text, so two
+        # different paths could look identical; they must display escaped
+        # while selection still uses the raw name.
+        name = "pre\x1b[2K\u202emid\rpost"
+        opener = FakeExecOpener(_listing(name))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.value = "/srv/"
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
+            )
+            options = app.screen.query_one(OptionList)
+            await until(pilot, lambda: options.option_count == 2, label="options")
+            prompt = options.get_option_at_index(1).prompt
+            assert isinstance(prompt, Text)
+            assert prompt.plain == "pre\\x1b[2K\\u202emid\\rpost"
+            options.focus()
+            await pilot.press("down", "enter")
+            await until(
+                pilot, lambda: not isinstance(app.screen, RemotePathPickerScreen), label="dismiss"
+            )
+            assert remote.value == f"/srv/{name}"
+
     async def test_markup_in_directory_path_title_rendered_literally(self) -> None:
         # The picker title embeds directory names picked from the listing;
         # the Static is markup-disabled so brackets stay literal on screen.
