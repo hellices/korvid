@@ -41,7 +41,7 @@ the API supports one. `--readonly` disables writes entirely;
 The agent can *request* a delete, scale, restart, or resize — it can never
 execute one.
 
-**Ops that out-do their kubectl counterparts.** Port-forwards (`Shift-F`)
+**Ops that outdo their kubectl counterparts.** Port-forwards (`Shift-F`)
 are session-tracked: `:pf` lists them with live status, stops (`Ctrl-D`) or
 re-attaches (`r`) any of them, a forward whose pod dies flips to `broken`
 with a toast instead of failing silently, local-port conflicts are rejected
