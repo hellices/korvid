@@ -10,6 +10,7 @@ tar argv builders, spec validation, and local tar packing/extraction.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -409,7 +410,11 @@ async def download(
             # destination, not the staging temp file the extraction opened.
             raise TransferError(f"cannot write {local_path}: {exc.strerror or exc}") from exc
     finally:
-        spool_path.unlink(missing_ok=True)
+        # The unlink needs the directory's write bit too: when that is what
+        # just failed, a raw PermissionError here would replace the
+        # normalized TransferError and expose the .part staging name.
+        with contextlib.suppress(OSError):
+            spool_path.unlink(missing_ok=True)
 
 
 def _with_permission_hint(message: str, remote_path: str) -> str:
@@ -479,9 +484,14 @@ async def upload(
                     _with_permission_hint(sink.error_message("upload failed"), remote_path)
                 )
             if not sink.verdict:
+                # The stderr may still carry the permission story even when
+                # the server dropped before any channel-3 verdict.
                 raise TransferError(
-                    sink.error_message(
-                        "upload sent, but the connection closed without reporting an outcome"
+                    _with_permission_hint(
+                        sink.error_message(
+                            "upload sent, but the connection closed without reporting an outcome"
+                        ),
+                        remote_path,
                     )
                 )
     finally:

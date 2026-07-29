@@ -302,3 +302,43 @@ class TestPermissionErrors:
         message = str(excinfo.value)
         assert str(restricted) in message
         assert ".part" not in message
+
+    async def test_upload_permission_denied_without_verdict_still_hints(
+        self, tmp_path: Path
+    ) -> None:
+        # The server can emit the permission stderr and drop the connection
+        # before any channel-3 verdict; the no-verdict failure path must
+        # carry the same hint as the verdict path.
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = FakeWs([b"\x02tar: f: Cannot open: Permission denied\n"])
+        with pytest.raises(TransferError, match="Permission denied") as excinfo:
+            await upload(FakeExec(ws), src, "/app/f")
+        message = str(excinfo.value)
+        assert "hint:" in message
+        assert "/app" in message
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="permission checks are meaningless as root")
+    async def test_directory_losing_write_bit_mid_stream_keeps_transfer_error(
+        self, tmp_path: Path
+    ) -> None:
+        # The spool is created while the directory is writable; the write bit
+        # flips before extraction. The extraction failure is normalized to a
+        # TransferError — and the spool-cleanup failure in the finally block
+        # must not replace it with a raw PermissionError naming the .part
+        # staging file.
+        locked = tmp_path / "d"
+        locked.mkdir()
+        dest = locked / "app.log"
+        archive = tar_bytes("app.log", b"data")
+        ws = FakeWs([b"\x01" + archive, b"\x03" + SUCCESS])
+
+        def lock(_count: int) -> None:
+            locked.chmod(0o500)
+
+        try:
+            with pytest.raises(TransferError, match="cannot write") as excinfo:
+                await download(FakeExec(ws), "/var/log/app.log", dest, progress=lock)
+            assert ".part" not in str(excinfo.value)
+        finally:
+            locked.chmod(0o700)
