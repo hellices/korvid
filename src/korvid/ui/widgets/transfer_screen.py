@@ -174,7 +174,12 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
         if not current.strip():
             current = ""
         start = current if current.endswith("/") else posixpath.dirname(current)
-        picker = RemotePathPickerScreen(self._remote_lister, start or "/")
+        if not posixpath.isabs(start):
+            # A relative start would list the container's working directory
+            # and produce selections that can never validate (absolute
+            # remote paths required) — browse from the root instead.
+            start = "/"
+        picker = RemotePathPickerScreen(self._remote_lister, start)
         self.app.push_screen(picker, self._apply_remote_pick)
 
     def _apply_remote_pick(self, result: str | None) -> None:

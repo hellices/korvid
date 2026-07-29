@@ -506,6 +506,24 @@ class TestWhitespaceVerbatim:
             tree = app.screen.query_one(DirectoryTree)
             assert Path(tree.path) == spaced
 
+    async def test_relative_remote_value_starts_browsing_at_root(self) -> None:
+        # "foo/bar" would derive the start dir "foo": the listing would be
+        # relative to the container's working directory and every selection
+        # would fail remote-path validation (absolute required).
+        opener = FakeExecOpener(_listing("etc/"))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.value = "foo/bar"
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
+            )
+            await until(pilot, lambda: len(opener.calls) == 1, label="listing")
+            assert opener.calls[0]["command"] == ["ls", "-1Ap", "--", "/"]
+
 
 class TestMarkupSafety:
     """Remote filenames are cluster-controlled: rendering them as Textual
