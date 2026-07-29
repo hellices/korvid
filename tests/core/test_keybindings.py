@@ -116,3 +116,35 @@ def test_shift_alias_keys_expands_both_spellings() -> None:
     assert shift_alias_keys("G") == "shift+g,G"
     assert shift_alias_keys("ctrl+q") == "ctrl+q"
     assert shift_alias_keys("g") == "g"
+
+
+def test_reserved_keys_cannot_be_taken_by_an_override() -> None:
+    # Keys owned by non-remappable bindings (the 1-9 favorites, issue #108)
+    # must still participate in collision checks even though their actions
+    # are not in the remappable-action map.
+    plan = plan_keybindings({"logs": "1"}, _ACTIONS, reserved_keys={"1": "favorite_namespace(1)"})
+    assert plan.overrides == {}
+    assert len(plan.warnings) == 1
+    assert "reserved" in plan.warnings[0]
+    assert "favorite_namespace(1)" in plan.warnings[0]
+
+
+def test_non_reserved_key_override_is_unaffected_by_reserved_keys() -> None:
+    plan = plan_keybindings(
+        {"logs": "ctrl+l"}, _ACTIONS, reserved_keys={"1": "favorite_namespace(1)"}
+    )
+    assert plan.overrides == {"logs": "ctrl+l"}
+    assert plan.warnings == ()
+
+
+def test_comma_separated_key_values_are_rejected() -> None:
+    # Textual keymaps accept comma-separated key lists, so "1,ctrl+l" would
+    # smuggle the reserved "1" past every collision check as one opaque
+    # marker. Config documents one replacement key per action — reject
+    # comma values outright.
+    plan = plan_keybindings(
+        {"logs": "1,ctrl+l"}, _ACTIONS, reserved_keys={"1": "favorite_namespace(1)"}
+    )
+    assert plan.overrides == {}
+    assert len(plan.warnings) == 1
+    assert "one key" in plan.warnings[0]
