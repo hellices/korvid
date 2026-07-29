@@ -181,6 +181,12 @@ async def list_remote_dir(open_exec: OpenExec, path: str) -> list[RemoteEntry]:
     The output is file *names* only — no resource payloads — which is why
     it does not go through the sensitive-read masking pipeline; it is also
     user-driven only and never registered as an agent tool.
+
+    Filenames containing an embedded LF are out of scope: the `ls -1`
+    protocol separates records with LF, so such a name is indistinguishable
+    from two entries. Picking a resulting phantom entry only puts a
+    nonexistent path in the input field — `validate_spec` re-checks every
+    transfer, and the listing itself is read-only.
     """
     sink = _FrameSink()
     # bytearray: += on bytes copies the accumulated listing per frame.
