@@ -246,6 +246,13 @@ def _yaml_equal(a: object, b: object) -> bool:
 #: still approval-gated and audited).
 _UID_LOOKUP_TIMEOUT = 10.0
 
+
+def _manifest_uid(manifest: dict[str, Any]) -> str | None:
+    """The metadata.uid of a fetched manifest, or None when absent."""
+    raw = (manifest.get("metadata") or {}).get("uid")
+    return str(raw) if raw else None
+
+
 #: Upper bound on the pre-dialog dry-run round trip (issue #19): a slow or
 #: unreachable API server delays the approval dialog by at most this long,
 #: after which it opens without a preview - a preview must never block the
@@ -2576,6 +2583,15 @@ class KorvidApp(App[None]):
         "Job": "jobs",
     }
 
+    #: Chain the ownership banner may walk (issue #119): a superset of the
+    #: re-attach map — a CronJob-spawned pod must reach the CronJob, where
+    #: the helm/OLM markers live (re-attach never targets a CronJob: it
+    #: forwards to pods, which Jobs own directly).
+    _OWNER_CHAIN_PLURALS: ClassVar[dict[str, str]] = {
+        **_WORKLOAD_PLURALS,
+        "CronJob": "cronjobs",
+    }
+
     async def _resolve_forward_workload(self, namespace: str, name: str) -> str | None:
         """The pod's owning workload as ``"<plural>/<name>"``, best effort.
 
@@ -4420,6 +4436,15 @@ class KorvidApp(App[None]):
         ):
             return
         detail = self._edit_detail(manifest, edited)
+        # The pre-edit manifest is already in hand — the banner costs at
+        # most the owner-chain walk. That walk is another awaited gap:
+        # re-validate the selection after it, like every other pre-dialog
+        # await, before pushing the confirmation.
+        note = await self._managed_note_from(manifest, ns)
+        if not self._write_context_intact(
+            "edit", meta, ns, name, phase="the ownership lookup", epoch=epoch
+        ):
+            return
         await self._push_write_confirmation(
             f"Apply edited {label}?",
             # Issue #21: the approval dialog summarizes the change, not
@@ -4431,9 +4456,7 @@ class KorvidApp(App[None]):
             name=name,
             op_factory=lambda: ops.replace_object(meta, ns, name, edited, uid=uid),
             detail=detail,
-            # The pre-edit manifest is already in hand — the banner costs at
-            # most the owner-chain walk.
-            managed_note=await self._managed_note_from(manifest, ns),
+            managed_note=note,
         )
 
     def _parse_edited_manifest(
@@ -6951,21 +6974,23 @@ class KorvidApp(App[None]):
             verb, target = self._write_perm_target(action, meta)
             return f"ERROR: missing permission: {verb} {target}"
         try:
-            # Capture the target's uid *before* asking for approval: the
-            # executed write carries it as a precondition, so the approval is
-            # bound to this exact object incarnation - a same-named
-            # replacement created while the dialog is open gets a 409, not
-            # the mutation. The lookup uses the caller's validated alias, not
-            # meta.plural: alias resolution is first-wins, so a plural that
-            # collides across groups could otherwise resolve to a different
-            # resource than the one validated above.
-            uid = await self._target_uid(kind.strip().lower(), ns, name)
+            # Capture the target's manifest *before* asking for approval:
+            # the executed write carries its uid as a precondition, so the
+            # approval is bound to this exact object incarnation - a
+            # same-named replacement created while the dialog is open gets a
+            # 409, not the mutation. The lookup uses the caller's validated
+            # alias, not meta.plural: alias resolution is first-wins, so a
+            # plural that collides across groups could otherwise resolve to
+            # a different resource than the one validated above. The same
+            # snapshot feeds the ownership banner - no second round trip.
+            snapshot = await self._target_manifest(kind.strip().lower(), ns, name)
         except ApiStatusError:
             return f"ERROR: {self._gvr_label(meta)}/{name} not found{self._write_locus(ns)}"
+        uid = _manifest_uid(snapshot) if snapshot is not None else None
         preview = await self._preview_for_action(
             action, meta, ns, name, replicas, resources, uid, stamp
         )
-        note = await self._managed_note(kind.strip().lower(), ns, name)
+        note = await self._managed_note_from(snapshot, ns) if snapshot is not None else None
         require = name if action == "delete" and not meta.namespaced else None
         decision = await self._await_user_approval(
             f"Agent requests: {action} {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
@@ -7022,11 +7047,13 @@ class KorvidApp(App[None]):
             )
         return None
 
-    async def _target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
-        """Uid of a write target at request time, looked up by the same alias
-        the write was validated with (both resolve through the one aliases
-        mapping wired in __main__, so the manifest and the mutation address
-        the same resource even when plurals collide across groups).
+    async def _target_manifest(
+        self, kind_alias: str, ns: str | None, name: str
+    ) -> dict[str, Any] | None:
+        """Manifest of a write target at request time, looked up by the same
+        alias the write was validated with (both resolve through the one
+        aliases mapping wired in __main__, so the manifest and the mutation
+        address the same resource even when plurals collide across groups).
         Raises ApiStatusError(404) when the target does not exist (the caller
         turns that into an actionable error before bothering the user with a
         dialog). Fails open (None -> no precondition, matching the previous
@@ -7037,7 +7064,7 @@ class KorvidApp(App[None]):
         if self._get_manifest is None:
             return None
         try:
-            manifest = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 self._get_manifest(kind_alias, ns, name), _UID_LOOKUP_TIMEOUT
             )
         except ApiStatusError as exc:
@@ -7051,32 +7078,53 @@ class KorvidApp(App[None]):
         except Exception:
             logger.exception("uid lookup for %s/%s failed; writing without precondition", ns, name)
             return None
-        raw = (manifest.get("metadata") or {}).get("uid")
-        return str(raw) if raw else None
+
+    async def _target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
+        """Uid of a write target at request time — `_target_manifest` with
+        only the precondition extracted (same 404/fail-open semantics)."""
+        manifest = await self._target_manifest(kind_alias, ns, name)
+        return _manifest_uid(manifest) if manifest is not None else None
 
     async def _managed_note(self, kind_alias: str, ns: str | None, name: str) -> str | None:
         """Ownership banner text for a write dialog, or None (issue #119).
 
         Best-effort display support, fail-open: no manifest source, a slow
         or failed lookup, or an unmanaged target all yield None — the write
-        flow itself is never blocked or delayed past `_UID_LOOKUP_TIMEOUT`.
+        flow is never blocked, and the target fetch plus the entire
+        owner-chain walk share one `_UID_LOOKUP_TIMEOUT` deadline.
         """
         if self._get_manifest is None:
             return None
         try:
-            manifest = await asyncio.wait_for(
-                self._get_manifest(kind_alias, ns, name), _UID_LOOKUP_TIMEOUT
-            )
+            async with asyncio.timeout(_UID_LOOKUP_TIMEOUT):
+                manifest = await self._get_manifest(kind_alias, ns, name)
+                return await self._walk_managed(manifest, ns)
         except Exception as exc:  # display support only — never blocks the write
-            logger.debug("manager lookup for %s/%s failed: %s", ns, name, exc)
+            # An API error message can embed the response body (for a
+            # Secret, its data): log the exception type, not its payload.
+            logger.debug("manager lookup for %s/%s failed: %s", ns, name, type(exc).__name__)
             return None
-        return await self._managed_note_from(manifest, ns)
 
     async def _managed_note_from(self, manifest: dict[str, Any], ns: str | None) -> str | None:
-        """Manager note for an already-fetched manifest, walking the built-in
-        controller chain when the object itself looks unmanaged: a pod owned
-        by rs -> deploy reports the Deployment's manager (helm annotations
-        live on the top-level object, not on every pod it produced)."""
+        """Manager note for an already-fetched manifest; the owner-chain
+        walk shares one `_UID_LOOKUP_TIMEOUT` deadline and fails open like
+        `_managed_note`."""
+        meta_obj = manifest.get("metadata")
+        name = str(meta_obj.get("name") or "?") if isinstance(meta_obj, dict) else "?"
+        try:
+            async with asyncio.timeout(_UID_LOOKUP_TIMEOUT):
+                return await self._walk_managed(manifest, ns)
+        except Exception as exc:  # display support only — never blocks the write
+            # Same payload caution as _managed_note: type name only.
+            logger.debug("owner-chain lookup for %s/%s failed: %s", ns, name, type(exc).__name__)
+            return None
+
+    async def _walk_managed(self, manifest: dict[str, Any], ns: str | None) -> str | None:
+        """Walk the built-in controller chain when the object itself looks
+        unmanaged: a pod owned by rs -> deploy (or job -> cronjob) reports
+        the top owner's manager — helm annotations live on the top-level
+        object, not on every pod it produced. Callers bound this walk with
+        one shared deadline and fail open on any error."""
         found = manager_of(manifest)
         current = manifest
         for _ in range(2):
@@ -7085,16 +7133,10 @@ class KorvidApp(App[None]):
             owner = controller_owner(current)
             if owner is None:
                 break
-            plural = self._WORKLOAD_PLURALS.get(owner[0])
+            plural = self._OWNER_CHAIN_PLURALS.get(owner[0])
             if plural is None or self._get_manifest is None:
                 break
-            try:
-                current = await asyncio.wait_for(
-                    self._get_manifest(plural, ns, owner[1]), _UID_LOOKUP_TIMEOUT
-                )
-            except Exception as exc:  # display support only
-                logger.debug("owner-chain lookup for %s/%s failed: %s", ns, owner[1], exc)
-                return None
+            current = await self._get_manifest(plural, ns, owner[1])
             found = manager_of(current)
         return found.note if found is not None else None
 

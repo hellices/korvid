@@ -8,6 +8,7 @@ audit log.
 import asyncio
 import copy
 import json
+import logging
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -1144,3 +1145,185 @@ async def test_banner_lookup_failure_never_blocks_the_dialog(tmp_path: Path) -> 
         await pilot.press("y")
         await until(pilot, lambda: rec.calls == [("delete", "deployments", "default", "web")])
         assert rec.calls == [("delete", "deployments", "default", "web")]
+
+
+async def test_owner_chain_walk_follows_cronjobs(tmp_path: Path) -> None:
+    """Pod -> Job -> CronJob is a common chain and the helm/OLM markers live
+    on the CronJob — the walk must know its plural (issue #119 review)."""
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        if kind == "jobs":
+            return {
+                "metadata": {
+                    "name": name,
+                    "ownerReferences": [
+                        {
+                            "apiVersion": "batch/v1",
+                            "kind": "CronJob",
+                            "name": "hourly",
+                            "controller": True,
+                        }
+                    ],
+                }
+            }
+        assert kind == "cronjobs"
+        return _helm_deploy_manifest(kind, ns, name)
+
+    app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    pod = {
+        "metadata": {
+            "name": "hourly-123-abc",
+            "namespace": "default",
+            "ownerReferences": [
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "name": "hourly-123",
+                    "controller": True,
+                }
+            ],
+        }
+    }
+    note = await app._managed_note_from(pod, "default")
+    assert note is not None
+    assert "helm release web/nginx" in note
+
+
+async def test_owner_chain_walk_shares_one_deadline(tmp_path: Path) -> None:
+    """Per-hop bounds would let the target plus two owners delay the dialog
+    to ~3x _UID_LOOKUP_TIMEOUT despite the fail-open promise: the whole
+    target-and-owner-chain lookup shares a single deadline."""
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        if kind == "pods":
+            return {
+                "metadata": {
+                    "name": name,
+                    "ownerReferences": [
+                        {
+                            "apiVersion": "apps/v1",
+                            "kind": "ReplicaSet",
+                            "name": "web-abc",
+                            "controller": True,
+                        }
+                    ],
+                }
+            }
+        await asyncio.sleep(0.7)  # each hop alone stays under the 1.0 bound
+        if kind == "replicasets":
+            return {
+                "metadata": {
+                    "name": name,
+                    "ownerReferences": [
+                        {
+                            "apiVersion": "apps/v1",
+                            "kind": "Deployment",
+                            "name": "web",
+                            "controller": True,
+                        }
+                    ],
+                }
+            }
+        return _helm_deploy_manifest(kind, ns, name)
+
+    app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    with mock.patch("korvid.ui.app._UID_LOOKUP_TIMEOUT", 1.0):
+        assert await app._managed_note("pods", "default", "web-1") is None
+
+
+async def test_banner_lookup_failure_logs_omit_exception_payloads(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An API error message can embed the response body — for a Secret, its
+    data. Banner-lookup failure logs name the exception type, never its
+    payload (CodeQL py/clear-text-logging-sensitive-data)."""
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        raise RuntimeError("token: SECRET-PAYLOAD")
+
+    app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    pod = {
+        "metadata": {
+            "name": "p",
+            "ownerReferences": [
+                {
+                    "apiVersion": "apps/v1",
+                    "kind": "Deployment",
+                    "name": "web",
+                    "controller": True,
+                }
+            ],
+        }
+    }
+    with caplog.at_level(logging.DEBUG, logger="korvid.ui.app"):
+        assert await app._managed_note("secrets", "default", "db-creds") is None
+        assert await app._managed_note_from(pod, "default") is None
+    assert "SECRET-PAYLOAD" not in caplog.text
+
+
+async def test_edit_cancelled_when_selection_changes_during_ownership_lookup(
+    tmp_path: Path,
+) -> None:
+    """The banner's owner-chain walk is another awaited gap after the editor
+    session: a selection change during it must cancel the confirmation, not
+    push a dialog for the stale target (issue #119 review)."""
+    pod_manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "web-1",
+            "namespace": "default",
+            "uid": "pod-uid-1",
+            "ownerReferences": [
+                {
+                    "apiVersion": "apps/v1",
+                    "kind": "ReplicaSet",
+                    "name": "web-abc",
+                    "controller": True,
+                }
+            ],
+        },
+        "spec": {"containers": [{"name": "app", "image": "nginx:1"}]},
+    }
+    app_holder: list[KorvidApp] = []
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        if kind == "replicasets":
+            # The user moves on while the owner lookup is in flight.
+            app_holder[0].query_one(ResourceTable).move_cursor(row=1)
+            return {"metadata": {"name": name}}
+        return copy.deepcopy(pod_manifest)
+
+    async def edit_text(text: str) -> str | None:
+        return text.replace("nginx:1", "nginx:2")
+
+    rec = Recorder()
+    other = PodSummary(
+        name="web-2",
+        namespace="default",
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node=None,
+        uid="pod-uid-2",
+    )
+    app = make_app(
+        rec,
+        tmp_path / "audit.jsonl",
+        get_manifest=get_manifest,
+        edit_text=edit_text,
+        extra_pods=[other],
+    )
+    app_holder.append(app)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("e")
+        await until(
+            pilot,
+            lambda: any(
+                "selection changed during the ownership lookup" in n.message
+                for n in app._notifications
+            ),
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+    assert rec.calls == []

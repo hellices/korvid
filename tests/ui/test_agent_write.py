@@ -588,9 +588,10 @@ async def test_agent_uid_lookup_uses_validated_alias(tmp_path: Path) -> None:
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         await task
-    # Every manifest lookup (uid + ownership banner) resolves through the
-    # caller's alias, normalized — not "deployments" via meta.plural.
-    assert kinds == ["deploy", "deploy"]
+    # The single snapshot fetch resolves through the caller's alias,
+    # normalized — not "deployments" via meta.plural — and feeds both the
+    # uid precondition and the ownership banner (no second round-trip).
+    assert kinds == ["deploy"]
 
 
 async def test_uid_lookup_times_out_fail_open(tmp_path: Path) -> None:
