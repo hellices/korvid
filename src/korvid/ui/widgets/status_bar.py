@@ -20,6 +20,7 @@ class StatusBar(Static):
         mcp_label: str = "",
         filter_label: str = "",
         progress_label: str = "",
+        proposals_label: str = "",
         protected: bool = False,
     ) -> None:
         ctx = context or "(current)"
@@ -27,12 +28,13 @@ class StatusBar(Static):
         mcp = f"  ⇄{mcp_label}" if mcp_label else ""
         flt = f"  ▼{filter_label}" if filter_label else ""
         prog = f"  ⏳{progress_label}" if progress_label else ""
+        props = f"  ⚑{proposals_label}" if proposals_label else ""
         # Text keeps user-entered filter text literal (never Rich markup).
         line = Text()
         if protected:
             # Protected contexts (issue #83): loud red marker + tinted bar.
             line.append(" ⛨ PROTECTED ", style="bold white on red")
             line.append("  ")
-        line.append(f"ctx:{ctx}  ns:{namespace}  ⚡{agent_label}{mcp}{flt}{prog}{trail}")
+        line.append(f"ctx:{ctx}  ns:{namespace}  ⚡{agent_label}{mcp}{flt}{prog}{props}{trail}")
         self.set_class(protected, "protected")
         self.update(line)

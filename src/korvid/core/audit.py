@@ -121,6 +121,13 @@ def default_audit_path() -> Path:
     return base / "korvid" / "audit.jsonl"
 
 
+class _UnsetType:
+    """Sentinel distinguishing 'no per-entry context' from an explicit None."""
+
+
+_UNSET = _UnsetType()
+
+
 def _default_actor() -> str:
     """The OS user running korvid — audit entries must answer *who*.
 
@@ -215,10 +222,18 @@ class AuditLog:
         version: str = "",
         detail: str = "",
         outcome: str = "success",
+        context: str | None | _UnsetType = _UNSET,
     ) -> None:
+        """Append one entry; `context` binds it to a specific cluster.
+
+        By default the entry carries the log's ambient context. Entries
+        about an object bound to a known cluster (e.g. proposal outcomes,
+        which race `:ctx`'s `set_context`) pass their own `context` so a
+        concurrent switch can never attribute them to the wrong cluster.
+        """
         entry = {
             "timestamp": datetime.now().astimezone().isoformat(),
-            "context": self._context,
+            "context": self._context if isinstance(context, _UnsetType) else context,
             "actor": self._actor,
             "action": action,
             "kind": kind,

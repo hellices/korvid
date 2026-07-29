@@ -66,9 +66,14 @@ class FreshKeysInput(Input):
         await super()._on_key(event)
 
 
-class ConfirmScreen(ModalScreen[bool]):
+class ConfirmScreen(ModalScreen[bool | None]):
     """y/n approval dialog; with ``require_name`` the exact resource name
     must be typed (cluster-scoped or otherwise high-blast-radius deletes).
+
+    Resolves True on confirmation, False on an explicit decline (`n`), and
+    None on dismissal without a decision (Esc). Most callers treat None as
+    a cancel; the external-proposal review flow relies on the distinction —
+    a dismissed proposal stays pending, a declined one is denied.
 
     With ``protected_context`` (issue #83) the dialog adds a red protected
     banner and the y/n shortcut is replaced by typing the context name —
@@ -81,6 +86,10 @@ class ConfirmScreen(ModalScreen[bool]):
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("escape", "cancel", "Cancel", show=True),
+        # An explicit decline that stays available when a typed gate owns
+        # the plain `n` key as input text (external proposals need a way to
+        # be denied — a dismissal leaves them pending).
+        Binding("ctrl+n", "decline", "Decline", show=True),
     ]
 
     def __init__(
@@ -127,7 +136,7 @@ class ConfirmScreen(ModalScreen[bool]):
             if self._preview is not None:
                 yield Static(self._preview_text(), classes="confirm-preview")
             if self._typed_gate is None:
-                yield Static("y = confirm    n/Esc = cancel", classes="confirm-hint")
+                yield Static("y = confirm    n = decline    Esc = dismiss", classes="confirm-hint")
             else:
                 what = (
                     "the resource name"
@@ -135,7 +144,8 @@ class ConfirmScreen(ModalScreen[bool]):
                     else "the protected context name"
                 )
                 yield Static(
-                    f"Type {what} {self._typed_gate!r} and press Enter to confirm (Esc cancels)",
+                    f"Type {what} {self._typed_gate!r} and press Enter to confirm"
+                    " (Esc dismisses, Ctrl+N declines)",
                     classes="confirm-hint",
                 )
                 yield FreshKeysInput(
@@ -185,6 +195,11 @@ class ConfirmScreen(ModalScreen[bool]):
             )
 
     def action_cancel(self) -> None:
+        # Esc is a dismissal, not a decision — distinct from the explicit
+        # decline (`n`/Ctrl+N → False) for callers that must tell them apart.
+        self.dismiss(None)
+
+    def action_decline(self) -> None:
         self.dismiss(False)
 
 

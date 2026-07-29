@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 import os
+import secrets
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,7 @@ from starlette.types import Receive, Scope, Send
 
 from korvid.core.audit import interprocess_lock
 from korvid.core.mcp import MCPControllerBase
-from korvid.tools.executor import ToolExecutor
+from korvid.tools.executor import PROPOSAL_TOOL_NAMES, ToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -83,10 +84,35 @@ def _load_registry(path: Path) -> dict[str, Any] | None:
 
 
 def _replace_atomically(path: Path, registry: dict[str, Any]) -> None:
-    """Temp file + rename so readers never observe a torn record."""
+    """Temp file + rename so readers never observe a torn record.
+
+    Owner-only mode: the registry may carry a write-proposal capability
+    token (issue #110), so the file must be *created* 0600 via an atomic
+    open — a chmod after a umask-default create would leave the token
+    briefly world-readable at a predictable path."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(registry))
+    tmp.unlink(missing_ok=True)  # a stale tmp could carry a foreign mode
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps(registry))
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
     tmp.replace(path)
+
+
+def _sanitize_client_meta(value: object, *, limit: int = 120) -> str:
+    """Bound and flatten caller-supplied clientInfo metadata.
+
+    The value crosses into approval dialogs (whose safety bindings are one
+    line each), the status bar and audit records: replace every
+    non-printable character (newlines, ANSI escapes) with a space and cap
+    the length so a hostile caller cannot inject dialog lines or bloat
+    audit entries.
+    """
+    text = "".join(ch if ch.isprintable() else " " for ch in str(value))
+    return text[:limit]
 
 
 class KorvidMCPServer:
@@ -106,12 +132,27 @@ class KorvidMCPServer:
         *,
         port: int = DEFAULT_MCP_PORT,
         endpoint_path: Path | None = None,
+        capability_token: str | None = None,
     ) -> None:
         self._executor = executor
         self._tools = list(tools)
         self._tool_names = {t["function"]["name"] for t in self._tools}
         self._port = port
         self._endpoint_path = endpoint_path
+        #: Per-run secret gating the write-proposal tools (issue #110): it is
+        #: published only in the owner-readable endpoint file, so a caller
+        #: echoing it has proven local same-user file access — the same trust
+        #: level as the kubeconfig itself. None means proposals are disabled.
+        self._capability_token = capability_token
+        #: Transport is stateless (no persistent MCP session), so proposals
+        #: are keyed to the server run: one id per start, injected
+        #: server-side and never taken from the caller. Every caller of one
+        #: run therefore shares this identity — by construction they all
+        #: hold the same capability token from the same owner-only file, so
+        #: they are a single local trust domain: the per-session pending cap
+        #: degenerates to a per-run cap and any authorized caller may cancel
+        #: (cancellation never executes anything, so it is fail-safe).
+        self._session_id = f"mcp-{os.getpid()}-{secrets.token_urlsafe(8)}"
         self._started: anyio.Event = anyio.Event()
         self._bound_port: int | None = None
         self._uvicorn: uvicorn.Server | None = None
@@ -149,8 +190,60 @@ class KorvidMCPServer:
             return [
                 types.TextContent(type="text", text=f"ERROR: tool not available over MCP: {name}")
             ]
-        result = await self._executor.execute(name, arguments or {})
+        # Underscore-prefixed keys are reserved for server-side injection
+        # (transport identity); strip whatever the caller sent so nothing in
+        # the executor ever trusts caller-controlled identity metadata.
+        args = {k: v for k, v in (arguments or {}).items() if not k.startswith("_")}
+        if name in PROPOSAL_TOOL_NAMES:
+            error = self._authorize_proposal_call(args)
+            if error is not None:
+                return [types.TextContent(type="text", text=error)]
+            client_name, client_version = self._client_info()
+            args["_session_id"] = self._session_id
+            args["_client_name"] = client_name
+            args["_client_version"] = client_version
+        result = await self._executor.execute(name, args)
         return [types.TextContent(type="text", text=result)]
+
+    def _authorize_proposal_call(self, args: dict[str, Any]) -> str | None:
+        """Capability check for the write-proposal tools; error text or None.
+
+        Pops ``capability`` from ``args`` so the secret never reaches the
+        executor, the store, or a log line. Constant-time comparison: the
+        token is the only thing standing between a local process and the
+        proposal queue, so it must not be guessable byte-by-byte.
+        """
+        supplied = args.pop("capability", None)
+        if self._capability_token is None:
+            return "ERROR: write proposals are not enabled on this server"
+        # Generated tokens are ASCII (`secrets.token_urlsafe`); the supplied
+        # value is untrusted MCP input where `str.encode()` can raise
+        # UnicodeEncodeError (lone surrogates) and `compare_digest` raises
+        # TypeError on non-ASCII str — every mismatch must yield the error
+        # response, never an exception, so reject non-ASCII input first.
+        if (
+            not isinstance(supplied, str)
+            or not supplied.isascii()
+            or not secrets.compare_digest(supplied, self._capability_token)
+        ):
+            return "ERROR: invalid or missing capability token"
+        return None
+
+    def _client_info(self) -> tuple[str, str]:
+        """Best-effort caller identity from the MCP initialize handshake.
+
+        Display metadata only — never an authorization input (any caller can
+        claim any name). Stateless transport may not carry it; degrade to
+        empty strings. Values are sanitized here because they cross into
+        approval dialogs, the status bar and audit records."""
+        try:
+            params = self._server.request_context.session.client_params
+            info = params.clientInfo if params is not None else None
+        except (LookupError, AttributeError):
+            return "", ""
+        if info is None:
+            return "", ""
+        return _sanitize_client_meta(info.name), _sanitize_client_meta(info.version)
 
     @property
     def bound_port(self) -> int | None:
@@ -287,6 +380,11 @@ class KorvidMCPServer:
                     "url": f"http://{_HOST}:{port}/mcp",
                     "port": port,
                     "pid": os.getpid(),
+                    **(
+                        {"capability": self._capability_token}
+                        if self._capability_token is not None
+                        else {}
+                    ),
                 }
                 _replace_atomically(path, registry)
         except OSError:
@@ -404,9 +502,17 @@ class MCPController(MCPControllerBase):
             if not done:
                 return task
         self._consume_result(task)
-        self._server = None
-        self._task = None
+        # Clear ownership only while it still points at *this* run: a
+        # concurrent start() may have installed a fresh server while the old
+        # task was awaited, and wiping its references would orphan a live
+        # run behind a `running == False` report.
+        if self._task is task:
+            self._server = None
+            self._task = None
         return None
+
+    def pending_task(self) -> asyncio.Task[None] | None:
+        return self._task if self._task is not None and not self._task.done() else None
 
     @staticmethod
     def _consume_result(task: asyncio.Task[None] | None) -> None:

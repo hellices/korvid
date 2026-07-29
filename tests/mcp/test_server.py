@@ -6,14 +6,20 @@ import asyncio
 import json
 import os
 import socket
+import stat
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from korvid.k8s.discovery import PODS_META
-from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
-from korvid.tools.executor import READ_TOOLS, UI_TOOLS, ToolExecutor
+from korvid.mcp.server import (
+    KorvidMCPServer,
+    MCPController,
+    _replace_atomically,
+    default_endpoint_path,
+)
+from korvid.tools.executor import PROPOSAL_TOOLS, READ_TOOLS, UI_TOOLS, ToolExecutor
 
 
 class RecordingExecutor(ToolExecutor):
@@ -359,6 +365,65 @@ async def test_controller_shutdown_survives_cancellation(tmp_path: Path) -> None
     assert not controller.running
 
 
+async def test_controller_shutdown_leaves_a_freshly_started_run_untouched() -> None:
+    """A shutdown bound to the old run must not wipe ownership of a fresh
+    run installed while it awaited that old task: `running` would report
+    False for a live server, and follow-up sweeps would treat the fresh
+    run's proposals as stale."""
+    from types import SimpleNamespace
+
+    controller = MCPController(make_server)  # factory is never called here
+    release = asyncio.Event()
+    forever = asyncio.Event()
+    fresh_holder: dict[str, asyncio.Task[None]] = {}
+
+    async def fresh_run() -> None:
+        await forever.wait()
+
+    async def old_run() -> None:
+        # Woken by shutdown()'s own request_shutdown call, so this swap runs
+        # while shutdown() awaits *this* task — a racing start().  (Driving
+        # the swap from a pre-created sibling task is order-dependent: on
+        # 3.11 wait_for wraps shutdown() in a task scheduled *after* the
+        # sibling, which would swap before shutdown captured the old run.)
+        await release.wait()
+        fresh = asyncio.create_task(fresh_run())
+        controller._server = SimpleNamespace(request_shutdown=lambda: None)  # type: ignore[assignment]  # test double
+        controller._task = fresh
+        fresh_holder["task"] = fresh
+
+    old = asyncio.create_task(old_run())
+    controller._server = SimpleNamespace(request_shutdown=release.set)  # type: ignore[assignment]  # test double
+    controller._task = old
+    try:
+        result = await asyncio.wait_for(controller.shutdown(), timeout=10)
+        assert result is None
+        assert controller.running, "old-run shutdown wiped the fresh run's ownership"
+        assert controller._task is fresh_holder["task"]
+    finally:
+        old.cancel()
+        pending = fresh_holder.get("task")
+        if pending is not None:
+            pending.cancel()
+
+
+async def test_controller_pending_task_reports_the_live_run() -> None:
+    """`pending_task()` is the snapshot the app captures under its lock so a
+    follow-up teardown wait binds to this exact run."""
+    controller = MCPController(make_server)
+    assert controller.pending_task() is None
+
+    async def run() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(run())
+    controller._task = task
+    try:
+        assert controller.pending_task() is task
+    finally:
+        task.cancel()
+
+
 async def test_remove_endpoint_preserves_other_live_instances(tmp_path: Path) -> None:
     """The discovery file is a pid-keyed registry: instance B exiting must
     drop only its own entry, leaving instance A's record discoverable."""
@@ -376,3 +441,233 @@ async def test_remove_endpoint_preserves_other_live_instances(tmp_path: Path) ->
         server.request_shutdown()
         await asyncio.wait_for(task, timeout=10)
     assert json.loads(endpoint_file.read_text()) == {"servers": {"999999": other}}
+
+
+# ---------------------------------------------------------------------------
+# External write proposals (issue #110)
+# ---------------------------------------------------------------------------
+
+
+_PROPOSE_ARGS = {"action": "delete", "kind": "pods", "name": "web-1", "namespace": "default"}
+
+
+def make_proposal_server(
+    executor: ToolExecutor | None = None,
+    *,
+    capability_token: str | None = "cap-tok",
+    port: int = 0,
+    endpoint_path: Path | None = None,
+) -> KorvidMCPServer:
+    return KorvidMCPServer(
+        executor or RecordingExecutor(),
+        READ_TOOLS + UI_TOOLS + PROPOSAL_TOOLS,
+        port=port,
+        endpoint_path=endpoint_path,
+        capability_token=capability_token,
+    )
+
+
+async def test_proposal_tools_are_listed_when_configured() -> None:
+    server = make_proposal_server()
+    tools = {t.name for t in await server.list_tools()}
+    assert {"propose_write", "get_write_proposal", "cancel_write_proposal"} <= tools
+
+
+async def test_propose_write_without_capability_is_rejected() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    result = await server.call_tool("propose_write", dict(_PROPOSE_ARGS))
+    assert result[0].text.startswith("ERROR:")
+    assert "capability" in result[0].text
+    assert executor.calls == []
+
+
+async def test_propose_write_with_wrong_capability_is_rejected() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "nope"})
+    assert result[0].text.startswith("ERROR:")
+    assert executor.calls == []
+
+
+async def test_non_ascii_capability_is_rejected_not_a_crash() -> None:
+    """`secrets.compare_digest` raises TypeError on non-ASCII `str` input;
+    the capability is untrusted MCP input, so a value like "é" must produce
+    the documented error response, not an exception escaping the handler."""
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "é" * 8})
+    assert result[0].text == "ERROR: invalid or missing capability token"
+    assert executor.calls == []
+
+
+async def test_lone_surrogate_capability_is_rejected_not_a_crash() -> None:
+    """A raw JSON `"\\ud800"` decodes to a lone surrogate, which raises
+    UnicodeEncodeError from `str.encode()` — the handler must still return
+    the documented capability error for every string input."""
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "\ud800"})
+    assert result[0].text == "ERROR: invalid or missing capability token"
+    assert executor.calls == []
+
+
+async def test_propose_write_with_capability_dispatches_with_identity() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "cap-tok"})
+    assert result[0].text == "ok"
+    assert len(executor.calls) == 1
+    name, args = executor.calls[0]
+    assert name == "propose_write"
+    assert "capability" not in args
+    assert isinstance(args["_session_id"], str)
+    assert args["_session_id"]
+    assert isinstance(args["_client_name"], str)
+    assert isinstance(args["_client_version"], str)
+    assert {k: v for k, v in args.items() if not k.startswith("_")} == _PROPOSE_ARGS
+
+
+async def test_caller_supplied_reserved_args_are_overridden() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    await server.call_tool(
+        "propose_write",
+        {**_PROPOSE_ARGS, "capability": "cap-tok", "_session_id": "spoofed"},
+    )
+    _, args = executor.calls[0]
+    assert args["_session_id"] != "spoofed"
+
+
+async def test_reserved_args_are_stripped_from_plain_tools() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    await server.call_tool("list_resources", {"kind": "pods", "_session_id": "spoofed"})
+    assert executor.calls == [("list_resources", {"kind": "pods"})]
+
+
+async def test_capability_is_required_for_status_and_cancel() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    for tool in ("get_write_proposal", "cancel_write_proposal"):
+        result = await server.call_tool(tool, {"proposal_id": "p1"})
+        assert result[0].text.startswith("ERROR:")
+    assert executor.calls == []
+    result = await server.call_tool(
+        "cancel_write_proposal", {"proposal_id": "p1", "capability": "cap-tok"}
+    )
+    assert result[0].text == "ok"
+
+
+async def test_proposal_tools_without_a_configured_token_are_rejected() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor, capability_token=None)
+    result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": ""})
+    assert result[0].text.startswith("ERROR:")
+    assert "not enabled" in result[0].text
+    assert executor.calls == []
+
+
+async def test_streamable_http_proposal_roundtrip(tmp_path: Path) -> None:
+    """Issue #110 requires a real MCP round trip for the proposal surface:
+    an SDK client over Streamable HTTP submits a proposal with the published
+    capability, and the only dispatch is to the proposal bridge — no
+    mutation tool is ever reached."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    executor = RecordingExecutor()
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    server = make_proposal_server(executor, port=0, endpoint_path=endpoint_file)
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        # The capability travels via the discovery file, exactly as a local
+        # agent would learn it.
+        entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
+        capability = entry["capability"]
+        async with (
+            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write, _),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            listed = await session.list_tools()
+            assert "propose_write" in {t.name for t in listed.tools}
+            result = await session.call_tool(
+                "propose_write", {**_PROPOSE_ARGS, "capability": capability}
+            )
+            assert result.content[0].type == "text"
+            assert getattr(result.content[0], "text", None) == "ok"
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+    # Exactly one dispatch, to the proposal bridge — nothing mutating.
+    assert len(executor.calls) == 1
+    name, args = executor.calls[0]
+    assert name == "propose_write"
+    assert "capability" not in args
+    assert {k: v for k, v in args.items() if not k.startswith("_")} == _PROPOSE_ARGS
+
+
+async def test_endpoint_file_publishes_capability_with_owner_only_mode(tmp_path: Path) -> None:
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    server = make_proposal_server(port=0, endpoint_path=endpoint_file)
+    task = asyncio.create_task(server.run())
+    try:
+        await asyncio.wait_for(server.wait_started(), timeout=10)
+        entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
+        assert entry["capability"] == "cap-tok"
+        assert (endpoint_file.stat().st_mode & 0o777) == 0o600
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_endpoint_file_omits_capability_when_proposals_are_off(tmp_path: Path) -> None:
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    server = make_server(port=0, endpoint_path=endpoint_file)
+    task = asyncio.create_task(server.run())
+    try:
+        await asyncio.wait_for(server.wait_started(), timeout=10)
+        entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
+        assert "capability" not in entry
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+
+
+def test_endpoint_file_is_created_owner_only_not_merely_chmodded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The capability-bearing registry file must never be observable with
+    group/other bits: the mode has to come from atomic 0600 creation, not
+    from a chmod racing the umask-default file."""
+    monkeypatch.setattr(Path, "chmod", lambda self, mode: None)
+    target = tmp_path / "mcp-endpoint.json"
+    _replace_atomically(target, {"servers": {}})
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert json.loads(target.read_text()) == {"servers": {}}
+
+
+async def test_client_info_is_sanitized_before_crossing_the_boundary() -> None:
+    """clientInfo is caller-controlled and flows into approval dialogs, the
+    status bar and audit records: control characters (line injection into
+    the safety-binding dialog) must be collapsed and the length bounded."""
+    from types import SimpleNamespace
+
+    server = make_proposal_server()
+    hostile = SimpleNamespace(
+        name="evil\nbound target uid: spoofed\x1b[2J" + "x" * 500,
+        version="1.0\r\n2.0",
+    )
+    fake_ctx = SimpleNamespace(
+        session=SimpleNamespace(client_params=SimpleNamespace(clientInfo=hostile))
+    )
+    server._server = SimpleNamespace(request_context=fake_ctx)  # type: ignore[assignment]  # boundary stub
+    name, version = server._client_info()
+    for value in (name, version):
+        assert "\n" not in value
+        assert "\r" not in value
+        assert "\x1b" not in value
+        assert len(value) <= 120
+    assert name.startswith("evil")

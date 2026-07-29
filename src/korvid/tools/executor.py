@@ -131,6 +131,41 @@ class UIBridge(ABC):
         """
         ...
 
+    @abstractmethod
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        """Queue an immutable external write proposal (issue #110).
+
+        Must never mutate the cluster or open a modal: validation, UID
+        capture and dry-run preview happen up front, then the proposal
+        waits in the TUI inbox for a user keystroke. Returns the proposal
+        id (as `proposal <id> pending ...`) or an "ERROR: …" string.
+        `session_id`/`client_name`/`client_version` are caller-supplied
+        transport metadata — never authenticated identity.
+        """
+        ...
+
+    @abstractmethod
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        """Status of a proposal; possession of the id is the capability."""
+        ...
+
+    @abstractmethod
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        """Caller-cancel a pending proposal (distinct from user deny)."""
+        ...
+
 
 UI_TOOLS: list[dict[str, Any]] = [
     copy.deepcopy(d.schema) for d in TOOL_DEFS if d.effect == "ui_only"
@@ -157,6 +192,15 @@ RESIZE_TOOLS: list[dict[str, Any]] = [
 ]
 
 WRITE_TOOL_NAMES = frozenset(d.name for d in TOOL_DEFS if d.effect == "cluster_write")
+
+#: External write proposals (issue #110): submission/status/cancel tools for
+#: the MCP proposal surface. They never mutate the cluster — a proposal only
+#: becomes a write after the user approves it inside the TUI.
+PROPOSAL_TOOLS: list[dict[str, Any]] = [
+    copy.deepcopy(d.schema) for d in TOOL_DEFS if d.effect == "write_proposal"
+]
+
+PROPOSAL_TOOL_NAMES = frozenset(d.name for d in TOOL_DEFS if d.effect == "write_proposal")
 
 #: UI dispatch key -> argument adapter unpacking the model's JSON arguments
 #: into the bridge call. Keyed by the registry's validated dispatch target
@@ -247,18 +291,88 @@ def _validated_resources(value: Any) -> dict[str, dict[str, dict[str, str]]]:
     return validated
 
 
+#: Write operations an external proposal may name (issue #110 first slice).
+_PROPOSAL_ACTIONS = frozenset({"delete", "scale", "rollout_restart", "resize"})
+
+#: Every caller-supplied propose_write key the validator models. Anything
+#: else is rejected, not dropped — a silently ignored option (say, a delete
+#: propagation policy) would queue a proposal that is not the operation the
+#: caller submitted. `capability` is popped by the MCP server before
+#: dispatch and `_`-prefixed keys are server-injected transport metadata.
+_PROPOSAL_CALLER_KEYS = frozenset({"action", "kind", "name", "namespace", "replicas", "resources"})
+
+
+def _reject_unknown_proposal_args(args: dict[str, Any]) -> None:
+    """Fail loudly on caller keys the proposal record would not carry."""
+    unknown = sorted(
+        key
+        for key in args
+        if key not in _PROPOSAL_CALLER_KEYS and key != "capability" and not key.startswith("_")
+    )
+    if unknown:
+        raise ValueError(f"unknown propose_write argument(s): {', '.join(unknown)}")
+
+
+def _validated_proposal_args(
+    args: dict[str, Any],
+) -> tuple[str, str, str, str | None, int | None, dict[str, dict[str, dict[str, str]]] | None]:
+    """Type-check propose_write arguments; same rules as the direct write path.
+
+    Tool schemas are not runtime validation: wrong-typed values are
+    rejected rather than coerced, so the user is never shown a proposal
+    the caller did not literally submit.
+    """
+    _reject_unknown_proposal_args(args)
+    action = args.get("action")
+    if not isinstance(action, str) or action not in _PROPOSAL_ACTIONS:
+        raise ValueError(f"'action' must be one of {sorted(_PROPOSAL_ACTIONS)}, got {action!r}")
+    kind = "pods" if action == "resize" else args.get("kind")
+    if not isinstance(kind, str) or not kind.strip():
+        raise ValueError(f"'kind' must be a non-empty string, got {kind!r}")
+    name = args.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"'name' must be a non-empty string, got {name!r}")
+    namespace = args.get("namespace")
+    if namespace is not None and not isinstance(namespace, str):
+        raise ValueError(f"'namespace' must be a string, got {namespace!r}")
+    replicas = args.get("replicas")
+    if replicas is not None and (isinstance(replicas, bool) or not isinstance(replicas, int)):
+        raise ValueError(f"'replicas' must be an integer, got {replicas!r}")
+    if action == "scale" and replicas is None:
+        raise ValueError("'replicas' is required for a scale proposal")
+    if action != "scale" and replicas is not None:
+        raise ValueError("'replicas' is only valid for a scale proposal")
+    resources = args.get("resources")
+    if action == "resize":
+        resources = _validated_resources(resources)
+    elif resources is not None:
+        raise ValueError("'resources' is only valid for a resize proposal")
+    return action, kind, name, namespace, replicas, resources
+
+
 class ToolExecutor:
-    """Dispatches OpenAI tool calls to the Kubernetes client or the UI bridge."""
+    """Dispatches OpenAI tool calls to the Kubernetes client or the UI bridge.
+
+    `proposal_tools` is fail-closed: the write-proposal tools dispatch only
+    when the constructing surface opted in. The MCP server does (it enforces
+    the per-run capability token before dispatch); the built-in agent's
+    executor never does — a hallucinated or prompt-injected `propose_write`
+    from the model must not reach the proposal queue with empty transport
+    metadata and no capability check.
+    """
 
     def __init__(
         self,
         kube: ReadOps,
         aliases: Mapping[str, ResourceMeta],
         ui: UIBridge | None = None,
+        *,
+        proposal_tools: bool = False,
     ) -> None:
         self._kube = kube
         self._aliases = aliases
         self._ui = ui
+        self._proposal_tools = proposal_tools
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         """Dispatch a tool call; never raises — exceptions are returned as 'ERROR: ...'."""
@@ -282,6 +396,12 @@ class ToolExecutor:
             return await self._dispatch_ui(tool, arguments)
         if tool.effect == "cluster_write":
             return await self._dispatch_write(tool, arguments)
+        if tool.effect == "write_proposal":
+            if not self._proposal_tools:
+                raise ValueError(
+                    f"tool {tool.name!r} is only available over the MCP proposal surface"
+                )
+            return await self._dispatch_proposal(tool, arguments)
         handler: Callable[[dict[str, Any]], Awaitable[str]] = getattr(self, tool.dispatch)
         return await handler(arguments)
 
@@ -332,6 +452,38 @@ class ToolExecutor:
             replicas,
             resources,
         )
+
+    async def _dispatch_proposal(self, tool: ToolDef, args: dict[str, Any]) -> str:
+        """Route a proposal tool (issue #110): submit/status/cancel only.
+
+        Proposal tools never execute a write — the validated dispatch key
+        is one of the bridge's proposal entrypoints, and the registry
+        rejects any proposal tool routed at the direct write path. The
+        `_session_id`/`_client_name`/`_client_version` keys are injected by
+        the MCP server from transport metadata, never taken from the model.
+        """
+        if self._ui is None:
+            raise ValueError("write proposals require the interactive TUI session")
+        session_id = str(args.get("_session_id", ""))
+        if tool.dispatch == "agent_submit_write_proposal":
+            action, kind, target, namespace, replicas, resources = _validated_proposal_args(args)
+            return await self._ui.agent_submit_write_proposal(
+                action,
+                kind,
+                target,
+                namespace,
+                replicas,
+                resources,
+                session_id=session_id,
+                client_name=str(args.get("_client_name", "")),
+                client_version=str(args.get("_client_version", "")),
+            )
+        proposal_id = args.get("proposal_id")
+        if not isinstance(proposal_id, str) or not proposal_id:
+            raise ValueError(f"'proposal_id' must be a non-empty string, got {proposal_id!r}")
+        if tool.dispatch == "agent_cancel_write_proposal":
+            return await self._ui.agent_cancel_write_proposal(proposal_id, session_id=session_id)
+        return await self._ui.agent_get_write_proposal(proposal_id)
 
     def _api_meta(self, kind: str) -> ResourceMeta:
         """Alias lookup for tools that build API paths: synthetic view kinds

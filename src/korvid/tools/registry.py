@@ -21,19 +21,30 @@ import copy
 from dataclasses import dataclass
 from typing import Any, Literal
 
-Effect = Literal["cluster_read", "ui_only", "cluster_write"]
+Effect = Literal["cluster_read", "ui_only", "cluster_write", "write_proposal"]
 Approval = Literal["none", "user_confirmation"]
 Capability = Literal["none", "pod_resize"]
-Surface = Literal["full_agent", "small_agent", "mcp"]
+Surface = Literal["full_agent", "small_agent", "mcp", "mcp_proposal"]
 
-_EFFECTS = ("cluster_read", "ui_only", "cluster_write")
+_EFFECTS = ("cluster_read", "ui_only", "cluster_write", "write_proposal")
 _APPROVALS = ("none", "user_confirmation")
 _CAPABILITIES = ("none", "pod_resize")
-_SURFACES = ("full_agent", "small_agent", "mcp")
+_SURFACES = ("full_agent", "small_agent", "mcp", "mcp_proposal")
 
 #: The only bridge method allowed to receive a cluster write: the
 #: user-confirmation approval gate (design doc security invariant).
 _WRITE_ENTRYPOINT = "agent_request_write"
+
+#: The only bridge methods a write-proposal tool may dispatch on: proposal
+#: submission/status/cancel never execute anything (issue #110) — routing a
+#: proposal tool into the direct write path is rejected at import time.
+_PROPOSAL_ENTRYPOINTS = frozenset(
+    {
+        "agent_submit_write_proposal",
+        "agent_get_write_proposal",
+        "agent_cancel_write_proposal",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -106,13 +117,21 @@ def _validate_write_policy(d: ToolDef) -> None:
             raise ValueError(f"cluster write {d.name!r} requires the approval gate")
         if not d.write_action:
             raise ValueError(f"cluster write {d.name!r} requires a write_action")
-        if "mcp" in d.surfaces:
+        if "mcp" in d.surfaces or "mcp_proposal" in d.surfaces:
             raise ValueError(f"cluster write {d.name!r} must not be exposed on mcp")
     else:
         if d.write_action is not None:
             raise ValueError(f"tool {d.name!r}: write_action is only valid on cluster writes")
         if d.approval != "none":
             raise ValueError(f"tool {d.name!r}: approval gate is only valid on cluster writes")
+    if d.effect == "write_proposal" and d.surfaces != frozenset({"mcp_proposal"}):
+        raise ValueError(
+            f"write proposal tool {d.name!r} may only be exposed on the mcp_proposal surface"
+        )
+    if d.effect != "write_proposal" and "mcp_proposal" in d.surfaces:
+        raise ValueError(
+            f"tool {d.name!r}: the mcp_proposal surface is reserved for write proposal tools"
+        )
 
 
 def validate_dispatch_targets(defs: list[ToolDef], *, executor_cls: type, bridge_cls: type) -> None:
@@ -136,6 +155,19 @@ def validate_dispatch_targets(defs: list[ToolDef], *, executor_cls: type, bridge
                 f"tool {d.name!r} (cluster_write): dispatch target "
                 f"{d.dispatch!r} bypasses the approval-gated "
                 f"{_WRITE_ENTRYPOINT!r} entrypoint"
+            )
+        if d.effect == "write_proposal" and d.dispatch not in _PROPOSAL_ENTRYPOINTS:
+            raise ValueError(
+                f"tool {d.name!r} (write_proposal): dispatch target "
+                f"{d.dispatch!r} is not a proposal entrypoint "
+                f"({sorted(_PROPOSAL_ENTRYPOINTS)})"
+            )
+        if d.effect != "write_proposal" and d.dispatch in _PROPOSAL_ENTRYPOINTS:
+            raise ValueError(
+                f"tool {d.name!r} ({d.effect}): dispatch target "
+                f"{d.dispatch!r} is a reserved proposal entrypoint — only "
+                f"write_proposal tools may route there, otherwise the "
+                f"proposal capability check is skipped"
             )
         if d.effect == "cluster_read":
             cls, role = executor_cls, "executor"
@@ -180,16 +212,21 @@ def agent_tool_schemas(
     return schemas
 
 
-def mcp_tool_schemas() -> list[dict[str, Any]]:
+def mcp_tool_schemas(*, write_proposals: bool = False) -> list[dict[str, Any]]:
     """The MCP exposure surface: read + UI-drive tools only.
 
-    Write tools stay with the built-in agent until an approval UX for
-    external callers is designed (issue #11 non-goal); `validate_tool_defs`
+    Direct write tools stay with the built-in agent; `validate_tool_defs`
     rejects any MCP-exposed cluster write independent of list placement.
+    When `write_proposals` is enabled (issue #110), the surface adds the
+    proposal submission/status/cancel tools — those never execute a write
+    themselves, they queue an immutable proposal for TUI review.
     Returns deep copies so a caller mutating a schema cannot corrupt the
     registry (issue #97).
     """
-    return [copy.deepcopy(d.schema) for d in TOOL_DEFS if "mcp" in d.surfaces]
+    surfaces: set[Surface] = {"mcp"}
+    if write_proposals:
+        surfaces.add("mcp_proposal")
+    return [copy.deepcopy(d.schema) for d in TOOL_DEFS if d.surfaces & surfaces]
 
 
 _ALL_SURFACES: frozenset[Surface] = frozenset({"full_agent", "small_agent", "mcp"})
@@ -689,6 +726,187 @@ TOOL_DEFS: list[ToolDef] = [
                         },
                     },
                     "required": ["name", "namespace", "resources"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="propose_write",
+        effect="write_proposal",
+        dispatch="agent_submit_write_proposal",
+        surfaces=frozenset({"mcp_proposal"}),
+        schema={
+            "type": "function",
+            "function": {
+                "name": "propose_write",
+                "description": (
+                    "Submit an immutable cluster-write proposal for review in "
+                    "the korvid TUI. This NEVER mutates the cluster: the "
+                    "proposal waits in the TUI's inbox until the user reviews "
+                    "and approves it with a keystroke, denies it, or it "
+                    "expires. Returns the proposal id — poll it with "
+                    "get_write_proposal. Changing an operation requires a new "
+                    "proposal."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["delete", "scale", "rollout_restart", "resize"],
+                            "description": "The write operation to propose.",
+                        },
+                        "kind": {
+                            "type": "string",
+                            "description": (
+                                "Resource kind or alias (ignored for resize, "
+                                "which always targets pods)."
+                            ),
+                        },
+                        "name": {"type": "string", "description": "Resource name."},
+                        "namespace": {
+                            "type": "string",
+                            "description": "Namespace (required for namespaced resources).",
+                        },
+                        "replicas": {
+                            "type": "integer",
+                            "description": "Desired replica count (scale only).",
+                        },
+                        "resources": {
+                            "type": "object",
+                            "description": (
+                                "Resize only: container name -> "
+                                "{'requests'/'limits' -> {'cpu'/'memory' -> quantity}}."
+                            ),
+                        },
+                        "capability": {
+                            "type": "string",
+                            "description": (
+                                "Write-proposal capability token from the "
+                                "korvid MCP endpoint registry file."
+                            ),
+                        },
+                    },
+                    "required": ["action", "name", "capability"],
+                    "allOf": [
+                        {
+                            "if": {
+                                "properties": {"action": {"enum": ["delete"]}},
+                                "required": ["action"],
+                            },
+                            "then": {
+                                "required": ["kind"],
+                                "not": {
+                                    "anyOf": [
+                                        {"required": ["replicas"]},
+                                        {"required": ["resources"]},
+                                    ]
+                                },
+                            },
+                        },
+                        {
+                            "if": {
+                                "properties": {"action": {"enum": ["rollout_restart"]}},
+                                "required": ["action"],
+                            },
+                            "then": {
+                                "required": ["kind", "namespace"],
+                                "not": {
+                                    "anyOf": [
+                                        {"required": ["replicas"]},
+                                        {"required": ["resources"]},
+                                    ]
+                                },
+                            },
+                        },
+                        {
+                            "if": {
+                                "properties": {"action": {"enum": ["scale"]}},
+                                "required": ["action"],
+                            },
+                            "then": {
+                                "required": ["kind", "replicas", "namespace"],
+                                "not": {"required": ["resources"]},
+                            },
+                        },
+                        {
+                            "if": {
+                                "properties": {"action": {"enum": ["resize"]}},
+                                "required": ["action"],
+                            },
+                            "then": {
+                                "required": ["resources", "namespace"],
+                                "not": {"required": ["replicas"]},
+                            },
+                        },
+                    ],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="get_write_proposal",
+        effect="write_proposal",
+        dispatch="agent_get_write_proposal",
+        surfaces=frozenset({"mcp_proposal"}),
+        schema={
+            "type": "function",
+            "function": {
+                "name": "get_write_proposal",
+                "description": (
+                    "Status of a previously submitted write proposal: pending, "
+                    "approved, executed, failed, denied, expired, or cancelled. "
+                    "Requires the proposal id returned by propose_write."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "proposal_id": {
+                            "type": "string",
+                            "description": "Id returned by propose_write.",
+                        },
+                        "capability": {
+                            "type": "string",
+                            "description": (
+                                "Write-proposal capability token from the "
+                                "korvid MCP endpoint registry file."
+                            ),
+                        },
+                    },
+                    "required": ["proposal_id", "capability"],
+                },
+            },
+        },
+    ),
+    ToolDef(
+        name="cancel_write_proposal",
+        effect="write_proposal",
+        dispatch="agent_cancel_write_proposal",
+        surfaces=frozenset({"mcp_proposal"}),
+        schema={
+            "type": "function",
+            "function": {
+                "name": "cancel_write_proposal",
+                "description": (
+                    "Cancel a pending write proposal you submitted. A proposal "
+                    "the user already resolved cannot be cancelled."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "proposal_id": {
+                            "type": "string",
+                            "description": "Id returned by propose_write.",
+                        },
+                        "capability": {
+                            "type": "string",
+                            "description": (
+                                "Write-proposal capability token from the "
+                                "korvid MCP endpoint registry file."
+                            ),
+                        },
+                    },
+                    "required": ["proposal_id", "capability"],
                 },
             },
         },

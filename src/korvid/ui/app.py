@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import weakref
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
@@ -92,6 +93,14 @@ from korvid.k8s.portforward import FORWARDABLE_KINDS, forward_target_gvr
 from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.tools.executor import UIBridge
+from korvid.tools.proposals import (
+    ProposalClosedError,
+    ProposalLimitError,
+    ProposalState,
+    ProposalStore,
+    ProposalTooLargeError,
+    WriteProposal,
+)
 from korvid.ui.command import command_help
 from korvid.ui.debug import DebugController
 from korvid.ui.drain import DrainController
@@ -99,6 +108,8 @@ from korvid.ui.hints import EventsFetcher, HintController, pod_needs_hint
 from korvid.ui.messages import (
     AgentPromptSubmitted,
     ClearFilter,
+    ExternalProposalExpired,
+    ExternalProposalsChanged,
     FilterCommand,
     NavigateCommand,
     QuitCommand,
@@ -602,6 +613,7 @@ class KorvidApp(App[None]):
         probe_context: Callable[[str], Awaitable[None]] | None = None,
         switch_context: Callable[[str | None], Awaitable[ContextSwitchResult]] | None = None,
         helm: HelmCLI | None = None,
+        proposal_store: ProposalStore | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -633,6 +645,9 @@ class KorvidApp(App[None]):
         self._audit = audit
         self._check_permission = check_permission
         self._mcp = mcp
+        #: External MCP write proposals (issue #110): shared with the MCP
+        #: server; None when the feature is disabled.
+        self._proposal_store = proposal_store
         self._edit_text = edit_text
         self._metrics = metrics
         self._forwards = forwards
@@ -1049,6 +1064,9 @@ class KorvidApp(App[None]):
             # Config problems (e.g. an invalid custom column) surface once at
             # startup instead of hiding in a log file (issue #45).
             self.notify(warning, title="Config warning", severity="warning")
+
+        if self._proposal_store is not None:
+            self._subscribe_proposal_updates(self._proposal_store)
 
         # Both callbacks fire from watch tasks on the same loop; post_message is
         # loop-safe. Watch tasks are cancelled in on_unmount before shutdown to
@@ -1593,6 +1611,12 @@ class KorvidApp(App[None]):
             mcp_restart = await self._quiesce_mcp_for_switch()
             if mcp_restart is None:
                 return
+            # Old-context proposals are stale the moment this committed
+            # transition begins: the old MCP run (and its capability) is
+            # already stopped, and both the teardown below and the retarget
+            # perform fallible awaits — expire them now, not at a later
+            # point that an exception could keep from ever being reached.
+            await self._expire_proposals_audited("kube context switched")
             await self._teardown_for_context_switch()
             ok, applied = await self._retarget_context(name, old)
             if not ok:
@@ -1756,6 +1780,9 @@ class KorvidApp(App[None]):
         already torn down and nothing is connected). ``applied`` is the
         context actually in effect, which may legitimately be None (the
         kubeconfig default) — that is why success is a separate flag.
+
+        Old-context proposals were already expired by the caller (right
+        after MCP quiescing), before teardown or either switch attempt.
         """
         try:
             result = await self._switch_context(name)  # type: ignore[misc]  # guarded by caller
@@ -2164,6 +2191,9 @@ class KorvidApp(App[None]):
         if head == "mcp":
             self._handle_mcp_command(parts[1:])
             return
+        if head == "proposals":
+            self._open_proposal_review()
+            return
         if head == "pf":
             self._open_forward_list()
             return
@@ -2282,11 +2312,67 @@ class KorvidApp(App[None]):
                         severity="warning",
                     )
                     return
+                was_running = mcp.running
+                if action == "on" and not was_running:
+                    # Any pending proposal predates the run about to start —
+                    # its capability token is from an older, ended run.
+                    # Sweep BEFORE the endpoint goes live: once start()
+                    # returns, the new run's callers may already have
+                    # submitted, and their work must not be expired as
+                    # old-run stragglers.
+                    await self._expire_proposals_audited("the MCP server was restarted")
                 msg = await (mcp.start() if action == "on" else mcp.stop())
+                # A real stop invalidates every capability token handed out
+                # for that run (issue #110): pending proposals from it must
+                # not survive. A stop whose bounded teardown timed out
+                # (`running` still True) has still ended that run's
+                # authority, so it expires too; only an idempotent
+                # status-preserving toggle (`:mcp on` while already
+                # running) keeps pending work.
+                stopped = action == "off" and was_running
+                # Captured under the lock and BEFORE the audited sweep: the
+                # sweep awaits audit appends, and the dying run's task can
+                # finish during that wait — `running` re-read afterwards
+                # would be False, skipping the follow-up sweep that catches
+                # the run's last in-flight submissions. The wait below must
+                # bind to *this* dying run, never to whichever run the
+                # controller owns once the lock is released.
+                old_task = mcp.pending_task() if stopped and mcp.running else None
+                if stopped:
+                    await self._expire_proposals_audited("the MCP server was stopped")
             self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
             self._refresh_status()
+            if old_task is not None:
+                # The bounded stop timed out and the old run is still dying
+                # in the background: wait it out, then sweep again so an
+                # in-flight submission that raced the teardown cannot
+                # outlive its server run.
+                await self._sweep_after_mcp_teardown(mcp, old_task)
 
         self.run_worker(_switch(), exclusive=False)
+
+    async def _sweep_after_mcp_teardown(
+        self, mcp: MCPControllerBase, task: asyncio.Task[None]
+    ) -> None:
+        """Final proposal sweep once a dragged-out MCP teardown completes.
+
+        `stop()`'s bounded wait can return while the old server run is still
+        dying; an in-flight proposal call on that run may land *after* the
+        stop-time sweep. *task* is the old run's server task, captured under
+        `_nav_lock` before it was released: the follow-up wait binds to that
+        exact run, so a fresh server started by a racing `:mcp on` is never
+        the one waited on or torn down here.
+        """
+        with contextlib.suppress(Exception):
+            await asyncio.wait({task})
+        # Serialize the sweep decision against a racing `:mcp on`: if a
+        # fresh run came up while the old teardown dragged on, pending
+        # proposals belong to that live run (its start transition already
+        # swept old-run stragglers) and must not be expired here.
+        async with self._nav_lock:
+            if mcp.running:
+                return
+            await self._expire_proposals_audited("the MCP server was stopped")
 
     def _apply_agent_settings(self, settings: AgentSettings) -> bool:
         """Swap in a fresh runtime built from the wizard's settings.
@@ -6178,8 +6264,47 @@ class KorvidApp(App[None]):
             mcp_label=mcp_label,
             filter_label=self._resource_filter.describe(),
             progress_label=" · ".join(label for label in self._progress_labels.values() if label),
+            proposals_label=self._proposals_label(),
             protected=self._protected_context is not None,
         )
+
+    def _proposals_label(self) -> str:
+        """Status-bar text for pending external write proposals (issue #110):
+        a persistent, non-modal indicator naming source and target."""
+        store = self._proposal_store
+        if store is None:
+            return ""
+        pending = store.pending()
+        if not pending:
+            return ""
+        p = pending[0]  # oldest — the next proposal a review would surface
+        source = p.client_name or "mcp"
+        target = f"{p.action} {p.kind}/{p.name}"
+        if len(pending) == 1:
+            return f"1 proposal from {source}: {target} — :proposals"
+        return f"{len(pending)} proposals (next from {source}: {target}) — :proposals"
+
+    def on_external_proposals_changed(self, message: ExternalProposalsChanged) -> None:
+        self._refresh_status()
+
+    async def on_external_proposal_expired(self, message: ExternalProposalExpired) -> None:
+        """Audit a proposal the lazy TTL sweep expired: it reached a terminal
+        state like any other and must not vanish from the audit trail."""
+        await self._audit_proposal_outcome(message.proposal, "expired", message.reason)
+
+    def _subscribe_proposal_updates(self, store: ProposalStore) -> None:
+        """Keep the pending indicator live: post_message is loop-safe, so the
+        callback may fire from the MCP server's task (or any thread) and
+        never touches widgets directly."""
+
+        def _proposals_changed() -> None:
+            self.post_message(ExternalProposalsChanged())
+
+        def _proposal_expired(proposal: WriteProposal, reason: str) -> None:
+            self.post_message(ExternalProposalExpired(proposal, reason))
+
+        store.subscribe(_proposals_changed)
+        store.set_on_expired(_proposal_expired)
 
     def _agent_blocked_in_protected(self) -> bool:
         """`agent.disable_in_protected` (issue #83): agent turns are refused
@@ -6911,6 +7036,477 @@ class KorvidApp(App[None]):
         raw = (manifest.get("metadata") or {}).get("uid")
         return str(raw) if raw else None
 
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        """External MCP write proposal intake (issue #110).
+
+        Validates exactly like the direct agent write path (kind, RBAC, UID
+        capture, dry-run preview) but instead of opening a dialog it queues
+        an immutable proposal for later user review — no modal, no focus
+        steal. Returns the proposal id; the caller polls
+        ``get_write_proposal`` for the terminal outcome.
+        """
+        store = self._proposal_store
+        if store is None:
+            return "ERROR: external write proposals are not enabled"
+        name = name.strip()
+        stamp = restart_stamp()
+        # Intake is validated against exactly one context: snapshot it here
+        # and recheck before queueing — RBAC, UID capture and the preview all
+        # await, and a context switch landing mid-intake would otherwise
+        # stamp old-context validation onto a new-context proposal.
+        epoch = self._ctx_epoch
+        context = self.config.kube_context
+        built = self._agent_write_op(
+            action, kind, name, namespace, replicas, resources, restarted_at=stamp
+        )
+        if isinstance(built, str):
+            return built
+        meta, ns, _op, operation, _detail = built
+        arguments_json = json.dumps(
+            {
+                "action": action,
+                "kind": kind.strip().lower(),
+                "name": name,
+                "namespace": ns,
+                "replicas": replicas,
+                "resources": resources,
+                "restarted_at": stamp,
+            }
+        )
+        # Untrusted-input bound: enforced before any cluster I/O (the store
+        # atomically rechecks it at submit) so an oversized payload cannot
+        # force an RBAC round trip, UID lookup, or server dry-run.
+        if len(arguments_json) > store.max_argument_chars:
+            return (
+                f"ERROR: proposal arguments exceed {store.max_argument_chars}"
+                " characters; the proposal was not queued"
+            )
+        if not await self._permitted(action, meta, ns, name):
+            verb, target = self._write_perm_target(action, meta)
+            return f"ERROR: missing permission: {verb} {target}"
+        try:
+            uid = await self._target_uid(kind.strip().lower(), ns, name)
+        except ApiStatusError:
+            return f"ERROR: {self._gvr_label(meta)}/{name} not found{self._write_locus(ns)}"
+        if uid is None:
+            # The interactive path fails open here (a user is watching);
+            # an external proposal without a UID binding could mutate a
+            # same-named replacement, so it must fail closed instead.
+            return (
+                "ERROR: could not verify the write target (UID capture"
+                " failed); the proposal was not queued — try again"
+            )
+        preview = await self._preview_for_action(
+            action, meta, ns, name, replicas, resources, uid, stamp
+        )
+        if self._ctx_switching or self._ctx_epoch != epoch or self.config.kube_context != context:
+            return (
+                "ERROR: the kube context changed while the proposal was being"
+                " validated; the proposal was not queued — try again"
+            )
+        try:
+            proposal = store.submit(
+                action=action,
+                group=meta.group,
+                version=meta.version,
+                kind=meta.plural,
+                namespace=ns,
+                name=name,
+                arguments_json=arguments_json,
+                uid=uid,
+                context=context,
+                context_epoch=epoch,
+                summary=operation,
+                preview=tuple(preview or ()),
+                session_id=session_id,
+                client_name=client_name,
+                client_version=client_version,
+            )
+        except (ProposalClosedError, ProposalLimitError, ProposalTooLargeError) as exc:
+            return f"ERROR: {exc}"
+        source = client_name or "an external MCP caller"
+        self.notify(
+            f"Write proposal from {source}: {operation} — review with :proposals",
+            severity="warning",
+            timeout=10,
+        )
+        ttl = max(0, int(proposal.expires_at - proposal.created_at))
+        return (
+            f"proposal {proposal.id} is pending user review in the TUI"
+            f" (expires in {ttl}s if unreviewed); poll get_write_proposal"
+            " for the outcome"
+        )
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        """Terminal-outcome lookup for an external write proposal."""
+        store = self._proposal_store
+        if store is None:
+            return "ERROR: external write proposals are not enabled"
+        found = store.get(proposal_id)
+        if found is None:
+            return "ERROR: unknown proposal id"
+        proposal, state, reason = found
+        line = f"proposal {proposal.id}: {state} — {proposal.summary}"
+        return f"{line} ({reason})" if reason else line
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        """Caller-initiated cancel; only the submitting session may cancel."""
+        store = self._proposal_store
+        if store is None:
+            return "ERROR: external write proposals are not enabled"
+        found = store.get(proposal_id)
+        if found is not None and store.cancel(proposal_id, session_id=session_id):
+            await self._audit_proposal_outcome(found[0], "cancelled", "cancelled by caller")
+            return f"proposal {proposal_id} cancelled"
+        return "ERROR: proposal not found, not pending, or owned by another session"
+
+    async def _audit_proposal_outcome(
+        self, proposal: WriteProposal, state: str, reason: str
+    ) -> None:
+        """Best-effort audit for a terminal proposal outcome (issue #110).
+
+        These transitions mutate nothing, so a failed append is logged
+        instead of blocking — the mutation path itself stays fail-closed in
+        `_run_write` (which separately audits executed/failed writes with
+        the same proposal provenance). The blocking file append is offloaded
+        per audit.py's contract for async contexts.
+        """
+        await asyncio.to_thread(self._append_proposal_audit, proposal, state, reason)
+
+    def _append_proposal_audit(self, proposal: WriteProposal, state: str, reason: str) -> None:
+        """Blocking append of a proposal outcome; call via to_thread."""
+        audit = self._audit
+        if audit is None:
+            return
+        try:
+            audit.append(
+                action=proposal.action,
+                kind=proposal.kind,
+                group=proposal.group,
+                version=proposal.version,
+                namespace=proposal.namespace,
+                name=proposal.name,
+                detail=self._proposal_provenance(proposal),
+                outcome=f"proposal {state}: {reason}" if reason else f"proposal {state}",
+                # These outcome appends are not serialized with `:ctx`'s
+                # set_context: bind the entry to the proposal's own cluster.
+                context=proposal.context,
+            )
+        except Exception:
+            logger.warning("could not audit proposal %s outcome %s", proposal.id, state)
+
+    @staticmethod
+    def _proposal_provenance(proposal: WriteProposal) -> str:
+        """Field-injection-safe audit provenance for an external proposal.
+
+        `client_name`/`client_version` are untrusted MCP client metadata:
+        non-printables are stripped at intake, but spaces and `=` could
+        still forge field-looking tokens (`session=forged`). Quote them
+        (shell-style, so benign values stay bare) so every `key=` field in
+        the detail is korvid's own.
+        """
+        caller = shlex.quote(proposal.client_name or "unknown")
+        version = (
+            f" version={shlex.quote(proposal.client_version)}" if proposal.client_version else ""
+        )
+        return (
+            f"source=external_mcp proposal={proposal.id}"
+            f" caller={caller}{version} session={proposal.session_id}"
+        )
+
+    async def _expire_proposals_audited(self, reason: str) -> None:
+        """Expire every pending proposal and audit each terminal outcome."""
+        store = self._proposal_store
+        if store is None:
+            return
+        for proposal in store.expire_all(reason=reason):
+            await self._audit_proposal_outcome(proposal, "expired", reason)
+
+    def _open_proposal_review(self) -> None:
+        """`:proposals` — review pending external proposals one at a time."""
+        store = self._proposal_store
+        if store is None:
+            self.notify(
+                "External write proposals are disabled (set mcp.write_proposals: true)",
+                severity="warning",
+            )
+            return
+        if not store.pending():
+            self.notify("No pending write proposals")
+            return
+        # Never *replace* a live review worker (exclusive=True would cancel
+        # it): once a proposal is claimed, cancellation could interrupt
+        # `_run_write` mid-mutation and strand the record as `approved`
+        # with an uncertain cluster outcome. Duplicate opens are refused.
+        if any(w.group == "proposal-review" and not w.is_finished for w in self.workers):
+            self.notify("A proposal review is already open", severity="warning")
+            return
+        self.run_worker(self._review_proposals(store), group="proposal-review")
+
+    async def _review_proposals(self, store: ProposalStore) -> None:
+        """Review pending proposals oldest-first until none remain or the
+        user dismisses the dialog (a dismissed proposal stays pending)."""
+        while True:
+            pending = store.pending()
+            if not pending:
+                self._refresh_status()
+                return
+            if not await self._review_one_proposal(store, pending[0]):
+                self._refresh_status()
+                return
+
+    async def _review_one_proposal(self, store: ProposalStore, proposal: WriteProposal) -> bool:
+        """Re-validate and put one proposal in front of the user; False stops
+        the review loop (dismissal), True moves on to the next proposal."""
+        if proposal.context_epoch != self._ctx_epoch or (
+            proposal.context != self.config.kube_context
+        ):
+            await self._resolve_proposal_audited(
+                store, proposal, "expired", "kube context changed since submission"
+            )
+            return True
+        rebuilt = self._rebuild_proposal_op(proposal)
+        if isinstance(rebuilt, str):
+            await self._resolve_proposal_audited(
+                store, proposal, "expired", rebuilt.removeprefix("ERROR: ")
+            )
+            return True
+        meta, ns, op, operation, _detail = rebuilt
+        if not await self._permitted(proposal.action, meta, ns, proposal.name):
+            await self._resolve_proposal_audited(
+                store, proposal, "failed", "permission revoked since submission"
+            )
+            return True
+        # The awaited SSAR can be slow: re-read state and context before
+        # surfacing the dialog. The proposal may have been cancelled or
+        # expired meanwhile, and a `:ctx` switch begun in flight owns its
+        # fate (the switch's sweep expires old-context proposals) — never
+        # put an already-invalid proposal in front of the user.
+        found = store.get(proposal.id)
+        if found is None or found[1] != "pending":
+            return True
+        if self._ctx_switching or proposal.context_epoch != self._ctx_epoch:
+            return False
+        source = proposal.client_name or "external MCP caller"
+        title = (
+            f"External proposal from {source}: {proposal.action}"
+            f" {self._gvr_label(meta)}/{proposal.name}{self._write_locus(ns)}"
+        )
+        require = proposal.name if proposal.action == "delete" and not meta.namespaced else None
+        decision = await self._await_proposal_decision(
+            title,
+            self._proposal_dialog_body(proposal, operation),
+            require_name=require,
+            preview=list(proposal.preview),
+        )
+        if decision == "dismissed":
+            return False
+        if decision == "declined":
+            await self._resolve_proposal_audited(store, proposal, "denied", "denied by user")
+            return True
+        await self._execute_proposal(store, proposal, meta, ns, op)
+        return True
+
+    async def _await_proposal_decision(
+        self,
+        title: str,
+        operation: str,
+        *,
+        require_name: str | None,
+        preview: list[str] | None,
+    ) -> Literal["approved", "declined", "dismissed"]:
+        """One ConfirmScreen decision for a proposal; only real key input can
+        resolve it. Unlike agent writes this is user-initiated (:proposals),
+        so there is no panel gate — but never stack over another dialog where
+        a stray keystroke could approve, and treat an unanswered dialog as a
+        dismissal (the proposal stays pending until its own TTL)."""
+        if len(self.screen_stack) != 1:
+            self.notify("Close the current dialog, then run :proposals again", severity="warning")
+            return "dismissed"
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[bool | None] = loop.create_future()
+
+        def _done(confirmed: bool | None) -> None:
+            if not fut.done():
+                fut.set_result(confirmed)
+
+        screen = self._confirm_screen(title, operation, require_name=require_name, preview=preview)
+        await self.push_screen(screen, _done)
+        try:
+            confirmed = await asyncio.wait_for(fut, timeout=_APPROVAL_TIMEOUT)
+        except TimeoutError:
+            if self.screen is screen:
+                with contextlib.suppress(Exception):
+                    self.pop_screen()
+            return "dismissed"
+        if confirmed is None:  # Esc: no decision was made
+            return "dismissed"
+        return "approved" if confirmed else "declined"
+
+    def _rebuild_proposal_op(
+        self, proposal: WriteProposal
+    ) -> tuple[ResourceMeta, str | None, Callable[[str | None], Awaitable[None]], str, str] | str:
+        """Rebuild the write operation from the proposal's immutable
+        arguments at review time: readonly mode, audit availability, kind
+        resolution and argument validation are all rechecked — the stored
+        record never carries an executable closure."""
+        try:
+            args = json.loads(proposal.arguments_json)
+        except ValueError:
+            return "ERROR: proposal arguments are unreadable"
+        return self._agent_write_op(
+            args["action"],
+            args["kind"],
+            args["name"],
+            args["namespace"],
+            args["replicas"],
+            args["resources"],
+            restarted_at=args["restarted_at"],
+        )
+
+    async def _resolve_proposal_audited(
+        self, store: ProposalStore, proposal: WriteProposal, state: ProposalState, reason: str
+    ) -> None:
+        """Resolve a pending proposal and audit the terminal outcome."""
+        if store.resolve(proposal.id, state, reason=reason):
+            await self._audit_proposal_outcome(proposal, state, reason)
+
+    def _proposal_dialog_body(self, proposal: WriteProposal, operation: str) -> str:
+        """The dialog body for a proposal: the operation plus the immutable
+        safety bindings issue #110 requires the user to see before approval —
+        the caller (explicitly untrusted metadata), the bound kube context
+        and epoch, the bound target UID, and the expiry."""
+        caller = proposal.client_name or "unknown"
+        version = f" {proposal.client_version}" if proposal.client_version else ""
+        remaining = max(0, int(proposal.expires_at - time.monotonic()))
+        return "\n".join(
+            (
+                operation,
+                "",
+                f"caller (untrusted metadata): {caller}{version}",
+                f"bound kube context: {proposal.context or '(default)'}"
+                f" (epoch {proposal.context_epoch})",
+                f"bound target uid: {proposal.uid}",
+                f"expires in {remaining}s unless approved or denied",
+            )
+        )
+
+    async def _fail_proposal(
+        self, store: ProposalStore, proposal: WriteProposal, meta: ResourceMeta, reason: str
+    ) -> None:
+        """Record and audit a pre-write failure of a claimed proposal."""
+        store.finish_execution(proposal.id, executed=False, reason=reason)
+        await self._audit_proposal_outcome(proposal, "failed", reason)
+        self.notify(
+            f"Proposal {proposal.action} {meta.plural}/{proposal.name} failed: {reason}",
+            severity="error",
+        )
+
+    async def _execute_proposal(
+        self,
+        store: ProposalStore,
+        proposal: WriteProposal,
+        meta: ResourceMeta,
+        ns: str | None,
+        op: Callable[[str | None], Awaitable[None]],
+    ) -> None:
+        """Claim and execute an approved proposal under the nav lock so a
+        context switch or `:mcp off` cannot interleave: the claim itself is
+        linearized with the shutdown/switch expiry sweeps (if one of those
+        won while the dialog was open or the lock was contended, there is no
+        pending proposal left to claim). After the claim, the context epoch
+        and RBAC are rechecked, then the UID binding, then the same
+        fail-closed audit-before-mutation path as every other write."""
+        async with self._nav_lock:
+            if not store.begin_execution(proposal.id):
+                # Cancelled, TTL-expired, or invalidated (MCP shutdown /
+                # context switch) before the claim landed: the approval no
+                # longer has a pending proposal to execute.
+                self.notify("The proposal was withdrawn before approval landed", severity="warning")
+                return
+            if proposal.context_epoch != self._ctx_epoch or (
+                proposal.context != self.config.kube_context
+            ):
+                await self._fail_proposal(
+                    store, proposal, meta, "the kube context changed before execution"
+                )
+                return
+            if not await self._permitted(proposal.action, meta, ns, proposal.name):
+                await self._fail_proposal(
+                    store, proposal, meta, "permission revoked before execution"
+                )
+                return
+            args = json.loads(proposal.arguments_json)
+            try:
+                current_uid = await self._target_uid(args["kind"], ns, proposal.name)
+            except ApiStatusError:
+                await self._fail_proposal(store, proposal, meta, "the target no longer exists")
+                return
+            if current_uid != proposal.uid:
+                await self._fail_proposal(
+                    store,
+                    proposal,
+                    meta,
+                    "the target was replaced since the proposal was created",
+                )
+                return
+            detail = self._proposal_provenance(proposal)
+            write = asyncio.ensure_future(
+                self._run_write(
+                    proposal.action, meta, ns, proposal.name, op(proposal.uid), detail=detail
+                )
+            )
+            try:
+                outcome = await asyncio.shield(write)
+            except asyncio.CancelledError:
+                # Worker cancellation (TUI shutdown) after the claim: the
+                # record must still reach a terminal state, never a
+                # permanent `approved` over an uncertain cluster outcome.
+                await self._settle_interrupted_execution(store, proposal, write)
+                raise
+            store.finish_execution(
+                proposal.id, executed=outcome == "done", reason="" if outcome == "done" else outcome
+            )
+            if outcome == "done":
+                self.notify(f"Executed proposal: {proposal.summary}")
+
+    async def _settle_interrupted_execution(
+        self, store: ProposalStore, proposal: WriteProposal, write: asyncio.Future[str]
+    ) -> None:
+        """A claimed execution's worker was cancelled mid-write. Use the
+        write's real outcome when it already settled; otherwise abandon the
+        in-flight call and record the uncertainty — the API server may or
+        may not have committed the mutation by the time cancellation lands.
+        """
+        if write.done() and not write.cancelled() and write.exception() is None:
+            # _run_write already audited this outcome itself.
+            outcome = write.result()
+            store.finish_execution(
+                proposal.id, executed=outcome == "done", reason="" if outcome == "done" else outcome
+            )
+            return
+        write.cancel()
+        reason = "interrupted before completion — the cluster outcome is uncertain"
+        store.finish_execution(proposal.id, executed=False, reason=reason)
+        # _run_write only got as far as its intent record: the terminal
+        # outcome must reach the audit trail even while cancellation is
+        # unwinding — shield the append so a second cancel cannot skip it
+        # (the offloaded thread completes regardless).
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(self._audit_proposal_outcome(proposal, "failed", reason))
+
     def _agent_write_op(
         self,
         action: str,
@@ -7205,6 +7801,12 @@ class KorvidApp(App[None]):
 
     async def on_unmount(self) -> None:
         # Cancel any active log stream tasks before the event loop shuts down.
+        # A proposal must never outlive the session that previewed it; close
+        # the store first so an in-flight submission cannot land after the
+        # final sweep.
+        if self._proposal_store is not None:
+            self._proposal_store.close()
+        await self._expire_proposals_audited("the TUI session ended")
         if self._ns_prefetch_task is not None:
             self._ns_prefetch_task.cancel()
         if self._ctx_prefetch_task is not None:
@@ -7274,3 +7876,34 @@ class AppUIBridge(UIBridge):
         return await self._app.agent_request_write(
             action, kind, name, namespace, replicas, resources
         )
+
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        return await self._app.agent_submit_write_proposal(
+            action,
+            kind,
+            name,
+            namespace,
+            replicas,
+            resources,
+            session_id=session_id,
+            client_name=client_name,
+            client_version=client_version,
+        )
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        return await self._app.agent_get_write_proposal(proposal_id)
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        return await self._app.agent_cancel_write_proposal(proposal_id, session_id=session_id)

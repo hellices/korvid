@@ -375,10 +375,53 @@ class FakeBridge(UIBridge):
         )
         return f"approved and executed: {action} {kind}/{name}"
 
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        self.calls.append(
+            (
+                "submit_proposal",
+                {
+                    "action": action,
+                    "kind": kind,
+                    "name": name,
+                    "namespace": namespace,
+                    "replicas": replicas,
+                    "resources": resources,
+                    "session_id": session_id,
+                    "client_name": client_name,
+                    "client_version": client_version,
+                },
+            )
+        )
+        return "proposal abc123 pending"
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        self.calls.append(("get_proposal", {"proposal_id": proposal_id}))
+        return "proposal pending"
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        self.calls.append(
+            ("cancel_proposal", {"proposal_id": proposal_id, "session_id": session_id})
+        )
+        return "proposal cancelled"
+
 
 def make_ui_executor(bridge: Any) -> ToolExecutor:
     kube: Any = FakeKube()
-    return ToolExecutor(kube, {"pods": PODS_META}, ui=bridge)
+    # proposal_tools mirrors the MCP server's wiring — the only surface the
+    # write-proposal tools may dispatch from.
+    return ToolExecutor(kube, {"pods": PODS_META}, ui=bridge, proposal_tools=True)
 
 
 def test_ui_tools_schema_names() -> None:
@@ -1353,3 +1396,143 @@ async def test_write_resize_path_still_validates_resources_under_any_name(
     )
     assert out.startswith("ERROR:")
     assert bridge.calls == []
+
+
+# --- write proposal tools (issue #110) -----------------------------------
+
+
+async def test_proposal_tools_are_rejected_off_the_mcp_surface() -> None:
+    """The proposal tools are registered, so the shared executor 'knows'
+    them — but only the MCP path enforces the per-run capability token
+    before dispatch. A default-constructed executor (the built-in agent's
+    wiring) must refuse them, or a hallucinated/prompt-injected call could
+    queue proposals with empty transport metadata and no capability."""
+    kube: Any = FakeKube()
+    executor = ToolExecutor(kube, {"pods": PODS_META}, ui=FakeBridge())
+    for name, args in (
+        ("propose_write", {"action": "delete", "kind": "pods", "name": "web"}),
+        ("get_write_proposal", {"proposal_id": "p1"}),
+        ("cancel_write_proposal", {"proposal_id": "p1"}),
+    ):
+        result = await executor.execute(name, dict(args))
+        assert result.startswith("ERROR:"), name
+        assert "MCP" in result, name
+
+
+async def test_propose_write_dispatches_to_the_proposal_entrypoint() -> None:
+    bridge = FakeBridge()
+    executor = make_ui_executor(bridge)
+    result = await executor.execute(
+        "propose_write",
+        {
+            "action": "scale",
+            "kind": "deploy",
+            "name": "web",
+            "namespace": "default",
+            "replicas": 3,
+            "_session_id": "sess-1",
+            "_client_name": "claude-code",
+            "_client_version": "1.2",
+        },
+    )
+    assert "proposal" in result
+    assert bridge.calls == [
+        (
+            "submit_proposal",
+            {
+                "action": "scale",
+                "kind": "deploy",
+                "name": "web",
+                "namespace": "default",
+                "replicas": 3,
+                "resources": None,
+                "session_id": "sess-1",
+                "client_name": "claude-code",
+                "client_version": "1.2",
+            },
+        )
+    ]
+
+
+async def test_propose_write_rejects_an_unknown_action() -> None:
+    executor = make_ui_executor(FakeBridge())
+    result = await executor.execute(
+        "propose_write", {"action": "drain", "kind": "nodes", "name": "n1"}
+    )
+    assert result.startswith("ERROR:")
+    assert "action" in result
+
+
+async def test_propose_write_scale_requires_replicas() -> None:
+    executor = make_ui_executor(FakeBridge())
+    result = await executor.execute(
+        "propose_write", {"action": "scale", "kind": "deploy", "name": "web", "namespace": "d"}
+    )
+    assert result.startswith("ERROR:")
+    assert "replicas" in result
+
+
+async def test_propose_write_rejects_replicas_on_a_non_scale_action() -> None:
+    """The immutable record must be exactly the operation the caller
+    submitted: a stray `replicas` on a delete would be silently ignored by
+    the operation builder while never appearing in the review dialog."""
+    executor = make_ui_executor(FakeBridge())
+    result = await executor.execute(
+        "propose_write",
+        {"action": "delete", "kind": "pods", "name": "web", "replicas": 3},
+    )
+    assert result.startswith("ERROR:")
+    assert "only valid for a scale proposal" in result
+
+
+async def test_propose_write_rejects_unknown_arguments() -> None:
+    """A caller option the validator doesn't model (e.g. a delete
+    propagation policy) must fail loudly: silently dropping it would queue
+    a proposal that is not the operation the caller submitted — the same
+    silent-mismatch already prevented for stray replicas/resources.
+    Server-reserved keys (transport metadata, capability token) stay
+    accepted."""
+    executor = make_ui_executor(FakeBridge())
+    result = await executor.execute(
+        "propose_write",
+        {"action": "delete", "kind": "pods", "name": "web", "propagation_policy": "Orphan"},
+    )
+    assert result.startswith("ERROR:")
+    assert "propagation_policy" in result
+
+    reserved = await executor.execute(
+        "propose_write",
+        {
+            "action": "delete",
+            "kind": "pods",
+            "name": "web",
+            "_session_id": "sess-1",
+            "capability": "tok",
+        },
+    )
+    assert not reserved.startswith("ERROR:")
+
+
+async def test_get_write_proposal_requires_a_proposal_id() -> None:
+    executor = make_ui_executor(FakeBridge())
+    result = await executor.execute("get_write_proposal", {})
+    assert result.startswith("ERROR:")
+    assert "proposal_id" in result
+
+
+async def test_cancel_write_proposal_forwards_the_transport_session() -> None:
+    bridge = FakeBridge()
+    executor = make_ui_executor(bridge)
+    result = await executor.execute(
+        "cancel_write_proposal", {"proposal_id": "p1", "_session_id": "sess-9"}
+    )
+    assert "cancelled" in result
+    assert bridge.calls == [("cancel_proposal", {"proposal_id": "p1", "session_id": "sess-9"})]
+
+
+async def test_proposal_tools_without_a_bridge_return_an_error() -> None:
+    executor = make_ui_executor(None)
+    result = await executor.execute(
+        "propose_write", {"action": "delete", "kind": "pods", "name": "web"}
+    )
+    assert result.startswith("ERROR:")
