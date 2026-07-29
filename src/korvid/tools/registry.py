@@ -788,6 +788,43 @@ TOOL_DEFS: list[ToolDef] = [
                         },
                     },
                     "required": ["action", "name", "capability"],
+                    "allOf": [
+                        {
+                            "if": {
+                                "properties": {"action": {"enum": ["delete", "rollout_restart"]}},
+                                "required": ["action"],
+                            },
+                            "then": {
+                                "required": ["kind"],
+                                "not": {
+                                    "anyOf": [
+                                        {"required": ["replicas"]},
+                                        {"required": ["resources"]},
+                                    ]
+                                },
+                            },
+                        },
+                        {
+                            "if": {
+                                "properties": {"action": {"enum": ["scale"]}},
+                                "required": ["action"],
+                            },
+                            "then": {
+                                "required": ["kind", "replicas"],
+                                "not": {"required": ["resources"]},
+                            },
+                        },
+                        {
+                            "if": {
+                                "properties": {"action": {"enum": ["resize"]}},
+                                "required": ["action"],
+                            },
+                            "then": {
+                                "required": ["resources"],
+                                "not": {"required": ["replicas"]},
+                            },
+                        },
+                    ],
                 },
             },
         },

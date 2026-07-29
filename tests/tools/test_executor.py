@@ -1485,6 +1485,34 @@ async def test_propose_write_rejects_replicas_on_a_non_scale_action() -> None:
     assert "only valid for a scale proposal" in result
 
 
+async def test_propose_write_rejects_unknown_arguments() -> None:
+    """A caller option the validator doesn't model (e.g. a delete
+    propagation policy) must fail loudly: silently dropping it would queue
+    a proposal that is not the operation the caller submitted — the same
+    silent-mismatch already prevented for stray replicas/resources.
+    Server-reserved keys (transport metadata, capability token) stay
+    accepted."""
+    executor = make_ui_executor(FakeBridge())
+    result = await executor.execute(
+        "propose_write",
+        {"action": "delete", "kind": "pods", "name": "web", "propagation_policy": "Orphan"},
+    )
+    assert result.startswith("ERROR:")
+    assert "propagation_policy" in result
+
+    reserved = await executor.execute(
+        "propose_write",
+        {
+            "action": "delete",
+            "kind": "pods",
+            "name": "web",
+            "_session_id": "sess-1",
+            "capability": "tok",
+        },
+    )
+    assert not reserved.startswith("ERROR:")
+
+
 async def test_get_write_proposal_requires_a_proposal_id() -> None:
     executor = make_ui_executor(FakeBridge())
     result = await executor.execute("get_write_proposal", {})

@@ -294,6 +294,24 @@ def _validated_resources(value: Any) -> dict[str, dict[str, dict[str, str]]]:
 #: Write operations an external proposal may name (issue #110 first slice).
 _PROPOSAL_ACTIONS = frozenset({"delete", "scale", "rollout_restart", "resize"})
 
+#: Every caller-supplied propose_write key the validator models. Anything
+#: else is rejected, not dropped — a silently ignored option (say, a delete
+#: propagation policy) would queue a proposal that is not the operation the
+#: caller submitted. `capability` is popped by the MCP server before
+#: dispatch and `_`-prefixed keys are server-injected transport metadata.
+_PROPOSAL_CALLER_KEYS = frozenset({"action", "kind", "name", "namespace", "replicas", "resources"})
+
+
+def _reject_unknown_proposal_args(args: dict[str, Any]) -> None:
+    """Fail loudly on caller keys the proposal record would not carry."""
+    unknown = sorted(
+        key
+        for key in args
+        if key not in _PROPOSAL_CALLER_KEYS and key != "capability" and not key.startswith("_")
+    )
+    if unknown:
+        raise ValueError(f"unknown propose_write argument(s): {', '.join(unknown)}")
+
 
 def _validated_proposal_args(
     args: dict[str, Any],
@@ -304,6 +322,7 @@ def _validated_proposal_args(
     rejected rather than coerced, so the user is never shown a proposal
     the caller did not literally submit.
     """
+    _reject_unknown_proposal_args(args)
     action = args.get("action")
     if not isinstance(action, str) or action not in _PROPOSAL_ACTIONS:
         raise ValueError(f"'action' must be one of {sorted(_PROPOSAL_ACTIONS)}, got {action!r}")

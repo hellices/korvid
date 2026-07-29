@@ -442,3 +442,28 @@ def test_proposal_tool_schemas_advertise_the_required_capability() -> None:
         params = schemas[name]["function"]["parameters"]
         assert params["properties"]["capability"]["type"] == "string"
         assert "capability" in params["required"]
+
+
+def test_propose_write_schema_encodes_action_specific_requirements() -> None:
+    """MCP hosts generate arguments from the advertised schema; a schema
+    that accepts calls the executor deterministically rejects (missing
+    kind/replicas/resources, stray replicas on a delete) turns
+    valid-by-schema calls into guaranteed errors. The per-action contract
+    the executor enforces is mirrored as conditional schema branches."""
+    schemas = {s["function"]["name"]: s for s in mcp_tool_schemas(write_proposals=True)}
+    params = schemas["propose_write"]["function"]["parameters"]
+    branches = {
+        action: branch["then"]
+        for branch in params["allOf"]
+        for action in branch["if"]["properties"]["action"]["enum"]
+    }
+    assert set(branches) == {"delete", "scale", "rollout_restart", "resize"}
+    for action in ("delete", "rollout_restart"):
+        assert "kind" in branches[action]["required"]
+        exclusions = branches[action]["not"]["anyOf"]
+        assert {"required": ["replicas"]} in exclusions
+        assert {"required": ["resources"]} in exclusions
+    assert set(branches["scale"]["required"]) == {"kind", "replicas"}
+    assert branches["scale"]["not"] == {"required": ["resources"]}
+    assert branches["resize"]["required"] == ["resources"]
+    assert branches["resize"]["not"] == {"required": ["replicas"]}
