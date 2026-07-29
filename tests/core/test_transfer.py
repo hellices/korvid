@@ -282,7 +282,8 @@ class TestValidateSpecPermissions:
 
     def test_download_into_unsearchable_directory(self, tmp_path: Path) -> None:
         # Creating the .part staging file needs the directory's search bit
-        # too: write-only (0o600) still cannot create the destination.
+        # too: read/write without search (0o600) still cannot create the
+        # destination.
         unsearchable = tmp_path / "unsearchable"
         unsearchable.mkdir(mode=0o600)
         try:

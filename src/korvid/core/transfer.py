@@ -353,6 +353,28 @@ async def _await_thread(func: Callable[..., _T], /, *args: Any) -> _T:
         raise
 
 
+def _create_spool(local_path: Path) -> tuple[int, Path]:
+    """Create the download staging file next to the destination.
+
+    OSErrors are normalized to TransferError naming the destination
+    directory — never the internal staging file (issue #123). validate_spec
+    pre-checks writability, but the bit can flip between the dialog and the
+    stream. Only permission failures get the "not writable" wording: mkstemp
+    can also fail with ENOSPC, EMFILE, ENAMETOOLONG and the like.
+    """
+    try:
+        fd, spool_name = tempfile.mkstemp(
+            dir=local_path.parent, prefix=f".{local_path.name}.", suffix=".part"
+        )
+    except OSError as exc:
+        if isinstance(exc, PermissionError):
+            detail = f"local directory is not writable: {local_path.parent}"
+        else:
+            detail = f"cannot create download staging file in {local_path.parent}"
+        raise TransferError(f"{detail} ({exc.strerror or exc})") from exc
+    return fd, Path(spool_name)
+
+
 async def download(
     open_exec: OpenExec,
     remote_path: str,
@@ -368,18 +390,7 @@ async def download(
     """
     sink = _FrameSink()
     total = 0
-    try:
-        fd, spool_name = tempfile.mkstemp(
-            dir=local_path.parent, prefix=f".{local_path.name}.", suffix=".part"
-        )
-    except OSError as exc:
-        # validate_spec pre-checks writability, but the bit can flip between
-        # the dialog and the stream; name the destination directory — never
-        # the internal staging file — in the user-facing error (issue #123).
-        raise TransferError(
-            f"local directory is not writable: {local_path.parent} ({exc.strerror or exc})"
-        ) from exc
-    spool_path = Path(spool_name)
+    fd, spool_path = _create_spool(local_path)
     try:
         with os.fdopen(fd, "wb") as spool:
             async with open_exec(download_command(remote_path), False) as ws:

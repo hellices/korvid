@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import io
 import json
 import os
@@ -304,6 +305,24 @@ class TestPermissionErrors:
             await download(FakeExec(ws), "/var/log/app.log", dest)
         message = str(excinfo.value)
         assert str(restricted) in message
+        assert ".part" not in message
+
+    async def test_download_enospc_is_not_labelled_unwritable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # mkstemp can fail for reasons other than permissions (ENOSPC, EMFILE,
+        # ENAMETOOLONG); those must not be misreported as "not writable".
+        def full_disk(**_kwargs: object) -> tuple[int, str]:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr("korvid.core.transfer.tempfile.mkstemp", full_disk)
+        dest = tmp_path / "app.log"
+        ws = FakeWs([b"\x01" + tar_bytes("app.log", b"data"), b"\x03" + SUCCESS])
+        with pytest.raises(TransferError, match="No space left on device") as excinfo:
+            await download(FakeExec(ws), "/var/log/app.log", dest)
+        message = str(excinfo.value)
+        assert "not writable" not in message
+        assert str(tmp_path) in message
         assert ".part" not in message
 
     async def test_upload_permission_denied_without_verdict_still_hints(
