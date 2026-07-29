@@ -87,11 +87,18 @@ def _replace_atomically(path: Path, registry: dict[str, Any]) -> None:
     """Temp file + rename so readers never observe a torn record.
 
     Owner-only mode: the registry may carry a write-proposal capability
-    token (issue #110), and the permission must hold before the rename
-    makes the content visible."""
+    token (issue #110), so the file must be *created* 0600 via an atomic
+    open — a chmod after a umask-default create would leave the token
+    briefly world-readable at a predictable path."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(registry))
-    tmp.chmod(0o600)
+    tmp.unlink(missing_ok=True)  # a stale tmp could carry a foreign mode
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps(registry))
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
     tmp.replace(path)
 
 
@@ -126,7 +133,12 @@ class KorvidMCPServer:
         self._capability_token = capability_token
         #: Transport is stateless (no persistent MCP session), so proposals
         #: are keyed to the server run: one id per start, injected
-        #: server-side and never taken from the caller.
+        #: server-side and never taken from the caller. Every caller of one
+        #: run therefore shares this identity — by construction they all
+        #: hold the same capability token from the same owner-only file, so
+        #: they are a single local trust domain: the per-session pending cap
+        #: degenerates to a per-run cap and any authorized caller may cancel
+        #: (cancellation never executes anything, so it is fail-safe).
         self._session_id = f"mcp-{os.getpid()}-{secrets.token_urlsafe(8)}"
         self._started: anyio.Event = anyio.Event()
         self._bound_port: int | None = None

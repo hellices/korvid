@@ -422,3 +422,13 @@ def test_validate_dispatch_targets_rejects_proposal_tool_naming_the_write_entryp
     )
     with pytest.raises(ValueError, match="proposal"):
         validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
+
+
+def test_proposal_tool_schemas_advertise_the_required_capability() -> None:
+    """MCP hosts derive tool arguments from the advertised inputSchema; the
+    capability token the server enforces must be discoverable there."""
+    schemas = {s["function"]["name"]: s for s in mcp_tool_schemas(write_proposals=True)}
+    for name in ("propose_write", "get_write_proposal", "cancel_write_proposal"):
+        params = schemas[name]["function"]["parameters"]
+        assert params["properties"]["capability"]["type"] == "string"
+        assert "capability" in params["required"]

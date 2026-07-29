@@ -772,8 +772,15 @@ TOOL_DEFS: list[ToolDef] = [
                                 "{'requests'/'limits' -> {'cpu'/'memory' -> quantity}}."
                             ),
                         },
+                        "capability": {
+                            "type": "string",
+                            "description": (
+                                "Write-proposal capability token from the "
+                                "korvid MCP endpoint registry file."
+                            ),
+                        },
                     },
-                    "required": ["action", "name"],
+                    "required": ["action", "name", "capability"],
                 },
             },
         },
@@ -799,8 +806,15 @@ TOOL_DEFS: list[ToolDef] = [
                             "type": "string",
                             "description": "Id returned by propose_write.",
                         },
+                        "capability": {
+                            "type": "string",
+                            "description": (
+                                "Write-proposal capability token from the "
+                                "korvid MCP endpoint registry file."
+                            ),
+                        },
                     },
-                    "required": ["proposal_id"],
+                    "required": ["proposal_id", "capability"],
                 },
             },
         },
@@ -825,8 +839,15 @@ TOOL_DEFS: list[ToolDef] = [
                             "type": "string",
                             "description": "Id returned by propose_write.",
                         },
+                        "capability": {
+                            "type": "string",
+                            "description": (
+                                "Write-proposal capability token from the "
+                                "korvid MCP endpoint registry file."
+                            ),
+                        },
                     },
-                    "required": ["proposal_id"],
+                    "required": ["proposal_id", "capability"],
                 },
             },
         },

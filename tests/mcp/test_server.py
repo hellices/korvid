@@ -6,13 +6,19 @@ import asyncio
 import json
 import os
 import socket
+import stat
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from korvid.k8s.discovery import PODS_META
-from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
+from korvid.mcp.server import (
+    KorvidMCPServer,
+    MCPController,
+    _replace_atomically,
+    default_endpoint_path,
+)
 from korvid.tools.executor import PROPOSAL_TOOLS, READ_TOOLS, UI_TOOLS, ToolExecutor
 
 
@@ -506,3 +512,16 @@ async def test_endpoint_file_omits_capability_when_proposals_are_off(tmp_path: P
     finally:
         server.request_shutdown()
         await asyncio.wait_for(task, timeout=10)
+
+
+def test_endpoint_file_is_created_owner_only_not_merely_chmodded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The capability-bearing registry file must never be observable with
+    group/other bits: the mode has to come from atomic 0600 creation, not
+    from a chmod racing the umask-default file."""
+    monkeypatch.setattr(Path, "chmod", lambda self, mode: None)
+    target = tmp_path / "mcp-endpoint.json"
+    _replace_atomically(target, {"servers": {}})
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert json.loads(target.read_text()) == {"servers": {}}

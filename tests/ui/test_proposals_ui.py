@@ -9,8 +9,11 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from textual.widgets import Static
+
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
+from korvid.core.mcp import MCPControllerBase
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
@@ -76,6 +79,7 @@ def make_app(
     permitted: bool = True,
     readonly: bool = False,
     uid: str | None = "uid-1",
+    mcp: MCPControllerBase | None = None,
 ) -> KorvidApp:
     resource_store = ResourceStore()
     deploys = [GenericSummary(name="web", namespace="default", kind="Deployment", created="")]
@@ -104,6 +108,7 @@ def make_app(
         audit=AuditLog(audit_path),
         check_permission=check_permission,
         proposal_store=store,
+        mcp=mcp,
     )
 
 
@@ -134,8 +139,7 @@ async def test_submit_queues_a_pending_proposal_without_mutating(tmp_path: Path)
     rec = Recorder()
     store = ProposalStore()
     app = make_app(rec, tmp_path / "a.jsonl", store)
-    async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+    async with app.run_test():
         result = await _submit(app)
         assert not isinstance(app.screen, ConfirmScreen)  # no modal, no focus steal
         pending = store.pending()  # read before shutdown expires the queue
@@ -218,7 +222,6 @@ async def test_review_approve_executes_with_the_bound_uid(tmp_path: Path) -> Non
     audit_path = tmp_path / "a.jsonl"
     app = make_app(rec, audit_path, store)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _submit(app)
         pid = store.pending()[0].id
         app._open_proposal_review()
@@ -242,7 +245,6 @@ async def test_review_decline_denies_without_mutating(tmp_path: Path) -> None:
     store = ProposalStore()
     app = make_app(rec, tmp_path / "a.jsonl", store)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _submit(app)
         pid = store.pending()[0].id
         app._open_proposal_review()
@@ -260,7 +262,6 @@ async def test_review_expires_a_stale_context_epoch_without_a_dialog(tmp_path: P
     store = ProposalStore()
     app = make_app(rec, tmp_path / "a.jsonl", store)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _submit(app)
         pid = store.pending()[0].id
         app._ctx_epoch += 1  # a context switch landed after submission
@@ -278,7 +279,6 @@ async def test_review_uid_change_fails_the_proposal(tmp_path: Path) -> None:
     store = ProposalStore()
     app = make_app(rec, tmp_path / "a.jsonl", store)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await _submit(app)
         pid = store.pending()[0].id
 
@@ -304,7 +304,6 @@ async def test_pending_proposals_show_in_the_status_bar(tmp_path: Path) -> None:
     store = ProposalStore()
     app = make_app(Recorder(), tmp_path / "a.jsonl", store)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         assert app._proposals_label() == ""
         await _submit(app)
         label = app._proposals_label()
@@ -317,10 +316,152 @@ async def test_pending_proposals_show_in_the_status_bar(tmp_path: Path) -> None:
 async def test_shutdown_expires_pending_proposals(tmp_path: Path) -> None:
     store = ProposalStore()
     app = make_app(Recorder(), tmp_path / "a.jsonl", store)
-    async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+    async with app.run_test():
         await _submit(app)
         pid = store.pending()[0].id
     found = store.get(pid)
     assert found is not None
     assert found[1] == "expired"
+
+
+# --- review round 1 hardening ------------------------------------------------
+
+
+class FakeMCP(MCPControllerBase):
+    """Minimal lifecycle double for the `:mcp` toggle tests."""
+
+    def __init__(self, *, running: bool) -> None:
+        self.is_on = running
+
+    @property
+    def running(self) -> bool:
+        return self.is_on
+
+    def status(self) -> str:
+        return "MCP on" if self.is_on else "MCP off"
+
+    async def start(self) -> str:
+        if self.is_on:
+            return self.status()  # idempotent: no new server run, no new token
+        self.is_on = True
+        return "MCP on"
+
+    async def stop(self) -> str:
+        self.is_on = False
+        return "MCP off"
+
+    async def shutdown(self) -> None:
+        self.is_on = False
+
+
+async def test_submit_fails_closed_when_the_target_uid_cannot_be_captured(
+    tmp_path: Path,
+) -> None:
+    """A proposal without a UID binding could mutate a same-named
+    replacement; unlike the interactive path, submission must fail closed."""
+    store = ProposalStore()
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store, uid=None)
+    async with app.run_test():
+        result = await _submit(app)
+        pending = store.pending()
+    assert result.startswith("ERROR:")
+    assert pending == []
+
+
+async def test_context_switch_after_the_approval_claim_fails_the_proposal(
+    tmp_path: Path,
+) -> None:
+    """begin_execution can win just before a context switch; the epoch must
+    be rechecked after the claim, immediately before mutation."""
+    rec = Recorder()
+    store = ProposalStore()
+    app = make_app(rec, tmp_path / "a.jsonl", store)
+    async with app.run_test():
+        await _submit(app)
+        proposal = store.pending()[0]
+        rebuilt = app._rebuild_proposal_op(proposal)
+        assert not isinstance(rebuilt, str)
+        meta, ns, op, _operation, _detail = rebuilt
+        assert store.begin_execution(proposal.id)
+        app._ctx_epoch += 1  # a context switch raced the approval
+        await app._execute_proposal(store, proposal, meta, ns, op)
+        found = store.get(proposal.id)
+    assert rec.calls == []
+    assert found is not None
+    assert found[1] == "failed"
+    assert "context" in found[2]
+
+
+async def test_review_dialog_shows_the_proposal_safety_bindings(tmp_path: Path) -> None:
+    """Issue #110: the dialog must show the bound context, UID, expiry, and
+    label the caller as untrusted metadata before approval."""
+    store = ProposalStore()
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        app._open_proposal_review()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        body = str(app.screen.query_one(".confirm-operation", Static).render())
+        await pilot.press("n")
+    assert "ctx-a" in body
+    assert "uid-1" in body
+    assert "expires" in body
+    assert "untrusted" in body
+
+
+async def test_denied_and_cancelled_outcomes_are_audited_with_provenance(
+    tmp_path: Path,
+) -> None:
+    rec = Recorder()
+    store = ProposalStore()
+    audit_path = tmp_path / "a.jsonl"
+    app = make_app(rec, audit_path, store)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        denied_id = store.pending()[0].id
+        app._open_proposal_review()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("n")
+        await until(pilot, lambda: (f := store.get(denied_id)) is not None and f[1] == "denied")
+        await _submit(app)
+        cancelled_id = store.pending()[0].id
+        await app.agent_cancel_write_proposal(cancelled_id, session_id="sess-1")
+    assert rec.calls == []
+    entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    outcomes = {e["outcome"]: e["detail"] for e in entries}
+    denied = next(v for k, v in outcomes.items() if "denied" in k)
+    assert denied_id in denied
+    assert "external_mcp" in denied
+    cancelled = next(v for k, v in outcomes.items() if "cancelled" in k)
+    assert cancelled_id in cancelled
+
+
+async def test_mcp_on_when_already_running_keeps_pending_proposals(tmp_path: Path) -> None:
+    """`:mcp on` on an already-running server is a status query: no new
+    server run, no new capability token, so pending work must survive."""
+    store = ProposalStore()
+    mcp = FakeMCP(running=True)
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store, mcp=mcp)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        app._handle_mcp_command(["on"])
+        await until(pilot, lambda: not any(w.is_running for w in app.workers))
+        found = store.get(pid)
+    assert found is not None
+    assert found[1] == "pending"
+
+
+async def test_mcp_off_expires_pending_proposals(tmp_path: Path) -> None:
+    store = ProposalStore()
+    mcp = FakeMCP(running=True)
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store, mcp=mcp)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        app._handle_mcp_command(["off"])
+        await until(pilot, lambda: (f := store.get(pid)) is not None and f[1] != "pending")
+        found = store.get(pid)
+    assert found is not None
+    assert found[1] == "expired"
+    assert "restarted" in found[2] or "stopped" in found[2]

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import weakref
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
@@ -94,6 +95,7 @@ from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.tools.executor import UIBridge
 from korvid.tools.proposals import (
     ProposalLimitError,
+    ProposalState,
     ProposalStore,
     ProposalTooLargeError,
     WriteProposal,
@@ -1791,10 +1793,9 @@ class KorvidApp(App[None]):
     ) -> None:
         """Adopt the new cluster's identity and re-probed capabilities."""
         self._ctx_epoch += 1
-        if self._proposal_store is not None:
-            # External proposals are bound to the exact context they were
-            # previewed against; a switch invalidates every pending one.
-            self._proposal_store.expire_all(reason="kube context switched")
+        # External proposals are bound to the exact context they were
+        # previewed against; a switch invalidates every pending one.
+        self._expire_proposals_audited("kube context switched")
         # Adopt the target context's kubeconfig namespace as the session
         # default too: `ns` toggle-back and the helm/operator namespace
         # fallbacks read config.namespace, and jumping to the *startup*
@@ -2301,12 +2302,16 @@ class KorvidApp(App[None]):
                         severity="warning",
                     )
                     return
+                was_running = mcp.running
                 msg = await (mcp.start() if action == "on" else mcp.stop())
-                if self._proposal_store is not None:
-                    # A server start/stop invalidates every capability token
-                    # handed out for the previous run (issue #110): pending
-                    # proposals from that run must not survive it.
-                    self._proposal_store.expire_all(reason="the MCP server was restarted")
+                if was_running != mcp.running:
+                    # A real lifecycle transition invalidates every
+                    # capability token handed out for the previous run
+                    # (issue #110): pending proposals from that run must not
+                    # survive it. An idempotent status-preserving toggle
+                    # (`:mcp on` while already running) must not discard
+                    # pending work.
+                    self._expire_proposals_audited("the MCP server was restarted")
             self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
             self._refresh_status()
 
@@ -6892,6 +6897,14 @@ class KorvidApp(App[None]):
             uid = await self._target_uid(kind.strip().lower(), ns, name)
         except ApiStatusError:
             return f"ERROR: {self._gvr_label(meta)}/{name} not found{self._write_locus(ns)}"
+        if uid is None:
+            # The interactive path fails open here (a user is watching);
+            # an external proposal without a UID binding could mutate a
+            # same-named replacement, so it must fail closed instead.
+            return (
+                "ERROR: could not verify the write target (UID capture"
+                " failed); the proposal was not queued — try again"
+            )
         preview = await self._preview_for_action(
             action, meta, ns, name, replicas, resources, uid, stamp
         )
@@ -6954,9 +6967,49 @@ class KorvidApp(App[None]):
         store = self._proposal_store
         if store is None:
             return "ERROR: external write proposals are not enabled"
-        if store.cancel(proposal_id, session_id=session_id):
+        found = store.get(proposal_id)
+        if found is not None and store.cancel(proposal_id, session_id=session_id):
+            self._audit_proposal_outcome(found[0], "cancelled", "cancelled by caller")
             return f"proposal {proposal_id} cancelled"
         return "ERROR: proposal not found, not pending, or owned by another session"
+
+    def _audit_proposal_outcome(self, proposal: WriteProposal, state: str, reason: str) -> None:
+        """Best-effort audit for a terminal proposal outcome (issue #110).
+
+        These transitions mutate nothing, so a failed append is logged
+        instead of blocking — the mutation path itself stays fail-closed in
+        `_run_write` (which separately audits executed/failed writes with
+        the same proposal provenance).
+        """
+        audit = self._audit
+        if audit is None:
+            return
+        caller = proposal.client_name or "unknown"
+        version = f" {proposal.client_version}" if proposal.client_version else ""
+        try:
+            audit.append(
+                action=proposal.action,
+                kind=proposal.kind,
+                group=proposal.group,
+                version=proposal.version,
+                namespace=proposal.namespace,
+                name=proposal.name,
+                detail=(
+                    f"source=external_mcp proposal={proposal.id}"
+                    f" caller={caller}{version} session={proposal.session_id}"
+                ),
+                outcome=f"proposal {state}: {reason}" if reason else f"proposal {state}",
+            )
+        except Exception:
+            logger.warning("could not audit proposal %s outcome %s", proposal.id, state)
+
+    def _expire_proposals_audited(self, reason: str) -> None:
+        """Expire every pending proposal and audit each terminal outcome."""
+        store = self._proposal_store
+        if store is None:
+            return
+        for proposal in store.expire_all(reason=reason):
+            self._audit_proposal_outcome(proposal, "expired", reason)
 
     def _open_proposal_review(self) -> None:
         """`:proposals` — review pending external proposals one at a time."""
@@ -6990,15 +7043,21 @@ class KorvidApp(App[None]):
         if proposal.context_epoch != self._ctx_epoch or (
             proposal.context != self.config.kube_context
         ):
-            store.resolve(proposal.id, "expired", reason="kube context changed since submission")
+            self._resolve_proposal_audited(
+                store, proposal, "expired", "kube context changed since submission"
+            )
             return True
         rebuilt = self._rebuild_proposal_op(proposal)
         if isinstance(rebuilt, str):
-            store.resolve(proposal.id, "expired", reason=rebuilt.removeprefix("ERROR: "))
+            self._resolve_proposal_audited(
+                store, proposal, "expired", rebuilt.removeprefix("ERROR: ")
+            )
             return True
         meta, ns, op, operation, _detail = rebuilt
         if not await self._permitted(proposal.action, meta, ns, proposal.name):
-            store.resolve(proposal.id, "failed", reason="permission revoked since submission")
+            self._resolve_proposal_audited(
+                store, proposal, "failed", "permission revoked since submission"
+            )
             return True
         source = proposal.client_name or "external MCP caller"
         title = (
@@ -7007,12 +7066,15 @@ class KorvidApp(App[None]):
         )
         require = proposal.name if proposal.action == "delete" and not meta.namespaced else None
         decision = await self._await_proposal_decision(
-            title, operation, require_name=require, preview=list(proposal.preview)
+            title,
+            self._proposal_dialog_body(proposal, operation),
+            require_name=require,
+            preview=list(proposal.preview),
         )
         if decision == "dismissed":
             return False
         if decision == "declined":
-            store.resolve(proposal.id, "denied", reason="denied by user")
+            self._resolve_proposal_audited(store, proposal, "denied", "denied by user")
             return True
         if not store.begin_execution(proposal.id):
             # Cancelled or TTL-expired while the dialog was open: the
@@ -7077,6 +7139,44 @@ class KorvidApp(App[None]):
             restarted_at=args["restarted_at"],
         )
 
+    def _resolve_proposal_audited(
+        self, store: ProposalStore, proposal: WriteProposal, state: ProposalState, reason: str
+    ) -> None:
+        """Resolve a pending proposal and audit the terminal outcome."""
+        if store.resolve(proposal.id, state, reason=reason):
+            self._audit_proposal_outcome(proposal, state, reason)
+
+    def _proposal_dialog_body(self, proposal: WriteProposal, operation: str) -> str:
+        """The dialog body for a proposal: the operation plus the immutable
+        safety bindings issue #110 requires the user to see before approval —
+        the caller (explicitly untrusted metadata), the bound kube context
+        and epoch, the bound target UID, and the expiry."""
+        caller = proposal.client_name or "unknown"
+        version = f" {proposal.client_version}" if proposal.client_version else ""
+        remaining = max(0, int(proposal.expires_at - time.monotonic()))
+        return "\n".join(
+            (
+                operation,
+                "",
+                f"caller (untrusted metadata): {caller}{version}",
+                f"bound kube context: {proposal.context or '(default)'}"
+                f" (epoch {proposal.context_epoch})",
+                f"bound target uid: {proposal.uid}",
+                f"expires in {remaining}s unless approved or denied",
+            )
+        )
+
+    def _fail_proposal(
+        self, store: ProposalStore, proposal: WriteProposal, meta: ResourceMeta, reason: str
+    ) -> None:
+        """Record and audit a pre-write failure of a claimed proposal."""
+        store.finish_execution(proposal.id, executed=False, reason=reason)
+        self._audit_proposal_outcome(proposal, "failed", reason)
+        self.notify(
+            f"Proposal {proposal.action} {meta.plural}/{proposal.name} failed: {reason}",
+            severity="error",
+        )
+
     async def _execute_proposal(
         self,
         store: ProposalStore,
@@ -7085,45 +7185,50 @@ class KorvidApp(App[None]):
         ns: str | None,
         op: Callable[[str | None], Awaitable[None]],
     ) -> None:
-        """Execute a claimed proposal: recheck the UID binding, then run the
-        same fail-closed audit-before-mutation path as every other write."""
-        args = json.loads(proposal.arguments_json)
-        try:
-            current_uid = await self._target_uid(args["kind"], ns, proposal.name)
-        except ApiStatusError:
-            store.finish_execution(proposal.id, executed=False, reason="target no longer exists")
-            self.notify(
-                f"Proposal {proposal.action} {meta.plural}/{proposal.name} failed:"
-                " the target no longer exists",
-                severity="error",
+        """Execute a claimed proposal under the nav lock so a context switch
+        cannot interleave with the mutation: the approval dialog may have
+        been open for minutes, so the context epoch and RBAC are rechecked
+        *after* the claim, then the UID binding, then the same fail-closed
+        audit-before-mutation path as every other write."""
+        async with self._nav_lock:
+            if proposal.context_epoch != self._ctx_epoch or (
+                proposal.context != self.config.kube_context
+            ):
+                self._fail_proposal(
+                    store, proposal, meta, "the kube context changed before execution"
+                )
+                return
+            if not await self._permitted(proposal.action, meta, ns, proposal.name):
+                self._fail_proposal(store, proposal, meta, "permission revoked before execution")
+                return
+            args = json.loads(proposal.arguments_json)
+            try:
+                current_uid = await self._target_uid(args["kind"], ns, proposal.name)
+            except ApiStatusError:
+                self._fail_proposal(store, proposal, meta, "the target no longer exists")
+                return
+            if current_uid != proposal.uid:
+                self._fail_proposal(
+                    store,
+                    proposal,
+                    meta,
+                    "the target was replaced since the proposal was created",
+                )
+                return
+            caller = proposal.client_name or "unknown"
+            version = f" {proposal.client_version}" if proposal.client_version else ""
+            detail = (
+                f"source=external_mcp proposal={proposal.id}"
+                f" caller={caller}{version} session={proposal.session_id}"
             )
-            return
-        if proposal.uid is not None and current_uid != proposal.uid:
+            outcome = await self._run_write(
+                proposal.action, meta, ns, proposal.name, op(proposal.uid), detail=detail
+            )
             store.finish_execution(
-                proposal.id,
-                executed=False,
-                reason="target was replaced since the proposal was created",
+                proposal.id, executed=outcome == "done", reason="" if outcome == "done" else outcome
             )
-            self.notify(
-                f"Proposal {proposal.action} {meta.plural}/{proposal.name} failed:"
-                " the target was replaced since the proposal was created",
-                severity="error",
-            )
-            return
-        caller = proposal.client_name or "unknown"
-        version = f" {proposal.client_version}" if proposal.client_version else ""
-        detail = (
-            f"source=external_mcp proposal={proposal.id}"
-            f" caller={caller}{version} session={proposal.session_id}"
-        )
-        outcome = await self._run_write(
-            proposal.action, meta, ns, proposal.name, op(proposal.uid), detail=detail
-        )
-        store.finish_execution(
-            proposal.id, executed=outcome == "done", reason="" if outcome == "done" else outcome
-        )
-        if outcome == "done":
-            self.notify(f"Executed proposal: {proposal.summary}")
+            if outcome == "done":
+                self.notify(f"Executed proposal: {proposal.summary}")
 
     def _agent_write_op(
         self,
@@ -7419,9 +7524,8 @@ class KorvidApp(App[None]):
 
     async def on_unmount(self) -> None:
         # Cancel any active log stream tasks before the event loop shuts down.
-        if self._proposal_store is not None:
-            # A proposal must never outlive the session that previewed it.
-            self._proposal_store.expire_all(reason="the TUI session ended")
+        # A proposal must never outlive the session that previewed it.
+        self._expire_proposals_audited("the TUI session ended")
         if self._ns_prefetch_task is not None:
             self._ns_prefetch_task.cancel()
         if self._ctx_prefetch_task is not None:

@@ -76,6 +76,11 @@ class ProposalStore:
     and `pending → denied | expired | cancelled` via `resolve`,
     `expire_all`, `cancel`, or the lazy TTL sweep. An approved proposal
     never expires mid-execution.
+
+    Terminal records stay pollable for `terminal_retention` seconds (and at
+    most `max_terminal` records, oldest evicted first) so an authorized but
+    untrusted caller cannot grow memory without bound by churning proposals;
+    after the window `get` reports the id as unknown.
     """
 
     def __init__(
@@ -86,6 +91,8 @@ class ProposalStore:
         max_pending_total: int = 10,
         max_argument_chars: int = 8192,
         max_preview_lines: int = 100,
+        terminal_retention: float = 600.0,
+        max_terminal: int = 50,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._ttl = ttl
@@ -93,11 +100,14 @@ class ProposalStore:
         self._max_total = max_pending_total
         self._max_argument_chars = max_argument_chars
         self._max_preview_lines = max_preview_lines
+        self._terminal_retention = terminal_retention
+        self._max_terminal = max_terminal
         self._clock = clock
         self._lock = threading.Lock()
         self._proposals: dict[str, WriteProposal] = {}
         self._states: dict[str, tuple[ProposalState, str]] = {}
         self._order: list[str] = []
+        self._resolved_at: dict[str, float] = {}
         self._subscribers: list[Callable[[], None]] = []
 
     def subscribe(self, callback: Callable[[], None]) -> None:
@@ -237,26 +247,35 @@ class ProposalStore:
             self._notify()
         return changed
 
-    def expire_all(self, *, reason: str) -> int:
-        """Expire every pending proposal (context switch, shutdown, ...)."""
-        count = 0
+    def expire_all(self, *, reason: str) -> list[WriteProposal]:
+        """Expire every pending proposal (context switch, shutdown, ...).
+
+        Returns the proposals that were expired so the caller can audit each
+        terminal outcome.
+        """
+        expired: list[WriteProposal] = []
         with self._lock:
+            now = self._clock()
             for proposal in list(self._iter_pending()):
                 self._states[proposal.id] = ("expired", reason)
-                count += 1
-        if count:
+                self._resolved_at[proposal.id] = now
+                expired.append(proposal)
+        if expired:
             self._notify()
-        return count
+        return expired
 
     def _transition(
         self, proposal_id: str, *, from_state: ProposalState, to: tuple[ProposalState, str]
     ) -> bool:
         with self._lock:
-            self._sweep_expired(self._clock())
+            now = self._clock()
+            self._sweep_expired(now)
             current = self._states.get(proposal_id)
             if current is None or current[0] != from_state:
                 return False
             self._states[proposal_id] = to
+            if to[0] in TERMINAL_STATES:
+                self._resolved_at[proposal_id] = now
             return True
 
     def _iter_pending(self) -> list[WriteProposal]:
@@ -268,6 +287,23 @@ class ProposalStore:
         for pid in self._order:
             if self._states[pid][0] == "pending" and self._proposals[pid].expires_at <= now:
                 self._states[pid] = ("expired", "proposal expired before review")
+                self._resolved_at[pid] = now
+        # Bounded terminal retention: keep resolved records pollable for a
+        # defined window, then drop them so proposal churn cannot grow
+        # memory without bound.
+        terminal = [pid for pid in self._order if self._states[pid][0] in TERMINAL_STATES]
+        evict = {
+            pid for pid in terminal if self._resolved_at[pid] + self._terminal_retention <= now
+        }
+        keep = [pid for pid in terminal if pid not in evict]
+        if len(keep) > self._max_terminal:
+            evict.update(keep[: len(keep) - self._max_terminal])
+        if evict:
+            self._order = [pid for pid in self._order if pid not in evict]
+            for pid in evict:
+                del self._proposals[pid]
+                del self._states[pid]
+                del self._resolved_at[pid]
 
     def _notify(self) -> None:
         with self._lock:

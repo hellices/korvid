@@ -251,8 +251,8 @@ def test_expire_all_expires_only_pending_proposals() -> None:
     pending = submit(store, name="a")
     denied = submit(store, name="b")
     store.resolve(denied.id, "denied", reason="no")
-    count = store.expire_all(reason="context switched")
-    assert count == 1
+    expired = store.expire_all(reason="context switched")
+    assert [p.id for p in expired] == [pending.id]
     record = store.get(pending.id)
     assert record is not None
     assert record[1] == "expired"
@@ -290,3 +290,51 @@ def test_store_is_thread_safe_under_concurrent_claims() -> None:
     for t in threads:
         t.join()
     assert sum(wins) == 1
+
+
+# --- terminal retention (review round 1) -----------------------------------
+
+
+def test_terminal_proposals_are_evicted_after_the_retention_window() -> None:
+    store, clock = make_store(terminal_retention=600.0)
+    proposal = submit(store)
+    store.resolve(proposal.id, "denied", reason="no")
+    clock.now += 599.0
+    record = store.get(proposal.id)
+    assert record is not None
+    assert record[1] == "denied"
+    clock.now += 2.0
+    assert store.get(proposal.id) is None
+
+
+def test_terminal_proposals_beyond_the_cap_evict_oldest_first() -> None:
+    store, _ = make_store(max_pending_per_session=100, max_pending_total=100, max_terminal=2)
+    resolved = [submit(store, name=f"web-{i}") for i in range(3)]
+    for proposal in resolved:
+        store.resolve(proposal.id, "denied", reason="no")
+    assert store.get(resolved[0].id) is None
+    newest = store.get(resolved[2].id)
+    assert newest is not None
+    assert newest[1] == "denied"
+
+
+def test_terminal_eviction_never_touches_pending_or_approved_proposals() -> None:
+    store, clock = make_store(terminal_retention=1.0)
+    pending = submit(store, name="a")
+    approved = submit(store, name="b")
+    assert store.begin_execution(approved.id)
+    denied = submit(store, name="c")
+    store.resolve(denied.id, "denied", reason="no")
+    clock.now += 2.0
+    assert store.get(denied.id) is None
+    assert store.get(pending.id) is not None
+    assert store.get(approved.id) is not None
+
+
+def test_expire_all_returns_the_expired_proposals() -> None:
+    store, _ = make_store()
+    pending = submit(store, name="a")
+    denied = submit(store, name="b")
+    store.resolve(denied.id, "denied", reason="no")
+    expired = store.expire_all(reason="context switched")
+    assert [p.id for p in expired] == [pending.id]

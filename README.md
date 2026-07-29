@@ -744,8 +744,11 @@ access.  Each server run generates a high-entropy capability token,
 published only in the owner-readable (`0600`) endpoint registry file and
 removed on shutdown; callers must echo it as the `capability` argument on
 every proposal tool call.  MCP `clientInfo` is displayed as caller-supplied
-metadata, never treated as authenticated identity.  Pending proposals are
-capped per session and globally, and argument/preview sizes are bounded.
+metadata, never treated as authenticated identity.  Every caller of one
+server run shares a single session identity (the transport is stateless
+and the token file is the shared credential), so the pending caps and the
+cancel check operate per server run; terminal outcomes stay pollable for
+a bounded retention window and argument/preview sizes are bounded.
 
 ## Agent eval harness
 
