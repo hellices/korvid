@@ -365,3 +365,19 @@ def test_set_context_applies_to_subsequent_entries(tmp_path: Path) -> None:
     lines = [json.loads(line) for line in path.read_text().splitlines()]
     assert lines[0]["context"] == "ctx-a"
     assert lines[1]["context"] == "ctx-b"
+
+
+def test_append_context_override_wins_over_ambient(tmp_path: Path) -> None:
+    """A per-entry context binds the entry to the cluster the recorded
+    object lives on (e.g. proposal outcomes racing a `:ctx` switch);
+    omitting it keeps the ambient context, and an explicit None is a real
+    value, not a fallback."""
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path, context="ambient-ctx")
+    log.append(action="delete", kind="pods", namespace="ns", name="a", context="bound-ctx")
+    log.append(action="delete", kind="pods", namespace="ns", name="b")
+    log.append(action="delete", kind="pods", namespace="ns", name="c", context=None)
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert lines[0]["context"] == "bound-ctx"
+    assert lines[1]["context"] == "ambient-ctx"
+    assert lines[2]["context"] is None

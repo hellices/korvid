@@ -36,3 +36,14 @@ class MCPControllerBase(abc.ABC):
     @abc.abstractmethod
     async def shutdown(self) -> asyncio.Task[None] | None:
         """Begin a graceful stop; returns any still-pending teardown task."""
+
+    def pending_task(self) -> asyncio.Task[None] | None:
+        """The live run's server task, if any.
+
+        A snapshot taken under the caller's serialization: follow-up
+        teardown work (waiting out a stop whose bounded teardown timed out)
+        must bind to *this* run's task, never to whichever run the
+        controller happens to own later — a racing restart may have
+        installed a fresh server by then.
+        """
+        return None

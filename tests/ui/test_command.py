@@ -130,6 +130,26 @@ def test_builtin_names_reserved_over_resource_aliases() -> None:
         assert msg.text == text
 
 
+def test_proposals_is_reserved_over_resource_aliases() -> None:
+    """A cluster CRD alias named `proposals` must not shadow the external
+    write-proposal inbox (issue #110): the approval surface has to stay
+    reachable no matter what resources the cluster serves."""
+
+    def crd_known(head: str) -> str | None:
+        return "proposals" if head == "proposals" else None
+
+    msg = parse_command("proposals", crd_known)
+    assert isinstance(msg, UnknownCommand)
+    assert msg.text == "proposals"
+
+
+def test_command_help_lists_proposals() -> None:
+    from korvid.ui.command import command_help
+
+    commands = [cmd for cmd, _ in command_help()]
+    assert ":proposals" in commands
+
+
 # ---------------------------------------------------------------------------
 # :sort (issue #45)
 # ---------------------------------------------------------------------------

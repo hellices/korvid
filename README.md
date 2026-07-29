@@ -84,6 +84,8 @@ Full key reference: [docs/keybindings.md](docs/keybindings.md).
   models, and an eval harness that grades diagnosis quality.
 - **[MCP server](docs/mcp.md)** — expose korvid's read and UI-drive tools
   to VS Code, Claude Code, Cursor, or Zed; write tools are never exposed.
+  An opt-in proposal flow lets external agents queue writes that execute
+  only after your keystroke in the TUI.
 
 ## Status
 

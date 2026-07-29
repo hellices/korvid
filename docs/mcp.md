@@ -10,6 +10,9 @@ external agents — VS Code Copilot Chat, Claude Code, Cursor, Zed — over a
 resources, fetch manifests, logs, and events, and drive the TUI you are
 looking at (navigate, filter, open logs/describe).  Write tools are **not**
 exposed: cluster mutations stay behind the in-TUI confirmation dialog.
+An opt-in *proposal* flow lets external agents queue writes for your review
+(see [External write proposals](#external-write-proposals)) — even then, a
+proposal never executes without a fresh keystroke in the TUI.
 
 The live endpoint is also published to
 `$XDG_STATE_HOME/korvid/mcp-endpoint.json` (defaulting to
@@ -46,3 +49,51 @@ claude mcp add --transport http korvid http://127.0.0.1:7878/mcp
 ```json
 {"context_servers": {"korvid": {"url": "http://127.0.0.1:7878/mcp"}}}
 ```
+
+## External write proposals
+
+Off by default.  With
+
+```yaml
+mcp:
+  enabled: true
+  write_proposals: true
+```
+
+the MCP surface adds three tools — `propose_write`, `get_write_proposal`,
+`cancel_write_proposal` — that let an external agent *propose* a cluster
+write (delete, scale, rollout restart, in-place pod resize).  A proposal
+never mutates anything by itself:
+
+- `propose_write` runs the same validation as the built-in agent write path
+  (kind resolution, read-only mode, RBAC pre-check, target-UID capture,
+  server-side dry-run preview) and then queues an **immutable** proposal.
+  The caller gets the proposal id back immediately and polls
+  `get_write_proposal` for the terminal outcome — no MCP request is held
+  open while you decide.
+- The TUI shows a persistent `⚑` indicator in the status bar naming the
+  caller and target.  Nothing auto-opens and focus is never stolen.
+- `:proposals` reviews pending proposals one at a time in the same
+  confirmation dialog as every other write — including the typed-name gate
+  for cluster-scoped deletes and the typed-context gate in protected
+  contexts.  Only your keystroke can approve; MCP tools cannot focus, type,
+  or confirm.
+- Before executing, korvid rechecks the kube context epoch, RBAC, and the
+  captured target UID (a same-named replacement fails the proposal instead
+  of being mutated), then writes through the same fail-closed
+  audit-before-mutation path with `source=external_mcp`, the proposal id,
+  and the caller metadata in the audit record.
+- Deny, dismiss (leave pending), TTL expiry (10 minutes), and caller cancel
+  are distinct outcomes.  Pending proposals are invalidated by a context
+  switch, an MCP server restart, and TUI shutdown.
+
+Local callers are untrusted: read access alone does not grant proposal
+access.  Each server run generates a high-entropy capability token,
+published only in the owner-readable (`0600`) endpoint registry file and
+removed on shutdown; callers must echo it as the `capability` argument on
+every proposal tool call.  MCP `clientInfo` is displayed as caller-supplied
+metadata, never treated as authenticated identity.  Every caller of one
+server run shares a single session identity (the transport is stateless
+and the token file is the shared credential), so the pending caps and the
+cancel check operate per server run; terminal outcomes stay pollable for
+a bounded retention window and argument/preview sizes are bounded.

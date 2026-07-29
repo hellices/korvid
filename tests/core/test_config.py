@@ -348,6 +348,27 @@ def test_mcp_defaults_off(tmp_path: Path) -> None:
     assert cfg.mcp_port == 7878
 
 
+def test_mcp_write_proposals_default_off(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text("mcp:\n  enabled: true\n")
+    cfg = load_config(f)
+    assert cfg.mcp_write_proposals is False
+
+
+def test_mcp_write_proposals_requires_literal_true(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text('mcp:\n  write_proposals: "yes"\n')
+    cfg = load_config(f)
+    assert cfg.mcp_write_proposals is False
+
+
+def test_mcp_write_proposals_enabled(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text("mcp:\n  enabled: true\n  write_proposals: true\n")
+    cfg = load_config(f)
+    assert cfg.mcp_write_proposals is True
+
+
 def test_mcp_loaded_from_yaml(tmp_path: Path) -> None:
     f = tmp_path / "config.yaml"
     f.write_text("mcp:\n  enabled: true\n  port: 9000\n")

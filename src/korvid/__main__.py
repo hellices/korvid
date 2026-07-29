@@ -14,6 +14,7 @@ import contextlib
 import dataclasses
 import importlib.util
 import logging
+import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,7 @@ from korvid.tools.executor import (
     ToolExecutor,
     UIBridge,
 )
+from korvid.tools.proposals import ProposalStore
 from korvid.tools.registry import mcp_tool_schemas
 from korvid.ui.app import (
     AppUIBridge,
@@ -116,14 +118,36 @@ def _build_mcp_controller(
     from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
 
     def factory() -> KorvidMCPServer:
+        # A fresh capability token per server run (issue #110): the token is
+        # published only in the owner-readable endpoint file, so echoing it
+        # proves same-user local file access; a restart invalidates every
+        # previously handed-out token together with the pending proposals.
+        token = secrets.token_urlsafe(32) if config.mcp_write_proposals else None
         return KorvidMCPServer(
-            ToolExecutor(kube, aliases, ui=ui),
-            mcp_tool_schemas(),
+            ToolExecutor(
+                kube,
+                aliases,
+                ui=ui,
+                # The only surface allowed to reach the write-proposal tools:
+                # this server enforces the capability token before dispatch.
+                proposal_tools=config.mcp_write_proposals,
+            ),
+            mcp_tool_schemas(write_proposals=config.mcp_write_proposals),
             port=config.mcp_port,
             endpoint_path=default_endpoint_path(),
+            capability_token=token,
         )
 
     return MCPController(factory)
+
+
+def _build_proposal_store(config: KorvidConfig) -> ProposalStore | None:
+    """One store shared by the app (indicator/review/execution) and — through
+    the UI bridge — the MCP server's proposal tools (issue #110). None keeps
+    the feature reporting itself as disabled."""
+    if not config.mcp_write_proposals:
+        return None
+    return ProposalStore()
 
 
 async def _shutdown(
@@ -257,6 +281,46 @@ class _UIBridgeProxy(UIBridge):
             return await self.target.agent_request_write(
                 action, kind, name, namespace, replicas, resources
             )
+
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        if self.target is None:
+            return self._NOT_READY
+        async with self._lock:
+            return await self.target.agent_submit_write_proposal(
+                action,
+                kind,
+                name,
+                namespace,
+                replicas,
+                resources,
+                session_id=session_id,
+                client_name=client_name,
+                client_version=client_version,
+            )
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        if self.target is None:
+            return self._NOT_READY
+        async with self._lock:
+            return await self.target.agent_get_write_proposal(proposal_id)
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        if self.target is None:
+            return self._NOT_READY
+        async with self._lock:
+            return await self.target.agent_cancel_write_proposal(proposal_id, session_id=session_id)
 
 
 #: Upper bound on the pods/resize discovery probe at startup: the TUI must
@@ -738,6 +802,7 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
     )
 
     mcp_controller = _build_mcp_controller(config, kube, aliases, ui_proxy)
+    proposal_store = _build_proposal_store(config)
 
     # `:ctx` switching (issue #36): the closure needs the app (for discovery
     # restarts) and the live discovery task, both created below — boxes
@@ -777,6 +842,7 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
             config, kube, aliases, app_box, discovery_box, retarget_agent
         ),
         helm=_build_helm(config),
+        proposal_store=proposal_store,
     )
     app_box.append(app)
     # Late-bind the UI bridge: from here on the agent's UI-control tools

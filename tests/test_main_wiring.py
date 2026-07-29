@@ -91,6 +91,30 @@ class _FakeApp(UIBridge):
         self.calls.append(f"write:{action}:{kind}/{name}:{resources}")
         return "ok-write"
 
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        self.calls.append(f"propose:{action}:{kind}/{name}")
+        return "ok-propose"
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        self.calls.append(f"proposal-status:{proposal_id}")
+        return "ok-status"
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        self.calls.append(f"proposal-cancel:{proposal_id}")
+        return "ok-cancel"
+
 
 async def test_proxy_without_target_returns_error() -> None:
     from korvid.__main__ import _UIBridgeProxy
@@ -240,6 +264,53 @@ async def test_mcp_controller_exposes_read_and_ui_tools() -> None:
     assert names == [t["function"]["name"] for t in READ_TOOLS + UI_TOOLS]
 
 
+async def test_mcp_controller_exposes_proposal_tools_when_configured() -> None:
+    """`mcp.write_proposals: true` adds the proposal tools and a per-run
+    capability token; each fresh server gets a fresh token."""
+    from korvid.__main__ import _build_mcp_controller
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+    from korvid.mcp.server import MCPController
+
+    config = KorvidConfig(mcp_enabled=True, mcp_port=1234, mcp_write_proposals=True)
+    controller = _build_mcp_controller(config, cast("KubeClient", object()), {}, None)
+    assert isinstance(controller, MCPController)
+    server = controller._factory()
+    names = {t.name for t in await server.list_tools()}
+    assert {"propose_write", "get_write_proposal", "cancel_write_proposal"} <= names
+    token = server._capability_token
+    assert isinstance(token, str)
+    assert len(token) >= 32
+    other = controller._factory()
+    assert other._capability_token != token
+
+
+def test_proposal_store_wired_only_when_enabled() -> None:
+    """One ProposalStore is built when mcp.write_proposals is on; base
+    installs get None (the app then reports the feature as disabled)."""
+    from korvid.__main__ import _build_proposal_store
+    from korvid.core.config import KorvidConfig
+    from korvid.tools.proposals import ProposalStore
+
+    assert _build_proposal_store(KorvidConfig()) is None
+    store = _build_proposal_store(KorvidConfig(mcp_write_proposals=True))
+    assert isinstance(store, ProposalStore)
+
+
+async def test_mcp_controller_omits_proposal_tools_by_default() -> None:
+    from korvid.__main__ import _build_mcp_controller
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+
+    config = KorvidConfig(mcp_enabled=True, mcp_port=1234)
+    controller = _build_mcp_controller(config, cast("KubeClient", object()), {}, None)
+    assert controller is not None
+    server = controller._factory()  # type: ignore[attr-defined]  # concrete MCPController in this branch
+    names = {t.name for t in await server.list_tools()}
+    assert not names & {"propose_write", "get_write_proposal", "cancel_write_proposal"}
+    assert server._capability_token is None
+
+
 class _OverlapProbeBridge(UIBridge):
     """Records whether any two bridge calls ever overlap in time."""
 
@@ -267,6 +338,27 @@ class _OverlapProbeBridge(UIBridge):
         return await self._enter()
 
     async def agent_drill_down(self, name: str) -> str:
+        return await self._enter()
+
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        return await self._enter()
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        return await self._enter()
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
         return await self._enter()
 
     async def agent_request_write(
