@@ -262,6 +262,14 @@ def _installed_csv_name(manifest: dict[str, Any]) -> str:
     return str(status.get("installedCSV") or "")
 
 
+class _CsvTargetUnavailable(Exception):
+    """The Subscription records an installed CSV that cannot be safely
+    targeted right now. The uninstall must abort: skipping the CSV would
+    leave the operator running after an approved *full* uninstall, and
+    deleting it without a uid pin could remove a replacement incarnation
+    created while the dialog was open."""
+
+
 #: Upper bound on the pre-dialog dry-run round trip (issue #19): a slow or
 #: unreachable API server delays the approval dialog by at most this long,
 #: after which it opens without a preview - a preview must never block the
@@ -5774,7 +5782,17 @@ class KorvidApp(App[None]):
         if manifest is None:
             return
         csv_name = _installed_csv_name(manifest)
-        csv_meta, csv_uid = await self._installed_csv_target(ns, csv_name)
+        try:
+            csv_meta, csv_uid = await self._installed_csv_target(ns, csv_name)
+        except _CsvTargetUnavailable as exc:
+            self.notify(
+                f"uninstall {name} aborted: {exc} -"
+                f" installed CSV {csv_name} cannot be safely removed",
+                severity="error",
+            )
+            return
+        if csv_meta is not None and not await self._permitted("uninstall", csv_meta, ns, csv_name):
+            return
         ctx_meta, ctx_ns, ctx_name = ctx
         if not self._write_context_intact(
             "uninstall", ctx_meta, ctx_ns, ctx_name, phase="the manifest fetch", epoch=epoch
@@ -5828,29 +5846,31 @@ class KorvidApp(App[None]):
     async def _installed_csv_target(
         self, ns: str | None, csv_name: str
     ) -> tuple[ResourceMeta | None, str | None]:
-        """(meta, uid) of the Subscription's installed CSV. Meta None when no
-        CSV is recorded, the CSV API is undiscovered, or the CSV is already
-        gone (404) - the Subscription alone is removed then. Uid None when
-        the pinning fetch fails for another reason: the delete proceeds
-        without a precondition, like a row without a cached uid."""
+        """(meta, uid) of the Subscription's installed CSV, or (None, None)
+        when there is nothing to delete - no CSV recorded, or the CSV is
+        already gone (404). Raises `_CsvTargetUnavailable` when the CSV
+        exists but cannot be uid-pinned (API undiscovered, lookup failed):
+        the uninstall aborts rather than skip the CSV or delete it
+        unpinned."""
         if not csv_name:
             return None, None
         key = self._olm_alias_key("clusterserviceversions")
         if key is None:
-            return None, None
-        meta = self.aliases[key]
+            raise _CsvTargetUnavailable("the CSV API was not discovered")
         if self._get_manifest is None:
-            return meta, None
+            raise _CsvTargetUnavailable("no manifest source to pin the CSV uid")
         try:
             manifest = await self._get_manifest(key, ns, csv_name)
         except ApiStatusError as exc:
             if exc.status == 404:
                 return None, None
-            return meta, None
-        except Exception:
-            logger.debug("CSV uid lookup failed; delete proceeds unpinned", exc_info=True)
-            return meta, None
-        return meta, _manifest_uid(manifest)
+            raise _CsvTargetUnavailable(f"the CSV uid lookup failed (API {exc.status})") from exc
+        except Exception as exc:
+            raise _CsvTargetUnavailable("the CSV uid lookup failed") from exc
+        csv_uid = _manifest_uid(manifest)
+        if not csv_uid:
+            raise _CsvTargetUnavailable("the CSV manifest has no uid to pin")
+        return self.aliases[key], csv_uid
 
     def _operator_uninstall_operation(
         self,
@@ -5878,6 +5898,7 @@ class KorvidApp(App[None]):
         lines.append("CRDs and custom resources are KEPT - remove them manually if needed.")
         return "\n".join(lines)
 
+    @_tracks_cluster_write
     async def _operator_apply_uninstall(
         self,
         ops: WriteOps,

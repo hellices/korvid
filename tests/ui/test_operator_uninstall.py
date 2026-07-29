@@ -9,10 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.errors import ApiStatusError
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 
 from .test_olm_view import (
+    SUB_META,
     Recorder,
+    _aliases,
     _csv,
     _navigate,
     _subscription,
@@ -108,6 +111,158 @@ async def test_subscription_without_installed_csv_removes_subscription_only(
         assert ops.calls == [
             ("delete", "subscriptions", "operators", "cert-manager", "sub-cert-manager")
         ]
+
+
+async def test_uninstall_blocked_when_csv_delete_is_forbidden(tmp_path: Path) -> None:
+    """The dialog offers an atomic uninstall (Subscription + CSV): a known
+    CSV-delete denial must block *before* approval, or the flow deletes the
+    Subscription and then fails, leaving the operator half-uninstalled."""
+    ops = Recorder()
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        {"cert-manager": _SUB_MANIFEST, "cert-manager.v1.14.4": _CSV_MANIFEST},
+        tmp_path / "audit.jsonl",
+        write_ops=ops,
+    )
+
+    async def deny_csv_delete(
+        verb: str, plural: str, subresource: str, ns: str | None, group: str, name: str
+    ) -> bool:
+        return plural != "clusterserviceversions"
+
+    app._check_permission = deny_csv_delete
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        await pilot.press("ctrl+d")
+        await until(
+            pilot,
+            lambda: any("missing permission" in str(n.message) for n in app._notifications),
+            label="denial surfaced",
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert ops.calls == []
+
+
+async def test_uninstall_aborted_when_csv_api_is_undiscovered(tmp_path: Path) -> None:
+    """An installed CSV that cannot be targeted (CSV API undiscovered) must
+    abort the uninstall - deleting only the Subscription would leave the
+    operator running after the user approved a full uninstall."""
+    ops = Recorder()
+    aliases = _aliases()
+    del aliases["clusterserviceversions"], aliases["csv"]
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        {"cert-manager": _SUB_MANIFEST},
+        tmp_path / "audit.jsonl",
+        write_ops=ops,
+        aliases=aliases,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        await pilot.press("ctrl+d")
+        await until(
+            pilot,
+            lambda: any(
+                "aborted" in str(n.message) and "cert-manager.v1.14.4" in str(n.message)
+                for n in app._notifications
+            ),
+            label="abort notified",
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert ops.calls == []
+
+
+async def test_uninstall_aborted_when_csv_uid_cannot_be_established(tmp_path: Path) -> None:
+    """A failed (non-404) CSV uid lookup must abort instead of deleting the
+    CSV unpinned - an unpinned delete could remove a replacement object
+    created while the dialog was open."""
+    ops = Recorder()
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        {"cert-manager": _SUB_MANIFEST, "cert-manager.v1.14.4": _CSV_MANIFEST},
+        tmp_path / "audit.jsonl",
+        write_ops=ops,
+    )
+    real_get_manifest = app._get_manifest
+    assert real_get_manifest is not None
+
+    async def failing_csv_lookup(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        if "clusterserviceversions" in kind:
+            raise ApiStatusError(500, "boom")
+        return await real_get_manifest(kind, ns, name)
+
+    app._get_manifest = failing_csv_lookup
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        await pilot.press("ctrl+d")
+        await until(
+            pilot,
+            lambda: any("aborted" in str(n.message) for n in app._notifications),
+            label="abort notified",
+        )
+        assert not isinstance(app.screen, ConfirmScreen)
+        assert ops.calls == []
+
+
+async def test_csv_already_gone_removes_subscription_only(tmp_path: Path) -> None:
+    """A 404 on the CSV lookup is not an error: the CSV is already gone and
+    the flow degrades to a subscription-only uninstall."""
+    ops = Recorder()
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        {"cert-manager": _SUB_MANIFEST},
+        tmp_path / "audit.jsonl",
+        write_ops=ops,
+    )
+    real_get_manifest = app._get_manifest
+    assert real_get_manifest is not None
+
+    async def csv_gone(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        if "clusterserviceversions" in kind:
+            raise ApiStatusError(404, "NotFound")
+        return await real_get_manifest(kind, ns, name)
+
+    app._get_manifest = csv_gone
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        operation = app.screen._operation  # type: ignore[attr-defined]  # test peeks
+        assert "no installed CSV" in operation
+        await pilot.press("y")
+        await until(pilot, lambda: len(ops.calls) == 1, label="subscription delete ran")
+        assert ops.calls[0][1] == "subscriptions"
+
+
+async def test_apply_uninstall_reserves_the_cluster_write_slot_synchronously(
+    tmp_path: Path,
+) -> None:
+    """The whole two-delete operation counts as one in-flight cluster write
+    from the moment the confirmation callback constructs it - a `:ctx`
+    switch queued in the callback-to-worker gap must see it (issue #36)."""
+    ops = Recorder()
+    app = make_app({}, {}, tmp_path / "audit.jsonl", write_ops=ops)
+    async with app.run_test():
+        coro = app._operator_apply_uninstall(
+            ops,
+            SUB_META,
+            "operators",
+            "cert-manager",
+            "sub-cert-manager",
+            csv_meta=None,
+            csv_name="",
+            csv_uid=None,
+        )
+        try:
+            assert app._active_cluster_writes == 1  # reserved before the worker starts
+            await coro
+        finally:
+            coro.close()  # keep a failed assert from leaking the coroutine
+        assert app._active_cluster_writes == 0
 
 
 async def test_subscription_uninstall_declined_runs_nothing(tmp_path: Path) -> None:
