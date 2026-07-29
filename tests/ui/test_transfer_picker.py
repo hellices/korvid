@@ -9,9 +9,11 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import pytest
 from textual.pilot import Pilot
 from textual.widgets import DirectoryTree, Input, OptionList, RadioSet
 
+from korvid.core.transfer import TransferError
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.path_picker import LocalPathPickerScreen, RemotePathPickerScreen
 from korvid.ui.widgets.resource_table import ResourceTable
@@ -320,3 +322,48 @@ class TestRemotePickerRobustness:
             await until(pilot, lambda: len(opener.calls) == 2, label="forced listing")
             assert opener.calls[1]["command"] == ["ls", "-1Ap", "--", "/srv/link"]
             assert isinstance(app.screen, RemotePathPickerScreen)
+
+
+class TestContextEpochGuard:
+    """Issue #124 review: the lister must be bound to the dialog's context
+    epoch — a :ctx switch retargets the shared exec client, so a stale
+    lister would browse (and display) the wrong cluster."""
+
+    async def test_ctrl_o_after_context_switch_degrades_without_exec(self) -> None:
+        opener = FakeExecOpener(_listing("etc/"))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.focus()
+            app._ctx_epoch += 1  # a :ctx switch completed under the dialog
+            await pilot.press("ctrl+o")
+            await until(
+                pilot,
+                lambda: any("context changed" in str(n.message) for n in app._notifications),
+                label="epoch toast",
+            )
+            await until(pilot, lambda: app.screen is dialog, label="dialog kept")
+            assert opener.calls == []  # never touched the (new) cluster
+
+    async def test_result_discarded_when_epoch_changes_during_listing(self) -> None:
+        inner = FakeExecOpener(_listing("etc/"))
+
+        def flipping(
+            namespace: str,
+            pod: str,
+            container: str | None,
+            command: list[str],
+            *,
+            stdin: bool,
+        ) -> contextlib.AbstractAsyncContextManager[Any]:
+            # A switch completes while the listing is in flight.
+            app._ctx_epoch += 1
+            return inner(namespace, pod, container, command, stdin=stdin)
+
+        app = make_app([_pod("api-1")], open_pod_exec=flipping)
+        async with app.run_test():
+            lister = app._remote_lister("default", "api-1", "app", epoch=app._ctx_epoch)
+            assert lister is not None
+            with pytest.raises(TransferError, match="context changed"):
+                await lister("/")

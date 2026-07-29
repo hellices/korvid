@@ -65,7 +65,7 @@ from korvid.core.portforward import (
 from korvid.core.secrets import mask_secret_manifest
 from korvid.core.sorting import SORT_COLUMNS, SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
-from korvid.core.transfer import RemoteEntry, TransferSpec, list_remote_dir
+from korvid.core.transfer import RemoteEntry, TransferError, TransferSpec, list_remote_dir
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan
@@ -3062,30 +3062,47 @@ class KorvidApp(App[None]):
                 self._start_transfer(namespace, name, container, spec, uid, epoch)
 
         self.push_screen(
-            TransferScreen(target, remote_lister=self._remote_lister(namespace, name, container)),
+            TransferScreen(
+                target, remote_lister=self._remote_lister(namespace, name, container, epoch)
+            ),
             _on_spec,
         )
 
     def _remote_lister(
-        self, namespace: str, name: str, container: str | None
+        self, namespace: str, name: str, container: str | None, epoch: int
     ) -> Callable[[str], Awaitable[list[RemoteEntry]]] | None:
         """Directory-listing callable for the ctrl+o remote path picker.
 
         A read-only `ls` over the exec API (issue #124): names only, so the
         masking pipeline does not apply, and it is never exposed to the
         agent — browsing is user-driven like the transfer itself.
+
+        Bound to the dialog's context *epoch*: a :ctx switch retargets the
+        shared exec client while the dialog still shows the old pod label,
+        so a stale lister would browse — and display — the wrong cluster.
+        Raises TransferError (the picker's degradation path) when a switch
+        started, completed, or crosses the listing await.
         """
         open_pod_exec = self._open_pod_exec
         if open_pod_exec is None:
             return None
 
         async def _list(path: str) -> list[RemoteEntry]:
+            stale = f"the kube context changed while the dialog for {namespace}/{name} was open"
+            if self._ctx_switch_crossed(epoch):
+                raise TransferError(stale)
+
             def open_exec(
                 command: list[str], stdin: bool
             ) -> contextlib.AbstractAsyncContextManager[Any]:
                 return open_pod_exec(namespace, name, container, command, stdin=stdin)
 
-            return await list_remote_dir(open_exec, path)
+            entries = await list_remote_dir(open_exec, path)
+            if self._ctx_switch_crossed(epoch):
+                # The listing raced the switch: it may already come from the
+                # new cluster — never present it under the old pod label.
+                raise TransferError(stale)
+            return entries
 
         return _list
 

@@ -476,3 +476,14 @@ class TestListRemoteDir:
         ws = FakeWs([b"\x01" + b"weird\x0bname\n", b"\x03" + SUCCESS])
         entries = await list_remote_dir(FakeExec(ws), "/srv")
         assert entries == [RemoteEntry("weird\x0bname", False)]
+
+    async def test_oversized_listing_raises_transfer_error(self) -> None:
+        # The listing is cluster-controlled: an enormous directory must not
+        # accumulate unbounded stdout (and one UI option per entry) — past
+        # the cap the read stops and the picker degrades to manual entry.
+        chunk = b"\x01" + b"x" * (256 * 1024) + b"\n"
+        frames: list[bytes | str] = [chunk] * 5
+        frames.append(b"\x03" + SUCCESS)
+        ws = FakeWs(frames)
+        with pytest.raises(TransferError, match="too large"):
+            await list_remote_dir(FakeExec(ws), "/srv")
