@@ -31,11 +31,12 @@ Copilot, Azure OpenAI, Anthropic, OpenAI, local Ollama, or any
 OpenAI-compatible endpoint — including a `small` profile tuned for 3B–14B
 local models.
 
-**Writes are gated, previewed, and audited — no exceptions.** Every mutation
-(yours or agent-requested) passes an RBAC pre-check, shows a server dry-run
-preview in a confirmation dialog, and executes only on your keystroke. Every
+**Writes are gated and audited — no exceptions.** Every mutation (yours or
+agent-requested) executes only after you confirm it in a dialog, and every
 executed write lands in a fail-closed audit log: if the audit entry cannot
-be written, the write is blocked. `--readonly` disables writes entirely;
+be written, the write is blocked. Kubernetes API writes additionally get a
+best-effort RBAC pre-check and a server dry-run preview in the dialog where
+the API supports one. `--readonly` disables writes entirely;
 `protected_contexts` adds typed-name confirmation on production clusters.
 The agent can *request* a delete, scale, restart, or resize — it can never
 execute one.

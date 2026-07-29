@@ -7,20 +7,35 @@ those actions run under. Keys referenced here are listed in
 
 ## The safety model
 
-Every cluster write, no matter how it is initiated (keybinding, helm/OLM
-wizard, or [agent](agent.md) request), runs the same pipeline:
+Two guarantees hold for **every** cluster write, no matter how it is
+initiated (keybinding, helm/OLM wizard, or [agent](agent.md) request):
 
-1. **SSAR pre-check** — a SelfSubjectAccessReview verifies your RBAC allows
-   the write before any dialog opens.
-2. **Server dry-run preview** — where the API supports it, the write is
-   replayed with `dryRun=All` and the outcome shown in the dialog (see
-   below).
-3. **Approval dialog** — nothing executes until you confirm with a
+1. **Approval dialog** — nothing executes until you confirm with a
    keystroke. Dialog confirm keys are not remappable.
-4. **Fail-closed audit log** — every executed write is recorded at
+2. **Fail-closed audit log** — every executed write is recorded at
    `$XDG_STATE_HOME/korvid/audit.jsonl` (default
    `~/.local/state/korvid/audit.jsonl`; 0600 permissions, size-rotated).
    If the audit entry cannot be written, the write is blocked.
+
+Two further checks run **best-effort** in front of the dialog for
+Kubernetes API writes (delete, scale, restart, resize, cordon, drain,
+edits, …):
+
+- **SSAR pre-check** — a SelfSubjectAccessReview surfaces "missing RBAC
+  permission" before the dialog opens instead of after a failed mutation.
+  It is advisory: if the check itself fails or times out, korvid warns
+  and proceeds to the (still gated, still audited) dialog rather than
+  locking you out.
+- **Server dry-run preview** — where the API supports it, the write is
+  replayed with `dryRun=All` and the outcome shown in the dialog (see
+  below). If the preview cannot be produced, the dialog opens without
+  one and says so.
+
+Writes that do not go through the Kubernetes API skip the SSAR step but
+still require the approval dialog and the fail-closed audit entry: helm
+install/upgrade/rollback shows a `helm --dry-run` rendered-manifest
+preview in its dialog instead of a server `dryRun=All`, and file uploads
+into pods go straight to confirmation with no preview.
 
 ### Read-only mode
 
