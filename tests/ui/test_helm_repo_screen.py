@@ -197,7 +197,11 @@ async def test_actions_are_rejected_while_a_repo_mutation_is_pending() -> None:
         await pilot.press("enter")  # add: pending on the gate
         await until(pilot, lambda: ops.add_started == 1, label="add in flight")
         await pilot.press("ctrl+r")  # must be rejected, not cancel the add
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: "still working" in str(screen.query_one("#repo-status", Static).render()),
+            label="rejection surfaced",
+        )
         ops.add_gate.set()
         await until(
             pilot,
@@ -223,7 +227,11 @@ async def test_escape_is_rejected_while_a_repo_mutation_is_pending() -> None:
         await pilot.press("enter")  # add: pending on the gate
         await until(pilot, lambda: ops.add_started == 1, label="add in flight")
         await pilot.press("escape")  # must be rejected: the add is mutating
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: "still working" in str(screen.query_one("#repo-status", Static).render()),
+            label="rejection surfaced",
+        )
         assert app.screen is screen
         ops.add_gate.set()
         await until(
