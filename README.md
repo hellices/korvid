@@ -68,8 +68,9 @@ Full key reference: [docs/keybindings.md](docs/keybindings.md).
   split workspace, the log viewer (multi-pod merge, JSON highlighting,
   search, save), explicit namespace scope with RBAC-aware denials, and
   probe-first context switching.
-- **[Operations and safety](docs/ops.md)** — the write pipeline (SSAR
-  pre-check → dry-run preview → approval → fail-closed audit), read-only
+- **[Operations and safety](docs/ops.md)** — the safety model (keystroke
+  approval + fail-closed audit on every write, with best-effort SSAR
+  pre-checks and dry-run previews), read-only
   mode, protected contexts, node cordon / drain with PDB-aware impact
   plans, port-forwarding with liveness tracking, file transfer over the
   exec API, distroless debug fallback, and node shells.
