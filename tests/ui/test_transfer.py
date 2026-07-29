@@ -129,7 +129,14 @@ async def test_ctrl_t_requires_pods_kind() -> None:
     async with app.run_test() as pilot:
         await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="rows")
         app.current_kind = "deployments"
+        # Off the pods view the binding is gated (issue #114): the key is
+        # inert — no dialog, no warning.
         await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert not isinstance(app.screen, TransferScreen)
+        assert not any("only available for pods" in str(n.message) for n in app._notifications)
+        # A direct invocation (bypassing the key gate) still explains itself.
+        app.action_transfer()
         await until(
             pilot,
             lambda: any("only available for pods" in str(n.message) for n in app._notifications),

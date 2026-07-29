@@ -274,8 +274,9 @@ async def test_shell_kubectl_missing_error_notify() -> None:
             mock_call.assert_not_called()
 
 
-async def test_shell_non_pods_kind_warning() -> None:
-    """s on non-pods kind → warning notification; subprocess.call NOT invoked."""
+async def test_shell_non_pods_kind_is_inert() -> None:
+    """s off the pods/nodes views is gated (issue #114): the key is inert
+    and subprocess.call is NOT invoked. The action itself still warns."""
     app = make_app(
         [],
         extra_data={"deployments": [_deploy("frontend")]},
@@ -294,6 +295,11 @@ async def test_shell_non_pods_kind_warning() -> None:
             await pilot.pause(0.2)
             assert app.current_kind == "deployments"
             await pilot.press("s")
+            await pilot.pause(0.1)
+            assert not any("Shell is available" in n.message for n in app._notifications)
+            mock_call.assert_not_called()
+            # A direct invocation (bypassing the key gate) still explains itself.
+            app.action_shell()
             await pilot.pause(0.1)
             notifications = [n.message for n in app._notifications]
             assert any("Shell is available for pods and nodes" in m for m in notifications)
