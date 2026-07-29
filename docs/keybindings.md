@@ -1,7 +1,10 @@
 # Keybindings
 
-All keys, grouped by the context they act in. The in-app help overlay (`?`)
-always shows the effective keys, including any remaps.
+All keys, grouped by the context they act in. The footer legend adapts to the
+current view: only the keys that act on the resource kind on screen are shown
+(helm's `i`/`u`/`r`, node ops' `c`/`u`/`D`, workload restart/scale, …), and
+off-view keys are inert. The in-app help overlay (`?`) always documents every
+view and shows the effective keys, including any remaps.
 
 | Key | Context | Action |
 |-----|---------|--------|
@@ -64,7 +67,8 @@ Action names: `quit`, `help`, `open_command`, `open_filter`,
 `log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
 `sort_by_mem`, `toggle_agent`, `delete_resource`, `rollout_restart`,
 `resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
-`cordon_node`, `uncordon_node`, `drain_node`, `port_forward`, `transfer`.
+`cordon_node`, `uncordon_node`, `drain_node`, `port_forward`, `transfer`,
+`helm_install`, `helm_upgrade`, `helm_rollback`.
 
 Unknown actions, duplicate keys, and keys that shadow another action's
 default produce a startup warning and are skipped — never a crash. The
