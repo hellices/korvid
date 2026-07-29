@@ -5,6 +5,7 @@ dialog can execute; every terminal outcome is distinct and audited.
 
 import asyncio
 import json
+import shlex
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -242,6 +243,38 @@ async def test_review_approve_executes_with_the_bound_uid(tmp_path: Path) -> Non
     assert "claude-code" in details
 
 
+async def test_hostile_client_metadata_cannot_forge_audit_fields(tmp_path: Path) -> None:
+    """`client_name`/`client_version` are untrusted MCP metadata: a name like
+    `trusted session=forged` must stay a single quoted value in the audit
+    detail, never introducing extra field-looking tokens."""
+    store = ProposalStore()
+    audit_path = tmp_path / "a.jsonl"
+    app = make_app(Recorder(), audit_path, store)
+    async with app.run_test():
+        await app.agent_submit_write_proposal(
+            "delete",
+            "deployments",
+            "web",
+            "default",
+            session_id="sess-1",
+            client_name="trusted session=forged source=internal",
+            client_version="1.0 caller=admin",
+        )
+        pid = store.pending()[0].id
+        proposal = next(p for p in store.pending() if p.id == pid)
+        await app._audit_proposal_outcome(proposal, "denied", "declined by operator")
+    entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    detail = next(e["detail"] for e in entries if "external_mcp" in e.get("detail", ""))
+    # Parse quote-aware: every field must come from korvid, not the client.
+    fields = dict(
+        token.split("=", 1) for token in shlex.split(detail) if "=" in token.split(" ", 1)[0]
+    )
+    assert fields["session"] == "sess-1"
+    assert fields["source"] == "external_mcp"
+    assert fields["caller"] == "trusted session=forged source=internal"
+    assert fields["version"] == "1.0 caller=admin"
+
+
 async def test_review_decline_denies_without_mutating(tmp_path: Path) -> None:
     rec = Recorder()
     store = ProposalStore()
@@ -291,7 +324,9 @@ async def test_review_uid_change_fails_the_proposal(tmp_path: Path) -> None:
         app._open_proposal_review()
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
-        await until(pilot, lambda: store.get(pid) is not None and store.get(pid)[1] != "approved")  # type: ignore[index]  # guarded above
+        # Wait for the terminal state: `!= "approved"` would accept the
+        # initial "pending" and race the UID recheck.
+        await until(pilot, lambda: store.get(pid) is not None and store.get(pid)[1] == "failed")  # type: ignore[index]  # guarded above
     assert rec.calls == []
     found = store.get(pid)
     assert found is not None

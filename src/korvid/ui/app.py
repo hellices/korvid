@@ -7066,8 +7066,6 @@ class KorvidApp(App[None]):
         audit = self._audit
         if audit is None:
             return
-        caller = proposal.client_name or "unknown"
-        version = f" {proposal.client_version}" if proposal.client_version else ""
         try:
             audit.append(
                 action=proposal.action,
@@ -7076,14 +7074,30 @@ class KorvidApp(App[None]):
                 version=proposal.version,
                 namespace=proposal.namespace,
                 name=proposal.name,
-                detail=(
-                    f"source=external_mcp proposal={proposal.id}"
-                    f" caller={caller}{version} session={proposal.session_id}"
-                ),
+                detail=self._proposal_provenance(proposal),
                 outcome=f"proposal {state}: {reason}" if reason else f"proposal {state}",
             )
         except Exception:
             logger.warning("could not audit proposal %s outcome %s", proposal.id, state)
+
+    @staticmethod
+    def _proposal_provenance(proposal: WriteProposal) -> str:
+        """Field-injection-safe audit provenance for an external proposal.
+
+        `client_name`/`client_version` are untrusted MCP client metadata:
+        non-printables are stripped at intake, but spaces and `=` could
+        still forge field-looking tokens (`session=forged`). Quote them
+        (shell-style, so benign values stay bare) so every `key=` field in
+        the detail is korvid's own.
+        """
+        caller = shlex.quote(proposal.client_name or "unknown")
+        version = (
+            f" version={shlex.quote(proposal.client_version)}" if proposal.client_version else ""
+        )
+        return (
+            f"source=external_mcp proposal={proposal.id}"
+            f" caller={caller}{version} session={proposal.session_id}"
+        )
 
     async def _expire_proposals_audited(self, reason: str) -> None:
         """Expire every pending proposal and audit each terminal outcome."""
@@ -7301,12 +7315,7 @@ class KorvidApp(App[None]):
                     "the target was replaced since the proposal was created",
                 )
                 return
-            caller = proposal.client_name or "unknown"
-            version = f" {proposal.client_version}" if proposal.client_version else ""
-            detail = (
-                f"source=external_mcp proposal={proposal.id}"
-                f" caller={caller}{version} session={proposal.session_id}"
-            )
+            detail = self._proposal_provenance(proposal)
             outcome = await self._run_write(
                 proposal.action, meta, ns, proposal.name, op(proposal.uid), detail=detail
             )
