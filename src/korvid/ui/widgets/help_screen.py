@@ -90,7 +90,7 @@ def key_label(key: str) -> str:
 
 
 def _base_action(action: str) -> str:
-    """Action name without call parameters (``favorite_namespace(3)`` → ``favorite_namespace``)."""
+    """Action name without call parameters (`favorite_namespace(3)` → `favorite_namespace`)."""
     return action.split("(")[0]
 
 

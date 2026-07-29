@@ -159,3 +159,17 @@ async def test_help_overlay_applies_remap_to_helm_handler_rows() -> None:
         body = app.screen.body_text() if isinstance(app.screen, HelpScreen) else ""
         assert "x          Install a chart" in body
         assert "i          Install a chart" not in body
+
+
+async def test_favorite_digit_keys_are_reserved_against_overrides() -> None:
+    # The 1-9 favorites are excluded from the remappable-action map, but
+    # their keys must still be reserved: `logs: "1"` would otherwise be
+    # accepted while the live favorite binding still owns the key.
+    app = make_app([_pod("web")], config=_config({"logs": "1"}))
+    async with app.run_test() as pilot:
+        await until(
+            pilot,
+            lambda: any("reserved" in n.message for n in app._notifications),
+            label="reserved-key warning notified",
+        )
+        assert app._keybinding_overrides == {}

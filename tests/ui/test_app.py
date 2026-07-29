@@ -1034,11 +1034,15 @@ async def test_favorite_namespace_403_keeps_a_usable_ui() -> None:
         await until(pilot, lambda: app.query_one(ResourceTable).row_count, label="table seeded")
         await pilot.press("1")
         await until(pilot, lambda: app.current_scope == "secret-ns", label="favorite entered")
-        await until(
-            pilot,
-            lambda: any("no permission" in n.message.lower() for n in app._notifications),
-            label="denial surfaced once",
-        )
+
+        def _denials() -> int:
+            return sum("no permission" in n.message.lower() for n in app._notifications)
+
+        await until(pilot, lambda: _denials() > 0, label="denial surfaced")
+        # One report, no retry loop: give a would-be retry time to fire.
+        await pilot.pause()
+        await pilot.pause()
+        assert _denials() == 1
         # The UI stays usable: navigating away still works.
         await pilot.press("0")  # all-namespaces toggle
         await until(pilot, lambda: app.current_scope == ALL_NAMESPACES, label="navigated away")

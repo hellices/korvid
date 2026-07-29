@@ -989,7 +989,15 @@ class KorvidApp(App[None]):
         """
         bindings = [raw if isinstance(raw, Binding) else Binding(*raw) for raw in self.BINDINGS]
         priority_actions = {binding.action for binding in bindings if binding.priority}
-        plan = plan_keybindings(self.config.keybindings, self._binding_actions(), priority_actions)
+        # Id-less bindings (the 1-9 favorites) are not remappable, but their
+        # keys stay reserved so an override cannot silently shadow them.
+        reserved_keys = {binding.key: binding.action for binding in bindings if binding.id is None}
+        plan = plan_keybindings(
+            self.config.keybindings,
+            self._binding_actions(),
+            priority_actions,
+            reserved_keys=reserved_keys,
+        )
         self._keybinding_overrides = plan.overrides
         keymap: dict[str, str] = {}
         for binding in bindings:
