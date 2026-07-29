@@ -7123,7 +7123,14 @@ class KorvidApp(App[None]):
         if not store.pending():
             self.notify("No pending write proposals")
             return
-        self.run_worker(self._review_proposals(store), exclusive=True, group="proposal-review")
+        # Never *replace* a live review worker (exclusive=True would cancel
+        # it): once a proposal is claimed, cancellation could interrupt
+        # `_run_write` mid-mutation and strand the record as `approved`
+        # with an uncertain cluster outcome. Duplicate opens are refused.
+        if any(w.group == "proposal-review" and not w.is_finished for w in self.workers):
+            self.notify("A proposal review is already open", severity="warning")
+            return
+        self.run_worker(self._review_proposals(store), group="proposal-review")
 
     async def _review_proposals(self, store: ProposalStore) -> None:
         """Review pending proposals oldest-first until none remain or the

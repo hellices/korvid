@@ -243,6 +243,63 @@ async def test_review_approve_executes_with_the_bound_uid(tmp_path: Path) -> Non
     assert "claude-code" in details
 
 
+class GatedRecorder(Recorder):
+    """`delete_object` blocks until released — holds the review worker
+    mid-execution so a racing second `:proposals` can be exercised."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def delete_object(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        await self.release.wait()
+        await super().delete_object(meta, namespace, name, uid=uid)
+
+
+async def test_a_second_proposals_open_never_cancels_a_claimed_execution(tmp_path: Path) -> None:
+    """`:proposals` while a review worker holds a claimed proposal must be
+    refused, not replace the worker: exclusive replacement would cancel
+    `_run_write` mid-mutation and strand the record as `approved` with an
+    uncertain cluster outcome."""
+    rec = GatedRecorder()
+    store = ProposalStore()
+    app = make_app(rec, tmp_path / "a.jsonl", store)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        # A second pending proposal so the duplicate open gets past the
+        # empty-inbox check and would actually start a replacement worker.
+        await app.agent_submit_write_proposal(
+            "delete",
+            "deployments",
+            "web-2",
+            "default",
+            session_id="sess-1",
+            client_name="claude-code",
+            client_version="1.0",
+        )
+        app._open_proposal_review()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+
+        def state(of: str) -> str:
+            found = store.get(of)
+            return found[1] if found is not None else "gone"
+
+        # The claim has landed; the write itself is still gated in flight.
+        await until(pilot, lambda: state(pid) == "approved")
+        app._open_proposal_review()  # duplicate open mid-execution
+        rec.release.set()
+        await until(pilot, lambda: state(pid) != "approved")
+        assert state(pid) == "executed"
+        # The surviving worker moves on to the next pending proposal.
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("escape")
+    assert rec.calls == [("delete", "deployments", "default", "web")]
+
+
 async def test_hostile_client_metadata_cannot_forge_audit_fields(tmp_path: Path) -> None:
     """`client_name`/`client_version` are untrusted MCP metadata: a name like
     `trusted session=forged` must stay a single quoted value in the audit
