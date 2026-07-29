@@ -83,6 +83,7 @@ def make_app(
     readonly: bool = False,
     uid: str | None = "uid-1",
     mcp: MCPControllerBase | None = None,
+    check_permission: Any = None,
 ) -> KorvidApp:
     resource_store = ResourceStore()
     deploys = [GenericSummary(name="web", namespace="default", kind="Deployment", created="")]
@@ -93,7 +94,7 @@ def make_app(
         while True:
             await asyncio.sleep(0.01)
 
-    async def check_permission(
+    async def check_permission_default(
         verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
     ) -> bool:
         return permitted
@@ -109,7 +110,7 @@ def make_app(
         get_manifest=get_manifest,
         write_ops=recorder,
         audit=AuditLog(audit_path),
-        check_permission=check_permission,
+        check_permission=check_permission or check_permission_default,
         proposal_store=store,
         mcp=mcp,
     )
@@ -298,6 +299,80 @@ async def test_a_second_proposals_open_never_cancels_a_claimed_execution(tmp_pat
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("escape")
     assert rec.calls == [("delete", "deployments", "default", "web")]
+
+
+def _gated_permission_check() -> tuple[asyncio.Event, asyncio.Event, asyncio.Event, Any]:
+    """A permission checker the test can hold in flight: (armed, entered,
+    gate, fn). Unarmed calls pass straight through — the submission path
+    also runs an SSAR, and only the review-time check should be gated."""
+    armed = asyncio.Event()
+    entered = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def check(
+        verb: str, resource: str, sub: str, ns: str | None, group: str, name: str
+    ) -> bool:
+        if armed.is_set():
+            entered.set()
+            await gate.wait()
+        return True
+
+    return armed, entered, gate, check
+
+
+def _review_worker_finished(app: KorvidApp) -> bool:
+    return not any(w.group == "proposal-review" and not w.is_finished for w in app.workers)
+
+
+async def test_a_proposal_cancelled_during_the_rbac_check_never_reaches_a_dialog(
+    tmp_path: Path,
+) -> None:
+    """The awaited SubjectAccessReview can be slow; a proposal the caller
+    cancels while it is in flight must not surface an approval dialog for
+    an already-terminal record."""
+    armed, entered, gate, check = _gated_permission_check()
+    rec = Recorder()
+    store = ProposalStore()
+    app = make_app(rec, tmp_path / "a.jsonl", store, check_permission=check)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        armed.set()
+        app._open_proposal_review()
+        # `pilot.pause` waits for app idle and would starve behind the
+        # in-flight check — await the checkpoint event directly.
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert store.cancel(pid, session_id="sess-1")
+        gate.set()
+        await until(pilot, lambda: _review_worker_finished(app))
+        assert not isinstance(app.screen, ConfirmScreen)
+    assert rec.calls == []
+
+
+async def test_a_context_switch_begun_during_the_rbac_check_never_reaches_a_dialog(
+    tmp_path: Path,
+) -> None:
+    """A `:ctx` switch that begins while the SSAR is in flight owns the
+    proposal's fate (its sweep expires old-context proposals): the review
+    must stop without a dialog, never surface an old-context proposal
+    after the switch."""
+    armed, entered, gate, check = _gated_permission_check()
+    rec = Recorder()
+    store = ProposalStore()
+    app = make_app(rec, tmp_path / "a.jsonl", store, check_permission=check)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        armed.set()
+        app._open_proposal_review()
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        app._ctx_switching = True  # what :ctx holds while a switch is in flight
+        gate.set()
+        await until(pilot, lambda: _review_worker_finished(app))
+        assert not isinstance(app.screen, ConfirmScreen)
+        # Still pending: the switch's own expiry sweep decides its fate.
+        assert [p.id for p in store.pending()] == [pid]
+    assert rec.calls == []
 
 
 async def test_worker_cancellation_never_strands_a_claimed_proposal(tmp_path: Path) -> None:

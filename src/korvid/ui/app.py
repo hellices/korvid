@@ -7169,6 +7169,16 @@ class KorvidApp(App[None]):
                 store, proposal, "failed", "permission revoked since submission"
             )
             return True
+        # The awaited SSAR can be slow: re-read state and context before
+        # surfacing the dialog. The proposal may have been cancelled or
+        # expired meanwhile, and a `:ctx` switch begun in flight owns its
+        # fate (the switch's sweep expires old-context proposals) — never
+        # put an already-invalid proposal in front of the user.
+        found = store.get(proposal.id)
+        if found is None or found[1] != "pending":
+            return True
+        if self._ctx_switching or proposal.context_epoch != self._ctx_epoch:
+            return False
         source = proposal.client_name or "external MCP caller"
         title = (
             f"External proposal from {source}: {proposal.action}"
