@@ -10,7 +10,6 @@ tar argv builders, spec validation, and local tar packing/extraction.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
@@ -111,19 +110,22 @@ def validate_spec(spec: TransferSpec) -> str | None:
 
 def _validate_download_destination(local: Path) -> str | None:
     """Local-side checks for a download destination path."""
-    if local.is_dir():
-        # Caught here: after the stream this would only surface as an
-        # IsADirectoryError from the extraction step, long after the bytes
-        # were transferred.
-        return f"local path is a directory, expected a file path: {local}"
     parent = local.parent
     if not parent.is_dir():
         return f"local directory does not exist: {parent}"
     # Writability is checked here too (issue #123): failing after the dialog
     # would leave an intent audit entry and a raw errno for a foreseeable
-    # condition. The stream re-checks — the bit can flip in between.
-    if not os.access(parent, os.W_OK):
+    # condition. Creating the staging file needs both the write and the
+    # search bit — and the search bit must be checked *before* any stat of
+    # ``local`` below, which would itself raise PermissionError without it.
+    # The stream re-checks — the bits can flip in between.
+    if not os.access(parent, os.W_OK | os.X_OK):
         return f"local directory is not writable: {parent}"
+    if local.is_dir():
+        # Caught here: after the stream this would only surface as an
+        # IsADirectoryError from the extraction step, long after the bytes
+        # were transferred.
+        return f"local path is a directory, expected a file path: {local}"
     if local.exists() and not os.access(local, os.W_OK):
         return f"local file is not writable: {local}"
     return None
@@ -196,7 +198,7 @@ def default_local_path(remote_path: str) -> str:
     """
     base = posixpath.basename(remote_path.rstrip("/")) or "download"
     downloads = Path("~/Downloads").expanduser()
-    usable = downloads.is_dir() and os.access(downloads, os.W_OK)
+    usable = downloads.is_dir() and os.access(downloads, os.W_OK | os.X_OK)
     directory = downloads if usable else Path("~").expanduser()
     return str(directory / base)
 
@@ -412,9 +414,13 @@ async def download(
     finally:
         # The unlink needs the directory's write bit too: when that is what
         # just failed, a raw PermissionError here would replace the
-        # normalized TransferError and expose the .part staging name.
-        with contextlib.suppress(OSError):
+        # normalized TransferError and expose the .part staging name. A
+        # cleanup failure after a *successful* extraction is only logged —
+        # the download itself did land.
+        try:
             spool_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("could not remove download spool %s", spool_path)
 
 
 def _with_permission_hint(message: str, remote_path: str) -> str:

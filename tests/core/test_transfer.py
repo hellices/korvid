@@ -258,7 +258,14 @@ class TestPackExtract:
         assert not (tmp_path.parent.parent / "evil.txt").exists()
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="permission checks are meaningless as root")
+_PERMISSIONS_MEANINGLESS = os.name == "nt" or os.geteuid() == 0
+_skip_permission_tests = pytest.mark.skipif(
+    _PERMISSIONS_MEANINGLESS,
+    reason="POSIX permission bits are not meaningful here (Windows or root)",
+)
+
+
+@_skip_permission_tests
 class TestValidateSpecPermissions:
     """Issue #123: directory/file permission problems must fail inside the
     dialog with a clear message, never after the intent audit as a raw errno
@@ -272,6 +279,19 @@ class TestValidateSpecPermissions:
         assert error is not None
         assert "not writable" in error
         assert str(restricted) in error
+
+    def test_download_into_unsearchable_directory(self, tmp_path: Path) -> None:
+        # Creating the .part staging file needs the directory's search bit
+        # too: write-only (0o600) still cannot create the destination.
+        unsearchable = tmp_path / "unsearchable"
+        unsearchable.mkdir(mode=0o600)
+        try:
+            spec = TransferSpec("download", "/var/log/app.log", str(unsearchable / "app.log"))
+            error = validate_spec(spec)
+            assert error is not None
+            assert "not writable" in error
+        finally:
+            unsearchable.chmod(0o700)
 
     def test_download_onto_readonly_file(self, tmp_path: Path) -> None:
         dest = tmp_path / "app.log"
@@ -296,7 +316,7 @@ class TestValidateSpecPermissions:
         assert validate_spec(spec) is None
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="permission checks are meaningless as root")
+@_skip_permission_tests
 class TestDefaultLocalPathPermissions:
     def test_skips_unwritable_downloads_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -307,6 +327,17 @@ class TestDefaultLocalPathPermissions:
         downloads = tmp_path / "Downloads"
         downloads.mkdir(mode=0o500)
         assert default_local_path("/var/log/app.log") == str(tmp_path / "app.log")
+
+    def test_skips_unsearchable_downloads_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        downloads = tmp_path / "Downloads"
+        downloads.mkdir(mode=0o600)
+        try:
+            assert default_local_path("/var/log/app.log") == str(tmp_path / "app.log")
+        finally:
+            downloads.chmod(0o700)
 
 
 class TestPermissionHint:

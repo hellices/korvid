@@ -288,7 +288,10 @@ class TestPermissionErrors:
             await upload(FakeExec(ws), src, "/tmp/f")
         assert "hint:" not in str(excinfo.value)
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="permission checks are meaningless as root")
+    @pytest.mark.skipif(
+        os.name == "nt" or os.geteuid() == 0,
+        reason="POSIX permission bits are not meaningful here (Windows or root)",
+    )
     async def test_download_unwritable_directory_is_a_transfer_error(self, tmp_path: Path) -> None:
         # validate_spec catches this up front, but a directory can lose its
         # write bit between the dialog and the stream: the late failure must
@@ -318,7 +321,10 @@ class TestPermissionErrors:
         assert "hint:" in message
         assert "/app" in message
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="permission checks are meaningless as root")
+    @pytest.mark.skipif(
+        os.name == "nt" or os.geteuid() == 0,
+        reason="POSIX permission bits are not meaningful here (Windows or root)",
+    )
     async def test_directory_losing_write_bit_mid_stream_keeps_transfer_error(
         self, tmp_path: Path
     ) -> None:
