@@ -232,7 +232,8 @@ async def test_csv_already_gone_removes_subscription_only(tmp_path: Path) -> Non
         await pilot.press("ctrl+d")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
         operation = app.screen._operation  # type: ignore[attr-defined]  # test peeks
-        assert "no installed CSV" in operation
+        assert "already gone" in operation
+        assert "cert-manager.v1.14.4" in operation
         await pilot.press("y")
         await until(pilot, lambda: len(ops.calls) == 1, label="subscription delete ran")
         assert ops.calls[0][1] == "subscriptions"

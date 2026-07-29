@@ -5894,6 +5894,11 @@ class KorvidApp(App[None]):
                 "",
                 "OLM garbage-collects the operator's Deployment and RBAC owned by the CSV.",
             ]
+        elif csv_name:
+            lines += [
+                "",
+                f"(installed CSV {csv_name} is already gone - only the Subscription is removed)",
+            ]
         else:
             lines += ["", "(no installed CSV recorded - only the Subscription is removed)"]
         lines.append("CRDs and custom resources are KEPT - remove them manually if needed.")
@@ -6018,7 +6023,7 @@ class KorvidApp(App[None]):
             return None
         if self._helm is None:
             self.notify(
-                "helm CLI not found on PATH - install/upgrade/rollback unavailable",
+                "helm CLI not found on PATH - install/upgrade/rollback/uninstall unavailable",
                 severity="error",
             )
             return None
