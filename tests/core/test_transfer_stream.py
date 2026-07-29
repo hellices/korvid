@@ -17,7 +17,14 @@ from typing import Any
 
 import pytest
 
-from korvid.core.transfer import TransferError, _await_thread, download, upload
+from korvid.core.transfer import (
+    RemoteEntry,
+    TransferError,
+    _await_thread,
+    download,
+    list_remote_dir,
+    upload,
+)
 
 SUCCESS = json.dumps({"metadata": {}, "status": "Success"}).encode()
 NOT_FOUND = json.dumps(
@@ -367,3 +374,153 @@ class TestPermissionErrors:
             assert ".part" not in str(excinfo.value)
         finally:
             locked.chmod(0o700)
+
+
+class TestListRemoteDir:
+    """Issue #124: one exec round-trip listing a container directory."""
+
+    async def test_lists_entries_dirs_first(self) -> None:
+        listing = b"app.log\nconfig/\n.hidden\nlib/\n"
+        ws = FakeWs([b"\x01" + listing, b"\x03" + SUCCESS])
+        entries = await list_remote_dir(FakeExec(ws), "/srv")
+        assert entries == [
+            RemoteEntry("config", True),
+            RemoteEntry("lib", True),
+            RemoteEntry(".hidden", False),
+            RemoteEntry("app.log", False),
+        ]
+
+    async def test_runs_ls_with_option_terminator(self) -> None:
+        # `--` so a directory name starting with "-" is never read as an
+        # option; -1Ap gives one name per line, hidden files, dir markers.
+        # A trailing slash makes the operand directory-only: `ls file`
+        # succeeds and echoes the operand, which force-open (`o`) would
+        # otherwise render as a pseudo-directory containing itself.
+        ws = FakeWs([b"\x01" + b"f\n", b"\x03" + SUCCESS])
+        exec_ = FakeExec(ws)
+        await list_remote_dir(exec_, "/srv")
+        assert exec_.calls == [(["ls", "-1Ap", "--", "/srv/"], False)]
+
+    async def test_root_listing_keeps_single_slash(self) -> None:
+        ws = FakeWs([b"\x01" + b"f\n", b"\x03" + SUCCESS])
+        exec_ = FakeExec(ws)
+        await list_remote_dir(exec_, "/")
+        assert exec_.calls == [(["ls", "-1Ap", "--", "/"], False)]
+
+    async def test_non_utf8_names_reject_listing(self) -> None:
+        # errors="replace" would collapse an invalid-UTF-8 name and a real
+        # U+FFFD name to the same entry; selecting the former would then
+        # transfer the latter's path. Exec arguments are strings, so such
+        # names can never round-trip — degrade to manual entry instead.
+        ws = FakeWs([b"\x01" + b"ok.log\n\xff\xfebad\n", b"\x03" + SUCCESS])
+        with pytest.raises(TransferError, match="non-UTF-8"):
+            await list_remote_dir(FakeExec(ws), "/srv")
+
+    async def test_duplicate_names_reject_listing(self) -> None:
+        # An embedded-LF name can alias a real sibling: "decoy\nlogs" plus a
+        # real "logs/" parses into both a bare "logs" file entry and a
+        # "logs" directory — picking the "file" would hand tar the real
+        # directory. Real ls never emits duplicates, so an ambiguous listing
+        # degrades to manual entry.
+        ws = FakeWs([b"\x01" + b"decoy\nlogs\nlogs/\n", b"\x03" + SUCCESS])
+        with pytest.raises(TransferError, match="ambiguous"):
+            await list_remote_dir(FakeExec(ws), "/srv")
+
+    async def test_empty_directory(self) -> None:
+        ws = FakeWs([b"\x03" + SUCCESS])
+        assert await list_remote_dir(FakeExec(ws), "/empty") == []
+
+    async def test_failure_verdict_raises_transfer_error(self) -> None:
+        failure = json.dumps(
+            {"status": "Failure", "message": "command terminated with non-zero exit code"}
+        ).encode()
+        ws = FakeWs([b"\x02ls: /nope: No such file or directory\n", b"\x03" + failure])
+        with pytest.raises(TransferError, match="No such file or directory"):
+            await list_remote_dir(FakeExec(ws), "/nope")
+
+    async def test_missing_ls_raises_transfer_error(self) -> None:
+        # Distroless images have tar but often no ls: the caller degrades to
+        # manual path entry, so the failure must be a typed TransferError.
+        ws = FakeWs([b"\x03" + NOT_FOUND])
+        with pytest.raises(TransferError, match="executable file not found"):
+            await list_remote_dir(FakeExec(ws), "/srv")
+
+    async def test_no_verdict_raises_transfer_error(self) -> None:
+        # Connection dropped before channel 3: the listing may be truncated,
+        # never present it as complete.
+        ws = FakeWs([b"\x01" + b"partial\n"])
+        with pytest.raises(TransferError, match="without reporting an outcome"):
+            await list_remote_dir(FakeExec(ws), "/srv")
+
+    async def test_symlink_marker_stripped_as_file(self) -> None:
+        # -p suffixes only real directories; a dangling `@`-free symlink to a
+        # dir shows bare. Names ending in "/" are dirs, everything else files.
+        ws = FakeWs([b"\x01" + b"link\nreal/\n", b"\x03" + SUCCESS])
+        entries = await list_remote_dir(FakeExec(ws), "/srv")
+        assert entries == [RemoteEntry("real", True), RemoteEntry("link", False)]
+
+    async def test_transport_error_normalized_to_transfer_error(self) -> None:
+        # open_pod_exec propagates HTTP/connection failures from __aenter__;
+        # the picker's degradation contract only catches TransferError, so
+        # transport errors must be normalized here.
+        class BrokenExec:
+            def __call__(
+                self, command: list[str], stdin: bool
+            ) -> contextlib.AbstractAsyncContextManager[Any]:
+                @contextlib.asynccontextmanager
+                async def _cm() -> AsyncIterator[FakeWs]:
+                    raise ConnectionError("HTTP 403: exec forbidden")
+                    yield FakeWs([])  # pragma: no cover - unreachable
+
+                return _cm()
+
+        with pytest.raises(TransferError, match="exec forbidden"):
+            await list_remote_dir(BrokenExec(), "/srv")
+
+    async def test_cancellation_propagates(self) -> None:
+        # Cancellation is not a listing failure: it must never be swallowed
+        # into a TransferError.
+        class HangingExec:
+            def __call__(
+                self, command: list[str], stdin: bool
+            ) -> contextlib.AbstractAsyncContextManager[Any]:
+                @contextlib.asynccontextmanager
+                async def _cm() -> AsyncIterator[FakeWs]:
+                    await asyncio.sleep(3600)
+                    yield FakeWs([])  # pragma: no cover - unreachable
+
+                return _cm()
+
+        task = asyncio.create_task(list_remote_dir(HangingExec(), "/srv"))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_control_characters_in_names_are_not_split(self) -> None:
+        # The protocol separates records with LF only; splitlines() would
+        # also split on VT/FF/U+0085 inside a valid filename, producing
+        # phantom entries that cannot be selected.
+        ws = FakeWs([b"\x01" + b"weird\x0bname\n", b"\x03" + SUCCESS])
+        entries = await list_remote_dir(FakeExec(ws), "/srv")
+        assert entries == [RemoteEntry("weird\x0bname", False)]
+
+    async def test_oversized_listing_raises_transfer_error(self) -> None:
+        # The listing is cluster-controlled: an enormous directory must not
+        # accumulate unbounded stdout (and one UI option per entry) — past
+        # the cap the read stops and the picker degrades to manual entry.
+        chunk = b"\x01" + b"x" * (256 * 1024) + b"\n"
+        frames: list[bytes | str] = [chunk] * 5
+        frames.append(b"\x03" + SUCCESS)
+        ws = FakeWs(frames)
+        with pytest.raises(TransferError, match="too large"):
+            await list_remote_dir(FakeExec(ws), "/srv")
+
+    async def test_too_many_entries_raises_transfer_error(self) -> None:
+        # The byte cap alone does not bound the picker: 1 MiB of short
+        # names is hundreds of thousands of entries, each becoming a UI
+        # option synchronously. Degrade before constructing them.
+        listing = "".join(f"f{i}\n" for i in range(10_001)).encode()
+        ws = FakeWs([b"\x01" + listing, b"\x03" + SUCCESS])
+        with pytest.raises(TransferError, match="too many entries"):
+            await list_remote_dir(FakeExec(ws), "/srv")

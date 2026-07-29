@@ -20,7 +20,7 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, NamedTuple, TypeVar
 
 _T = TypeVar("_T")
 
@@ -85,8 +85,11 @@ def validate_spec(spec: TransferSpec) -> str | None:
     Kept deliberately local-only: remote-side problems (missing file, missing
     tar binary, permissions) surface from the stream itself with the server's
     own message, which is always more accurate than a client-side guess.
+
+    Paths are validated verbatim — filenames may legitimately begin or end
+    with whitespace — stripping is used only to detect blank fields.
     """
-    remote_error = _validate_remote_path(spec.remote_path.strip())
+    remote_error = _validate_remote_path(spec.remote_path if spec.remote_path.strip() else "")
     if remote_error is not None:
         return remote_error
     if not spec.local_path.strip():
@@ -143,6 +146,117 @@ def _validate_remote_path(remote: str) -> str | None:
         # out of scope); "/tmp/.." an even larger parent tree.
         return "remote path must name a file, not a directory"
     return None
+
+
+class RemoteEntry(NamedTuple):
+    """One name in a remote directory listing (issue #124)."""
+
+    name: str
+    is_dir: bool
+
+
+def list_dir_command(path: str) -> list[str]:
+    """ls argv listing ``path`` one name per line with directory markers.
+
+    `-1Ap`: one entry per line, hidden files without `.`/`..`, a trailing
+    slash on directories. `--` keeps a leading-dash path from being read as
+    an option. The operand's own trailing slash makes it directory-only:
+    `ls file` succeeds and echoes the operand, which force-open (`o`) would
+    otherwise render as a pseudo-directory containing itself; a symlink to
+    a directory is still traversed.
+    """
+    return ["ls", "-1Ap", "--", path.rstrip("/") + "/"]
+
+
+# The listing is cluster-controlled input: cap accumulation so a huge (or
+# adversarial) directory cannot exhaust TUI memory — 1 MiB is thousands of
+# entries, far beyond what a picker can usefully present. The entry cap
+# bounds the picker itself: 1 MiB of short names is still hundreds of
+# thousands of entries, each becoming a UI option synchronously.
+_LIST_MAX_BYTES = 1 << 20
+_LIST_MAX_ENTRIES = 10_000
+
+
+async def list_remote_dir(open_exec: OpenExec, path: str) -> list[RemoteEntry]:
+    """List a container directory over the exec API (issue #124).
+
+    A single read-only round-trip: `ls -1Ap` on the remote side, stdout
+    parsed by the trailing-slash directory marker, directories first and
+    alphabetical within each group. Raises TransferError when the listing
+    is unavailable (no `ls` in the image, exec forbidden, non-zero exit,
+    connection dropped before a verdict) or larger than `_LIST_MAX_BYTES` /
+    `_LIST_MAX_ENTRIES`, so callers can degrade to manual path entry.
+
+    The output is file *names* only — no resource payloads — which is why
+    it does not go through the sensitive-read masking pipeline; it is also
+    user-driven only and never registered as an agent tool.
+
+    Filenames containing an embedded LF are out of scope: the `ls -1`
+    protocol separates records with LF, so such a name is indistinguishable
+    from two entries. A phantom entry that collides with a real sibling
+    (e.g. "decoy\\nlogs" next to a real "logs/") is rejected as an
+    ambiguous listing; the remaining phantoms only put a nonexistent path
+    in the input field — `validate_spec` re-checks every transfer, and the
+    listing itself is read-only.
+    """
+    sink = _FrameSink()
+    # bytearray: += on bytes copies the accumulated listing per frame.
+    stdout = bytearray()
+    try:
+        async with open_exec(list_dir_command(path), False) as ws:
+            async for msg in ws:
+                stdout += sink.feed(msg.data)
+                if len(stdout) > _LIST_MAX_BYTES:
+                    # Leaving the `async with` closes the stream: the read
+                    # is bounded, not merely the parse.
+                    raise TransferError(f"directory listing for {path} is too large to browse")
+    except TransferError:
+        raise
+    except Exception as exc:
+        # open_pod_exec propagates transport/API failures (HTTP 403, broken
+        # connection) untyped; normalize them so callers can degrade to
+        # manual path entry. CancelledError is a BaseException and passes.
+        raise TransferError(f"cannot list {path}: {exc}") from exc
+    if sink.failure is not None:
+        raise TransferError(sink.error_message(f"cannot list {path}"))
+    if not sink.verdict:
+        raise TransferError(
+            sink.error_message(f"connection closed without reporting an outcome for {path}")
+        )
+    return _parse_listing(stdout, path)
+
+
+def _parse_listing(stdout: bytes | bytearray, path: str) -> list[RemoteEntry]:
+    """Parse `ls -1Ap` output into sorted entries (dirs first)."""
+    entries: list[RemoteEntry] = []
+    try:
+        text = stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # errors="replace" would collapse an invalid-UTF-8 name and a real
+        # U+FFFD name into the same entry; selecting the former would then
+        # transfer the latter's path. Exec arguments are strings, so such
+        # names can never round-trip — degrade to manual entry instead.
+        raise TransferError(f"directory listing for {path} contains non-UTF-8 names") from exc
+    # LF only: splitlines() would also split on VT/FF/U+0085, which are
+    # unusual but valid filename characters, producing phantom entries.
+    seen: set[str] = set()
+    for line in text.split("\n"):
+        if not line:
+            continue
+        if len(entries) >= _LIST_MAX_ENTRIES:
+            raise TransferError(f"directory listing for {path} has too many entries to browse")
+        is_dir = line.endswith("/")
+        name = line.rstrip("/") if is_dir else line
+        if name in seen:
+            # An embedded-LF name can alias a real sibling ("decoy\nlogs"
+            # next to a real "logs/" yields both a bare "logs" entry and a
+            # "logs" directory); real ls never emits duplicates, so an
+            # ambiguous listing degrades to manual entry.
+            raise TransferError(f"directory listing for {path} is ambiguous")
+        seen.add(name)
+        entries.append(RemoteEntry(name, is_dir))
+    entries.sort(key=lambda e: (not e.is_dir, e.name))
+    return entries
 
 
 def download_command(remote_path: str) -> list[str]:

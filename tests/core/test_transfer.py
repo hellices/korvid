@@ -63,6 +63,26 @@ class TestValidateSpec:
         assert error is not None
         assert "file" in error
 
+    def test_remote_path_with_trailing_space_is_validated_verbatim(self) -> None:
+        # "/srv/ " names the file " " in /srv — valid; stripping before
+        # validation turned it into the directory "/srv/" and rejected it.
+        spec = TransferSpec("download", "/srv/ ", "/tmp/x")
+        assert validate_spec(spec) is None
+
+    def test_remote_path_with_leading_space_rejected_as_relative(self) -> None:
+        # " /srv/x" is not absolute; validating a stripped copy accepted a
+        # different path than the one transferred.
+        spec = TransferSpec("download", " /srv/x", "/tmp/x")
+        error = validate_spec(spec)
+        assert error is not None
+        assert "absolute" in error
+
+    def test_blank_remote_path_still_reported_as_required(self) -> None:
+        spec = TransferSpec("download", "   ", "/tmp/x")
+        error = validate_spec(spec)
+        assert error is not None
+        assert "required" in error
+
     def test_empty_local_path(self) -> None:
         spec = TransferSpec("download", "/var/log/app.log", "")
         error = validate_spec(spec)

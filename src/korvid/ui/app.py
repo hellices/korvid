@@ -66,7 +66,7 @@ from korvid.core.portforward import (
 from korvid.core.secrets import mask_secret_manifest
 from korvid.core.sorting import SORT_COLUMNS, SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
-from korvid.core.transfer import TransferSpec
+from korvid.core.transfer import RemoteEntry, TransferError, TransferSpec, list_remote_dir
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan
@@ -3181,7 +3181,82 @@ class KorvidApp(App[None]):
             if spec is not None:
                 self._start_transfer(namespace, name, container, spec, uid, epoch)
 
-        self.push_screen(TransferScreen(target), _on_spec)
+        self.push_screen(
+            TransferScreen(
+                target,
+                remote_lister=self._remote_lister(namespace, name, container, uid, epoch),
+            ),
+            _on_spec,
+        )
+
+    def _remote_lister(
+        self, namespace: str, name: str, container: str | None, uid: str | None, epoch: int
+    ) -> Callable[[str], Awaitable[list[RemoteEntry]]] | None:
+        """Directory-listing callable for the ctrl+o remote path picker.
+
+        A read-only `ls` over the exec API (issue #124): names only, so the
+        masking pipeline does not apply, and it is never exposed to the
+        agent — browsing is user-driven like the transfer itself.
+
+        Bound to the dialog's context *epoch* and pod *uid*: a :ctx switch
+        retargets the shared exec client, and a same-named replacement pod
+        does not change the epoch — either way the listing would come from
+        somewhere other than what the dialog shows. Raises TransferError
+        (the picker's degradation path) when either binding is stale,
+        checked before each exec and again after the await so a listing
+        that raced the change is discarded.
+        """
+        open_pod_exec = self._open_pod_exec
+        if open_pod_exec is None:
+            return None
+
+        async def _guard() -> None:
+            def check_epoch() -> None:
+                if self._ctx_switch_crossed(epoch):
+                    raise TransferError(
+                        f"the kube context changed while the dialog for {namespace}/{name} was open"
+                    )
+
+            check_epoch()
+            await self._verify_listing_pod(namespace, name, uid)
+            # The uid lookup awaited the manifest source: a switch that
+            # completed during that await retargeted the shared exec client,
+            # so re-check before any exec follows.
+            check_epoch()
+
+        async def _list(path: str) -> list[RemoteEntry]:
+            await _guard()
+
+            def open_exec(
+                command: list[str], stdin: bool
+            ) -> contextlib.AbstractAsyncContextManager[Any]:
+                return open_pod_exec(namespace, name, container, command, stdin=stdin)
+
+            entries = await list_remote_dir(open_exec, path)
+            # Re-check: a listing that raced a switch or a pod replacement
+            # must never be presented under the old selection.
+            await _guard()
+            return entries
+
+        return _list
+
+    async def _verify_listing_pod(self, namespace: str, name: str, uid: str | None) -> None:
+        """Raise TransferError unless pod `uid` is still the incarnation the
+        transfer dialog was opened for. Fails open when no uid was captured
+        (matching the transfer's own uid gate in ui/transfer.py); with a
+        captured uid an unverifiable lookup fails closed — browsing is
+        optional, so degrading to manual entry beats listing a same-named
+        replacement pod."""
+        if uid is None:
+            return
+        try:
+            current = await self._target_uid("pods", namespace, name)
+        except ApiStatusError as exc:
+            raise TransferError(f"pod {name} no longer exists") from exc
+        if current is None:
+            raise TransferError(f"pod {name} could not be verified — enter the path manually")
+        if current != uid:
+            raise TransferError(f"pod {name} was replaced since the dialog was opened")
 
     def _start_transfer(
         self,
