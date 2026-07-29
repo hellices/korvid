@@ -177,7 +177,8 @@ async def list_remote_dir(open_exec: OpenExec, path: str) -> list[RemoteEntry]:
     user-driven only and never registered as an agent tool.
     """
     sink = _FrameSink()
-    stdout = b""
+    # bytearray: += on bytes copies the accumulated listing per frame.
+    stdout = bytearray()
     try:
         async with open_exec(list_dir_command(path), False) as ws:
             async for msg in ws:
@@ -194,7 +195,9 @@ async def list_remote_dir(open_exec: OpenExec, path: str) -> list[RemoteEntry]:
             sink.error_message(f"connection closed without reporting an outcome for {path}")
         )
     entries = []
-    for line in stdout.decode("utf-8", errors="replace").splitlines():
+    # LF only: splitlines() would also split on VT/FF/U+0085, which are
+    # unusual but valid filename characters, producing phantom entries.
+    for line in stdout.decode("utf-8", errors="replace").split("\n"):
         if not line:
             continue
         is_dir = line.endswith("/")

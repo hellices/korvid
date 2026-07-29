@@ -63,7 +63,8 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
 
     A submitted spec is pre-validated here (so typos keep the dialog open
     with a toast) but the caller re-validates before running — the dialog
-    never touches the cluster.
+    itself never runs a transfer. The optional ctrl+o remote picker is the
+    one cluster touch: injected read-only directory listings (issue #124).
     """
 
     CSS = _DIALOG_CSS

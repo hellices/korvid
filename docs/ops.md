@@ -129,7 +129,9 @@ and a local path — leaving the local path empty on a download saves to
 Don't know the exact path? `Ctrl-O` on either path field opens a picker:
 the local side is a directory tree, the remote side browses the container
 one `ls` round-trip per directory (`Enter` opens a directory or picks a
-file, `s` picks the directory itself, `Esc` backs out). Remote browsing
+file, `o` opens the highlighted entry as a directory even when it isn't
+marked as one — symlinked directories show bare — `s` picks the directory
+itself, `Esc` backs out). Remote browsing
 needs `ls` in the image — when it's missing (common in distroless), a toast
 says so and the dialog keeps working with manually typed paths. The listing
 is a read-only convenience for the user; it is never exposed to the agent.

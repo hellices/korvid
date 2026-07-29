@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -239,3 +242,80 @@ class TestBrowseGating:
             )
             tree = app.screen.query_one(DirectoryTree)
             assert Path(tree.path) == Path("~").expanduser()
+
+
+class TestRemotePickerRobustness:
+    async def test_escape_dismisses_while_listing_stalls(self) -> None:
+        # A stalled exec connection must not turn the convenience picker
+        # into a gate: the listing runs in a cancellable worker, so Esc
+        # still dismisses the picker while the listing hangs.
+        release = asyncio.Event()
+
+        class StallingOpener:
+            def __call__(
+                self,
+                namespace: str,
+                pod: str,
+                container: str | None,
+                command: list[str],
+                *,
+                stdin: bool,
+            ) -> contextlib.AbstractAsyncContextManager[Any]:
+                @contextlib.asynccontextmanager
+                async def _cm() -> AsyncIterator[Any]:
+                    await release.wait()
+                    yield FakeWsEmpty()
+
+                return _cm()
+
+        class FakeWsEmpty:
+            def __aiter__(self) -> FakeWsEmpty:
+                return self
+
+            async def __anext__(self) -> Any:
+                raise StopAsyncIteration
+
+        app = make_app([_pod("api-1")], open_pod_exec=StallingOpener())
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            try:
+                # Pre-fix, the blocked screen pump hangs the pilot itself:
+                # bound the interaction so the regression fails, not hangs.
+                async with asyncio.timeout(10):
+                    remote = dialog.query_one("#transfer-remote", Input)
+                    remote.value = "/srv/"
+                    remote.focus()
+                    await pilot.press("ctrl+o")
+                    await until(
+                        pilot,
+                        lambda: isinstance(app.screen, RemotePathPickerScreen),
+                        label="picker",
+                    )
+                    await pilot.press("escape")
+                    await until(pilot, lambda: app.screen is dialog, label="picker closed")
+            finally:
+                # Unblock the stalled listing so app teardown can finish even
+                # when the timeout above fired (the pre-fix behavior).
+                release.set()
+
+    async def test_o_forces_open_symlinked_directory(self) -> None:
+        # ls -p marks only real directories: a symlink to a directory shows
+        # bare. `o` on the highlighted entry opens it as a directory anyway.
+        opener = FakeExecOpener(_listing("link"))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.value = "/srv/"
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
+            )
+            options = app.screen.query_one(OptionList)
+            await until(pilot, lambda: options.option_count == 2, label="options")
+            options.focus()
+            await pilot.press("down", "o")
+            await until(pilot, lambda: len(opener.calls) == 2, label="forced listing")
+            assert opener.calls[1]["command"] == ["ls", "-1Ap", "--", "/srv/link"]
+            assert isinstance(app.screen, RemotePathPickerScreen)

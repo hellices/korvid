@@ -109,16 +109,20 @@ class RemotePathPickerScreen(ModalScreen[str | None]):
     """Browse the container filesystem one `ls` round-trip per directory.
 
     Enter descends into a directory or dismisses with a file's full path;
-    `s` dismisses with the current directory plus a trailing slash. When
-    the *initial* listing fails (no `ls` in a distroless image, exec
-    forbidden) the picker closes with an explanatory toast and the dialog
-    keeps working exactly as before — browsing is never a gate.
+    `o` opens the highlighted entry as a directory even when `ls -p` did
+    not mark it as one (symlinked directories show bare); `s` dismisses
+    with the current directory plus a trailing slash. Listings run in a
+    cancellable worker, so a stalled connection never blocks Esc. When the
+    *initial* listing fails (no `ls` in a distroless image, exec forbidden)
+    the picker closes with an explanatory toast and the dialog keeps
+    working exactly as before — browsing is never a gate.
     """
 
     CSS = _PICKER_CSS
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("escape", "cancel", "Cancel", show=True),
+        Binding("o", "force_open", "Open as dir", show=True),
         Binding("s", "select_dir", "Select dir", show=True),
     ]
 
@@ -133,13 +137,20 @@ class RemotePathPickerScreen(ModalScreen[str | None]):
             yield Static(f"Remote: {self._path}", classes="picker-title", markup=False)
             yield OptionList()
             yield Static(
-                "Enter = open / pick file    s = pick this directory    Esc = cancel",
+                "Enter = open / pick file    o = open as dir    "
+                "s = pick this directory    Esc = cancel",
                 classes="picker-hint",
                 markup=False,
             )
 
-    async def on_mount(self) -> None:
-        await self._load(self._path, initial=True)
+    def on_mount(self) -> None:
+        self._start_load(self._path, initial=True)
+
+    def _start_load(self, path: str, *, initial: bool = False) -> None:
+        """Load a listing in a worker: the screen stays responsive (Esc must
+        dismiss even against a stalled connection), and dismissal/screen
+        teardown cancels the worker."""
+        self.run_worker(self._load(path, initial=initial), group="remote-listing", exclusive=True)
 
     async def _load(self, path: str, *, initial: bool = False) -> None:
         path = posixpath.normpath(path) if path != "/" else "/"
@@ -168,18 +179,30 @@ class RemotePathPickerScreen(ModalScreen[str | None]):
             options.highlighted = 0
         self.query_one(".picker-title", Static).update(f"Remote: {path}")
 
-    async def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
-        index = event.option_index
+        self._open_index(event.option_index, force=False)
+
+    def action_force_open(self) -> None:
+        index = self.query_one(OptionList).highlighted
+        if index is not None:
+            self._open_index(index, force=True)
+
+    def _open_index(self, index: int, *, force: bool) -> None:
+        """Descend into option ``index``; ``force`` treats a file entry as a
+        directory (`ls -p` marks only real directories, so a symlink to a
+        directory shows bare — a wrong guess just shows the listing toast)."""
         if self._path != "/":
             if index == 0:
-                await self._load(posixpath.dirname(self._path.rstrip("/")) or "/")
+                self._start_load(posixpath.dirname(self._path.rstrip("/")) or "/")
                 return
             index -= 1
+        if index >= len(self._entries):
+            return
         entry = self._entries[index]
         target = posixpath.join(self._path, entry.name)
-        if entry.is_dir:
-            await self._load(target)
+        if entry.is_dir or force:
+            self._start_load(target)
         else:
             self.dismiss(target)
 

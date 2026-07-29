@@ -468,3 +468,11 @@ class TestListRemoteDir:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+    async def test_control_characters_in_names_are_not_split(self) -> None:
+        # The protocol separates records with LF only; splitlines() would
+        # also split on VT/FF/U+0085 inside a valid filename, producing
+        # phantom entries that cannot be selected.
+        ws = FakeWs([b"\x01" + b"weird\x0bname\n", b"\x03" + SUCCESS])
+        entries = await list_remote_dir(FakeExec(ws), "/srv")
+        assert entries == [RemoteEntry("weird\x0bname", False)]
