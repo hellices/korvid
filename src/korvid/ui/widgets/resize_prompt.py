@@ -105,7 +105,9 @@ class ResizePrompt(ModalScreen["dict[str, dict[str, dict[str, str]]] | None"]):
         # A multi-container pod can outgrow the dialog height; a scrollable
         # body keeps every input reachable instead of clipping the overflow.
         with VerticalScroll():
-            yield Static(f"Resize {self._target}", classes="confirm-title", markup=False)
+            yield Static(
+                f"In-place pod resize: {self._target}", classes="confirm-title", markup=False
+            )
             yield Static(
                 "Edit quantities and press Enter (Esc cancels). "
                 "Empty fields keep the current value.",
