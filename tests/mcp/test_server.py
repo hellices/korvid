@@ -374,35 +374,37 @@ async def test_controller_shutdown_leaves_a_freshly_started_run_untouched() -> N
 
     controller = MCPController(make_server)  # factory is never called here
     release = asyncio.Event()
-
-    async def old_run() -> None:
-        await release.wait()
-
-    old = asyncio.create_task(old_run())
-    controller._server = SimpleNamespace(request_shutdown=lambda: None)  # type: ignore[assignment]  # test double
-    controller._task = old
     forever = asyncio.Event()
+    fresh_holder: dict[str, asyncio.Task[None]] = {}
 
     async def fresh_run() -> None:
         await forever.wait()
 
-    async def swap_in_fresh_run() -> asyncio.Task[None]:
-        # Runs while shutdown() awaits the old task: a racing start().
+    async def old_run() -> None:
+        # Woken by shutdown()'s own request_shutdown call, so this swap runs
+        # while shutdown() awaits *this* task — a racing start().  (Driving
+        # the swap from a pre-created sibling task is order-dependent: on
+        # 3.11 wait_for wraps shutdown() in a task scheduled *after* the
+        # sibling, which would swap before shutdown captured the old run.)
+        await release.wait()
         fresh = asyncio.create_task(fresh_run())
         controller._server = SimpleNamespace(request_shutdown=lambda: None)  # type: ignore[assignment]  # test double
         controller._task = fresh
-        release.set()
-        return fresh
+        fresh_holder["task"] = fresh
 
-    swap = asyncio.create_task(swap_in_fresh_run())
+    old = asyncio.create_task(old_run())
+    controller._server = SimpleNamespace(request_shutdown=release.set)  # type: ignore[assignment]  # test double
+    controller._task = old
     try:
         result = await asyncio.wait_for(controller.shutdown(), timeout=10)
-        fresh = await swap
         assert result is None
         assert controller.running, "old-run shutdown wiped the fresh run's ownership"
-        assert controller._task is fresh
+        assert controller._task is fresh_holder["task"]
     finally:
-        (await swap).cancel()
+        old.cancel()
+        pending = fresh_holder.get("task")
+        if pending is not None:
+            pending.cancel()
 
 
 async def test_controller_pending_task_reports_the_live_run() -> None:
