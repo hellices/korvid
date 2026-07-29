@@ -620,3 +620,88 @@ async def test_submit_after_shutdown_began_is_rejected(tmp_path: Path) -> None:
             client_name="",
             client_version="",
         )
+
+
+async def test_a_failed_context_switch_still_expires_pending_proposals(tmp_path: Path) -> None:
+    """Proposals are invalidated when the committed retarget phase begins:
+    if both the target switch and the fallback raise, the old-context
+    validation is still stale (the client may be half-retargeted) and no
+    proposal may stay reviewable."""
+    rec = Recorder()
+    store = ProposalStore()
+    app = make_app(rec, tmp_path / "a.jsonl", store)
+    async with app.run_test():
+        await _submit(app)
+        pid = store.pending()[0].id
+
+        async def failing_switch(name: str | None) -> Any:
+            raise RuntimeError("cluster probe failed")
+
+        app._switch_context = failing_switch
+        ok, _applied = await app._retarget_context("ctx-b", "ctx-a")
+        assert ok is False
+        found = store.get(pid)
+        assert found is not None
+        assert found[1] == "expired"
+    assert rec.calls == []
+
+
+class SlowStopMCP(FakeMCP):
+    """`stop()` times out (the run keeps dying in the background); only the
+    follow-up `shutdown()` observes completion."""
+
+    def __init__(self) -> None:
+        super().__init__(running=True)
+        self.late_submit: ProposalStore | None = None
+
+    async def stop(self) -> str:
+        return "MCP stopping (cleanup is taking long)"  # is_on stays True
+
+    async def shutdown(self) -> None:
+        if self.late_submit is not None:
+            # An in-flight old-run submission lands while teardown drags on.
+            self.late_submit.submit(
+                action="delete",
+                group="apps",
+                version="v1",
+                kind="deployments",
+                namespace="default",
+                name="web",
+                arguments_json="{}",
+                uid="uid-1",
+                context="ctx-a",
+                context_epoch=0,
+                summary="delete deployments/web",
+                preview=(),
+                session_id="sess-old",
+                client_name="",
+                client_version="",
+            )
+        self.is_on = False
+
+
+async def test_mcp_off_that_times_out_still_expires_pending_proposals(tmp_path: Path) -> None:
+    store = ProposalStore()
+    mcp = SlowStopMCP()
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store, mcp=mcp)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        app._handle_mcp_command(["off"])
+        await until(pilot, lambda: (f := store.get(pid)) is not None and f[1] != "pending")
+        found = store.get(pid)
+    assert found is not None
+    assert found[1] == "expired"
+
+
+async def test_mcp_off_sweeps_again_after_a_late_shutdown(tmp_path: Path) -> None:
+    """A submission racing the dragged-out teardown must not outlive its
+    server run: a second sweep runs once the old run actually dies."""
+    store = ProposalStore()
+    mcp = SlowStopMCP()
+    mcp.late_submit = store
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store, mcp=mcp)
+    async with app.run_test() as pilot:
+        app._handle_mcp_command(["off"])
+        await until(pilot, lambda: not mcp.running and store.pending() == [])
+        assert store.pending() == []

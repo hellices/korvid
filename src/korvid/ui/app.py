@@ -1766,12 +1766,14 @@ class KorvidApp(App[None]):
         context actually in effect, which may legitimately be None (the
         kubeconfig default) — that is why success is a separate flag.
         """
+        # Old-context proposals are stale the moment this committed retarget
+        # phase begins: even if both switch attempts below raise, the client
+        # may already be half-retargeted, so expire them before the first
+        # fallible attempt — not only after a successful swap.
+        await self._expire_proposals_audited("kube context switched")
         try:
             result = await self._switch_context(name)  # type: ignore[misc]  # guarded by caller
             self._apply_context_switch(name, old, result)
-            # External proposals are bound to the exact context they were
-            # previewed against; a switch invalidates every pending one.
-            await self._expire_proposals_audited("kube context switched")
             return True, name
         except Exception as exc:
             self.notify(
@@ -1782,7 +1784,6 @@ class KorvidApp(App[None]):
         try:
             result = await self._switch_context(old)  # type: ignore[misc]  # guarded by caller
             self._apply_context_switch(old, old, result)
-            await self._expire_proposals_audited("kube context switched")
             self.notify(f"Restored context {old or '(kubeconfig default)'}")
             return True, old
         except Exception as exc:
@@ -2307,18 +2308,45 @@ class KorvidApp(App[None]):
                     return
                 was_running = mcp.running
                 msg = await (mcp.start() if action == "on" else mcp.stop())
-                if was_running != mcp.running:
-                    # A real lifecycle transition invalidates every
-                    # capability token handed out for the previous run
-                    # (issue #110): pending proposals from that run must not
-                    # survive it. An idempotent status-preserving toggle
-                    # (`:mcp on` while already running) must not discard
-                    # pending work.
-                    await self._expire_proposals_audited("the MCP server was restarted")
+                # A real lifecycle transition invalidates every capability
+                # token handed out for the previous run (issue #110):
+                # pending proposals from that run must not survive it. A
+                # stop whose bounded teardown timed out (`running` still
+                # True) has still ended that run's authority, so it expires
+                # too; only an idempotent status-preserving toggle
+                # (`:mcp on` while already running) keeps pending work.
+                stopped = action == "off" and was_running
+                if was_running != mcp.running or stopped:
+                    reason = (
+                        "the MCP server was stopped"
+                        if action == "off"
+                        else "the MCP server was restarted"
+                    )
+                    await self._expire_proposals_audited(reason)
             self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
             self._refresh_status()
+            if action == "off" and mcp.running:
+                # The bounded stop timed out and the old run is still dying
+                # in the background: wait it out, then sweep again so an
+                # in-flight submission that raced the teardown cannot
+                # outlive its server run.
+                await self._sweep_after_mcp_shutdown(mcp)
 
         self.run_worker(_switch(), exclusive=False)
+
+    async def _sweep_after_mcp_shutdown(self, mcp: MCPControllerBase) -> None:
+        """Final proposal sweep once a dragged-out MCP teardown completes.
+
+        `stop()`'s bounded wait can return while the old server run is still
+        dying; an in-flight proposal call on that run may land *after* the
+        stop-time sweep. Wait for the run to actually end, then expire again
+        so nothing submitted under the dead run's capability stays pending.
+        """
+        with contextlib.suppress(Exception):
+            pending = await mcp.shutdown()
+            if pending is not None:
+                await asyncio.wait({pending})
+        await self._expire_proposals_audited("the MCP server was stopped")
 
     def _apply_agent_settings(self, settings: AgentSettings) -> bool:
         """Swap in a fresh runtime built from the wizard's settings.

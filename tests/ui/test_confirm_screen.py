@@ -403,3 +403,38 @@ async def test_protected_context_keeps_resource_name_gate() -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert app.result is True
+
+
+async def test_ctrl_n_declines_with_a_require_name_gate() -> None:
+    """With a typed gate the `n` key is input text, so an explicit decline
+    control must exist — Esc alone would leave no way to deny (external
+    proposals stay pending on dismissal)."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+
+        def _done(v: bool | None) -> None:
+            app.result = v
+
+        await app.push_screen(
+            ConfirmScreen("Delete node x", "delete nodes/x", require_name="x"), _done
+        )
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        assert app.result is False
+
+
+async def test_ctrl_n_declines_with_a_protected_context_gate() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+
+        def _done(v: bool | None) -> None:
+            app.result = v
+
+        await app.push_screen(
+            ConfirmScreen("Delete pod", "delete pods/x", protected_context="prod"), _done
+        )
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        assert app.result is False
