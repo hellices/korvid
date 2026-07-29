@@ -17,7 +17,14 @@ from typing import Any
 
 import pytest
 
-from korvid.core.transfer import TransferError, _await_thread, download, upload
+from korvid.core.transfer import (
+    RemoteEntry,
+    TransferError,
+    _await_thread,
+    download,
+    list_remote_dir,
+    upload,
+)
 
 SUCCESS = json.dumps({"metadata": {}, "status": "Success"}).encode()
 NOT_FOUND = json.dumps(
@@ -367,3 +374,59 @@ class TestPermissionErrors:
             assert ".part" not in str(excinfo.value)
         finally:
             locked.chmod(0o700)
+
+
+class TestListRemoteDir:
+    """Issue #124: one exec round-trip listing a container directory."""
+
+    async def test_lists_entries_dirs_first(self) -> None:
+        listing = b"app.log\nconfig/\n.hidden\nlib/\n"
+        ws = FakeWs([b"\x01" + listing, b"\x03" + SUCCESS])
+        entries = await list_remote_dir(FakeExec(ws), "/srv")
+        assert entries == [
+            RemoteEntry("config", True),
+            RemoteEntry("lib", True),
+            RemoteEntry(".hidden", False),
+            RemoteEntry("app.log", False),
+        ]
+
+    async def test_runs_ls_with_option_terminator(self) -> None:
+        # `--` so a directory name starting with "-" is never read as an
+        # option; -1Ap gives one name per line, hidden files, dir markers.
+        ws = FakeWs([b"\x01" + b"f\n", b"\x03" + SUCCESS])
+        exec_ = FakeExec(ws)
+        await list_remote_dir(exec_, "/srv")
+        assert exec_.calls == [(["ls", "-1Ap", "--", "/srv"], False)]
+
+    async def test_empty_directory(self) -> None:
+        ws = FakeWs([b"\x03" + SUCCESS])
+        assert await list_remote_dir(FakeExec(ws), "/empty") == []
+
+    async def test_failure_verdict_raises_transfer_error(self) -> None:
+        failure = json.dumps(
+            {"status": "Failure", "message": "command terminated with non-zero exit code"}
+        ).encode()
+        ws = FakeWs([b"\x02ls: /nope: No such file or directory\n", b"\x03" + failure])
+        with pytest.raises(TransferError, match="No such file or directory"):
+            await list_remote_dir(FakeExec(ws), "/nope")
+
+    async def test_missing_ls_raises_transfer_error(self) -> None:
+        # Distroless images have tar but often no ls: the caller degrades to
+        # manual path entry, so the failure must be a typed TransferError.
+        ws = FakeWs([b"\x03" + NOT_FOUND])
+        with pytest.raises(TransferError, match="executable file not found"):
+            await list_remote_dir(FakeExec(ws), "/srv")
+
+    async def test_no_verdict_raises_transfer_error(self) -> None:
+        # Connection dropped before channel 3: the listing may be truncated,
+        # never present it as complete.
+        ws = FakeWs([b"\x01" + b"partial\n"])
+        with pytest.raises(TransferError, match="without reporting an outcome"):
+            await list_remote_dir(FakeExec(ws), "/srv")
+
+    async def test_symlink_marker_stripped_as_file(self) -> None:
+        # -p suffixes only real directories; a dangling `@`-free symlink to a
+        # dir shows bare. Names ending in "/" are dirs, everything else files.
+        ws = FakeWs([b"\x01" + b"link\nreal/\n", b"\x03" + SUCCESS])
+        entries = await list_remote_dir(FakeExec(ws), "/srv")
+        assert entries == [RemoteEntry("real", True), RemoteEntry("link", False)]

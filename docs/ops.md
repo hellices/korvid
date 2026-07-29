@@ -126,6 +126,14 @@ container picker first): pick a direction, the remote path in the container,
 and a local path — leaving the local path empty on a download saves to
 `~/Downloads/<name>`, or to `~/<name>` when no `Downloads` directory exists.
 
+Don't know the exact path? `Ctrl-O` on either path field opens a picker:
+the local side is a directory tree, the remote side browses the container
+one `ls` round-trip per directory (`Enter` opens a directory or picks a
+file, `s` picks the directory itself, `Esc` backs out). Remote browsing
+needs `ls` in the image — when it's missing (common in distroless), a toast
+says so and the dialog keeps working with manually typed paths. The listing
+is a read-only convenience for the user; it is never exposed to the agent.
+
 Transfers ride the exec API as a tar stream, so there is no dependency on a
 `kubectl` binary — but the container must have `tar` (the server's error is
 shown verbatim when it doesn't, e.g. distroless images). Local permission

@@ -20,7 +20,7 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, NamedTuple, TypeVar
 
 _T = TypeVar("_T")
 
@@ -143,6 +143,58 @@ def _validate_remote_path(remote: str) -> str | None:
         # out of scope); "/tmp/.." an even larger parent tree.
         return "remote path must name a file, not a directory"
     return None
+
+
+class RemoteEntry(NamedTuple):
+    """One name in a remote directory listing (issue #124)."""
+
+    name: str
+    is_dir: bool
+
+
+def list_dir_command(path: str) -> list[str]:
+    """ls argv listing ``path`` one name per line with directory markers.
+
+    `-1Ap`: one entry per line, hidden files without `.`/`..`, a trailing
+    slash on directories. `--` keeps a leading-dash path from being read as
+    an option.
+    """
+    return ["ls", "-1Ap", "--", path]
+
+
+async def list_remote_dir(open_exec: OpenExec, path: str) -> list[RemoteEntry]:
+    """List a container directory over the exec API (issue #124).
+
+    A single read-only round-trip: `ls -1Ap` on the remote side, stdout
+    parsed by the trailing-slash directory marker, directories first and
+    alphabetical within each group. Raises TransferError when the listing
+    is unavailable (no `ls` in the image, exec forbidden, non-zero exit,
+    connection dropped before a verdict) so callers can degrade to manual
+    path entry.
+
+    The output is file *names* only — no resource payloads — which is why
+    it does not go through the sensitive-read masking pipeline; it is also
+    user-driven only and never registered as an agent tool.
+    """
+    sink = _FrameSink()
+    stdout = b""
+    async with open_exec(list_dir_command(path), False) as ws:
+        async for msg in ws:
+            stdout += sink.feed(msg.data)
+    if sink.failure is not None:
+        raise TransferError(sink.error_message(f"cannot list {path}"))
+    if not sink.verdict:
+        raise TransferError(
+            sink.error_message(f"connection closed without reporting an outcome for {path}")
+        )
+    entries = []
+    for line in stdout.decode("utf-8", errors="replace").splitlines():
+        if not line:
+            continue
+        is_dir = line.endswith("/")
+        entries.append(RemoteEntry(line.rstrip("/") if is_dir else line, is_dir))
+    entries.sort(key=lambda e: (not e.is_dir, e.name))
+    return entries
 
 
 def download_command(remote_path: str) -> list[str]:

@@ -65,7 +65,7 @@ from korvid.core.portforward import (
 from korvid.core.secrets import mask_secret_manifest
 from korvid.core.sorting import SORT_COLUMNS, SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
-from korvid.core.transfer import TransferSpec
+from korvid.core.transfer import RemoteEntry, TransferSpec, list_remote_dir
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan
@@ -3061,7 +3061,33 @@ class KorvidApp(App[None]):
             if spec is not None:
                 self._start_transfer(namespace, name, container, spec, uid, epoch)
 
-        self.push_screen(TransferScreen(target), _on_spec)
+        self.push_screen(
+            TransferScreen(target, remote_lister=self._remote_lister(namespace, name, container)),
+            _on_spec,
+        )
+
+    def _remote_lister(
+        self, namespace: str, name: str, container: str | None
+    ) -> Callable[[str], Awaitable[list[RemoteEntry]]] | None:
+        """Directory-listing callable for the ctrl+o remote path picker.
+
+        A read-only `ls` over the exec API (issue #124): names only, so the
+        masking pipeline does not apply, and it is never exposed to the
+        agent — browsing is user-driven like the transfer itself.
+        """
+        open_pod_exec = self._open_pod_exec
+        if open_pod_exec is None:
+            return None
+
+        async def _list(path: str) -> list[RemoteEntry]:
+            def open_exec(
+                command: list[str], stdin: bool
+            ) -> contextlib.AbstractAsyncContextManager[Any]:
+                return open_pod_exec(namespace, name, container, command, stdin=stdin)
+
+            return await list_remote_dir(open_exec, path)
+
+        return _list
 
     def _start_transfer(
         self,
