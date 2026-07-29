@@ -193,6 +193,15 @@ RESIZE_TOOLS: list[dict[str, Any]] = [
 
 WRITE_TOOL_NAMES = frozenset(d.name for d in TOOL_DEFS if d.effect == "cluster_write")
 
+#: External write proposals (issue #110): submission/status/cancel tools for
+#: the MCP proposal surface. They never mutate the cluster — a proposal only
+#: becomes a write after the user approves it inside the TUI.
+PROPOSAL_TOOLS: list[dict[str, Any]] = [
+    copy.deepcopy(d.schema) for d in TOOL_DEFS if d.effect == "write_proposal"
+]
+
+PROPOSAL_TOOL_NAMES = frozenset(d.name for d in TOOL_DEFS if d.effect == "write_proposal")
+
 #: UI dispatch key -> argument adapter unpacking the model's JSON arguments
 #: into the bridge call. Keyed by the registry's validated dispatch target
 #: (not the tool name) so a definition can never silently invoke a

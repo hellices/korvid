@@ -13,7 +13,7 @@ import pytest
 
 from korvid.k8s.discovery import PODS_META
 from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
-from korvid.tools.executor import READ_TOOLS, UI_TOOLS, ToolExecutor
+from korvid.tools.executor import PROPOSAL_TOOLS, READ_TOOLS, UI_TOOLS, ToolExecutor
 
 
 class RecordingExecutor(ToolExecutor):
@@ -376,3 +376,133 @@ async def test_remove_endpoint_preserves_other_live_instances(tmp_path: Path) ->
         server.request_shutdown()
         await asyncio.wait_for(task, timeout=10)
     assert json.loads(endpoint_file.read_text()) == {"servers": {"999999": other}}
+
+
+# ---------------------------------------------------------------------------
+# External write proposals (issue #110)
+# ---------------------------------------------------------------------------
+
+
+_PROPOSE_ARGS = {"action": "delete", "kind": "pods", "name": "web-1", "namespace": "default"}
+
+
+def make_proposal_server(
+    executor: ToolExecutor | None = None,
+    *,
+    capability_token: str | None = "cap-tok",
+    port: int = 0,
+    endpoint_path: Path | None = None,
+) -> KorvidMCPServer:
+    return KorvidMCPServer(
+        executor or RecordingExecutor(),
+        READ_TOOLS + UI_TOOLS + PROPOSAL_TOOLS,
+        port=port,
+        endpoint_path=endpoint_path,
+        capability_token=capability_token,
+    )
+
+
+async def test_proposal_tools_are_listed_when_configured() -> None:
+    server = make_proposal_server()
+    tools = {t.name for t in await server.list_tools()}
+    assert {"propose_write", "get_write_proposal", "cancel_write_proposal"} <= tools
+
+
+async def test_propose_write_without_capability_is_rejected() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    result = await server.call_tool("propose_write", dict(_PROPOSE_ARGS))
+    assert result[0].text.startswith("ERROR:")
+    assert "capability" in result[0].text
+    assert executor.calls == []
+
+
+async def test_propose_write_with_wrong_capability_is_rejected() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "nope"})
+    assert result[0].text.startswith("ERROR:")
+    assert executor.calls == []
+
+
+async def test_propose_write_with_capability_dispatches_with_identity() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "cap-tok"})
+    assert result[0].text == "ok"
+    assert len(executor.calls) == 1
+    name, args = executor.calls[0]
+    assert name == "propose_write"
+    assert "capability" not in args
+    assert isinstance(args["_session_id"], str)
+    assert args["_session_id"]
+    assert isinstance(args["_client_name"], str)
+    assert isinstance(args["_client_version"], str)
+    assert {k: v for k, v in args.items() if not k.startswith("_")} == _PROPOSE_ARGS
+
+
+async def test_caller_supplied_reserved_args_are_overridden() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    await server.call_tool(
+        "propose_write",
+        {**_PROPOSE_ARGS, "capability": "cap-tok", "_session_id": "spoofed"},
+    )
+    _, args = executor.calls[0]
+    assert args["_session_id"] != "spoofed"
+
+
+async def test_reserved_args_are_stripped_from_plain_tools() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    await server.call_tool("list_resources", {"kind": "pods", "_session_id": "spoofed"})
+    assert executor.calls == [("list_resources", {"kind": "pods"})]
+
+
+async def test_capability_is_required_for_status_and_cancel() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    for tool in ("get_write_proposal", "cancel_write_proposal"):
+        result = await server.call_tool(tool, {"proposal_id": "p1"})
+        assert result[0].text.startswith("ERROR:")
+    assert executor.calls == []
+    result = await server.call_tool(
+        "cancel_write_proposal", {"proposal_id": "p1", "capability": "cap-tok"}
+    )
+    assert result[0].text == "ok"
+
+
+async def test_proposal_tools_without_a_configured_token_are_rejected() -> None:
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor, capability_token=None)
+    result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": ""})
+    assert result[0].text.startswith("ERROR:")
+    assert "not enabled" in result[0].text
+    assert executor.calls == []
+
+
+async def test_endpoint_file_publishes_capability_with_owner_only_mode(tmp_path: Path) -> None:
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    server = make_proposal_server(port=0, endpoint_path=endpoint_file)
+    task = asyncio.create_task(server.run())
+    try:
+        await asyncio.wait_for(server.wait_started(), timeout=10)
+        entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
+        assert entry["capability"] == "cap-tok"
+        assert (endpoint_file.stat().st_mode & 0o777) == 0o600
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_endpoint_file_omits_capability_when_proposals_are_off(tmp_path: Path) -> None:
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    server = make_server(port=0, endpoint_path=endpoint_file)
+    task = asyncio.create_task(server.run())
+    try:
+        await asyncio.wait_for(server.wait_started(), timeout=10)
+        entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
+        assert "capability" not in entry
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)

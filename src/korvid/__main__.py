@@ -14,6 +14,7 @@ import contextlib
 import dataclasses
 import importlib.util
 import logging
+import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -116,11 +117,17 @@ def _build_mcp_controller(
     from korvid.mcp.server import KorvidMCPServer, MCPController, default_endpoint_path
 
     def factory() -> KorvidMCPServer:
+        # A fresh capability token per server run (issue #110): the token is
+        # published only in the owner-readable endpoint file, so echoing it
+        # proves same-user local file access; a restart invalidates every
+        # previously handed-out token together with the pending proposals.
+        token = secrets.token_urlsafe(32) if config.mcp_write_proposals else None
         return KorvidMCPServer(
             ToolExecutor(kube, aliases, ui=ui),
-            mcp_tool_schemas(),
+            mcp_tool_schemas(write_proposals=config.mcp_write_proposals),
             port=config.mcp_port,
             endpoint_path=default_endpoint_path(),
+            capability_token=token,
         )
 
     return MCPController(factory)

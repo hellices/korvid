@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 import os
+import secrets
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,7 @@ from starlette.types import Receive, Scope, Send
 
 from korvid.core.audit import interprocess_lock
 from korvid.core.mcp import MCPControllerBase
-from korvid.tools.executor import ToolExecutor
+from korvid.tools.executor import PROPOSAL_TOOL_NAMES, ToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +84,14 @@ def _load_registry(path: Path) -> dict[str, Any] | None:
 
 
 def _replace_atomically(path: Path, registry: dict[str, Any]) -> None:
-    """Temp file + rename so readers never observe a torn record."""
+    """Temp file + rename so readers never observe a torn record.
+
+    Owner-only mode: the registry may carry a write-proposal capability
+    token (issue #110), and the permission must hold before the rename
+    makes the content visible."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(registry))
+    tmp.chmod(0o600)
     tmp.replace(path)
 
 
@@ -106,12 +112,22 @@ class KorvidMCPServer:
         *,
         port: int = DEFAULT_MCP_PORT,
         endpoint_path: Path | None = None,
+        capability_token: str | None = None,
     ) -> None:
         self._executor = executor
         self._tools = list(tools)
         self._tool_names = {t["function"]["name"] for t in self._tools}
         self._port = port
         self._endpoint_path = endpoint_path
+        #: Per-run secret gating the write-proposal tools (issue #110): it is
+        #: published only in the owner-readable endpoint file, so a caller
+        #: echoing it has proven local same-user file access — the same trust
+        #: level as the kubeconfig itself. None means proposals are disabled.
+        self._capability_token = capability_token
+        #: Transport is stateless (no persistent MCP session), so proposals
+        #: are keyed to the server run: one id per start, injected
+        #: server-side and never taken from the caller.
+        self._session_id = f"mcp-{os.getpid()}-{secrets.token_urlsafe(8)}"
         self._started: anyio.Event = anyio.Event()
         self._bound_port: int | None = None
         self._uvicorn: uvicorn.Server | None = None
@@ -149,8 +165,52 @@ class KorvidMCPServer:
             return [
                 types.TextContent(type="text", text=f"ERROR: tool not available over MCP: {name}")
             ]
-        result = await self._executor.execute(name, arguments or {})
+        # Underscore-prefixed keys are reserved for server-side injection
+        # (transport identity); strip whatever the caller sent so nothing in
+        # the executor ever trusts caller-controlled identity metadata.
+        args = {k: v for k, v in (arguments or {}).items() if not k.startswith("_")}
+        if name in PROPOSAL_TOOL_NAMES:
+            error = self._authorize_proposal_call(args)
+            if error is not None:
+                return [types.TextContent(type="text", text=error)]
+            client_name, client_version = self._client_info()
+            args["_session_id"] = self._session_id
+            args["_client_name"] = client_name
+            args["_client_version"] = client_version
+        result = await self._executor.execute(name, args)
         return [types.TextContent(type="text", text=result)]
+
+    def _authorize_proposal_call(self, args: dict[str, Any]) -> str | None:
+        """Capability check for the write-proposal tools; error text or None.
+
+        Pops ``capability`` from ``args`` so the secret never reaches the
+        executor, the store, or a log line. Constant-time comparison: the
+        token is the only thing standing between a local process and the
+        proposal queue, so it must not be guessable byte-by-byte.
+        """
+        supplied = args.pop("capability", None)
+        if self._capability_token is None:
+            return "ERROR: write proposals are not enabled on this server"
+        if not isinstance(supplied, str) or not secrets.compare_digest(
+            supplied, self._capability_token
+        ):
+            return "ERROR: invalid or missing capability token"
+        return None
+
+    def _client_info(self) -> tuple[str, str]:
+        """Best-effort caller identity from the MCP initialize handshake.
+
+        Display metadata only — never an authorization input (any caller can
+        claim any name). Stateless transport may not carry it; degrade to
+        empty strings."""
+        try:
+            params = self._server.request_context.session.client_params
+            info = params.clientInfo if params is not None else None
+        except (LookupError, AttributeError):
+            return "", ""
+        if info is None:
+            return "", ""
+        return str(info.name), str(info.version)
 
     @property
     def bound_port(self) -> int | None:
@@ -287,6 +347,11 @@ class KorvidMCPServer:
                     "url": f"http://{_HOST}:{port}/mcp",
                     "port": port,
                     "pid": os.getpid(),
+                    **(
+                        {"capability": self._capability_token}
+                        if self._capability_token is not None
+                        else {}
+                    ),
                 }
                 _replace_atomically(path, registry)
         except OSError:

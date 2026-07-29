@@ -71,6 +71,10 @@ class KorvidConfig:
     agent_disable_in_protected: bool = False
     mcp_enabled: bool = False
     mcp_port: int = 7878
+    #: `mcp.write_proposals` (issue #110): expose the external write-proposal
+    #: tools over MCP. Off by default; the tools only queue proposals — every
+    #: mutation still requires explicit approval inside the TUI.
+    mcp_write_proposals: bool = False
     #: kubectl debug image overrides (issue #52): air-gapped / private registry.
     #: `debug_images is None` means unconfigured; an explicit empty mapping is
     #: a deliberate restriction (only default/custom images are offered).
@@ -178,6 +182,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_disable_in_protected=agent_raw.get("disable_in_protected") is True,
         mcp_enabled=mcp_raw.get("enabled") is True,
         mcp_port=_parse_port(mcp_raw.get("port")),
+        mcp_write_proposals=mcp_raw.get("write_proposals") is True,
         debug_default_image=_opt_str(debug_raw.get("default_image")),
         debug_images=debug_images,
         node_shell_image=_opt_str(node_shell_raw.get("image")),
