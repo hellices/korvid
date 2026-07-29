@@ -201,6 +201,16 @@ def test_validate_dispatch_targets_rejects_ui_tool_naming_executor_method() -> N
         validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
 
 
+def test_validate_dispatch_targets_rejects_non_proposal_tool_on_proposal_entrypoint() -> None:
+    """Reserved proposal entrypoints require effect == write_proposal: a
+    ui_only tool routed at `agent_submit_write_proposal` would expose
+    proposal submission on the ordinary MCP surface, skipping the separate
+    proposal capability check keyed off PROPOSAL_TOOL_NAMES."""
+    bad = _tool("a", effect="ui_only", dispatch="agent_submit_write_proposal")
+    with pytest.raises(ValueError, match="proposal entrypoint"):
+        validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)
+
+
 def test_validate_dispatch_targets_rejects_write_tool_naming_executor_method() -> None:
     bad = _tool(
         "a",

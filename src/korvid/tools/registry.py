@@ -162,6 +162,13 @@ def validate_dispatch_targets(defs: list[ToolDef], *, executor_cls: type, bridge
                 f"{d.dispatch!r} is not a proposal entrypoint "
                 f"({sorted(_PROPOSAL_ENTRYPOINTS)})"
             )
+        if d.effect != "write_proposal" and d.dispatch in _PROPOSAL_ENTRYPOINTS:
+            raise ValueError(
+                f"tool {d.name!r} ({d.effect}): dispatch target "
+                f"{d.dispatch!r} is a reserved proposal entrypoint — only "
+                f"write_proposal tools may route there, otherwise the "
+                f"proposal capability check is skipped"
+            )
         if d.effect == "cluster_read":
             cls, role = executor_cls, "executor"
         else:

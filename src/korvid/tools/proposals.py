@@ -266,9 +266,17 @@ class ProposalStore:
         return result
 
     def resolve(self, proposal_id: str, state: ProposalState, *, reason: str = "") -> bool:
-        """Move a pending proposal to a terminal state exactly once."""
-        if state not in TERMINAL_STATES:
-            raise ValueError(f"resolve() only accepts terminal states, got {state!r}")
+        """Move a pending proposal to a terminal state exactly once.
+
+        `executed` is reserved for `finish_execution()` — recording it here
+        would fake a successful write without the exactly-once
+        `begin_execution()` claim ever having happened.
+        """
+        if state not in TERMINAL_STATES or state == "executed":
+            raise ValueError(
+                f"resolve() only accepts non-executed terminal states "
+                f"(use finish_execution() for executed), got {state!r}"
+            )
         changed = self._transition(proposal_id, from_state="pending", to=(state, reason))
         if changed:
             self._notify()

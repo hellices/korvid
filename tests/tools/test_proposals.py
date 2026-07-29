@@ -177,6 +177,20 @@ def test_preview_is_truncated_to_the_line_bound() -> None:
     assert "truncated" in proposal.preview[-1]
 
 
+def test_resolve_rejects_executed_bypassing_the_execution_claim() -> None:
+    """`executed` may only be recorded by finish_execution() after the
+    exactly-once begin_execution() claim — resolve() letting a pending
+    proposal jump straight to `executed` would fake a successful write to
+    status callers without any execution having happened."""
+    store, _ = make_store()
+    proposal = submit(store)
+    with pytest.raises(ValueError, match="finish_execution"):
+        store.resolve(proposal.id, "executed", reason="skipped the claim")
+    record = store.get(proposal.id)
+    assert record is not None
+    assert record[1] == "pending"
+
+
 def test_resolve_is_exactly_once() -> None:
     store, _ = make_store()
     proposal = submit(store)
