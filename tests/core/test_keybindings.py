@@ -135,3 +135,16 @@ def test_non_reserved_key_override_is_unaffected_by_reserved_keys() -> None:
     )
     assert plan.overrides == {"logs": "ctrl+l"}
     assert plan.warnings == ()
+
+
+def test_comma_separated_key_values_are_rejected() -> None:
+    # Textual keymaps accept comma-separated key lists, so "1,ctrl+l" would
+    # smuggle the reserved "1" past every collision check as one opaque
+    # marker. Config documents one replacement key per action — reject
+    # comma values outright.
+    plan = plan_keybindings(
+        {"logs": "1,ctrl+l"}, _ACTIONS, reserved_keys={"1": "favorite_namespace(1)"}
+    )
+    assert plan.overrides == {}
+    assert len(plan.warnings) == 1
+    assert "one key" in plan.warnings[0]

@@ -85,6 +85,12 @@ def _validated_overrides(
             warnings.append(f"keybindings: '{action}' needs a non-empty key string")
             continue
         key = raw_key.strip()
+        if "," in key:
+            warnings.append(
+                f"keybindings: '{action}' must map to exactly one key, got '{key}' — "
+                "comma-separated key lists are not supported"
+            )
+            continue
         marker = canonical_key(key)
         if action in priority_actions and marker in APPROVAL_KEYS:
             warnings.append(
