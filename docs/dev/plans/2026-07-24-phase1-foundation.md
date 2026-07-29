@@ -4,7 +4,7 @@
 
 **Goal:** Build the korvid foundation — repo gates, config, k8s client wrapper, resource store/watch, Textual app shell with UI Bus, and a pods view vertical slice with `:` command bar and `/` filter.
 
-**Architecture:** Pragmatic layered per `docs/specs/2026-07-24-korvid-engineering-standards.md` §3 — `ui/` (Textual, owns Messages) → `core/` + `agent/` + `k8s/` (pure Python, Textual-free), constructor injection wired in `__main__.py`, layer rules enforced by tach.
+**Architecture:** Pragmatic layered per `docs/dev/specs/2026-07-24-korvid-engineering-standards.md` §3 — `ui/` (Textual, owns Messages) → `core/` + `agent/` + `k8s/` (pure Python, Textual-free), constructor injection wired in `__main__.py`, layer rules enforced by tach.
 
 **Tech Stack:** Python ≥3.11, Textual ≥8, kubernetes_asyncio, PyYAML, uv + hatchling, Ruff, mypy --strict, pytest + pytest-asyncio + Pilot.
 
