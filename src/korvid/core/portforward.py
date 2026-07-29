@@ -755,7 +755,7 @@ def controller_owner(manifest: dict[str, Any]) -> tuple[str, str] | None:
     if not isinstance(refs, list):
         return None
     for ref in refs:
-        if not isinstance(ref, dict) or not ref.get("controller"):
+        if not isinstance(ref, dict) or ref.get("controller") is not True:
             continue
         kind, name = ref.get("kind"), ref.get("name")
         if isinstance(kind, str) and isinstance(name, str) and kind and name:

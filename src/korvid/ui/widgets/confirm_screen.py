@@ -43,6 +43,10 @@ ConfirmScreen .confirm-protected {
     background: $error;
     text-style: bold;
 }
+ConfirmScreen .confirm-managed {
+    color: $warning;
+    text-style: bold;
+}
 """
 
 
@@ -80,6 +84,11 @@ class ConfirmScreen(ModalScreen[bool | None]):
     the extra layer every write in a protected context must pass. When
     ``require_name`` is also set, that resource-name gate (at least as
     strong) stays the typed requirement.
+
+    ``managed_note`` (issue #119) renders an ownership banner — "managed by
+    helm release X / operator Y, the right lever is Z" — above the preview.
+    Purely informational: the approval gate is unchanged, direct writes stay
+    legitimate (emergencies, debugging).
     """
 
     CSS = _DIALOG_CSS
@@ -101,6 +110,7 @@ class ConfirmScreen(ModalScreen[bool | None]):
         preview: list[str] | None = None,
         preview_title: str = "server dry-run preview:",
         protected_context: str | None = None,
+        managed_note: str | None = None,
     ) -> None:
         super().__init__()
         self._title = title
@@ -109,6 +119,7 @@ class ConfirmScreen(ModalScreen[bool | None]):
         self._preview = preview
         self._preview_title = preview_title
         self._protected_context = protected_context
+        self._managed_note = managed_note
         # The value the confirm input must match: the resource name when the
         # caller demanded one, otherwise the protected context name.
         self._typed_gate = require_name or protected_context
@@ -133,6 +144,8 @@ class ConfirmScreen(ModalScreen[bool | None]):
                     markup=False,
                 )
             yield Static(self._operation, classes="confirm-operation", markup=False)
+            if self._managed_note is not None:
+                yield Static(f"⚠ {self._managed_note}", classes="confirm-managed", markup=False)
             if self._preview is not None:
                 yield Static(self._preview_text(), classes="confirm-preview")
             if self._typed_gate is None:

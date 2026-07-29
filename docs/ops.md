@@ -30,6 +30,15 @@ edits, …):
   replayed with `dryRun=All` and the outcome shown in the dialog (see
   below). If the preview cannot be produced, the dialog opens without
   one and says so.
+- **Ownership banner** — when the target is managed by a helm release,
+  an OLM operator, or another controller's custom resource (detected
+  from the object's own labels, annotations, and ownerReferences; pods
+  are traced up their controller chain), the dialog shows a
+  `⚠ managed by …` line naming the manager and the right lever — chart
+  values for helm, the CR for an operator, whose reconcile loop would
+  otherwise revert the change within seconds. It warns, never blocks:
+  direct writes stay legitimate (emergencies, debugging), and a failed
+  lookup simply means no banner.
 
 Writes that do not go through the Kubernetes API skip the SSAR step but
 still require the approval dialog and the fail-closed audit entry: helm

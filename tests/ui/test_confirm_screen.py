@@ -438,3 +438,57 @@ async def test_ctrl_n_declines_with_a_protected_context_gate() -> None:
         await pilot.press("ctrl+n")
         await pilot.pause()
         assert app.result is False
+
+
+async def test_managed_note_renders_as_a_warning_line() -> None:
+    """Issue #119: a write on a helm/operator-managed object shows an
+    ownership banner above the preview — information before approval, the
+    keystroke gate itself unchanged."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        note = "managed by helm release web/nginx — change the chart values instead"
+        await app.push_screen(
+            ConfirmScreen(
+                "Delete deployments/nginx?",
+                "DELETE deployments/nginx in web",
+                managed_note=note,
+                preview=["- deployment nginx"],
+            ),
+            lambda v: None,
+        )
+        await pilot.pause()
+        banner = app.screen.query_one(".confirm-managed", Static)
+        assert note in str(banner.render())
+
+
+async def test_no_managed_note_no_banner_widget() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(
+            ConfirmScreen("Delete pods/web-1?", "DELETE pods/web-1 in default"),
+            lambda v: None,
+        )
+        await pilot.pause()
+        assert not app.screen.query(".confirm-managed")
+
+
+async def test_managed_note_does_not_change_the_approval_gate() -> None:
+    """The banner warns, never blocks: plain y still confirms."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+
+        def _done(v: bool | None) -> None:
+            app.result = v
+
+        await app.push_screen(
+            ConfirmScreen(
+                "Scale deployments/web?",
+                "PATCH deployments/web/scale: 3→0 in default",
+                managed_note="managed by operator kafka-operator.v0.38 (CSV)",
+            ),
+            _done,
+        )
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+        assert app.result is True
