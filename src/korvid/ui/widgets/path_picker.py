@@ -34,10 +34,16 @@ def _display_name(name: str) -> str:
 
     ESC sequences, bidi controls, CR, and other non-printing characters can
     render invisibly or reorder text, making two different remote paths look
-    identical in the listing. Selection keeps the raw `RemoteEntry` name.
+    identical in the listing. Literal backslashes are escaped too so the
+    escaped forms stay unambiguous (a file literally named `\\x1b` must not
+    render like one containing a real ESC). Selection keeps the raw
+    `RemoteEntry` name.
     """
     return "".join(
-        repr(ch)[1:-1] if unicodedata.category(ch) in ("Cc", "Cf") else ch for ch in name
+        repr(ch)[1:-1]
+        if unicodedata.category(ch) in ("Cc", "Cf")
+        else ("\\\\" if ch == "\\" else ch)
+        for ch in name
     )
 
 
@@ -149,7 +155,9 @@ class RemotePathPickerScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Static(f"Remote: {self._path}", classes="picker-title", markup=False)
+            yield Static(
+                f"Remote: {_display_name(self._path)}", classes="picker-title", markup=False
+            )
             yield OptionList()
             yield Static(
                 "Enter = open / pick file    o = open as dir    "
@@ -197,7 +205,7 @@ class RemotePathPickerScreen(ModalScreen[str | None]):
             options.add_option(Option(Text(f"{label}/" if entry.is_dir else label)))
         if options.option_count:
             options.highlighted = 0
-        self.query_one(".picker-title", Static).update(f"Remote: {path}")
+        self.query_one(".picker-title", Static).update(f"Remote: {_display_name(path)}")
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()

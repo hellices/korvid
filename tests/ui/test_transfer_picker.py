@@ -598,3 +598,72 @@ class TestMarkupSafety:
             title = app.screen.query_one(".picker-title", Static)
             assert isinstance(title.visual, Content)
             assert title.visual.plain == "Remote: /srv/[red]dir[/red]"
+
+    async def test_control_characters_in_title_rendered_escaped(self) -> None:
+        # Descending into a control-character directory must escape the
+        # title too — ESC/bidi controls would erase or reorder it — while
+        # _path stays raw for the ls round-trips.
+        opener = FakeExecOpener(_listing("d\x1b[2Kir/"))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.value = "/srv/"
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
+            )
+            options = app.screen.query_one(OptionList)
+            await until(pilot, lambda: options.option_count == 2, label="options")
+            options.focus()
+            await pilot.press("down", "enter")
+            await until(pilot, lambda: len(opener.calls) == 2, label="descended")
+            assert opener.calls[1]["command"] == ["ls", "-1Ap", "--", "/srv/d\x1b[2Kir/"]
+            title = app.screen.query_one(".picker-title", Static)
+            assert isinstance(title.visual, Content)
+            assert title.visual.plain == "Remote: /srv/d\\x1b[2Kir"
+
+    async def test_initial_title_escapes_control_characters(self) -> None:
+        # The initial path can carry control characters (e.g. reopening the
+        # picker after a selection inside such a directory).
+        opener = FakeExecOpener(_listing("app.log"))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.value = "/srv/e\x1bvil/"
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
+            )
+            await until(pilot, lambda: len(opener.calls) == 1, label="listing")
+            title = app.screen.query_one(".picker-title", Static)
+            assert isinstance(title.visual, Content)
+            assert title.visual.plain == "Remote: /srv/e\\x1bvil"
+
+    async def test_literal_backslash_sequences_escaped_distinctly(self) -> None:
+        # Without escaping literal backslashes, a file literally named
+        # r"\x1b" and a file containing a real ESC render identically.
+        opener = FakeExecOpener(_listing("\\x1b", "\x1b"))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.value = "/srv/"
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
+            )
+            options = app.screen.query_one(OptionList)
+            await until(pilot, lambda: options.option_count == 3, label="options")
+            prompts = []
+            for index in (1, 2):
+                prompt = options.get_option_at_index(index).prompt
+                assert isinstance(prompt, Text)
+                prompts.append(prompt.plain)
+            assert len(set(prompts)) == 2
+            assert "\\\\x1b" in prompts
+            assert "\\x1b" in prompts
