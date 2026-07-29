@@ -419,7 +419,9 @@ class FakeBridge(UIBridge):
 
 def make_ui_executor(bridge: Any) -> ToolExecutor:
     kube: Any = FakeKube()
-    return ToolExecutor(kube, {"pods": PODS_META}, ui=bridge)
+    # proposal_tools mirrors the MCP server's wiring — the only surface the
+    # write-proposal tools may dispatch from.
+    return ToolExecutor(kube, {"pods": PODS_META}, ui=bridge, proposal_tools=True)
 
 
 def test_ui_tools_schema_names() -> None:
@@ -1397,6 +1399,24 @@ async def test_write_resize_path_still_validates_resources_under_any_name(
 
 
 # --- write proposal tools (issue #110) -----------------------------------
+
+
+async def test_proposal_tools_are_rejected_off_the_mcp_surface() -> None:
+    """The proposal tools are registered, so the shared executor 'knows'
+    them — but only the MCP path enforces the per-run capability token
+    before dispatch. A default-constructed executor (the built-in agent's
+    wiring) must refuse them, or a hallucinated/prompt-injected call could
+    queue proposals with empty transport metadata and no capability."""
+    kube: Any = FakeKube()
+    executor = ToolExecutor(kube, {"pods": PODS_META}, ui=FakeBridge())
+    for name, args in (
+        ("propose_write", {"action": "delete", "kind": "pods", "name": "web"}),
+        ("get_write_proposal", {"proposal_id": "p1"}),
+        ("cancel_write_proposal", {"proposal_id": "p1"}),
+    ):
+        result = await executor.execute(name, dict(args))
+        assert result.startswith("ERROR:"), name
+        assert "MCP" in result, name
 
 
 async def test_propose_write_dispatches_to_the_proposal_entrypoint() -> None:

@@ -124,7 +124,14 @@ def _build_mcp_controller(
         # previously handed-out token together with the pending proposals.
         token = secrets.token_urlsafe(32) if config.mcp_write_proposals else None
         return KorvidMCPServer(
-            ToolExecutor(kube, aliases, ui=ui),
+            ToolExecutor(
+                kube,
+                aliases,
+                ui=ui,
+                # The only surface allowed to reach the write-proposal tools:
+                # this server enforces the capability token before dispatch.
+                proposal_tools=config.mcp_write_proposals,
+            ),
             mcp_tool_schemas(write_proposals=config.mcp_write_proposals),
             port=config.mcp_port,
             endpoint_path=default_endpoint_path(),

@@ -332,17 +332,28 @@ def _validated_proposal_args(
 
 
 class ToolExecutor:
-    """Dispatches OpenAI tool calls to the Kubernetes client or the UI bridge."""
+    """Dispatches OpenAI tool calls to the Kubernetes client or the UI bridge.
+
+    `proposal_tools` is fail-closed: the write-proposal tools dispatch only
+    when the constructing surface opted in. The MCP server does (it enforces
+    the per-run capability token before dispatch); the built-in agent's
+    executor never does — a hallucinated or prompt-injected `propose_write`
+    from the model must not reach the proposal queue with empty transport
+    metadata and no capability check.
+    """
 
     def __init__(
         self,
         kube: ReadOps,
         aliases: Mapping[str, ResourceMeta],
         ui: UIBridge | None = None,
+        *,
+        proposal_tools: bool = False,
     ) -> None:
         self._kube = kube
         self._aliases = aliases
         self._ui = ui
+        self._proposal_tools = proposal_tools
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         """Dispatch a tool call; never raises — exceptions are returned as 'ERROR: ...'."""
@@ -367,6 +378,10 @@ class ToolExecutor:
         if tool.effect == "cluster_write":
             return await self._dispatch_write(tool, arguments)
         if tool.effect == "write_proposal":
+            if not self._proposal_tools:
+                raise ValueError(
+                    f"tool {tool.name!r} is only available over the MCP proposal surface"
+                )
             return await self._dispatch_proposal(tool, arguments)
         handler: Callable[[dict[str, Any]], Awaitable[str]] = getattr(self, tool.dispatch)
         return await handler(arguments)
