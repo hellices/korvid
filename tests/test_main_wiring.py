@@ -782,15 +782,14 @@ async def test_ctx_retarget_keeps_the_small_profile_surface(monkeypatch: object)
     assert "AWS EKS" in prompt  # new cluster's environment note
 
 
-async def test_ctx_switch_fallbacks_follow_session_namespace(
+async def test_ctx_switch_result_carries_the_context_namespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sequential switches derive fallbacks from the app's evolving session
-    default, not the startup snapshot: A -> B(ns-b) -> C(no kubeconfig
-    namespace) must keep ns-b in C's fallback set (issue #36 review)."""
+    """The switch result reports the target context's kubeconfig namespace so
+    the app can adopt it as the session default (issue #36); no fallback
+    namespace set is derived from config (issue #108)."""
     import asyncio
     import contextlib
-    import dataclasses
     from types import SimpleNamespace
 
     import korvid.__main__ as main_mod
@@ -824,19 +823,67 @@ async def test_ctx_switch_fallbacks_follow_session_namespace(
     )
     try:
         result_b = await switch("ctx-b")
-        assert "ns-b" in result_b.fallback_namespaces
-        # Mimic KorvidApp._apply_context_switch adopting ns-b as the default.
-        app_stub.config = dataclasses.replace(
-            startup, kube_context="ctx-b", namespace=result_b.context_namespace
-        )
         result_c = await switch("ctx-c")
     finally:
         for task in discovery_box:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-    assert "ns-b" in result_c.fallback_namespaces
-    assert "startup-ns" not in result_c.fallback_namespaces
+    assert result_b.context_namespace == "ns-b"
+    assert result_c.context_namespace is None
+    assert not hasattr(result_b, "fallback_namespaces")
+
+
+def test_startup_namespace_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup namespace resolves CLI > config `namespace:` > kubeconfig
+    context namespace > `default` (issue #108)."""
+    import korvid.__main__ as main_mod
+    from korvid.__main__ import _load_startup_config
+    from korvid.core.config import KorvidConfig
+
+    monkeypatch.setattr(main_mod, "resolve_context_name", lambda name: name)
+    monkeypatch.setattr(main_mod, "resolve_context_namespace", lambda name: "ctx-ns")
+
+    monkeypatch.setattr(main_mod, "load_config", lambda: KorvidConfig(namespace="cfg-ns"))
+    assert _load_startup_config(False, namespace="cli-ns").namespace == "cli-ns"
+    assert _load_startup_config(False).namespace == "cfg-ns"
+
+    monkeypatch.setattr(main_mod, "load_config", lambda: KorvidConfig())
+    assert _load_startup_config(False).namespace == "ctx-ns"
+
+    monkeypatch.setattr(main_mod, "resolve_context_namespace", lambda name: None)
+    assert _load_startup_config(False).namespace == "default"
+
+
+def test_cli_namespace_flag_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`korvid -n team-a` and `--namespace team-a` select the startup
+    namespace (issue #108)."""
+    import korvid.__main__ as main_mod
+
+    calls: list[str | None] = []
+
+    def fake_run(coro: Any) -> None:
+        coro.close()
+
+    def fake_run_app(
+        readonly: bool = False, mcp: bool = False, namespace: str | None = None
+    ) -> Any:
+        calls.append(namespace)
+
+        async def noop() -> None:
+            pass
+
+        return noop()
+
+    monkeypatch.setattr("asyncio.run", fake_run)
+    monkeypatch.setattr(main_mod, "_run", fake_run_app)
+    monkeypatch.setattr("sys.argv", ["korvid", "-n", "team-a"])
+    main_mod.main()
+    monkeypatch.setattr("sys.argv", ["korvid", "--namespace", "team-b"])
+    main_mod.main()
+    monkeypatch.setattr("sys.argv", ["korvid"])
+    main_mod.main()
+    assert calls == ["team-a", "team-b", None]
 
 
 def test_protected_context_name_glob_match(monkeypatch: pytest.MonkeyPatch) -> None:

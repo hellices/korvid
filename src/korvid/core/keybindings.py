@@ -64,11 +64,13 @@ def _validated_overrides(
     raw: Mapping[str, object],
     actions: Mapping[str, tuple[str, ...]],
     priority_actions: Collection[str],
+    reserved_keys: Mapping[str, str],
     warnings: list[str],
 ) -> dict[str, str]:
     """First pass: per-entry checks (action known, key usable, no dup key)."""
     overrides: dict[str, str] = {}
     used_keys: dict[str, str] = {}
+    reserved = {canonical_key(k): owner for k, owner in reserved_keys.items()}
     for action, raw_key in raw.items():
         if action in PROTECTED_ACTIONS:
             warnings.append(
@@ -83,11 +85,23 @@ def _validated_overrides(
             warnings.append(f"keybindings: '{action}' needs a non-empty key string")
             continue
         key = raw_key.strip()
+        if "," in key:
+            warnings.append(
+                f"keybindings: '{action}' must map to exactly one key, got '{key}' — "
+                "comma-separated key lists are not supported"
+            )
+            continue
         marker = canonical_key(key)
         if action in priority_actions and marker in APPROVAL_KEYS:
             warnings.append(
                 f"keybindings: '{action}' is a priority binding and may not take "
                 f"'{key}' — the approval dialogs listen for that key"
+            )
+            continue
+        if marker in reserved:
+            warnings.append(
+                f"keybindings: key '{key}' for '{action}' is reserved by "
+                f"'{reserved[marker]}' and cannot be remapped over"
             )
             continue
         if marker in used_keys:
@@ -134,6 +148,7 @@ def plan_keybindings(
     raw: Mapping[str, object],
     actions: Mapping[str, tuple[str, ...]],
     priority_actions: Collection[str] = frozenset(),
+    reserved_keys: Mapping[str, str] | None = None,
 ) -> KeymapPlan:
     """Validate config keybinding overrides against the app's actions.
 
@@ -143,12 +158,14 @@ def plan_keybindings(
         actions: Every remappable action mapped to its default keys.
         priority_actions: Actions whose bindings fire before any screen;
             these may not take an approval-dialog key (`APPROVAL_KEYS`).
+        reserved_keys: Keys owned by non-remappable bindings (key → owning
+            action, e.g. the 1-9 favorites); an override may not take one.
 
     Returns:
         A plan whose `overrides` contains only safe, conflict-free entries;
         every rejected entry produces one entry in `warnings`.
     """
     warnings: list[str] = []
-    overrides = _validated_overrides(raw, actions, priority_actions, warnings)
+    overrides = _validated_overrides(raw, actions, priority_actions, reserved_keys or {}, warnings)
     _drop_default_collisions(overrides, actions, warnings)
     return KeymapPlan(overrides, tuple(warnings))

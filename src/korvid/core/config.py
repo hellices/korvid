@@ -36,10 +36,9 @@ class ViewConfig:
 class KorvidConfig:
     kube_context: str | None = None
     namespace: str | None = None
-    #: Fallback namespaces for RBAC-limited users (issue #49): used by the
-    #: namespace picker and the per-namespace watch fanout when cluster-wide
-    #: LIST/WATCH is forbidden.
-    namespaces: tuple[str, ...] = ()
+    #: UI-only namespace shortcuts (issue #108): bound to keys `1`-`9` in
+    #: order. Purely local navigation state — never an authorization list.
+    favorite_namespaces: tuple[str, ...] = ()
     agent_enabled: bool = False
     agent_provider: str | None = None
     agent_base_url: str | None = None
@@ -139,10 +138,20 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         # re-enabling public zero-config images.
         debug_images = {}
     views, view_warnings = _parse_views(raw.get("views"))
+    warnings = list(view_warnings)
+    if "namespaces" in raw:
+        warnings.append(
+            "namespaces: no longer controls the namespace picker or watches"
+            " (issue #108) — Kubernetes authorization is owned by the API"
+            " server. Use `namespace:` for the startup namespace and"
+            " `favorite_namespaces:` for UI-only shortcuts on keys 1-9."
+        )
+    favorites, favorite_warnings = _parse_favorite_namespaces(raw.get("favorite_namespaces"))
+    warnings.extend(favorite_warnings)
     return KorvidConfig(
         kube_context=raw.get("kube_context"),
         namespace=raw.get("namespace"),
-        namespaces=_parse_namespaces(raw.get("namespaces")),
+        favorite_namespaces=favorites,
         agent_enabled=enabled,
         agent_provider=provider,
         agent_base_url=_opt_str(agent_raw.get("base_url")),
@@ -174,7 +183,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         node_shell_image=_opt_str(node_shell_raw.get("image")),
         node_shell_namespace=_opt_str(node_shell_raw.get("namespace")),
         views=views,
-        warnings=tuple(view_warnings),
+        warnings=tuple(warnings),
     )
 
 
@@ -346,11 +355,18 @@ def _opt_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _parse_namespaces(value: Any) -> tuple[str, ...]:
-    """`namespaces:` fallback list (issue #49): non-empty strings only."""
+def _parse_favorite_namespaces(value: Any) -> tuple[tuple[str, ...], list[str]]:
+    """`favorite_namespaces:` UI shortcut list (issue #108): non-empty
+    strings only, capped at the nine digit keys `1`-`9`."""
     if not isinstance(value, list):
-        return ()
-    return tuple(item for item in value if isinstance(item, str) and item)
+        return (), []
+    names = tuple(item for item in value if isinstance(item, str) and item)
+    if len(names) > 9:
+        return names[:9], [
+            f"favorite_namespaces: only the first 9 entries are bound to"
+            f" keys 1-9; {len(names) - 9} extra entries ignored"
+        ]
+    return names, []
 
 
 def _parse_protected_contexts(value: Any) -> tuple[str, ...]:

@@ -32,6 +32,7 @@ PDB-aware impact plan; `--readonly` disables them all.
 | `Ctrl-W` `v` / `w` / `q` | table | Split workspace into two panes / focus the other pane / close the focused pane |
 | `Shift-N/A/C/M` | table | Sort by name / age / CPU / MEM (repeat flips ▲/▼; sorts on data, not rendered strings) |
 | `0` | global | Toggle all-namespaces view |
+| `1`-`9` | global | Jump to a favorite namespace (`favorite_namespaces` config, in order) |
 | `d` | table | Describe selected resource (manifest + events) |
 | `s` | pods table | Shell into selected pod (`kubectl exec`; offers `kubectl debug` fallback for distroless images) |
 | `s` | nodes table | Node shell (`kubectl debug node/`; approval dialog — privileged pod with the host filesystem at `/host`, deleted on exit) |
@@ -342,31 +343,47 @@ at the new cluster. An open AI conversation survives the switch: the agent
 is told the context changed, and its tools operate on the new cluster from
 the next turn.
 
-## RBAC-limited clusters
+## Namespace scope
 
-korvid degrades gracefully when your role only grants specific namespaces
-(no cluster-wide `list namespaces` or cluster-scope watches):
+korvid always watches exactly one explicit scope — a single namespace or
+all namespaces — and never expands it on your behalf.
 
-- **Namespace picker** (`:ns`): when listing namespaces is forbidden, the
-  picker falls back to the `namespaces:` list from config and your
-  kubeconfig context's namespace instead of an error dead-end. `:ns <name>`
-  free-text entry always works.
-- **All-namespaces view** (`0`): if the cluster-wide list is forbidden and
-  no fallback namespaces are configured, korvid shows an inline notice and
-  stays in the current namespace rather than looping error cards.
-- **Watches**: when the cluster-scope watch answers 403 and fallback
-  namespaces are configured, korvid fans out into one watch per namespace —
-  the all-namespaces view then shows everything your RBAC grants allow.
-- **API discovery**: individual API groups that fail discovery are hidden;
-  they never fail startup.
+The startup namespace resolves in precedence order: the `-n`/`--namespace`
+CLI flag, then `namespace:` in `~/.config/korvid/config.yaml`, then your
+kubeconfig context's namespace, then `default`:
 
-Configure your granted namespaces in `~/.config/korvid/config.yaml`:
+```bash
+korvid -n team-a
+```
+
+Switch scope inside the app with `:ns <name>` (free-text always works, no
+list permission needed), the `:ns` picker, or `0` to toggle the
+all-namespaces view. Keys `1`-`9` jump straight to your favorite
+namespaces — a pure UI shortcut over the same `:ns` path:
 
 ```yaml
-namespaces:
+namespace: team-a        # startup namespace (optional)
+favorite_namespaces:     # 1-9 jump keys, in order (max 9)
   - team-a
   - team-b
 ```
+
+On RBAC-limited clusters korvid reports denials instead of guessing around
+them:
+
+- A watch that answers 403 stops with one concise notice — no retry loop,
+  no fan-out into other namespaces. Switch to a namespace your role grants
+  with `:ns <name>` or a favorite key.
+- `0` re-checks cluster-wide access each press, so it starts working the
+  moment your role is granted the permission.
+- When listing namespaces is forbidden, the `:ns` picker explains the
+  denial and points at `:ns <name>` free-text entry.
+- API discovery is unaffected: individual API groups that fail discovery
+  are hidden; they never fail startup.
+
+The legacy `namespaces:` fallback list (and the per-namespace watch
+fan-out it drove) is gone; a leftover key produces a startup warning
+pointing at `favorite_namespaces`.
 
 ## Port-forwarding
 

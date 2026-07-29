@@ -595,36 +595,55 @@ def test_ollama_negative_seed_falls_back(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# namespaces: fallback namespace list for RBAC-limited users (issue #49)
+# namespace scope (issue #108): legacy `namespaces:` is a migration warning;
+# `favorite_namespaces:` is a UI-only shortcut list bound to keys 1-9.
 # ---------------------------------------------------------------------------
 
 
-def test_namespaces_list_parsed(tmp_path: Path) -> None:
+def test_legacy_namespaces_key_emits_migration_warning(tmp_path: Path) -> None:
     p = tmp_path / "config.yaml"
     p.write_text("namespaces:\n  - team-a\n  - team-b\n")
     cfg = load_config(p)
-    assert cfg.namespaces == ("team-a", "team-b")
+    assert not hasattr(cfg, "namespaces")
+    assert any("namespaces" in w and "favorite_namespaces" in w for w in cfg.warnings)
 
 
-def test_namespaces_default_empty(tmp_path: Path) -> None:
+def test_favorite_namespaces_parsed(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    p.write_text("favorite_namespaces:\n  - team-a\n  - team-b\n")
+    cfg = load_config(p)
+    assert cfg.favorite_namespaces == ("team-a", "team-b")
+
+
+def test_favorite_namespaces_default_empty(tmp_path: Path) -> None:
     p = tmp_path / "config.yaml"
     p.write_text("namespace: default\n")
     cfg = load_config(p)
-    assert cfg.namespaces == ()
+    assert cfg.favorite_namespaces == ()
+    assert cfg.warnings == ()
 
 
-def test_namespaces_non_list_ignored(tmp_path: Path) -> None:
+def test_favorite_namespaces_non_list_ignored(tmp_path: Path) -> None:
     p = tmp_path / "config.yaml"
-    p.write_text("namespaces: oops\n")
+    p.write_text("favorite_namespaces: oops\n")
     cfg = load_config(p)
-    assert cfg.namespaces == ()
+    assert cfg.favorite_namespaces == ()
 
 
-def test_namespaces_non_string_entries_skipped(tmp_path: Path) -> None:
+def test_favorite_namespaces_non_string_entries_skipped(tmp_path: Path) -> None:
     p = tmp_path / "config.yaml"
-    p.write_text('namespaces:\n  - team-a\n  - 5\n  - ""\n  - null\n')
+    p.write_text('favorite_namespaces:\n  - team-a\n  - 5\n  - ""\n  - null\n')
     cfg = load_config(p)
-    assert cfg.namespaces == ("team-a",)
+    assert cfg.favorite_namespaces == ("team-a",)
+
+
+def test_favorite_namespaces_capped_at_nine_with_warning(tmp_path: Path) -> None:
+    p = tmp_path / "config.yaml"
+    names = "\n".join(f"  - ns-{i}" for i in range(11))
+    p.write_text(f"favorite_namespaces:\n{names}\n")
+    cfg = load_config(p)
+    assert cfg.favorite_namespaces == tuple(f"ns-{i}" for i in range(9))
+    assert any("favorite_namespaces" in w for w in cfg.warnings)
 
 
 # ---------------------------------------------------------------------------
