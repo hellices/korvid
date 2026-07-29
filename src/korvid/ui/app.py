@@ -5938,6 +5938,9 @@ class KorvidApp(App[None]):
         log_pane = self._log_pane
         self._log_buffer = LogBuffer(self._log_buffer_max_lines)
         log_pane.open(sources, force_prefix=force_prefix, log_buffer=self._log_buffer)
+        # The pane controls (f/w/t/Ctrl-S/p) gate on pane visibility: tell
+        # the footer legend the pane just appeared (issue #114).
+        self.refresh_bindings()
 
         if previous:
             log_pane.write_banner("\u2500\u2500 previous container logs \u2500\u2500")
@@ -6140,6 +6143,8 @@ class KorvidApp(App[None]):
         self._log_pane_owner = None
         with contextlib.suppress(Exception):
             self._log_pane.close()
+        # The pane controls gate on pane visibility (issue #114).
+        self.refresh_bindings()
 
     def _refresh_status(self) -> None:
         # Availability comes from the actual runtime, not the config flag —
@@ -6366,11 +6371,6 @@ class KorvidApp(App[None]):
         "shell": frozenset({("", "pods"), ("", "nodes")}),
         "logs": frozenset({("", "pods")}),
         "logs_multi": frozenset({("", "pods")}),
-        "log_format": frozenset({("", "pods")}),
-        "log_wrap": frozenset({("", "pods")}),
-        "log_timestamps": frozenset({("", "pods")}),
-        "log_save": frozenset({("", "pods")}),
-        "log_previous": frozenset({("", "pods")}),
         "hint_details": frozenset({("", "pods")}),
         "resize_pod": frozenset({("", "pods")}),
         "transfer": frozenset({("", "pods")}),
@@ -6390,11 +6390,33 @@ class KorvidApp(App[None]):
         "helm_rollback": frozenset({(HELM_REVISIONS_META.group, HELM_REVISIONS_META.plural)}),
     }
 
+    #: Actions that operate on the visible log pane, not the focused view:
+    #: the split workflow tails logs from one pane while the other shows a
+    #: different kind, so these gate on pane visibility (review of #114).
+    _LOG_PANE_ACTIONS: ClassVar[frozenset[str]] = frozenset(
+        {"log_format", "log_wrap", "log_timestamps", "log_save", "log_previous"}
+    )
+
+    #: Generic write actions that `_write_target` rejects on synthetic
+    #: (client-side, read-only) views such as the helm browser: advertising
+    #: them there would be a lie (review of #114). The dedicated helm write
+    #: actions stay available through `_ACTION_VIEWS`.
+    _SYNTHETIC_GATED_ACTIONS: ClassVar[frozenset[str]] = frozenset(
+        {"delete_resource", "edit_resource"}
+    )
+
     def _action_available(self, action: str) -> bool:
         """Composition availability, independent of the current view: the
         help overlay filters on this alone so off-view keys stay documented
         (issues #73, #114)."""
         return not (action == "toggle_agent" and not self._agent_available)
+
+    def _log_pane_open(self) -> bool:
+        """Whether a log pane is currently visible (pre-compose: no)."""
+        try:
+            return bool(self._log_pane.display)
+        except NoMatches:
+            return False
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Gate bindings on composition availability and the current view.
@@ -6405,6 +6427,12 @@ class KorvidApp(App[None]):
         """
         if not self._action_available(action):
             return False
+        if action in self._LOG_PANE_ACTIONS:
+            return self._log_pane_open()
+        if action in self._SYNTHETIC_GATED_ACTIONS:
+            meta = self.aliases.get(self._canonical_kind(self.current_kind))
+            # Unknown kinds keep the keys: the handler's own guards decide.
+            return meta is None or not meta.synthetic
         views = self._ACTION_VIEWS.get(action)
         if views is None:
             return True

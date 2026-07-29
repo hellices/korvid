@@ -31,6 +31,7 @@ from korvid.k8s.helm import (
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.help_screen import HelpScreen
+from korvid.ui.widgets.log_pane import LogPane
 from korvid.ui.widgets.resource_table import ResourceTable
 
 from .waits import until
@@ -338,3 +339,89 @@ async def test_footer_legend_follows_view_changes() -> None:
             pilot, lambda: "Cordon" in _footer_descriptions(app), label="node keys in footer"
         )
         assert "Logs" not in _footer_descriptions(app)
+
+
+# ---------------------------------------------------------------------------
+# Log-pane controls follow the visible pane, not the focused view (review)
+# ---------------------------------------------------------------------------
+
+
+async def test_log_pane_controls_hidden_while_no_pane_is_open() -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        await _rows_listed(pilot, app)  # pods view, no log pane yet
+        active = app.screen.active_bindings
+        assert "f" not in active
+        assert "w" not in active
+        assert "t" not in active
+        assert "p" not in active
+        assert "ctrl+s" not in active
+
+
+async def test_log_pane_controls_survive_focus_on_another_view() -> None:
+    """The split workflow tails logs from one pane while the other shows a
+    different kind: the pane controls act on the visible stream and must
+    stay live (and footer-visible) regardless of the focused view."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await _rows_listed(pilot, app)
+        await app._open_log_pane("default", [("api-1", "app")])
+        log_pane = app.query_one(LogPane)
+        await until(pilot, lambda: log_pane.display, label="log pane open")
+        await until(
+            pilot, lambda: "JSON/raw" in _footer_descriptions(app), label="pane keys in footer"
+        )
+        await pilot.press("ctrl+w", "v")  # split; focus moves to the new pane
+        await _navigate(pilot, "deploy", "deployments")
+        active = app.screen.active_bindings
+        assert active["f"].binding.id == "log_format"
+        assert active["p"].binding.id == "log_previous"
+        formatted = log_pane.formatted
+        await pilot.press("f")  # dispatch must reach the visible pane
+        await until(pilot, lambda: log_pane.formatted != formatted, label="format toggled off-view")
+
+
+async def test_log_pane_controls_vanish_when_the_pane_closes() -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        await _rows_listed(pilot, app)
+        await app._open_log_pane("default", [("api-1", "app")])
+        await until(
+            pilot, lambda: "JSON/raw" in _footer_descriptions(app), label="pane keys in footer"
+        )
+        await app._close_log_pane()
+        await until(
+            pilot,
+            lambda: "JSON/raw" not in _footer_descriptions(app),
+            label="pane keys gone from footer",
+        )
+        assert "f" not in app.screen.active_bindings
+
+
+# ---------------------------------------------------------------------------
+# Generic write keys are gated off synthetic (read-only) views (review)
+# ---------------------------------------------------------------------------
+
+
+async def test_synthetic_helm_views_hide_generic_write_keys() -> None:
+    """Helm releases/revisions are synthetic client-side views: the generic
+    delete/edit path rejects them, so advertising Ctrl-D / e there would be
+    a lie. The dedicated helm write actions remain."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        await _rows_listed(pilot, app)
+        active = app.screen.active_bindings
+        assert active["ctrl+d"].binding.id == "delete_resource"  # real kinds keep it
+        assert active["e"].binding.id == "edit_resource"
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app)
+        active = app.screen.active_bindings
+        assert "ctrl+d" not in active
+        assert "e" not in active
+        assert active["u"].binding.id == "helm_upgrade"  # helm writes stay
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app)
+        active = app.screen.active_bindings
+        assert "ctrl+d" not in active
+        assert "e" not in active
+        assert active["r"].binding.id == "helm_rollback"
