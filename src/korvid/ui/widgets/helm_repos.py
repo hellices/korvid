@@ -13,7 +13,7 @@ from typing import Any, ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Input, LoadingIndicator, OptionList, Static
@@ -38,10 +38,11 @@ class HelmRepoScreen(ModalScreen[None]):
     HelmRepoScreen {
         align: center middle;
     }
-    HelmRepoScreen > Vertical {
+    HelmRepoScreen > VerticalScroll {
         width: 72;
         max-width: 90%;
         height: auto;
+        max-height: 80%;
         border: round $primary;
         padding: 1 2;
         background: $surface;
@@ -93,7 +94,7 @@ class HelmRepoScreen(ModalScreen[None]):
         self._mutating = False
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        with VerticalScroll():
             yield Static("Helm chart repositories", id="repo-title", markup=False)
             yield OptionList(id="repo-list")
             yield LoadingIndicator(id="repo-loading")

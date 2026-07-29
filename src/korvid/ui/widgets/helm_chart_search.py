@@ -13,7 +13,7 @@ from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Input, LoadingIndicator, OptionList, Static
@@ -37,10 +37,11 @@ class HelmChartSearchScreen(ModalScreen["ChartHit | None"]):
     HelmChartSearchScreen {
         align: center middle;
     }
-    HelmChartSearchScreen Vertical {
+    HelmChartSearchScreen VerticalScroll {
         width: 72;
         max-width: 90%;
         height: auto;
+        max-height: 80%;
         border: round $primary;
         padding: 1 2;
         background: $surface;
@@ -82,7 +83,7 @@ class HelmChartSearchScreen(ModalScreen["ChartHit | None"]):
         self._search_seq = 0
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        with VerticalScroll():
             yield Static(self._title, id="chart-search-title", markup=False)
             yield FreshKeysInput(
                 self._created_time,
