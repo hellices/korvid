@@ -41,6 +41,17 @@ the API supports one. `--readonly` disables writes entirely;
 The agent can *request* a delete, scale, restart, or resize — it can never
 execute one.
 
+**Ops that out-do their kubectl counterparts.** Port-forwards (`Shift-F`)
+are session-tracked: `:pf` lists them with live status, stops (`Ctrl-D`) or
+re-attaches (`r`) any of them, a forward whose pod dies flips to `broken`
+with a toast instead of failing silently, local-port conflicts are rejected
+before anything spawns, and every forward is torn down on exit — all
+audited. File transfer (`Ctrl-T`) rides the exec API as a tar stream — no
+`kubectl cp`, no kubectl binary needed — with `Ctrl-O` path browsing on both
+the local and the in-container side, downloads that never leave a
+half-written file, and uploads that are approval-gated and audited
+fail-closed like every other write. Details in [docs/ops.md](docs/ops.md).
+
 ## Quick start
 
 ```sh
