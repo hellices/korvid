@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import ClassVar
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -174,7 +175,10 @@ class RemotePathPickerScreen(ModalScreen[str | None]):
         if path != "/":
             options.add_option(Option("../"))
         for entry in entries:
-            options.add_option(Option(f"{entry.name}/" if entry.is_dir else entry.name))
+            # Literal Text: names are cluster-controlled, so markup-enabled
+            # strings would let "[red]secret[/red]" display as "secret" and
+            # transfer a path other than the one the user sees.
+            options.add_option(Option(Text(f"{entry.name}/" if entry.is_dir else entry.name)))
         if options.option_count:
             options.highlighted = 0
         self.query_one(".picker-title", Static).update(f"Remote: {path}")

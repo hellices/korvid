@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.text import Text
+from textual.content import Content
 from textual.pilot import Pilot
-from textual.widgets import DirectoryTree, Input, OptionList, RadioSet
+from textual.widgets import DirectoryTree, Input, OptionList, RadioSet, Static
 
 from korvid.core.transfer import TransferError
 from korvid.ui.app import KorvidApp
@@ -367,3 +369,50 @@ class TestContextEpochGuard:
             assert lister is not None
             with pytest.raises(TransferError, match="context changed"):
                 await lister("/")
+
+
+class TestMarkupSafety:
+    """Remote filenames are cluster-controlled: rendering them as Textual
+    markup would let "[red]secret[/red]" display as "secret", so the picker
+    could transfer a path other than the one the user sees."""
+
+    async def test_markup_in_filenames_rendered_literally(self) -> None:
+        opener = FakeExecOpener(_listing("[red]secret[/red]"))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.value = "/srv/"
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
+            )
+            options = app.screen.query_one(OptionList)
+            await until(pilot, lambda: options.option_count == 2, label="options")
+            prompt = options.get_option_at_index(1).prompt
+            assert isinstance(prompt, Text)
+            assert prompt.plain == "[red]secret[/red]"
+
+    async def test_markup_in_directory_path_title_rendered_literally(self) -> None:
+        # The picker title embeds directory names picked from the listing;
+        # the Static is markup-disabled so brackets stay literal on screen.
+        opener = FakeExecOpener(_listing("[red]dir[/red]/"))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.value = "/srv/"
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
+            )
+            options = app.screen.query_one(OptionList)
+            await until(pilot, lambda: options.option_count == 2, label="options")
+            options.focus()
+            await pilot.press("down", "enter")  # descend into the marked-up dir
+            await until(pilot, lambda: len(opener.calls) == 2, label="descended")
+            title = app.screen.query_one(".picker-title", Static)
+            assert isinstance(title.visual, Content)
+            assert title.visual.plain == "Remote: /srv/[red]dir[/red]"
