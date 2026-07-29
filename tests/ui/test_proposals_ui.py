@@ -705,3 +705,50 @@ async def test_mcp_off_sweeps_again_after_a_late_shutdown(tmp_path: Path) -> Non
         app._handle_mcp_command(["off"])
         await until(pilot, lambda: not mcp.running and store.pending() == [])
         assert store.pending() == []
+
+
+class RestartRacingMCP(SlowStopMCP):
+    """While the old run's teardown drags on, a racing `:mcp on` completes a
+    fresh run and that run accepts a new proposal."""
+
+    async def shutdown(self) -> None:
+        if self.late_submit is not None:
+            # The new run's proposal, submitted after the restart.
+            self.late_submit.submit(
+                action="delete",
+                group="apps",
+                version="v1",
+                kind="deployments",
+                namespace="default",
+                name="web",
+                arguments_json="{}",
+                uid="uid-1",
+                context="ctx-a",
+                context_epoch=0,
+                summary="delete deployments/web",
+                preview=(),
+                session_id="sess-new",
+                client_name="",
+                client_version="",
+            )
+        self.is_on = True  # the fresh run is live
+
+
+async def test_a_restart_racing_the_late_shutdown_keeps_new_run_proposals(
+    tmp_path: Path,
+) -> None:
+    """The final old-run sweep must not expire a proposal that belongs to a
+    fresh run started while the old teardown was still dragging on: only a
+    server that stayed down gets the unconditional sweep."""
+    store = ProposalStore()
+    mcp = RestartRacingMCP()
+    mcp.late_submit = store
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store, mcp=mcp)
+    async with app.run_test() as pilot:
+        app._handle_mcp_command(["off"])
+        await until(pilot, lambda: mcp.running and len(store.pending()) > 0)
+        # Wait for the off-worker (and its final sweep decision) to finish.
+        await until(pilot, lambda: all(w.is_finished for w in app.workers))
+        pending = store.pending()
+    assert len(pending) == 1
+    assert pending[0].session_id == "sess-new"

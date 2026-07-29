@@ -2346,7 +2346,14 @@ class KorvidApp(App[None]):
             pending = await mcp.shutdown()
             if pending is not None:
                 await asyncio.wait({pending})
-        await self._expire_proposals_audited("the MCP server was stopped")
+        # Serialize the sweep decision against a racing `:mcp on`: if a
+        # fresh run came up while the old teardown dragged on, pending
+        # proposals belong to that live run (its start transition already
+        # swept old-run stragglers) and must not be expired here.
+        async with self._nav_lock:
+            if mcp.running:
+                return
+            await self._expire_proposals_audited("the MCP server was stopped")
 
     def _apply_agent_settings(self, settings: AgentSettings) -> bool:
         """Swap in a fresh runtime built from the wizard's settings.

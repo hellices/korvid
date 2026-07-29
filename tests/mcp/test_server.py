@@ -431,6 +431,17 @@ async def test_propose_write_with_wrong_capability_is_rejected() -> None:
     assert executor.calls == []
 
 
+async def test_non_ascii_capability_is_rejected_not_a_crash() -> None:
+    """`secrets.compare_digest` raises TypeError on non-ASCII `str` input;
+    the capability is untrusted MCP input, so a value like "é" must produce
+    the documented error response, not an exception escaping the handler."""
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "é" * 8})
+    assert result[0].text == "ERROR: invalid or missing capability token"
+    assert executor.calls == []
+
+
 async def test_propose_write_with_capability_dispatches_with_identity() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor)
@@ -485,6 +496,47 @@ async def test_proposal_tools_without_a_configured_token_are_rejected() -> None:
     assert result[0].text.startswith("ERROR:")
     assert "not enabled" in result[0].text
     assert executor.calls == []
+
+
+async def test_streamable_http_proposal_roundtrip(tmp_path: Path) -> None:
+    """Issue #110 requires a real MCP round trip for the proposal surface:
+    an SDK client over Streamable HTTP submits a proposal with the published
+    capability, and the only dispatch is to the proposal bridge — no
+    mutation tool is ever reached."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    executor = RecordingExecutor()
+    endpoint_file = tmp_path / "mcp-endpoint.json"
+    server = make_proposal_server(executor, port=0, endpoint_path=endpoint_file)
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        # The capability travels via the discovery file, exactly as a local
+        # agent would learn it.
+        entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
+        capability = entry["capability"]
+        async with (
+            streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write, _),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            listed = await session.list_tools()
+            assert "propose_write" in {t.name for t in listed.tools}
+            result = await session.call_tool(
+                "propose_write", {**_PROPOSE_ARGS, "capability": capability}
+            )
+            assert result.content[0].type == "text"
+            assert getattr(result.content[0], "text", None) == "ok"
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+    # Exactly one dispatch, to the proposal bridge — nothing mutating.
+    assert len(executor.calls) == 1
+    name, args = executor.calls[0]
+    assert name == "propose_write"
+    assert "capability" not in args
+    assert {k: v for k, v in args.items() if not k.startswith("_")} == _PROPOSE_ARGS
 
 
 async def test_endpoint_file_publishes_capability_with_owner_only_mode(tmp_path: Path) -> None:
