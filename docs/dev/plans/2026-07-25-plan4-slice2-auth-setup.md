@@ -971,7 +971,7 @@ Track the live provider in a mutable holder at composition root: `provider_box: 
 
 **Files:**
 - Modify: `README.md` (config examples per provider×auth, unofficial-API warning, install/run instructions incl. `uv run korvid` for dev and `pipx install korvid` style for users)
-- Modify: `docs/plans/2026-07-25-plan4-slice2-auth-setup.md` (mark complete)
+- Modify: `docs/dev/plans/2026-07-25-plan4-slice2-auth-setup.md` (mark complete)
 
 **README must include these exact config examples:**
 
