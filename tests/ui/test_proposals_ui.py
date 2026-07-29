@@ -21,7 +21,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary
 from korvid.k8s.writes import WriteOps
-from korvid.tools.proposals import ProposalStore
+from korvid.tools.proposals import ProposalClosedError, ProposalStore
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 
@@ -539,3 +539,84 @@ async def test_lazy_ttl_expiry_is_audited_with_provenance(tmp_path: Path) -> Non
     expired = [e for e in entries if pid in e["detail"] and "expired" in e["outcome"]]
     assert len(expired) == 1
     assert "external_mcp" in expired[0]["detail"]
+
+
+async def test_submit_during_a_context_switch_is_rejected(tmp_path: Path) -> None:
+    """RBAC, UID capture and the dry-run preview were all validated against
+    the context at intake start; if a switch lands during those awaits the
+    proposal must be rejected, not stamped with the new context/epoch."""
+    rec = Recorder()
+    store = ProposalStore()
+    app = make_app(rec, tmp_path / "a.jsonl", store)
+    async with app.run_test():
+        original = app._preview_for_action
+
+        async def switching_preview(*args: Any, **kwargs: Any) -> list[str] | None:
+            app._ctx_epoch += 1  # a context switch lands mid-intake
+            return await original(*args, **kwargs)
+
+        app._preview_for_action = switching_preview  # type: ignore[method-assign]  # test seam
+        result = await _submit(app)
+        assert result.startswith("ERROR:")
+        assert "context" in result
+        assert store.pending() == []
+    assert rec.calls == []
+
+
+async def test_oversized_arguments_are_rejected_before_any_cluster_io(tmp_path: Path) -> None:
+    """The size bound is untrusted-input validation: it must run before the
+    RBAC check, UID lookup, and server dry-run, or a caller can force
+    cluster I/O with an arbitrarily large payload."""
+    rec = Recorder()
+    store = ProposalStore()
+    manifest_calls: list[str] = []
+    app = make_app(rec, tmp_path / "a.jsonl", store)
+    original_uid = app._target_uid
+
+    async def counting_uid(kind: str, ns: str | None, name: str) -> str | None:
+        manifest_calls.append(name)
+        return await original_uid(kind, ns, name)
+
+    app._target_uid = counting_uid  # type: ignore[assignment]  # test seam
+    async with app.run_test():
+        result = await app.agent_submit_write_proposal(
+            "delete",
+            "deployments",
+            "web",
+            "default",
+            resources={"app": {"requests": {"cpu": "1" * 10_000}}},
+            session_id="sess-1",
+        )
+    assert result.startswith("ERROR:")
+    assert "exceed" in result
+    assert manifest_calls == []  # no UID lookup: rejected before cluster I/O
+    assert store.pending() == []
+
+
+async def test_submit_after_shutdown_began_is_rejected(tmp_path: Path) -> None:
+    """on_unmount closes the store before the final expiry sweep: an
+    in-flight MCP call landing after the sweep gets an error instead of
+    queueing a proposal nobody will ever review, expire, or audit."""
+    store = ProposalStore()
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store)
+    async with app.run_test():
+        pass
+    # The app has unmounted: the store must refuse new submissions.
+    with pytest.raises(ProposalClosedError, match="closed"):
+        store.submit(
+            action="delete",
+            group="apps",
+            version="v1",
+            kind="deployments",
+            namespace="default",
+            name="web",
+            arguments_json="{}",
+            uid="uid-1",
+            context="ctx-a",
+            context_epoch=0,
+            summary="delete",
+            preview=(),
+            session_id="sess-1",
+            client_name="",
+            client_version="",
+        )

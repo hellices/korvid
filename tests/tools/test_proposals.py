@@ -15,6 +15,7 @@ import threading
 import pytest
 
 from korvid.tools.proposals import (
+    ProposalClosedError,
     ProposalLimitError,
     ProposalStore,
     ProposalTooLargeError,
@@ -375,3 +376,47 @@ def test_expire_all_does_not_fire_the_on_expired_hook() -> None:
     expired = store.expire_all(reason="context switched")
     assert [p.id for p in expired] == [pending.id]
     assert hook_calls == []
+
+
+def test_a_sweep_during_a_cap_rejected_submit_still_notifies() -> None:
+    """If submit raises a cap error after the sweep expired an older
+    proposal, that expiry's notification and hook must not be lost — later
+    sweeps will never rediscover it."""
+    store, clock = make_store(ttl=10.0, max_pending_per_session=1)
+    x = submit(store, name="x", session="s1")  # expires at t+10
+    clock.now += 5.0
+    submit(store, name="y", session="s2")  # expires at t+15; x still pending
+    clock.now += 7.0  # x is now expired, y still pending (s2's cap is full)
+    events: list[int] = []
+    expired: list[str] = []
+    store.subscribe(lambda: events.append(1))
+    store.set_on_expired(lambda proposal, reason: expired.append(proposal.id))
+    with pytest.raises(ProposalLimitError, match="session"):
+        submit(store, name="z", session="s2")
+    assert expired == [x.id]
+    assert events, "the sweep's expiry notification was lost to the cap error"
+
+
+def test_terminal_cap_evicts_by_resolution_time_not_submission_order() -> None:
+    """A just-resolved outcome must stay pollable; the oldest *resolved*
+    record is the one the cap evicts."""
+    store, clock = make_store(max_terminal=1, terminal_retention=1000.0)
+    early_submit = submit(store, name="a")  # submitted first, resolved last
+    late_submit = submit(store, name="b")  # submitted second, resolved first
+    store.resolve(late_submit.id, "denied", reason="no")
+    clock.now += 1.0
+    store.resolve(early_submit.id, "denied", reason="no")
+    store.pending()  # trigger a sweep
+    assert store.get(early_submit.id) is not None, "just-resolved record was evicted"
+    assert store.get(late_submit.id) is None
+
+
+def test_a_closed_store_refuses_new_submissions() -> None:
+    """Shutdown closes the store before the final expiry sweep so an
+    in-flight MCP call cannot queue a proposal that would never be reviewed,
+    expired, or audited."""
+    store, _ = make_store()
+    store.close()
+    with pytest.raises(ProposalClosedError, match="closed"):
+        submit(store)
+    assert store.pending() == []

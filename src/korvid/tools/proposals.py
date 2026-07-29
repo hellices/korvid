@@ -37,6 +37,10 @@ class ProposalLimitError(Exception):
     """The per-session or global pending cap is exhausted."""
 
 
+class ProposalClosedError(Exception):
+    """The store no longer accepts submissions (the TUI session ended)."""
+
+
 class ProposalTooLargeError(Exception):
     """The proposal's arguments exceed the size bound."""
 
@@ -113,6 +117,7 @@ class ProposalStore:
         self._resolved_at: dict[str, float] = {}
         self._subscribers: list[Callable[[], None]] = []
         self._on_expired: Callable[[WriteProposal, str], None] | None = None
+        self._closed = False
 
     def subscribe(self, callback: Callable[[], None]) -> None:
         """Register a callback fired after every submit or state change.
@@ -155,6 +160,7 @@ class ProposalStore:
         """Create a pending proposal, enforcing every caller-facing bound.
 
         Raises:
+            ProposalClosedError: the store was closed (shutdown in progress).
             ProposalTooLargeError: `arguments_json` exceeds the size bound.
             ProposalLimitError: the session or global pending cap is full.
         """
@@ -169,43 +175,75 @@ class ProposalStore:
                 f"... preview truncated ({omitted} more lines)",
             )
         now = self._clock()
+        proposal: WriteProposal | None = None
+        error: Exception | None = None
         with self._lock:
             swept = self._sweep_expired(now)
-            pending = self._iter_pending()
-            if sum(p.session_id == session_id for p in pending) >= self._max_per_session:
-                raise ProposalLimitError(
-                    f"session already has {self._max_per_session} pending proposals"
+            # Errors are collected, not raised, inside the lock: a raise here
+            # would skip _after_sweep and permanently drop the notification
+            # and expiry hook for anything the sweep just expired.
+            if self._closed:
+                error = ProposalClosedError(
+                    "the proposal store is closed (the TUI session is shutting down)"
                 )
-            if len(pending) >= self._max_total:
-                raise ProposalLimitError(
-                    f"global pending proposal limit of {self._max_total} reached"
+            else:
+                error = self._cap_error(session_id)
+            if error is None:
+                proposal = WriteProposal(
+                    id=secrets.token_urlsafe(32),
+                    action=action,
+                    group=group,
+                    version=version,
+                    kind=kind,
+                    namespace=namespace,
+                    name=name,
+                    arguments_json=arguments_json,
+                    uid=uid,
+                    context=context,
+                    context_epoch=context_epoch,
+                    summary=summary,
+                    preview=preview,
+                    session_id=session_id,
+                    client_name=client_name,
+                    client_version=client_version,
+                    created_at=now,
+                    expires_at=now + self._ttl,
                 )
-            proposal = WriteProposal(
-                id=secrets.token_urlsafe(32),
-                action=action,
-                group=group,
-                version=version,
-                kind=kind,
-                namespace=namespace,
-                name=name,
-                arguments_json=arguments_json,
-                uid=uid,
-                context=context,
-                context_epoch=context_epoch,
-                summary=summary,
-                preview=preview,
-                session_id=session_id,
-                client_name=client_name,
-                client_version=client_version,
-                created_at=now,
-                expires_at=now + self._ttl,
-            )
-            self._proposals[proposal.id] = proposal
-            self._states[proposal.id] = ("pending", "")
-            self._order.append(proposal.id)
+                self._proposals[proposal.id] = proposal
+                self._states[proposal.id] = ("pending", "")
+                self._order.append(proposal.id)
         self._after_sweep(swept)
+        if error is not None:
+            raise error
+        if proposal is None:  # pragma: no cover — error is None implies proposal was built
+            raise RuntimeError("submit built neither a proposal nor an error")
         self._notify()
         return proposal
+
+    def _cap_error(self, session_id: str) -> ProposalLimitError | None:
+        """The pending-cap violation a submit would hit, if any (lock held)."""
+        pending = self._iter_pending()
+        if sum(p.session_id == session_id for p in pending) >= self._max_per_session:
+            return ProposalLimitError(
+                f"session already has {self._max_per_session} pending proposals"
+            )
+        if len(pending) >= self._max_total:
+            return ProposalLimitError(f"global pending proposal limit of {self._max_total} reached")
+        return None
+
+    def close(self) -> None:
+        """Refuse all future submissions (shutdown): any in-flight MCP call
+        that lands after the final expiry sweep gets an error instead of
+        queueing a proposal nobody will ever review, expire, or audit."""
+        with self._lock:
+            self._closed = True
+
+    @property
+    def max_argument_chars(self) -> int:
+        """Serialized-argument size bound, exposed so intake can reject an
+        oversized payload before doing any cluster I/O (the store itself
+        still rechecks atomically at submit)."""
+        return self._max_argument_chars
 
     def get(self, proposal_id: str) -> tuple[WriteProposal, ProposalState, str] | None:
         """The proposal plus its current state, or None for an unknown id."""
@@ -319,7 +357,12 @@ class ProposalStore:
         evict = {
             pid for pid in terminal if self._resolved_at[pid] + self._terminal_retention <= now
         }
-        keep = [pid for pid in terminal if pid not in evict]
+        # Cap eviction drops the oldest *resolved* records first (not the
+        # oldest submitted): a just-resolved outcome must stay pollable.
+        keep = sorted(
+            (pid for pid in terminal if pid not in evict),
+            key=lambda pid: self._resolved_at[pid],
+        )
         if len(keep) > self._max_terminal:
             evict.update(keep[: len(keep) - self._max_terminal])
         if evict:

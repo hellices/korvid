@@ -94,6 +94,7 @@ from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.tools.executor import UIBridge
 from korvid.tools.proposals import (
+    ProposalClosedError,
     ProposalLimitError,
     ProposalState,
     ProposalStore,
@@ -6895,12 +6896,37 @@ class KorvidApp(App[None]):
             return "ERROR: external write proposals are not enabled"
         name = name.strip()
         stamp = restart_stamp()
+        # Intake is validated against exactly one context: snapshot it here
+        # and recheck before queueing — RBAC, UID capture and the preview all
+        # await, and a context switch landing mid-intake would otherwise
+        # stamp old-context validation onto a new-context proposal.
+        epoch = self._ctx_epoch
+        context = self.config.kube_context
         built = self._agent_write_op(
             action, kind, name, namespace, replicas, resources, restarted_at=stamp
         )
         if isinstance(built, str):
             return built
         meta, ns, _op, operation, _detail = built
+        arguments_json = json.dumps(
+            {
+                "action": action,
+                "kind": kind.strip().lower(),
+                "name": name,
+                "namespace": ns,
+                "replicas": replicas,
+                "resources": resources,
+                "restarted_at": stamp,
+            }
+        )
+        # Untrusted-input bound: enforced before any cluster I/O (the store
+        # atomically rechecks it at submit) so an oversized payload cannot
+        # force an RBAC round trip, UID lookup, or server dry-run.
+        if len(arguments_json) > store.max_argument_chars:
+            return (
+                f"ERROR: proposal arguments exceed {store.max_argument_chars}"
+                " characters; the proposal was not queued"
+            )
         if not await self._permitted(action, meta, ns, name):
             verb, target = self._write_perm_target(action, meta)
             return f"ERROR: missing permission: {verb} {target}"
@@ -6919,15 +6945,11 @@ class KorvidApp(App[None]):
         preview = await self._preview_for_action(
             action, meta, ns, name, replicas, resources, uid, stamp
         )
-        arguments = {
-            "action": action,
-            "kind": kind.strip().lower(),
-            "name": name,
-            "namespace": ns,
-            "replicas": replicas,
-            "resources": resources,
-            "restarted_at": stamp,
-        }
+        if self._ctx_switching or self._ctx_epoch != epoch or self.config.kube_context != context:
+            return (
+                "ERROR: the kube context changed while the proposal was being"
+                " validated; the proposal was not queued — try again"
+            )
         try:
             proposal = store.submit(
                 action=action,
@@ -6936,17 +6958,17 @@ class KorvidApp(App[None]):
                 kind=meta.plural,
                 namespace=ns,
                 name=name,
-                arguments_json=json.dumps(arguments),
+                arguments_json=arguments_json,
                 uid=uid,
-                context=self.config.kube_context,
-                context_epoch=self._ctx_epoch,
+                context=context,
+                context_epoch=epoch,
                 summary=operation,
                 preview=tuple(preview or ()),
                 session_id=session_id,
                 client_name=client_name,
                 client_version=client_version,
             )
-        except (ProposalLimitError, ProposalTooLargeError) as exc:
+        except (ProposalClosedError, ProposalLimitError, ProposalTooLargeError) as exc:
             return f"ERROR: {exc}"
         source = client_name or "an external MCP caller"
         self.notify(
@@ -7546,7 +7568,11 @@ class KorvidApp(App[None]):
 
     async def on_unmount(self) -> None:
         # Cancel any active log stream tasks before the event loop shuts down.
-        # A proposal must never outlive the session that previewed it.
+        # A proposal must never outlive the session that previewed it; close
+        # the store first so an in-flight submission cannot land after the
+        # final sweep.
+        if self._proposal_store is not None:
+            self._proposal_store.close()
         await self._expire_proposals_audited("the TUI session ended")
         if self._ns_prefetch_task is not None:
             self._ns_prefetch_task.cancel()
