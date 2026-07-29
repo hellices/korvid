@@ -109,6 +109,7 @@ def make_app(
     manifests: dict[str, dict[str, Any]] | None = None,
     namespace: str = "default",
     aliases: dict[str, ResourceMeta] | None = None,
+    helm_components: bool = True,
 ) -> tuple[KorvidApp, list[tuple[str, str | None, str]]]:
     store = ResourceStore()
     describe_calls: list[tuple[str, str | None, str]] = []
@@ -136,7 +137,7 @@ def make_app(
         list_namespaces=list_namespaces,
         aliases=dict(aliases if aliases is not None else _ALIASES),
         get_manifest=get_manifest,
-        get_helm_components=get_helm_components,
+        get_helm_components=get_helm_components if helm_components else None,
     )
     return app, describe_calls
 
@@ -333,3 +334,165 @@ async def test_subscription_falls_back_to_installplan_components() -> None:
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         labels = _tree_labels(app)
         assert any("Deployment/argocd-operator-controller" in label for label in labels)
+
+
+def test_component_resolution_matches_declared_group() -> None:
+    """Two CRDs sharing a Kind across groups: the declared apiVersion picks
+    the right view, and namespacedness rides along for scoping."""
+    aliases = dict(_ALIASES)
+    aliases["widgets.a.example.com"] = ResourceMeta(
+        "Widget", "widgets", "a.example.com", "v1", True
+    )
+    aliases["widgets.b.example.com"] = ResourceMeta(
+        "Widget", "widgets", "b.example.com", "v1", False
+    )
+    app, _ = make_app({}, aliases=aliases)
+    ref_b = ComponentRef(kind="Widget", name="x", api_version="b.example.com/v1")
+    assert app._view_for_component(ref_b) == ("widgets.b.example.com", False)
+    ref_a = ComponentRef(kind="Widget", name="x", api_version="a.example.com/v1")
+    assert app._view_for_component(ref_a) == ("widgets.a.example.com", True)
+    # Core group ("v1") and undeclared apiVersion still resolve normally.
+    assert app._view_for_component(ComponentRef(kind="Pod", name="p", api_version="v1")) == (
+        "pods",
+        True,
+    )
+    assert app._view_for_component(ComponentRef(kind="Deployment", name="d")) == (
+        "deployments",
+        True,
+    )
+    # A declared group with no discovered match must not fall back to the
+    # wrong group's view.
+    ghost = ComponentRef(kind="Widget", name="x", api_version="c.example.com/v1")
+    assert app._view_for_component(ghost) is None
+
+
+async def test_open_tree_refreshes_on_store_update() -> None:
+    """A store event for a watched kind rebuilds the open tree in place
+    (issue #120 requires live updates via store notifications)."""
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        # A second pane elsewhere could be watching deployments; simulate it.
+        await app.watch_manager.start("deployments", "default")
+        await until(
+            pilot,
+            lambda: len(app.store.get("deployments", "default")) == 2,
+            label="deployments watched",
+        )
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        assert any(label == "Deployment/web-nginx" for label in _tree_labels(app))
+        app.store.apply_event("deployments", "default", "DELETED", _deployment("web-nginx"))
+        await until(
+            pilot,
+            lambda: any("Deployment/web-nginx (missing)" in label for label in _tree_labels(app)),
+            label="tree refreshed with missing marker",
+        )
+
+
+async def test_tree_does_not_open_when_view_changed_during_fetch() -> None:
+    """The user moved on while components were being fetched: the tree must
+    not pop over an unrelated view."""
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
+    gate = asyncio.Event()
+
+    async def slow_components(ns: str, name: str) -> list[ComponentRef]:
+        await gate.wait()
+        return _WEB_COMPONENTS["web"]
+
+    app._get_helm_components = slow_components
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        await pilot.press("enter")  # fetch parked on the gate
+        await _navigate(pilot, "pods", "pods")
+        gate.set()
+        await pilot.pause(0.1)
+        assert not isinstance(app.screen, HierarchyScreen)
+        assert app.current_kind == "pods"
+
+
+async def test_enter_on_csv_opens_hierarchy_from_operator_labels() -> None:
+    """CSV path: the operators.coreos.com/<name> label OLM stamps on the CSV
+    leads to the Operator object's component refs."""
+    csv = GenericSummary(
+        name="argocd-operator.v1.14.4",
+        namespace="operators",
+        kind="ClusterServiceVersion",
+        created="2026-07-26T10:00:00Z",
+        uid="csv-1",
+    )
+    csv_manifest: dict[str, Any] = {
+        "kind": "ClusterServiceVersion",
+        "metadata": {
+            "name": "argocd-operator.v1.14.4",
+            "labels": {"operators.coreos.com/argocd-operator.operators": ""},
+        },
+    }
+    app, _ = make_app(
+        {"clusterserviceversions": [csv]},
+        manifests={
+            "argocd-operator.v1.14.4": csv_manifest,
+            "argocd-operator.operators": _OPERATOR_MANIFEST,
+        },
+        namespace="operators",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "clusterserviceversions", "clusterserviceversions")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="csv listed")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        labels = _tree_labels(app)
+        assert any("Deployment/argocd-operator-controller" in label for label in labels)
+
+
+async def test_enter_without_components_accessor_falls_back_to_revision_drill() -> None:
+    """No get_helm_components wired (degraded session): Enter keeps the
+    pre-#120 behaviour and drills into the release's revisions."""
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS, helm_components=False)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "helmrevisions", label="drilled")
+        assert not isinstance(app.screen, HierarchyScreen)
+
+
+async def test_jump_notifies_when_object_never_appears() -> None:
+    """Goto for an object that never lands in the table must not fail
+    silently - the user gets told instead of staring at a wrong cursor."""
+    components = {"web": [ComponentRef(kind="Deployment", name="ghost")]}
+    app, _ = make_app(_HELM_DATA, components=components)
+    app._jump_poll_attempts = 3
+    notices: list[str] = []
+    original = app.notify
+
+    def _capture(message: str, **kwargs: Any) -> Any:
+        notices.append(message)
+        return original(message, **kwargs)
+
+    async with app.run_test() as pilot:
+        app.notify = _capture  # type: ignore[method-assign]  # test spy
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        await pilot.press("down")  # Deployment/ghost
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await until(
+            pilot,
+            lambda: any("ghost" in n for n in notices),
+            label="give-up notification",
+        )

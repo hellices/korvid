@@ -34,8 +34,9 @@ tree of everything that root installed and how the pieces hang together
     ConfigMap/web-nginx-config
 ```
 
-- **Helm roots** list the objects rendered in the release's manifest
-  (decoded from the release Secret — no helm binary, no extra API calls).
+- **Helm roots** list the objects rendered in the release's manifest,
+  decoded from the release Secret (no helm binary; one Secret list + get
+  per open, nothing per node).
 - **Operator roots** prefer the cluster's own bookkeeping, in order: the
   Operator object's `status.components.refs` (includes the CSV, CRDs, and
   RBAC), then the Subscription's InstallPlan `status.plan`. Where neither

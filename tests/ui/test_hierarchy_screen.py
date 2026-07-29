@@ -32,22 +32,25 @@ class _Live:
     owner_uids: tuple[str, ...] = ()
 
 
+#: kind -> (view alias, namespaced)
 _VIEWS = {
-    "Deployment": "deployments",
-    "ReplicaSet": "replicasets",
-    "Pod": "pods",
-    "Service": "services",
-    "ConfigMap": "configmaps",
+    "Deployment": ("deployments", True),
+    "ReplicaSet": ("replicasets", True),
+    "Pod": ("pods", True),
+    "Service": ("services", True),
+    "ConfigMap": ("configmaps", True),
+    "ClusterRole": ("clusterroles", False),
 }
 
 
-def _resolve(kind: str) -> str | None:
-    return _VIEWS.get(kind)
+def _resolve(ref: ComponentRef) -> tuple[str, bool] | None:
+    return _VIEWS.get(ref.kind)
 
 
 def _lookup_from(data: dict[str, list[_Live]]):  # type: ignore[no-untyped-def]  # test helper
-    def lookup(view: str) -> list[_Live]:
-        return data.get(view, [])
+    def lookup(view: str) -> list[_Live] | None:
+        # None = the view is not watched; a list (even empty) = watched.
+        return data.get(view)
 
     return lookup
 
@@ -107,13 +110,37 @@ def test_missing_live_object_is_marked() -> None:
 
 
 def test_unwatched_view_gets_no_missing_marker() -> None:
-    """An empty store bucket means the kind is not watched right now, not
+    """lookup returning None means the kind is not watched right now, not
     that the object is gone - claiming "missing" there would be a lie."""
     refs = [ComponentRef(kind="Service", name="web")]
     root = build_hierarchy(
         "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from({})
     )
     assert root.children[0].label == "Service/web"
+
+
+def test_watched_empty_bucket_marks_missing() -> None:
+    """A watched view with an empty bucket is affirmative absence: the
+    watch is live and the object is not there."""
+    refs = [ComponentRef(kind="Service", name="web")]
+    data: dict[str, list[_Live]] = {"services": []}
+    root = build_hierarchy(
+        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
+    )
+    assert root.children[0].label == "Service/web (missing)"
+
+
+def test_cluster_scoped_component_never_inherits_release_namespace() -> None:
+    """ClusterRole and friends carry no namespace; defaulting them to the
+    release namespace would break the live match and the goto target."""
+    refs = [ComponentRef(kind="ClusterRole", name="web-role")]
+    data = {"clusterroles": [_Live("web-role", "")]}
+    root = build_hierarchy(
+        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
+    )
+    node = root.children[0]
+    assert node.label == "ClusterRole/web-role"
+    assert (node.kind, node.namespace, node.name) == ("clusterroles", "", "web-role")
 
 
 def test_unknown_kind_is_shown_but_not_navigable() -> None:
@@ -227,3 +254,22 @@ async def test_escape_dismisses_with_none() -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert app.result is None
+
+
+async def test_update_tree_replaces_content_and_keeps_cursor() -> None:
+    """Store updates while the modal is open rebuild the tree in place;
+    the cursor stays on the same line instead of snapping to the root."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        screen = HierarchyScreen("helm/web", _sample_root())
+        await app.push_screen(screen)
+        await pilot.pause()
+        await pilot.press("down")  # Deployment/web
+        new_root = _sample_root()
+        new_root.children[0].label = "Deployment/web (missing)"
+        screen.update_tree(new_root)
+        await pilot.pause()
+        tree = app.screen.query_one(Tree)
+        labels = [str(line.node.label) for line in tree._tree_lines]
+        assert any("Deployment/web (missing)" in label for label in labels)
+        assert tree.cursor_line == 1

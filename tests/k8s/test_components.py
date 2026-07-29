@@ -188,3 +188,29 @@ class TestInstallPlanComponents:
     def test_non_list_input_yields_nothing(self) -> None:
         assert installplan_components(None) == []
         assert installplan_components("plan") == []
+
+
+class TestParserWorkBounds:
+    """The caps bound *inspected* input, not accepted refs - a hostile
+    payload of malformed or duplicate entries must not buy unbounded work."""
+
+    def test_manifest_docs_beyond_cap_are_never_parsed(self) -> None:
+        garbage = "not-an-object\n---\n" * MAX_COMPONENT_DOCS
+        tail = "kind: Service\nmetadata:\n  name: late\n"
+        assert manifest_components(garbage + tail) == []
+
+    def test_reference_entries_beyond_cap_are_never_inspected(self) -> None:
+        entries = [{"kind": "Broken"}] * MAX_COMPONENT_DOCS
+        entries.append({"kind": "Service", "name": "late"})
+        assert reference_components(entries) == []
+
+    def test_installplan_steps_beyond_cap_are_never_inspected(self) -> None:
+        steps: list[object] = ["junk"] * MAX_COMPONENT_DOCS
+        steps.append({"resource": {"version": "v1", "kind": "Service", "name": "late"}})
+        assert installplan_components(steps) == []
+
+    def test_deeply_nested_document_is_skipped_not_raised(self) -> None:
+        bomb = "[" * 200_000
+        rest = "---\nkind: Service\nmetadata:\n  name: web\n"
+        refs = manifest_components(bomb + "\n" + rest)
+        assert refs == [ComponentRef(kind="Service", name="web")]

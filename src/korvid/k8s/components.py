@@ -19,9 +19,10 @@ from typing import Any
 
 import yaml
 
-#: Upper bound on component rows extracted from one source. Real charts and
-#: operators install tens of objects; the cap keeps a hostile payload from
-#: turning the tree view into a memory sink.
+#: Upper bound on the documents/entries/steps *inspected* per source. Real
+#: charts and operators install tens of objects; bounding the input (not the
+#: accepted rows) keeps a hostile payload of malformed or duplicate entries
+#: from buying unbounded parse work.
 MAX_COMPONENT_DOCS = 500
 
 #: Upper bound on the rendered-manifest text handed to the YAML parser. The
@@ -76,12 +77,12 @@ def manifest_components(manifest: Any) -> list[ComponentRef]:
         return []
     refs: list[ComponentRef] = []
     seen: set[ComponentRef] = set()
-    for chunk in _split_docs(manifest):
-        if len(refs) >= MAX_COMPONENT_DOCS:
-            break
+    for chunk in _split_docs(manifest)[:MAX_COMPONENT_DOCS]:
         try:
             doc = yaml.safe_load(chunk)
-        except yaml.YAMLError:
+        except (yaml.YAMLError, RecursionError):
+            # RecursionError: pathologically nested flow collections blow the
+            # interpreter stack inside the parser - skip like any bad doc.
             continue
         if not isinstance(doc, dict):
             continue
@@ -123,9 +124,7 @@ def reference_components(entries: Any) -> list[ComponentRef]:
         return []
     refs: list[ComponentRef] = []
     seen: set[ComponentRef] = set()
-    for entry in entries:
-        if len(refs) >= MAX_COMPONENT_DOCS:
-            break
+    for entry in entries[:MAX_COMPONENT_DOCS]:
         if not isinstance(entry, dict):
             continue
         kind = _scalar(entry.get("kind"))
@@ -149,9 +148,7 @@ def installplan_components(steps: Any) -> list[ComponentRef]:
         return []
     refs: list[ComponentRef] = []
     seen: set[ComponentRef] = set()
-    for step in steps:
-        if len(refs) >= MAX_COMPONENT_DOCS:
-            break
+    for step in steps[:MAX_COMPONENT_DOCS]:
         if not isinstance(step, dict):
             continue
         resource = step.get("resource")

@@ -862,6 +862,12 @@ class KorvidApp(App[None]):
         # Kinds with a table render already queued — coalesces the per-object
         # notifications of a LIST seed into a single rebuild (see _on_store_update).
         self._render_pending: set[str] = set()
+        # Rebuild inputs for an open HierarchyScreen: (title, refs, namespace,
+        # scope). Store updates rebuild the tree in place while it is open.
+        self._hierarchy_ctx: tuple[str, list[ComponentRef], str, str] | None = None
+        # Cursor-placement poll budget for hierarchy goto (50ms per attempt);
+        # an attribute so tests can shrink the give-up window.
+        self._jump_poll_attempts: int = 200
         # Hint-strip lifecycle (issue #97 U3b): the controller owns the event
         # cache and the parked-cursor refresh timer; widget access and worker
         # scheduling stay here, injected as narrow callables.
@@ -1171,6 +1177,7 @@ class KorvidApp(App[None]):
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
         self._render_pending.discard(message.kind)
         self._render_table(message.kind)
+        self._refresh_hierarchy()
 
     def _prefetch_namespaces(self) -> None:
         """Warm the command-bar namespace completions in the background."""
@@ -2174,13 +2181,21 @@ class KorvidApp(App[None]):
             return "ClusterServiceVersion"
         return None
 
-    def _view_for_kind(self, kind: str) -> str | None:
-        """Canonical view alias for a manifest Kind, or None when no real
-        (non-synthetic) view was discovered for it."""
+    def _view_for_component(self, ref: ComponentRef) -> tuple[str, bool] | None:
+        """Canonical view alias plus namespacedness for a component ref, or
+        None when no real (non-synthetic) view was discovered for it. A
+        declared apiVersion must match the discovered group - two CRDs
+        sharing a Kind across groups must not resolve to the wrong view."""
+        group = ref.api_version.rpartition("/")[0]  # core "v1" -> ""
+        fallback: tuple[str, bool] | None = None
         for alias, meta in self.aliases.items():
-            if meta.kind == kind and not meta.synthetic and self._canonical_kind(alias) == alias:
-                return alias
-        return None
+            if meta.kind != ref.kind or meta.synthetic or self._canonical_kind(alias) != alias:
+                continue
+            if meta.group == group:
+                return alias, meta.namespaced
+            if not ref.api_version and fallback is None:
+                fallback = (alias, meta.namespaced)
+        return fallback
 
     async def _hierarchy_refs(
         self, root: str, namespace: str, name: str
@@ -2199,6 +2214,7 @@ class KorvidApp(App[None]):
 
     def _on_hierarchy_pick(self, epoch: int, result: tuple[str, str, str, str] | None) -> None:
         """A tree node action: jump to the object's view or describe it."""
+        self._hierarchy_ctx = None  # tree closed: stop live rebuilds
         if result is None:
             return
         if self._ctx_switching or epoch != self._ctx_epoch:
@@ -2211,32 +2227,68 @@ class KorvidApp(App[None]):
         job = self._describe_named if action == "describe" else self._jump_to_object
         self.run_worker(job(kind, ns, obj), exclusive=True, group="hierarchy")
 
+    def _hierarchy_lookup(self, scope: str) -> Callable[[str], list[Summary] | None]:
+        """Store lookup for the tree: a list only for views a live watch is
+        actually feeding (in the tree's scope or all-namespaces), else None -
+        the builder must not claim "missing" from a bucket nothing fills."""
+
+        def lookup(view: str) -> list[Summary] | None:
+            active = self.watch_manager.active
+            for view_scope in (scope, ALL_NAMESPACES):
+                if (view, view_scope) in active:
+                    return self.store.get(view, view_scope)
+            return None
+
+        return lookup
+
+    def _refresh_hierarchy(self) -> None:
+        """Rebuild an open hierarchy tree from the current store state."""
+        ctx = self._hierarchy_ctx
+        screen = self.screen
+        if ctx is None or not isinstance(screen, HierarchyScreen):
+            return
+        title, refs, namespace, scope = ctx
+        screen.update_tree(
+            build_hierarchy(
+                title,
+                refs,
+                namespace=namespace,
+                resolve=self._view_for_component,
+                lookup=self._hierarchy_lookup(scope),
+            )
+        )
+
     async def _open_hierarchy(self, namespace: str, name: str) -> None:
         """Gather component refs for the selected root and push the tree.
 
         The fetches span awaited gaps: the captured epoch cancels a tree (or
         a node action) that would otherwise describe the old cluster after a
-        context switch completed underneath."""
+        context switch completed underneath, and the captured pane view
+        keeps the tree from popping over a view the user moved to."""
         root = self._hierarchy_root_kind()
         if root is None or not self._ctx_reads_allowed():
             return
         epoch = self._ctx_epoch
+        pane = self._pane
+        kind, scope = pane.kind, pane.scope
         refs = await self._hierarchy_refs(root, namespace, name)
         if refs is None:
             return
         if self._ctx_switching or epoch != self._ctx_epoch:
             return
+        if self._pane is not pane or pane.kind != kind or pane.scope != scope:
+            return  # the user moved on while components were being fetched
         if len(self.screen_stack) > 1:  # another dialog opened during the fetch
             return
         title = f"{root} {namespace}/{name}" if namespace else f"{root} {name}"
-        scope = self.current_scope
         tree_root = build_hierarchy(
             title,
             refs,
             namespace=namespace,
-            resolve=self._view_for_kind,
-            lookup=lambda view: self.store.get(view, scope),
+            resolve=self._view_for_component,
+            lookup=self._hierarchy_lookup(scope),
         )
+        self._hierarchy_ctx = (title, refs, namespace, scope)
         await self.push_screen(
             HierarchyScreen(title, tree_root), functools.partial(self._on_hierarchy_pick, epoch)
         )
@@ -2321,10 +2373,16 @@ class KorvidApp(App[None]):
             return
         await self._navigate(kind, namespace if meta.namespaced and namespace else None)
         row_key = f"{namespace}/{name}"
-        for _ in range(40):
-            if self.current_kind != kind or self._focus_row(row_key):
+        for _ in range(self._jump_poll_attempts):
+            if self.current_kind != kind:
+                return  # the user moved on - stop quietly
+            if self._focus_row(row_key):
                 return
             await asyncio.sleep(0.05)
+        self.notify(
+            f"{name} is not visible in {kind} - it may be gone or outside the current scope",
+            severity="warning",
+        )
 
     def _focus_row(self, row_key: str) -> bool:
         """Move the focused table's cursor to *row_key*; False when absent."""
