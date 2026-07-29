@@ -1243,3 +1243,16 @@ def test_reattach_releases_the_previous_generations_waiter() -> None:
     assert results == ["superseded"]
     procs[0].stdout.feed(None)
     procs[1].stdout.feed(None)
+
+
+def test_controller_owner_requires_a_boolean_controller_flag() -> None:
+    """The API defines ownerReferences.controller as a boolean; a malformed
+    string "false" is truthy and must not be treated as controlling."""
+    from korvid.core.portforward import controller_owner
+
+    manifest = {
+        "metadata": {
+            "ownerReferences": [{"kind": "ReplicaSet", "name": "api-6d5f", "controller": "false"}]
+        }
+    }
+    assert controller_owner(manifest) is None

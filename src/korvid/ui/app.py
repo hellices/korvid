@@ -79,6 +79,7 @@ from korvid.k8s.helm import (
 )
 from korvid.k8s.helmcli import ChartHit, HelmCLI
 from korvid.k8s.logs import LogLine
+from korvid.k8s.managed import manager_of
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import ContainerTrouble, PodSummary
 from korvid.k8s.olm import (
@@ -244,6 +245,13 @@ def _yaml_equal(a: object, b: object) -> bool:
 #: On timeout the lookup fails open (write proceeds without a precondition,
 #: still approval-gated and audited).
 _UID_LOOKUP_TIMEOUT = 10.0
+
+
+def _manifest_uid(manifest: dict[str, Any]) -> str | None:
+    """The metadata.uid of a fetched manifest, or None when absent."""
+    raw = (manifest.get("metadata") or {}).get("uid")
+    return str(raw) if raw else None
+
 
 #: Upper bound on the pre-dialog dry-run round trip (issue #19): a slow or
 #: unreachable API server delays the approval dialog by at most this long,
@@ -2575,6 +2583,15 @@ class KorvidApp(App[None]):
         "Job": "jobs",
     }
 
+    #: Chain the ownership banner may walk (issue #119): a superset of the
+    #: re-attach map — a CronJob-spawned pod must reach the CronJob, where
+    #: the helm/OLM markers live (re-attach never targets a CronJob: it
+    #: forwards to pods, which Jobs own directly).
+    _OWNER_CHAIN_PLURALS: ClassVar[dict[str, str]] = {
+        **_WORKLOAD_PLURALS,
+        "CronJob": "cronjobs",
+    }
+
     async def _resolve_forward_workload(self, namespace: str, name: str) -> str | None:
         """The pod's owning workload as ``"<plural>/<name>"``, best effort.
 
@@ -4247,6 +4264,7 @@ class KorvidApp(App[None]):
         require_name: str | None = None,
         preview: list[str] | None = None,
         preview_title: str = "server dry-run preview:",
+        managed_note: str | None = None,
     ) -> None:
         """The standard write-approval flow (issue #91 U1): push a confirm
         dialog and, on approval, launch `_run_write` on an app-owned worker.
@@ -4271,6 +4289,7 @@ class KorvidApp(App[None]):
                 require_name=require_name,
                 preview=preview,
                 preview_title=preview_title,
+                managed_note=managed_note,
             ),
             _done,
         )
@@ -4287,9 +4306,13 @@ class KorvidApp(App[None]):
             return
         meta, ns, name, uid = target
         epoch = self._ctx_epoch
+        # Captured with the target: view state is mutable across the awaits
+        # below, and the banner must describe the row the user acted on.
+        kind_alias = self._canonical_kind(self.current_kind)
         if not await self._precheck_keybinding_write("delete", meta, ns, name):
             return
         preview = await self._dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
+        note = await self._managed_note(kind_alias, ns, name)
         if not self._write_context_intact(
             "delete", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
@@ -4306,6 +4329,7 @@ class KorvidApp(App[None]):
             op_factory=lambda: ops.delete_object(meta, ns, name, uid=uid),
             require_name=require,
             preview=preview,
+            managed_note=note,
         )
 
     async def action_rollout_restart(self) -> None:
@@ -4324,6 +4348,8 @@ class KorvidApp(App[None]):
             )
             return
         epoch = self._ctx_epoch
+        # Captured with the target — see action_delete_resource.
+        kind_alias = self._canonical_kind(self.current_kind)
         if not await self._precheck_keybinding_write("rollout_restart", meta, ns, name):
             return
         # One stamp per approval: the previewed request and the executed
@@ -4332,6 +4358,7 @@ class KorvidApp(App[None]):
         preview = await self._dry_run_preview(
             ops.preview_rollout_restart(meta, ns, name, uid=uid, restarted_at=stamp)
         )
+        note = await self._managed_note(kind_alias, ns, name)
         if not self._write_context_intact(
             "rollout_restart", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
@@ -4349,6 +4376,7 @@ class KorvidApp(App[None]):
                 meta, ns, name, uid=uid, restarted_at=stamp
             ),
             preview=preview,
+            managed_note=note,
         )
 
     async def _fetch_manifest_for_edit(
@@ -4413,6 +4441,15 @@ class KorvidApp(App[None]):
         ):
             return
         detail = self._edit_detail(manifest, edited)
+        # The pre-edit manifest is already in hand — the banner costs at
+        # most the owner-chain walk. That walk is another awaited gap:
+        # re-validate the selection after it, like every other pre-dialog
+        # await, before pushing the confirmation.
+        note = await self._managed_note_from(manifest, ns)
+        if not self._write_context_intact(
+            "edit", meta, ns, name, phase="the ownership lookup", epoch=epoch
+        ):
+            return
         await self._push_write_confirmation(
             f"Apply edited {label}?",
             # Issue #21: the approval dialog summarizes the change, not
@@ -4424,6 +4461,7 @@ class KorvidApp(App[None]):
             name=name,
             op_factory=lambda: ops.replace_object(meta, ns, name, edited, uid=uid),
             detail=detail,
+            managed_note=note,
         )
 
     def _parse_edited_manifest(
@@ -4563,6 +4601,8 @@ class KorvidApp(App[None]):
             self.notify(f"scale does not apply to {self._gvr_label(meta)}", severity="warning")
             return
         epoch = self._ctx_epoch
+        # Captured with the target — see action_delete_resource.
+        kind_alias = self._canonical_kind(self.current_kind)
         if not await self._precheck_keybinding_write("scale", meta, ns, name):
             return
         current = self._current_replicas(ns, name)
@@ -4572,7 +4612,9 @@ class KorvidApp(App[None]):
                 return
             # The dry-run round trip must not run inside a screen callback:
             # a worker fetches the preview, revalidates, then confirms.
-            self.run_worker(self._confirm_scale(meta, ns, name, uid, current, replicas, epoch))
+            self.run_worker(
+                self._confirm_scale(meta, ns, name, uid, current, replicas, epoch, kind_alias)
+            )
 
         await self.push_screen(
             ReplicasPrompt(f"{self._gvr_label(meta)}/{name}", current=current), _on_replicas
@@ -4587,15 +4629,18 @@ class KorvidApp(App[None]):
         current: int | None,
         replicas: int,
         epoch: int,
+        kind_alias: str,
     ) -> None:
         """Dry-run preview + approval dialog for a scale, after the replica
         count is known. Revalidates the selection after the preview round
         trip: keystrokes during the await must never land on a confirmation
-        for a different row."""
+        for a different row. `kind_alias` was captured with the target — the
+        banner must describe the row the user acted on, not the current view."""
         ops = self._write_ops
         if ops is None:
             return
         preview = await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
+        note = await self._managed_note(kind_alias, ns, name)
         if not self._write_context_intact(
             "scale", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
@@ -4613,6 +4658,7 @@ class KorvidApp(App[None]):
             op_factory=lambda: ops.scale_object(meta, ns, name, replicas, uid=uid),
             detail=f"replicas -> {replicas}",
             preview=preview,
+            managed_note=note,
         )
 
     async def action_resize_pod(self) -> None:
@@ -4640,9 +4686,10 @@ class KorvidApp(App[None]):
         epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("resize", meta, ns, name):
             return
-        containers = await self._pod_container_resources(ns, name)
-        if containers is None:
+        fetched = await self._pod_container_resources(ns, name)
+        if fetched is None:
             return
+        containers, pod_manifest = fetched
         if not self._write_context_intact(
             "resize", meta, ns, name, phase="the manifest fetch", epoch=epoch
         ):
@@ -4653,7 +4700,9 @@ class KorvidApp(App[None]):
                 return
             # The dry-run round trip must not run inside a screen callback:
             # a worker fetches the preview, revalidates, then confirms.
-            self.run_worker(self._confirm_resize(meta, ns, name, uid, resources, epoch))
+            self.run_worker(
+                self._confirm_resize(meta, ns, name, uid, resources, epoch, pod_manifest)
+            )
 
         await self.push_screen(
             ResizePrompt(f"{self._gvr_label(meta)}/{name}", containers=containers), _on_resources
@@ -4661,10 +4710,12 @@ class KorvidApp(App[None]):
 
     async def _pod_container_resources(
         self, ns: str | None, name: str
-    ) -> list[tuple[str, dict[str, dict[str, str]]]] | None:
+    ) -> tuple[list[tuple[str, dict[str, dict[str, str]]]], dict[str, Any]] | None:
         """Current per-container requests/limits from the live manifest, in
-        spec order, to prefill the resize prompt; None (with a notification)
-        when the manifest cannot be fetched."""
+        spec order, to prefill the resize prompt — plus the manifest itself,
+        so the ownership banner can reuse the snapshot instead of a second
+        GET. None (with a notification) when the manifest cannot be
+        fetched."""
         if self._get_manifest is None:
             self.notify("Resize unavailable: no manifest source", severity="warning")
             return None
@@ -4684,7 +4735,7 @@ class KorvidApp(App[None]):
         if not containers:
             self.notify("Pod manifest lists no containers", severity="warning")
             return None
-        return containers
+        return containers, manifest
 
     @staticmethod
     def _resize_summary(resources: dict[str, dict[str, dict[str, str]]]) -> str:
@@ -4708,11 +4759,13 @@ class KorvidApp(App[None]):
         uid: str | None,
         resources: dict[str, dict[str, dict[str, str]]],
         epoch: int,
+        pod_manifest: dict[str, Any],
     ) -> None:
         """Dry-run preview + approval dialog for an in-place pod resize.
         Revalidates the selection after the preview round trip: keystrokes
         during the await must never land on a confirmation for a different
-        row."""
+        row. `pod_manifest` is the snapshot the prompt was prefilled from —
+        the banner reuses it instead of refetching the same object."""
         ops = self._write_ops
         if ops is None:
             return
@@ -4720,6 +4773,7 @@ class KorvidApp(App[None]):
         preview = await self._dry_run_preview(
             ops.preview_resize(namespace, name, resources, uid=uid)
         )
+        note = await self._managed_note_from(pod_manifest, ns)
         if not self._write_context_intact(
             "resize", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
@@ -4735,6 +4789,7 @@ class KorvidApp(App[None]):
             op_factory=lambda: ops.resize_pod(namespace, name, resources, uid=uid),
             detail=summary,
             preview=preview,
+            managed_note=note,
         )
 
     def _node_target(self, action: str) -> tuple[WriteOps, ResourceMeta, str, str | None] | None:
@@ -6319,6 +6374,7 @@ class KorvidApp(App[None]):
         require_name: str | None = None,
         preview: list[str] | None = None,
         preview_title: str = "server dry-run preview:",
+        managed_note: str | None = None,
     ) -> ConfirmScreen:
         """Build every write-approval dialog through one place so the
         protected-context layer (issue #83) can never be forgotten: while a
@@ -6331,6 +6387,7 @@ class KorvidApp(App[None]):
             preview=preview,
             preview_title=preview_title,
             protected_context=self._protected_context,
+            managed_note=managed_note,
         )
 
     # ------------------------------------------------------------------
@@ -6935,26 +6992,30 @@ class KorvidApp(App[None]):
             verb, target = self._write_perm_target(action, meta)
             return f"ERROR: missing permission: {verb} {target}"
         try:
-            # Capture the target's uid *before* asking for approval: the
-            # executed write carries it as a precondition, so the approval is
-            # bound to this exact object incarnation - a same-named
-            # replacement created while the dialog is open gets a 409, not
-            # the mutation. The lookup uses the caller's validated alias, not
-            # meta.plural: alias resolution is first-wins, so a plural that
-            # collides across groups could otherwise resolve to a different
-            # resource than the one validated above.
-            uid = await self._target_uid(kind.strip().lower(), ns, name)
+            # Capture the target's manifest *before* asking for approval:
+            # the executed write carries its uid as a precondition, so the
+            # approval is bound to this exact object incarnation - a
+            # same-named replacement created while the dialog is open gets a
+            # 409, not the mutation. The lookup uses the caller's validated
+            # alias, not meta.plural: alias resolution is first-wins, so a
+            # plural that collides across groups could otherwise resolve to
+            # a different resource than the one validated above. The same
+            # snapshot feeds the ownership banner - no second round trip.
+            snapshot = await self._target_manifest(kind.strip().lower(), ns, name)
         except ApiStatusError:
             return f"ERROR: {self._gvr_label(meta)}/{name} not found{self._write_locus(ns)}"
+        uid = _manifest_uid(snapshot) if snapshot is not None else None
         preview = await self._preview_for_action(
             action, meta, ns, name, replicas, resources, uid, stamp
         )
+        note = await self._managed_note_from(snapshot, ns) if snapshot is not None else None
         require = name if action == "delete" and not meta.namespaced else None
         decision = await self._await_user_approval(
             f"Agent requests: {action} {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
             operation,
             require_name=require,
             preview=preview,
+            managed_note=note,
         )
         if decision == "expired":
             return (
@@ -7004,11 +7065,13 @@ class KorvidApp(App[None]):
             )
         return None
 
-    async def _target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
-        """Uid of a write target at request time, looked up by the same alias
-        the write was validated with (both resolve through the one aliases
-        mapping wired in __main__, so the manifest and the mutation address
-        the same resource even when plurals collide across groups).
+    async def _target_manifest(
+        self, kind_alias: str, ns: str | None, name: str
+    ) -> dict[str, Any] | None:
+        """Manifest of a write target at request time, looked up by the same
+        alias the write was validated with (both resolve through the one
+        aliases mapping wired in __main__, so the manifest and the mutation
+        address the same resource even when plurals collide across groups).
         Raises ApiStatusError(404) when the target does not exist (the caller
         turns that into an actionable error before bothering the user with a
         dialog). Fails open (None -> no precondition, matching the previous
@@ -7019,7 +7082,7 @@ class KorvidApp(App[None]):
         if self._get_manifest is None:
             return None
         try:
-            manifest = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 self._get_manifest(kind_alias, ns, name), _UID_LOOKUP_TIMEOUT
             )
         except ApiStatusError as exc:
@@ -7033,8 +7096,67 @@ class KorvidApp(App[None]):
         except Exception:
             logger.exception("uid lookup for %s/%s failed; writing without precondition", ns, name)
             return None
-        raw = (manifest.get("metadata") or {}).get("uid")
-        return str(raw) if raw else None
+
+    async def _target_uid(self, kind_alias: str, ns: str | None, name: str) -> str | None:
+        """Uid of a write target at request time — `_target_manifest` with
+        only the precondition extracted (same 404/fail-open semantics)."""
+        manifest = await self._target_manifest(kind_alias, ns, name)
+        return _manifest_uid(manifest) if manifest is not None else None
+
+    async def _managed_note(self, kind_alias: str, ns: str | None, name: str) -> str | None:
+        """Ownership banner text for a write dialog, or None (issue #119).
+
+        Best-effort display support, fail-open: no manifest source, a slow
+        or failed lookup, or an unmanaged target all yield None — the write
+        flow is never blocked, and the target fetch plus the entire
+        owner-chain walk share one `_UID_LOOKUP_TIMEOUT` deadline.
+        """
+        if self._get_manifest is None:
+            return None
+        try:
+            async with asyncio.timeout(_UID_LOOKUP_TIMEOUT):
+                manifest = await self._get_manifest(kind_alias, ns, name)
+                return await self._walk_managed(manifest, ns)
+        except Exception as exc:  # display support only — never blocks the write
+            # An API error message can embed the response body (for a
+            # Secret, its data): log the exception type, not its payload.
+            logger.debug("manager lookup for %s/%s failed: %s", ns, name, type(exc).__name__)
+            return None
+
+    async def _managed_note_from(self, manifest: dict[str, Any], ns: str | None) -> str | None:
+        """Manager note for an already-fetched manifest; the owner-chain
+        walk shares one `_UID_LOOKUP_TIMEOUT` deadline and fails open like
+        `_managed_note`."""
+        try:
+            async with asyncio.timeout(_UID_LOOKUP_TIMEOUT):
+                return await self._walk_managed(manifest, ns)
+        except Exception as exc:  # display support only — never blocks the write
+            # Same payload caution as _managed_note — the exception type
+            # only, and nothing derived from the manifest (which may be a
+            # Secret's; CodeQL py/clear-text-logging-sensitive-data).
+            logger.debug("owner-chain lookup in %s failed: %s", ns, type(exc).__name__)
+            return None
+
+    async def _walk_managed(self, manifest: dict[str, Any], ns: str | None) -> str | None:
+        """Walk the built-in controller chain when the object itself looks
+        unmanaged: a pod owned by rs -> deploy (or job -> cronjob) reports
+        the top owner's manager — helm annotations live on the top-level
+        object, not on every pod it produced. Callers bound this walk with
+        one shared deadline and fail open on any error."""
+        found = manager_of(manifest)
+        current = manifest
+        for _ in range(2):
+            if found is not None:
+                break
+            owner = controller_owner(current)
+            if owner is None:
+                break
+            plural = self._OWNER_CHAIN_PLURALS.get(owner[0])
+            if plural is None or self._get_manifest is None:
+                break
+            current = await self._get_manifest(plural, ns, owner[1])
+            found = manager_of(current)
+        return found.note if found is not None else None
 
     async def agent_submit_write_proposal(
         self,
@@ -7666,6 +7788,7 @@ class KorvidApp(App[None]):
         *,
         require_name: str | None = None,
         preview: list[str] | None = None,
+        managed_note: str | None = None,
     ) -> Literal["approved", "declined", "expired"]:
         """Show a ConfirmScreen and wait for the user's decision. Only real key
         input can resolve it. While the agent panel is collapsed, or another
@@ -7688,7 +7811,13 @@ class KorvidApp(App[None]):
             if not fut.done():
                 fut.set_result(bool(confirmed))
 
-        screen = self._confirm_screen(title, operation, require_name=require_name, preview=preview)
+        screen = self._confirm_screen(
+            title,
+            operation,
+            require_name=require_name,
+            preview=preview,
+            managed_note=managed_note,
+        )
         await self.push_screen(screen, _done)
         # Recheck after mounting: surfacing the dialog (or push_screen itself)
         # can consume the last of the budget, and a fixed minimum here would

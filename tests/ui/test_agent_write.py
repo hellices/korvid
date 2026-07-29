@@ -588,7 +588,10 @@ async def test_agent_uid_lookup_uses_validated_alias(tmp_path: Path) -> None:
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         await task
-    assert kinds == ["deploy"]  # the caller's alias, normalized - not "deployments"
+    # The single snapshot fetch resolves through the caller's alias,
+    # normalized — not "deployments" via meta.plural — and feeds both the
+    # uid precondition and the ownership banner (no second round-trip).
+    assert kinds == ["deploy"]
 
 
 async def test_uid_lookup_times_out_fail_open(tmp_path: Path) -> None:
@@ -608,3 +611,31 @@ async def test_uid_lookup_times_out_fail_open(tmp_path: Path) -> None:
     with patch("korvid.ui.app._UID_LOOKUP_TIMEOUT", 0.05):
         assert await app._target_uid("pods", "default", "api-1") is None
     assert started.is_set()  # the lookup really ran and was cancelled by the bound
+
+
+async def test_agent_write_dialog_shows_the_ownership_banner(tmp_path: Path) -> None:
+    """Agent-requested writes go through the same ConfirmScreen — the
+    ownership banner covers them too (issue #119)."""
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return {
+            "metadata": {
+                "name": name,
+                "namespace": ns,
+                "uid": "deploy-uid-1",
+                "labels": {"olm.owner": "kafka-operator.v0.38.0"},
+            }
+        }
+
+    app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        _expand_panel(app)
+        task = asyncio.ensure_future(
+            app.agent_request_write("delete", "deployments", "web", namespace="default")
+        )
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        banner = app.screen.query_one(".confirm-managed")
+        assert "kafka-operator.v0.38.0" in str(banner.render())
+        await pilot.press("escape")
+        await task

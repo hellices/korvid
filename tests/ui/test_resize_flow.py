@@ -107,6 +107,7 @@ def make_app(
     readonly: bool = False,
     permitted: bool | None = None,
     check_calls: list[tuple[str, str, str, str | None, str, str]] | None = None,
+    get_manifest: object = None,
 ) -> KorvidApp:
     store = ResourceStore()
     data: dict[str, list[Summary]] = {
@@ -139,7 +140,7 @@ def make_app(
         while True:
             await asyncio.sleep(0.01)
 
-    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+    async def default_get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
         return _POD_MANIFEST
 
     async def check_permission(
@@ -155,7 +156,7 @@ def make_app(
         store=store,
         watch_manager=WatchManager(store, source),
         aliases=dict(_ALIASES),
-        get_manifest=get_manifest,
+        get_manifest=get_manifest or default_get_manifest,  # type: ignore[arg-type]  # test seam
         write_ops=recorder,
         audit=AuditLog(audit_path),
         check_permission=None if permitted is None else check_permission,
@@ -352,3 +353,41 @@ async def test_agent_resize_rejected_when_cluster_lacks_subresource(tmp_path: Pa
         assert result.startswith("ERROR:")
         assert "1.35" in result
         assert rec.calls == []
+
+
+async def test_resize_banner_reuses_the_prompt_manifest(tmp_path: Path) -> None:
+    """The prompt prefill already fetched the pod manifest — the ownership
+    banner derives from that snapshot instead of a second GET for the same
+    object (issue #119 review)."""
+    fetches: list[str] = []
+    managed = {
+        "metadata": {
+            "name": "web-1",
+            "namespace": "default",
+            "uid": "pod-uid-1",
+            "labels": {"app.kubernetes.io/managed-by": "Helm"},
+            "annotations": {
+                "meta.helm.sh/release-name": "nginx",
+                "meta.helm.sh/release-namespace": "web",
+            },
+        },
+        "spec": _POD_MANIFEST["spec"],
+    }
+
+    async def counting(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        fetches.append(kind)
+        return managed
+
+    app = make_app(ResizeRecorder(), tmp_path / "audit.jsonl", get_manifest=counting)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("R")
+        await until(pilot, lambda: isinstance(app.screen, ResizePrompt))
+        field = app.screen.query_one("#resize-0-requests-cpu", Input)
+        field.value = "200m"
+        field.focus()
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        banner = app.screen.query_one(".confirm-managed", Static)
+        assert "helm release web/nginx" in str(banner.render())
+    assert fetches == ["pods"]
