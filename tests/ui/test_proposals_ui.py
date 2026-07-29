@@ -5,10 +5,12 @@ dialog can execute; every terminal outcome is distinct and audited.
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import pytest
 from textual.widgets import Static
 
 from korvid.core.audit import AuditLog
@@ -465,3 +467,75 @@ async def test_mcp_off_expires_pending_proposals(tmp_path: Path) -> None:
     assert found is not None
     assert found[1] == "expired"
     assert "restarted" in found[2] or "stopped" in found[2]
+
+
+async def test_review_escape_leaves_the_proposal_pending(tmp_path: Path) -> None:
+    """Esc dismisses the review dialog without deciding: the proposal must
+    stay pending (until its own TTL), not be recorded as denied."""
+    rec = Recorder()
+    store = ProposalStore()
+    app = make_app(rec, tmp_path / "a.jsonl", store)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        app._open_proposal_review()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
+        found = store.get(pid)
+        assert found is not None
+        assert found[1] == "pending"
+    assert rec.calls == []
+
+
+async def test_terminal_outcome_audits_run_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AuditLog.append does blocking file I/O; best-effort proposal-outcome
+    audits must be offloaded (audit.py's contract for async contexts), not
+    stall the UI loop."""
+    rec = Recorder()
+    store = ProposalStore()
+    app = make_app(rec, tmp_path / "a.jsonl", store)
+    append_threads: list[int] = []
+    original_append = AuditLog.append
+
+    def recording_append(self: AuditLog, **kwargs: Any) -> None:
+        append_threads.append(threading.get_ident())
+        original_append(self, **kwargs)
+
+    monkeypatch.setattr(AuditLog, "append", recording_append)
+    loop_thread = threading.get_ident()
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        app._open_proposal_review()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("n")
+        await until(pilot, lambda: (f := store.get(pid)) is not None and f[1] == "denied")
+        await until(pilot, lambda: bool(append_threads))
+    assert append_threads
+    assert all(t != loop_thread for t in append_threads)
+
+
+async def test_lazy_ttl_expiry_is_audited_with_provenance(tmp_path: Path) -> None:
+    """A proposal the lazy TTL sweep expires reaches a terminal state like
+    any other: its outcome must land in the audit log, not vanish silently."""
+    rec = Recorder()
+    clock_now = [1000.0]
+    store = ProposalStore(ttl=10.0, clock=lambda: clock_now[0])
+    audit_path = tmp_path / "a.jsonl"
+    app = make_app(rec, audit_path, store)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        clock_now[0] += 11.0
+        assert store.pending() == []  # triggers the lazy sweep
+        await until(
+            pilot,
+            lambda: audit_path.exists() and pid in audit_path.read_text(),
+        )
+    entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    expired = [e for e in entries if pid in e["detail"] and "expired" in e["outcome"]]
+    assert len(expired) == 1
+    assert "external_mcp" in expired[0]["detail"]

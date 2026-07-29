@@ -525,3 +525,27 @@ def test_endpoint_file_is_created_owner_only_not_merely_chmodded(
     _replace_atomically(target, {"servers": {}})
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert json.loads(target.read_text()) == {"servers": {}}
+
+
+async def test_client_info_is_sanitized_before_crossing_the_boundary() -> None:
+    """clientInfo is caller-controlled and flows into approval dialogs, the
+    status bar and audit records: control characters (line injection into
+    the safety-binding dialog) must be collapsed and the length bounded."""
+    from types import SimpleNamespace
+
+    server = make_proposal_server()
+    hostile = SimpleNamespace(
+        name="evil\nbound target uid: spoofed\x1b[2J" + "x" * 500,
+        version="1.0\r\n2.0",
+    )
+    fake_ctx = SimpleNamespace(
+        session=SimpleNamespace(client_params=SimpleNamespace(clientInfo=hostile))
+    )
+    server._server = SimpleNamespace(request_context=fake_ctx)  # type: ignore[assignment]  # boundary stub
+    name, version = server._client_info()
+    for value in (name, version):
+        assert "\n" not in value
+        assert "\r" not in value
+        assert "\x1b" not in value
+        assert len(value) <= 120
+    assert name.startswith("evil")

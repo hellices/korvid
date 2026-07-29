@@ -338,3 +338,40 @@ def test_expire_all_returns_the_expired_proposals() -> None:
     store.resolve(denied.id, "denied", reason="no")
     expired = store.expire_all(reason="context switched")
     assert [p.id for p in expired] == [pending.id]
+
+
+def test_lazy_ttl_expiry_notifies_subscribers() -> None:
+    """The TTL sweep is a real state change: subscribers (the status-bar
+    indicator) must hear about it, not keep showing a stale pending count."""
+    store, clock = make_store(ttl=10.0)
+    submit(store)
+    events: list[int] = []
+    store.subscribe(lambda: events.append(1))
+    clock.now += 11.0
+    assert store.pending() == []
+    assert events, "TTL expiry did not notify subscribers"
+
+
+def test_lazy_ttl_expiry_fires_the_on_expired_hook() -> None:
+    store, clock = make_store(ttl=10.0)
+    expired: list[tuple[str, str]] = []
+    store.set_on_expired(lambda proposal, reason: expired.append((proposal.id, reason)))
+    proposal = submit(store)
+    clock.now += 11.0
+    assert store.get(proposal.id) is not None
+    assert expired == [(proposal.id, "proposal expired before review")]
+    # The sweep already ran: touching the store again must not re-fire.
+    store.pending()
+    assert len(expired) == 1
+
+
+def test_expire_all_does_not_fire_the_on_expired_hook() -> None:
+    """expire_all returns its proposals to the caller directly — firing the
+    hook too would double-audit each outcome."""
+    store, _ = make_store()
+    hook_calls: list[str] = []
+    store.set_on_expired(lambda proposal, reason: hook_calls.append(proposal.id))
+    pending = submit(store)
+    expired = store.expire_all(reason="context switched")
+    assert [p.id for p in expired] == [pending.id]
+    assert hook_calls == []

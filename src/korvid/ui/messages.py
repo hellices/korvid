@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from textual.message import Message
 
+from korvid.tools.proposals import WriteProposal
+
 
 class NavigateCommand(Message):
     """Command to navigate to a view, optionally in a specific namespace."""
@@ -123,3 +125,16 @@ class ExternalProposalsChanged(Message):
     #110): the app refreshes its pending indicator; never opens a dialog."""
 
     pass
+
+
+class ExternalProposalExpired(Message):
+    """Posted for each proposal the lazy TTL sweep expired (issue #110).
+
+    The sweep may run on any thread (the MCP server touches the store too);
+    posting a message marshals the terminal-outcome audit onto the UI loop.
+    """
+
+    def __init__(self, proposal: WriteProposal, reason: str) -> None:
+        super().__init__()
+        self.proposal = proposal
+        self.reason = reason

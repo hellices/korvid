@@ -102,6 +102,19 @@ def _replace_atomically(path: Path, registry: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _sanitize_client_meta(value: object, *, limit: int = 120) -> str:
+    """Bound and flatten caller-supplied clientInfo metadata.
+
+    The value crosses into approval dialogs (whose safety bindings are one
+    line each), the status bar and audit records: replace every
+    non-printable character (newlines, ANSI escapes) with a space and cap
+    the length so a hostile caller cannot inject dialog lines or bloat
+    audit entries.
+    """
+    text = "".join(ch if ch.isprintable() else " " for ch in str(value))
+    return text[:limit]
+
+
 class KorvidMCPServer:
     """Streamable HTTP MCP server wrapping the agent tool surface.
 
@@ -214,7 +227,8 @@ class KorvidMCPServer:
 
         Display metadata only — never an authorization input (any caller can
         claim any name). Stateless transport may not carry it; degrade to
-        empty strings."""
+        empty strings. Values are sanitized here because they cross into
+        approval dialogs, the status bar and audit records."""
         try:
             params = self._server.request_context.session.client_params
             info = params.clientInfo if params is not None else None
@@ -222,7 +236,7 @@ class KorvidMCPServer:
             return "", ""
         if info is None:
             return "", ""
-        return str(info.name), str(info.version)
+        return _sanitize_client_meta(info.name), _sanitize_client_meta(info.version)
 
     @property
     def bound_port(self) -> int | None:

@@ -29,6 +29,9 @@ TERMINAL_STATES: frozenset[ProposalState] = frozenset(
     {"denied", "expired", "cancelled", "failed", "executed"}
 )
 
+#: Stored reason (and hook argument) for proposals the lazy TTL sweep expires.
+_TTL_EXPIRY_REASON = "proposal expired before review"
+
 
 class ProposalLimitError(Exception):
     """The per-session or global pending cap is exhausted."""
@@ -109,6 +112,7 @@ class ProposalStore:
         self._order: list[str] = []
         self._resolved_at: dict[str, float] = {}
         self._subscribers: list[Callable[[], None]] = []
+        self._on_expired: Callable[[WriteProposal, str], None] | None = None
 
     def subscribe(self, callback: Callable[[], None]) -> None:
         """Register a callback fired after every submit or state change.
@@ -118,6 +122,16 @@ class ProposalStore:
         """
         with self._lock:
             self._subscribers.append(callback)
+
+    def set_on_expired(self, callback: Callable[[WriteProposal, str], None]) -> None:
+        """Hook fired once per proposal the lazy TTL sweep expires.
+
+        Runs outside the lock and may fire from any thread — the korvid app
+        marshals it onto the UI loop to audit the outcome. `expire_all` does
+        NOT fire it: that path returns its proposals to the caller directly.
+        Set once at wiring time, before the store is shared across threads.
+        """
+        self._on_expired = callback
 
     def submit(
         self,
@@ -156,7 +170,7 @@ class ProposalStore:
             )
         now = self._clock()
         with self._lock:
-            self._sweep_expired(now)
+            swept = self._sweep_expired(now)
             pending = self._iter_pending()
             if sum(p.session_id == session_id for p in pending) >= self._max_per_session:
                 raise ProposalLimitError(
@@ -189,24 +203,29 @@ class ProposalStore:
             self._proposals[proposal.id] = proposal
             self._states[proposal.id] = ("pending", "")
             self._order.append(proposal.id)
+        self._after_sweep(swept)
         self._notify()
         return proposal
 
     def get(self, proposal_id: str) -> tuple[WriteProposal, ProposalState, str] | None:
         """The proposal plus its current state, or None for an unknown id."""
+        found: tuple[WriteProposal, ProposalState, str] | None = None
         with self._lock:
-            self._sweep_expired(self._clock())
+            swept = self._sweep_expired(self._clock())
             proposal = self._proposals.get(proposal_id)
-            if proposal is None:
-                return None
-            state, reason = self._states[proposal_id]
-            return proposal, state, reason
+            if proposal is not None:
+                state, reason = self._states[proposal_id]
+                found = (proposal, state, reason)
+        self._after_sweep(swept)
+        return found
 
     def pending(self) -> list[WriteProposal]:
         """Pending proposals in submission order (expired ones swept first)."""
         with self._lock:
-            self._sweep_expired(self._clock())
-            return list(self._iter_pending())
+            swept = self._sweep_expired(self._clock())
+            result = list(self._iter_pending())
+        self._after_sweep(swept)
+        return result
 
     def resolve(self, proposal_id: str, state: ProposalState, *, reason: str = "") -> bool:
         """Move a pending proposal to a terminal state exactly once."""
@@ -269,25 +288,30 @@ class ProposalStore:
     ) -> bool:
         with self._lock:
             now = self._clock()
-            self._sweep_expired(now)
+            swept = self._sweep_expired(now)
             current = self._states.get(proposal_id)
-            if current is None or current[0] != from_state:
-                return False
-            self._states[proposal_id] = to
-            if to[0] in TERMINAL_STATES:
-                self._resolved_at[proposal_id] = now
-            return True
+            changed = current is not None and current[0] == from_state
+            if changed:
+                self._states[proposal_id] = to
+                if to[0] in TERMINAL_STATES:
+                    self._resolved_at[proposal_id] = now
+        self._after_sweep(swept)
+        return changed
 
     def _iter_pending(self) -> list[WriteProposal]:
         return [self._proposals[pid] for pid in self._order if self._states[pid][0] == "pending"]
 
-    def _sweep_expired(self, now: float) -> None:
+    def _sweep_expired(self, now: float) -> list[WriteProposal]:
         # Lazy TTL: only pending proposals expire — an approved proposal is
-        # mid-execution and must reach executed/failed.
+        # mid-execution and must reach executed/failed. Returns the newly
+        # expired proposals so the caller can notify and fire the expiry
+        # hook after releasing the lock.
+        swept: list[WriteProposal] = []
         for pid in self._order:
             if self._states[pid][0] == "pending" and self._proposals[pid].expires_at <= now:
-                self._states[pid] = ("expired", "proposal expired before review")
+                self._states[pid] = ("expired", _TTL_EXPIRY_REASON)
                 self._resolved_at[pid] = now
+                swept.append(self._proposals[pid])
         # Bounded terminal retention: keep resolved records pollable for a
         # defined window, then drop them so proposal churn cannot grow
         # memory without bound.
@@ -304,6 +328,19 @@ class ProposalStore:
                 del self._proposals[pid]
                 del self._states[pid]
                 del self._resolved_at[pid]
+        return swept
+
+    def _after_sweep(self, swept: list[WriteProposal]) -> None:
+        """Lazy TTL expiry is a real state change: tell subscribers (so a
+        pending-count indicator refreshes) and fire the expiry hook (so the
+        app can audit each outcome), both outside the lock."""
+        if not swept:
+            return
+        hook = self._on_expired
+        if hook is not None:
+            for proposal in swept:
+                hook(proposal, _TTL_EXPIRY_REASON)
+        self._notify()
 
     def _notify(self) -> None:
         with self._lock:

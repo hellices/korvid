@@ -66,9 +66,14 @@ class FreshKeysInput(Input):
         await super()._on_key(event)
 
 
-class ConfirmScreen(ModalScreen[bool]):
+class ConfirmScreen(ModalScreen[bool | None]):
     """y/n approval dialog; with ``require_name`` the exact resource name
     must be typed (cluster-scoped or otherwise high-blast-radius deletes).
+
+    Resolves True on confirmation, False on an explicit decline (`n`), and
+    None on dismissal without a decision (Esc). Most callers treat None as
+    a cancel; the external-proposal review flow relies on the distinction —
+    a dismissed proposal stays pending, a declined one is denied.
 
     With ``protected_context`` (issue #83) the dialog adds a red protected
     banner and the y/n shortcut is replaced by typing the context name —
@@ -185,7 +190,9 @@ class ConfirmScreen(ModalScreen[bool]):
             )
 
     def action_cancel(self) -> None:
-        self.dismiss(False)
+        # Esc is a dismissal, not a decision — distinct from the explicit
+        # decline (`n` → False) for callers that must tell them apart.
+        self.dismiss(None)
 
 
 class ReplicasPrompt(ModalScreen[int | None]):

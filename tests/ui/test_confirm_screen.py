@@ -34,19 +34,35 @@ async def test_y_confirms() -> None:
         assert app.result is True
 
 
-async def test_n_and_escape_cancel() -> None:
-    for key in ("n", "escape"):
-        app = HostApp()
-        async with app.run_test() as pilot:
+async def test_n_declines_with_false() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
 
-            def _done(v: bool | None, app: HostApp = app) -> None:
-                app.result = v
+        def _done(v: bool | None, app: HostApp = app) -> None:
+            app.result = v
 
-            await app.push_screen(ConfirmScreen("Delete", "delete pods/x"), _done)
-            await pilot.pause()
-            await pilot.press(key)
-            await pilot.pause()
-            assert app.result is False
+        await app.push_screen(ConfirmScreen("Delete", "delete pods/x"), _done)
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause()
+        assert app.result is False
+
+
+async def test_escape_dismisses_with_none() -> None:
+    """Esc is a dismissal, not a decision: callers that must distinguish
+    'declined' from 'walked away' (external proposals stay pending on
+    dismissal) get None; every other caller treats None as falsy."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+
+        def _done(v: bool | None, app: HostApp = app) -> None:
+            app.result = v
+
+        await app.push_screen(ConfirmScreen("Delete", "delete pods/x"), _done)
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.result is None
 
 
 async def test_dialog_shows_exact_operation() -> None:
