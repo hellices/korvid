@@ -54,6 +54,7 @@ class FakeHelm(HelmCLI):
         self.hits: list[ChartHit] = [_NGINX]
         self.search_error: str | None = None
         self.install_error: str | None = None
+        self.uninstall_error: str | None = None
         self.diff_plugin = False
         self.values_seen: str | None = None
         self.repos = [HelmRepo(name="bitnami", url="https://charts.bitnami.com/bitnami")]
@@ -158,6 +159,18 @@ class FakeHelm(HelmCLI):
     async def diff_rollback(self, release: str, revision: int, namespace: str) -> str:
         self.calls.append(("diff-rollback", release, revision, namespace))
         return "- ROLLBACK-DIFF-LINE"
+
+    async def dry_run_uninstall(
+        self, release: str, namespace: str, *, keep_history: bool = False
+    ) -> str:
+        self.calls.append(("dry-run-uninstall", release, namespace, keep_history))
+        return "UNINSTALL-DRY-RUN-SUMMARY"
+
+    async def uninstall(self, release: str, namespace: str, *, keep_history: bool = False) -> str:
+        self.calls.append(("uninstall", release, namespace, keep_history))
+        if self.uninstall_error is not None:
+            raise HelmError(self.uninstall_error)
+        return f'release "{release}" uninstalled'
 
 
 def _release_row(name: str, chart: str = "nginx-18.1.0") -> HelmReleaseSummary:
@@ -591,6 +604,116 @@ async def test_rollback_without_helm_binary_reports_absence(tmp_path: Path) -> N
             lambda: any("helm CLI not found" in n.message for n in app._notifications),
             label="absence notified",
         )
+        assert len(app.screen_stack) == 1
+
+
+async def test_uninstall_ctrl_d_on_release_confirms_and_executes(tmp_path: Path) -> None:
+    """Ctrl+D on a release row (issue #117): dry-run preview, typed-name
+    approval, fail-closed audit, then `helm uninstall`."""
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(helm=helm, audit_path=audit_path)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        operation = app.screen._operation  # type: ignore[attr-defined]  # test peeks
+        assert "HELM UNINSTALL web" in operation
+        assert "namespace default" in operation
+        # High blast radius: the release name must be typed, y alone is inert.
+        await pilot.press("y")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        assert ("uninstall", "web", "default", False) not in helm.calls
+        await pilot.press("backspace")  # the y landed in the name input
+        for ch in "web":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: audit_path.exists() and "success" in audit_path.read_text(),
+            label="audited success",
+        )
+        assert ("uninstall", "web", "default", False) in helm.calls
+        entries = _audit_entries(audit_path)
+        assert entries[0]["action"] == "helm-uninstall"
+        assert entries[0]["outcome"] == "intent"
+        assert entries[-1]["outcome"] == "success"
+
+
+async def test_uninstall_preview_shows_dry_run_output(tmp_path: Path) -> None:
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        assert ("dry-run-uninstall", "web", "default", False) in helm.calls
+        preview = app.screen._preview  # type: ignore[attr-defined]  # test peeks the dialog
+        assert preview is not None
+        assert any("UNINSTALL-DRY-RUN-SUMMARY" in line for line in preview)
+        title = app.screen._preview_title  # type: ignore[attr-defined]  # test peeks
+        assert title == "helm uninstall --dry-run preview:"
+
+
+async def test_uninstall_declined_runs_nothing(tmp_path: Path) -> None:
+    helm = FakeHelm()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(helm=helm, audit_path=audit_path)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        await pilot.press("escape")
+        await until(pilot, lambda: len(app.screen_stack) == 1, label="dialog dismissed")
+        assert not any(call[0] == "uninstall" for call in helm.calls)
+        assert not audit_path.exists() or "helm-uninstall" not in audit_path.read_text()
+
+
+async def test_uninstall_without_helm_binary_reports_absence(tmp_path: Path) -> None:
+    app = make_app(helm=None, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("ctrl+d")
+        await until(
+            pilot,
+            lambda: any("helm CLI not found" in n.message for n in app._notifications),
+            label="absence notified",
+        )
+        assert len(app.screen_stack) == 1
+
+
+async def test_uninstall_readonly_mode_blocks(tmp_path: Path) -> None:
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl", readonly=True)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("ctrl+d")
+        await until(
+            pilot,
+            lambda: any("Read-only mode" in n.message for n in app._notifications),
+            label="readonly notified",
+        )
+        assert helm.calls == []
+        assert len(app.screen_stack) == 1
+
+
+async def test_uninstall_ctrl_d_on_revision_drilldown_stays_blocked(tmp_path: Path) -> None:
+    """The revision drill-down rows are individual history Secrets, not the
+    release: ctrl+d must stay inert there (issue #117)."""
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+        assert helm.calls == []
         assert len(app.screen_stack) == 1
 
 

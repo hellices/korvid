@@ -4296,7 +4296,17 @@ class KorvidApp(App[None]):
 
     async def action_delete_resource(self) -> None:
         """Ctrl-D: delete the selected resource behind a layered confirmation
-        (cluster-scoped kinds require typing the resource name)."""
+        (cluster-scoped kinds require typing the resource name). On the helm
+        release browser the key means `helm uninstall` (issue #117) - helm
+        must remove the release's own bookkeeping, a raw Secret delete would
+        orphan the deployed resources."""
+        current = self.aliases.get(self._canonical_kind(self.current_kind))
+        if current is not None and (current.group, current.plural) == (
+            HELM_RELEASES_META.group,
+            HELM_RELEASES_META.plural,
+        ):
+            self._helm_uninstall_start()
+            return
         ops = self._write_ops
         if ops is None:
             self.notify("Delete unavailable in this session", severity="warning")
@@ -4867,6 +4877,29 @@ class KorvidApp(App[None]):
         namespace = ns or row.namespace
         self.run_worker(
             self._helm_rollback_flow(helm, row, ns, name, namespace, epoch),
+            exclusive=True,
+            group="helm-write",
+        )
+
+    def _helm_uninstall_start(self) -> None:
+        """Ctrl+D on the helm release browser: uninstall the selected release
+        (issue #117). Target captured synchronously with the keypress; the
+        slow dry-run preview + confirmation run in a worker, exactly like
+        rollback."""
+        helm = self._helm_gate()
+        if helm is None:
+            return
+        epoch = self._ctx_epoch
+        ns, name = self._selected_ns_name()
+        if name is None:
+            return
+        row = self._helm_release_row(ns, name)
+        if row is None:
+            self.notify("no helm release selected", severity="warning")
+            return
+        namespace = ns or row.namespace
+        self.run_worker(
+            self._helm_uninstall_flow(helm, row, ns, name, namespace, epoch),
             exclusive=True,
             group="helm-write",
         )
@@ -6030,6 +6063,60 @@ class KorvidApp(App[None]):
             return None
         return _clip_preview(text) if text is not None else None
 
+    async def _helm_uninstall_flow(
+        self,
+        helm: HelmCLI,
+        row: HelmReleaseSummary,
+        ns: str | None,
+        name: str,
+        namespace: str,
+        epoch: int,
+    ) -> None:
+        """Uninstall (ctrl+d on a release row): approval-gated, audited
+        `helm uninstall`. The release name must be typed to confirm - the
+        blast radius is every resource the release owns, so the y shortcut
+        is not enough. The target row is captured by the action at keypress
+        time and passed in - this worker must never re-read the selection."""
+        with self._progress("rendering uninstall preview"):
+            preview = await self._helm_uninstall_preview(helm, row.name, namespace)
+        if not self._write_context_intact(
+            "helm-uninstall", HELM_RELEASES_META, ns, name, phase="the dry-run preview", epoch=epoch
+        ):
+            return
+        operation = (
+            f"HELM UNINSTALL {row.name} ({row.chart}) from namespace {namespace}\n"
+            "Deletes every resource this release owns and removes its history."
+        )
+        await self._push_write_confirmation(
+            f"Uninstall release {row.name}?",
+            operation,
+            action="helm-uninstall",
+            meta=HELM_RELEASES_META,
+            namespace=namespace,
+            name=row.name,
+            op_factory=lambda: self._helm_apply_uninstall(helm, row.name, namespace),
+            require_name=row.name,
+            preview=preview,
+            preview_title="helm uninstall --dry-run preview:",
+        )
+
+    async def _helm_apply_uninstall(self, helm: HelmCLI, release: str, namespace: str) -> None:
+        await helm.uninstall(release, namespace)
+
+    async def _helm_uninstall_preview(
+        self, helm: HelmCLI, release: str, namespace: str
+    ) -> list[str] | None:
+        """`helm uninstall --dry-run` summary; None on any failure (the
+        dialog then opens without a preview, like every other preview)."""
+        try:
+            text = await asyncio.wait_for(
+                helm.dry_run_uninstall(release, namespace), _HELM_PREVIEW_TIMEOUT
+            )
+        except Exception:
+            logger.debug("helm uninstall preview failed; dialog opens without it", exc_info=True)
+            return None
+        return _clip_preview(text)
+
     def _helm_release_row(self, ns: str | None, name: str) -> HelmReleaseSummary | None:
         for obj in self.store.get("helmreleases", self.current_scope):
             if (
@@ -6631,6 +6718,15 @@ class KorvidApp(App[None]):
             return self._log_pane_open()
         if action in self._SYNTHETIC_GATED_ACTIONS:
             meta = self.aliases.get(self._canonical_kind(self.current_kind))
+            if (
+                action == "delete_resource"
+                and meta is not None
+                and (meta.group, meta.plural)
+                == (HELM_RELEASES_META.group, HELM_RELEASES_META.plural)
+            ):
+                # Ctrl+D on the release browser is `helm uninstall`
+                # (issue #117) - the one synthetic view where delete works.
+                return True
             # Unknown kinds keep the keys: the handler's own guards decide.
             return meta is None or not meta.synthetic
         views = self._ACTION_VIEWS.get(action)

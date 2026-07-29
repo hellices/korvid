@@ -224,16 +224,21 @@ async def test_d_on_release_describes_the_helm_release() -> None:
 
 
 async def test_write_actions_reject_synthetic_helm_kinds(tmp_path: Path) -> None:
-    """Helm browser rows are read-only views over Secrets: Ctrl-D must not
-    open an approval dialog, and an agent-side write against the synthetic
-    kind must come back as an ERROR - neither may reach the API."""
+    """Helm browser rows are read-only views over Secrets: Ctrl-D routes to
+    `helm uninstall` (issue #117) - without a helm binary it reports absence
+    instead of opening a raw Secret-delete dialog - and an agent-side write
+    against the synthetic kind must come back as an ERROR."""
     app, _ = make_app(_default_data(), audit_path=tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         await _navigate(pilot, "helm", "helmreleases")
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 2, label="releases listed")
         await pilot.press("ctrl+d")
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: any("helm CLI not found" in n.message for n in app._notifications),
+            label="uninstall routed to helm, absence notified",
+        )
         assert len(app.screen_stack) == 1  # no ConfirmScreen pushed
         result = app._agent_write_op(
             "delete", "helmreleases", "web", "default", None, None, restarted_at="s"
