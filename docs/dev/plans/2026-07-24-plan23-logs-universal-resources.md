@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- All constraints from `docs/specs/2026-07-24-korvid-engineering-standards.md` and the phase-1 plan apply (mypy --strict, ruff, tach layers, `pytest.raises(match=)`, commit per green task, never `--no-verify`)
+- All constraints from `docs/dev/specs/2026-07-24-korvid-engineering-standards.md` and the phase-1 plan apply (mypy --strict, ruff, tach layers, `pytest.raises(match=)`, commit per green task, never `--no-verify`)
 - Third-party `ApiException` NEVER crosses the k8s layer — wrap as `ApiStatusError` (`src/korvid/k8s/errors.py`)
 - Textual imports **only** in `ui/`
 - familiar TUI conventions: `d`=describe, `s`=shell-in, `l`=logs, `0`=all namespaces, `D`=debug (reserved, later plan)

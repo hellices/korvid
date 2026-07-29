@@ -1,6 +1,6 @@
 # korvid Development Guidelines
 
-korvid is an AI-native Kubernetes TUI (Python 3.11+, Textual). Design doc: `docs/specs/2026-07-23-korvid-tui-design.md`. Engineering standards: `docs/specs/2026-07-24-korvid-engineering-standards.md`.
+korvid is an AI-native Kubernetes TUI (Python 3.11+, Textual). Design doc: `docs/dev/specs/2026-07-23-korvid-tui-design.md`. Engineering standards: `docs/dev/specs/2026-07-24-korvid-engineering-standards.md`.
 
 ## Quick Setup
 
