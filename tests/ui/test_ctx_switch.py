@@ -55,7 +55,6 @@ class _CtxEnv:
         self.result = result or ContextSwitchResult(
             pod_resize_supported=True,
             provider_hint="AKS",
-            fallback_namespaces=("team-b",),
             context_namespace="ns-b",
         )
         #: Which cluster the watch source serves; the switch fake flips it.
@@ -124,7 +123,6 @@ async def test_switch_success_retargets_session() -> None:
         # Capability gates re-evaluated from the switch result.
         assert app._pod_resize_supported is True
         assert app._provider_hint == "AKS"
-        assert app._fallback_namespaces == ("team-b",)
         # Scope follows the new context's kubeconfig namespace.
         assert app.current_scope == "ns-b"
         # The watch restarted against the new cluster.
@@ -669,7 +667,6 @@ async def test_switch_rebinds_helm_wrapper() -> None:
         result=ContextSwitchResult(
             pod_resize_supported=False,
             provider_hint=None,
-            fallback_namespaces=(),
             context_namespace=None,
             helm=new_helm,
         )
@@ -1101,7 +1098,6 @@ async def test_switch_adopts_protection_and_clears_on_switch_back() -> None:
         result=ContextSwitchResult(
             pod_resize_supported=False,
             provider_hint=None,
-            fallback_namespaces=(),
             context_namespace="ns-b",
             protected_context="ctx-b",
         )
@@ -1127,7 +1123,6 @@ async def test_switch_adopts_protection_and_clears_on_switch_back() -> None:
         env.result = ContextSwitchResult(
             pod_resize_supported=False,
             provider_hint=None,
-            fallback_namespaces=(),
             context_namespace=None,
             protected_context=None,
         )
@@ -1177,7 +1172,6 @@ async def test_switch_restarts_metrics_for_same_namespace() -> None:
         result=ContextSwitchResult(
             pod_resize_supported=True,
             provider_hint=None,
-            fallback_namespaces=(),
             context_namespace="default",  # same namespace as before the switch
         ),
         metrics=MetricsPoller(fetch, interval=0.05),

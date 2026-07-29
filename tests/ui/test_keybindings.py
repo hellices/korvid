@@ -104,6 +104,13 @@ def test_readme_documents_every_remappable_action() -> None:
         assert f"`{action}`" in readme, f"README missing keybinding action {action!r}"
 
 
+def test_favorite_namespace_keys_are_not_remappable() -> None:
+    # The nine 1-9 favorite bindings carry no keymap id — the keymap cannot
+    # move them, so offering them as remappable actions would be a lie.
+    actions = KorvidApp._binding_actions()
+    assert not any(action.startswith("favorite_namespace") for action in actions)
+
+
 async def test_shifted_letter_remap_works_via_terminal_uppercase_spelling() -> None:
     # Real terminals deliver shift+g as "G" — the documented `shift+g`
     # syntax must still work there, not only under Pilot.

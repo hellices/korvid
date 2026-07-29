@@ -949,42 +949,14 @@ async def test_list_seed_coalesces_table_renders() -> None:
 
 
 # ---------------------------------------------------------------------------
-# RBAC-limited degradation (issue #49): picker fallback + all-namespaces guard
+# 403 as an explicit boundary (issue #108): concise notices, no config-derived
+# namespace lists, all-namespaces guard stays put on denial.
 # ---------------------------------------------------------------------------
 
 
-async def test_namespace_picker_403_falls_back_to_configured_namespaces() -> None:
-    """A forbidden namespace LIST opens the picker with the configured/kubeconfig
-    fallback namespaces instead of an error dead-end."""
-    from korvid.k8s.errors import ApiStatusError
-    from korvid.ui.messages import ShowNamespacePicker
-    from korvid.ui.widgets.namespace_picker import NamespacePicker
-
-    from .waits import until
-
-    store = ResourceStore()
-
-    async def failing_list() -> list[str]:
-        raise ApiStatusError(403, "Forbidden")
-
-    app = KorvidApp(
-        config=KorvidConfig(namespace="default"),
-        store=store,
-        watch_manager=WatchManager(store, fake_source([])),
-        list_namespaces=failing_list,
-        fallback_namespaces=("team-a", "team-b"),
-    )
-    async with app.run_test() as pilot:
-        app.post_message(ShowNamespacePicker())
-        picker = app.query_one(NamespacePicker)
-        await until(pilot, lambda: picker.display, label="picker opened with fallback")
-        assert picker.option_count == 2
-        notifications = [n.message for n in app._notifications]
-        assert any("forbidden" in m.lower() for m in notifications)
-
-
-async def test_namespace_picker_403_without_fallback_hints_free_text() -> None:
-    """No fallback namespaces: keep the RBAC guidance and point at `:ns <name>`."""
+async def test_namespace_picker_403_shows_permission_notice_and_ns_hint() -> None:
+    """A forbidden namespace LIST shows one concise permission notice pointing
+    at `:ns <name>` — no namespace list is manufactured from config."""
     from korvid.k8s.errors import ApiStatusError
     from korvid.ui.messages import ShowNamespacePicker
     from korvid.ui.widgets.namespace_picker import NamespacePicker
@@ -1012,10 +984,69 @@ async def test_namespace_picker_403_without_fallback_hints_free_text() -> None:
         assert app.query_one(NamespacePicker).display is False
 
 
+async def test_favorite_namespace_keys_navigate_like_ns_command() -> None:
+    """Keys 1-9 jump to `favorite_namespaces` entries in order via the same
+    navigation path as `:ns <name>` (issue #108); unbound digits are no-ops."""
+    from .waits import until
+
+    store = ResourceStore()
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default", favorite_namespaces=("team-a", "team-b")),
+        store=store,
+        watch_manager=WatchManager(store, fake_source([_pod("api-1")])),
+        aliases=dict(_DEFAULT_TEST_ALIASES),
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count, label="table seeded")
+        await pilot.press("2")
+        await until(pilot, lambda: app.current_scope == "team-b", label="favorite 2 entered")
+        await pilot.press("1")
+        await until(pilot, lambda: app.current_scope == "team-a", label="favorite 1 entered")
+        await pilot.press("3")  # no third favorite: stays put
+        await pilot.pause()
+        assert app.current_scope == "team-a"
+
+
+async def test_favorite_namespace_403_keeps_a_usable_ui() -> None:
+    """A favorite may point at a namespace the user cannot LIST: the jump
+    still navigates, the watch reports one concise notice, and the UI stays
+    usable (issue #108)."""
+    from korvid.k8s.errors import ApiStatusError
+
+    from .waits import until
+
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        if scope == "secret-ns":
+            raise ApiStatusError(403, "Forbidden")
+        yield ("ADDED", _pod("api-1"))
+        while True:
+            await asyncio.sleep(0.01)
+
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default", favorite_namespaces=("secret-ns",)),
+        store=store,
+        watch_manager=WatchManager(store, source, retry_delay=0),
+        aliases=dict(_DEFAULT_TEST_ALIASES),
+    )
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count, label="table seeded")
+        await pilot.press("1")
+        await until(pilot, lambda: app.current_scope == "secret-ns", label="favorite entered")
+        await until(
+            pilot,
+            lambda: any("no permission" in n.message.lower() for n in app._notifications),
+            label="denial surfaced once",
+        )
+        # The UI stays usable: navigating away still works.
+        await pilot.press("0")  # all-namespaces toggle
+        await until(pilot, lambda: app.current_scope == ALL_NAMESPACES, label="navigated away")
+
+
 async def test_toggle_all_namespaces_denied_stays_in_namespace() -> None:
-    """SSAR says cluster-wide list is forbidden and no fallback namespaces are
-    configured: stay in the current namespace with an inline notice instead of
-    letting the watch spiral into error cards."""
+    """SSAR says cluster-wide list is forbidden: stay in the current namespace
+    with one inline notice instead of letting the watch spiral into errors."""
     store = ResourceStore()
 
     async def deny_list(
@@ -1043,24 +1074,23 @@ async def test_toggle_all_namespaces_denied_stays_in_namespace() -> None:
         assert app.current_scope == "default"
 
 
-async def test_toggle_all_namespaces_with_fallback_proceeds() -> None:
-    """With fallback namespaces configured the per-namespace watch fanout can
-    serve the all-namespaces view, so the toggle goes through even when the
-    cluster-wide SSAR is denied."""
+async def test_toggle_all_namespaces_rechecks_after_grant() -> None:
+    """Pressing `0` performs a fresh capability check each time: a denial
+    followed by an RBAC grant must enter the real cluster-wide view."""
     store = ResourceStore()
+    allowed = False
 
-    async def deny_list(
+    async def toggling_ssar(
         verb: str, resource: str, subresource: str, ns: str | None, group: str, name: str
     ) -> bool:
-        return False
+        return allowed
 
     app = KorvidApp(
         config=KorvidConfig(namespace="default"),
         store=store,
         watch_manager=WatchManager(store, fake_source([_pod("api-1")])),
         aliases=dict(_DEFAULT_TEST_ALIASES),
-        check_permission=deny_list,
-        fallback_namespaces=("team-a",),
+        check_permission=toggling_ssar,
     )
     async with app.run_test() as pilot:
         from .waits import until
@@ -1069,8 +1099,16 @@ async def test_toggle_all_namespaces_with_fallback_proceeds() -> None:
         await pilot.press("0")
         await until(
             pilot,
+            lambda: any("forbidden" in n.message.lower() for n in app._notifications),
+            label="denial notice shown",
+        )
+        assert app.current_scope == "default"
+        allowed = True
+        await pilot.press("0")
+        await until(
+            pilot,
             lambda: app.current_scope == ALL_NAMESPACES,
-            label="scope toggled to all namespaces",
+            label="scope toggled after the grant",
         )
 
 

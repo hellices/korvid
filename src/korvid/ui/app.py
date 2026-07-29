@@ -261,13 +261,12 @@ class ContextSwitchResult:
     """What the composition root re-derived for the new cluster (issue #36).
 
     Returned by the injected ``switch_context`` callable once the connection
-    is retargeted: capability gates and namespace fallbacks are per-cluster
-    facts the app must adopt atomically with the switch.
+    is retargeted: capability gates are per-cluster facts the app must adopt
+    atomically with the switch.
     """
 
     pod_resize_supported: bool
     provider_hint: str | None
-    fallback_namespaces: tuple[str, ...]
     context_namespace: str | None
     #: helm CLI wrapper rebound to the new context (issue #31 x #36): the
     #: startup HelmCLI pins --kube-context, so keeping it across a switch
@@ -455,6 +454,18 @@ class KorvidApp(App[None]):
         Binding("colon", "open_command", "Command", id="open_command"),
         Binding("slash", "open_filter", "Filter/Search", id="open_filter"),
         Binding("0", "toggle_all_namespaces", "All NS", id="toggle_all_namespaces"),
+        # `favorite_namespaces` shortcuts (issue #108): UI-only jumps, bound
+        # in config order. Hidden from the footer; the help overlay merges
+        # the nine bindings into a single row.
+        *[
+            Binding(
+                str(i),
+                f"favorite_namespace({i})",
+                "Jump to favorite namespace (1-9)",
+                show=False,
+            )
+            for i in range(1, 10)
+        ],
         Binding("d", "describe", "Describe", id="describe"),
         Binding("s", "shell", "Shell", id="shell"),
         Binding("l", "logs", "Logs", id="logs"),
@@ -584,7 +595,6 @@ class KorvidApp(App[None]):
         provider_hint: str | None = None,
         protected_context: str | None = None,
         open_pod_exec: Callable[..., contextlib.AbstractAsyncContextManager[Any]] | None = None,
-        fallback_namespaces: tuple[str, ...] = (),
         list_contexts: Callable[[], tuple[list[str], str | None]] | None = None,
         probe_context: Callable[[str], Awaitable[None]] | None = None,
         switch_context: Callable[[str | None], Awaitable[ContextSwitchResult]] | None = None,
@@ -595,9 +605,6 @@ class KorvidApp(App[None]):
         self.store = store
         self.watch_manager = watch_manager
         self._list_namespaces = list_namespaces
-        #: RBAC-limited fallback (issue #49): configured/kubeconfig namespaces
-        #: offered when cluster-wide namespace listing is forbidden.
-        self._fallback_namespaces = fallback_namespaces
         #: `:ctx` collaborators (issue #36), wired by the composition root:
         #: kubeconfig context listing, the pre-switch auth probe, and the
         #: connection/capability retarget. All None in builds without a
@@ -956,10 +963,17 @@ class KorvidApp(App[None]):
 
     @classmethod
     def _binding_actions(cls) -> dict[str, tuple[str, ...]]:
-        """Every remappable app action mapped to its default keys."""
+        """Every remappable app action mapped to its default keys.
+
+        Bindings without a keymap ``id`` (the parametrised 1-9 favorites)
+        are excluded: Textual's keymap moves bindings by id, so an
+        id-less binding cannot actually be remapped.
+        """
         actions: dict[str, tuple[str, ...]] = {}
         for raw in cls.BINDINGS:
             binding = raw if isinstance(raw, Binding) else Binding(*raw)
+            if binding.id is None:
+                continue
             actions[binding.action] = (*actions.get(binding.action, ()), binding.key)
         return actions
 
@@ -1039,14 +1053,8 @@ class KorvidApp(App[None]):
         def _on_watch_error(detail: str) -> None:
             self.post_message(ShowError("Watch failed", detail))
 
-        def _on_watch_notice(detail: str) -> None:
-            # Informational (issue #49): e.g. per-namespace fallback engaged.
-            # Watch tasks run on the app's event loop, so notify is safe here.
-            self.notify(detail, severity="warning")
-
         self.store.subscribe(_on_store_update)
         self.watch_manager.on_error = _on_watch_error
-        self.watch_manager.on_notice = _on_watch_notice
         if self._metrics is not None:
             # Metrics updates reuse the pods render path; the pending guard in
             # _on_store_update coalesces them with watch events.
@@ -1365,13 +1373,25 @@ class KorvidApp(App[None]):
             new_scope = ALL_NAMESPACES
         await self.on_navigate_command(NavigateCommand(None, new_scope))
 
+    async def action_favorite_namespace(self, index: int) -> None:
+        """Jump to `favorite_namespaces[index-1]` (issue #108, keys 1-9).
+
+        A favorite is a UI-only shortcut: it uses the exact same navigation
+        path as `:ns <name>` — no access is granted, no namespace list is
+        derived, and a forbidden watch reports its own concise notice.
+        """
+        favorites = self.config.favorite_namespaces
+        if index > len(favorites):
+            return
+        await self.on_navigate_command(NavigateCommand(None, favorites[index - 1]))
+
     async def _cluster_list_permitted(self) -> bool:
-        """All-namespaces guard (issue #49): without fallback namespaces a
-        forbidden cluster-wide LIST would only loop error cards — SSAR-check
-        first and stay put with an inline notice instead. Fanout-capable
-        setups (fallback namespaces configured) and SSAR failures pass
-        through (fail-open; the watch reports real errors on its own)."""
-        if self._check_permission is None or self._fallback_namespaces:
+        """All-namespaces guard (issue #108): a forbidden cluster-wide LIST
+        would only loop error cards — SSAR-check first and stay put with an
+        inline notice instead. Checked fresh on every `0` press so a later
+        RBAC grant is observed; SSAR failures pass through (fail-open; the
+        watch reports real errors on its own)."""
+        if self._check_permission is None:
             return True
         meta = self.aliases.get(self.current_kind)
         if meta is None:
@@ -1393,8 +1413,8 @@ class KorvidApp(App[None]):
         if not allowed:
             self.notify(
                 f"Cluster-wide {plural} list forbidden — staying in"
-                f" {self.current_scope!r}. Add `namespaces:` to config.yaml for"
-                " a multi-namespace view within your RBAC grants.",
+                f" {self.current_scope!r}. Press 0 again after access is"
+                " granted, or switch namespaces with `:ns <name>`.",
                 severity="warning",
             )
         return allowed
@@ -1454,22 +1474,12 @@ class KorvidApp(App[None]):
         return True
 
     def _handle_namespace_list_error(self, exc: ApiStatusError) -> None:
-        """RBAC-limited fallback for the picker (issue #49): a forbidden
-        cluster-wide LIST opens the picker with the configured/kubeconfig
-        namespaces; with none configured, point at `:ns <name>` free-text
-        entry instead of an error dead-end."""
-        if exc.status == 403 and self._fallback_namespaces:
-            self.notify(
-                "Cluster-wide namespace list forbidden — showing configured namespaces",
-                severity="warning",
-            )
-            fallback = list(self._fallback_namespaces)
-            self._command_bar.namespace_words = fallback
-            self._namespace_picker.open(fallback)
-            return
+        """403 is an authorization boundary (issue #108): show one concise
+        permission notice pointing at `:ns <name>` free-text entry — never
+        manufacture a namespace list from configuration."""
         msg = explain_api_error(exc.status, exc.reason, "namespaces", None)
         if exc.status == 403:
-            msg += " Switch directly with `:ns <name>` or add `namespaces:` to config.yaml."
+            msg += " Switch directly with `:ns <name>`."
         self.notify(msg, title="Failed to list namespaces", severity="error")
 
     # ------------------------------------------------------------------
@@ -1778,8 +1788,6 @@ class KorvidApp(App[None]):
                 severity="warning",
                 timeout=10,
             )
-        self._fallback_namespaces = result.fallback_namespaces
-        self.watch_manager.set_fallback_namespaces(result.fallback_namespaces)
         if self._audit is not None:
             self._audit.set_context(name)
         if self._forwards is not None:

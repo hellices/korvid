@@ -131,26 +131,6 @@ def test_all_namespaces_get_sorted_by_namespace_then_name() -> None:
     ]
 
 
-def test_clear_namespace_removes_only_that_namespace() -> None:
-    """Per-namespace watch fallback re-LISTs one namespace at a time (issue #49):
-    purging its slice must not wipe other namespaces from the shared bucket."""
-    store = ResourceStore()
-    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("a", ns="default"))
-    store.apply_event("pods", ALL_NAMESPACES, "ADDED", _pod("b", ns="prod"))
-    seen: list[str] = []
-    store.subscribe(seen.append)
-    store.clear_namespace("pods", ALL_NAMESPACES, "prod")
-    result = store.get("pods", ALL_NAMESPACES)
-    assert [(p.namespace, p.name) for p in result] == [("default", "a")]
-    assert seen == ["pods"]
-
-
-def test_clear_namespace_on_missing_bucket_is_noop() -> None:
-    store = ResourceStore()
-    store.clear_namespace("pods", ALL_NAMESPACES, "prod")
-    assert store.get("pods", ALL_NAMESPACES) == []
-
-
 def test_clear_all_drops_every_bucket_and_notifies() -> None:
     """`:ctx` teardown (issue #36): no rows from the old cluster may survive."""
     store = ResourceStore()

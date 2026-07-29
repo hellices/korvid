@@ -40,6 +40,9 @@ _ACTION_GROUPS: dict[str, tuple[str, ...]] = {
     "help": ("Global",),
     "open_command": ("Global",),
     "toggle_all_namespaces": ("Global",),
+    # Parametrised 1-9 favorites (issue #108) merge into one row via the
+    # base-action dedupe in `_add`.
+    "favorite_namespace": ("Global",),
     # `/` filters the table but searches inside the log / describe panes.
     "open_filter": ("Table", "Logs"),
     "describe": ("Table",),
@@ -86,8 +89,13 @@ def key_label(key: str) -> str:
     return plain
 
 
+def _base_action(action: str) -> str:
+    """Action name without call parameters (``favorite_namespace(3)`` → ``favorite_namespace``)."""
+    return action.split("(")[0]
+
+
 def _groups_for_action(action: str) -> tuple[str, ...]:
-    return _ACTION_GROUPS.get(action, ("Global",))
+    return _ACTION_GROUPS.get(_base_action(action), ("Global",))
 
 
 def _as_binding(binding: BindingType) -> Binding:
@@ -126,7 +134,9 @@ def collect_help(
     seen_actions: set[tuple[str, str]] = set()
 
     def _add(group: str, binding: Binding) -> None:
-        marker = (group, binding.action)
+        # Dedupe on the base action so parametrised bindings (nine 1-9
+        # favorites) collapse into a single row under the first key.
+        marker = (group, _base_action(binding.action))
         if marker in seen_actions:
             return
         seen_actions.add(marker)

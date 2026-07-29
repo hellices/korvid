@@ -271,7 +271,8 @@ async def test_same_kind_different_scope_independent_watches() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-namespace fallback when cluster-scope watch is forbidden (issue #49)
+# 403 is an authorization boundary (issue #108): reported once, no retry
+# loops, no per-namespace fanout — the API server owns authorization.
 # ---------------------------------------------------------------------------
 
 
@@ -279,81 +280,9 @@ def _ns_pod(name: str, ns: str) -> PodSummary:
     return PodSummary(name=name, namespace=ns, phase="Running", ready="1/1", restarts=0, node=None)
 
 
-async def test_all_ns_403_falls_back_to_per_namespace_watches() -> None:
-    """403 on the cluster-scope watch fans out to the configured namespaces;
-    events from every namespace land in the ALL_NAMESPACES bucket."""
-    store = ResourceStore()
-    notices: list[str] = []
-
-    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        if scope == ALL_NAMESPACES:
-            raise ApiStatusError(403, "Forbidden")
-        yield ("ADDED", _ns_pod(f"p-{scope}", scope))
-        while True:
-            await asyncio.sleep(0.01)
-
-    mgr = WatchManager(store, source, fallback_namespaces=("team-a", "team-b"), retry_delay=0)
-    mgr.on_notice = notices.append
-    await mgr.start("pods", ALL_NAMESPACES)
-    await asyncio.sleep(0.1)
-    names = {(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)}
-    assert names == {("team-a", "p-team-a"), ("team-b", "p-team-b")}
-    # The fanout keeps running under the original (kind, ALL) key.
-    assert mgr.active == {("pods", ALL_NAMESPACES)}
-    assert notices
-    assert "team-a" in notices[0]
-    await mgr.stop_all()
-
-
-async def test_all_ns_403_without_fallback_keeps_error_path() -> None:
-    """No configured namespaces -> the existing retry-then-report path stands."""
-    store = ResourceStore()
-    errors: list[str] = []
-
-    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        raise ApiStatusError(403, "Forbidden")
-        yield ("", _ns_pod("", ""))  # pragma: no cover - async generator typing aid
-
-    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=2)
-    await mgr.start("pods", ALL_NAMESPACES)
-    await asyncio.sleep(0.05)
-    assert mgr.active == set()
-    assert errors
-
-
-async def test_fanout_single_namespace_failure_is_isolated() -> None:
-    """One forbidden namespace must not kill the other namespace watches."""
-    store = ResourceStore()
-    errors: list[str] = []
-
-    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        if scope == ALL_NAMESPACES or scope == "team-b":
-            raise ApiStatusError(403, "Forbidden")
-        yield ("ADDED", _ns_pod(f"p-{scope}", scope))
-        while True:
-            await asyncio.sleep(0.01)
-
-    mgr = WatchManager(
-        store,
-        source,
-        on_error=errors.append,
-        fallback_namespaces=("team-a", "team-b"),
-        retry_delay=0,
-        max_retries=2,
-    )
-    await mgr.start("pods", ALL_NAMESPACES)
-    await asyncio.sleep(0.1)
-    names = {(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)}
-    assert names == {("team-a", "p-team-a")}
-    assert errors
-    assert any("team-b" in e for e in errors)
-    assert mgr.active == {("pods", ALL_NAMESPACES)}  # team-a stream still alive
-    await mgr.stop_all()
-
-
-async def test_namespaced_scope_403_never_fans_out() -> None:
-    """The fallback applies to the cluster scope only: a forbidden single
-    namespace is a real error, not a fanout trigger."""
+async def test_cluster_scope_403_reports_once_without_retries() -> None:
+    """A Forbidden cluster-scope watch is deterministic: one attempt, one
+    report, no retry loop and no per-namespace watch tasks."""
     store = ResourceStore()
     errors: list[str] = []
     scopes_seen: list[str] = []
@@ -363,133 +292,89 @@ async def test_namespaced_scope_403_never_fans_out() -> None:
         raise ApiStatusError(403, "Forbidden")
         yield ("", _ns_pod("", ""))  # pragma: no cover - async generator typing aid
 
-    mgr = WatchManager(
-        store,
-        source,
-        on_error=errors.append,
-        fallback_namespaces=("team-a",),
-        retry_delay=0,
-        max_retries=2,
-    )
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=5)
+    await mgr.start("pods", ALL_NAMESPACES)
+    await asyncio.sleep(0.05)
+    assert scopes_seen == [ALL_NAMESPACES]
+    assert len(errors) == 1
+    assert mgr.active == set()
+
+
+async def test_namespaced_scope_403_reports_once_without_retries() -> None:
+    """A forbidden single-namespace watch gets the same one-shot report."""
+    store = ResourceStore()
+    errors: list[str] = []
+    scopes_seen: list[str] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        scopes_seen.append(scope)
+        raise ApiStatusError(403, "Forbidden")
+        yield ("", _ns_pod("", ""))  # pragma: no cover - async generator typing aid
+
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=5)
     await mgr.start("pods", "secret-ns")
     await asyncio.sleep(0.05)
-    assert errors
-    assert set(scopes_seen) == {"secret-ns"}
+    assert scopes_seen == ["secret-ns"]
+    assert len(errors) == 1
+    assert mgr.active == set()
 
 
-async def test_fanout_reconnect_purges_only_its_namespace() -> None:
-    """A namespace stream that ends re-LISTs on reconnect; the purge must not
-    drop the other namespaces' rows from the shared ALL bucket."""
-    store = ResourceStore()
-
-    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        if scope == ALL_NAMESPACES:
-            raise ApiStatusError(403, "Forbidden")
-        yield ("ADDED", _ns_pod(f"p-{scope}", scope))
-        if scope == "team-a":
-            return  # stream ends normally -> reconnect + re-LIST
-        while True:
-            await asyncio.sleep(0.01)
-
-    mgr = WatchManager(store, source, fallback_namespaces=("team-a", "team-b"), retry_delay=0.01)
-    await mgr.start("pods", ALL_NAMESPACES)
-    await asyncio.sleep(0.15)
-    names = {(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)}
-    assert names == {("team-a", "p-team-a"), ("team-b", "p-team-b")}
-    await mgr.stop_all()
-
-
-async def test_non_403_error_on_all_scope_does_not_fan_out() -> None:
-    """Only a Forbidden answer proves an RBAC boundary; network flakes and
-    server errors keep the normal retry path."""
+async def test_403_purges_rows_seeded_by_the_forbidden_list() -> None:
+    """The source LISTs before it WATCHes: rows can land in the bucket before
+    the 403 — they must not stay visible after the denial."""
     store = ResourceStore()
     errors: list[str] = []
-    scopes_seen: list[str] = []
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        scopes_seen.append(scope)
+        yield ("ADDED", _ns_pod("stale", "other-ns"))
+        raise ApiStatusError(403, "Forbidden")
+
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0)
+    await mgr.start("pods", ALL_NAMESPACES)
+    await asyncio.sleep(0.05)
+    assert store.get("pods", ALL_NAMESPACES) == []
+    assert len(errors) == 1
+
+
+async def test_non_403_errors_keep_the_retry_path() -> None:
+    """Network flakes / server errors are transient: retry up to max_retries
+    before reporting."""
+    store = ResourceStore()
+    errors: list[str] = []
+    attempts: list[str] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        attempts.append(scope)
         raise ApiStatusError(500, "Internal Server Error")
         yield ("", _ns_pod("", ""))  # pragma: no cover - async generator typing aid
 
-    mgr = WatchManager(
-        store,
-        source,
-        on_error=errors.append,
-        fallback_namespaces=("team-a",),
-        retry_delay=0,
-        max_retries=2,
-    )
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=3)
     await mgr.start("pods", ALL_NAMESPACES)
     await asyncio.sleep(0.05)
-    assert errors
-    assert set(scopes_seen) == {ALL_NAMESPACES}
+    assert len(attempts) == 3
+    assert len(errors) == 1
 
 
-async def test_cluster_scoped_kind_403_does_not_fan_out() -> None:
-    """watch_objects ignores the namespace for cluster-scoped kinds: a fanout
-    would just repeat the same forbidden cluster-wide request per namespace."""
+async def test_restarted_watch_after_403_observes_a_new_grant() -> None:
+    """A later RBAC grant must be picked up by the next started watch — the
+    manager must not stay pinned to the denial."""
     store = ResourceStore()
     errors: list[str] = []
-    scopes_seen: list[str] = []
+    granted = False
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        scopes_seen.append(scope)
-        raise ApiStatusError(403, "Forbidden")
-        yield ("", _ns_pod("", ""))  # pragma: no cover - async generator typing aid
+        if not granted:
+            raise ApiStatusError(403, "Forbidden")
+        yield ("ADDED", _ns_pod("p1", "team-a"))
+        while True:
+            await asyncio.sleep(0.01)
 
-    mgr = WatchManager(
-        store,
-        source,
-        on_error=errors.append,
-        fallback_namespaces=("team-a",),
-        is_namespaced=lambda kind: kind != "nodes",
-        retry_delay=0,
-        max_retries=2,
-    )
-    await mgr.start("nodes", ALL_NAMESPACES)
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0)
+    await mgr.start("pods", ALL_NAMESPACES)
     await asyncio.sleep(0.05)
-    assert errors
-    assert set(scopes_seen) == {ALL_NAMESPACES}
-
-
-async def test_fanout_purges_rows_seeded_by_the_forbidden_cluster_list() -> None:
-    """The source LISTs before it WATCHes: rows can land in the ALL bucket
-    before the watch answers 403. Fanout must purge them, or rows from
-    namespaces outside the fallback set would stay visible forever."""
-    store = ResourceStore()
-
-    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        if scope == ALL_NAMESPACES:
-            yield ("ADDED", _ns_pod("stale", "other-ns"))
-            raise ApiStatusError(403, "Forbidden")
-        yield ("ADDED", _ns_pod(f"p-{scope}", scope))
-        while True:
-            await asyncio.sleep(0.01)
-
-    mgr = WatchManager(store, source, fallback_namespaces=("team-a",), retry_delay=0)
+    assert mgr.active == set()
+    granted = True
     await mgr.start("pods", ALL_NAMESPACES)
-    await asyncio.sleep(0.1)
-    names = {(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)}
-    assert names == {("team-a", "p-team-a")}
-    await mgr.stop_all()
-
-
-async def test_set_fallback_namespaces_applies_to_next_fanout() -> None:
-    """`:ctx` switching (issue #36) re-derives the fallback set for the new
-    cluster; a later 403 fanout must watch the new namespaces, not the old."""
-    store = ResourceStore()
-
-    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
-        if scope == ALL_NAMESPACES:
-            raise ApiStatusError(403, "Forbidden")
-        yield ("ADDED", _ns_pod(f"p-{scope}", scope))
-        while True:
-            await asyncio.sleep(0.01)
-
-    mgr = WatchManager(store, source, fallback_namespaces=("old-a", "old-b"), retry_delay=0)
-    mgr.set_fallback_namespaces(("new-a",))
-    await mgr.start("pods", ALL_NAMESPACES)
-    await asyncio.sleep(0.1)
-    names = {(p.namespace, p.name) for p in store.get("pods", ALL_NAMESPACES)}
-    assert names == {("new-a", "p-new-a")}
+    await asyncio.sleep(0.05)
+    assert [p.name for p in store.get("pods", ALL_NAMESPACES)] == ["p1"]
     await mgr.stop_all()

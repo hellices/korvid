@@ -501,7 +501,9 @@ def _build_agent_wiring(
     return agent_runtime, configurator, rebuild_agent, retarget_agent, provider_box, ui_proxy
 
 
-def _load_startup_config(readonly: bool, mcp: bool = False) -> KorvidConfig:
+def _load_startup_config(
+    readonly: bool, mcp: bool = False, namespace: str | None = None
+) -> KorvidConfig:
     config = load_config()
     if readonly:
         config = dataclasses.replace(config, readonly=True)
@@ -512,6 +514,14 @@ def _load_startup_config(readonly: bool, mcp: bool = False) -> KorvidConfig:
     resolved_ctx = resolve_context_name(config.kube_context)
     if resolved_ctx != config.kube_context:
         config = dataclasses.replace(config, kube_context=resolved_ctx)
+    # Startup namespace (issue #108): CLI -n > config `namespace:` >
+    # kubeconfig context namespace > "default". All four select one concrete
+    # namespace — none represents an RBAC grant or namespace discovery.
+    resolved_ns = (
+        namespace or config.namespace or resolve_context_namespace(config.kube_context) or "default"
+    )
+    if resolved_ns != config.namespace:
+        config = dataclasses.replace(config, namespace=resolved_ns)
     # Kind-aware column validation lives in the UI layer (only it knows each
     # kind's headers); config parsing already rejected the universal names.
     views, view_warnings = sanitize_views(config.views)
@@ -566,20 +576,6 @@ def _protected_context_name(config: KorvidConfig, context: str | None) -> str | 
     return None
 
 
-def _fallback_namespaces(config: KorvidConfig, context: str | None) -> tuple[str, ...]:
-    """Namespaces an RBAC-limited user can fall back to (issue #49), deduped
-    in priority order: explicit `namespaces:` config, the kubeconfig
-    context's namespace, korvid's default namespace. *context* is explicit
-    (not read from config) so a runtime `:ctx` switch can re-derive the set
-    for the new cluster (issue #36)."""
-    candidates = [
-        *config.namespaces,
-        resolve_context_namespace(context),
-        config.namespace,
-    ]
-    return tuple(dict.fromkeys(ns for ns in candidates if ns))
-
-
 def _make_switch_context(
     config: KorvidConfig,
     kube: KubeClient,
@@ -625,14 +621,11 @@ def _make_switch_context(
             cluster_context_note(provider_info),
         )
         # The startup `config` is a stale snapshot here: _apply_context_switch
-        # folds each applied context's namespace into app.config, and that
-        # evolving session default must seed the next cluster's fallback set
-        # (e.g. A -> B(ns-b) -> C(no namespace) keeps ns-b).
+        # folds each applied context's namespace into app.config.
         effective_config = app_box[0].config if app_box else config
         return ContextSwitchResult(
             pod_resize_supported=pod_resize_supported,
             provider_hint=provider_info.display if provider_info.known else None,
-            fallback_namespaces=_fallback_namespaces(effective_config, name),
             context_namespace=resolve_context_namespace(name),
             protected_context=_protected_context_name(effective_config, name),
             # HelmCLI pins --kube-context per instance: rebuild it for the
@@ -698,8 +691,8 @@ def _make_get_manifest(
     return get_manifest
 
 
-async def _run(readonly: bool = False, mcp: bool = False) -> None:
-    config = _load_startup_config(readonly, mcp)
+async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None = None) -> None:
+    config = _load_startup_config(readonly, mcp, namespace)
     # Custom columns (issue #45) are extracted from raw manifests inside the
     # client — the manifests are discarded once summaries are built.
     kube = KubeClient(custom_columns={kind: view.columns for kind, view in config.views.items()})
@@ -724,24 +717,7 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
 
     get_events = KubeEventsFetcher()
 
-    # RBAC-limited fallback namespaces (issue #49): the config list plus the
-    # kubeconfig context's namespace and korvid's default namespace, deduped
-    # in priority order. Feeds the picker and the per-namespace watch fanout.
-    fallback_namespaces = _fallback_namespaces(config, config.kube_context)
-
-    def _is_namespaced(kind: str) -> bool:
-        # Cluster-scoped kinds must not fan out per namespace (the source
-        # ignores the namespace for them); unknown kinds fail the watch with
-        # a ValueError anyway, so answer False conservatively.
-        meta = aliases.get(kind)
-        return meta.namespaced if meta is not None else False
-
-    watch_manager = WatchManager(
-        store,
-        source,
-        fallback_namespaces=fallback_namespaces,
-        is_namespaced=_is_namespaced,
-    )
+    watch_manager = WatchManager(store, source)
 
     # One bounded discovery round trip decides both the R keybinding and
     # whether the agent is offered the resize tool (issue #27).
@@ -774,7 +750,6 @@ async def _run(readonly: bool = False, mcp: bool = False) -> None:
         store=store,
         watch_manager=watch_manager,
         list_namespaces=kube.list_namespaces,
-        fallback_namespaces=fallback_namespaces,
         aliases=aliases,
         get_manifest=get_manifest,
         get_events=get_events,
@@ -827,13 +802,20 @@ def main() -> None:
         help="Disable all cluster write operations (keybindings and agent tools).",
     )
     parser.add_argument(
+        "-n",
+        "--namespace",
+        default=None,
+        help="Namespace to start in (overrides config `namespace:` and the"
+        " kubeconfig context namespace).",
+    )
+    parser.add_argument(
         "--mcp",
         action="store_true",
         help="Expose read + UI-drive tools to external MCP hosts over"
         " Streamable HTTP on 127.0.0.1 (port from config mcp.port, default 7878).",
     )
     args = parser.parse_args()
-    asyncio.run(_run(readonly=args.readonly, mcp=args.mcp))
+    asyncio.run(_run(readonly=args.readonly, mcp=args.mcp, namespace=args.namespace))
 
 
 if __name__ == "__main__":

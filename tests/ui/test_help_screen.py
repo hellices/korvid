@@ -92,7 +92,19 @@ def test_every_app_binding_action_has_an_explicit_group() -> None:
 
     for binding in KorvidApp.BINDINGS:
         action = binding.action if isinstance(binding, Binding) else binding[1]
-        assert action in _ACTION_GROUPS, f"unclassified binding action: {action}"
+        base_action = action.split("(")[0]
+        assert base_action in _ACTION_GROUPS, f"unclassified binding action: {action}"
+
+
+def test_collect_help_merges_parametrised_favorite_bindings_into_one_row() -> None:
+    """The nine 1-9 favorite bindings collapse into a single Global row."""
+    favorites = [
+        Binding(str(i), f"favorite_namespace({i})", "Jump to favorite namespace (1-9)", show=False)
+        for i in range(1, 10)
+    ]
+    groups = dict(collect_help(favorites, []))
+    rows = [row for row in groups.get("Global", []) if "favorite" in row[1].lower()]
+    assert rows == [("1", "Jump to favorite namespace (1-9)")]
 
 
 def test_collect_help_describe_screen_bindings_join_describe_group() -> None:
