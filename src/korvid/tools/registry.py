@@ -791,7 +791,7 @@ TOOL_DEFS: list[ToolDef] = [
                     "allOf": [
                         {
                             "if": {
-                                "properties": {"action": {"enum": ["delete", "rollout_restart"]}},
+                                "properties": {"action": {"enum": ["delete"]}},
                                 "required": ["action"],
                             },
                             "then": {
@@ -806,11 +806,26 @@ TOOL_DEFS: list[ToolDef] = [
                         },
                         {
                             "if": {
+                                "properties": {"action": {"enum": ["rollout_restart"]}},
+                                "required": ["action"],
+                            },
+                            "then": {
+                                "required": ["kind", "namespace"],
+                                "not": {
+                                    "anyOf": [
+                                        {"required": ["replicas"]},
+                                        {"required": ["resources"]},
+                                    ]
+                                },
+                            },
+                        },
+                        {
+                            "if": {
                                 "properties": {"action": {"enum": ["scale"]}},
                                 "required": ["action"],
                             },
                             "then": {
-                                "required": ["kind", "replicas"],
+                                "required": ["kind", "replicas", "namespace"],
                                 "not": {"required": ["resources"]},
                             },
                         },
@@ -820,7 +835,7 @@ TOOL_DEFS: list[ToolDef] = [
                                 "required": ["action"],
                             },
                             "then": {
-                                "required": ["resources"],
+                                "required": ["resources", "namespace"],
                                 "not": {"required": ["replicas"]},
                             },
                         },

@@ -499,6 +499,17 @@ async def test_non_ascii_capability_is_rejected_not_a_crash() -> None:
     assert executor.calls == []
 
 
+async def test_lone_surrogate_capability_is_rejected_not_a_crash() -> None:
+    """A raw JSON `"\\ud800"` decodes to a lone surrogate, which raises
+    UnicodeEncodeError from `str.encode()` — the handler must still return
+    the documented capability error for every string input."""
+    executor = RecordingExecutor()
+    server = make_proposal_server(executor)
+    result = await server.call_tool("propose_write", {**_PROPOSE_ARGS, "capability": "\ud800"})
+    assert result[0].text == "ERROR: invalid or missing capability token"
+    assert executor.calls == []
+
+
 async def test_propose_write_with_capability_dispatches_with_identity() -> None:
     executor = RecordingExecutor()
     server = make_proposal_server(executor)

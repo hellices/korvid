@@ -216,11 +216,15 @@ class KorvidMCPServer:
         supplied = args.pop("capability", None)
         if self._capability_token is None:
             return "ERROR: write proposals are not enabled on this server"
-        # Compare UTF-8 bytes: `compare_digest` raises TypeError on non-ASCII
-        # `str` input, and the supplied value is untrusted MCP input — every
-        # string mismatch must yield the error response, never an exception.
-        if not isinstance(supplied, str) or not secrets.compare_digest(
-            supplied.encode(), self._capability_token.encode()
+        # Generated tokens are ASCII (`secrets.token_urlsafe`); the supplied
+        # value is untrusted MCP input where `str.encode()` can raise
+        # UnicodeEncodeError (lone surrogates) and `compare_digest` raises
+        # TypeError on non-ASCII str — every mismatch must yield the error
+        # response, never an exception, so reject non-ASCII input first.
+        if (
+            not isinstance(supplied, str)
+            or not supplied.isascii()
+            or not secrets.compare_digest(supplied, self._capability_token)
         ):
             return "ERROR: invalid or missing capability token"
         return None

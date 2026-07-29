@@ -458,12 +458,16 @@ def test_propose_write_schema_encodes_action_specific_requirements() -> None:
         for action in branch["if"]["properties"]["action"]["enum"]
     }
     assert set(branches) == {"delete", "scale", "rollout_restart", "resize"}
+    # Every supported scale/restart/resize target is namespaced, so the
+    # schema requires namespace there; delete may hit cluster-scoped kinds.
+    assert "kind" in branches["delete"]["required"]
+    assert "namespace" not in branches["delete"]["required"]
+    assert set(branches["rollout_restart"]["required"]) == {"kind", "namespace"}
     for action in ("delete", "rollout_restart"):
-        assert "kind" in branches[action]["required"]
         exclusions = branches[action]["not"]["anyOf"]
         assert {"required": ["replicas"]} in exclusions
         assert {"required": ["resources"]} in exclusions
-    assert set(branches["scale"]["required"]) == {"kind", "replicas"}
+    assert set(branches["scale"]["required"]) == {"kind", "replicas", "namespace"}
     assert branches["scale"]["not"] == {"required": ["resources"]}
-    assert branches["resize"]["required"] == ["resources"]
+    assert set(branches["resize"]["required"]) == {"resources", "namespace"}
     assert branches["resize"]["not"] == {"required": ["replicas"]}
