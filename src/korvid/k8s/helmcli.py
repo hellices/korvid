@@ -39,6 +39,14 @@ class ChartHit:
     description: str
 
 
+@dataclass(frozen=True)
+class HelmRepo:
+    """One row of `helm repo list -o json`."""
+
+    name: str
+    url: str
+
+
 async def _execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
     """Run one subprocess to completion: (exit code, stdout, stderr).
 
@@ -133,6 +141,39 @@ class HelmCLI:
         except HelmError:
             return False
         return any(line.split()[:1] == ["diff"] for line in stdout.splitlines()[1:])
+
+    async def repo_list(self) -> list[HelmRepo]:
+        """Configured chart repositories, in helm's own order.
+
+        `helm repo list` exits non-zero with "no repositories to show" when
+        none are configured yet - that is an empty list here, not an error,
+        so a fresh setup lands on the repo screen instead of a failure toast.
+        """
+        try:
+            stdout = await self._run("repo", "list", "-o", "json")
+        except HelmError as exc:
+            if "no repositories" in str(exc).lower():
+                return []
+            raise
+        try:
+            data = json.loads(stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise HelmError(f"unexpected helm output: {exc}") from exc
+        repos: list[HelmRepo] = []
+        for item in data if isinstance(data, list) else []:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            repos.append(HelmRepo(name=str(item.get("name", "")), url=str(item.get("url", ""))))
+        return repos
+
+    async def repo_add(self, name: str, url: str) -> str:
+        """`helm repo add` - a local helm-config write (no cluster access);
+        the caller collects name and URL through an explicit typed form."""
+        return await self._run("repo", "add", name, url)
+
+    async def repo_update(self) -> str:
+        """`helm repo update` - refresh the local index of every repo."""
+        return await self._run("repo", "update")
 
     @staticmethod
     def _release_args(

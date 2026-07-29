@@ -13,7 +13,7 @@ from unittest import mock
 
 import pytest
 
-from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, find_helm
+from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, HelmRepo, find_helm
 
 pytestmark = pytest.mark.asyncio
 
@@ -330,3 +330,71 @@ async def test_upgrade_without_reuse_omits_the_flag() -> None:
     with mock.patch("korvid.k8s.helmcli._execute", execute):
         await cli.upgrade("web", "bitnami/nginx", "default")
     assert "--reuse-values" not in execute.await_args_list[0].args[0]
+
+
+REPO_LIST_JSON = json.dumps(
+    [
+        {"name": "bitnami", "url": "https://charts.bitnami.com/bitnami"},
+        {"name": "jetstack", "url": "https://charts.jetstack.io"},
+    ]
+)
+
+
+async def test_repo_list_parses_repos() -> None:
+    cli, execute = _cli()
+    execute.return_value = (0, REPO_LIST_JSON, "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        repos = await cli.repo_list()
+    assert repos == [
+        HelmRepo("bitnami", "https://charts.bitnami.com/bitnami"),
+        HelmRepo("jetstack", "https://charts.jetstack.io"),
+    ]
+    argv = execute.await_args_list[0].args[0]
+    assert argv[1:4] == ["repo", "list", "-o"]
+
+
+async def test_repo_list_empty_when_no_repos_configured() -> None:
+    """`helm repo list` exits non-zero with 'no repositories to show' when
+    none are configured - that is an empty list, not an error."""
+    cli, execute = _cli()
+    execute.return_value = (1, "", "Error: no repositories to show")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        repos = await cli.repo_list()
+    assert repos == []
+
+
+async def test_repo_list_other_failure_raises_helm_error() -> None:
+    cli, execute = _cli()
+    execute.return_value = (1, "", "Error: something broke")
+    with (
+        mock.patch("korvid.k8s.helmcli._execute", execute),
+        pytest.raises(HelmError, match="something broke"),
+    ):
+        await cli.repo_list()
+
+
+async def test_repo_list_skips_malformed_entries() -> None:
+    cli, execute = _cli()
+    execute.return_value = (0, json.dumps([{"url": "https://x"}, {"name": "ok", "url": "u"}]), "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        repos = await cli.repo_list()
+    assert repos == [HelmRepo("ok", "u")]
+
+
+async def test_repo_add_builds_argv() -> None:
+    cli, execute = _cli()
+    execute.return_value = (0, '"bitnami" has been added to your repositories\n', "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        out = await cli.repo_add("bitnami", "https://charts.bitnami.com/bitnami")
+    assert "added" in out
+    argv = execute.await_args_list[0].args[0]
+    assert argv[1:5] == ["repo", "add", "bitnami", "https://charts.bitnami.com/bitnami"]
+
+
+async def test_repo_update_builds_argv() -> None:
+    cli, execute = _cli()
+    execute.return_value = (0, "Update Complete.\n", "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        await cli.repo_update()
+    argv = execute.await_args_list[0].args[0]
+    assert argv[1:3] == ["repo", "update"]
