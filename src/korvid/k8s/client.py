@@ -20,6 +20,7 @@ from kubernetes_asyncio import watch as k8s_watch
 from kubernetes_asyncio.stream import WsApiClient
 
 from korvid.k8s.columns import CustomColumn, evaluate_all
+from korvid.k8s.components import ComponentRef, manifest_components
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan, build_drain_plan
@@ -543,6 +544,45 @@ class KubeClient(ReadOps, WriteOps):
         async for event_type, secret in self._watch_helm_secrets(namespace):
             yield (event_type, revision_from_secret(secret))
 
+    @staticmethod
+    def _helm_revision(secret: dict[str, Any]) -> int:
+        labels = (secret.get("metadata") or {}).get("labels") or {}
+        try:
+            return int(labels.get("version") or 0)
+        except ValueError:
+            return 0
+
+    async def _helm_release_secret(
+        self, namespace: str, name: str, revision: int | None = None
+    ) -> dict[str, Any]:
+        """The release's revision Secret (latest, or the requested revision).
+
+        Raises ApiStatusError(404) when no matching revision Secret exists.
+        """
+        base = self._helm_secrets_base(namespace)
+        path = f"{base}?{urlencode(self._helm_secrets_query(name=name))}"
+        data = await self._request_json(path)
+        items = list(data.get("items", []))
+        if revision is not None:
+            items = [s for s in items if self._helm_revision(s) == revision]
+        if not items:
+            raise ApiStatusError(404, f"helm release {name!r} not found in {namespace!r}")
+        return max(items, key=self._helm_revision)
+
+    async def get_helm_release_components(self, namespace: str, name: str) -> list[ComponentRef]:
+        """Component refs from the latest revision's rendered manifest.
+
+        Raises ApiStatusError(404) when the release does not exist; an
+        undecodable payload degrades to an empty component list (the tree
+        then shows only the root, matching the browser's label fallback).
+        """
+        chosen = await self._helm_release_secret(namespace, name)
+        try:
+            payload = decode_release(chosen)
+        except ValueError:
+            return []
+        return manifest_components(payload.get("manifest"))
+
     async def get_helm_release(
         self, namespace: str, name: str, revision: int | None = None
     ) -> dict[str, Any]:
@@ -555,23 +595,8 @@ class KubeClient(ReadOps, WriteOps):
         ``warning`` key (the browser lists such releases via the same
         fallback, so describe must not fail where the row still shows).
         """
-        base = self._helm_secrets_base(namespace)
-        path = f"{base}?{urlencode(self._helm_secrets_query(name=name))}"
-        data = await self._request_json(path)
-
-        def _rev(secret: dict[str, Any]) -> int:
-            labels = (secret.get("metadata") or {}).get("labels") or {}
-            try:
-                return int(labels.get("version") or 0)
-            except ValueError:
-                return 0
-
-        items = list(data.get("items", []))
-        if revision is not None:
-            items = [s for s in items if _rev(s) == revision]
-        if not items:
-            raise ApiStatusError(404, f"helm release {name!r} not found in {namespace!r}")
-        chosen = max(items, key=_rev)
+        chosen = await self._helm_release_secret(namespace, name, revision)
+        _rev = self._helm_revision
         labels = (chosen.get("metadata") or {}).get("labels") or {}
         try:
             payload = decode_release(chosen)

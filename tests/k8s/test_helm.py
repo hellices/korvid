@@ -469,3 +469,43 @@ class TestGetHelmRelease:
             pytest.raises(ApiStatusError, match="not found"),
         ):
             await client.get_helm_release("default", "ghost")
+
+
+class TestGetHelmReleaseComponents:
+    async def test_components_come_from_the_rendered_manifest(self) -> None:
+        payload = _payload()
+        payload["manifest"] = (
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web-nginx\n"
+            "---\n"
+            "apiVersion: v1\nkind: Service\nmetadata:\n  name: web-nginx\n"
+        )
+        client = KubeClient()
+        list_resp = {"items": [_secret("web", 1), _secret("web", 3, payload=payload)]}
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        ):
+            refs = await client.get_helm_release_components("default", "web")
+        assert [(r.kind, r.name) for r in refs] == [
+            ("Deployment", "web-nginx"),
+            ("Service", "web-nginx"),
+        ]
+
+    async def test_undecodable_payload_degrades_to_no_components(self) -> None:
+        secret = _secret("web", 2, data={"release": base64.b64encode(b"junk").decode()})
+        client = KubeClient()
+        list_resp = {"items": [secret]}
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        ):
+            assert await client.get_helm_release_components("default", "web") == []
+
+    async def test_unknown_release_raises_not_found(self) -> None:
+        client = KubeClient()
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(return_value={"items": []})),
+            pytest.raises(ApiStatusError, match="not found"),
+        ):
+            await client.get_helm_release_components("default", "ghost")
