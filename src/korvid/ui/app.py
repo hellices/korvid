@@ -4306,10 +4306,13 @@ class KorvidApp(App[None]):
             return
         meta, ns, name, uid = target
         epoch = self._ctx_epoch
+        # Captured with the target: view state is mutable across the awaits
+        # below, and the banner must describe the row the user acted on.
+        kind_alias = self._canonical_kind(self.current_kind)
         if not await self._precheck_keybinding_write("delete", meta, ns, name):
             return
         preview = await self._dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
-        note = await self._managed_note(self._canonical_kind(self.current_kind), ns, name)
+        note = await self._managed_note(kind_alias, ns, name)
         if not self._write_context_intact(
             "delete", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
@@ -4345,6 +4348,8 @@ class KorvidApp(App[None]):
             )
             return
         epoch = self._ctx_epoch
+        # Captured with the target — see action_delete_resource.
+        kind_alias = self._canonical_kind(self.current_kind)
         if not await self._precheck_keybinding_write("rollout_restart", meta, ns, name):
             return
         # One stamp per approval: the previewed request and the executed
@@ -4353,7 +4358,7 @@ class KorvidApp(App[None]):
         preview = await self._dry_run_preview(
             ops.preview_rollout_restart(meta, ns, name, uid=uid, restarted_at=stamp)
         )
-        note = await self._managed_note(self._canonical_kind(self.current_kind), ns, name)
+        note = await self._managed_note(kind_alias, ns, name)
         if not self._write_context_intact(
             "rollout_restart", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
@@ -4596,6 +4601,8 @@ class KorvidApp(App[None]):
             self.notify(f"scale does not apply to {self._gvr_label(meta)}", severity="warning")
             return
         epoch = self._ctx_epoch
+        # Captured with the target — see action_delete_resource.
+        kind_alias = self._canonical_kind(self.current_kind)
         if not await self._precheck_keybinding_write("scale", meta, ns, name):
             return
         current = self._current_replicas(ns, name)
@@ -4605,7 +4612,9 @@ class KorvidApp(App[None]):
                 return
             # The dry-run round trip must not run inside a screen callback:
             # a worker fetches the preview, revalidates, then confirms.
-            self.run_worker(self._confirm_scale(meta, ns, name, uid, current, replicas, epoch))
+            self.run_worker(
+                self._confirm_scale(meta, ns, name, uid, current, replicas, epoch, kind_alias)
+            )
 
         await self.push_screen(
             ReplicasPrompt(f"{self._gvr_label(meta)}/{name}", current=current), _on_replicas
@@ -4620,16 +4629,18 @@ class KorvidApp(App[None]):
         current: int | None,
         replicas: int,
         epoch: int,
+        kind_alias: str,
     ) -> None:
         """Dry-run preview + approval dialog for a scale, after the replica
         count is known. Revalidates the selection after the preview round
         trip: keystrokes during the await must never land on a confirmation
-        for a different row."""
+        for a different row. `kind_alias` was captured with the target — the
+        banner must describe the row the user acted on, not the current view."""
         ops = self._write_ops
         if ops is None:
             return
         preview = await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
-        note = await self._managed_note(self._canonical_kind(self.current_kind), ns, name)
+        note = await self._managed_note(kind_alias, ns, name)
         if not self._write_context_intact(
             "scale", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):

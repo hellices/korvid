@@ -246,3 +246,22 @@ def test_managed_by_is_frozen() -> None:
     found = manager_of(_manifest(labels={"olm.managed": "true"}))
     assert isinstance(found, ManagedBy)
     assert found.__dataclass_params__.frozen  # type: ignore[attr-defined]  # dataclass introspection
+
+
+def test_string_controller_flag_is_not_controlling() -> None:
+    """ownerReferences.controller is a boolean in the API; a malformed
+    string value like "false" must not be treated as truthy — that would
+    produce a false ownership warning."""
+    manifest = {
+        "metadata": {
+            "ownerReferences": [
+                {
+                    "apiVersion": "kafka.strimzi.io/v1beta2",
+                    "kind": "Kafka",
+                    "name": "prod",
+                    "controller": "false",
+                }
+            ]
+        }
+    }
+    assert manager_of(manifest) is None

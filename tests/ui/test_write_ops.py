@@ -1327,3 +1327,34 @@ async def test_edit_cancelled_when_selection_changes_during_ownership_lookup(
         )
         assert not isinstance(app.screen, ConfirmScreen)
     assert rec.calls == []
+
+
+async def test_banner_kind_captured_before_the_preview_await(tmp_path: Path) -> None:
+    """The banner lookup uses the kind captured when the write flow began:
+    the view can change during the preview await and change back before the
+    final selection check, and the dialog must not carry a note fetched for
+    an unrelated kind (issue #119 review)."""
+    looked_up: list[str] = []
+    app_holder: list[KorvidApp] = []
+
+    class ViewSwitchingRecorder(Recorder):
+        async def preview_delete(
+            self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+        ) -> list[str] | None:
+            # The user browses to another view while the preview is in flight…
+            app_holder[0].current_kind = "deployments"
+            return None
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        looked_up.append(kind)
+        # …and returns to the original view before the final check.
+        app_holder[0].current_kind = "pods"
+        return {"metadata": {"name": name}}
+
+    app = make_app(ViewSwitchingRecorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    app_holder.append(app)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+    assert looked_up == ["pods"]

@@ -124,7 +124,7 @@ def _olm_csv_owner(meta: dict[str, Any]) -> str | None:
 
 def _cr_controller_manager(meta: dict[str, Any]) -> ManagedBy | None:
     for ref in _owner_refs(meta):
-        if not ref.get("controller"):
+        if ref.get("controller") is not True:  # boolean in the API; strings are malformed
             continue
         api_version = ref.get("apiVersion")
         kind = ref.get("kind")
