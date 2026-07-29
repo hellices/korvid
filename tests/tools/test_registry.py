@@ -323,3 +323,102 @@ def test_executor_surface_lists_are_isolated_from_the_registry() -> None:
     for surface in (READ_TOOLS, UI_TOOLS, WRITE_TOOLS, RESIZE_TOOLS):
         for schema in surface:
             assert _mutable_ids(schema).isdisjoint(canonical_ids)
+
+
+# --- external write proposals (issue #110) -------------------------------
+
+
+def test_proposal_tools_are_registered_with_the_proposal_effect() -> None:
+    for name in ("propose_write", "get_write_proposal", "cancel_write_proposal"):
+        tool = next(d for d in TOOL_DEFS if d.name == name)
+        assert tool.effect == "write_proposal"
+        assert tool.surfaces == frozenset({"mcp_proposal"})
+        assert tool.approval == "none"
+        assert tool.write_action is None
+
+
+def test_mcp_surface_excludes_proposal_tools_by_default() -> None:
+    names = _names(mcp_tool_schemas())
+    assert "propose_write" not in names
+    assert "get_write_proposal" not in names
+    assert "cancel_write_proposal" not in names
+
+
+def test_mcp_surface_offers_proposal_tools_only_when_enabled() -> None:
+    names = _names(mcp_tool_schemas(write_proposals=True))
+    assert "propose_write" in names
+    assert "get_write_proposal" in names
+    assert "cancel_write_proposal" in names
+    # Direct write tools stay off the MCP surface even with proposals on.
+    for direct in ("delete_resource", "scale_resource", "rollout_restart", "resize_pod"):
+        assert direct not in names
+
+
+def test_agent_surfaces_never_offer_proposal_tools() -> None:
+    for surface in ("full_agent", "small_agent"):
+        names = _names(agent_tool_schemas(surface, readonly=False, resize_supported=True))
+        assert "propose_write" not in names
+
+
+def test_validate_rejects_cluster_write_on_the_proposal_surface() -> None:
+    bad = _tool(
+        "a",
+        effect="cluster_write",
+        approval="user_confirmation",
+        write_action="delete",
+        dispatch="agent_request_write",
+        surfaces=frozenset({"full_agent", "mcp_proposal"}),
+    )
+    with pytest.raises(ValueError, match="mcp"):
+        validate_tool_defs([bad])
+
+
+def test_validate_rejects_proposal_tool_outside_the_proposal_surface() -> None:
+    bad = _tool(
+        "a",
+        effect="write_proposal",
+        dispatch="agent_submit_write_proposal",
+        surfaces=frozenset({"mcp"}),
+    )
+    with pytest.raises(ValueError, match="mcp_proposal"):
+        validate_tool_defs([bad])
+
+
+def test_validate_rejects_proposal_tool_with_write_action_or_approval() -> None:
+    with pytest.raises(ValueError, match="write_action"):
+        validate_tool_defs(
+            [
+                _tool(
+                    "a",
+                    effect="write_proposal",
+                    dispatch="agent_submit_write_proposal",
+                    surfaces=frozenset({"mcp_proposal"}),
+                    write_action="delete",
+                )
+            ]
+        )
+    with pytest.raises(ValueError, match="approval"):
+        validate_tool_defs(
+            [
+                _tool(
+                    "a",
+                    effect="write_proposal",
+                    dispatch="agent_submit_write_proposal",
+                    surfaces=frozenset({"mcp_proposal"}),
+                    approval="user_confirmation",
+                )
+            ]
+        )
+
+
+def test_validate_dispatch_targets_rejects_proposal_tool_naming_the_write_entrypoint() -> None:
+    # A proposal tool must never route into the direct write path: the
+    # submit/status/cancel entrypoints are the only legal targets.
+    bad = _tool(
+        "a",
+        effect="write_proposal",
+        dispatch="agent_request_write",
+        surfaces=frozenset({"mcp_proposal"}),
+    )
+    with pytest.raises(ValueError, match="proposal"):
+        validate_dispatch_targets([bad], executor_cls=ToolExecutor, bridge_cls=UIBridge)

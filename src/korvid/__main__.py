@@ -258,6 +258,46 @@ class _UIBridgeProxy(UIBridge):
                 action, kind, name, namespace, replicas, resources
             )
 
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        if self.target is None:
+            return self._NOT_READY
+        async with self._lock:
+            return await self.target.agent_submit_write_proposal(
+                action,
+                kind,
+                name,
+                namespace,
+                replicas,
+                resources,
+                session_id=session_id,
+                client_name=client_name,
+                client_version=client_version,
+            )
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        if self.target is None:
+            return self._NOT_READY
+        async with self._lock:
+            return await self.target.agent_get_write_proposal(proposal_id)
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        if self.target is None:
+            return self._NOT_READY
+        async with self._lock:
+            return await self.target.agent_cancel_write_proposal(proposal_id, session_id=session_id)
+
 
 #: Upper bound on the pods/resize discovery probe at startup: the TUI must
 #: appear promptly even against a slow or hung apiserver.

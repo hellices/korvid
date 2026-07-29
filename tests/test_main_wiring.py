@@ -91,6 +91,30 @@ class _FakeApp(UIBridge):
         self.calls.append(f"write:{action}:{kind}/{name}:{resources}")
         return "ok-write"
 
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        self.calls.append(f"propose:{action}:{kind}/{name}")
+        return "ok-propose"
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        self.calls.append(f"proposal-status:{proposal_id}")
+        return "ok-status"
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        self.calls.append(f"proposal-cancel:{proposal_id}")
+        return "ok-cancel"
+
 
 async def test_proxy_without_target_returns_error() -> None:
     from korvid.__main__ import _UIBridgeProxy
@@ -267,6 +291,27 @@ class _OverlapProbeBridge(UIBridge):
         return await self._enter()
 
     async def agent_drill_down(self, name: str) -> str:
+        return await self._enter()
+
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        return await self._enter()
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        return await self._enter()
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
         return await self._enter()
 
     async def agent_request_write(

@@ -57,6 +57,27 @@ class _FakeBridge(UIBridge):
         )
         return f"approved and executed: {action} {kind}/{name}"
 
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        return "proposal pending"
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        return "proposal pending"
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        return "proposal cancelled"
+
 
 def test_write_tool_schemas() -> None:
     names = {t["function"]["name"] for t in WRITE_TOOLS}

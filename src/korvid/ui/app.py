@@ -6798,6 +6798,30 @@ class KorvidApp(App[None]):
         raw = (manifest.get("metadata") or {}).get("uid")
         return str(raw) if raw else None
 
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        """External MCP write proposal intake (issue #110). Not wired yet."""
+        return "ERROR: external write proposals are not enabled"
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        """Status lookup for an external write proposal. Not wired yet."""
+        return "ERROR: external write proposals are not enabled"
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        """Caller-initiated cancel of an external write proposal. Not wired yet."""
+        return "ERROR: external write proposals are not enabled"
+
     def _agent_write_op(
         self,
         action: str,
@@ -7161,3 +7185,34 @@ class AppUIBridge(UIBridge):
         return await self._app.agent_request_write(
             action, kind, name, namespace, replicas, resources
         )
+
+    async def agent_submit_write_proposal(
+        self,
+        action: str,
+        kind: str,
+        name: str,
+        namespace: str | None = None,
+        replicas: int | None = None,
+        resources: dict[str, dict[str, dict[str, str]]] | None = None,
+        *,
+        session_id: str = "",
+        client_name: str = "",
+        client_version: str = "",
+    ) -> str:
+        return await self._app.agent_submit_write_proposal(
+            action,
+            kind,
+            name,
+            namespace,
+            replicas,
+            resources,
+            session_id=session_id,
+            client_name=client_name,
+            client_version=client_version,
+        )
+
+    async def agent_get_write_proposal(self, proposal_id: str) -> str:
+        return await self._app.agent_get_write_proposal(proposal_id)
+
+    async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
+        return await self._app.agent_cancel_write_proposal(proposal_id, session_id=session_id)
