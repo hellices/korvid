@@ -193,9 +193,11 @@ async def list_remote_dir(open_exec: OpenExec, path: str) -> list[RemoteEntry]:
 
     Filenames containing an embedded LF are out of scope: the `ls -1`
     protocol separates records with LF, so such a name is indistinguishable
-    from two entries. Picking a resulting phantom entry only puts a
-    nonexistent path in the input field — `validate_spec` re-checks every
-    transfer, and the listing itself is read-only.
+    from two entries. A phantom entry that collides with a real sibling
+    (e.g. "decoy\\nlogs" next to a real "logs/") is rejected as an
+    ambiguous listing; the remaining phantoms only put a nonexistent path
+    in the input field — `validate_spec` re-checks every transfer, and the
+    listing itself is read-only.
     """
     sink = _FrameSink()
     # bytearray: += on bytes copies the accumulated listing per frame.
@@ -237,13 +239,22 @@ def _parse_listing(stdout: bytes | bytearray, path: str) -> list[RemoteEntry]:
         raise TransferError(f"directory listing for {path} contains non-UTF-8 names") from exc
     # LF only: splitlines() would also split on VT/FF/U+0085, which are
     # unusual but valid filename characters, producing phantom entries.
+    seen: set[str] = set()
     for line in text.split("\n"):
         if not line:
             continue
         if len(entries) >= _LIST_MAX_ENTRIES:
             raise TransferError(f"directory listing for {path} has too many entries to browse")
         is_dir = line.endswith("/")
-        entries.append(RemoteEntry(line.rstrip("/") if is_dir else line, is_dir))
+        name = line.rstrip("/") if is_dir else line
+        if name in seen:
+            # An embedded-LF name can alias a real sibling ("decoy\nlogs"
+            # next to a real "logs/" yields both a bare "logs" entry and a
+            # "logs" directory); real ls never emits duplicates, so an
+            # ambiguous listing degrades to manual entry.
+            raise TransferError(f"directory listing for {path} is ambiguous")
+        seen.add(name)
+        entries.append(RemoteEntry(name, is_dir))
     entries.sort(key=lambda e: (not e.is_dir, e.name))
     return entries
 

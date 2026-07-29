@@ -416,6 +416,16 @@ class TestListRemoteDir:
         with pytest.raises(TransferError, match="non-UTF-8"):
             await list_remote_dir(FakeExec(ws), "/srv")
 
+    async def test_duplicate_names_reject_listing(self) -> None:
+        # An embedded-LF name can alias a real sibling: "decoy\nlogs" plus a
+        # real "logs/" parses into both a bare "logs" file entry and a
+        # "logs" directory — picking the "file" would hand tar the real
+        # directory. Real ls never emits duplicates, so an ambiguous listing
+        # degrades to manual entry.
+        ws = FakeWs([b"\x01" + b"decoy\nlogs\nlogs/\n", b"\x03" + SUCCESS])
+        with pytest.raises(TransferError, match="ambiguous"):
+            await list_remote_dir(FakeExec(ws), "/srv")
+
     async def test_empty_directory(self) -> None:
         ws = FakeWs([b"\x03" + SUCCESS])
         assert await list_remote_dir(FakeExec(ws), "/empty") == []
