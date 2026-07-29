@@ -1032,3 +1032,115 @@ async def test_external_editor_suspend_not_supported_cancels(tmp_path: Path) -> 
             lambda: any("does not support" in n.message for n in app._notifications),
         )
     assert rec.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #119: ownership banner on managed targets
+# ---------------------------------------------------------------------------
+
+
+def _helm_deploy_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+    return {
+        "metadata": {
+            "name": name,
+            "namespace": ns,
+            "labels": {"app.kubernetes.io/managed-by": "Helm"},
+            "annotations": {
+                "meta.helm.sh/release-name": "nginx",
+                "meta.helm.sh/release-namespace": "web",
+            },
+        }
+    }
+
+
+async def test_delete_confirm_shows_the_ownership_banner(tmp_path: Path) -> None:
+    """A helm-managed target warns in the dialog before approval (issue #119)."""
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return _helm_deploy_manifest(kind, ns, name)
+
+    app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "deployments")
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        banner = app.screen.query_one(".confirm-managed")
+        assert "helm release web/nginx" in str(banner.render())
+
+
+async def test_pod_banner_walks_the_controller_chain(tmp_path: Path) -> None:
+    """A pod owned by rs -> deploy reports the top owner's manager: the pod
+    itself carries no helm annotations, the Deployment does (issue #119)."""
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        if kind == "pods":
+            return {
+                "metadata": {
+                    "name": name,
+                    "namespace": ns,
+                    "ownerReferences": [
+                        {
+                            "apiVersion": "apps/v1",
+                            "kind": "ReplicaSet",
+                            "name": "web-abc",
+                            "controller": True,
+                        }
+                    ],
+                }
+            }
+        if kind == "replicasets":
+            return {
+                "metadata": {
+                    "name": name,
+                    "namespace": ns,
+                    "ownerReferences": [
+                        {
+                            "apiVersion": "apps/v1",
+                            "kind": "Deployment",
+                            "name": "web",
+                            "controller": True,
+                        }
+                    ],
+                }
+            }
+        return _helm_deploy_manifest(kind, ns, name)
+
+    app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        banner = app.screen.query_one(".confirm-managed")
+        assert "helm release web/nginx" in str(banner.render())
+
+
+async def test_unmanaged_target_shows_no_banner(tmp_path: Path) -> None:
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return {"metadata": {"name": name, "namespace": ns}}
+
+    app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "deployments")
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        assert not app.screen.query(".confirm-managed")
+
+
+async def test_banner_lookup_failure_never_blocks_the_dialog(tmp_path: Path) -> None:
+    """The banner is best-effort display (fail-open): a broken manifest
+    fetch means no banner, never a blocked write flow."""
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+    rec = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path, get_manifest=get_manifest)
+    async with app.run_test() as pilot:
+        await _to_view(pilot, "deployments")
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        assert not app.screen.query(".confirm-managed")
+        await pilot.press("y")
+        await until(pilot, lambda: rec.calls == [("delete", "deployments", "default", "web")])
+        assert rec.calls == [("delete", "deployments", "default", "web")]

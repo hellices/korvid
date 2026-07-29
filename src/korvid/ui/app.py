@@ -79,6 +79,7 @@ from korvid.k8s.helm import (
 )
 from korvid.k8s.helmcli import ChartHit, HelmCLI
 from korvid.k8s.logs import LogLine
+from korvid.k8s.managed import manager_of
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import ContainerTrouble, PodSummary
 from korvid.k8s.olm import (
@@ -4247,6 +4248,7 @@ class KorvidApp(App[None]):
         require_name: str | None = None,
         preview: list[str] | None = None,
         preview_title: str = "server dry-run preview:",
+        managed_note: str | None = None,
     ) -> None:
         """The standard write-approval flow (issue #91 U1): push a confirm
         dialog and, on approval, launch `_run_write` on an app-owned worker.
@@ -4271,6 +4273,7 @@ class KorvidApp(App[None]):
                 require_name=require_name,
                 preview=preview,
                 preview_title=preview_title,
+                managed_note=managed_note,
             ),
             _done,
         )
@@ -4290,6 +4293,7 @@ class KorvidApp(App[None]):
         if not await self._precheck_keybinding_write("delete", meta, ns, name):
             return
         preview = await self._dry_run_preview(ops.preview_delete(meta, ns, name, uid=uid))
+        note = await self._managed_note(self._canonical_kind(self.current_kind), ns, name)
         if not self._write_context_intact(
             "delete", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
@@ -4306,6 +4310,7 @@ class KorvidApp(App[None]):
             op_factory=lambda: ops.delete_object(meta, ns, name, uid=uid),
             require_name=require,
             preview=preview,
+            managed_note=note,
         )
 
     async def action_rollout_restart(self) -> None:
@@ -4332,6 +4337,7 @@ class KorvidApp(App[None]):
         preview = await self._dry_run_preview(
             ops.preview_rollout_restart(meta, ns, name, uid=uid, restarted_at=stamp)
         )
+        note = await self._managed_note(self._canonical_kind(self.current_kind), ns, name)
         if not self._write_context_intact(
             "rollout_restart", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
@@ -4349,6 +4355,7 @@ class KorvidApp(App[None]):
                 meta, ns, name, uid=uid, restarted_at=stamp
             ),
             preview=preview,
+            managed_note=note,
         )
 
     async def _fetch_manifest_for_edit(
@@ -4424,6 +4431,9 @@ class KorvidApp(App[None]):
             name=name,
             op_factory=lambda: ops.replace_object(meta, ns, name, edited, uid=uid),
             detail=detail,
+            # The pre-edit manifest is already in hand — the banner costs at
+            # most the owner-chain walk.
+            managed_note=await self._managed_note_from(manifest, ns),
         )
 
     def _parse_edited_manifest(
@@ -4596,6 +4606,7 @@ class KorvidApp(App[None]):
         if ops is None:
             return
         preview = await self._dry_run_preview(ops.preview_scale(meta, ns, name, replicas, uid=uid))
+        note = await self._managed_note(self._canonical_kind(self.current_kind), ns, name)
         if not self._write_context_intact(
             "scale", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
@@ -4613,6 +4624,7 @@ class KorvidApp(App[None]):
             op_factory=lambda: ops.scale_object(meta, ns, name, replicas, uid=uid),
             detail=f"replicas -> {replicas}",
             preview=preview,
+            managed_note=note,
         )
 
     async def action_resize_pod(self) -> None:
@@ -4720,6 +4732,7 @@ class KorvidApp(App[None]):
         preview = await self._dry_run_preview(
             ops.preview_resize(namespace, name, resources, uid=uid)
         )
+        note = await self._managed_note("pods", ns, name)
         if not self._write_context_intact(
             "resize", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
@@ -4735,6 +4748,7 @@ class KorvidApp(App[None]):
             op_factory=lambda: ops.resize_pod(namespace, name, resources, uid=uid),
             detail=summary,
             preview=preview,
+            managed_note=note,
         )
 
     def _node_target(self, action: str) -> tuple[WriteOps, ResourceMeta, str, str | None] | None:
@@ -6319,6 +6333,7 @@ class KorvidApp(App[None]):
         require_name: str | None = None,
         preview: list[str] | None = None,
         preview_title: str = "server dry-run preview:",
+        managed_note: str | None = None,
     ) -> ConfirmScreen:
         """Build every write-approval dialog through one place so the
         protected-context layer (issue #83) can never be forgotten: while a
@@ -6331,6 +6346,7 @@ class KorvidApp(App[None]):
             preview=preview,
             preview_title=preview_title,
             protected_context=self._protected_context,
+            managed_note=managed_note,
         )
 
     # ------------------------------------------------------------------
@@ -6949,12 +6965,14 @@ class KorvidApp(App[None]):
         preview = await self._preview_for_action(
             action, meta, ns, name, replicas, resources, uid, stamp
         )
+        note = await self._managed_note(kind.strip().lower(), ns, name)
         require = name if action == "delete" and not meta.namespaced else None
         decision = await self._await_user_approval(
             f"Agent requests: {action} {self._gvr_label(meta)}/{name}{self._write_locus(ns)}",
             operation,
             require_name=require,
             preview=preview,
+            managed_note=note,
         )
         if decision == "expired":
             return (
@@ -7035,6 +7053,50 @@ class KorvidApp(App[None]):
             return None
         raw = (manifest.get("metadata") or {}).get("uid")
         return str(raw) if raw else None
+
+    async def _managed_note(self, kind_alias: str, ns: str | None, name: str) -> str | None:
+        """Ownership banner text for a write dialog, or None (issue #119).
+
+        Best-effort display support, fail-open: no manifest source, a slow
+        or failed lookup, or an unmanaged target all yield None — the write
+        flow itself is never blocked or delayed past `_UID_LOOKUP_TIMEOUT`.
+        """
+        if self._get_manifest is None:
+            return None
+        try:
+            manifest = await asyncio.wait_for(
+                self._get_manifest(kind_alias, ns, name), _UID_LOOKUP_TIMEOUT
+            )
+        except Exception as exc:  # display support only — never blocks the write
+            logger.debug("manager lookup for %s/%s failed: %s", ns, name, exc)
+            return None
+        return await self._managed_note_from(manifest, ns)
+
+    async def _managed_note_from(self, manifest: dict[str, Any], ns: str | None) -> str | None:
+        """Manager note for an already-fetched manifest, walking the built-in
+        controller chain when the object itself looks unmanaged: a pod owned
+        by rs -> deploy reports the Deployment's manager (helm annotations
+        live on the top-level object, not on every pod it produced)."""
+        found = manager_of(manifest)
+        current = manifest
+        for _ in range(2):
+            if found is not None:
+                break
+            owner = controller_owner(current)
+            if owner is None:
+                break
+            plural = self._WORKLOAD_PLURALS.get(owner[0])
+            if plural is None or self._get_manifest is None:
+                break
+            try:
+                current = await asyncio.wait_for(
+                    self._get_manifest(plural, ns, owner[1]), _UID_LOOKUP_TIMEOUT
+                )
+            except Exception as exc:  # display support only
+                logger.debug("owner-chain lookup for %s/%s failed: %s", ns, owner[1], exc)
+                return None
+            found = manager_of(current)
+        return found.note if found is not None else None
 
     async def agent_submit_write_proposal(
         self,
@@ -7666,6 +7728,7 @@ class KorvidApp(App[None]):
         *,
         require_name: str | None = None,
         preview: list[str] | None = None,
+        managed_note: str | None = None,
     ) -> Literal["approved", "declined", "expired"]:
         """Show a ConfirmScreen and wait for the user's decision. Only real key
         input can resolve it. While the agent panel is collapsed, or another
@@ -7688,7 +7751,13 @@ class KorvidApp(App[None]):
             if not fut.done():
                 fut.set_result(bool(confirmed))
 
-        screen = self._confirm_screen(title, operation, require_name=require_name, preview=preview)
+        screen = self._confirm_screen(
+            title,
+            operation,
+            require_name=require_name,
+            preview=preview,
+            managed_note=managed_note,
+        )
         await self.push_screen(screen, _done)
         # Recheck after mounting: surfacing the dialog (or push_screen itself)
         # can consume the last of the budget, and a fixed minimum here would
