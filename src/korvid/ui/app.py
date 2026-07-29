@@ -7183,11 +7183,6 @@ class KorvidApp(App[None]):
         if decision == "declined":
             await self._resolve_proposal_audited(store, proposal, "denied", "denied by user")
             return True
-        if not store.begin_execution(proposal.id):
-            # Cancelled or TTL-expired while the dialog was open: the
-            # approval no longer has a pending proposal to claim.
-            self.notify("The proposal was withdrawn before approval landed", severity="warning")
-            return True
         await self._execute_proposal(store, proposal, meta, ns, op)
         return True
 
@@ -7294,12 +7289,20 @@ class KorvidApp(App[None]):
         ns: str | None,
         op: Callable[[str | None], Awaitable[None]],
     ) -> None:
-        """Execute a claimed proposal under the nav lock so a context switch
-        cannot interleave with the mutation: the approval dialog may have
-        been open for minutes, so the context epoch and RBAC are rechecked
-        *after* the claim, then the UID binding, then the same fail-closed
-        audit-before-mutation path as every other write."""
+        """Claim and execute an approved proposal under the nav lock so a
+        context switch or `:mcp off` cannot interleave: the claim itself is
+        linearized with the shutdown/switch expiry sweeps (if one of those
+        won while the dialog was open or the lock was contended, there is no
+        pending proposal left to claim). After the claim, the context epoch
+        and RBAC are rechecked, then the UID binding, then the same
+        fail-closed audit-before-mutation path as every other write."""
         async with self._nav_lock:
+            if not store.begin_execution(proposal.id):
+                # Cancelled, TTL-expired, or invalidated (MCP shutdown /
+                # context switch) before the claim landed: the approval no
+                # longer has a pending proposal to execute.
+                self.notify("The proposal was withdrawn before approval landed", severity="warning")
+                return
             if proposal.context_epoch != self._ctx_epoch or (
                 proposal.context != self.config.kube_context
             ):
@@ -7338,7 +7341,7 @@ class KorvidApp(App[None]):
                 # Worker cancellation (TUI shutdown) after the claim: the
                 # record must still reach a terminal state, never a
                 # permanent `approved` over an uncertain cluster outcome.
-                self._settle_interrupted_execution(store, proposal, write)
+                await self._settle_interrupted_execution(store, proposal, write)
                 raise
             store.finish_execution(
                 proposal.id, executed=outcome == "done", reason="" if outcome == "done" else outcome
@@ -7346,9 +7349,8 @@ class KorvidApp(App[None]):
             if outcome == "done":
                 self.notify(f"Executed proposal: {proposal.summary}")
 
-    @staticmethod
-    def _settle_interrupted_execution(
-        store: ProposalStore, proposal: WriteProposal, write: asyncio.Future[str]
+    async def _settle_interrupted_execution(
+        self, store: ProposalStore, proposal: WriteProposal, write: asyncio.Future[str]
     ) -> None:
         """A claimed execution's worker was cancelled mid-write. Use the
         write's real outcome when it already settled; otherwise abandon the
@@ -7356,17 +7358,21 @@ class KorvidApp(App[None]):
         may not have committed the mutation by the time cancellation lands.
         """
         if write.done() and not write.cancelled() and write.exception() is None:
+            # _run_write already audited this outcome itself.
             outcome = write.result()
             store.finish_execution(
                 proposal.id, executed=outcome == "done", reason="" if outcome == "done" else outcome
             )
             return
         write.cancel()
-        store.finish_execution(
-            proposal.id,
-            executed=False,
-            reason="interrupted before completion — the cluster outcome is uncertain",
-        )
+        reason = "interrupted before completion — the cluster outcome is uncertain"
+        store.finish_execution(proposal.id, executed=False, reason=reason)
+        # _run_write only got as far as its intent record: the terminal
+        # outcome must reach the audit trail even while cancellation is
+        # unwinding — shield the append so a second cancel cannot skip it
+        # (the offloaded thread completes regardless).
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(self._audit_proposal_outcome(proposal, "failed", reason))
 
     def _agent_write_op(
         self,

@@ -328,6 +328,70 @@ async def test_worker_cancellation_never_strands_a_claimed_proposal(tmp_path: Pa
     assert rec.calls == []  # the gated write never went through
 
 
+async def test_approval_racing_a_shutdown_expiry_loses_the_claim(tmp_path: Path) -> None:
+    """The execution claim is linearized under `_nav_lock` with `:mcp off`'s
+    shutdown expiry: a proposal that was pending when shutdown began must be
+    expired, never claimed and executed after the server is gone."""
+    rec = Recorder()
+    store = ProposalStore()
+    app = make_app(rec, tmp_path / "a.jsonl", store)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        app._open_proposal_review()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        async with app._nav_lock:  # what :mcp off holds during shutdown
+            await pilot.press("y")
+            # The worker leaves the dialog and reaches the claim/lock wait.
+            await until(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
+            store.expire_all(reason="the MCP server was stopped")
+
+        def state() -> str:
+            found = store.get(pid)
+            return found[1] if found is not None else "gone"
+
+        await until(pilot, lambda: state() != "pending" and state() != "approved")
+        assert state() == "expired"
+    assert rec.calls == []
+
+
+async def test_cancelled_execution_still_audits_a_terminal_outcome(tmp_path: Path) -> None:
+    """When cancellation settles a claimed proposal as failed/uncertain, the
+    audit trail must not stop at `intent` — the terminal outcome is appended
+    even while the worker is unwinding."""
+    rec = GatedRecorder()
+    store = ProposalStore()
+    audit_path = tmp_path / "a.jsonl"
+    app = make_app(rec, audit_path, store)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        app._open_proposal_review()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+
+        def state() -> str:
+            found = store.get(pid)
+            return found[1] if found is not None else "gone"
+
+        await until(pilot, lambda: state() == "approved")
+        app.workers.cancel_group(app, "proposal-review")
+        await until(pilot, lambda: state() == "failed")
+
+        def audited() -> bool:
+            # The shielded append may still be in flight when the state
+            # flips — poll the file, not the in-memory transition.
+            if not audit_path.exists():
+                return False
+            text = audit_path.read_text()
+            return "proposal failed" in text and "uncertain" in text
+
+        await until(pilot, audited)
+    entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    outcomes = [e.get("outcome", "") for e in entries]
+    assert any(o.startswith("proposal failed") and "uncertain" in o for o in outcomes)
+
+
 async def test_hostile_client_metadata_cannot_forge_audit_fields(tmp_path: Path) -> None:
     """`client_name`/`client_version` are untrusted MCP metadata: a name like
     `trusted session=forged` must stay a single quoted value in the audit
@@ -519,8 +583,9 @@ async def test_submit_fails_closed_when_the_target_uid_cannot_be_captured(
 async def test_context_switch_after_the_approval_claim_fails_the_proposal(
     tmp_path: Path,
 ) -> None:
-    """begin_execution can win just before a context switch; the epoch must
-    be rechecked after the claim, immediately before mutation."""
+    """The context epoch must be rechecked right after the claim,
+    immediately before mutation — a switch that happened while the dialog
+    was open fails the proposal instead of writing to the new cluster."""
     rec = Recorder()
     store = ProposalStore()
     app = make_app(rec, tmp_path / "a.jsonl", store)
@@ -530,7 +595,6 @@ async def test_context_switch_after_the_approval_claim_fails_the_proposal(
         rebuilt = app._rebuild_proposal_op(proposal)
         assert not isinstance(rebuilt, str)
         meta, ns, op, _operation, _detail = rebuilt
-        assert store.begin_execution(proposal.id)
         app._ctx_epoch += 1  # a context switch raced the approval
         await app._execute_proposal(store, proposal, meta, ns, op)
         found = store.get(proposal.id)
