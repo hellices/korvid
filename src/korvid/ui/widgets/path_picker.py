@@ -34,14 +34,15 @@ def _display_name(name: str) -> str:
 
     ESC sequences, bidi controls, CR, and other non-printing characters can
     render invisibly or reorder text, making two different remote paths look
-    identical in the listing. Literal backslashes are escaped too so the
-    escaped forms stay unambiguous (a file literally named `\\x1b` must not
-    render like one containing a real ESC). Selection keeps the raw
-    `RemoteEntry` name.
+    identical in the listing; Zl/Zp line and paragraph separators (U+2028,
+    U+2029) can break the layout the same way. Literal backslashes are
+    escaped too so the escaped forms stay unambiguous (a file literally named
+    `\\x1b` must not render like one containing a real ESC). Selection keeps
+    the raw `RemoteEntry` name.
     """
     return "".join(
         repr(ch)[1:-1]
-        if unicodedata.category(ch) in ("Cc", "Cf")
+        if unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp")
         else ("\\\\" if ch == "\\" else ch)
         for ch in name
     )
@@ -200,15 +201,19 @@ class RemotePathPickerScreen(ModalScreen[str | None]):
         self._entries = entries
         options = self.query_one(OptionList)
         options.clear_options()
+        items: list[Option] = []
         if path != "/":
-            options.add_option(Option("../"))
+            items.append(Option("../"))
         for entry in entries:
             # Literal Text: names are cluster-controlled, so markup-enabled
             # strings would let "[red]secret[/red]" display as "secret" and
             # transfer a path other than the one the user sees. Control and
             # format characters are escaped for the same reason (_display_name).
             label = _display_name(entry.name)
-            options.add_option(Option(Text(f"{label}/" if entry.is_dir else label)))
+            items.append(Option(Text(f"{label}/" if entry.is_dir else label)))
+        # One bulk add: per-option add_option refreshes the list every call,
+        # which can freeze the picker (and Esc) on large-but-valid listings.
+        options.add_options(items)
         if options.option_count:
             options.highlighted = 0
         self.query_one(".picker-title", Static).update(f"Remote: {_display_name(path)}")
