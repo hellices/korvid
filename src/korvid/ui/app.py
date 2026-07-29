@@ -16,7 +16,7 @@ import tempfile
 import threading
 import weakref
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
@@ -671,7 +671,7 @@ class KorvidApp(App[None]):
         #: cancels it (evictions stop; the node stays cordoned).
         self._drain_worker: Worker[None] | None = None
         self._drain_node: str | None = None
-        self._drain_progress: str = ""
+        self._progress_label: str = ""
         #: detected cloud provider short name ("aks", "aws", ...) or None;
         #: drives the Service/Ingress describe footer (issue #30).
         self._provider_hint = provider_hint
@@ -719,7 +719,7 @@ class KorvidApp(App[None]):
         self._drain = DrainController(
             notify=self.notify,
             audit_write=lambda *args: self._audit_write(*args),
-            set_progress=self._set_drain_progress,
+            set_progress=self._set_progress,
         )
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
@@ -4197,7 +4197,10 @@ class KorvidApp(App[None]):
         on the helm revision drill-down the same key rolls the release back
         to the selected revision (issue #31)."""
         if self._canonical_kind(self.current_kind) == "helmrevisions":
-            await self._helm_rollback_flow()
+            # A worker, like install/upgrade: the diff preview can block for
+            # up to _HELM_PREVIEW_TIMEOUT and must not freeze the message
+            # pump (the status-bar progress could never paint).
+            self.run_worker(self._helm_rollback_flow(), exclusive=True, group="helm-write")
             return
         ops = self._write_ops
         if ops is None:
@@ -4652,7 +4655,9 @@ class KorvidApp(App[None]):
         on the helm browser the same key upgrades the selected release
         (issue #31)."""
         if self._canonical_kind(self.current_kind) == "helmreleases":
-            await self._helm_upgrade_flow()
+            # A worker, like install (see action_hint_details): the flow ends
+            # in a preview await that must not freeze the message pump.
+            self.run_worker(self._helm_upgrade_flow(), exclusive=True, group="helm-write")
             return
         await self._cordon_action(unschedulable=False)
 
@@ -4760,12 +4765,23 @@ class KorvidApp(App[None]):
             _done,
         )
 
-    def _set_drain_progress(self, label: str) -> None:
-        """Publish live drain progress on the status bar (issue #40); a
-        failure to render must never interrupt the drain itself."""
-        self._drain_progress = label
+    def _set_progress(self, label: str) -> None:
+        """Publish transient progress (drain, helm previews) on the status
+        bar; a failure to render must never interrupt the operation
+        itself."""
+        self._progress_label = label
         with contextlib.suppress(Exception):
             self._refresh_status()
+
+    @contextlib.contextmanager
+    def _progress(self, label: str) -> Iterator[None]:
+        """Status-bar progress scoped exactly to the wrapped await: shown on
+        entry, cleared on exit however the operation ends."""
+        self._set_progress(label)
+        try:
+            yield
+        finally:
+            self._set_progress("")
 
     @_tracks_cluster_write
     async def _run_drain(
@@ -5572,10 +5588,13 @@ class KorvidApp(App[None]):
                 line.strip() and not line.lstrip().startswith("#") for line in text.splitlines()
             )
             values_text = text if meaningful else None
-        # Rendering can take up to _HELM_PREVIEW_TIMEOUT: say so, or the UI
-        # looks frozen between the wizard and the approval dialog (issue #106).
-        self.notify("Rendering helm preview (dry-run)…", timeout=4)
-        rendered = await self._helm_change_preview(helm, hit, choices, values_text, upgrade=upgrade)
+        # Rendering can take up to _HELM_PREVIEW_TIMEOUT (20s): show progress
+        # for exactly as long as the render is pending, or the UI looks
+        # frozen between the wizard and the approval dialog (issue #106).
+        with self._progress("rendering helm preview (dry-run)"):
+            rendered = await self._helm_change_preview(
+                helm, hit, choices, values_text, upgrade=upgrade
+            )
         action = "helm-upgrade" if upgrade else "helm-install"
         if not self._helm_context_after_preview(action, choices, upgrade=upgrade, epoch=epoch):
             return
@@ -5744,8 +5763,8 @@ class KorvidApp(App[None]):
             self.notify("no helm revision selected", severity="warning")
             return
         namespace = ns or row.namespace
-        self.notify("Rendering rollback preview…", timeout=4)
-        preview = await self._helm_rollback_preview(helm, row.release, row.revision, namespace)
+        with self._progress("rendering rollback preview"):
+            preview = await self._helm_rollback_preview(helm, row.release, row.revision, namespace)
         if not self._write_context_intact(
             "helm-rollback", HELM_REVISIONS_META, ns, name, phase="the diff preview", epoch=epoch
         ):
@@ -6075,7 +6094,7 @@ class KorvidApp(App[None]):
             breadcrumb=self._drill.breadcrumb(),
             mcp_label=mcp_label,
             filter_label=self._resource_filter.describe(),
-            progress_label=self._drain_progress,
+            progress_label=self._progress_label,
             protected=self._protected_context is not None,
         )
 

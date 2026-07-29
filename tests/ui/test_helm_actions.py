@@ -677,6 +677,19 @@ async def test_install_picker_ctrl_r_manages_repositories(tmp_path: Path) -> Non
         assert ("repo-list",) in helm.calls
 
 
+class GatedRollbackPreviewHelm(FakeHelm):
+    """The rollback diff blocks until the test releases it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+        self.diff_plugin = True
+
+    async def diff_rollback(self, release: str, revision: int, namespace: str) -> str:
+        await self.gate.wait()
+        return await super().diff_rollback(release, revision, namespace)
+
+
 async def test_upgrade_aborts_when_selection_changes_during_preview(tmp_path: Path) -> None:
     """The preview runs after the wizard closes, over an interactive table:
     a selection/view change during it must cancel the confirmation, like
@@ -701,3 +714,54 @@ async def test_upgrade_aborts_when_selection_changes_during_preview(tmp_path: Pa
         )
         assert len(app.screen_stack) == 1
         assert not any(call[0] == "upgrade" for call in helm.calls)
+
+
+async def test_preview_progress_shows_while_render_pending_and_clears_after(
+    tmp_path: Path,
+) -> None:
+    """The dry-run render can take up to 20s: the status bar must show
+    progress exactly while `_helm_change_preview` is awaited (issue #106) —
+    present while the render is pending, gone once the dialog opens."""
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    def _bar(app: KorvidApp) -> str:
+        return str(app.query_one(StatusBar).render())
+
+    helm = GatedPreviewHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("u")
+        await _pick_first_chart(pilot, app, search_first=False)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        await pilot.press("enter")  # preview now pending on the gate
+        await until(
+            pilot, lambda: "helm preview" in _bar(app), label="progress visible during render"
+        )
+        helm.gate.set()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        assert "helm preview" not in _bar(app)
+        await pilot.press("n")
+
+
+async def test_rollback_preview_progress_shows_and_clears(tmp_path: Path) -> None:
+    """Same lifecycle guarantee for the rollback diff preview."""
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    def _bar(app: KorvidApp) -> str:
+        return str(app.query_one(StatusBar).render())
+
+    helm = GatedRollbackPreviewHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("r")
+        await until(
+            pilot, lambda: "rollback preview" in _bar(app), label="progress visible during render"
+        )
+        helm.gate.set()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        assert "rollback preview" not in _bar(app)
+        await pilot.press("n")
