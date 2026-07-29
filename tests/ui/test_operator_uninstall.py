@@ -253,6 +253,7 @@ async def test_apply_uninstall_reserves_the_cluster_write_slot_synchronously(
             "operators",
             "cert-manager",
             "sub-cert-manager",
+            fetch_kind="subscriptions",
             csv_meta=None,
             csv_name="",
             csv_uid=None,
@@ -263,6 +264,38 @@ async def test_apply_uninstall_reserves_the_cluster_write_slot_synchronously(
         finally:
             coro.close()  # keep a failed assert from leaking the coroutine
         assert app._active_cluster_writes == 0
+
+
+async def test_installed_csv_advancing_mid_dialog_aborts_the_uninstall(tmp_path: Path) -> None:
+    """OLM can advance `status.installedCSV` in place while the dialog is
+    open (same Subscription uid): the approved deletes would then target a
+    stale CSV. The apply step re-verifies the Subscription and aborts."""
+    ops = Recorder()
+    manifests: dict[str, dict[str, Any]] = {
+        "cert-manager": json.loads(json.dumps(_SUB_MANIFEST)),
+        "cert-manager.v1.14.4": _CSV_MANIFEST,
+    }
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        manifests,
+        tmp_path / "audit.jsonl",
+        write_ops=ops,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        # The operator upgrades while the dialog is open: same Subscription
+        # uid, new installed CSV.
+        manifests["cert-manager"]["status"]["installedCSV"] = "cert-manager.v1.14.5"
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any("changed while the dialog" in str(n.message) for n in app._notifications),
+            label="abort notified",
+        )
+        assert ops.calls == []
 
 
 async def test_subscription_uninstall_declined_runs_nothing(tmp_path: Path) -> None:

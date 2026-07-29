@@ -5809,6 +5809,7 @@ class KorvidApp(App[None]):
                         ns,
                         name,
                         uid,
+                        fetch_kind=fetch_kind,
                         csv_meta=csv_meta,
                         csv_name=csv_name,
                         csv_uid=csv_uid,
@@ -5907,6 +5908,7 @@ class KorvidApp(App[None]):
         name: str,
         uid: str | None,
         *,
+        fetch_kind: str,
         csv_meta: ResourceMeta | None,
         csv_name: str,
         csv_uid: str | None,
@@ -5915,6 +5917,13 @@ class KorvidApp(App[None]):
         each delete individually audited fail-closed. A failed or blocked
         Subscription delete leaves the CSV untouched - removing the CSV
         alone would only make OLM reinstall it."""
+        if await self._subscription_target_stale(fetch_kind, ns, name, uid, csv_name):
+            self.notify(
+                f"uninstall {name} aborted: the subscription changed while"
+                " the dialog was open - refresh and retry",
+                severity="warning",
+            )
+            return
         outcome = await self._run_write(
             "uninstall",
             sub_meta,
@@ -5933,6 +5942,27 @@ class KorvidApp(App[None]):
             ops.delete_object(csv_meta, ns, csv_name, uid=csv_uid),
             detail=f"subscription={name}",
         )
+
+    async def _subscription_target_stale(
+        self, fetch_kind: str, ns: str | None, name: str, uid: str | None, csv_name: str
+    ) -> bool:
+        """Whether the Subscription no longer matches what the user approved:
+        a different incarnation (uid changed), or OLM advanced
+        `status.installedCSV` in place while the dialog was open - the
+        approved deletes would then target a stale CSV and leave the new one
+        running. Fail-open on fetch errors: the deletes' own uid
+        preconditions still guard, and a vanished Subscription just makes
+        the first delete fail loudly."""
+        if self._get_manifest is None:
+            return False
+        try:
+            manifest = await self._get_manifest(fetch_kind, ns, name)
+        except Exception:
+            return False
+        fetched_uid = _manifest_uid(manifest)
+        if uid and fetched_uid and fetched_uid != uid:
+            return True
+        return _installed_csv_name(manifest) != csv_name
 
     async def _csv_uninstall_redirect(
         self, csv_meta: ResourceMeta, ns: str | None, name: str
