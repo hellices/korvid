@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from textual.pilot import Pilot
-from textual.widgets import DirectoryTree, Input, OptionList
+from textual.widgets import DirectoryTree, Input, OptionList, RadioSet
 
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.path_picker import LocalPathPickerScreen, RemotePathPickerScreen
@@ -210,3 +210,32 @@ class TestRemotePicker:
             )
             await until(pilot, lambda: app.screen is dialog, label="dialog kept")
             assert remote.value == "/srv/app.log"
+
+
+class TestBrowseGating:
+    async def test_ctrl_o_outside_path_fields_does_nothing(self) -> None:
+        # ctrl+o is a screen binding: with the direction radio focused it
+        # must not open any picker.
+        app = make_app([_pod("api-1")], open_pod_exec=FakeExecOpener(_listing()))
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            dialog.query_one(RadioSet).focus()
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            assert app.screen is dialog
+
+    async def test_unexpandable_tilde_falls_back_to_home(self) -> None:
+        # Path.expanduser raises RuntimeError for "~no_such_user/f": browsing
+        # must fall back to home, not escape the dialog handler.
+        app = make_app([_pod("api-1")], open_pod_exec=FakeExecOpener(_listing()))
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            local = dialog.query_one("#transfer-local", Input)
+            local.value = "~no_such_user_hopefully/file.log"
+            local.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, LocalPathPickerScreen), label="picker"
+            )
+            tree = app.screen.query_one(DirectoryTree)
+            assert Path(tree.path) == Path("~").expanduser()

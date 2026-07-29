@@ -430,3 +430,41 @@ class TestListRemoteDir:
         ws = FakeWs([b"\x01" + b"link\nreal/\n", b"\x03" + SUCCESS])
         entries = await list_remote_dir(FakeExec(ws), "/srv")
         assert entries == [RemoteEntry("real", True), RemoteEntry("link", False)]
+
+    async def test_transport_error_normalized_to_transfer_error(self) -> None:
+        # open_pod_exec propagates HTTP/connection failures from __aenter__;
+        # the picker's degradation contract only catches TransferError, so
+        # transport errors must be normalized here.
+        class BrokenExec:
+            def __call__(
+                self, command: list[str], stdin: bool
+            ) -> contextlib.AbstractAsyncContextManager[Any]:
+                @contextlib.asynccontextmanager
+                async def _cm() -> AsyncIterator[FakeWs]:
+                    raise ConnectionError("HTTP 403: exec forbidden")
+                    yield FakeWs([])  # pragma: no cover - unreachable
+
+                return _cm()
+
+        with pytest.raises(TransferError, match="exec forbidden"):
+            await list_remote_dir(BrokenExec(), "/srv")
+
+    async def test_cancellation_propagates(self) -> None:
+        # Cancellation is not a listing failure: it must never be swallowed
+        # into a TransferError.
+        class HangingExec:
+            def __call__(
+                self, command: list[str], stdin: bool
+            ) -> contextlib.AbstractAsyncContextManager[Any]:
+                @contextlib.asynccontextmanager
+                async def _cm() -> AsyncIterator[FakeWs]:
+                    await asyncio.sleep(3600)
+                    yield FakeWs([])  # pragma: no cover - unreachable
+
+                return _cm()
+
+        task = asyncio.create_task(list_remote_dir(HangingExec(), "/srv"))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task

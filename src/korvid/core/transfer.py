@@ -178,9 +178,15 @@ async def list_remote_dir(open_exec: OpenExec, path: str) -> list[RemoteEntry]:
     """
     sink = _FrameSink()
     stdout = b""
-    async with open_exec(list_dir_command(path), False) as ws:
-        async for msg in ws:
-            stdout += sink.feed(msg.data)
+    try:
+        async with open_exec(list_dir_command(path), False) as ws:
+            async for msg in ws:
+                stdout += sink.feed(msg.data)
+    except Exception as exc:
+        # open_pod_exec propagates transport/API failures (HTTP 403, broken
+        # connection) untyped; normalize them so callers can degrade to
+        # manual path entry. CancelledError is a BaseException and passes.
+        raise TransferError(f"cannot list {path}: {exc}") from exc
     if sink.failure is not None:
         raise TransferError(sink.error_message(f"cannot list {path}"))
     if not sink.verdict:

@@ -131,10 +131,13 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
 
     def action_browse(self) -> None:
         """ctrl+o: open the picker for whichever path input has focus."""
-        if self.focused is not None and self.focused.id == "transfer-remote":
+        focused = self.focused.id if self.focused is not None else None
+        if focused == "transfer-remote":
             self._browse_remote()
-        else:
+        elif focused == "transfer-local":
             self._browse_local()
+        # Any other focus (direction radio): the binding is screen-level,
+        # but browsing is advertised for the path fields only — do nothing.
 
     def _browse_local(self) -> None:
         current = self.query_one("#transfer-local", Input).value.strip()
@@ -218,7 +221,12 @@ class TransferProgressScreen(ModalScreen[None]):
 def _deepest_existing_dir(value: str) -> Path:
     """The deepest existing directory along ``value``; home when none fits."""
     if value:
-        path = Path(value).expanduser()
+        try:
+            path = Path(value).expanduser()
+        except RuntimeError:
+            # "~no_such_user/f": same fallback validate_spec applies — never
+            # let the expansion failure escape the dialog handler.
+            return Path("~").expanduser()
         for candidate in (path, *path.parents):
             if candidate.is_dir():
                 return candidate
