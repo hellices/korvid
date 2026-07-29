@@ -4613,7 +4613,7 @@ class KorvidApp(App[None]):
             return
         summary = self._resize_summary(resources)
         await self._push_write_confirmation(
-            f"Resize pods/{name}?",
+            f"Apply in-place pod resize to pods/{name}?",
             f"PATCH pods/{name}/resize: {summary}{self._write_locus(ns)}",
             action="resize",
             meta=meta,
