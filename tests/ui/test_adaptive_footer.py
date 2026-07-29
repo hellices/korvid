@@ -425,3 +425,57 @@ async def test_synthetic_helm_views_hide_generic_write_keys() -> None:
         assert "ctrl+d" not in active
         assert "e" not in active
         assert active["r"].binding.id == "helm_rollback"
+
+
+# ---------------------------------------------------------------------------
+# Helm actions guard direct invocation off-view (review round 2)
+# ---------------------------------------------------------------------------
+
+
+async def test_helm_actions_direct_invocation_off_view_warns(tmp_path: Path) -> None:
+    """`check_action` gates only key dispatch; a direct action call (e.g. via
+    the command palette or a remap race) must not open a Helm write flow with
+    a pod/deployment row as the release name. Each action explains itself and
+    stops before the Helm gate."""
+    app = make_app(audit=AuditLog(tmp_path / "audit.jsonl"))
+    async with app.run_test() as pilot:
+        await _rows_listed(pilot, app)  # pods view
+
+        def warned() -> bool:
+            return any(
+                "helm" in str(n.message).lower() and "view" in str(n.message).lower()
+                for n in app._notifications
+            )
+
+        app.action_helm_install()
+        await until(pilot, warned, label="install warned")
+        assert len(app.screen_stack) == 1  # no wizard pushed
+
+        app._notifications.clear()
+        app.action_helm_upgrade()
+        await until(pilot, warned, label="upgrade warned")
+        assert len(app.screen_stack) == 1
+
+        app._notifications.clear()
+        app.action_helm_rollback()
+        await until(pilot, warned, label="rollback warned")
+        assert len(app.screen_stack) == 1
+
+
+async def test_helm_rollback_direct_on_releases_view_warns(tmp_path: Path) -> None:
+    """Rollback resolves the selected row against the *revisions* store; on the
+    releases view a same-named release row must not be misread as a revision."""
+    app = make_app(audit=AuditLog(tmp_path / "audit.jsonl"))
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app)
+        app.action_helm_rollback()
+        await until(
+            pilot,
+            lambda: any(
+                "helm" in str(n.message).lower() and "view" in str(n.message).lower()
+                for n in app._notifications
+            ),
+            label="rollback warned",
+        )
+        assert len(app.screen_stack) == 1

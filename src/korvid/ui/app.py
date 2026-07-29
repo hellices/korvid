@@ -4676,17 +4676,31 @@ class KorvidApp(App[None]):
         """u: mark the selected node schedulable again (kubectl uncordon)."""
         await self._cordon_action(unschedulable=False)
 
+    def _helm_view_guard(self, meta: ResourceMeta, what: str) -> bool:
+        """`check_action` gates only key dispatch (issue #114); a direct
+        action call must not trust the focused row of an unrelated view as a
+        Helm release/revision name and open a write flow with it."""
+        current = self.aliases.get(self._canonical_kind(self.current_kind))
+        if current is not None and (current.group, current.plural) == (meta.group, meta.plural):
+            return True
+        self.notify(f"{what} is only available on the {meta.plural} view", severity="warning")
+        return False
+
     def action_helm_install(self) -> None:
         """i on the helm browser: start the chart install wizard (issue #31).
         Synchronous: the picker must open with the keypress, before any
         buffered navigation input could change the view the namespace is
         derived from."""
+        if not self._helm_view_guard(HELM_RELEASES_META, "Helm install"):
+            return
         self._helm_install_flow()
 
     def action_helm_upgrade(self) -> None:
         """u on the helm browser: upgrade the selected release (issue #31).
         Synchronous: the picker opens with the keypress; buffered cursor
         keys must not retarget the upgrade."""
+        if not self._helm_view_guard(HELM_RELEASES_META, "Helm upgrade"):
+            return
         self._helm_upgrade_flow()
 
     def action_helm_rollback(self) -> None:
@@ -4696,6 +4710,8 @@ class KorvidApp(App[None]):
         (the diff render can block for up to _HELM_PREVIEW_TIMEOUT and must
         not freeze the message pump, or the status-bar progress could never
         paint)."""
+        if not self._helm_view_guard(HELM_REVISIONS_META, "Helm rollback"):
+            return
         helm = self._helm_gate()
         if helm is None:
             return
@@ -6366,7 +6382,9 @@ class KorvidApp(App[None]):
     #: `packagemanifests`) must not surface another view's actions.
     #: `log_search_next`/`log_search_prev` stay unlisted on purpose: they
     #: also serve the describe pane's search (any view) and the
-    #: sort-by-name fallback.
+    #: sort-by-name fallback. Fail-closed by design: a kind missing from
+    #: `aliases` (e.g. mid-discovery) hides every listed action until its
+    #: identity is known.
     _ACTION_VIEWS: ClassVar[dict[str, frozenset[tuple[str, str]]]] = {
         "shell": frozenset({("", "pods"), ("", "nodes")}),
         "logs": frozenset({("", "pods")}),
