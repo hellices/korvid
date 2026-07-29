@@ -8,8 +8,8 @@ is the right confirmation shape here.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from typing import ClassVar
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any, ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -83,6 +83,10 @@ class HelmRepoScreen(ModalScreen[None]):
         self._repo_add = repo_add
         self._repo_update = repo_update
         self._created_time = Message().time
+        #: one repo operation at a time: `helm repo add/update` mutate local
+        #: helm config and must never be cancelled mid-flight by a newer
+        #: action — new work is rejected while one is pending.
+        self._busy = False
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -121,8 +125,19 @@ class HelmRepoScreen(ModalScreen[None]):
     def action_update_repos(self) -> None:
         self._start(self._update_repos())
 
-    def _start(self, work: Awaitable[None]) -> None:
-        self.run_worker(work, exclusive=True, group="helm-repos")
+    def _start(self, work: Coroutine[Any, Any, None]) -> None:
+        if self._busy:
+            work.close()
+            self._status("still working — wait for the current operation to finish")
+            return
+        self._busy = True
+        self.run_worker(self._guarded(work), group="helm-repos")
+
+    async def _guarded(self, work: Coroutine[Any, Any, None]) -> None:
+        try:
+            await work
+        finally:
+            self._busy = False
 
     def _status(self, text: str) -> None:
         self.query_one("#repo-status", Static).update(text)

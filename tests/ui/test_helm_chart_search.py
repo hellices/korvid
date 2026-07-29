@@ -194,3 +194,32 @@ async def test_ctrl_r_opens_repo_management() -> None:
         await _composed(app, pilot)
         await pilot.press("ctrl+r")
         await until(pilot, lambda: app.repos_opened == 1, label="repo callback invoked")
+
+
+async def test_resubmit_while_pending_keeps_the_spinner_owned_by_the_new_search() -> None:
+    """A second Enter cancels the previous exclusive search worker; its
+    cleanup must not hide the loading indicator the replacement owns."""
+    app = HostApp()
+    search = FakeSearch()
+    search.gate = asyncio.Event()
+    async with app.run_test() as pilot:
+        await _open(app, search)
+        await _composed(app, pilot)
+        await pilot.press("enter")  # search 1: pending on the gate
+        await until(
+            pilot,
+            lambda: app.screen.query_one(LoadingIndicator).display,
+            label="spinner visible",
+        )
+        await pilot.press("enter")  # search 2 replaces search 1
+        for _ in range(5):
+            await pilot.pause()
+        # the cancelled worker's cleanup ran by now: the spinner must survive
+        assert app.screen.query_one(LoadingIndicator).display
+        search.gate.set()
+        await until(
+            pilot,
+            lambda: not app.screen.query_one(LoadingIndicator).display,
+            label="spinner hidden after the live search",
+        )
+        assert _options(app) == 2

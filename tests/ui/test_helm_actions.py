@@ -765,3 +765,64 @@ async def test_rollback_preview_progress_shows_and_clears(tmp_path: Path) -> Non
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
         assert "rollback preview" not in _bar(app)
         await pilot.press("n")
+
+
+async def test_install_and_upgrade_pickers_open_synchronously_with_the_keypress(
+    tmp_path: Path,
+) -> None:
+    """The modal-opening prefix has no awaits and must run inside the action
+    itself: buffered navigation keys processed before a deferred worker
+    could otherwise re-derive the target from a different view/row."""
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("i")
+        assert isinstance(app.screen, HelmChartSearchScreen)  # no until: synchronous
+        await pilot.press("escape")
+        await until(pilot, lambda: len(app.screen_stack) == 1, label="picker closed")
+        await pilot.press("u")
+        assert isinstance(app.screen, HelmChartSearchScreen)
+
+
+async def test_rollback_target_is_captured_by_the_action_not_the_worker(tmp_path: Path) -> None:
+    """The rollback worker must receive the row selected at keypress time as
+    explicit arguments — reading the selection inside the worker would race
+    buffered cursor keys."""
+    from unittest import mock
+
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    seen: list[tuple[Any, ...]] = []
+
+    async def spy(helm_arg: Any, row: Any, ns: Any, name: Any, namespace: Any, epoch: Any) -> None:
+        seen.append((row.release, row.revision, namespace))
+
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        with mock.patch.object(app, "_helm_rollback_flow", spy):
+            await pilot.press("r")
+            # captured synchronously: the facts exist before any worker ran
+            assert seen == [("web", 2, "default")]
+
+
+async def test_progress_labels_are_owner_scoped(tmp_path: Path) -> None:
+    """Drain and helm previews can overlap (different worker groups): one
+    finishing must not clear the other's status-bar label."""
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        app._set_progress("drain", "evicting pods 1/5")
+        with app._progress("rendering helm preview (dry-run)"):
+            bar = str(app.query_one(StatusBar).render())
+            assert "evicting pods 1/5" in bar
+            assert "rendering helm preview" in bar
+        bar = str(app.query_one(StatusBar).render())
+        assert "evicting pods 1/5" in bar  # drain label survived the helm scope
+        assert "rendering helm preview" not in bar
+        app._set_progress("drain", "")
+        assert "evicting" not in str(app.query_one(StatusBar).render())

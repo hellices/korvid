@@ -671,7 +671,9 @@ class KorvidApp(App[None]):
         #: cancels it (evictions stop; the node stays cordoned).
         self._drain_worker: Worker[None] | None = None
         self._drain_node: str | None = None
-        self._progress_label: str = ""
+        #: status-bar progress labels keyed by owner (drain, helm preview):
+        #: concurrent operations must not clear each other's feedback.
+        self._progress_labels: dict[str, str] = {}
         #: detected cloud provider short name ("aks", "aws", ...) or None;
         #: drives the Service/Ingress describe footer (issue #30).
         self._provider_hint = provider_hint
@@ -719,7 +721,7 @@ class KorvidApp(App[None]):
         self._drain = DrainController(
             notify=self.notify,
             audit_write=lambda *args: self._audit_write(*args),
-            set_progress=self._set_progress,
+            set_progress=functools.partial(self._set_progress, "drain"),
         )
         self._permission_check_warned = False
         self._agent_runtime = agent_runtime
@@ -1855,8 +1857,10 @@ class KorvidApp(App[None]):
         two-line strip folded away."""
         if self._canonical_kind(self.current_kind) == "helmreleases":
             # Same key, different view: on the helm browser `i` starts the
-            # chart install wizard (issue #31).
-            self.run_worker(self._helm_install_flow(), exclusive=True, group="helm-write")
+            # chart install wizard (issue #31). Synchronous: the picker must
+            # open with the keypress, before any buffered navigation input
+            # could change the view the namespace is derived from.
+            self._helm_install_flow()
             return
         if self.current_kind != "pods":
             return
@@ -4197,10 +4201,27 @@ class KorvidApp(App[None]):
         on the helm revision drill-down the same key rolls the release back
         to the selected revision (issue #31)."""
         if self._canonical_kind(self.current_kind) == "helmrevisions":
-            # A worker, like install/upgrade: the diff preview can block for
-            # up to _HELM_PREVIEW_TIMEOUT and must not freeze the message
-            # pump (the status-bar progress could never paint).
-            self.run_worker(self._helm_rollback_flow(), exclusive=True, group="helm-write")
+            # Target captured synchronously with the keypress; only the slow
+            # preview + confirmation run in a worker (the diff render can
+            # block for up to _HELM_PREVIEW_TIMEOUT and must not freeze the
+            # message pump, or the status-bar progress could never paint).
+            helm = self._helm_gate()
+            if helm is None:
+                return
+            epoch = self._ctx_epoch
+            ns, name = self._selected_ns_name()
+            if name is None:
+                return
+            row = self._helm_revision_row(ns, name)
+            if row is None:
+                self.notify("no helm revision selected", severity="warning")
+                return
+            namespace = ns or row.namespace
+            self.run_worker(
+                self._helm_rollback_flow(helm, row, ns, name, namespace, epoch),
+                exclusive=True,
+                group="helm-write",
+            )
             return
         ops = self._write_ops
         if ops is None:
@@ -4655,9 +4676,9 @@ class KorvidApp(App[None]):
         on the helm browser the same key upgrades the selected release
         (issue #31)."""
         if self._canonical_kind(self.current_kind) == "helmreleases":
-            # A worker, like install (see action_hint_details): the flow ends
-            # in a preview await that must not freeze the message pump.
-            self.run_worker(self._helm_upgrade_flow(), exclusive=True, group="helm-write")
+            # Synchronous: the picker opens with the keypress; buffered
+            # cursor keys must not retarget the upgrade.
+            self._helm_upgrade_flow()
             return
         await self._cordon_action(unschedulable=False)
 
@@ -4765,11 +4786,15 @@ class KorvidApp(App[None]):
             _done,
         )
 
-    def _set_progress(self, label: str) -> None:
-        """Publish transient progress (drain, helm previews) on the status
-        bar; a failure to render must never interrupt the operation
-        itself."""
-        self._progress_label = label
+    def _set_progress(self, owner: str, label: str) -> None:
+        """Publish transient progress on the status bar, scoped to its
+        owner (drain, helm preview): overlapping operations must never
+        overwrite or clear each other's label. A failure to render must
+        never interrupt the operation itself."""
+        if label:
+            self._progress_labels[owner] = label
+        else:
+            self._progress_labels.pop(owner, None)
         with contextlib.suppress(Exception):
             self._refresh_status()
 
@@ -4777,11 +4802,11 @@ class KorvidApp(App[None]):
     def _progress(self, label: str) -> Iterator[None]:
         """Status-bar progress scoped exactly to the wrapped await: shown on
         entry, cleared on exit however the operation ends."""
-        self._set_progress(label)
+        self._set_progress("helm", label)
         try:
             yield
         finally:
-            self._set_progress("")
+            self._set_progress("helm", "")
 
     @_tracks_cluster_write
     async def _run_drain(
@@ -5484,11 +5509,13 @@ class KorvidApp(App[None]):
         view_ns = self.current_namespace
         return view_ns if view_ns != ALL_NAMESPACES else (self.config.namespace or "default")
 
-    async def _helm_install_flow(self) -> None:
+    def _helm_install_flow(self) -> None:
         """Install (the `hint_details` key on the helm view): search-first
         chart picker -> wizard -> dry-run preview -> approval -> audited
         `helm install`. The picker opens instantly and fetches charts per
-        keyword (issue #106) instead of listing every repo upfront."""
+        keyword (issue #106) instead of listing every repo upfront.
+        Synchronous by design: no await may separate the keypress from the
+        namespace/epoch capture and the modal push."""
         helm = self._helm_gate()
         if helm is None:
             return
@@ -5500,10 +5527,12 @@ class KorvidApp(App[None]):
             initial="",
         )
 
-    async def _helm_upgrade_flow(self) -> None:
+    def _helm_upgrade_flow(self) -> None:
         """Upgrade (the `uncordon_node` key on a release row): the same
         wizard with the release name and namespace fixed to the selected
-        row's facts; the picker pre-searches the release's chart name."""
+        row's facts; the picker pre-searches the release's chart name.
+        Synchronous by design: no await may separate the keypress from the
+        row/epoch capture and the modal push."""
         helm = self._helm_gate()
         if helm is None:
             return
@@ -5747,22 +5776,19 @@ class KorvidApp(App[None]):
         lines = _clip_preview(text)
         return (lines, title) if lines is not None else None
 
-    async def _helm_rollback_flow(self) -> None:
+    async def _helm_rollback_flow(
+        self,
+        helm: HelmCLI,
+        row: HelmRevisionSummary,
+        ns: str | None,
+        name: str,
+        namespace: str,
+        epoch: int,
+    ) -> None:
         """Rollback (the `rollout_restart` key on a revision row of the
-        drill-down): approval-gated, audited
-        `helm rollback` to that revision."""
-        helm = self._helm_gate()
-        if helm is None:
-            return
-        epoch = self._ctx_epoch
-        ns, name = self._selected_ns_name()
-        if name is None:
-            return
-        row = self._helm_revision_row(ns, name)
-        if row is None:
-            self.notify("no helm revision selected", severity="warning")
-            return
-        namespace = ns or row.namespace
+        drill-down): approval-gated, audited `helm rollback` to that
+        revision. The target row is captured by the action at keypress time
+        and passed in — this worker must never re-read the selection."""
         with self._progress("rendering rollback preview"):
             preview = await self._helm_rollback_preview(helm, row.release, row.revision, namespace)
         if not self._write_context_intact(
@@ -6094,7 +6120,7 @@ class KorvidApp(App[None]):
             breadcrumb=self._drill.breadcrumb(),
             mcp_label=mcp_label,
             filter_label=self._resource_filter.describe(),
-            progress_label=self._progress_label,
+            progress_label=" · ".join(label for label in self._progress_labels.values() if label),
             protected=self._protected_context is not None,
         )
 

@@ -76,6 +76,10 @@ class HelmChartSearchScreen(ModalScreen["ChartHit | None"]):
         self._on_manage_repos = on_manage_repos
         self._hits: list[ChartHit] = []
         self._created_time = Message().time
+        #: generation counter: an exclusive resubmit cancels the previous
+        #: search worker, whose cleanup must not touch the spinner or the
+        #: results the replacement owns.
+        self._search_seq = 0
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -117,9 +121,12 @@ class HelmChartSearchScreen(ModalScreen["ChartHit | None"]):
             self._on_manage_repos()
 
     def _start_search(self, keyword: str) -> None:
-        self.run_worker(self._run_search(keyword), exclusive=True, group="helm-chart-search")
+        self._search_seq += 1
+        self.run_worker(
+            self._run_search(keyword, self._search_seq), exclusive=True, group="helm-chart-search"
+        )
 
-    async def _run_search(self, keyword: str) -> None:
+    async def _run_search(self, keyword: str, seq: int) -> None:
         loading = self.query_one("#chart-loading", LoadingIndicator)
         status = self.query_one("#chart-status", Static)
         results = self.query_one("#chart-results", OptionList)
@@ -130,10 +137,16 @@ class HelmChartSearchScreen(ModalScreen["ChartHit | None"]):
         try:
             hits = await self._search(keyword)
         except HelmError as exc:
-            status.update(f"helm search failed: {exc}")
+            if seq == self._search_seq:
+                status.update(f"helm search failed: {exc}")
             return
         finally:
-            loading.display = False
+            # Only the live search may clear the spinner: a cancelled
+            # predecessor's cleanup can run after its replacement showed it.
+            if seq == self._search_seq:
+                loading.display = False
+        if seq != self._search_seq:
+            return
         if not hits:
             status.update(
                 f"no charts matched {keyword!r} — try another keyword or add a repository (Ctrl-R)"

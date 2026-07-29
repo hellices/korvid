@@ -36,6 +36,8 @@ class FakeRepoOps:
         self.added: list[tuple[str, str]] = []
         self.updates = 0
         self.gate: asyncio.Event | None = None
+        self.add_gate: asyncio.Event | None = None
+        self.add_started = 0
 
     async def repo_list(self) -> list[HelmRepo]:
         if self.gate is not None:
@@ -43,6 +45,9 @@ class FakeRepoOps:
         return list(self.repos)
 
     async def repo_add(self, name: str, url: str) -> str:
+        self.add_started += 1
+        if self.add_gate is not None:
+            await self.add_gate.wait()
         if self.add_error is not None:
             raise HelmError(self.add_error)
         self.added.append((name, url))
@@ -175,3 +180,28 @@ async def test_escape_closes() -> None:
         await _listed(app, pilot, 1)
         await pilot.press("escape")
         await until(pilot, lambda: app.closed, label="screen closed")
+
+
+async def test_actions_are_rejected_while_a_repo_mutation_is_pending() -> None:
+    """`helm repo add` mutates local config: a queued Ctrl-R/Enter must not
+    cancel it mid-flight — new actions are rejected until it finishes."""
+    app = HostApp()
+    ops = FakeRepoOps()
+    ops.add_gate = asyncio.Event()
+    async with app.run_test() as pilot:
+        screen = await _open(app, ops)
+        await _listed(app, pilot, 1)
+        screen.query_one("#repo-name", Input).value = "jetstack"
+        screen.query_one("#repo-url", Input).value = "https://charts.jetstack.io"
+        screen.query_one("#repo-url", Input).focus()
+        await pilot.press("enter")  # add: pending on the gate
+        await until(pilot, lambda: ops.add_started == 1, label="add in flight")
+        await pilot.press("ctrl+r")  # must be rejected, not cancel the add
+        await pilot.pause()
+        ops.add_gate.set()
+        await until(
+            pilot,
+            lambda: ops.added == [("jetstack", "https://charts.jetstack.io")],
+            label="add completed despite the queued update",
+        )
+        assert ops.updates == 0
