@@ -240,6 +240,30 @@ async def test_download_writes_file_and_audits(tmp_path: Path) -> None:
     assert f"bytes={len(payload)}" in entries[1]["detail"]
 
 
+async def test_download_preserves_trailing_whitespace_in_paths(tmp_path: Path) -> None:
+    # Picker-selected paths must round-trip verbatim: if both "report" and
+    # "report " exist, stripping the field would silently transfer the
+    # former while the user selected the latter.
+    payload = b"bytes"
+    opener = FakeExecOpener([b"\x01" + tar_bytes("report ", payload), b"\x03" + SUCCESS])
+    app = make_app(
+        [_pod("api-1")],
+        open_pod_exec=opener,
+        audit=AuditLog(tmp_path / "audit.jsonl", context="test"),
+    )
+    dest = tmp_path / "report "
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count == 1, label="rows")
+        await pilot.press("ctrl+t")
+        await until(pilot, lambda: isinstance(app.screen, TransferScreen), label="dialog")
+        _dialog(app).query_one("#transfer-remote", Input).value = "/srv/report "
+        _dialog(app).query_one("#transfer-local", Input).value = str(dest)
+        await pilot.press("enter")
+        await until(pilot, lambda: dest.exists(), label="file downloaded")
+    assert dest.read_bytes() == payload
+    assert opener.calls[0]["command"] == ["tar", "cf", "-", "-C", "/srv", "report "]
+
+
 async def test_download_blocked_without_audit_log(tmp_path: Path) -> None:
     opener = FakeExecOpener([b"\x01" + tar_bytes("f", b"x"), b"\x03" + SUCCESS])
     app = make_app([_pod("api-1")], open_pod_exec=opener, audit=None)

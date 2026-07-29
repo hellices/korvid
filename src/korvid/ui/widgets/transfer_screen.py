@@ -7,6 +7,10 @@ gate, auditing, and the stream itself are the app's responsibility.
 
 from __future__ import annotations
 
+import os
+import posixpath
+from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import ClassVar
 
 from textual import events, on
@@ -16,8 +20,11 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, RadioButton, RadioSet, Static
 
-from korvid.core.transfer import TransferSpec, default_local_path, validate_spec
+from korvid.core.transfer import RemoteEntry, TransferSpec, default_local_path, validate_spec
 from korvid.ui.messages import TransferCancelRequested
+from korvid.ui.widgets.path_picker import LocalPathPickerScreen, RemotePathPickerScreen
+
+RemoteLister = Callable[[str], Awaitable[list[RemoteEntry]]]
 
 _DIALOG_CSS = """
 TransferScreen, TransferProgressScreen {
@@ -56,18 +63,21 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
 
     A submitted spec is pre-validated here (so typos keep the dialog open
     with a toast) but the caller re-validates before running — the dialog
-    never touches the cluster.
+    itself never runs a transfer. The optional ctrl+o remote picker is the
+    one cluster touch: injected read-only directory listings (issue #124).
     """
 
     CSS = _DIALOG_CSS
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("escape", "cancel", "Cancel", show=True),
+        Binding("ctrl+o", "browse", "Browse", show=True),
     ]
 
-    def __init__(self, target: str) -> None:
+    def __init__(self, target: str, remote_lister: RemoteLister | None = None) -> None:
         super().__init__()
         self._target = target
+        self._remote_lister = remote_lister
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -85,7 +95,11 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
                 placeholder="local path (empty = ~/Downloads/<name>, or ~/<name>)",
                 id="transfer-local",
             )
-            yield Static("Enter = start    Esc = cancel", classes="transfer-hint", markup=False)
+            yield Static(
+                "Enter = start    ^o = browse    Esc = cancel",
+                classes="transfer-hint",
+                markup=False,
+            )
 
     def on_mount(self) -> None:
         self.query_one("#transfer-remote", Input).focus()
@@ -102,8 +116,13 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
     def _submit(self, event: Input.Submitted) -> None:
         event.stop()
         direction = self.direction
-        remote = self.query_one("#transfer-remote", Input).value.strip()
-        local = self.query_one("#transfer-local", Input).value.strip()
+        # Verbatim: picker-selected names may legitimately end in whitespace
+        # ("report" vs "report " are different files); strip only to decide
+        # whether a field is blank.
+        remote = self.query_one("#transfer-remote", Input).value
+        remote = remote if remote.strip() else ""
+        local = self.query_one("#transfer-local", Input).value
+        local = local if local.strip() else ""
         if direction == "download" and not local and remote:
             local = default_local_path(remote)
         spec = TransferSpec(direction=direction, remote_path=remote, local_path=local)  # type: ignore[arg-type]  # direction is one of the two literals by construction
@@ -115,6 +134,66 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+    def action_browse(self) -> None:
+        """ctrl+o: open the picker for whichever path input has focus."""
+        focused = self.focused.id if self.focused is not None else None
+        if focused == "transfer-remote":
+            self._browse_remote()
+        elif focused == "transfer-local":
+            self._browse_local()
+        # Any other focus (direction radio): the binding is screen-level,
+        # but browsing is advertised for the path fields only — do nothing.
+
+    def _browse_local(self) -> None:
+        # Verbatim (blank check aside): a directory name may end in
+        # whitespace, and stripping would probe a different path.
+        current = self.query_one("#transfer-local", Input).value
+        start = _deepest_existing_dir(current if current.strip() else "")
+        picker = LocalPathPickerScreen(start, select_dirs=self.direction == "download")
+        self.app.push_screen(picker, self._apply_local_pick)
+
+    def _apply_local_pick(self, result: str | None) -> None:
+        field = self.query_one("#transfer-local", Input)
+        if result is not None:
+            if result.endswith(("/", os.sep)):
+                # Directory choice: complete it with the remote basename when
+                # one is already typed, otherwise leave the name to the user.
+                # Basename taken verbatim — it may end in whitespace.
+                remote = self.query_one("#transfer-remote", Input).value
+                base = posixpath.basename(remote.rstrip("/")) if remote.strip() else ""
+                result += base
+            field.value = result
+        field.focus()
+
+    def _browse_remote(self) -> None:
+        if self._remote_lister is None:
+            self.notify("remote browsing unavailable", severity="warning")
+            return
+        current = self.query_one("#transfer-remote", Input).value
+        if not current.strip():
+            current = ""
+        start = current if current.endswith("/") else posixpath.dirname(current)
+        if not posixpath.isabs(start):
+            # A relative start would list the container's working directory
+            # and produce selections that can never validate (absolute
+            # remote paths required) — browse from the root instead.
+            start = "/"
+        picker = RemotePathPickerScreen(self._remote_lister, start)
+        self.app.push_screen(picker, self._apply_remote_pick)
+
+    def _apply_remote_pick(self, result: str | None) -> None:
+        field = self.query_one("#transfer-remote", Input)
+        if result is not None:
+            if result.endswith("/"):
+                # Directory choice: an upload destination gets the local
+                # file's name appended; otherwise the user completes it.
+                # Name taken verbatim — it may end in whitespace.
+                local = self.query_one("#transfer-local", Input).value
+                if self.direction == "upload" and local.strip():
+                    result += Path(local).name
+            field.value = result
+        field.focus()
 
 
 class TransferProgressScreen(ModalScreen[None]):
@@ -154,6 +233,21 @@ class TransferProgressScreen(ModalScreen[None]):
         # Swallow everything else: the transfer owns the app until it ends.
         if event.key != "escape":
             event.stop()
+
+
+def _deepest_existing_dir(value: str) -> Path:
+    """The deepest existing directory along ``value``; home when none fits."""
+    if value:
+        try:
+            path = Path(value).expanduser()
+        except RuntimeError:
+            # "~no_such_user/f": same fallback validate_spec applies — never
+            # let the expansion failure escape the dialog handler.
+            return Path("~").expanduser()
+        for candidate in (path, *path.parents):
+            if candidate.is_dir():
+                return candidate
+    return Path("~").expanduser()
 
 
 def _human_bytes(count: int) -> str:
