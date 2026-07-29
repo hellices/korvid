@@ -300,6 +300,34 @@ async def test_a_second_proposals_open_never_cancels_a_claimed_execution(tmp_pat
     assert rec.calls == [("delete", "deployments", "default", "web")]
 
 
+async def test_worker_cancellation_never_strands_a_claimed_proposal(tmp_path: Path) -> None:
+    """TUI shutdown cancels workers; if that lands after `begin_execution()`
+    the record must settle to a terminal, explicitly-uncertain failure —
+    never stay `approved` while the API server may or may not have already
+    committed the mutation."""
+    rec = GatedRecorder()
+    store = ProposalStore()
+    app = make_app(rec, tmp_path / "a.jsonl", store)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        app._open_proposal_review()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+
+        def state() -> str:
+            found = store.get(pid)
+            return found[1] if found is not None else "gone"
+
+        await until(pilot, lambda: state() == "approved")
+        app.workers.cancel_group(app, "proposal-review")  # what shutdown does
+        await until(pilot, lambda: state() == "failed")
+        found = store.get(pid)
+        assert found is not None
+        assert "uncertain" in found[2]
+    assert rec.calls == []  # the gated write never went through
+
+
 async def test_hostile_client_metadata_cannot_forge_audit_fields(tmp_path: Path) -> None:
     """`client_name`/`client_version` are untrusted MCP metadata: a name like
     `trusted session=forged` must stay a single quoted value in the audit

@@ -7327,14 +7327,46 @@ class KorvidApp(App[None]):
                 )
                 return
             detail = self._proposal_provenance(proposal)
-            outcome = await self._run_write(
-                proposal.action, meta, ns, proposal.name, op(proposal.uid), detail=detail
+            write = asyncio.ensure_future(
+                self._run_write(
+                    proposal.action, meta, ns, proposal.name, op(proposal.uid), detail=detail
+                )
             )
+            try:
+                outcome = await asyncio.shield(write)
+            except asyncio.CancelledError:
+                # Worker cancellation (TUI shutdown) after the claim: the
+                # record must still reach a terminal state, never a
+                # permanent `approved` over an uncertain cluster outcome.
+                self._settle_interrupted_execution(store, proposal, write)
+                raise
             store.finish_execution(
                 proposal.id, executed=outcome == "done", reason="" if outcome == "done" else outcome
             )
             if outcome == "done":
                 self.notify(f"Executed proposal: {proposal.summary}")
+
+    @staticmethod
+    def _settle_interrupted_execution(
+        store: ProposalStore, proposal: WriteProposal, write: asyncio.Future[str]
+    ) -> None:
+        """A claimed execution's worker was cancelled mid-write. Use the
+        write's real outcome when it already settled; otherwise abandon the
+        in-flight call and record the uncertainty — the API server may or
+        may not have committed the mutation by the time cancellation lands.
+        """
+        if write.done() and not write.cancelled() and write.exception() is None:
+            outcome = write.result()
+            store.finish_execution(
+                proposal.id, executed=outcome == "done", reason="" if outcome == "done" else outcome
+            )
+            return
+        write.cancel()
+        store.finish_execution(
+            proposal.id,
+            executed=False,
+            reason="interrupted before completion — the cluster outcome is uncertain",
+        )
 
     def _agent_write_op(
         self,
