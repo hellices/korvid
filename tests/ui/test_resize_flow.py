@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from textual.widgets import Input
+from textual.widgets import Input, Static
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -179,12 +179,16 @@ async def test_resize_confirmed_executes_and_audits(tmp_path: Path) -> None:
         await pilot.pause(0.1)
         await pilot.press("R")
         await until(pilot, lambda: isinstance(app.screen, ResizePrompt))
+        prompt_text = " ".join(str(node.render()) for node in app.screen.query(Static))
+        assert "In-place pod resize" in prompt_text
         field = app.screen.query_one("#resize-0-requests-cpu", Input)
         assert field.value == "100m"  # prefilled from the live manifest
         field.value = "200m"
         field.focus()
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        confirm_text = " ".join(str(node.render()) for node in app.screen.query(Static))
+        assert "Apply in-place pod resize" in confirm_text
         await pilot.press("y")
         await until(pilot, lambda: audit_path.exists() and "success" in audit_path.read_text())
         assert rec.calls == [("resize", "default", "web-1", {"app": {"requests": {"cpu": "200m"}}})]

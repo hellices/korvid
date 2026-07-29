@@ -97,11 +97,12 @@ async def test_uppercase_alt_binding_follows_the_remap() -> None:
         await until(pilot, lambda: _sorted_by_age(), label="g sorts by age")
 
 
-def test_readme_documents_every_remappable_action() -> None:
-    # The README's action-name list must not drift from the real BINDINGS.
-    readme = Path(__file__).parents[2].joinpath("README.md").read_text()
+def test_keybindings_doc_documents_every_remappable_action() -> None:
+    # docs/keybindings.md's action-name list must not drift from the real
+    # BINDINGS (the list moved out of README.md in the docs restructure).
+    doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
     for action in KorvidApp._binding_actions():
-        assert f"`{action}`" in readme, f"README missing keybinding action {action!r}"
+        assert f"`{action}`" in doc, f"docs/keybindings.md missing keybinding action {action!r}"
 
 
 def test_favorite_namespace_keys_are_not_remappable() -> None:
@@ -142,11 +143,11 @@ async def test_priority_action_cannot_take_an_approval_dialog_key() -> None:
         assert app._keybinding_overrides == {}
 
 
-async def test_help_overlay_applies_remap_to_helm_handler_rows() -> None:
-    """The Helm rows in the help overlay are dispatched through remappable
-    actions (hint_details/uncordon_node/rollout_restart): the overlay must
-    advertise the effective keys, not the hardcoded defaults."""
-    app = make_app([_pod("web")], config=_config({"hint_details": "x"}))
+async def test_help_overlay_applies_remap_to_helm_rows() -> None:
+    """The Helm rows in the help overlay come from dedicated remappable
+    bindings (issue #114): the overlay must advertise the effective keys,
+    not the hardcoded defaults."""
+    app = make_app([_pod("web")], config=_config({"helm_install": "x"}))
     async with app.run_test() as pilot:
         table = app.query_one(ResourceTable)
         await until(pilot, lambda: table.row_count == 1, label="pod loaded")
@@ -157,8 +158,8 @@ async def test_help_overlay_applies_remap_to_helm_handler_rows() -> None:
             label="help overlay open",
         )
         body = app.screen.body_text() if isinstance(app.screen, HelpScreen) else ""
-        assert "x          Install a chart" in body
-        assert "i          Install a chart" not in body
+        assert "x          Install chart" in body
+        assert "i          Install chart" not in body
 
 
 async def test_favorite_digit_keys_are_reserved_against_overrides() -> None:

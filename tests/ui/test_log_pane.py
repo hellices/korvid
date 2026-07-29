@@ -191,8 +191,9 @@ def _titles_visible(app: KorvidApp) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def test_l_on_non_pods_kind_warns() -> None:
-    """Pressing l when kind != pods shows a warning notification."""
+async def test_l_on_non_pods_kind_is_inert() -> None:
+    """Off the pods view the logs binding is gated (issue #114): the key
+    is inert. The action itself still warns when invoked directly."""
     app = make_app([])
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
@@ -200,8 +201,10 @@ async def test_l_on_non_pods_kind_warns() -> None:
         app.current_kind = "deployments"
         await pilot.press("l")
         await pilot.pause(0.05)
-        msgs = [n.message for n in app._notifications]
-        assert any("pod" in m.lower() for m in msgs)
+        assert not any("pod" in n.message.lower() for n in app._notifications)
+        await app.action_logs()
+        await pilot.pause(0.05)
+        assert any("pod" in n.message.lower() for n in app._notifications)
 
 
 async def test_l_on_empty_table_warns() -> None:
@@ -468,8 +471,9 @@ async def test_error_task_discarded_state_stays_error() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_L_on_non_pods_kind_warns_no_tasks() -> None:
-    """Shift+L when kind != pods shows warning and spawns no stream tasks."""
+async def test_L_on_non_pods_kind_is_inert_no_tasks() -> None:
+    """Shift+L off the pods view is gated (issue #114): the key is inert
+    and no stream tasks spawn. The action itself still warns directly."""
     fake = FakeStream(lines_per_call=1)
     app = make_app([_pod("myapp")], stream_logs=fake)
     async with app.run_test() as pilot:
@@ -477,8 +481,11 @@ async def test_L_on_non_pods_kind_warns_no_tasks() -> None:
         app.current_kind = "deployments"
         await pilot.press("shift+l")
         await pilot.pause(0.05)
-        msgs = [n.message for n in app._notifications]
-        assert any("pod" in m.lower() for m in msgs)
+        assert not any("pod" in n.message.lower() for n in app._notifications)
+        assert len(app._log_tasks) == 0
+        await app.action_logs_multi()
+        await pilot.pause(0.05)
+        assert any("pod" in n.message.lower() for n in app._notifications)
         assert len(app._log_tasks) == 0
 
 
