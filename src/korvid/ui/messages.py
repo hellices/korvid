@@ -116,3 +116,10 @@ class TransferCancelRequested(Message):
     hits escape during a file transfer."""
 
     pass
+
+
+class ExternalProposalsChanged(Message):
+    """Posted whenever the external write-proposal store changes (issue
+    #110): the app refreshes its pending indicator; never opens a dialog."""
+
+    pass
