@@ -7127,14 +7127,14 @@ class KorvidApp(App[None]):
         """Manager note for an already-fetched manifest; the owner-chain
         walk shares one `_UID_LOOKUP_TIMEOUT` deadline and fails open like
         `_managed_note`."""
-        meta_obj = manifest.get("metadata")
-        name = str(meta_obj.get("name") or "?") if isinstance(meta_obj, dict) else "?"
         try:
             async with asyncio.timeout(_UID_LOOKUP_TIMEOUT):
                 return await self._walk_managed(manifest, ns)
         except Exception as exc:  # display support only — never blocks the write
-            # Same payload caution as _managed_note: type name only.
-            logger.debug("owner-chain lookup for %s/%s failed: %s", ns, name, type(exc).__name__)
+            # Same payload caution as _managed_note — the exception type
+            # only, and nothing derived from the manifest (which may be a
+            # Secret's; CodeQL py/clear-text-logging-sensitive-data).
+            logger.debug("owner-chain lookup in %s failed: %s", ns, type(exc).__name__)
             return None
 
     async def _walk_managed(self, manifest: dict[str, Any], ns: str | None) -> str | None:
