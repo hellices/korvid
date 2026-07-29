@@ -97,11 +97,12 @@ async def test_uppercase_alt_binding_follows_the_remap() -> None:
         await until(pilot, lambda: _sorted_by_age(), label="g sorts by age")
 
 
-def test_readme_documents_every_remappable_action() -> None:
-    # The README's action-name list must not drift from the real BINDINGS.
-    readme = Path(__file__).parents[2].joinpath("README.md").read_text()
+def test_keybindings_doc_documents_every_remappable_action() -> None:
+    # docs/keybindings.md's action-name list must not drift from the real
+    # BINDINGS (the list moved out of README.md in the docs restructure).
+    doc = Path(__file__).parents[2].joinpath("docs", "keybindings.md").read_text()
     for action in KorvidApp._binding_actions():
-        assert f"`{action}`" in readme, f"README missing keybinding action {action!r}"
+        assert f"`{action}`" in doc, f"docs/keybindings.md missing keybinding action {action!r}"
 
 
 def test_favorite_namespace_keys_are_not_remappable() -> None:
