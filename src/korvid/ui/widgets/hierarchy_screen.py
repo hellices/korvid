@@ -102,15 +102,18 @@ def build_hierarchy(
         if view is None:
             root.children.append(HierarchyNode(label=f"{ref.kind}/{ref.name}"))
             continue
+        bucket = lookup(view)
         live = next(
             (
                 obj
-                for obj in lookup(view)
+                for obj in bucket
                 if getattr(obj, "name", None) == ref.name and getattr(obj, "namespace", None) == ns
             ),
             None,
         )
-        marker = "" if live is not None else " (missing)"
+        # An empty bucket means the view is not watched right now - absence
+        # is only meaningful where the store actually has data for the kind.
+        marker = "" if live is not None or not bucket else " (missing)"
         uid = str(getattr(live, "uid", "") or "")
         root.children.append(
             HierarchyNode(

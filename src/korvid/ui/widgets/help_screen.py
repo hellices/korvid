@@ -78,6 +78,7 @@ _ACTION_GROUPS: dict[str, tuple[str, ...]] = {
     "helm_install": ("Helm",),
     "helm_upgrade": ("Helm",),
     "helm_rollback": ("Helm",),
+    "helm_history": ("Helm",),
 }
 
 

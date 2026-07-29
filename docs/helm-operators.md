@@ -12,11 +12,44 @@ helm binary required (press `0` to widen the view to all namespaces).
 korvid reads the release Secrets Helm 3 stores in the cluster
 (`type=helm.sh/release.v1`) and decodes them in place, showing name,
 revision, status, chart, and app version, live-updated through the same
-watch pipeline as any other view.  `Enter` drills into the release's
+watch pipeline as any other view.  `Enter` opens the release's
+[hierarchy tree](#hierarchy-tree); `h` drills into the release's
 revision history (newest first, like `helm history`); `d` describes a
 release or a single revision with the decoded metadata and the
 user-supplied values — the rendered manifest blob is deliberately left
 out.
+
+## Hierarchy tree
+
+`Enter` on a Helm release, an OLM Subscription, or a CSV opens a read-only
+tree of everything that root installed and how the pieces hang together
+(issue #120):
+
+```
+▼ HelmRelease default/web
+  ▼ Deployment/web-nginx
+    ▼ ReplicaSet/web-nginx-7d9c
+        Pod/web-nginx-7d9c-x2kf
+    Service/web-nginx
+    ConfigMap/web-nginx-config
+```
+
+- **Helm roots** list the objects rendered in the release's manifest
+  (decoded from the release Secret — no helm binary, no extra API calls).
+- **Operator roots** prefer the cluster's own bookkeeping, in order: the
+  Operator object's `status.components.refs` (includes the CSV, CRDs, and
+  RBAC), then the Subscription's InstallPlan `status.plan`. Where neither
+  API is available the tree degrades to the root alone.
+- **Runtime descendants** (Deployment → ReplicaSet → Pod) come from
+  ownerReferences against the live store, so the tree shows what is
+  running now, not just what was rendered. A declared object the store
+  watches but cannot find is marked `(missing)`.
+
+`Enter` on a node jumps to that kind's real view with the cursor on the
+object — logs, describe, edit, delete, and further drill-down all work
+there unchanged. `d` describes the node directly; `Esc` returns to the
+browser. The tree itself is read-only: every write still happens in the
+real views behind the usual approval gates.
 
 ## Helm install / upgrade / rollback / uninstall
 

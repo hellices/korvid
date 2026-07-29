@@ -96,13 +96,24 @@ def test_deployment_expands_runtime_descendants_by_owner_uids() -> None:
 
 def test_missing_live_object_is_marked() -> None:
     refs = [ComponentRef(kind="Service", name="gone")]
+    data = {"services": [_Live("other", "default")]}
     root = build_hierarchy(
-        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from({})
+        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
     )
     node = root.children[0]
     assert node.label == "Service/gone (missing)"
     # Still navigable: describe on a missing object gives the 404 explanation.
     assert (node.kind, node.name) == ("services", "gone")
+
+
+def test_unwatched_view_gets_no_missing_marker() -> None:
+    """An empty store bucket means the kind is not watched right now, not
+    that the object is gone - claiming "missing" there would be a lie."""
+    refs = [ComponentRef(kind="Service", name="web")]
+    root = build_hierarchy(
+        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from({})
+    )
+    assert root.children[0].label == "Service/web"
 
 
 def test_unknown_kind_is_shown_but_not_navigable() -> None:
