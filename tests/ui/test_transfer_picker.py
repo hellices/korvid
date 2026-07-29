@@ -365,9 +365,58 @@ class TestContextEpochGuard:
 
         app = make_app([_pod("api-1")], open_pod_exec=flipping)
         async with app.run_test():
-            lister = app._remote_lister("default", "api-1", "app", epoch=app._ctx_epoch)
+            lister = app._remote_lister("default", "api-1", "app", uid=None, epoch=app._ctx_epoch)
             assert lister is not None
             with pytest.raises(TransferError, match="context changed"):
+                await lister("/")
+
+
+class TestPodUidGuard:
+    """Issue #124 review: a same-named replacement pod does not change the
+    context epoch, so the lister must also be bound to the pod uid captured
+    when the dialog opened — like the transfer itself (ui/transfer.py)."""
+
+    async def test_ctrl_o_degrades_when_pod_replaced(self) -> None:
+        opener = FakeExecOpener(_listing("etc/"))
+
+        async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+            return {"metadata": {"uid": "uid-replacement"}}
+
+        app = make_app(
+            [_pod("api-1", uid="uid-approved")],
+            open_pod_exec=opener,
+            get_manifest=get_manifest,
+        )
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot,
+                lambda: any("replaced" in str(n.message) for n in app._notifications),
+                label="replaced toast",
+            )
+            await until(pilot, lambda: app.screen is dialog, label="dialog kept")
+            assert opener.calls == []  # never listed the replacement pod
+
+    async def test_result_discarded_when_pod_replaced_during_listing(self) -> None:
+        uids = ["uid-approved", "uid-replacement"]
+
+        async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+            return {"metadata": {"uid": uids.pop(0)}}
+
+        app = make_app(
+            [_pod("api-1", uid="uid-approved")],
+            open_pod_exec=FakeExecOpener(_listing("etc/")),
+            get_manifest=get_manifest,
+        )
+        async with app.run_test():
+            lister = app._remote_lister(
+                "default", "api-1", "app", uid="uid-approved", epoch=app._ctx_epoch
+            )
+            assert lister is not None
+            with pytest.raises(TransferError, match="replaced"):
                 await lister("/")
 
 

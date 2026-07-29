@@ -496,3 +496,12 @@ class TestListRemoteDir:
         ws = FakeWs(frames)
         with pytest.raises(TransferError, match="too large"):
             await list_remote_dir(FakeExec(ws), "/srv")
+
+    async def test_too_many_entries_raises_transfer_error(self) -> None:
+        # The byte cap alone does not bound the picker: 1 MiB of short
+        # names is hundreds of thousands of entries, each becoming a UI
+        # option synchronously. Degrade before constructing them.
+        listing = "".join(f"f{i}\n" for i in range(10_001)).encode()
+        ws = FakeWs([b"\x01" + listing, b"\x03" + SUCCESS])
+        with pytest.raises(TransferError, match="too many entries"):
+            await list_remote_dir(FakeExec(ws), "/srv")

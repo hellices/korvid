@@ -116,8 +116,13 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
     def _submit(self, event: Input.Submitted) -> None:
         event.stop()
         direction = self.direction
-        remote = self.query_one("#transfer-remote", Input).value.strip()
-        local = self.query_one("#transfer-local", Input).value.strip()
+        # Verbatim: picker-selected names may legitimately end in whitespace
+        # ("report" vs "report " are different files); strip only to decide
+        # whether a field is blank.
+        remote = self.query_one("#transfer-remote", Input).value
+        remote = remote if remote.strip() else ""
+        local = self.query_one("#transfer-local", Input).value
+        local = local if local.strip() else ""
         if direction == "download" and not local and remote:
             local = default_local_path(remote)
         spec = TransferSpec(direction=direction, remote_path=remote, local_path=local)  # type: ignore[arg-type]  # direction is one of the two literals by construction

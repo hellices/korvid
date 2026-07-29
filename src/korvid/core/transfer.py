@@ -167,8 +167,11 @@ def list_dir_command(path: str) -> list[str]:
 
 # The listing is cluster-controlled input: cap accumulation so a huge (or
 # adversarial) directory cannot exhaust TUI memory — 1 MiB is thousands of
-# entries, far beyond what a picker can usefully present.
+# entries, far beyond what a picker can usefully present. The entry cap
+# bounds the picker itself: 1 MiB of short names is still hundreds of
+# thousands of entries, each becoming a UI option synchronously.
 _LIST_MAX_BYTES = 1 << 20
+_LIST_MAX_ENTRIES = 10_000
 
 
 async def list_remote_dir(open_exec: OpenExec, path: str) -> list[RemoteEntry]:
@@ -178,8 +181,8 @@ async def list_remote_dir(open_exec: OpenExec, path: str) -> list[RemoteEntry]:
     parsed by the trailing-slash directory marker, directories first and
     alphabetical within each group. Raises TransferError when the listing
     is unavailable (no `ls` in the image, exec forbidden, non-zero exit,
-    connection dropped before a verdict) or larger than `_LIST_MAX_BYTES`,
-    so callers can degrade to manual path entry.
+    connection dropped before a verdict) or larger than `_LIST_MAX_BYTES` /
+    `_LIST_MAX_ENTRIES`, so callers can degrade to manual path entry.
 
     The output is file *names* only — no resource payloads — which is why
     it does not go through the sensitive-read masking pipeline; it is also
@@ -215,12 +218,14 @@ async def list_remote_dir(open_exec: OpenExec, path: str) -> list[RemoteEntry]:
         raise TransferError(
             sink.error_message(f"connection closed without reporting an outcome for {path}")
         )
-    entries = []
+    entries: list[RemoteEntry] = []
     # LF only: splitlines() would also split on VT/FF/U+0085, which are
     # unusual but valid filename characters, producing phantom entries.
     for line in stdout.decode("utf-8", errors="replace").split("\n"):
         if not line:
             continue
+        if len(entries) >= _LIST_MAX_ENTRIES:
+            raise TransferError(f"directory listing for {path} has too many entries to browse")
         is_dir = line.endswith("/")
         entries.append(RemoteEntry(line.rstrip("/") if is_dir else line, is_dir))
     entries.sort(key=lambda e: (not e.is_dir, e.name))
