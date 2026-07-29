@@ -131,7 +131,7 @@ class TestRemotePicker:
                 pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
             )
             # One exec round-trip listing the input value's directory.
-            assert opener.calls[0]["command"] == ["ls", "-1Ap", "--", "/srv"]
+            assert opener.calls[0]["command"] == ["ls", "-1Ap", "--", "/srv/"]
             options = app.screen.query_one(OptionList)
             await until(pilot, lambda: options.option_count == 3, label="options")
             prompts = [str(options.get_option_at_index(i).prompt) for i in range(3)]
@@ -173,7 +173,7 @@ class TestRemotePicker:
             options.focus()
             await pilot.press("down", "enter")
             await until(pilot, lambda: len(opener.calls) == 2, label="second listing")
-            assert opener.calls[1]["command"] == ["ls", "-1Ap", "--", "/srv/config"]
+            assert opener.calls[1]["command"] == ["ls", "-1Ap", "--", "/srv/config/"]
             assert isinstance(app.screen, RemotePathPickerScreen)
 
     async def test_s_fills_current_directory_with_upload_basename(self, tmp_path: Path) -> None:
@@ -322,7 +322,7 @@ class TestRemotePickerRobustness:
             options.focus()
             await pilot.press("down", "o")
             await until(pilot, lambda: len(opener.calls) == 2, label="forced listing")
-            assert opener.calls[1]["command"] == ["ls", "-1Ap", "--", "/srv/link"]
+            assert opener.calls[1]["command"] == ["ls", "-1Ap", "--", "/srv/link/"]
             assert isinstance(app.screen, RemotePathPickerScreen)
 
 

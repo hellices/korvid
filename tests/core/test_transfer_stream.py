@@ -393,10 +393,19 @@ class TestListRemoteDir:
     async def test_runs_ls_with_option_terminator(self) -> None:
         # `--` so a directory name starting with "-" is never read as an
         # option; -1Ap gives one name per line, hidden files, dir markers.
+        # A trailing slash makes the operand directory-only: `ls file`
+        # succeeds and echoes the operand, which force-open (`o`) would
+        # otherwise render as a pseudo-directory containing itself.
         ws = FakeWs([b"\x01" + b"f\n", b"\x03" + SUCCESS])
         exec_ = FakeExec(ws)
         await list_remote_dir(exec_, "/srv")
-        assert exec_.calls == [(["ls", "-1Ap", "--", "/srv"], False)]
+        assert exec_.calls == [(["ls", "-1Ap", "--", "/srv/"], False)]
+
+    async def test_root_listing_keeps_single_slash(self) -> None:
+        ws = FakeWs([b"\x01" + b"f\n", b"\x03" + SUCCESS])
+        exec_ = FakeExec(ws)
+        await list_remote_dir(exec_, "/")
+        assert exec_.calls == [(["ls", "-1Ap", "--", "/"], False)]
 
     async def test_empty_directory(self) -> None:
         ws = FakeWs([b"\x03" + SUCCESS])

@@ -157,9 +157,12 @@ def list_dir_command(path: str) -> list[str]:
 
     `-1Ap`: one entry per line, hidden files without `.`/`..`, a trailing
     slash on directories. `--` keeps a leading-dash path from being read as
-    an option.
+    an option. The operand's own trailing slash makes it directory-only:
+    `ls file` succeeds and echoes the operand, which force-open (`o`) would
+    otherwise render as a pseudo-directory containing itself; a symlink to
+    a directory is still traversed.
     """
-    return ["ls", "-1Ap", "--", path]
+    return ["ls", "-1Ap", "--", path.rstrip("/") + "/"]
 
 
 # The listing is cluster-controlled input: cap accumulation so a huge (or
