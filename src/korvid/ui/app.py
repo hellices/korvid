@@ -76,7 +76,7 @@ from korvid.k8s.helm import (
     HelmReleaseSummary,
     HelmRevisionSummary,
 )
-from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError
+from korvid.k8s.helmcli import ChartHit, HelmCLI
 from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.models import ContainerTrouble, PodSummary
@@ -130,7 +130,9 @@ from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt, Replica
 from korvid.ui.widgets.containers_screen import ContainersScreen, build_container_rows
 from korvid.ui.widgets.describe_screen import DescribePane, DescribeScreen
 from korvid.ui.widgets.filter_bar import FilterBar
+from korvid.ui.widgets.helm_chart_search import HelmChartSearchScreen
 from korvid.ui.widgets.helm_install import HelmInstallPrompt, HelmReleaseChoices
+from korvid.ui.widgets.helm_repos import HelmRepoScreen
 from korvid.ui.widgets.help_screen import HelpScreen, collect_help
 from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.hint_strip import HintStrip
@@ -5466,56 +5468,26 @@ class KorvidApp(App[None]):
         view_ns = self.current_namespace
         return view_ns if view_ns != ALL_NAMESPACES else (self.config.namespace or "default")
 
-    async def _helm_search(self, helm: HelmCLI, keyword: str) -> list[ChartHit] | None:
-        """Installable charts from the user's own repos, or None (with a
-        notification) when the search failed or found nothing."""
-        try:
-            hits = await helm.search_repo(keyword)
-            if not hits and keyword:
-                # Nothing matched the release's chart name (renamed, or from
-                # a repo no longer configured): fall back to everything.
-                hits = await helm.search_repo()
-        except HelmError as exc:
-            self.notify(f"helm search failed: {exc}", severity="error")
-            return None
-        if not hits:
-            self.notify(
-                "no installable charts found - configure repos with `helm repo add` first",
-                severity="warning",
-            )
-            return None
-        return hits
-
     async def _helm_install_flow(self) -> None:
-        """Install (the `hint_details` key on the helm view): chart picker ->
-        wizard -> dry-run preview ->
-        approval -> audited `helm install`."""
+        """Install (the `hint_details` key on the helm view): search-first
+        chart picker -> wizard -> dry-run preview -> approval -> audited
+        `helm install`. The picker opens instantly and fetches charts per
+        keyword (issue #106) instead of listing every repo upfront."""
         helm = self._helm_gate()
         if helm is None:
             return
-        epoch = self._ctx_epoch
-        hits = await self._helm_search(helm, "")
-        if hits is None:
-            return
-        if len(self.screen_stack) > 1:  # another dialog opened during the search
-            return
-        if self._canonical_kind(self.current_kind) != HELM_RELEASES_META.plural:
-            # The search runs in a worker over an interactive table: opening
-            # the picker over an unrelated view would also derive the target
-            # namespace from that view.
-            self.notify(
-                "helm install cancelled - left the helm view during the chart search",
-                severity="warning",
-            )
-            return
-        self._helm_pick_chart(
-            hits, release=None, namespace=self._helm_view_namespace(), epoch=epoch
+        self._helm_open_chart_search(
+            helm,
+            release=None,
+            namespace=self._helm_view_namespace(),
+            epoch=self._ctx_epoch,
+            initial="",
         )
 
     async def _helm_upgrade_flow(self) -> None:
         """Upgrade (the `uncordon_node` key on a release row): the same
-        wizard with the release name and
-        namespace fixed to the selected row's facts."""
+        wizard with the release name and namespace fixed to the selected
+        row's facts; the picker pre-searches the release's chart name."""
         helm = self._helm_gate()
         if helm is None:
             return
@@ -5525,30 +5497,20 @@ class KorvidApp(App[None]):
             return
         row = self._helm_release_row(ns, name)
         keyword = _chart_base(row.chart) if row is not None else ""
-        hits = await self._helm_search(helm, keyword)
-        if hits is None:
-            return
-        if not self._write_context_intact(
-            "helm-upgrade", HELM_RELEASES_META, ns, name, phase="the chart search", epoch=epoch
-        ):
-            return
         namespace = ns or (row.namespace if row is not None else self._helm_view_namespace())
-        self._helm_pick_chart(hits, release=name, namespace=namespace, epoch=epoch)
+        self._helm_open_chart_search(
+            helm, release=name, namespace=namespace, epoch=epoch, initial=keyword
+        )
 
-    def _helm_pick_chart(
-        self, hits: list[ChartHit], *, release: str | None, namespace: str, epoch: int
+    def _helm_open_chart_search(
+        self, helm: HelmCLI, *, release: str | None, namespace: str, epoch: int, initial: str
     ) -> None:
-        """Chart picker feeding the install/upgrade wizard; everything
-        offered comes from `helm search repo`, nothing is hardcoded."""
-        labels: dict[str, ChartHit] = {}
-        for hit in hits:
-            labels.setdefault(f"{hit.name}  {hit.version}", hit)
+        """Keyword-driven chart picker feeding the install/upgrade wizard;
+        everything offered comes from `helm search repo`, nothing is
+        hardcoded. Ctrl-R inside the picker manages chart repositories."""
 
-        def _picked(choice: str | None) -> None:
-            if choice is None:
-                return
-            hit = labels.get(choice)
-            if hit is None:  # pragma: no cover - PickScreen returns its own options
+        def _picked(hit: ChartHit | None) -> None:
+            if hit is None:
                 return
 
             def _chosen(choices: HelmReleaseChoices | None) -> None:
@@ -5564,8 +5526,28 @@ class KorvidApp(App[None]):
 
             self.push_screen(HelmInstallPrompt(hit, namespace=namespace, release=release), _chosen)
 
-        title = f"Upgrade {release} with chart:" if release else "Install chart:"
-        self.push_screen(PickScreen(title, list(labels)), _picked)
+        title = f"Upgrade {release} with chart:" if release else "Install helm chart"
+        self.push_screen(
+            HelmChartSearchScreen(
+                helm.search_repo,
+                title=title,
+                initial=initial,
+                on_manage_repos=lambda: self._helm_open_repos(helm),
+            ),
+            _picked,
+        )
+
+    def _helm_open_repos(self, helm: HelmCLI) -> None:
+        """Chart repository management (list/add/update). `helm repo` writes
+        local helm config only — never the cluster — so the typed form in
+        the screen is the confirmation, not the write-approval gate."""
+        self.push_screen(
+            HelmRepoScreen(
+                repo_list=helm.repo_list,
+                repo_add=helm.repo_add,
+                repo_update=helm.repo_update,
+            )
+        )
 
     async def _helm_confirm_change(
         self, hit: ChartHit, choices: HelmReleaseChoices, *, upgrade: bool, epoch: int
@@ -5590,6 +5572,9 @@ class KorvidApp(App[None]):
                 line.strip() and not line.lstrip().startswith("#") for line in text.splitlines()
             )
             values_text = text if meaningful else None
+        # Rendering can take up to _HELM_PREVIEW_TIMEOUT: say so, or the UI
+        # looks frozen between the wizard and the approval dialog (issue #106).
+        self.notify("Rendering helm preview (dry-run)…", timeout=4)
         rendered = await self._helm_change_preview(helm, hit, choices, values_text, upgrade=upgrade)
         action = "helm-upgrade" if upgrade else "helm-install"
         if not self._helm_context_after_preview(action, choices, upgrade=upgrade, epoch=epoch):
@@ -5759,6 +5744,7 @@ class KorvidApp(App[None]):
             self.notify("no helm revision selected", severity="warning")
             return
         namespace = ns or row.namespace
+        self.notify("Rendering rollback preview…", timeout=4)
         preview = await self._helm_rollback_preview(helm, row.release, row.revision, namespace)
         if not self._write_context_intact(
             "helm-rollback", HELM_REVISIONS_META, ns, name, phase="the diff preview", epoch=epoch
