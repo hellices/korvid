@@ -1,0 +1,231 @@
+"""Operator uninstall flow (issue #117): ctrl+d on an OLM Subscription
+removes the operator - the Subscription first (stopping reinstalls), then its
+installed CSV, with OLM garbage-collecting the operator's own Deployment and
+RBAC. CRDs and custom resources are never touched. Ctrl+d on a CSV whose
+Subscription is known redirects to the same full flow."""
+
+import json
+from pathlib import Path
+from typing import Any
+
+from korvid.k8s.discovery import ResourceMeta
+from korvid.ui.widgets.confirm_screen import ConfirmScreen
+
+from .test_olm_view import (
+    Recorder,
+    _csv,
+    _navigate,
+    _subscription,
+    make_app,
+)
+from .waits import until
+
+_SUB_MANIFEST = {
+    "metadata": {"name": "cert-manager", "namespace": "operators", "uid": "sub-cert-manager"},
+    "status": {"installedCSV": "cert-manager.v1.14.4"},
+}
+_CSV_MANIFEST = {
+    "metadata": {
+        "name": "cert-manager.v1.14.4",
+        "namespace": "operators",
+        "uid": "csv-cert-manager.v1.14.4",
+    },
+}
+
+
+def _audit_entries(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+async def test_ctrl_d_on_subscription_uninstalls_subscription_then_csv(tmp_path: Path) -> None:
+    ops = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        {"cert-manager": _SUB_MANIFEST, "cert-manager.v1.14.4": _CSV_MANIFEST},
+        audit_path,
+        write_ops=ops,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        operation = app.screen._operation  # type: ignore[attr-defined]  # test peeks
+        assert "OPERATOR UNINSTALL cert-manager" in operation
+        assert "DELETE subscriptions.operators.coreos.com/cert-manager" in operation
+        assert (
+            "DELETE clusterserviceversions.operators.coreos.com/cert-manager.v1.14.4" in operation
+        )
+        assert "garbage-collects" in operation
+        assert "CRDs and custom resources are KEPT" in operation
+        await pilot.press("y")
+        await until(pilot, lambda: len(ops.calls) == 2, label="both deletes ran")
+        # Subscription first (stops OLM reinstalling), then the CSV;
+        # both uid-pinned to the incarnations shown in the dialog.
+        assert ops.calls == [
+            ("delete", "subscriptions", "operators", "cert-manager", "sub-cert-manager"),
+            (
+                "delete",
+                "clusterserviceversions",
+                "operators",
+                "cert-manager.v1.14.4",
+                "csv-cert-manager.v1.14.4",
+            ),
+        ]
+        await until(
+            pilot,
+            lambda: audit_path.exists() and audit_path.read_text().count("success") == 2,
+            label="both writes audited",
+        )
+        entries = _audit_entries(audit_path)
+        assert [e["action"] for e in entries] == ["uninstall"] * 4
+        assert [e["outcome"] for e in entries] == ["intent", "success", "intent", "success"]
+        assert entries[0]["kind"] == "subscriptions"
+        assert entries[2]["kind"] == "clusterserviceversions"
+
+
+async def test_subscription_without_installed_csv_removes_subscription_only(
+    tmp_path: Path,
+) -> None:
+    ops = Recorder()
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        {"cert-manager": {"metadata": {"name": "cert-manager", "uid": "sub-cert-manager"}}},
+        tmp_path / "audit.jsonl",
+        write_ops=ops,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        operation = app.screen._operation  # type: ignore[attr-defined]  # test peeks
+        assert "no installed CSV" in operation
+        assert "clusterserviceversions" not in operation
+        await pilot.press("y")
+        await until(pilot, lambda: len(ops.calls) == 1, label="subscription delete ran")
+        assert ops.calls == [
+            ("delete", "subscriptions", "operators", "cert-manager", "sub-cert-manager")
+        ]
+
+
+async def test_subscription_uninstall_declined_runs_nothing(tmp_path: Path) -> None:
+    ops = Recorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        {"cert-manager": _SUB_MANIFEST, "cert-manager.v1.14.4": _CSV_MANIFEST},
+        audit_path,
+        write_ops=ops,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        await pilot.press("n")
+        await until(pilot, lambda: len(app.screen_stack) == 1, label="dialog dismissed")
+        assert ops.calls == []
+        assert not audit_path.exists() or "uninstall" not in audit_path.read_text()
+
+
+class FailingSubscriptionDelete(Recorder):
+    """The Subscription delete fails; the CSV must then be left alone."""
+
+    async def delete_object(
+        self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
+    ) -> None:
+        await super().delete_object(meta, namespace, name, uid=uid)
+        if meta.plural == "subscriptions":
+            raise RuntimeError("boom")
+
+
+async def test_failed_subscription_delete_leaves_the_csv(tmp_path: Path) -> None:
+    ops = FailingSubscriptionDelete()
+    app = make_app(
+        {"subscriptions": [_subscription("cert-manager")]},
+        {"cert-manager": _SUB_MANIFEST, "cert-manager.v1.14.4": _CSV_MANIFEST},
+        tmp_path / "audit.jsonl",
+        write_ops=ops,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="rows")
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any("failed" in str(n.message) for n in app._notifications),
+            label="failure notified",
+        )
+        assert len(ops.calls) == 1  # deleting the CSV alone would be reinstalled
+        assert ops.calls[0][1] == "subscriptions"
+
+
+async def test_ctrl_d_on_csv_with_known_subscription_redirects_to_full_flow(
+    tmp_path: Path,
+) -> None:
+    ops = Recorder()
+    app = make_app(
+        {
+            "subscriptions": [_subscription("cert-manager")],
+            "clusterserviceversions": [_csv("cert-manager.v1.14.4", "Succeeded")],
+        },
+        {"cert-manager": _SUB_MANIFEST, "cert-manager.v1.14.4": _CSV_MANIFEST},
+        tmp_path / "audit.jsonl",
+        write_ops=ops,
+    )
+    async with app.run_test() as pilot:
+        # Visit the subscriptions view first so the store knows the
+        # Subscription -> CSV link, then act from the CSV view.
+        await _navigate(pilot, "subscriptions", "subscriptions")
+        await until(pilot, lambda: bool(app.store.get("subscriptions", "operators")), label="subs")
+        await _navigate(pilot, "clusterserviceversions", "clusterserviceversions")
+        await until(
+            pilot,
+            lambda: bool(app.store.get("clusterserviceversions", "operators")),
+            label="csvs",
+        )
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        await until(
+            pilot,
+            lambda: any("reinstall" in str(n.message) for n in app._notifications),
+            label="reinstall warning",
+        )
+        operation = app.screen._operation  # type: ignore[attr-defined]  # test peeks
+        assert "OPERATOR UNINSTALL cert-manager" in operation
+        assert "DELETE subscriptions.operators.coreos.com/cert-manager" in operation
+        await pilot.press("y")
+        await until(pilot, lambda: len(ops.calls) == 2, label="both deletes ran")
+        assert ops.calls[0][1] == "subscriptions"
+        assert ops.calls[1][1] == "clusterserviceversions"
+
+
+async def test_ctrl_d_on_csv_without_known_subscription_is_a_plain_delete(
+    tmp_path: Path,
+) -> None:
+    ops = Recorder()
+    app = make_app(
+        {"clusterserviceversions": [_csv("orphan.v1.0.0", "Succeeded")]},
+        {"orphan.v1.0.0": {"metadata": {"name": "orphan.v1.0.0", "uid": "csv-orphan.v1.0.0"}}},
+        tmp_path / "audit.jsonl",
+        write_ops=ops,
+    )
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "clusterserviceversions", "clusterserviceversions")
+        await until(
+            pilot,
+            lambda: bool(app.store.get("clusterserviceversions", "operators")),
+            label="csvs",
+        )
+        await pilot.press("ctrl+d")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        operation = app.screen._operation  # type: ignore[attr-defined]  # test peeks
+        assert "OPERATOR UNINSTALL" not in operation
+        assert "DELETE clusterserviceversions.operators.coreos.com/orphan.v1.0.0" in operation
+        await pilot.press("y")
+        await until(pilot, lambda: len(ops.calls) == 1, label="plain delete ran")
+        assert ops.calls[0][:2] == ("delete", "clusterserviceversions")

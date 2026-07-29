@@ -253,6 +253,15 @@ def _manifest_uid(manifest: dict[str, Any]) -> str | None:
     return str(raw) if raw else None
 
 
+def _installed_csv_name(manifest: dict[str, Any]) -> str:
+    """`status.installedCSV` of a Subscription manifest, or '' when absent
+    (the operator never finished installing, or the status is malformed)."""
+    status = manifest.get("status")
+    if not isinstance(status, dict):
+        return ""
+    return str(status.get("installedCSV") or "")
+
+
 #: Upper bound on the pre-dialog dry-run round trip (issue #19): a slow or
 #: unreachable API server delays the approval dialog by at most this long,
 #: after which it opens without a preview - a preview must never block the
@@ -3958,6 +3967,9 @@ class KorvidApp(App[None]):
         "resize": ("patch", "resize"),
         "install": ("create", ""),
         "approve": ("update", ""),
+        # Operator uninstall deletes the Subscription (then its CSV); the
+        # pre-check and 403 messages therefore speak in delete terms.
+        "uninstall": ("delete", ""),
         # Cordon/uncordon patch node.spec.unschedulable; the drain pre-check
         # covers its cordon step (evictions are per-namespace pod
         # subresource creations that surface individually during execution).
@@ -4315,6 +4327,23 @@ class KorvidApp(App[None]):
         if target is None:
             return
         meta, ns, name, uid = target
+        if (meta.group, meta.plural) == (OPERATORS_GROUP, "subscriptions"):
+            # An OLM Subscription: deleting it alone leaves the operator
+            # running (the CSV stays) - offer the full uninstall instead.
+            await self._start_operator_uninstall(
+                meta,
+                ns,
+                name,
+                uid,
+                fetch_kind=self._canonical_kind(self.current_kind),
+                ctx=(meta, ns, name),
+            )
+            return
+        if (meta.group, meta.plural) == (
+            OPERATORS_GROUP,
+            "clusterserviceversions",
+        ) and await self._csv_uninstall_redirect(meta, ns, name):
+            return
         epoch = self._ctx_epoch
         # Captured with the target: view state is mutable across the awaits
         # below, and the banner must describe the row the user acted on.
@@ -5703,6 +5732,222 @@ class KorvidApp(App[None]):
             self.notify(f"installplans/{name} is already approved", severity="information")
             return None
         return spec
+
+    # ------------------------------------------------------------------
+    # operator uninstall (issue #117)
+    # ------------------------------------------------------------------
+
+    def _olm_alias_key(self, plural: str) -> str | None:
+        """The aliases key resolving to the OLM *plural* (prefers the
+        group-qualified alias, like `resolve_olm_meta`), or None when the
+        API was not discovered."""
+        for key in (f"{plural}.{OPERATORS_GROUP}", plural):
+            meta = self.aliases.get(key)
+            if meta is not None and meta.group == OPERATORS_GROUP:
+                return key
+        return None
+
+    async def _start_operator_uninstall(
+        self,
+        sub_meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+        *,
+        fetch_kind: str,
+        ctx: tuple[ResourceMeta, str | None, str],
+    ) -> None:
+        """Ctrl+D on an OLM Subscription (or redirected from its CSV):
+        uninstall the operator - delete the Subscription, then its installed
+        CSV; OLM garbage-collects the operator's Deployment and RBAC owned
+        by the CSV. CRDs and custom resources are never touched (their data
+        outlives the operator by design). ``ctx`` names the selection the
+        user acted on - the CSV row on the redirect path - so the post-await
+        re-validation checks the right row."""
+        ops = self._write_ops
+        if ops is None:
+            return
+        epoch = self._ctx_epoch
+        if not await self._permitted("uninstall", sub_meta, ns, name):
+            return
+        manifest = await self._fetch_subscription_for_uninstall(fetch_kind, sub_meta, ns, name, uid)
+        if manifest is None:
+            return
+        csv_name = _installed_csv_name(manifest)
+        csv_meta, csv_uid = await self._installed_csv_target(ns, csv_name)
+        ctx_meta, ctx_ns, ctx_name = ctx
+        if not self._write_context_intact(
+            "uninstall", ctx_meta, ctx_ns, ctx_name, phase="the manifest fetch", epoch=epoch
+        ):
+            return
+        operation = self._operator_uninstall_operation(sub_meta, ns, name, csv_meta, csv_name)
+
+        def _done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._operator_apply_uninstall(
+                        ops,
+                        sub_meta,
+                        ns,
+                        name,
+                        uid,
+                        csv_meta=csv_meta,
+                        csv_name=csv_name,
+                        csv_uid=csv_uid,
+                    )
+                )
+
+        await self.push_screen(
+            self._confirm_screen(f"Uninstall operator {name}?", operation), _done
+        )
+
+    async def _fetch_subscription_for_uninstall(
+        self, fetch_kind: str, sub_meta: ResourceMeta, ns: str | None, name: str, uid: str | None
+    ) -> dict[str, Any] | None:
+        """The Subscription manifest for the uninstall dialog, or None (with
+        a notification) when it cannot be fetched or is a different
+        incarnation than the row the user acted on."""
+        if self._get_manifest is None:
+            self.notify("Uninstall unavailable: no manifest source", severity="warning")
+            return None
+        try:
+            manifest = await self._get_manifest(fetch_kind, ns, name)
+        except Exception as exc:
+            self.notify(f"Could not fetch the subscription: {exc}", severity="error")
+            return None
+        fetched = _manifest_uid(manifest)
+        if uid and fetched and fetched != uid:
+            self.notify(
+                f"uninstall {self._gvr_label(sub_meta)}/{name} cancelled -"
+                " the subscription changed during the manifest fetch",
+                severity="warning",
+            )
+            return None
+        return manifest
+
+    async def _installed_csv_target(
+        self, ns: str | None, csv_name: str
+    ) -> tuple[ResourceMeta | None, str | None]:
+        """(meta, uid) of the Subscription's installed CSV. Meta None when no
+        CSV is recorded, the CSV API is undiscovered, or the CSV is already
+        gone (404) - the Subscription alone is removed then. Uid None when
+        the pinning fetch fails for another reason: the delete proceeds
+        without a precondition, like a row without a cached uid."""
+        if not csv_name:
+            return None, None
+        key = self._olm_alias_key("clusterserviceversions")
+        if key is None:
+            return None, None
+        meta = self.aliases[key]
+        if self._get_manifest is None:
+            return meta, None
+        try:
+            manifest = await self._get_manifest(key, ns, csv_name)
+        except ApiStatusError as exc:
+            if exc.status == 404:
+                return None, None
+            return meta, None
+        except Exception:
+            logger.debug("CSV uid lookup failed; delete proceeds unpinned", exc_info=True)
+            return meta, None
+        return meta, _manifest_uid(manifest)
+
+    def _operator_uninstall_operation(
+        self,
+        sub_meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        csv_meta: ResourceMeta | None,
+        csv_name: str,
+    ) -> str:
+        """The uninstall dialog body: exactly what will be deleted, what OLM
+        garbage-collects, and what is deliberately kept."""
+        lines = [
+            f"OPERATOR UNINSTALL {name}{self._write_locus(ns)}",
+            "",
+            f"  DELETE {self._gvr_label(sub_meta)}/{name}",
+        ]
+        if csv_meta is not None and csv_name:
+            lines += [
+                f"  DELETE {self._gvr_label(csv_meta)}/{csv_name}",
+                "",
+                "OLM garbage-collects the operator's Deployment and RBAC owned by the CSV.",
+            ]
+        else:
+            lines += ["", "(no installed CSV recorded - only the Subscription is removed)"]
+        lines.append("CRDs and custom resources are KEPT - remove them manually if needed.")
+        return "\n".join(lines)
+
+    async def _operator_apply_uninstall(
+        self,
+        ops: WriteOps,
+        sub_meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        uid: str | None,
+        *,
+        csv_meta: ResourceMeta | None,
+        csv_name: str,
+        csv_uid: str | None,
+    ) -> None:
+        """Subscription first (stops OLM from reinstalling), then the CSV;
+        each delete individually audited fail-closed. A failed or blocked
+        Subscription delete leaves the CSV untouched - removing the CSV
+        alone would only make OLM reinstall it."""
+        outcome = await self._run_write(
+            "uninstall",
+            sub_meta,
+            ns,
+            name,
+            ops.delete_object(sub_meta, ns, name, uid=uid),
+            detail=f"csv={csv_name or '-'}",
+        )
+        if outcome != "done" or csv_meta is None or not csv_name:
+            return
+        await self._run_write(
+            "uninstall",
+            csv_meta,
+            ns,
+            csv_name,
+            ops.delete_object(csv_meta, ns, csv_name, uid=csv_uid),
+            detail=f"subscription={name}",
+        )
+
+    async def _csv_uninstall_redirect(
+        self, csv_meta: ResourceMeta, ns: str | None, name: str
+    ) -> bool:
+        """Ctrl+D on a CSV installed by a known Subscription: warn that OLM
+        would reinstall a deleted CSV and offer the full uninstall instead
+        (issue #117). False - the plain delete proceeds - when no owning
+        Subscription is found; the lookup reads the store, so only
+        Subscriptions this session has watched count."""
+        sub_key = self._olm_alias_key("subscriptions")
+        if sub_key is None:
+            return False
+        row = next(
+            (
+                obj
+                for obj in self.store.get(self._canonical_kind(sub_key), self.current_scope)
+                if getattr(obj, "installed_csv", "") == name and (ns is None or obj.namespace == ns)
+            ),
+            None,
+        )
+        if row is None:
+            return False
+        self.notify(
+            f"{name} was installed by subscriptions/{row.name} - OLM would"
+            " reinstall a deleted CSV; uninstalling the operator instead",
+            severity="warning",
+        )
+        await self._start_operator_uninstall(
+            self.aliases[sub_key],
+            row.namespace or None,
+            row.name,
+            str(getattr(row, "uid", "") or "") or None,
+            fetch_kind=sub_key,
+            ctx=(csv_meta, ns, name),
+        )
+        return True
 
     # ------------------------------------------------------------------
     # helm install / upgrade / rollback via the detected helm CLI (issue #31)

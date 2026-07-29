@@ -99,7 +99,7 @@ class Recorder(WriteOps):
     async def delete_object(
         self, meta: ResourceMeta, namespace: str | None, name: str, *, uid: str | None = None
     ) -> None:
-        self.calls.append(("delete", meta.plural, namespace, name))
+        self.calls.append(("delete", meta.plural, namespace, name, uid))
 
     async def scale_object(
         self,
