@@ -407,6 +407,15 @@ class TestListRemoteDir:
         await list_remote_dir(exec_, "/")
         assert exec_.calls == [(["ls", "-1Ap", "--", "/"], False)]
 
+    async def test_non_utf8_names_reject_listing(self) -> None:
+        # errors="replace" would collapse an invalid-UTF-8 name and a real
+        # U+FFFD name to the same entry; selecting the former would then
+        # transfer the latter's path. Exec arguments are strings, so such
+        # names can never round-trip — degrade to manual entry instead.
+        ws = FakeWs([b"\x01" + b"ok.log\n\xff\xfebad\n", b"\x03" + SUCCESS])
+        with pytest.raises(TransferError, match="non-UTF-8"):
+            await list_remote_dir(FakeExec(ws), "/srv")
+
     async def test_empty_directory(self) -> None:
         ws = FakeWs([b"\x03" + SUCCESS])
         assert await list_remote_dir(FakeExec(ws), "/empty") == []

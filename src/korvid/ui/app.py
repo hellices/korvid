@@ -3123,14 +3123,19 @@ class KorvidApp(App[None]):
     async def _verify_listing_pod(self, namespace: str, name: str, uid: str | None) -> None:
         """Raise TransferError unless pod `uid` is still the incarnation the
         transfer dialog was opened for. Fails open when no uid was captured
-        (matching the transfer's own uid gate in ui/transfer.py)."""
+        (matching the transfer's own uid gate in ui/transfer.py); with a
+        captured uid an unverifiable lookup fails closed — browsing is
+        optional, so degrading to manual entry beats listing a same-named
+        replacement pod."""
         if uid is None:
             return
         try:
             current = await self._target_uid("pods", namespace, name)
         except ApiStatusError as exc:
             raise TransferError(f"pod {name} no longer exists") from exc
-        if current is not None and current != uid:
+        if current is None:
+            raise TransferError(f"pod {name} could not be verified — enter the path manually")
+        if current != uid:
             raise TransferError(f"pod {name} was replaced since the dialog was opened")
 
     def _start_transfer(

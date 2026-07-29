@@ -221,10 +221,23 @@ async def list_remote_dir(open_exec: OpenExec, path: str) -> list[RemoteEntry]:
         raise TransferError(
             sink.error_message(f"connection closed without reporting an outcome for {path}")
         )
+    return _parse_listing(stdout, path)
+
+
+def _parse_listing(stdout: bytes | bytearray, path: str) -> list[RemoteEntry]:
+    """Parse `ls -1Ap` output into sorted entries (dirs first)."""
     entries: list[RemoteEntry] = []
+    try:
+        text = stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # errors="replace" would collapse an invalid-UTF-8 name and a real
+        # U+FFFD name into the same entry; selecting the former would then
+        # transfer the latter's path. Exec arguments are strings, so such
+        # names can never round-trip — degrade to manual entry instead.
+        raise TransferError(f"directory listing for {path} contains non-UTF-8 names") from exc
     # LF only: splitlines() would also split on VT/FF/U+0085, which are
     # unusual but valid filename characters, producing phantom entries.
-    for line in stdout.decode("utf-8", errors="replace").split("\n"):
+    for line in text.split("\n"):
         if not line:
             continue
         if len(entries) >= _LIST_MAX_ENTRIES:
