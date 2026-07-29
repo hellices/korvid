@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import tarfile
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from korvid.core.transfer import (
     download_command,
     extract_single_file,
     pack_file,
+    permission_hint,
     upload_command,
     validate_spec,
 )
@@ -254,3 +256,78 @@ class TestPackExtract:
         assert extract_single_file(archive, dest) == 5
         assert dest.read_bytes() == b"pwned"
         assert not (tmp_path.parent.parent / "evil.txt").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission checks are meaningless as root")
+class TestValidateSpecPermissions:
+    """Issue #123: directory/file permission problems must fail inside the
+    dialog with a clear message, never after the intent audit as a raw errno
+    leaking the staging file name."""
+
+    def test_download_into_unwritable_directory(self, tmp_path: Path) -> None:
+        restricted = tmp_path / "restricted"
+        restricted.mkdir(mode=0o500)
+        spec = TransferSpec("download", "/var/log/app.log", str(restricted / "app.log"))
+        error = validate_spec(spec)
+        assert error is not None
+        assert "not writable" in error
+        assert str(restricted) in error
+
+    def test_download_onto_readonly_file(self, tmp_path: Path) -> None:
+        dest = tmp_path / "app.log"
+        dest.write_text("old")
+        dest.chmod(0o400)
+        spec = TransferSpec("download", "/var/log/app.log", str(dest))
+        error = validate_spec(spec)
+        assert error is not None
+        assert "not writable" in error
+
+    def test_upload_unreadable_source(self, tmp_path: Path) -> None:
+        src = tmp_path / "secret.bin"
+        src.write_bytes(b"x")
+        src.chmod(0o200)
+        spec = TransferSpec("upload", "/tmp/secret.bin", str(src))
+        error = validate_spec(spec)
+        assert error is not None
+        assert "not readable" in error
+
+    def test_writable_paths_still_pass(self, tmp_path: Path) -> None:
+        spec = TransferSpec("download", "/var/log/app.log", str(tmp_path / "app.log"))
+        assert validate_spec(spec) is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission checks are meaningless as root")
+class TestDefaultLocalPathPermissions:
+    def test_skips_unwritable_downloads_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The default must always survive validate_spec's new writability
+        # check, so a read-only ~/Downloads falls back to the home directory.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        downloads = tmp_path / "Downloads"
+        downloads.mkdir(mode=0o500)
+        assert default_local_path("/var/log/app.log") == str(tmp_path / "app.log")
+
+
+class TestPermissionHint:
+    """Issue #123: a remote permission failure keeps the server's verbatim
+    message but gains one actionable hint line."""
+
+    def test_permission_denied_gets_hint(self) -> None:
+        hint = permission_hint("tar: app.log: Cannot open: Permission denied", "/app/app.log")
+        assert hint is not None
+        assert "/app" in hint
+        assert "/tmp" in hint
+
+    def test_read_only_filesystem_gets_hint(self) -> None:
+        hint = permission_hint("tar: cfg: Cannot open: Read-only file system", "/etc/cfg")
+        assert hint is not None
+        assert "readOnlyRootFilesystem" in hint
+
+    def test_unrelated_failure_gets_no_hint(self) -> None:
+        assert permission_hint("tar: /nope: No such file or directory", "/nope/f") is None
+
+    def test_root_target_names_root(self) -> None:
+        hint = permission_hint("Permission denied", "/f")
+        assert hint is not None
+        assert "to / " in hint or "to /" in hint

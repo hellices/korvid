@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import io
 import json
+import os
 import tarfile
 import tempfile
 import threading
@@ -253,3 +254,51 @@ class TestAwaitThread:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert finished.is_set()
+
+
+class TestPermissionErrors:
+    """Issue #123: late permission failures are TransferErrors with the
+    destination path and, remotely, an actionable hint — never a raw errno
+    leaking the staging file name."""
+
+    async def test_upload_permission_denied_appends_hint(self, tmp_path: Path) -> None:
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        failure = json.dumps(
+            {"status": "Failure", "message": "command terminated with non-zero exit code"}
+        ).encode()
+        ws = FakeWs(
+            [
+                b"\x02tar: f: Cannot open: Permission denied\n",
+                b"\x03" + failure,
+            ]
+        )
+        with pytest.raises(TransferError, match="Permission denied") as excinfo:
+            await upload(FakeExec(ws), src, "/app/f")
+        message = str(excinfo.value)
+        assert "hint:" in message
+        assert "/app" in message
+        assert "/tmp" in message
+
+    async def test_upload_unrelated_failure_gets_no_hint(self, tmp_path: Path) -> None:
+        src = tmp_path / "f"
+        src.write_bytes(b"x")
+        ws = FakeWs([b"\x03" + NOT_FOUND])
+        with pytest.raises(TransferError, match="executable file not found") as excinfo:
+            await upload(FakeExec(ws), src, "/tmp/f")
+        assert "hint:" not in str(excinfo.value)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="permission checks are meaningless as root")
+    async def test_download_unwritable_directory_is_a_transfer_error(self, tmp_path: Path) -> None:
+        # validate_spec catches this up front, but a directory can lose its
+        # write bit between the dialog and the stream: the late failure must
+        # still name the destination directory, never the staging file.
+        restricted = tmp_path / "restricted"
+        restricted.mkdir(mode=0o500)
+        dest = restricted / "app.log"
+        ws = FakeWs([b"\x01" + tar_bytes("app.log", b"data"), b"\x03" + SUCCESS])
+        with pytest.raises(TransferError, match="not writable") as excinfo:
+            await download(FakeExec(ws), "/var/log/app.log", dest)
+        message = str(excinfo.value)
+        assert str(restricted) in message
+        assert ".part" not in message
