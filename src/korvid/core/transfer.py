@@ -102,15 +102,32 @@ def validate_spec(spec: TransferSpec) -> str | None:
             return f"local file not found: {local}"
         if not local.is_file():
             return f"not a regular file: {local}"
+        if not os.access(local, os.R_OK):
+            return f"local file is not readable: {local}"
         return None
+    return _validate_download_destination(local)
+
+
+def _validate_download_destination(local: Path) -> str | None:
+    """Local-side checks for a download destination path."""
+    parent = local.parent
+    if not parent.is_dir():
+        return f"local directory does not exist: {parent}"
+    # Writability is checked here too (issue #123): failing after the dialog
+    # would leave an intent audit entry and a raw errno for a foreseeable
+    # condition. Creating the staging file needs both the write and the
+    # search bit — and the search bit must be checked *before* any stat of
+    # ``local`` below, which would itself raise PermissionError without it.
+    # The stream re-checks — the bits can flip in between.
+    if not os.access(parent, os.W_OK | os.X_OK):
+        return f"local directory is not writable: {parent}"
     if local.is_dir():
         # Caught here: after the stream this would only surface as an
         # IsADirectoryError from the extraction step, long after the bytes
         # were transferred.
         return f"local path is a directory, expected a file path: {local}"
-    parent = local.parent
-    if not parent.is_dir():
-        return f"local directory does not exist: {parent}"
+    if local.exists() and not os.access(local, os.W_OK):
+        return f"local file is not writable: {local}"
     return None
 
 
@@ -149,15 +166,40 @@ def upload_command(remote_path: str) -> list[str]:
     return ["tar", "xf", "-", "-C", directory]
 
 
+#: Lowercased stderr fragments that identify a *permission* failure on the
+#: remote side. Deliberately narrow: "Cannot open" alone also covers plain
+#: missing files, which must never get a permission hint.
+_PERMISSION_FRAGMENTS = ("permission denied", "read-only file system")
+
+
+def permission_hint(message: str, remote_path: str) -> str | None:
+    """One actionable hint line for a remote permission failure, else None.
+
+    The server's verbatim message is always kept (it is the accurate part);
+    this only *adds* direction for the common non-root-image /
+    ``readOnlyRootFilesystem`` case (issue #123).
+    """
+    lowered = message.lower()
+    if not any(fragment in lowered for fragment in _PERMISSION_FRAGMENTS):
+        return None
+    directory = posixpath.dirname(remote_path) or "/"
+    return (
+        f"hint: the container user cannot write to {directory} — "
+        "try /tmp or a volume mount, or check readOnlyRootFilesystem"
+    )
+
+
 def default_local_path(remote_path: str) -> str:
     """Default download destination: ``~/Downloads/<basename>``.
 
     Falls back to ``~/<basename>`` when the ``Downloads`` directory does not
-    exist, so the default always survives ``validate_spec``'s parent check.
+    exist or is not writable, so the default always survives
+    ``validate_spec``'s parent checks.
     """
     base = posixpath.basename(remote_path.rstrip("/")) or "download"
     downloads = Path("~/Downloads").expanduser()
-    directory = downloads if downloads.is_dir() else Path("~").expanduser()
+    usable = downloads.is_dir() and os.access(downloads, os.W_OK | os.X_OK)
+    directory = downloads if usable else Path("~").expanduser()
     return str(directory / base)
 
 
@@ -311,6 +353,28 @@ async def _await_thread(func: Callable[..., _T], /, *args: Any) -> _T:
         raise
 
 
+def _create_spool(local_path: Path) -> tuple[int, Path]:
+    """Create the download staging file next to the destination.
+
+    OSErrors are normalized to TransferError naming the destination
+    directory — never the internal staging file (issue #123). validate_spec
+    pre-checks writability, but the bit can flip between the dialog and the
+    stream. Only permission failures get the "not writable" wording: mkstemp
+    can also fail with ENOSPC, EMFILE, ENAMETOOLONG and the like.
+    """
+    try:
+        fd, spool_name = tempfile.mkstemp(
+            dir=local_path.parent, prefix=f".{local_path.name}.", suffix=".part"
+        )
+    except OSError as exc:
+        if isinstance(exc, PermissionError):
+            detail = f"local directory is not writable: {local_path.parent}"
+        else:
+            detail = f"cannot create download staging file in {local_path.parent}"
+        raise TransferError(f"{detail} ({exc.strerror or exc})") from exc
+    return fd, Path(spool_name)
+
+
 async def download(
     open_exec: OpenExec,
     remote_path: str,
@@ -326,10 +390,7 @@ async def download(
     """
     sink = _FrameSink()
     total = 0
-    fd, spool_name = tempfile.mkstemp(
-        dir=local_path.parent, prefix=f".{local_path.name}.", suffix=".part"
-    )
-    spool_path = Path(spool_name)
+    fd, spool_path = _create_spool(local_path)
     try:
         with os.fdopen(fd, "wb") as spool:
             async with open_exec(download_command(remote_path), False) as ws:
@@ -355,9 +416,28 @@ async def download(
             raise TransferError(
                 sink.error_message(f"no data received for {remote_path} — does the file exist?")
             )
-        return await _await_thread(extract_single_file, spool_path, local_path)
+        try:
+            return await _await_thread(extract_single_file, spool_path, local_path)
+        except OSError as exc:
+            # Same late-writability story as the spool above: report the
+            # destination, not the staging temp file the extraction opened.
+            raise TransferError(f"cannot write {local_path}: {exc.strerror or exc}") from exc
     finally:
-        spool_path.unlink(missing_ok=True)
+        # The unlink needs the directory's write bit too: when that is what
+        # just failed, a raw PermissionError here would replace the
+        # normalized TransferError and expose the .part staging name. A
+        # cleanup failure after a *successful* extraction is only logged —
+        # the download itself did land.
+        try:
+            spool_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("could not remove download spool %s", spool_path)
+
+
+def _with_permission_hint(message: str, remote_path: str) -> str:
+    """Append the permission hint to an upload failure message when it fits."""
+    hint = permission_hint(message, remote_path)
+    return f"{message}\n{hint}" if hint else message
 
 
 async def upload(
@@ -402,7 +482,11 @@ async def upload(
                     # died; drain what the server managed to say, then prefer
                     # its verdict over the raw transport error.
                     await asyncio.wait({reader}, timeout=_UPLOAD_DRAIN_GRACE)
-                    raise TransferError(sink.error_message(f"connection lost: {exc}")) from exc
+                    raise TransferError(
+                        _with_permission_hint(
+                            sink.error_message(f"connection lost: {exc}"), remote_path
+                        )
+                    ) from exc
                 # Wait for the server's verdict: tar exits on the archive's
                 # end-of-archive marker, then the status frame arrives and
                 # _drain returns (or the server closes the websocket).
@@ -413,11 +497,18 @@ async def upload(
                 # closes, or the reader dies mid-iteration with a warning.
                 await asyncio.gather(reader, return_exceptions=True)
             if sink.failure is not None:
-                raise TransferError(sink.error_message("upload failed"))
-            if not sink.verdict:
                 raise TransferError(
-                    sink.error_message(
-                        "upload sent, but the connection closed without reporting an outcome"
+                    _with_permission_hint(sink.error_message("upload failed"), remote_path)
+                )
+            if not sink.verdict:
+                # The stderr may still carry the permission story even when
+                # the server dropped before any channel-3 verdict.
+                raise TransferError(
+                    _with_permission_hint(
+                        sink.error_message(
+                            "upload sent, but the connection closed without reporting an outcome"
+                        ),
+                        remote_path,
                     )
                 )
     finally:

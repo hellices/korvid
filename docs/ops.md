@@ -128,7 +128,11 @@ and a local path — leaving the local path empty on a download saves to
 
 Transfers ride the exec API as a tar stream, so there is no dependency on a
 `kubectl` binary — but the container must have `tar` (the server's error is
-shown verbatim when it doesn't, e.g. distroless images). A progress modal
+shown verbatim when it doesn't, e.g. distroless images). Local permission
+problems (an unwritable destination directory, an unreadable source file)
+are caught in the dialog before anything streams; a remote permission
+failure keeps the server's message and adds a hint pointing at `/tmp`,
+volume mounts, or `readOnlyRootFilesystem`. A progress modal
 shows the byte count as the stream advances; `Esc` cancels the transfer, and
 a cancelled or failed download never leaves a half-written local file.
 
