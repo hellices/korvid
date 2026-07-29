@@ -85,8 +85,11 @@ def validate_spec(spec: TransferSpec) -> str | None:
     Kept deliberately local-only: remote-side problems (missing file, missing
     tar binary, permissions) surface from the stream itself with the server's
     own message, which is always more accurate than a client-side guess.
+
+    Paths are validated verbatim — filenames may legitimately begin or end
+    with whitespace — stripping is used only to detect blank fields.
     """
-    remote_error = _validate_remote_path(spec.remote_path.strip())
+    remote_error = _validate_remote_path(spec.remote_path if spec.remote_path.strip() else "")
     if remote_error is not None:
         return remote_error
     if not spec.local_path.strip():

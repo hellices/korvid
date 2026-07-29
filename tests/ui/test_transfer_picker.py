@@ -420,6 +420,69 @@ class TestPodUidGuard:
                 await lister("/")
 
 
+class TestWhitespaceVerbatim:
+    """Round 8: basename derivation and start-dir probing must also use the
+    field values verbatim — "report" and "report " are different files."""
+
+    async def test_local_dir_pick_appends_remote_basename_verbatim(self, tmp_path: Path) -> None:
+        app = make_app([_pod("api-1")], open_pod_exec=FakeExecOpener(_listing()))
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            dialog.query_one("#transfer-remote", Input).value = "/srv/report "
+            local = dialog.query_one("#transfer-local", Input)
+            local.value = str(tmp_path) + "/"
+            local.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, LocalPathPickerScreen), label="picker"
+            )
+            app.screen.query_one(DirectoryTree).focus()
+            await pilot.press("s")
+            await until(pilot, lambda: app.screen is dialog, label="picker closed")
+            assert local.value == str(tmp_path) + "/report "
+
+    async def test_remote_dir_pick_appends_local_basename_verbatim(self, tmp_path: Path) -> None:
+        opener = FakeExecOpener(_listing("config/"))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            dialog.select_upload()
+            dialog.query_one("#transfer-local", Input).value = str(tmp_path / "bundle ")
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.value = "/srv/"
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
+            )
+            options = app.screen.query_one(OptionList)
+            await until(pilot, lambda: options.option_count == 2, label="options")
+            options.focus()
+            await pilot.press("s")
+            await until(pilot, lambda: app.screen is dialog, label="picker closed")
+            assert remote.value == "/srv/bundle "
+
+    async def test_local_start_dir_with_trailing_space_probed_verbatim(
+        self, tmp_path: Path
+    ) -> None:
+        # An existing directory named "archive " must be probed as-is:
+        # stripping probed "archive" (missing) and opened the parent.
+        spaced = tmp_path / "archive "
+        spaced.mkdir()
+        app = make_app([_pod("api-1")], open_pod_exec=FakeExecOpener(_listing()))
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            local = dialog.query_one("#transfer-local", Input)
+            local.value = str(spaced)
+            local.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, LocalPathPickerScreen), label="picker"
+            )
+            tree = app.screen.query_one(DirectoryTree)
+            assert Path(tree.path) == spaced
+
+
 class TestMarkupSafety:
     """Remote filenames are cluster-controlled: rendering them as Textual
     markup would let "[red]secret[/red]" display as "secret", so the picker

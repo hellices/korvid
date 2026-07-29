@@ -146,8 +146,10 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
         # but browsing is advertised for the path fields only — do nothing.
 
     def _browse_local(self) -> None:
-        current = self.query_one("#transfer-local", Input).value.strip()
-        start = _deepest_existing_dir(current)
+        # Verbatim (blank check aside): a directory name may end in
+        # whitespace, and stripping would probe a different path.
+        current = self.query_one("#transfer-local", Input).value
+        start = _deepest_existing_dir(current if current.strip() else "")
         picker = LocalPathPickerScreen(start, select_dirs=self.direction == "download")
         self.app.push_screen(picker, self._apply_local_pick)
 
@@ -157,8 +159,9 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
             if result.endswith(("/", os.sep)):
                 # Directory choice: complete it with the remote basename when
                 # one is already typed, otherwise leave the name to the user.
-                remote = self.query_one("#transfer-remote", Input).value.strip()
-                base = posixpath.basename(remote.rstrip("/")) if remote else ""
+                # Basename taken verbatim — it may end in whitespace.
+                remote = self.query_one("#transfer-remote", Input).value
+                base = posixpath.basename(remote.rstrip("/")) if remote.strip() else ""
                 result += base
             field.value = result
         field.focus()
@@ -167,7 +170,9 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
         if self._remote_lister is None:
             self.notify("remote browsing unavailable", severity="warning")
             return
-        current = self.query_one("#transfer-remote", Input).value.strip()
+        current = self.query_one("#transfer-remote", Input).value
+        if not current.strip():
+            current = ""
         start = current if current.endswith("/") else posixpath.dirname(current)
         picker = RemotePathPickerScreen(self._remote_lister, start or "/")
         self.app.push_screen(picker, self._apply_remote_pick)
@@ -178,8 +183,9 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
             if result.endswith("/"):
                 # Directory choice: an upload destination gets the local
                 # file's name appended; otherwise the user completes it.
-                local = self.query_one("#transfer-local", Input).value.strip()
-                if self.direction == "upload" and local:
+                # Name taken verbatim — it may end in whitespace.
+                local = self.query_one("#transfer-local", Input).value
+                if self.direction == "upload" and local.strip():
                     result += Path(local).name
             field.value = result
         field.focus()
