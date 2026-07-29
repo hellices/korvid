@@ -22,7 +22,7 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary
 from korvid.k8s.writes import WriteOps
-from korvid.tools.proposals import ProposalClosedError, ProposalStore
+from korvid.tools.proposals import ProposalClosedError, ProposalStore, WriteProposal
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 
@@ -1144,3 +1144,82 @@ async def test_a_restart_racing_the_late_shutdown_keeps_new_run_proposals(
         pending = store.pending()
     assert len(pending) == 1
     assert pending[0].session_id == "sess-new"
+
+
+async def test_a_run_dying_during_the_stop_sweep_still_gets_the_follow_up_sweep(
+    tmp_path: Path,
+) -> None:
+    """The stop-time sweep awaits audit appends, and the dying run's task
+    can finish (with a last in-flight old-run submission landing) during
+    that wait. The follow-up sweep must bind to a snapshot taken before
+    the audits — `mcp.running` re-read afterwards would already be False,
+    skipping the sweep and leaving the late proposal pending forever."""
+    store = ProposalStore()
+    mcp = SlowStopMCP()
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store, mcp=mcp)
+    async with app.run_test() as pilot:
+        await _submit(app)  # gives the stop-time sweep an audit to write
+        entered = asyncio.Event()
+        gate = asyncio.Event()
+        orig = app._audit_proposal_outcome
+
+        async def gated(proposal: WriteProposal, state: str, reason: str) -> None:
+            entered.set()
+            await gate.wait()
+            await orig(proposal, state, reason)
+
+        app._audit_proposal_outcome = gated  # type: ignore[method-assign]  # holding the sweep's audit in flight to race the dying run
+        app._handle_mcp_command(["off"])
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        # While the sweep's audit is in flight: the old run finishes dying
+        # and its last in-flight submission lands.
+        task = mcp.pending_task()
+        assert task is not None
+        await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert not mcp.running
+        store.submit(
+            action="delete",
+            group="apps",
+            version="v1",
+            kind="deployments",
+            namespace="default",
+            name="web",
+            arguments_json="{}",
+            uid="uid-1",
+            context="ctx-a",
+            context_epoch=0,
+            summary="delete deployments/web",
+            preview=(),
+            session_id="sess-late",
+            client_name="",
+            client_version="",
+        )
+        gate.set()
+        await until(pilot, lambda: all(w.is_finished for w in app.workers))
+        assert store.pending() == []
+
+
+async def test_proposal_outcome_audits_bind_to_the_proposal_context(tmp_path: Path) -> None:
+    """Denial/cancel/expiry audits are not serialized with `:ctx`: the
+    shared audit log's ambient context can flip while the threaded append
+    is pending. The outcome entry must record the proposal's bound
+    context, never whichever cluster the session points at by then."""
+    store = ProposalStore()
+    path = tmp_path / "a.jsonl"
+    app = make_app(Recorder(), path, store)
+    async with app.run_test() as pilot:
+        await _submit(app)
+        pid = store.pending()[0].id
+        assert app._audit is not None
+        app._audit.set_context("ctx-b")  # what a :ctx switch does mid-flight
+        await app.agent_cancel_write_proposal(pid, session_id="sess-1")
+
+        def outcome_context() -> object:
+            for line in path.read_text().splitlines():
+                entry = json.loads(line)
+                if str(entry["outcome"]).startswith("proposal cancelled"):
+                    return entry["context"]
+            return "missing"
+
+        await until(pilot, lambda: outcome_context() != "missing")
+        assert outcome_context() == "ctx-a"

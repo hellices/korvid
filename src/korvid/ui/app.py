@@ -2328,12 +2328,16 @@ class KorvidApp(App[None]):
                 # status-preserving toggle (`:mcp on` while already
                 # running) keeps pending work.
                 stopped = action == "off" and was_running
-                if stopped:
-                    await self._expire_proposals_audited("the MCP server was stopped")
-                # Captured under the lock: the follow-up wait below must
+                # Captured under the lock and BEFORE the audited sweep: the
+                # sweep awaits audit appends, and the dying run's task can
+                # finish during that wait — `running` re-read afterwards
+                # would be False, skipping the follow-up sweep that catches
+                # the run's last in-flight submissions. The wait below must
                 # bind to *this* dying run, never to whichever run the
                 # controller owns once the lock is released.
                 old_task = mcp.pending_task() if stopped and mcp.running else None
+                if stopped:
+                    await self._expire_proposals_audited("the MCP server was stopped")
             self.notify(msg, severity="error" if msg.startswith("ERROR") else "information")
             self._refresh_status()
             if old_task is not None:
@@ -7083,6 +7087,9 @@ class KorvidApp(App[None]):
                 name=proposal.name,
                 detail=self._proposal_provenance(proposal),
                 outcome=f"proposal {state}: {reason}" if reason else f"proposal {state}",
+                # These outcome appends are not serialized with `:ctx`'s
+                # set_context: bind the entry to the proposal's own cluster.
+                context=proposal.context,
             )
         except Exception:
             logger.warning("could not audit proposal %s outcome %s", proposal.id, state)
