@@ -416,7 +416,9 @@ async def test_synthetic_helm_views_hide_generic_write_keys() -> None:
         await _navigate(pilot, "helm", "helmreleases")
         await _rows_listed(pilot, app)
         active = app.screen.active_bindings
-        assert "ctrl+d" not in active
+        # ctrl+d stays: on the release browser it means `helm uninstall`
+        # (issue #117); e remains hidden - the rows are read-only Secrets.
+        assert active["ctrl+d"].binding.id == "delete_resource"
         assert "e" not in active
         assert active["u"].binding.id == "helm_upgrade"  # helm writes stay
         await _navigate(pilot, "helmrevisions", "helmrevisions")

@@ -30,7 +30,7 @@ view and shows the effective keys, including any remaps.
 | `Ctrl-S` | log pane | Save the current buffer to `$XDG_DATA_HOME/korvid/logs/` (default `~/.local/share/korvid/logs/`) |
 | `p` | log pane | Reload pane with previous (terminated) container logs |
 | `n` / `N` | log pane | Jump to next / previous search hit |
-| `Ctrl-D` | table | Delete selected resource (confirm dialog; cluster-scoped kinds require typing the name) |
+| `Ctrl-D` | table | Delete selected resource (confirm dialog; cluster-scoped kinds require typing the name). On a Helm release: uninstall; on a Subscription (or a CSV whose Subscription is known): [operator uninstall](helm-operators.md#operator-uninstall) — a CSV with no known Subscription is a plain delete |
 | `r` | table | Rolling restart of selected deployment / statefulset / daemonset (confirm dialog) |
 | `S` | table | Scale selected deployment / replicaset / statefulset (replica prompt + confirm dialog) |
 | `R` | pods table | In-place resize of pod CPU/memory requests/limits (Kubernetes 1.35+; prompt + confirm dialog) |

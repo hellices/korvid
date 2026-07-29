@@ -167,6 +167,39 @@ async def test_rollback_builds_argv() -> None:
     assert argv[1:5] == ["rollback", "web", "2", "--namespace"]
 
 
+async def test_uninstall_builds_argv() -> None:
+    cli, execute = _cli()
+    execute.return_value = (0, 'release "web" uninstalled\n', "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        out = await cli.uninstall("web", "default")
+    assert "uninstalled" in out
+    argv = execute.await_args_list[0].args[0]
+    assert argv[1:5] == ["uninstall", "web", "--namespace", "default"]
+    assert "--keep-history" not in argv
+    assert "--dry-run" not in argv
+
+
+async def test_uninstall_keep_history_flag() -> None:
+    cli, execute = _cli()
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        await cli.uninstall("web", "default", keep_history=True)
+    argv = execute.await_args_list[0].args[0]
+    assert argv[1:5] == ["uninstall", "web", "--namespace", "default"]
+    assert "--keep-history" in argv
+    assert "--dry-run" not in argv
+
+
+async def test_dry_run_uninstall_appends_dry_run_flag() -> None:
+    cli, execute = _cli()
+    execute.return_value = (0, 'release "web" uninstalled\n', "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        out = await cli.dry_run_uninstall("web", "default")
+    assert "uninstalled" in out
+    argv = execute.await_args_list[0].args[0]
+    assert argv[1:5] == ["uninstall", "web", "--namespace", "default"]
+    assert "--dry-run" in argv
+
+
 async def test_nonzero_exit_raises_helm_error_with_stderr_tail() -> None:
     cli, execute = _cli()
     execute.return_value = (1, "", "Error: chart not found: bogus/none\n")
