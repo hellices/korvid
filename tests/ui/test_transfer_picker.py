@@ -293,6 +293,7 @@ class TestRemotePickerRobustness:
                     )
                     await pilot.press("escape")
                     await until(pilot, lambda: app.screen is dialog, label="picker closed")
+                assert app.screen is dialog
             finally:
                 # Unblock the stalled listing so app teardown can finish even
                 # when the timeout above fired (the pre-fix behavior).
