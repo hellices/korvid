@@ -2311,22 +2311,25 @@ class KorvidApp(App[None]):
                     )
                     return
                 was_running = mcp.running
+                if action == "on" and not was_running:
+                    # Any pending proposal predates the run about to start —
+                    # its capability token is from an older, ended run.
+                    # Sweep BEFORE the endpoint goes live: once start()
+                    # returns, the new run's callers may already have
+                    # submitted, and their work must not be expired as
+                    # old-run stragglers.
+                    await self._expire_proposals_audited("the MCP server was restarted")
                 msg = await (mcp.start() if action == "on" else mcp.stop())
-                # A real lifecycle transition invalidates every capability
-                # token handed out for the previous run (issue #110):
-                # pending proposals from that run must not survive it. A
-                # stop whose bounded teardown timed out (`running` still
-                # True) has still ended that run's authority, so it expires
-                # too; only an idempotent status-preserving toggle
-                # (`:mcp on` while already running) keeps pending work.
+                # A real stop invalidates every capability token handed out
+                # for that run (issue #110): pending proposals from it must
+                # not survive. A stop whose bounded teardown timed out
+                # (`running` still True) has still ended that run's
+                # authority, so it expires too; only an idempotent
+                # status-preserving toggle (`:mcp on` while already
+                # running) keeps pending work.
                 stopped = action == "off" and was_running
-                if was_running != mcp.running or stopped:
-                    reason = (
-                        "the MCP server was stopped"
-                        if action == "off"
-                        else "the MCP server was restarted"
-                    )
-                    await self._expire_proposals_audited(reason)
+                if stopped:
+                    await self._expire_proposals_audited("the MCP server was stopped")
                 # Captured under the lock: the follow-up wait below must
                 # bind to *this* dying run, never to whichever run the
                 # controller owns once the lock is released.

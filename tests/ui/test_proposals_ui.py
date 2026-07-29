@@ -664,6 +664,72 @@ async def test_mcp_on_when_already_running_keeps_pending_proposals(tmp_path: Pat
     assert found[1] == "pending"
 
 
+class EagerCallerMCP(FakeMCP):
+    """A caller holding the fresh capability submits the moment `start()`
+    publishes the new endpoint — before it even returns to the app."""
+
+    def __init__(self, store: ProposalStore) -> None:
+        super().__init__(running=False)
+        self._store = store
+
+    async def start(self) -> str:
+        msg = await super().start()
+        self._store.submit(
+            action="delete",
+            group="apps",
+            version="v1",
+            kind="deployments",
+            namespace="default",
+            name="web",
+            arguments_json="{}",
+            uid="uid-1",
+            context="ctx-a",
+            context_epoch=0,
+            summary="delete deployments/web",
+            preview=(),
+            session_id="sess-new",
+            client_name="claude-code",
+            client_version="1.0",
+        )
+        return msg
+
+
+async def test_mcp_on_never_expires_the_new_runs_first_proposal(tmp_path: Path) -> None:
+    """`start()` returns only after the new endpoint and capability are
+    published, so a submission racing that window belongs to the NEW run
+    and must survive; stale pre-start proposals are swept before the start,
+    not after it."""
+    store = ProposalStore()
+    mcp = EagerCallerMCP(store)
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store, mcp=mcp)
+    async with app.run_test() as pilot:
+        # A stale leftover from an older run: must be swept by the start.
+        stale = store.submit(
+            action="delete",
+            group="apps",
+            version="v1",
+            kind="deployments",
+            namespace="default",
+            name="old",
+            arguments_json="{}",
+            uid="uid-0",
+            context="ctx-a",
+            context_epoch=0,
+            summary="delete deployments/old",
+            preview=(),
+            session_id="sess-old",
+            client_name="",
+            client_version="",
+        )
+        app._handle_mcp_command(["on"])
+        await until(pilot, lambda: not any(w.is_running for w in app.workers))
+        pending = store.pending()
+        assert [p.session_id for p in pending] == ["sess-new"]
+        found = store.get(stale.id)
+        assert found is not None
+        assert found[1] == "expired"
+
+
 async def test_mcp_off_expires_pending_proposals(tmp_path: Path) -> None:
     store = ProposalStore()
     mcp = FakeMCP(running=True)
