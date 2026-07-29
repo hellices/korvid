@@ -419,6 +419,30 @@ class TestPodUidGuard:
             with pytest.raises(TransferError, match="replaced"):
                 await lister("/")
 
+    async def test_no_exec_when_switch_completes_during_uid_lookup(self) -> None:
+        # TOCTOU: the epoch is checked before the uid lookup awaits the
+        # manifest; a switch completing during that await must be caught
+        # again *before* the exec, or the ls runs against the new cluster.
+        opener = FakeExecOpener(_listing("etc/"))
+
+        async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+            app._ctx_epoch += 1  # switch completes while the lookup is in flight
+            return {"metadata": {"uid": "uid-approved"}}
+
+        app = make_app(
+            [_pod("api-1", uid="uid-approved")],
+            open_pod_exec=opener,
+            get_manifest=get_manifest,
+        )
+        async with app.run_test():
+            lister = app._remote_lister(
+                "default", "api-1", "app", uid="uid-approved", epoch=app._ctx_epoch
+            )
+            assert lister is not None
+            with pytest.raises(TransferError, match="context changed"):
+                await lister("/")
+            assert opener.calls == []  # the guard fired before any exec
+
 
 class TestWhitespaceVerbatim:
     """Round 8: basename derivation and start-dir probing must also use the

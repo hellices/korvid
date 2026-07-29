@@ -3091,11 +3091,18 @@ class KorvidApp(App[None]):
             return None
 
         async def _guard() -> None:
-            if self._ctx_switch_crossed(epoch):
-                raise TransferError(
-                    f"the kube context changed while the dialog for {namespace}/{name} was open"
-                )
+            def check_epoch() -> None:
+                if self._ctx_switch_crossed(epoch):
+                    raise TransferError(
+                        f"the kube context changed while the dialog for {namespace}/{name} was open"
+                    )
+
+            check_epoch()
             await self._verify_listing_pod(namespace, name, uid)
+            # The uid lookup awaited the manifest source: a switch that
+            # completed during that await retargeted the shared exec client,
+            # so re-check before any exec follows.
+            check_epoch()
 
         async def _list(path: str) -> list[RemoteEntry]:
             await _guard()
