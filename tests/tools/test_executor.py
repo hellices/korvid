@@ -1452,6 +1452,19 @@ async def test_propose_write_scale_requires_replicas() -> None:
     assert "replicas" in result
 
 
+async def test_propose_write_rejects_replicas_on_a_non_scale_action() -> None:
+    """The immutable record must be exactly the operation the caller
+    submitted: a stray `replicas` on a delete would be silently ignored by
+    the operation builder while never appearing in the review dialog."""
+    executor = make_ui_executor(FakeBridge())
+    result = await executor.execute(
+        "propose_write",
+        {"action": "delete", "kind": "pods", "name": "web", "replicas": 3},
+    )
+    assert result.startswith("ERROR:")
+    assert "only valid for a scale proposal" in result
+
+
 async def test_get_write_proposal_requires_a_proposal_id() -> None:
     executor = make_ui_executor(FakeBridge())
     result = await executor.execute("get_write_proposal", {})

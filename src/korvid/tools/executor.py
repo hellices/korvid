@@ -321,6 +321,8 @@ def _validated_proposal_args(
         raise ValueError(f"'replicas' must be an integer, got {replicas!r}")
     if action == "scale" and replicas is None:
         raise ValueError("'replicas' is required for a scale proposal")
+    if action != "scale" and replicas is not None:
+        raise ValueError("'replicas' is only valid for a scale proposal")
     resources = args.get("resources")
     if action == "resize":
         resources = _validated_resources(resources)

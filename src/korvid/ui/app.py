@@ -1602,6 +1602,12 @@ class KorvidApp(App[None]):
             mcp_restart = await self._quiesce_mcp_for_switch()
             if mcp_restart is None:
                 return
+            # Old-context proposals are stale the moment this committed
+            # transition begins: the old MCP run (and its capability) is
+            # already stopped, and both the teardown below and the retarget
+            # perform fallible awaits — expire them now, not at a later
+            # point that an exception could keep from ever being reached.
+            await self._expire_proposals_audited("kube context switched")
             await self._teardown_for_context_switch()
             ok, applied = await self._retarget_context(name, old)
             if not ok:
@@ -1765,12 +1771,10 @@ class KorvidApp(App[None]):
         already torn down and nothing is connected). ``applied`` is the
         context actually in effect, which may legitimately be None (the
         kubeconfig default) — that is why success is a separate flag.
+
+        Old-context proposals were already expired by the caller (right
+        after MCP quiescing), before teardown or either switch attempt.
         """
-        # Old-context proposals are stale the moment this committed retarget
-        # phase begins: even if both switch attempts below raise, the client
-        # may already be half-retargeted, so expire them before the first
-        # fallible attempt — not only after a successful swap.
-        await self._expire_proposals_audited("kube context switched")
         try:
             result = await self._switch_context(name)  # type: ignore[misc]  # guarded by caller
             self._apply_context_switch(name, old, result)

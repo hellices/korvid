@@ -684,7 +684,7 @@ async def test_submit_after_shutdown_began_is_rejected(tmp_path: Path) -> None:
 
 
 async def test_a_failed_context_switch_still_expires_pending_proposals(tmp_path: Path) -> None:
-    """Proposals are invalidated when the committed retarget phase begins:
+    """Proposals are invalidated when the committed transition begins:
     if both the target switch and the fallback raise, the old-context
     validation is still stale (the client may be half-retargeted) and no
     proposal may stay reviewable."""
@@ -695,12 +695,48 @@ async def test_a_failed_context_switch_still_expires_pending_proposals(tmp_path:
         await _submit(app)
         pid = store.pending()[0].id
 
+        async def probe_ok(name: str | None) -> None:
+            return None
+
         async def failing_switch(name: str | None) -> Any:
             raise RuntimeError("cluster probe failed")
 
+        async def noop_teardown() -> None:
+            return None
+
+        app._probe_context = probe_ok
         app._switch_context = failing_switch
-        ok, _applied = await app._retarget_context("ctx-b", "ctx-a")
-        assert ok is False
+        app._teardown_for_context_switch = noop_teardown  # type: ignore[method-assign]  # focus on expiry
+        await app._switch_context_locked("ctx-b")
+        found = store.get(pid)
+        assert found is not None
+        assert found[1] == "expired"
+    assert rec.calls == []
+
+
+async def test_a_failing_teardown_still_expires_pending_proposals(tmp_path: Path) -> None:
+    """Expiry happens the moment the committed transition begins — right
+    after MCP quiescing succeeds, before `_teardown_for_context_switch()`.
+    The teardown performs several fallible awaits; if one raises, the old
+    MCP run is already stopped and its proposals must not stay pending and
+    executable from the TUI."""
+    rec = Recorder()
+    store = ProposalStore()
+    app = make_app(rec, tmp_path / "a.jsonl", store)
+    async with app.run_test():
+        await _submit(app)
+        pid = store.pending()[0].id
+
+        async def probe_ok(name: str | None) -> None:
+            return None
+
+        async def exploding_teardown() -> None:
+            raise RuntimeError("teardown blew up")
+
+        app._probe_context = probe_ok
+        app._teardown_for_context_switch = exploding_teardown  # type: ignore[method-assign]  # fault injection
+        with pytest.raises(RuntimeError, match="teardown blew up"):
+            await app._switch_context_locked("ctx-b")
         found = store.get(pid)
         assert found is not None
         assert found[1] == "expired"
