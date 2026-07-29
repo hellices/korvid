@@ -9,6 +9,8 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from textual.widgets import OptionList, Static
+
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
@@ -21,11 +23,12 @@ from korvid.k8s.helm import (
     HelmRevisionSummary,
     release_uid,
 )
-from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError
+from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, HelmRepo
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
+from korvid.ui.widgets.helm_chart_search import HelmChartSearchScreen
 from korvid.ui.widgets.helm_install import HelmInstallPrompt
-from korvid.ui.widgets.pick_screen import PickScreen
+from korvid.ui.widgets.helm_repos import HelmRepoScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 
 from .waits import until
@@ -53,6 +56,7 @@ class FakeHelm(HelmCLI):
         self.install_error: str | None = None
         self.diff_plugin = False
         self.values_seen: str | None = None
+        self.repos = [HelmRepo(name="bitnami", url="https://charts.bitnami.com/bitnami")]
 
     async def search_repo(self, keyword: str = "") -> list[ChartHit]:
         self.calls.append(("search", keyword))
@@ -62,6 +66,18 @@ class FakeHelm(HelmCLI):
 
     async def has_diff_plugin(self) -> bool:
         return self.diff_plugin
+
+    async def repo_list(self) -> list[HelmRepo]:
+        self.calls.append(("repo-list",))
+        return list(self.repos)
+
+    async def repo_add(self, name: str, url: str) -> str:
+        self.calls.append(("repo-add", name, url))
+        return f'"{name}" has been added to your repositories'
+
+    async def repo_update(self) -> str:
+        self.calls.append(("repo-update",))
+        return "Update Complete."
 
     def _snoop_values(self, values_file: str | None) -> None:
         # The temp values file is deleted right after the call: capture its
@@ -227,6 +243,26 @@ async def _rows_listed(pilot: Any, app: KorvidApp, n: int) -> None:
     await until(pilot, lambda: table.row_count == n, label=f"{n} rows listed")
 
 
+async def _pick_first_chart(pilot: Any, app: KorvidApp, *, search_first: bool = True) -> None:
+    """Drive the search-first picker: Enter searches with the typed keyword
+    (empty lists everything), then Enter picks the highlighted chart. The
+    upgrade flow pre-searches its chart name, so no explicit search there."""
+    await until(
+        pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="chart search screen"
+    )
+    if search_first:
+        await pilot.press("enter")
+    await until(
+        pilot,
+        lambda: (
+            isinstance(app.screen, HelmChartSearchScreen)
+            and app.screen.query_one(OptionList).option_count > 0
+        ),
+        label="charts listed",
+    )
+    await pilot.press("enter")
+
+
 def _audit_entries(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
@@ -280,8 +316,7 @@ async def test_install_happy_path_executes_and_audits(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await _navigate(pilot, "helm", "helmreleases")
         await pilot.press("i")
-        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="chart picker")
-        await pilot.press("enter")  # pick the only chart
+        await _pick_first_chart(pilot, app)
         await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
         await pilot.press("enter")  # accept prefilled defaults
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
@@ -310,8 +345,7 @@ async def test_install_preview_shows_dry_run_output(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await _navigate(pilot, "helm", "helmreleases")
         await pilot.press("i")
-        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="chart picker")
-        await pilot.press("enter")
+        await _pick_first_chart(pilot, app)
         await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
@@ -331,11 +365,19 @@ async def test_install_search_failure_is_reported(tmp_path: Path) -> None:
         await _navigate(pilot, "helm", "helmreleases")
         await pilot.press("i")
         await until(
-            pilot,
-            lambda: any("no repositories configured" in n.message for n in app._notifications),
-            label="search failure notified",
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="chart search"
         )
-        assert len(app.screen_stack) == 1
+        await pilot.press("enter")  # search everything
+        await until(
+            pilot,
+            lambda: (
+                "no repositories configured"
+                in str(app.screen.query_one("#chart-status", Static).render())
+            ),
+            label="search failure shown",
+        )
+        # the screen stays open so the user can fix the keyword or add a repo
+        assert isinstance(app.screen, HelmChartSearchScreen)
 
 
 async def test_install_no_charts_hints_at_repo_add(tmp_path: Path) -> None:
@@ -346,11 +388,17 @@ async def test_install_no_charts_hints_at_repo_add(tmp_path: Path) -> None:
         await _navigate(pilot, "helm", "helmreleases")
         await pilot.press("i")
         await until(
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="chart search"
+        )
+        await pilot.press("enter")
+        await until(
             pilot,
-            lambda: any("helm repo add" in n.message for n in app._notifications),
+            lambda: (
+                "add a repository" in str(app.screen.query_one("#chart-status", Static).render())
+            ),
             label="empty search hinted",
         )
-        assert len(app.screen_stack) == 1
+        assert isinstance(app.screen, HelmChartSearchScreen)
 
 
 async def test_install_cancel_at_picker_runs_nothing(tmp_path: Path) -> None:
@@ -360,10 +408,13 @@ async def test_install_cancel_at_picker_runs_nothing(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await _navigate(pilot, "helm", "helmreleases")
         await pilot.press("i")
-        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="chart picker")
+        await until(
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="chart search"
+        )
         await pilot.press("escape")
         await until(pilot, lambda: len(app.screen_stack) == 1, label="picker closed")
-        assert all(call[0] == "search" for call in helm.calls)
+        # search-first (issue #106): nothing is fetched until the user searches
+        assert helm.calls == []
         assert not audit_path.exists()
 
 
@@ -374,8 +425,7 @@ async def test_install_denied_at_approval_runs_nothing(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await _navigate(pilot, "helm", "helmreleases")
         await pilot.press("i")
-        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="chart picker")
-        await pilot.press("enter")
+        await _pick_first_chart(pilot, app)
         await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
@@ -394,8 +444,7 @@ async def test_install_failure_notifies_and_audits_error(tmp_path: Path) -> None
     async with app.run_test() as pilot:
         await _navigate(pilot, "helm", "helmreleases")
         await pilot.press("i")
-        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="chart picker")
-        await pilot.press("enter")
+        await _pick_first_chart(pilot, app)
         await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
@@ -423,8 +472,7 @@ async def test_install_with_edited_values_passes_values_file(tmp_path: Path) -> 
     async with app.run_test() as pilot:
         await _navigate(pilot, "helm", "helmreleases")
         await pilot.press("i")
-        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="chart picker")
-        await pilot.press("enter")
+        await _pick_first_chart(pilot, app)
         await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
         # switch the values field to "edit in $EDITOR"
         from textual.widgets import Select
@@ -452,10 +500,9 @@ async def test_upgrade_key_reuses_wizard_with_fixed_release(tmp_path: Path) -> N
         await _navigate(pilot, "helm", "helmreleases")
         await _rows_listed(pilot, app, 1)
         await pilot.press("u")
-        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="chart picker")
+        await _pick_first_chart(pilot, app, search_first=False)
         # the search was narrowed by the release's chart base name
         assert ("search", "nginx") in helm.calls
-        await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
@@ -480,8 +527,7 @@ async def test_upgrade_preview_prefers_diff_plugin(tmp_path: Path) -> None:
         await _navigate(pilot, "helm", "helmreleases")
         await _rows_listed(pilot, app, 1)
         await pilot.press("u")
-        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="chart picker")
-        await pilot.press("enter")
+        await _pick_first_chart(pilot, app, search_first=False)
         await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
@@ -566,18 +612,6 @@ async def test_helm_keys_do_not_leak_into_other_views(tmp_path: Path) -> None:
         assert len(app.screen_stack) == 1
 
 
-class GatedSearchHelm(FakeHelm):
-    """Search blocks until the test releases it, exposing the await gap."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.gate = asyncio.Event()
-
-    async def search_repo(self, keyword: str = "") -> list[ChartHit]:
-        await self.gate.wait()
-        return await super().search_repo(keyword)
-
-
 class GatedPreviewHelm(FakeHelm):
     """The upgrade dry-run blocks until the test releases it."""
 
@@ -606,26 +640,54 @@ class GatedPreviewHelm(FakeHelm):
         )
 
 
-async def test_install_aborts_when_user_leaves_helm_view_during_search(tmp_path: Path) -> None:
-    """`helm search repo` runs in a worker: if the user navigates away while
-    it is pending, the chart picker must not open over the new view (its
-    namespace would be derived from the wrong screen)."""
-    helm = GatedSearchHelm()
-    data = _default_data()
-    data["pods"] = []
-    app = make_app(data, helm=helm, audit_path=tmp_path / "audit.jsonl")
+async def test_install_opens_picker_instantly_without_fetching_charts(tmp_path: Path) -> None:
+    """Issue #106: the picker is search-first. Opening it must not run
+    `helm search repo` over every configured repository — the modal appears
+    immediately and charts are fetched only when the user searches."""
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
     async with app.run_test() as pilot:
         await _navigate(pilot, "helm", "helmreleases")
         await pilot.press("i")
-        await _navigate(pilot, "pods", "pods")
-        helm.gate.set()
+        await until(
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="chart search"
+        )
+        await pilot.pause()
+        assert helm.calls == []
+
+
+async def test_install_picker_ctrl_r_manages_repositories(tmp_path: Path) -> None:
+    """Ctrl-R inside the chart picker opens repository management wired to
+    the app's helm CLI: the configured repos are listed."""
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await until(
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="chart search"
+        )
+        await pilot.press("ctrl+r")
+        await until(pilot, lambda: isinstance(app.screen, HelmRepoScreen), label="repo screen")
         await until(
             pilot,
-            lambda: any("left the helm view" in n.message for n in app._notifications),
-            label="abort notified",
+            lambda: app.screen.query_one("#repo-list", OptionList).option_count == 1,
+            label="repos listed",
         )
-        assert len(app.screen_stack) == 1
-        assert not isinstance(app.screen, PickScreen)
+        assert ("repo-list",) in helm.calls
+
+
+class GatedRollbackPreviewHelm(FakeHelm):
+    """The rollback diff blocks until the test releases it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+        self.diff_plugin = True
+
+    async def diff_rollback(self, release: str, revision: int, namespace: str) -> str:
+        await self.gate.wait()
+        return await super().diff_rollback(release, revision, namespace)
 
 
 async def test_upgrade_aborts_when_selection_changes_during_preview(tmp_path: Path) -> None:
@@ -640,8 +702,7 @@ async def test_upgrade_aborts_when_selection_changes_during_preview(tmp_path: Pa
         await _navigate(pilot, "helm", "helmreleases")
         await _rows_listed(pilot, app, 1)
         await pilot.press("u")
-        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="chart picker")
-        await pilot.press("enter")
+        await _pick_first_chart(pilot, app, search_first=False)
         await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
         await pilot.press("enter")  # preview now pending on the gate
         await _navigate(pilot, "pods", "pods")
@@ -653,3 +714,138 @@ async def test_upgrade_aborts_when_selection_changes_during_preview(tmp_path: Pa
         )
         assert len(app.screen_stack) == 1
         assert not any(call[0] == "upgrade" for call in helm.calls)
+
+
+async def test_preview_progress_shows_while_render_pending_and_clears_after(
+    tmp_path: Path,
+) -> None:
+    """The dry-run render can take up to 20s: the status bar must show
+    progress exactly while `_helm_change_preview` is awaited (issue #106) —
+    present while the render is pending, gone once the dialog opens."""
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    def _bar(app: KorvidApp) -> str:
+        return str(app.query_one(StatusBar).render())
+
+    helm = GatedPreviewHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("u")
+        await _pick_first_chart(pilot, app, search_first=False)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        await pilot.press("enter")  # preview now pending on the gate
+        await until(
+            pilot, lambda: "helm preview" in _bar(app), label="progress visible during render"
+        )
+        helm.gate.set()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        assert "helm preview" not in _bar(app)
+        await pilot.press("n")
+
+
+async def test_rollback_preview_progress_shows_and_clears(tmp_path: Path) -> None:
+    """Same lifecycle guarantee for the rollback diff preview."""
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    def _bar(app: KorvidApp) -> str:
+        return str(app.query_one(StatusBar).render())
+
+    helm = GatedRollbackPreviewHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("r")
+        await until(
+            pilot, lambda: "rollback preview" in _bar(app), label="progress visible during render"
+        )
+        helm.gate.set()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        assert "rollback preview" not in _bar(app)
+        await pilot.press("n")
+
+
+async def test_install_and_upgrade_pickers_open_synchronously_with_the_keypress(
+    tmp_path: Path,
+) -> None:
+    """The modal-opening prefix has no awaits and must run inside the action
+    itself: buffered navigation keys processed before a deferred worker
+    could otherwise re-derive the target from a different view/row."""
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("i")
+        assert isinstance(app.screen, HelmChartSearchScreen)  # no until: synchronous
+        await pilot.press("escape")
+        await until(pilot, lambda: len(app.screen_stack) == 1, label="picker closed")
+        await pilot.press("u")
+        assert isinstance(app.screen, HelmChartSearchScreen)
+
+
+async def test_rollback_target_is_captured_by_the_action_not_the_worker(tmp_path: Path) -> None:
+    """The rollback worker must receive the row selected at keypress time as
+    explicit arguments — reading the selection inside the worker would race
+    buffered cursor keys."""
+    from unittest import mock
+
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    seen: list[tuple[Any, ...]] = []
+
+    async def spy(helm_arg: Any, row: Any, ns: Any, name: Any, namespace: Any, epoch: Any) -> None:
+        seen.append((row.release, row.revision, namespace))
+
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helmrevisions", "helmrevisions")
+        await _rows_listed(pilot, app, 1)
+        with mock.patch.object(app, "_helm_rollback_flow", spy):
+            await pilot.press("r")
+            # captured synchronously: the facts exist before any worker ran
+            assert seen == [("web", 2, "default")]
+
+
+async def test_progress_labels_are_owner_scoped(tmp_path: Path) -> None:
+    """Drain and helm previews can overlap (different worker groups): one
+    finishing must not clear the other's status-bar label."""
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    app = make_app(helm=FakeHelm(), audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        app._set_progress("drain", "evicting pods 1/5")
+        with app._progress("rendering helm preview (dry-run)"):
+            bar = str(app.query_one(StatusBar).render())
+            assert "evicting pods 1/5" in bar
+            assert "rendering helm preview" in bar
+        bar = str(app.query_one(StatusBar).render())
+        assert "evicting pods 1/5" in bar  # drain label survived the helm scope
+        assert "rendering helm preview" not in bar
+        app._set_progress("drain", "")
+        assert "evicting" not in str(app.query_one(StatusBar).render())
+
+
+async def test_stale_progress_cleanup_cannot_clear_the_replacements_label(
+    tmp_path: Path,
+) -> None:
+    """An exclusive `helm-write` replacement can publish its progress label
+    before the cancelled predecessor's cleanup runs: the stale cleanup must
+    only clear the label it owns."""
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        first = app._progress("first preview")
+        first.__enter__()
+        second = app._progress("second preview")
+        second.__enter__()
+        first.__exit__(None, None, None)  # stale predecessor cleanup runs late
+        await pilot.pause()
+        assert "second preview" in str(app.query_one(StatusBar).render())
+        second.__exit__(None, None, None)
+        await pilot.pause()
+        assert "second preview" not in str(app.query_one(StatusBar).render())

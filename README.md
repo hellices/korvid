@@ -186,9 +186,16 @@ When a `helm` binary is on `PATH`, the browser gains write actions
 
 | Key | View | Action |
 |---|---|---|
-| `i` | `:helm` | Install: chart picker (`helm search repo`), release/version/namespace wizard, optional values in `$EDITOR` |
-| `u` | `:helm` | Upgrade the selected release — same wizard, pinned to that release; defaults to reusing the release's current values (`--reuse-values`) |
+| `i` | `:helm` | Install: search-first chart picker (`helm search repo` per keyword), release/version/namespace wizard, optional values in `$EDITOR` |
+| `u` | `:helm` | Upgrade the selected release — same wizard, pinned to that release; the picker pre-searches the release's chart name; defaults to reusing the release's current values (`--reuse-values`) |
 | `r` | revision drill-down | Roll back the release to the selected revision |
+| `Ctrl-R` | chart picker | Manage chart repositories: list configured repos, add one (name + URL), refresh indexes (`helm repo update`) |
+
+The chart picker opens instantly and fetches charts per keyword — an
+empty search lists everything, and a loading indicator shows while
+`helm search repo` runs.  Repository management only touches the local
+helm configuration (`helm repo add`/`update` never talk to the
+cluster), so it is a typed form rather than an approval dialog.
 
 Install and upgrade render a preview before the confirmation
 dialog: install and upgrade run `--dry-run` (with `--hide-secret`, helm
