@@ -765,13 +765,14 @@ class TestMarkupSafety:
                 ),
                 label="degradation toast",
             )
-            message = next(
-                str(n.message)
-                for n in app._notifications
-                if "enter the path manually" in str(n.message)
+            note = next(
+                n for n in app._notifications if "enter the path manually" in str(n.message)
             )
+            message = str(note.message)
             assert "\\x1b" in message
             assert "\x1b" not in message
+            # cluster-controlled text: "[red]…[/red]" must never render as markup
+            assert note.markup is False
 
     async def test_subsequent_failure_toast_escapes_control_characters(self) -> None:
         # A failed descend keeps the picker open and toasts the path; the
@@ -797,8 +798,9 @@ class TestMarkupSafety:
                 lambda: any("cannot list" in str(n.message) for n in app._notifications),
                 label="failure toast",
             )
-            message = next(
-                str(n.message) for n in app._notifications if "cannot list" in str(n.message)
-            )
+            note = next(n for n in app._notifications if "cannot list" in str(n.message))
+            message = str(note.message)
             assert "\\x1b" in message
             assert "\x1b" not in message
+            # cluster-controlled text: "[red]…[/red]" must never render as markup
+            assert note.markup is False

@@ -183,18 +183,21 @@ class RemotePathPickerScreen(ModalScreen[str | None]):
         except TransferError as exc:
             # _display_name: the error text and path carry cluster-controlled
             # bytes (directory names, ls stderr) — raw control/bidi characters
-            # would alter or reorder the notification.
+            # would alter or reorder the notification. markup=False for the
+            # same reason: "[red]…[/red]" must display literally.
             if initial:
                 self.app.notify(
                     "directory listing unavailable in this container — "
                     f"enter the path manually ({_display_name(str(exc))})",
                     severity="warning",
+                    markup=False,
                 )
                 self.dismiss(None)
             else:
                 self.notify(
                     f"cannot list {_display_name(path)}: {_display_name(str(exc))}",
                     severity="warning",
+                    markup=False,
                 )
             return
         self._path = path
