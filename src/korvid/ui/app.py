@@ -674,6 +674,10 @@ class KorvidApp(App[None]):
         #: status-bar progress labels keyed by owner (drain, helm preview):
         #: concurrent operations must not clear each other's feedback.
         self._progress_labels: dict[str, str] = {}
+        #: monotonic token for `_progress()` scopes: an exclusive-worker
+        #: replacement can publish before its cancelled predecessor's
+        #: cleanup runs, which must then not clear the replacement's label.
+        self._progress_seq = 0
         #: detected cloud provider short name ("aks", "aws", ...) or None;
         #: drives the Service/Ingress describe footer (issue #30).
         self._provider_hint = provider_hint
@@ -4801,12 +4805,16 @@ class KorvidApp(App[None]):
     @contextlib.contextmanager
     def _progress(self, label: str) -> Iterator[None]:
         """Status-bar progress scoped exactly to the wrapped await: shown on
-        entry, cleared on exit however the operation ends."""
-        self._set_progress("helm", label)
+        entry, cleared on exit however the operation ends. Each scope gets a
+        unique owner token so a cancelled predecessor's late cleanup cannot
+        clear the label its exclusive-worker replacement published."""
+        self._progress_seq += 1
+        owner = f"helm:{self._progress_seq}"
+        self._set_progress(owner, label)
         try:
             yield
         finally:
-            self._set_progress("helm", "")
+            self._set_progress(owner, "")
 
     @_tracks_cluster_write
     async def _run_drain(

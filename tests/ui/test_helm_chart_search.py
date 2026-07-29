@@ -39,11 +39,19 @@ class FakeSearch:
         self.error: str | None = None
         self.calls: list[str] = []
         self.gate: asyncio.Event | None = None
+        self.cancelled = asyncio.Event()
 
     async def __call__(self, keyword: str) -> list[ChartHit]:
         self.calls.append(keyword)
-        if self.gate is not None:
-            await self.gate.wait()
+        try:
+            if self.gate is not None:
+                await self.gate.wait()
+        except asyncio.CancelledError:
+            # Set only after the cancellation reached the awaiting search:
+            # the widget's cleanup runs during this same unwind, so awaiting
+            # this event observes the cleanup deterministically.
+            self.cancelled.set()
+            raise
         if self.error is not None:
             raise HelmError(self.error)
         return self.hits
@@ -212,9 +220,9 @@ async def test_resubmit_while_pending_keeps_the_spinner_owned_by_the_new_search(
             label="spinner visible",
         )
         await pilot.press("enter")  # search 2 replaces search 1
-        for _ in range(5):
-            await pilot.pause()
-        # the cancelled worker's cleanup ran by now: the spinner must survive
+        await until(pilot, lambda: search.cancelled.is_set(), label="search 1 cancelled")
+        # the cancelled worker's cleanup ran during that unwind: the spinner
+        # owned by search 2 must survive it
         assert app.screen.query_one(LoadingIndicator).display
         search.gate.set()
         await until(

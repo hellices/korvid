@@ -826,3 +826,26 @@ async def test_progress_labels_are_owner_scoped(tmp_path: Path) -> None:
         assert "rendering helm preview" not in bar
         app._set_progress("drain", "")
         assert "evicting" not in str(app.query_one(StatusBar).render())
+
+
+async def test_stale_progress_cleanup_cannot_clear_the_replacements_label(
+    tmp_path: Path,
+) -> None:
+    """An exclusive `helm-write` replacement can publish its progress label
+    before the cancelled predecessor's cleanup runs: the stale cleanup must
+    only clear the label it owns."""
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        first = app._progress("first preview")
+        first.__enter__()
+        second = app._progress("second preview")
+        second.__enter__()
+        first.__exit__(None, None, None)  # stale predecessor cleanup runs late
+        await pilot.pause()
+        assert "second preview" in str(app.query_one(StatusBar).render())
+        second.__exit__(None, None, None)
+        await pilot.pause()
+        assert "second preview" not in str(app.query_one(StatusBar).render())

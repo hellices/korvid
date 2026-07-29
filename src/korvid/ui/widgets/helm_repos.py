@@ -87,6 +87,10 @@ class HelmRepoScreen(ModalScreen[None]):
         #: helm config and must never be cancelled mid-flight by a newer
         #: action — new work is rejected while one is pending.
         self._busy = False
+        #: the pending operation mutates helm config: dismissing the screen
+        #: (which cancels its workers and kills the subprocess) is rejected
+        #: until it finishes. A read-only list may be abandoned freely.
+        self._mutating = False
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -108,7 +112,7 @@ class HelmRepoScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self.query_one("#repo-name", Input).focus()
-        self._start(self._refresh_list())
+        self._start(self._refresh_list(), mutating=False)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
@@ -120,17 +124,21 @@ class HelmRepoScreen(ModalScreen[None]):
         self._start(self._add_repo(name, url))
 
     def action_close(self) -> None:
+        if self._mutating:
+            self._status("still working — wait for the current operation to finish")
+            return
         self.dismiss(None)
 
     def action_update_repos(self) -> None:
         self._start(self._update_repos())
 
-    def _start(self, work: Coroutine[Any, Any, None]) -> None:
+    def _start(self, work: Coroutine[Any, Any, None], *, mutating: bool = True) -> None:
         if self._busy:
             work.close()
             self._status("still working — wait for the current operation to finish")
             return
         self._busy = True
+        self._mutating = mutating
         self.run_worker(self._guarded(work), group="helm-repos")
 
     async def _guarded(self, work: Coroutine[Any, Any, None]) -> None:
@@ -138,6 +146,7 @@ class HelmRepoScreen(ModalScreen[None]):
             await work
         finally:
             self._busy = False
+            self._mutating = False
 
     def _status(self, text: str) -> None:
         self.query_one("#repo-status", Static).update(text)

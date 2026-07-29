@@ -205,3 +205,31 @@ async def test_actions_are_rejected_while_a_repo_mutation_is_pending() -> None:
             label="add completed despite the queued update",
         )
         assert ops.updates == 0
+
+
+async def test_escape_is_rejected_while_a_repo_mutation_is_pending() -> None:
+    """Dismissing the screen would cancel the screen-owned worker and kill
+    the `helm repo add` subprocess mid-mutation: Esc is rejected until the
+    mutation finishes (a pending read-only list may still be abandoned)."""
+    app = HostApp()
+    ops = FakeRepoOps()
+    ops.add_gate = asyncio.Event()
+    async with app.run_test() as pilot:
+        screen = await _open(app, ops)
+        await _listed(app, pilot, 1)
+        screen.query_one("#repo-name", Input).value = "jetstack"
+        screen.query_one("#repo-url", Input).value = "https://charts.jetstack.io"
+        screen.query_one("#repo-url", Input).focus()
+        await pilot.press("enter")  # add: pending on the gate
+        await until(pilot, lambda: ops.add_started == 1, label="add in flight")
+        await pilot.press("escape")  # must be rejected: the add is mutating
+        await pilot.pause()
+        assert app.screen is screen
+        ops.add_gate.set()
+        await until(
+            pilot,
+            lambda: ops.added == [("jetstack", "https://charts.jetstack.io")],
+            label="add completed despite the escape",
+        )
+        await pilot.press("escape")  # idle again: closes normally
+        await until(pilot, lambda: app.screen is not screen, label="screen closed")
