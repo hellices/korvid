@@ -792,7 +792,7 @@ async def test_e_edit_survives_alias_refresh_during_editor(tmp_path: Path) -> No
     app = make_app(rec, audit_path, get_manifest=get_manifest, edit_text=edit_text)
     app_holder.append(app)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count > 0, label="pod row")
         await pilot.press("e")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
@@ -866,7 +866,7 @@ async def test_e_edit_selection_change_during_editor_aborts(tmp_path: Path) -> N
     )
     app_holder.append(app)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count >= 2, label="pod rows")
         await pilot.press("e")
         await until(
             pilot,
@@ -1002,7 +1002,7 @@ async def test_e_edit_selection_change_during_fetch_never_opens_editor(tmp_path:
     )
     app_holder.append(app)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count >= 2, label="pod rows")
         await pilot.press("e")
         await until(
             pilot,
@@ -1108,7 +1108,7 @@ async def test_pod_banner_walks_the_controller_chain(tmp_path: Path) -> None:
 
     app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count > 0, label="pod row")
         await pilot.press("ctrl+d")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         banner = app.screen.query_one(".confirm-managed")
@@ -1316,7 +1316,7 @@ async def test_edit_cancelled_when_selection_changes_during_ownership_lookup(
     )
     app_holder.append(app)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count >= 2, label="pod rows")
         await pilot.press("e")
         await until(
             pilot,
@@ -1354,7 +1354,33 @@ async def test_banner_kind_captured_before_the_preview_await(tmp_path: Path) -> 
     app = make_app(ViewSwitchingRecorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
     app_holder.append(app)
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await until(pilot, lambda: app.query_one(ResourceTable).row_count > 0, label="pod row")
         await pilot.press("ctrl+d")
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
     assert looked_up == ["pods"]
+
+
+async def test_walk_ignores_string_controller_flags(tmp_path: Path) -> None:
+    """A malformed owner edge with controller: "false" must not be followed:
+    the walk would otherwise report the parent's manager for an object it
+    does not control (issue #119 review)."""
+
+    async def get_manifest(kind: str, ns: str | None, name: str) -> dict[str, Any]:
+        return _helm_deploy_manifest(kind, ns, name)
+
+    app = make_app(Recorder(), tmp_path / "audit.jsonl", get_manifest=get_manifest)
+    pod = {
+        "metadata": {
+            "name": "web-1",
+            "namespace": "default",
+            "ownerReferences": [
+                {
+                    "apiVersion": "apps/v1",
+                    "kind": "ReplicaSet",
+                    "name": "web-abc",
+                    "controller": "false",
+                }
+            ],
+        }
+    }
+    assert await app._managed_note_from(pod, "default") is None

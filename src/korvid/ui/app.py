@@ -4686,9 +4686,10 @@ class KorvidApp(App[None]):
         epoch = self._ctx_epoch
         if not await self._precheck_keybinding_write("resize", meta, ns, name):
             return
-        containers = await self._pod_container_resources(ns, name)
-        if containers is None:
+        fetched = await self._pod_container_resources(ns, name)
+        if fetched is None:
             return
+        containers, pod_manifest = fetched
         if not self._write_context_intact(
             "resize", meta, ns, name, phase="the manifest fetch", epoch=epoch
         ):
@@ -4699,7 +4700,9 @@ class KorvidApp(App[None]):
                 return
             # The dry-run round trip must not run inside a screen callback:
             # a worker fetches the preview, revalidates, then confirms.
-            self.run_worker(self._confirm_resize(meta, ns, name, uid, resources, epoch))
+            self.run_worker(
+                self._confirm_resize(meta, ns, name, uid, resources, epoch, pod_manifest)
+            )
 
         await self.push_screen(
             ResizePrompt(f"{self._gvr_label(meta)}/{name}", containers=containers), _on_resources
@@ -4707,10 +4710,12 @@ class KorvidApp(App[None]):
 
     async def _pod_container_resources(
         self, ns: str | None, name: str
-    ) -> list[tuple[str, dict[str, dict[str, str]]]] | None:
+    ) -> tuple[list[tuple[str, dict[str, dict[str, str]]]], dict[str, Any]] | None:
         """Current per-container requests/limits from the live manifest, in
-        spec order, to prefill the resize prompt; None (with a notification)
-        when the manifest cannot be fetched."""
+        spec order, to prefill the resize prompt — plus the manifest itself,
+        so the ownership banner can reuse the snapshot instead of a second
+        GET. None (with a notification) when the manifest cannot be
+        fetched."""
         if self._get_manifest is None:
             self.notify("Resize unavailable: no manifest source", severity="warning")
             return None
@@ -4730,7 +4735,7 @@ class KorvidApp(App[None]):
         if not containers:
             self.notify("Pod manifest lists no containers", severity="warning")
             return None
-        return containers
+        return containers, manifest
 
     @staticmethod
     def _resize_summary(resources: dict[str, dict[str, dict[str, str]]]) -> str:
@@ -4754,11 +4759,13 @@ class KorvidApp(App[None]):
         uid: str | None,
         resources: dict[str, dict[str, dict[str, str]]],
         epoch: int,
+        pod_manifest: dict[str, Any],
     ) -> None:
         """Dry-run preview + approval dialog for an in-place pod resize.
         Revalidates the selection after the preview round trip: keystrokes
         during the await must never land on a confirmation for a different
-        row."""
+        row. `pod_manifest` is the snapshot the prompt was prefilled from —
+        the banner reuses it instead of refetching the same object."""
         ops = self._write_ops
         if ops is None:
             return
@@ -4766,7 +4773,7 @@ class KorvidApp(App[None]):
         preview = await self._dry_run_preview(
             ops.preview_resize(namespace, name, resources, uid=uid)
         )
-        note = await self._managed_note("pods", ns, name)
+        note = await self._managed_note_from(pod_manifest, ns)
         if not self._write_context_intact(
             "resize", meta, ns, name, phase="the dry-run preview", epoch=epoch
         ):
