@@ -180,15 +180,21 @@ class RemotePathPickerScreen(ModalScreen[str | None]):
         try:
             entries = await self._lister(path)
         except TransferError as exc:
+            # _display_name: the error text and path carry cluster-controlled
+            # bytes (directory names, ls stderr) — raw control/bidi characters
+            # would alter or reorder the notification.
             if initial:
                 self.app.notify(
                     "directory listing unavailable in this container — "
-                    f"enter the path manually ({exc})",
+                    f"enter the path manually ({_display_name(str(exc))})",
                     severity="warning",
                 )
                 self.dismiss(None)
             else:
-                self.notify(f"cannot list {path}: {exc}", severity="warning")
+                self.notify(
+                    f"cannot list {_display_name(path)}: {_display_name(str(exc))}",
+                    severity="warning",
+                )
             return
         self._path = path
         self._entries = entries

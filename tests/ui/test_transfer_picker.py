@@ -690,3 +690,60 @@ class TestMarkupSafety:
             assert len(set(prompts)) == 2
             assert "\\\\x1b" in prompts
             assert "\\x1b" in prompts
+
+    async def test_initial_failure_toast_escapes_control_characters(self) -> None:
+        # The degradation toast embeds the error text, which carries ls
+        # stderr (and can carry the path); a raw ESC would alter the
+        # notification even though entries and title escape it.
+        opener = FakeExecOpener([b"\x02" + b"ls: e\x1bvil error\n", b"\x03" + NOT_FOUND])
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.value = "/srv/"
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot,
+                lambda: any(
+                    "enter the path manually" in str(n.message) for n in app._notifications
+                ),
+                label="degradation toast",
+            )
+            message = next(
+                str(n.message)
+                for n in app._notifications
+                if "enter the path manually" in str(n.message)
+            )
+            assert "\\x1b" in message
+            assert "\x1b" not in message
+
+    async def test_subsequent_failure_toast_escapes_control_characters(self) -> None:
+        # A failed descend keeps the picker open and toasts the path; the
+        # directory name came from the cluster and must display escaped.
+        opener = FakeExecOpener(_listing("d\x1bir/"))
+        app = make_app([_pod("api-1")], open_pod_exec=opener)
+        async with app.run_test() as pilot:
+            dialog = await _open_dialog(pilot, app)
+            remote = dialog.query_one("#transfer-remote", Input)
+            remote.value = "/srv/"
+            remote.focus()
+            await pilot.press("ctrl+o")
+            await until(
+                pilot, lambda: isinstance(app.screen, RemotePathPickerScreen), label="picker"
+            )
+            options = app.screen.query_one(OptionList)
+            await until(pilot, lambda: options.option_count == 2, label="options")
+            opener._frames = [b"\x03" + NOT_FOUND]  # next listing fails
+            options.focus()
+            await pilot.press("down", "enter")
+            await until(
+                pilot,
+                lambda: any("cannot list" in str(n.message) for n in app._notifications),
+                label="failure toast",
+            )
+            message = next(
+                str(n.message) for n in app._notifications if "cannot list" in str(n.message)
+            )
+            assert "\\x1b" in message
+            assert "\x1b" not in message
