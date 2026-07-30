@@ -95,6 +95,9 @@ asyncio_mode = "auto"
 addopts = "--strict-markers --tb=short"
 testpaths = ["tests"]
 filterwarnings = ["error"]
+markers = [
+    "contract: live-cluster contract tests (opt-in via KORVID_CONTRACT_RUN_ID)",
+]
 
 [tool.coverage.run]
 branch = true

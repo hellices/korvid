@@ -415,7 +415,7 @@ async def test_watch_objects_core_group_watch_list_path_is_api_v1() -> None:
 
     async def _fake_watch_call(*args: Any, **kwargs: Any) -> Any:
         watch_call_paths.append(args[0] if args else "")
-        return MagicMock()
+        return _raw_response(200, "OK", b"")
 
     mock_api.call_api = _fake_watch_call
 
@@ -624,6 +624,8 @@ def _write_api() -> MagicMock:
     """ApiClient mock whose call_api returns an empty JSON body."""
     api = MagicMock()
     resp = MagicMock()
+    resp.status = 200
+    resp.reason = "OK"
     resp.read = AsyncMock(return_value=b"{}")
     api.call_api = AsyncMock(return_value=resp)
     return api
@@ -706,6 +708,8 @@ async def test_write_consumes_response_body() -> None:
 def _ssar_api(allowed: bool) -> MagicMock:
     api = MagicMock()
     resp = MagicMock()
+    resp.status = 200
+    resp.reason = "OK"
     payload = b'{"status": {"allowed": true}}' if allowed else b'{"status": {"allowed": false}}'
     resp.read = AsyncMock(return_value=payload)
     api.call_api = AsyncMock(return_value=resp)
@@ -1495,3 +1499,116 @@ class TestSwitchContext:
         kube = KubeClient()
         with pytest.raises(TimeoutError):
             await kube.switch_context("ctx-slow-creds")
+
+
+# ---------------------------------------------------------------------------
+# non-2xx handling on the raw (_preload_content=False) path
+#
+# kubernetes_asyncio's rest.py only raises ApiException when it preloads the
+# body; with _preload_content=False the caller gets the raw aiohttp response
+# back regardless of status. The raw helpers must therefore check the HTTP
+# status themselves — otherwise a refused write (409 uid mismatch, 429 PDB
+# denial) silently "succeeds" and a 404 GET returns the Status JSON as if it
+# were the object (caught live by the contract suite, issue #109).
+# ---------------------------------------------------------------------------
+
+
+def _raw_response(status: int, reason: str, body: bytes) -> MagicMock:
+    """Fake aiohttp response as returned by call_api with _preload_content=False."""
+    resp = MagicMock()
+    resp.status = status
+    resp.reason = reason
+    resp.read = AsyncMock(return_value=body)
+    return resp
+
+
+async def test_delete_object_raises_on_non_2xx_raw_response() -> None:
+    """A 409 (uid precondition failed) delivered as a raw response body must
+    surface as ApiStatusError, not be swallowed as success."""
+    client = KubeClient()
+    body = b'{"kind":"Status","status":"Failure","reason":"Conflict","code":409}'
+    mock_api = MagicMock()
+    mock_api.call_api = AsyncMock(return_value=_raw_response(409, "Conflict", body))
+
+    with (
+        patch.object(client, "_api", mock_api),
+        pytest.raises(ApiStatusError, match="API 409: Conflict"),
+    ):
+        await client.delete_object(_deploy_meta(), "default", "my-dep", uid="wrong-uid")
+
+
+async def test_create_object_raises_on_non_2xx_raw_response() -> None:
+    """A 409 AlreadyExists on POST must raise, proving create-exactly-once."""
+    client = KubeClient()
+    body = b'{"kind":"Status","status":"Failure","reason":"AlreadyExists","code":409}'
+    mock_api = MagicMock()
+    mock_api.call_api = AsyncMock(return_value=_raw_response(409, "Conflict", body))
+
+    with (
+        patch.object(client, "_api", mock_api),
+        pytest.raises(ApiStatusError, match="API 409: Conflict") as excinfo,
+    ):
+        await client.create_object(_deploy_meta(), "default", {"metadata": {"name": "my-dep"}})
+    assert "AlreadyExists" in excinfo.value.body
+
+
+async def test_get_object_raises_on_non_2xx_raw_response() -> None:
+    """A 404 GET must raise instead of returning the Status JSON as the object."""
+    client = KubeClient()
+    body = b'{"kind":"Status","status":"Failure","reason":"NotFound","code":404}'
+    mock_api = MagicMock()
+    mock_api.call_api = AsyncMock(return_value=_raw_response(404, "Not Found", body))
+
+    with (
+        patch.object(client, "_api", mock_api),
+        pytest.raises(ApiStatusError, match="API 404: Not Found"),
+    ):
+        await client.get_object(_deploy_meta(), "default", "my-dep")
+
+
+async def test_list_namespaces_raises_on_non_2xx_raw_response() -> None:
+    """A 403 on the namespace LIST must raise, not degrade to an empty list."""
+    client = KubeClient()
+    body = b'{"kind":"Status","status":"Failure","reason":"Forbidden","code":403}'
+    fake_v1 = AsyncMock()
+    fake_v1.list_namespace.return_value = _raw_response(403, "Forbidden", body)
+
+    with (
+        patch.object(client, "_core_v1", fake_v1),
+        pytest.raises(ApiStatusError, match="API 403: Forbidden"),
+    ):
+        await client.list_namespaces()
+
+
+async def test_stream_logs_raises_on_non_2xx_raw_response() -> None:
+    """A 400 on the log request must raise instead of streaming the error
+    Status body as if it were log lines."""
+    client = KubeClient()
+    resp = _raw_response(400, "Bad Request", b"")
+    resp.close = MagicMock()
+    fake_v1 = AsyncMock()
+    fake_v1.read_namespaced_pod_log.return_value = resp
+
+    with (
+        patch.object(client, "_core_v1", fake_v1),
+        pytest.raises(ApiStatusError, match="API 400: Bad Request"),
+    ):
+        async for _ in client.stream_logs("default", "my-pod", ""):
+            pass
+    # The finally-close must also cover the error path (no leaked connection).
+    resp.close.assert_called_once()
+
+
+async def test_raw_watch_callable_raises_on_non_2xx_raw_response() -> None:
+    """kubernetes_asyncio's Watch never inspects resp.status: a non-2xx watch
+    response would be retried forever (empty body) or parsed as malformed
+    events, so the watch callable must raise before handing it to Watch."""
+    client = KubeClient()
+    body = b'{"kind":"Status","reason":"Forbidden","message":"denied"}'
+    mock_api = AsyncMock()
+    mock_api.call_api = AsyncMock(return_value=_raw_response(403, "Forbidden", body))
+
+    with patch.object(client, "_api", mock_api):
+        watch_func = client._make_raw_watch_callable("/api/v1/pods")
+        with pytest.raises(ApiStatusError, match="API 403: Forbidden"):
+            await watch_func(watch=True, _preload_content=False)

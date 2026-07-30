@@ -322,7 +322,9 @@ class TestWatchHelmReleases:
     async def test_watch_callable_forwards_extra_query_to_call_api(self) -> None:
         client = KubeClient()
         api = MagicMock()
-        api.call_api = AsyncMock()
+        ok = MagicMock()
+        ok.status = 200
+        api.call_api = AsyncMock(return_value=ok)
         with patch.object(client, "_api", api):
             fn = client._make_raw_watch_callable(
                 "/api/v1/secrets", extra_query=(("fieldSelector", "type=x"),)

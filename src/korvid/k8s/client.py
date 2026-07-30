@@ -665,6 +665,7 @@ class KubeClient(ReadOps, WriteOps):
             # _preload_content=False the caller owns the response. Writes may
             # return empty or non-JSON bodies, so no decode is attempted here.
             raw: bytes = await resp.read()
+            _raise_for_status(resp, raw)
             return raw
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(
@@ -1259,6 +1260,10 @@ class KubeClient(ReadOps, WriteOps):
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
         try:
+            # Raw path never raises for HTTP errors (see _raise_for_status):
+            # check up front so an error Status body isn't streamed as logs.
+            if not 200 <= int(getattr(resp, "status", 0) or 0) <= 299:
+                _raise_for_status(resp, await resp.read())
             async for raw in resp.content:
                 if not raw:
                     continue
@@ -1339,13 +1344,21 @@ class KubeClient(ReadOps, WriteOps):
             query_params: list[tuple[str, Any]] = [*extra_query, ("watch", "true")]
             if resource_version is not None:
                 query_params.append(("resourceVersion", resource_version))
-            return await api.call_api(
+            resp = await api.call_api(
                 path,
                 "GET",
                 auth_settings=["BearerToken"],
                 query_params=query_params,
                 _preload_content=False,
             )
+            # Watch never inspects resp.status: a non-2xx response would be
+            # retried forever (empty body) or surfaced as malformed events.
+            if not 200 <= int(getattr(resp, "status", 0) or 0) <= 299:
+                try:
+                    _raise_for_status(resp, await resp.read())
+                finally:
+                    resp.close()
+            return resp
 
         return _watch_call
 
@@ -1364,6 +1377,7 @@ class KubeClient(ReadOps, WriteOps):
                 _preload_content=False,
             )
             body = await resp.read()
+            _raise_for_status(resp, body)
             result: dict[str, Any] = json.loads(body)
             return result
         except k8s_client.exceptions.ApiException as exc:
@@ -1404,12 +1418,34 @@ class KubeClient(ReadOps, WriteOps):
 
 
 async def _to_dict(resp: Any) -> dict[str, Any]:
-    """Normalize aiohttp response or dict into a plain dict."""
+    """Normalize aiohttp response or dict into a plain dict.
+
+    Raises ApiStatusError on a non-2xx status: with ``_preload_content=False``
+    kubernetes_asyncio never raises for HTTP errors, so an unchecked error
+    Status body would otherwise be parsed as if it were the requested object.
+    """
     if isinstance(resp, dict):
         return resp
     body = await resp.read()
+    _raise_for_status(resp, body)
     result: dict[str, Any] = json.loads(body)
     return result
+
+
+def _raise_for_status(resp: Any, body: bytes) -> None:
+    """Raise ApiStatusError for a non-2xx raw (``_preload_content=False``)
+    response. kubernetes_asyncio's rest layer only raises ApiException when
+    it preloads the body, so raw-path callers must check the status
+    themselves — otherwise refused writes (409 uid precondition, 429 PDB
+    denial) silently look like successes (caught live by the contract
+    suite, issue #109)."""
+    status = int(getattr(resp, "status", 0) or 0)
+    if not 200 <= status <= 299:
+        raise ApiStatusError(
+            status,
+            str(getattr(resp, "reason", "") or ""),
+            body=body.decode("utf-8", errors="replace"),
+        )
 
 
 def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> list[ResourceMeta]:

@@ -11,6 +11,8 @@ from korvid.k8s.client import KubeClient
 
 def _resp(payload: dict[str, Any]) -> MagicMock:
     resp = MagicMock()
+    resp.status = 200
+    resp.reason = "OK"
     resp.read = AsyncMock(return_value=json.dumps(payload).encode())
     return resp
 
