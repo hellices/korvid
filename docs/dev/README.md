@@ -10,6 +10,8 @@ opposed to the user-facing feature docs that live directly under
 - [`plans/`](plans/) — dated implementation plans for individual phases
   and slices. Historical once executed; kept for traceability, not
   updated retroactively.
+- [`contract-tests.md`](contract-tests.md) — the live-cluster contract
+  suite and the Korvid test-only AKS infrastructure it runs against.
 
 If you are looking for how to *use* korvid, start at the
 [project README](../../README.md).

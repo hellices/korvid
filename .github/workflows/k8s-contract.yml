@@ -1,0 +1,123 @@
+name: K8s contract tests
+# Live-cluster contract suite (issue #109). Runs the destructive
+# write-path contract tests against the dedicated, stopped-at-rest
+# AKS cluster `aks-korvid-contract-test`. Never runs for pull requests
+# or forks: the Azure identity is scoped to the protected
+# `aks-contract-test` environment, which only `main` may use.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: korvid-k8s-contract
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    # GitHub-hosted ephemeral runner — deliberately NOT the shared
+    # self-hosted `korvid-runners` pool, so cluster credentials never
+    # touch persistent shared infrastructure.
+    runs-on: ubuntu-latest
+    environment: aks-contract-test
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+      AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Start AKS cluster
+        run: |
+          state=$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --query powerState.code -o tsv)
+          if [ "$state" != "Running" ]; then
+            az aks start -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME"
+          fi
+
+      - uses: azure/use-kubelogin@0ce7c36141aa27d4934872cf00b0120804c98a29 # v1.3
+        with:
+          kubelogin-version: v0.2.15
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch user credentials (no --admin, isolated kubeconfig)
+        run: |
+          export KUBECONFIG="$RUNNER_TEMP/contract-kubeconfig"
+          az aks get-credentials -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" \
+            --overwrite-existing -f "$KUBECONFIG"
+          kubelogin convert-kubeconfig -l azurecli --kubeconfig "$KUBECONFIG"
+          chmod 600 "$KUBECONFIG"
+          echo "KUBECONFIG=$KUBECONFIG" >> "$GITHUB_ENV"
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - run: uv sync --locked --dev --all-extras
+
+      - name: Install helm
+        run: |
+          HELM_VERSION=v3.19.0
+          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP" linux-amd64/helm
+          sudo install "$RUNNER_TEMP/linux-amd64/helm" /usr/local/bin/helm
+
+      - name: Janitor — remove stale fixtures from interrupted runs
+        run: uv run python -m tests.contract.janitor
+
+      - name: Run contract suite
+        env:
+          KORVID_CONTRACT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: uv run pytest -p no:randomly -m contract tests/contract/ -v
+
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          mkdir -p diag
+          kubectl get events -A --sort-by=.lastTimestamp > diag/events.txt || true
+          kubectl get pods -A -o wide > diag/pods.txt || true
+          kubectl get nodes -o wide > diag/nodes.txt || true
+          kubectl get ns -l app.kubernetes.io/managed-by=korvid-contract -o yaml > diag/namespaces.yaml || true
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: contract-diagnostics
+          path: diag/
+          retention-days: 14
+
+      - name: Delete kubeconfig
+        if: always()
+        run: |
+          if [ -n "${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+            rm -f "$KUBECONFIG"
+          fi
+
+      - name: Stop AKS cluster
+        if: always()
+        run: |
+          az aks stop -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --no-wait
+          for i in $(seq 1 30); do
+            state=$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --query powerState.code -o tsv || echo unknown)
+            [ "$state" = "Stopped" ] && exit 0
+            sleep 20
+          done
+          echo "::error title=AKS stop failed::aks-korvid-contract-test did not reach Stopped state; idle compute may be accruing. Stop it manually: az aks stop -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME"
+          exit 1
