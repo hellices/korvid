@@ -1,7 +1,7 @@
 """Semantic color tokens shared by TUI widgets.
 
 Maps Kubernetes state strings to Rich styles so every widget colors the
-same state the same way (common terminal color conventions).
+same state the same way.
 """
 
 from __future__ import annotations

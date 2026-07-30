@@ -4,7 +4,7 @@
 - **Status**: Draft (awaiting review)
 - **Scope**: toolchain, code architecture, quality gates, and agentic-development harness for all korvid code. Complements the design document (`2026-07-23-korvid-tui-design.md`).
 
-All choices below were validated against what fast-rising Python projects actually practice as of mid-2026 (Textual, posting, harlequin, FastAPI, pydantic, pydantic-ai, marimo, litellm, aider, uv/ruff) rather than textbook doctrine. Citations are noted inline where a choice follows a specific project.
+All choices below prioritize what works in practice for a modern async Python codebase over textbook doctrine.
 
 ---
 
@@ -14,12 +14,12 @@ All choices below were validated against what fast-rising Python projects actual
 
 | Concern | Tool | Rationale |
 |---|---|---|
-| Package/env management | **uv** (`uv sync`, `uv run`, `uv.lock`) | Universal standard in examined projects; matches our PyPI-first distribution (design doc §12-3) |
-| Build backend | **hatchling** | Used by pydantic, pydantic-ai, posting; uv-native |
-| Lint + import sorting | **Ruff** (`ruff check`) | Replaces flake8/isort/pyupgrade/bugbear in a single binary; no project examined starts new tooling with black/isort anymore |
+| Package/env management | **uv** (`uv sync`, `uv run`, `uv.lock`) | Fast, lockfile-first env management; matches our PyPI-first distribution (design doc §12-3) |
+| Build backend | **hatchling** | Modern, minimal, uv-native |
+| Lint + import sorting | **Ruff** (`ruff check`) | Replaces flake8/isort/pyupgrade/bugbear in a single binary |
 | Formatting | **Ruff format** | Black-compatible, built in — Black is not installed |
-| Type checking (primary) | **mypy --strict** | Mature, best ecosystem compat. pydantic-ai/pydantic use pyright as primary; we stay with mypy for stub breadth and revisit in Phase 2 |
-| Type checking (secondary) | **ty** (astral) — non-blocking CI job | FastAPI pattern: run ty in CI with `continue-on-error` while it matures (beta, 0.0.x). Positions us to switch when stable |
+| Type checking (primary) | **mypy --strict** | Mature, best ecosystem compat; chosen for stub breadth, revisit in Phase 2 |
+| Type checking (secondary) | **ty** (astral) — non-blocking CI job | Run ty in CI with `continue-on-error` while it matures (beta, 0.0.x). Positions us to switch when stable |
 | Testing | **pytest + pytest-asyncio + pytest-textual-snapshot + pytest-xdist + pytest-randomly** | Textual's official test harness (`Pilot`) + snapshot testing; randomly catches hidden test-order coupling |
 | Coverage | **pytest-cov**, gate `fail_under = 80`, branch coverage on | Global floor; `diff-cover` is a Phase-2 option if drift appears |
 | Layer boundaries | **tach** (`tach check`) | Enforces the import rules in §3 structurally — especially important when agents write code |
@@ -27,9 +27,9 @@ All choices below were validated against what fast-rising Python projects actual
 | Spell check | **typos** (pre-commit) | Rust-based, near-zero noise; catches typos in AI-generated comments/docstrings |
 | Security | **zizmor** (GitHub Actions audit, pre-commit) + **pip-audit** (scheduled CI) | Workflow security + dependency CVEs |
 | Hooks | **pre-commit** | See §4 gate layering |
-| Task runner | **Makefile** with `uv run` targets | pydantic-ai pattern; nox/tox rejected (uv handles env isolation) |
+| Task runner | **Makefile** with `uv run` targets | nox/tox rejected (uv handles env isolation) |
 
-**Explicitly rejected**: black/isort (Ruff covers), Poetry (uv covers), DI containers (§3), pluggy (§3), commitizen/conventional-commits enforcement (agents get stuck in pattern-mismatch loops; no examined project enforces it), interrogate (docstring presence ≠ quality), radon/xenon (Ruff `C90` covers), mutation testing (cost/noise), pyrefly (too early).
+**Explicitly rejected**: black/isort (Ruff covers), Poetry (uv covers), DI containers (§3), pluggy (§3), commitizen/conventional-commits enforcement (agents get stuck in pattern-mismatch loops), interrogate (docstring presence ≠ quality), radon/xenon (Ruff `C90` covers), mutation testing (cost/noise), pyrefly (too early).
 
 ### Single-file configuration
 
@@ -110,7 +110,7 @@ extend-exclude = ["*.lock", "*.snap"]
 ## 2. Clean-Code Rules
 
 1. **src layout**: all code under `src/korvid/`; tests under `tests/` mirroring the package tree
-2. **One responsibility per module**; when a file needs a scroll map, it is too big. (posting's 65 KB `app.py` is the counterexample we design against)
+2. **One responsibility per module**; when a file needs a scroll map, it is too big.
 3. **Typed everything public**: mypy --strict enforces annotations; no bare `# type: ignore` — always `# type: ignore[error-code]  # reason`
 4. **Docstrings**: Google style, markdown (no RST); required on public API, optional on internals
 5. **No bare `except:`**; catch specific exceptions (design doc §8 error-surfacing principles depend on this)
@@ -122,15 +122,15 @@ extend-exclude = ["*.lock", "*.snap"]
 
 ## 3. Software Architecture — Pragmatic Layered ("clean architecture, as far as the evidence supports")
 
-We examined how comparable fast-rising projects structure themselves: posting (Textual author's own TUI), harlequin (Textual SQL IDE **with a pluggable adapter system** — the closest analogue to our pluggable providers), pydantic-ai (agent framework with the most disciplined layering), marimo, litellm, aider. Findings:
+Guiding principles:
 
-- **Zero** of the six use a DI container (dependency-injector/punq/svcs). Wiring is constructor injection at the entry point.
-- Adapter/provider interfaces are **`abc.ABC`**, not `typing.Protocol`, in every project that has them (harlequin `HarlequinAdapter`, pydantic-ai `Model`/`Provider`, marimo `ChatModel`).
-- Plugin systems use **`importlib.metadata.entry_points`** with group names `<app>.<resource>` (harlequin: `harlequin.adapter`, `harlequin.keymap`). pluggy is only warranted when plugins must intercept each other's hooks (pytest's case) — not ours.
-- Nobody practices full hexagonal architecture. The discipline that *does* pay: keeping non-UI layers free of framework imports.
-- litellm is the anti-pattern for us: a monolithic router with a giant if/elif provider dispatch — a consequence of 100+ providers, not a design to emulate for our ~5.
+- No DI container (dependency-injector/punq/svcs). Wiring is constructor injection at the entry point.
+- Adapter/provider interfaces are **`abc.ABC`**, not `typing.Protocol`.
+- Plugin systems use **`importlib.metadata.entry_points`** with group names `<app>.<resource>`. pluggy is only warranted when plugins must intercept each other's hooks — not ours.
+- Full hexagonal architecture is unnecessary ceremony. The discipline that *does* pay: keeping non-UI layers free of framework imports.
+- A monolithic router with a giant if/elif provider dispatch is the anti-pattern — not a design to emulate for our ~5 providers.
 
-**Verdict: pragmatic layered.** Full hexagonal (ports/adapters/domain isolation/DI container) is rejected as ceremony none of our references need; "modules + conventions only" is rejected because agent-written code needs structural boundaries, not conventions. We take exactly these elements of clean architecture and no more:
+**Verdict: pragmatic layered.** Full hexagonal (ports/adapters/domain isolation/DI container) is rejected as ceremony; "modules + conventions only" is rejected because agent-written code needs structural boundaries, not conventions. We take exactly these elements of clean architecture and no more:
 
 1. **Dependency direction is law**, enforced by tach in CI (not by convention):
 
@@ -154,7 +154,7 @@ src/korvid/
 
    `core/`, `agent/`, `k8s/` being Textual-free means the agentic loop, resource cache, and client wrapper are all testable as plain asyncio code without a TUI harness.
 
-2. **Interfaces are `abc.ABC` at layer boundaries** — the key one being the provider interface (modeled on pydantic-ai's `Model`, deliberately minimal like marimo's `ChatModel`):
+2. **Interfaces are `abc.ABC` at layer boundaries** — the key one being the provider interface, kept deliberately minimal:
 
 ```python
 # src/korvid/agent/provider.py
@@ -176,11 +176,11 @@ class LLMProvider(ABC):
     ) -> AsyncIterator[CompletionEvent]: ...
 ```
 
-3. **Constructor injection, wired once in `__main__.py`** (harlequin injects its adapter into `Harlequin(App)` the same way). No service locators, no module-level singletons for injectable dependencies. Config is the one pragmatic exception (posting's `ContextVar` pattern is acceptable for read-only settings).
+3. **Constructor injection, wired once in `__main__.py`**. No service locators, no module-level singletons for injectable dependencies. Config is the one pragmatic exception (a `ContextVar` is acceptable for read-only settings).
 
-4. **The UI Bus rides Textual's message pump.** harlequin's async DB pipeline (`QuerySubmitted → QueriesExecuted → ResultsFetched`) is the proven template: define typed `Message` subclasses in `ui/messages.py` for every bus command/event (`AgentDelta`, `AgentToolRequest`, `AgentUICommand`, `NavigateCommand`, …) and let Textual dispatch them. We do **not** build a framework-independent dispatcher — `core/` stays Textual-free by exposing plain async functions/AsyncIterators that `ui/` workers (`@work`) call and translate into Messages. Both user keystrokes and agent UI-control tools emit the same Message types, which is what the design doc's "single entry point" (§4.1) requires.
+4. **The UI Bus rides Textual's message pump.** Define typed `Message` subclasses in `ui/messages.py` for every bus command/event (`AgentDelta`, `AgentToolRequest`, `AgentUICommand`, `NavigateCommand`, …) and let Textual dispatch them. We do **not** build a framework-independent dispatcher — `core/` stays Textual-free by exposing plain async functions/AsyncIterators that `ui/` workers (`@work`) call and translate into Messages. Both user keystrokes and agent UI-control tools emit the same Message types, which is what the design doc's "single entry point" (§4.1) requires.
 
-5. **Plugins (Phase 3) = entry_points + ABC**, groups `korvid.provider`, `korvid.panel`, `korvid.tool`. Built-in providers are registered through the same mechanism as external ones, so "built-in vs plugin" is a packaging detail, not an architectural one. This is exactly harlequin's adapter model.
+5. **Plugins (Phase 3) = entry_points + ABC**, groups `korvid.provider`, `korvid.panel`, `korvid.tool`. Built-in providers are registered through the same mechanism as external ones, so "built-in vs plugin" is a packaging detail, not an architectural one.
 
 ---
 
@@ -206,15 +206,15 @@ korvid is developed primarily with AI coding agents. Repo-managed assets keep an
 
 ### 5.1 Agent behavior contract — `AGENTS.md` (repo root, committed)
 
-The cross-harness standard file (read natively by Copilot/Codex-family tools; Claude Code reads it via `CLAUDE.md` containing the single line `@AGENTS.md` — the uv/marimo pattern). Contents:
+The cross-harness standard file (read natively by Copilot/Codex-family tools; Claude Code reads it via `CLAUDE.md` containing the single line `@AGENTS.md`). Contents:
 
 - Quick setup + the exact dev commands (`make lint / format / typecheck / test`)
 - The layer table from §3 and "run `uv run tach check` if you touched imports"
 - Style rules agents most often violate: no bare `type: ignore`, `pytest.raises` needs `match=`, every test asserts
-- **Workflow economics** (pydantic-ai's insight): *do not* run the full test suite or mypy after every edit — targeted checks while iterating; pre-commit and CI cover the rest at the right time
+- **Workflow economics**: *do not* run the full test suite or mypy after every edit — targeted checks while iterating; pre-commit and CI cover the rest at the right time
 - PR rules: no PR without explicit human instruction
 
-Per-layer `AGENTS.md` files (e.g., `src/korvid/agent/AGENTS.md` describing tool-gate invariants) are a Phase-2 option once the codebase grows (pydantic-ai's hierarchical pattern).
+Per-layer `AGENTS.md` files (e.g., `src/korvid/agent/AGENTS.md` describing tool-gate invariants) are a Phase-2 option once the codebase grows.
 
 ### 5.2 Harness hooks — `.claude/settings.json` + `.claude/hooks/` (committed)
 

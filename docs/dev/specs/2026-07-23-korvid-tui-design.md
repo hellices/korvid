@@ -8,16 +8,16 @@
 
 ## 1. Vision
 
-**A Kubernetes diagnostic/operations cockpit where keyboard-first cluster control and "a Claude Code-grade conversational AI agent" coexist on a single screen.**
+**A Kubernetes diagnostic/operations cockpit where keyboard-first cluster control and a first-class conversational AI agent coexist on a single screen.**
 
-- Day-to-day: a fast, keyboard-first resource navigation/operation TUI, like established terminal Kubernetes tools
+- Day-to-day: a fast, keyboard-first resource navigation/operation TUI
 - With the agent enabled: the agent investigates the cluster and **drives the TUI directly** (switching views, applying filters, opening logs) while showing its evidence as it diagnoses. Command execution goes through an approval gate
 - The user can take over with the keyboard at any moment — the TUI experience is never lost
 
 ### Why now (research findings, as of 2026-07)
 - No mature tool yet combines "full-screen TUI + conversational LLM + command execution" (the only attempt, ks-ai, remains a 7★ early-stage PoC)
-- The existing TUI ecosystem has no AI-integration roadmap (community native-integration attempts did not reach merge) — this combination is naturally achievable when starting from a fresh design
-- The Python/Textual stack is proven in production-grade TUIs (posting 12k★, elia 2.5k★, parllama active)
+- Combining keyboard-first cluster control with a deeply integrated AI agent is naturally achievable when starting from a fresh design
+- The Python/Textual stack is proven capable of production-grade TUIs
 - The biggest threat is general-purpose agents (Claude Code + K8s MCP) → differentiate through domain specialization: **automatic screen-context injection + TUI driving + approval/audit system**
 
 ---
@@ -27,7 +27,7 @@
 **Target**: SREs, platform engineers, and backend developers who operate Kubernetes from the terminal
 
 Core scenarios:
-1. **Explore**: `:pods`, `/filter`, log tailing — as fast as or faster than existing terminal tools
+1. **Explore**: `:pods`, `/filter`, log tailing — fast and keyboard-first
 2. **Conversational diagnosis**: open the agent panel and ask "why is the checkout service returning 5xx?" → the agent investigates events/logs/specs, bringing relevant views onto the screen as evidence → proposes root cause + fix
 3. **Approval-based mutation**: the agent proposes `kubectl rollout restart ...` → diff/command preview → user approves → execution → audit log entry
 4. **Screen-context questions**: with the cursor on a CrashLoopBackOff pod, press a shortcut → "why is this pod dying?" is sent with context (full resource spec, recent events, log tail) attached automatically
@@ -40,7 +40,7 @@ Core scenarios:
 |---|---|---|---|
 | Summary | TUI + read-only Q&A panel | Conversation is the primary UI; widgets are artifacts | Keyboard-first TUI + an agent that can drive the TUI |
 | Pros | Simple, low risk | Maximum AI differentiation | Satisfies both needs; structural differentiation |
-| Cons | Underserves the requirements; no different from kubectl-ai | Loses the TUI experience; competes head-on with general-purpose agents | Highest complexity |
+| Cons | Underserves the requirements; limited differentiation | Loses the TUI experience; competes head-on with general-purpose agents | Highest complexity |
 | Verdict | ❌ | ❌ | ✅ manage complexity with a phased roadmap |
 
 ---
@@ -88,51 +88,51 @@ Core scenarios:
 | Component | Choice | Rationale |
 |---|---|---|
 | Language | Python ≥3.11 | asyncio TaskGroup, mature ecosystem |
-| TUI | Textual (v8+) | 36.7k★, actively maintained, composable layout (split panes for free), async-native |
+| TUI | Textual (v8+) | Actively maintained, composable layout (split panes for free), async-native |
 | K8s client | kubernetes-client/python v36+ (`kubernetes.aio`) | Official, async watch streams, integrates naturally with Textual's event loop |
-| LLM adapter | Thin in-house adapter (OpenAI-compatible + Anthropic + Gemini + Ollama) | litellm is heavy with dependency risk; the tool-use loop must be owned in-house |
-| Packaging | uv + `pipx/uvx` install; single binary (PyApp/PEX) considered later | Pursue the "single binary" strength that leading terminal tools demonstrate |
+| LLM adapter | Thin in-house adapter (OpenAI-compatible + Anthropic + Gemini + Ollama) | Keep the adapter thin to minimize dependency risk; the tool-use loop must be owned in-house |
+| Packaging | uv + `pipx/uvx` install; single binary (PyApp/PEX) considered later | Pursue a frictionless "single binary" install experience |
 | Configuration | **Single `~/.config/korvid/config.yaml`** | A single file from day one — no config sprawl (§5 #7) |
 
 ---
 
-## 5. Unmet Needs in Existing Tools → Design Requirements (Day-1)
+## 5. Core Workflow Requirements (Day-1)
 
-We verified, with measured data (issue numbers, 👍 counts), the needs that the community has long asked for in terminal Kubernetes workflows but that remain unmet. The issue trackers of existing terminal Kubernetes tools are the best available data source for this demand — a map of proven demand that korvid, being a fresh design, can address from the start:
+These are the core needs of terminal Kubernetes workflows that korvid, being a fresh design, addresses from the start:
 
-| # | Unmet need (demand evidence) | korvid design response | Phase |
+| # | Requirement | korvid design response | Phase |
 |---|---|---|---|
-| 1 | Advanced log workflows — merged multi-pod view (#827, 62👍), JSON log parsing (#364, 147👍), reliable streaming (#1228 83👍, #1399) | **Logs as a first-class citizen**: merged multi-pod stream (pod prefixes), auto JSON detection + field extraction **with a formatted↔raw toggle (`f` in the log view — auto-detect never forces a rendering)**, previous-container logs (`p`, `--previous`), explicit buffer-overflow banner, reconnect status indicator, search hit count + n/N navigation | MVP |
-| 2 | Simultaneous multiple views (#351, #1430 40👍) — hard to build on a single-view stack architecture | **Split-pane architecture from Day 1**: WorkspaceScreen manages N panes (watch the pod list while reading logs). Built on Textual Containers | MVP (2-pane) |
-| 3 | Freely remappable keybindings (#625) | Every action is a named command on the command bus → fully remappable via the `keybindings:` config section | MVP |
-| 4 | Stronger guardrails for dangerous operations (#1016, #319) | **Layered confirmation**: normal delete = dialog; cluster-scoped delete = type-the-resource-name confirmation; protected contexts = extra confirmation + red header; `--readonly` mode | MVP |
-| 5 | Clear surfacing of RBAC/auth errors (#3730) | Explicit API error parsing: "no pods/exec permission (ns: prod)", token-expiry detection → re-auth guidance, unauthorized actions dimmed | MVP |
-| 6 | Minimal API-server load (#3603, 28👍) | **Selective watch**: only watch resources visible on screen, pause when unfocused, exponential backoff, watch bookmarks | MVP |
+| 1 | Advanced log workflows — merged multi-pod view, JSON log parsing, reliable streaming | **Logs as a first-class citizen**: merged multi-pod stream (pod prefixes), auto JSON detection + field extraction **with a formatted↔raw toggle (`f` in the log view — auto-detect never forces a rendering)**, previous-container logs (`p`, `--previous`), explicit buffer-overflow banner, reconnect status indicator, search hit count + n/N navigation | MVP |
+| 2 | Simultaneous multiple views | **Split-pane architecture from Day 1**: WorkspaceScreen manages N panes (watch the pod list while reading logs). Built on Textual Containers | MVP (2-pane) |
+| 3 | Freely remappable keybindings | Every action is a named command on the command bus → fully remappable via the `keybindings:` config section | MVP |
+| 4 | Stronger guardrails for dangerous operations | **Layered confirmation**: normal delete = dialog; cluster-scoped delete = type-the-resource-name confirmation; protected contexts = extra confirmation + red header; `--readonly` mode | MVP |
+| 5 | Clear surfacing of RBAC/auth errors | Explicit API error parsing: "no pods/exec permission (ns: prod)", token-expiry detection → re-auth guidance, unauthorized actions dimmed | MVP |
+| 6 | Minimal API-server load | **Selective watch**: only watch resources visible on screen, pause when unfocused, exponential backoff, watch bookmarks | MVP |
 | 7 | A simple configuration story | Single config.yaml + `contexts.<name>:` override sections; runs with zero config (kubeconfig auto-detection) | MVP |
-| 8 | Plugins that can extend the UI (#771, 160👍 — existing plugin models are shell-out only) | Python plugin API: register custom panels/columns/commands/agent tools. Schema-validated manifest | Phase 3 |
-| 9 | Automatic Secret base64 decoding (#1017, 42👍) | Auto decode↔encode round-trip by default when viewing/editing Secrets | Phase 2 |
-| 10 | Runtime resilience (#2465, 69👍) — highlights the importance of isolating UI and data layers | UI/data task separation + global exception boundary: data-layer exceptions render as error cards inside the affected panel; the app survives | MVP |
-| 11 | Reliable metrics sorting (#3793, 24👍) | Data model / rendering separation + unit test coverage for sorting/metrics | Phase 2 |
+| 8 | Plugins that can extend the UI | Python plugin API: register custom panels/columns/commands/agent tools. Schema-validated manifest | Phase 3 |
+| 9 | Automatic Secret base64 decoding | Auto decode↔encode round-trip by default when viewing/editing Secrets | Phase 2 |
+| 10 | Runtime resilience | UI/data task separation + global exception boundary: data-layer exceptions render as error cards inside the affected panel; the app survives | MVP |
+| 11 | Reliable metrics sorting | Data model / rendering separation + unit test coverage for sorting/metrics | Phase 2 |
 | 12 | A sustainable maintenance structure — a common challenge for small-maintainer projects | Minimal core + extension via plugins; CI/test automation to lower the contribution barrier | Operating policy |
 | 13 | Keybinding discoverability | Context-aware help + fuzzy command palette (search by action name → shows the key) + **ask the agent** | Phase 2 |
-| 14 | Broad terminal compatibility (#3598) | Use Textual's theme/color system (safer than managing colors in-house) | Free win |
-| 15 | Deeper Helm workflows (#1841, 28👍) | Non-goal (MVP) — via plugins in Phase 3+ | Phase 3+ |
+| 14 | Broad terminal compatibility | Use Textual's theme/color system (safer than managing colors in-house) | Free win |
+| 15 | Deeper Helm workflows | Non-goal (MVP) — via plugins in Phase 3+ | Phase 3+ |
 
-**Proven terminal-TUI UX conventions to inherit**: the `:` command bar + vim-style navigation, instant ctx/ns switching, fast startup, `/` filtering (regex/fuzzy/label), one-key shell-in (`s`, `kubectl exec -it` via PTY suspend), describe view (`d`, `kubectl describe`-equivalent rendered from the object + events), previous logs (`p`), port-forward management, read-only mode. We follow these conventions as-is to minimize switching cost for users — **`d` stays describe; the debug dialog uses `D` (all bindings remappable, §5 #3)**.
+**Interaction model**: the `:` command bar + vim-style navigation, instant ctx/ns switching, fast startup, `/` filtering (regex/fuzzy/label), one-key shell-in (`s`, `kubectl exec -it` via PTY suspend), describe view (`d`, `kubectl describe`-equivalent rendered from the object + events), previous logs (`p`), port-forward management, read-only mode. **`d` is describe; the debug dialog uses `D` (all bindings remappable, §5 #3)**.
 
-**Universal resource browsing (Day-1)**: any Kubernetes object kind — built-ins and CRDs — is reachable from the `:` command bar via API discovery (`:pods`, `:deploy`, `:crd`, `:<any-kind-or-shortname>`). Views are generic over a resource descriptor (columns + kind metadata), so new kinds cost data-mapping only, not new UI. **Namespace scope is first-class**: a view can target one namespace or all namespaces (`:pods all`, the `0` convention), and `/` filtering works identically in both scopes; all-namespace views add a NAMESPACE column.
+**Universal resource browsing (Day-1)**: any Kubernetes object kind — built-ins and CRDs — is reachable from the `:` command bar via API discovery (`:pods`, `:deploy`, `:crd`, `:<any-kind-or-shortname>`). Views are generic over a resource descriptor (columns + kind metadata), so new kinds cost data-mapping only, not new UI. **Namespace scope is first-class**: a view can target one namespace or all namespaces (`:pods all`, or the `0` key), and `/` filtering works identically in both scopes; all-namespace views add a NAMESPACE column.
 
 ---
 
 ## 6. Agent Design (the differentiating core)
 
-### 6.1 UX — "feels like Claude Code, keeps the classic TUI experience"
+### 6.1 UX — a conversational AI panel inside a keyboard-first TUI
 
 - `Ctrl-A` (tentative) toggles the agent panel — slides in as a right-side 30–40% panel. The rest of the screen remains a live TUI
 - **The panel is collapsible at any time** (same `Ctrl-A` toggle). Collapsing reclaims the full screen width for the resource views; the agent session — conversation history, in-flight tool calls, pending state — persists in the background
 - **Collapsed-state indicator**: while collapsed, a compact status badge lives in the status bar (e.g., `⚡AI ● working` / `⚡AI ✓ done` / `⚡AI ⏸ approval pending`). New agent output or a pending approval surfaces as a badge change (never a modal steal-focus), and re-expanding restores the full conversation exactly where it was. Approval dialogs are never auto-opened from the collapsed state — the badge invites the user to expand first
-- Panel contents: streaming markdown responses + a **tool-call log** (collapsible entries like Claude Code: "🔧 get_pod_logs(checkout-7d9f…) ✓") + an input box
-- **Token/cost visibility** (patterns validated against Claude Code, Gemini CLI, Aider, Cline as of 2026-07): the panel header shows an always-on context gauge — `34.2k / 200k tok · ~$0.11` with color thresholds (default: amber at 50%, red at 90% of the session budget, Gemini CLI-style). Each assistant turn carries a compact annotation (`↑1.2k ↓450`, Aider-style, expandable for cache stats later). While collapsed, the status-bar badge includes an abbreviated count (`⚡AI ● 34k`)
+- Panel contents: streaming markdown responses + a **tool-call log** (collapsible entries: "🔧 get_pod_logs(checkout-7d9f…) ✓") + an input box
+- **Token/cost visibility**: the panel header shows an always-on context gauge — `34.2k / 200k tok · ~$0.11` with color thresholds (default: amber at 50%, red at 90% of the session budget). Each assistant turn carries a compact annotation (`↑1.2k ↓450`, expandable for cache stats later). While collapsed, the status-bar badge includes an abbreviated count (`⚡AI ● 34k`)
 - **Two-tier context injection** (keeps input tokens bounded): the always-injected system context is *lightweight only* — active view, selected resource kind/name/status, filters, ns/ctx (hundreds of tokens). Full resource specs, log tails, and events are **not** auto-attached; the agent fetches them on demand via read tools (which are ingest-capped, §6.2). Exception: the "what's wrong with this?" shortcut on a selected resource pre-attaches rich context (spec + recent events + log tail, each trimmed) for that one turn
 - **Agent-drive mode**: when the agent manipulates the screen via UI-control tools, the affected panel is visually marked (border highlight + an "agent" badge). Any user keystroke immediately takes priority
 
@@ -148,14 +148,14 @@ An in-house tool-use loop (max iterations default 15, configurable):
 | UI control | `navigate`, `set_filter`, `open_logs`, `split_pane`, `highlight_resource` | None (screen-only changes, visually marked) |
 | shell | `run_kubectl(args)` (allowlist-validated) | Triple validation (verb × resource × flags); write verbs require approval |
 
-- Combines a **read-only-by-default** philosophy (HolmesGPT style) with **approval-based execution** (kubectl-ai style)
+- Combines a **read-only-by-default** philosophy with **approval-based execution**
 - **Shell tool validation is not verb-only**: `run_kubectl` validates the (verb × resource × flags) triple. Read verbs can still be dangerous — e.g., `get secrets -o yaml` (leaks secret payloads into LLM context), `proxy`/`port-forward` (long-running, network exposure), `--raw`, or flag smuggling into exec-like paths. Reads of sensitive resources (Secrets, ServiceAccount tokens) are forced through the masking pipeline; long-running and raw-API verbs are rejected outright
 - Approval dialog: shows the exact command to run + target resource + dry-run diff (when available); Y/n/edit. **Approval dialogs can only be confirmed by a user keystroke — no agent tool can open, focus, or confirm an approval dialog** (see UI-control hardening below)
 - **Audit log**: every write execution (user- or agent-initiated) is recorded in `~/.local/state/korvid/audit.jsonl` (who/when/command/approved-by). The file is created with `0600` permissions and rotated by size (default 50 MB, configurable retention). Auditing is **fail-closed**: if the audit entry cannot be written, the write action is blocked
 - **UI-control hardening**: UI-control tools are ungated (screen-only), but cluster-sourced content (labels, annotations, log lines) is a prompt-injection vector that could steer the agent into misleading screen manipulation. Therefore every UI-control action is also recorded in the tool-call log (§6.1), agent-driven panels are visually marked, and — as above — approval confirmation is reserved exclusively for user input
-- Privacy: an anonymize option for data sent to the LLM (k8sgpt style); Secret values masked by default
+- Privacy: an anonymize option for data sent to the LLM; Secret values masked by default
 - **Token/cost budget**: the iteration cap alone does not bound spend — each iteration re-sends the conversation history, so early large attachments are re-billed every turn. A per-session token budget (`agent.max_tokens_per_session`, default 200k) tracks cumulative input+output tokens; on breach the loop pauses and asks the user whether to continue (showing tokens consumed so far). Consumption is surfaced continuously in the panel-header gauge (§6.1). **Counting method**: provider `usage` fields from API responses are authoritative when present; for streaming responses that omit usage, a local estimate (chars/4 heuristic, or the provider's tokenizer when available) fills in and is reconciled against the final usage report when it arrives — the gauge marks estimated values with `~`
-- **Input-token growth control** (three tiers, cheapest first — mirrors the Gemini CLI/Cline/Claude Code split):
+- **Input-token growth control** (three tiers, cheapest first):
   1. **Ingest caps (free)**: every tool result is truncated at ingest (default ~2k tokens per result; log tails and event lists trimmed to configurable line/entry caps). Full outputs are kept outside the conversation (viewable in the TUI) and referenced by ID, so the agent can re-query a narrower slice instead of carrying the full dump
   2. **Tool-result compaction (free)**: as history grows, older tool results are the first thing replaced — with a one-line digest + reference (newest results are kept verbatim within a rolling budget)
   3. **Conversation summarization (costs one LLM call)**: at a threshold of the session budget (default 70%) or via a manual `/compact [focus…]` command, the older portion of the conversation is summarized into a structured snapshot, preserving the recent turns verbatim. Thrashing protection: if the context refills immediately after summarization, the loop stops and asks the user rather than looping
@@ -208,14 +208,14 @@ Non-disruptive debugging of running pods is a first-class feature. All three kub
 
 ### 6.5 Extended diagnostics — vanilla K8s API only (researched 2026-07-23)
 
-Five diagnostic features deliverable at the level of the **vanilla Kubernetes API + metrics-server (a de facto standard)**, without external ecosystem tooling (Helm/GitOps/security scanners/cost/multi-cluster). Each was selected because demand is proven by popular krew plugins, the capability has not been available in existing TUIs, and agent synergy is high.
+Five diagnostic features deliverable at the level of the **vanilla Kubernetes API + metrics-server (a de facto standard)**, without external ecosystem tooling (Helm/GitOps/security scanners/cost/multi-cluster). Each was selected because it supports common diagnostic workflows and agent synergy is high.
 
-| # | Feature | Demand evidence | APIs used | Phase |
+| # | Feature | Rationale | APIs used | Phase |
 |---|---|---|---|---|
-| 1 | **Event intelligence** | Existing TUI event views are plain lists; events are the #1 troubleshooting source | core v1 Events (`fieldSelector`, watch) | **MVP** |
-| 2 | **Ownership tree** | kubectl-tree 3.4k⭐ + kube-lineage 0.5k⭐ | recursive `ownerReferences` traversal | **MVP** |
-| 3 | **RBAC analysis** | rakkess 1.4k⭐ + who-can 0.9k⭐ + rbac-lookup 1.0k⭐ | `SubjectAccessReview`, `SelfSubjectRulesReview`, Roles/Bindings | Phase 2 |
-| 4 | **Usage vs requests/limits** | kube-capacity 2.7k⭐ | `metrics.k8s.io/v1beta1` + Pod spec resources | Phase 2 |
+| 1 | **Event intelligence** | Events are the #1 troubleshooting source and deserve more than a plain list | core v1 Events (`fieldSelector`, watch) | **MVP** |
+| 2 | **Ownership tree** | Makes resource ownership relationships inspectable at a glance | recursive `ownerReferences` traversal | **MVP** |
+| 3 | **RBAC analysis** | Clarifies effective permissions and access boundaries | `SubjectAccessReview`, `SelfSubjectRulesReview`, Roles/Bindings | Phase 2 |
+| 4 | **Usage vs requests/limits** | Surfaces resource pressure and misconfigured requests/limits | `metrics.k8s.io/v1beta1` + Pod spec resources | Phase 2 |
 | 5 | **PDB/Quota awareness + drain simulation** | A tooling gap; an essential SRE task | `policy/v1` PDB, ResourceQuota, LimitRange | Phase 2 |
 
 **Design notes:**
@@ -235,7 +235,7 @@ Five diagnostic features deliverable at the level of the **vanilla Kubernetes AP
 | `analyze_resource_usage` (metrics + spec comparison) | k8s read | None |
 | `simulate_drain` (PDB violation pre-check) | k8s read | None (executing the drain itself is write-gated) |
 
-**Considered and excluded**: rollout management (already well served by existing tools; little room for differentiation), an inline TUI YAML editor (high difficulty — dry-run diff is already part of the approval dialog), NetworkPolicy simulation (the vanilla API only shows "allow rules", not actual flows; enforcement differs by CNI), multi-session port-forward management (asyncio+SPDY+Textual technical risk, low LLM synergy — single port-forward stays in Phase 2).
+**Considered and excluded**: rollout management (outside the MVP scope), an inline TUI YAML editor (high difficulty — dry-run diff is already part of the approval dialog), NetworkPolicy simulation (the vanilla API only shows "allow rules", not actual flows; enforcement differs by CNI), multi-session port-forward management (asyncio+SPDY+Textual technical risk, low LLM synergy — single port-forward stays in Phase 2).
 
 ---
 
@@ -267,7 +267,7 @@ Five diagnostic features deliverable at the level of the **vanilla Kubernetes AP
 | **Phase 1 — MVP** | **universal resource views (any kind incl. CRDs via API discovery) with per-ns and all-namespaces scope**, events/ns/ctx views, `:` palette, `/` filter, 2-pane split, first-class log viewer (multi-pod/JSON formatted↔raw toggle/previous logs/reconnect), **describe view (`d`)**, **shell-in (`s`, exec -it)**, layered guardrails, RBAC error mapping, selective watch, single config, keybinding overrides, **agent panel (read tools + UI control + approval-based kubectl writes)**, **live debugging (ephemeral containers + agent debug tools, §6.4)**, **event intelligence + ownership tree (forward, §6.5)**, audit log | Daily diagnostic workflows fully served by korvid alone |
 | **Phase 2** | port-forward, copy-of-pod/node debug, Secret decode editing, metrics (top) sorting, **RBAC analysis + usage vs req/limits + PDB/drain simulation (§6.5)**, reverse ownership-tree indexing, command palette discoverability, session state restore, anonymize | Covers everyday cluster operations end to end, standalone |
 | **Phase 3** | Python plugin API (register panels/columns/agent tools), external MCP server connections (agent tool extension), simultaneous multi-cluster views, embedded debug terminal panel, diagnostic playbooks, (evaluation) Cilium/Hubble flow view | Ecosystem expansion begins |
-| **Non-goals** | Web UI, in-cluster resident agents (kagent's domain), Helm management (initially), optimization for 1000+ node mega-clusters | — |
+| **Non-goals** | Web UI, in-cluster resident agents, Helm management (initially), optimization for 1000+ node mega-clusters | — |
 
 ## 11. Risks & Mitigations
 
@@ -276,38 +276,24 @@ Five diagnostic features deliverable at the level of the **vanilla Kubernetes AP
 | General-purpose agents (Claude Code + MCP) erode the niche | Screen-context injection, TUI driving, and the approval/audit system are things general-purpose tools cannot do. In Phase 3, become an MCP client ourselves and absorb the ecosystem |
 | Python performance (large-scale watch) | Selective watch + async architecture. Mega-clusters are an explicit non-goal |
 | Textual bus factor = 1 | MIT license, large community, fork as a last resort. Manage UI-framework coupling behind an abstraction layer |
-| kubectl-ai adds a TUI | Speed of execution. Google is focused on REPL/web |
 | Agent misbehavior damaging a cluster | Writes are approval-gated by default. `--skip-approvals` can relax this, but **protected contexts ignore that option and always require approval**. Audit log, read-only mode |
 
 ## 12. Open Questions (owner decisions needed)
 
 1. ~~**Product name**~~ → **`korvid` finalized** (2026-07-23; naming research confirmed the GitHub K8s niche and PyPI are conflict-free. corvid = crow family, tool-using birds → a metaphor for agentic tool use)
 2. ~~Recommended default LLM provider~~ → **No default — strictly pluggable** (2026-07-24). Config injection activates a provider (Claude Code, GitHub Copilot, OpenAI, Anthropic, Gemini, OpenAI-compatible local); without one, agent mode and dependent features are cleanly disabled. Install/first-run strongly recommends configuring a provider (§6.3)
-3. ~~Distribution channels~~ → **PyPI first (install via `uv tool install korvid` / pipx), Homebrew tap in Phase 2** (2026-07-24). krew is out of scope (korvid is a standalone app, not a kubectl subcommand); single-binary packaging (PyInstaller/PyApp) stays a Phase 3 evaluation item
-4. ~~License~~ → **Apache-2.0** (2026-07-24). Open source. Matches the ecosystem standard (kubectl-ai, k8sgpt, and similar tools are all Apache-2.0) and avoids corporate AGPL blanket bans that would hurt adoption; a local TUI has little SaaS-wrapping exposure for AGPL to defend against
-5. **(Evaluation only) Cilium/Hubble network flow view** — technical feasibility confirmed: Hubble Relay gRPC (`GetFlows` streaming; insecure connection possible after port-forward), Python stubs can be generated from the protos, and the Hubble UI service map is itself built by aggregating flows, so the same approach is available. No existing tool renders a network topology in a TUI (a differentiation opportunity). However, given the fallback story for clusters without Hubble, TLS, and proto-maintenance risks, this stays an evaluation item for Phase 3 only (first candidate for the plugin API)
+3. ~~Distribution channels~~ → **PyPI first (install via `uv tool install korvid` / pipx), Homebrew tap in Phase 2** (2026-07-24). korvid is a standalone app, not a kubectl subcommand; single-binary packaging (PyInstaller/PyApp) stays a Phase 3 evaluation item
+4. ~~License~~ → **Apache-2.0** (2026-07-24). Open source. A permissive license supports broad adoption and avoids corporate AGPL blanket bans; a local TUI has little SaaS-wrapping exposure for AGPL to defend against
+5. **(Evaluation only) Cilium/Hubble network flow view** — technical feasibility confirmed: Hubble Relay gRPC (`GetFlows` streaming; insecure connection possible after port-forward), Python stubs can be generated from the protos, and the Hubble UI service map is itself built by aggregating flows, so the same approach is available. However, given the fallback story for clusters without Hubble, TLS, and proto-maintenance risks, this stays an evaluation item for Phase 3 only (first candidate for the plugin API)
 
-## 13. Cost Analysis: Extending an Existing Tool vs Building New
+## 13. Implementation Approach
 
-We compared three paths to realizing this scope from a cost perspective.
+korvid is built from scratch as a Python/Textual application.
 
-### Cost structure by path
+### Rationale
 
-| | A. Upstream contribution (PRs to an existing tool) | B. Fork and modify | **C. Build new (chosen)** |
-|---|---|---|---|
-| Initial cost | Looks low but carries maximum uncertainty | Onboarding onto a 34k★-scale Go codebase | Everything written from scratch |
-| Architectural fit | The agent panel and TUI driving require core structural changes — not possible via plugins (shell-out) | Converting a single-view stack (tview PageStack) into split panes means overhauling the rendering layer. The UI Bus and approval gate are also non-orthogonal to the existing event handling → core redesign | Optimized from the start for the target architecture (UI Bus, agent integration, split panes) |
-| Reusable assets | — | Roughly the data layer (informer wrappers). The AI loop, adapters, and approval/audit system would all be new regardless | Textual provides split panes, async, theming, and a test runner at the framework level — much of the UI infrastructure that existing tools had to hand-build comes for free |
-| Ongoing cost | No control over whether/when PRs merge (two prior AI-integration PRs did not reach merge) | Permanent divergence from upstream → perpetual cost of merging security patches and features. The positioning burden of being "a fork" | Full ownership of maintenance. Maturity (edge cases) takes time to accumulate |
-| Language/capability | Go | Go (the LLM ecosystem is comparatively thinner than Python's) | Python — strong in both Textual and the LLM ecosystem |
+1. For the agent to drive the TUI, every UI action must pass through the command bus (§4.1) — this is not an add-on but the **central design**, so the architecture is shaped around it from day one (UI Bus, agent integration, split panes)
+2. The largest volume of UI infrastructure (split panes, async, theming, a test runner) is absorbed by the Textual framework; the remaining risk (maturity, edge cases) is managed incrementally using the requirements in §5 as test scenarios
+3. Python is strong in both Textual and the LLM ecosystem
 
-### Verdict: C (build new)
-
-The core rationale: **this project's differentiators are not orthogonal to existing architectures**:
-
-1. For the agent to drive the TUI, every UI action must pass through the command bus (§4.1) — this is not an add-on but the **central design**. Retrofitting it onto an existing codebase effectively means rewriting the core → path B converges to "fork, then rewrite", and onboarding + retrofit + permanent divergence costs exceed the total cost of building new
-2. Path A (contribution) offers no control over project direction, so the feasibility of this scope itself is uncontrollable
-3. The biggest risk of building new (the volume of UI infrastructure) is largely absorbed by the Textual framework; the remaining risk (maturity) is managed incrementally using the measured needs in §5 as test scenarios
-4. Even as a new build, **proven UX conventions are inherited** (final paragraph of §5), keeping user switching costs as low as a fork's
-
-Choosing to build new does not mean severing ties with the existing ecosystem — the measured needs in §5 stand on knowledge accumulated by existing tool communities, and Phase 3's plugin API and MCP connectivity aim for interoperability with that ecosystem.
+Phase 3's plugin API and MCP connectivity aim for broad interoperability with the wider ecosystem.

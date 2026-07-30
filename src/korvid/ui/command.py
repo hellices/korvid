@@ -1,4 +1,4 @@
-"""`:`  command grammar — familiar TUI conventions. UnknownCommand is the future agent fallthrough hook."""
+"""`:`  command grammar. UnknownCommand is the future agent fallthrough hook."""
 
 from __future__ import annotations
 

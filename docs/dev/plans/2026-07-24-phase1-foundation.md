@@ -1024,7 +1024,7 @@ git commit -m "feat: selective watch manager with reconnect and failure reportin
 - Test: `tests/core/test_errors.py`, `tests/ui/test_messages.py` (+ `tests/ui/__init__.py`)
 
 **Interfaces:**
-- Produces (messages — the UI Bus vocabulary, harlequin pipeline pattern):
+- Produces (messages — the UI Bus vocabulary):
   - `NavigateCommand(view: str, namespace: str | None = None)` — e.g. `view="pods"`
   - `FilterCommand(pattern: str)` / `ClearFilter()`
   - `ResourcesUpdated(kind: str)`
@@ -1380,7 +1380,7 @@ git commit -m "feat: app shell with pods table vertical slice (store -> bus -> t
 - Test: `tests/ui/test_command.py`, extend `tests/ui/test_app.py`
 
 **Interfaces:**
-- Produces: `parse_command(text: str) -> NavigateCommand | FilterCommand | QuitCommand | UnknownCommand` where `QuitCommand`/`UnknownCommand(text: str)` are new Messages in `ui/messages.py`. Grammar (established TUI conventions, design doc §5): `pods` → navigate; `ns <name>` → namespace switch (NavigateCommand with current view); `q`/`quit` → quit; anything else → UnknownCommand.
+- Produces: `parse_command(text: str) -> NavigateCommand | FilterCommand | QuitCommand | UnknownCommand` where `QuitCommand`/`UnknownCommand(text: str)` are new Messages in `ui/messages.py`. Grammar (design doc §5): `pods` → navigate; `ns <name>` → namespace switch (NavigateCommand with current view); `q`/`quit` → quit; anything else → UnknownCommand.
 - `CommandBar(Input)` widget: hidden by default; `:` key shows and focuses it; Enter parses and posts the message; Esc hides.
 
 - [ ] **Step 1: Write failing parser tests**
@@ -1435,7 +1435,7 @@ class UnknownCommand(Message):
 
 `src/korvid/ui/command.py`:
 ```python
-"""`:` command grammar — familiar TUI conventions. UnknownCommand is the future agent fallthrough hook."""
+"""`:` command grammar. UnknownCommand is the future agent fallthrough hook."""
 
 from __future__ import annotations
 
@@ -1548,7 +1548,7 @@ Expected: all pass
 ```bash
 make check
 git add src/korvid/ui/ tests/ui/
-git commit -m "feat: colon command bar with TUI-convention grammar"
+git commit -m "feat: colon command bar grammar"
 ```
 
 ---
