@@ -248,6 +248,7 @@ class HierarchyScreen(ModalScreen[tuple[str, str, str, str] | None]):
         tree = self.query_one(Tree)
         target = self._cursor_identity(tree)
         cursor_line = tree.cursor_line
+        root_collapsed = not tree.root.is_expanded
         collapsed: set[tuple[str, str, str, str]] = set()
         self._collect_collapsed(tree.root, collapsed)
         tree.root.remove_children()
@@ -257,6 +258,8 @@ class HierarchyScreen(ModalScreen[tuple[str, str, str, str] | None]):
         tree.root.expand_all()
         if collapsed:
             self._restore_collapsed(tree.root, collapsed)
+        if root_collapsed:
+            tree.root.collapse()
         line = -1 if target is None else self._dfs_find(tree.root, target, 0)[0]
         tree.cursor_line = line if line >= 0 else min(cursor_line, tree.last_line)
 

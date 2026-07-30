@@ -81,6 +81,10 @@ def manifest_components(manifest: Any) -> list[ComponentRef]:
         return []
     refs: list[ComponentRef] = []
     seen: set[ComponentRef] = set()
+    # Manifest-wide inspection budget for flattened List items: duplicates
+    # and malformed items consume it too, so many List wrappers can neither
+    # multiply the output nor the work done on hostile input.
+    items_budget = MAX_COMPONENT_DOCS
     for chunk in _split_docs(manifest, MAX_COMPONENT_DOCS):
         try:
             doc = yaml.safe_load(chunk)
@@ -93,9 +97,9 @@ def manifest_components(manifest: Any) -> list[ComponentRef]:
         if _scalar(doc.get("kind")) == "List":
             items = doc.get("items")
             if isinstance(items, list):
-                # The output budget is shared across the whole manifest -
-                # many List wrappers must not multiply it.
-                for item in items[: MAX_COMPONENT_DOCS - len(refs)]:
+                take = items[: min(items_budget, MAX_COMPONENT_DOCS - len(refs))]
+                items_budget -= len(take)
+                for item in take:
                     _append(refs, seen, _ref_from_doc(item))
         else:
             _append(refs, seen, _ref_from_doc(doc))

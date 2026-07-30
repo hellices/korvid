@@ -466,6 +466,70 @@ async def test_enter_on_csv_opens_hierarchy_from_operator_labels() -> None:
         )
 
 
+async def test_same_named_component_in_another_namespace_is_kept() -> None:
+    """The root self-filter matches on the full identity: OLM copies CSVs
+    into other namespaces under the same name, and those copies are real
+    components, not the root."""
+    csv = GenericSummary(
+        name="argocd-operator.v1.14.4",
+        namespace="operators",
+        kind="ClusterServiceVersion",
+        created="2026-07-26T10:00:00Z",
+        uid="csv-1",
+    )
+    csv_manifest: dict[str, Any] = {
+        "kind": "ClusterServiceVersion",
+        "metadata": {
+            "name": "argocd-operator.v1.14.4",
+            "labels": {"operators.coreos.com/argocd-operator.operators": ""},
+        },
+    }
+    operator_manifest: dict[str, Any] = {
+        "kind": "Operator",
+        "metadata": {"name": "argocd-operator.operators"},
+        "status": {
+            "components": {
+                "refs": [
+                    {
+                        "kind": "ClusterServiceVersion",
+                        "name": "argocd-operator.v1.14.4",
+                        "namespace": "operators",
+                        "apiVersion": "operators.coreos.com/v1alpha1",
+                    },
+                    {
+                        "kind": "ClusterServiceVersion",
+                        "name": "argocd-operator.v1.14.4",
+                        "namespace": "other-ns",
+                        "apiVersion": "operators.coreos.com/v1alpha1",
+                    },
+                ]
+            }
+        },
+    }
+    app, _ = make_app(
+        {"clusterserviceversions": [csv]},
+        manifests={
+            "argocd-operator.v1.14.4": csv_manifest,
+            "argocd-operator.operators": operator_manifest,
+        },
+        namespace="operators",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "clusterserviceversions", "clusterserviceversions")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="csv listed")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        screen = app.screen
+        assert isinstance(screen, HierarchyScreen)
+        children = screen._root.children
+        # The root's own entry is dropped; the other-namespace copy stays.
+        assert [(c.name, c.namespace) for c in children] == [
+            ("argocd-operator.v1.14.4", "other-ns")
+        ]
+
+
 async def test_enter_without_components_accessor_falls_back_to_revision_drill() -> None:
     """No get_helm_components wired (degraded session): Enter keeps the
     pre-#120 behaviour and drills into the release's revisions."""

@@ -359,3 +359,18 @@ async def test_update_tree_preserves_collapsed_branches() -> None:
         labels = [str(line.node.label) for line in tree._tree_lines]
         assert any("Deployment/web" in label for label in labels)
         assert not any("Pod/web-1" in label for label in labels)
+
+
+async def test_update_tree_preserves_collapsed_root() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        screen = HierarchyScreen("helm/web", _sample_root())
+        await app.push_screen(screen)
+        await pilot.pause()
+        tree = app.screen.query_one(Tree)
+        tree.root.collapse()
+        await pilot.pause()
+        screen.update_tree(_sample_root())
+        await pilot.pause()
+        labels = [str(line.node.label) for line in tree._tree_lines]
+        assert labels == ["helm/web"]

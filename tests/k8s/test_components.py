@@ -153,6 +153,25 @@ class TestManifestComponents:
         refs = manifest_components(manifest)
         assert len(refs) == MAX_COMPONENT_DOCS
 
+    def test_list_item_inspection_budget_is_manifest_wide(self) -> None:
+        """Duplicate or malformed items must not refill the budget: the cap
+        bounds *inspected* list items across the whole manifest, so a
+        hostile manifest cannot force unbounded item scanning."""
+        dup_items = "".join(
+            "- apiVersion: v1\n  kind: ConfigMap\n  metadata:\n    name: dup\n" for _ in range(300)
+        )
+        unique_items = "".join(
+            f"- apiVersion: v1\n  kind: ConfigMap\n  metadata:\n    name: u-{i}\n"
+            for i in range(300)
+        )
+        manifest = (
+            f"apiVersion: v1\nkind: List\nitems:\n{dup_items}"
+            f"\n---\napiVersion: v1\nkind: List\nitems:\n{unique_items}"
+        )
+        refs = manifest_components(manifest)
+        # 300 duplicate inspections leave budget for only 200 unique items.
+        assert len(refs) == 1 + (MAX_COMPONENT_DOCS - 300)
+
     def test_list_without_items_yields_nothing(self) -> None:
         assert manifest_components("apiVersion: v1\nkind: List\nitems: oops\n") == []
 

@@ -2332,8 +2332,14 @@ class KorvidApp(App[None]):
         refs = await self._refs_from_operator_object(manifest, namespace, root)
         # The Operator's refs include the root object itself (the CSV, and
         # sometimes the Subscription); a root listed as its own child would
-        # just loop Enter back to the same tree.
-        refs = [r for r in refs if (r.kind, r.name) != (root, name)]
+        # just loop Enter back to the same tree. Match the full identity:
+        # OLM copies CSVs into other namespaces under the same name, and
+        # those copies are real components.
+        refs = [
+            r
+            for r in refs
+            if (r.kind, r.name) != (root, name) or (r.namespace and r.namespace != namespace)
+        ]
         if refs:
             return refs
         if root == "Subscription":
