@@ -50,45 +50,58 @@ class HierarchyNode:
 
 def _live_index(
     lookup: Callable[[str, str], list[Any] | None],
-    cache: dict[tuple[str, str], dict[str, Any] | None],
+    cache: _BucketCache,
     view: str,
     namespace: str,
 ) -> dict[str, Any] | None:
     """name -> live object for one (view, namespace), or None when the view
-    is not watched. Built once per tree so many same-kind refs don't rescan
-    (and re-sort) the same bucket."""
-    key = (view, namespace)
-    if key not in cache:
-        bucket = lookup(view, namespace)
-        cache[key] = (
-            None
-            if bucket is None
-            else {
-                str(getattr(obj, "name", "")): obj
-                for obj in bucket
-                if str(getattr(obj, "namespace", "") or "") == namespace
-            }
-        )
-    return cache[key]
+    is not watched. Indexed once per distinct bucket so many same-kind refs
+    (even spread across namespaces served by one all-namespaces watch) don't
+    rescan the same bucket."""
+    bucket = lookup(view, namespace)
+    if bucket is None:
+        return None
+    names, _ = _bucket_indexes(bucket, cache)
+    return names.get(namespace, {})
 
 
 def _owner_index(
     lookup: Callable[[str, str], list[Any] | None],
-    cache: dict[tuple[str, str], dict[tuple[str, str], list[Any]]],
+    cache: _BucketCache,
     view: str,
     namespace: str,
 ) -> dict[tuple[str, str], list[Any]]:
-    """(namespace, owner uid) -> children for one view, built once per tree."""
-    key = (view, namespace)
-    index = cache.get(key)
-    if index is None:
-        index = {}
-        for obj in lookup(view, namespace) or []:
+    """(namespace, owner uid) -> children for one view."""
+    bucket = lookup(view, namespace)
+    if bucket is None:
+        return {}
+    _, owners = _bucket_indexes(bucket, cache)
+    return owners
+
+
+_BucketCache = dict[
+    int, tuple[list[Any], dict[str, dict[str, Any]], dict[tuple[str, str], list[Any]]]
+]
+
+
+def _bucket_indexes(
+    bucket: list[Any], cache: _BucketCache
+) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], list[Any]]]:
+    """(namespace -> name -> obj, (namespace, owner uid) -> children) for one
+    bucket, computed on first sight. Keyed by object identity — the bucket
+    list is kept in the cache entry so its id cannot be recycled mid-build."""
+    entry = cache.get(id(bucket))
+    if entry is None:
+        names: dict[str, dict[str, Any]] = {}
+        owners: dict[tuple[str, str], list[Any]] = {}
+        for obj in bucket:
             ns = str(getattr(obj, "namespace", "") or "")
+            names.setdefault(ns, {})[str(getattr(obj, "name", ""))] = obj
             for owner_uid in getattr(obj, "owner_uids", ()) or ():
-                index.setdefault((ns, str(owner_uid)), []).append(obj)
-        cache[key] = index
-    return index
+                owners.setdefault((ns, str(owner_uid)), []).append(obj)
+        entry = (bucket, names, owners)
+        cache[id(bucket)] = entry
+    return entry[1], entry[2]
 
 
 def _runtime_children(
@@ -96,7 +109,7 @@ def _runtime_children(
     parent_uid: str,
     namespace: str,
     lookup: Callable[[str, str], list[Any] | None],
-    cache: dict[tuple[str, str], dict[tuple[str, str], list[Any]]],
+    cache: _BucketCache,
 ) -> list[HierarchyNode]:
     """Live descendants of one object via ownerReferences, recursively."""
     step = _RUNTIME_CHILDREN.get(view)
@@ -140,8 +153,7 @@ def build_hierarchy(
     explanation.
     """
     root = HierarchyNode(label=root_label)
-    owner_cache: dict[tuple[str, str], dict[tuple[str, str], list[Any]]] = {}
-    live_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
+    cache: _BucketCache = {}
     for ref in refs:
         resolved = resolve(ref)
         if resolved is None:
@@ -151,7 +163,7 @@ def build_hierarchy(
         # Cluster-scoped kinds never inherit the release namespace: they
         # live at "", and defaulting would break the live match and goto.
         ns = (ref.namespace or namespace) if namespaced else ""
-        index = _live_index(lookup, live_cache, view, ns)
+        index = _live_index(lookup, cache, view, ns)
         live = None if index is None else index.get(ref.name)
         # None means the view is not watched - absence is only meaningful
         # where a live watch actually feeds the store for the kind.
@@ -163,7 +175,7 @@ def build_hierarchy(
                 kind=view,
                 namespace=ns,
                 name=ref.name,
-                children=_runtime_children(view, uid, ns, lookup, owner_cache),
+                children=_runtime_children(view, uid, ns, lookup, cache),
             )
         )
     return root

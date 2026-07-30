@@ -8,7 +8,7 @@ from typing import Any
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
-from korvid.k8s.components import ComponentRef
+from korvid.k8s.components import MAX_COMPONENT_DOCS, ComponentRef
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.helm import (
     HELM_RELEASES_META,
@@ -415,7 +415,11 @@ async def test_tree_does_not_open_when_view_changed_during_fetch() -> None:
         await pilot.press("enter")  # fetch parked on the gate
         await _navigate(pilot, "pods", "pods")
         gate.set()
-        await pilot.pause(0.1)
+        await until(
+            pilot,
+            lambda: all(worker.is_finished for worker in app.workers),
+            label="hierarchy worker finished",
+        )
         assert not isinstance(app.screen, HierarchyScreen)
         assert app.current_kind == "pods"
 
@@ -592,3 +596,80 @@ async def test_csv_without_operator_api_lists_owned_workloads() -> None:
         await pilot.press("enter")
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         assert any("Deployment/argocd-operator-controller" in label for label in _tree_labels(app))
+
+
+async def test_owned_workloads_fallback_is_capped() -> None:
+    """The CSV ownerReferences fallback obeys the same component cap as the
+    manifest parsers - a pathological bucket cannot flood the tree."""
+    csv = GenericSummary(
+        name="argocd-operator.v1.14.4",
+        namespace="operators",
+        kind="ClusterServiceVersion",
+        created="2026-07-26T10:00:00Z",
+        uid="csv-uid-1",
+    )
+    owned: list[Summary] = [
+        GenericSummary(
+            name=f"owned-{i}",
+            namespace="operators",
+            kind="Deployment",
+            created="2026-07-26T10:00:00Z",
+            uid=f"dep-{i}",
+            owner_uids=("csv-uid-1",),
+        )
+        for i in range(MAX_COMPONENT_DOCS + 1)
+    ]
+    csv_manifest: dict[str, Any] = {
+        "kind": "ClusterServiceVersion",
+        "metadata": {"name": "argocd-operator.v1.14.4", "uid": "csv-uid-1"},
+    }
+    app, _ = make_app(
+        {"clusterserviceversions": [csv], "deployments": owned},
+        manifests={"argocd-operator.v1.14.4": csv_manifest},
+        namespace="operators",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app.watch_manager.start("deployments", "operators")
+        await until(
+            pilot,
+            lambda: len(app.store.get("deployments", "operators")) == len(owned),
+            label="deployments watched",
+        )
+        refs = app._refs_from_owned_workloads(csv_manifest, "operators")
+        assert len(refs) == MAX_COMPONENT_DOCS
+
+
+async def test_alias_discovery_refreshes_open_tree() -> None:
+    """A kind discovered while the tree is open (background alias merge)
+    turns its display-only nodes navigable on the next aliases update."""
+
+    def _kind_of(app: KorvidApp, label: str) -> str:
+        screen = app.screen
+        assert isinstance(screen, HierarchyScreen)
+        from textual.widgets import Tree
+
+        tree = screen.query_one(Tree)
+        for line in tree._tree_lines:
+            data = line.node.data
+            if data is not None and data.label == label:
+                return str(data.kind)
+        return "<absent>"
+
+    late_aliases = {k: v for k, v in _ALIASES.items() if k != "deployments"}
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS, aliases=late_aliases)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        assert _kind_of(app, "Deployment/web-nginx") == ""
+        app.aliases["deployments"] = _ALIASES["deployments"]
+        app.on_aliases_updated()
+        await until(
+            pilot,
+            lambda: _kind_of(app, "Deployment/web-nginx") == "deployments",
+            label="tree refreshed after alias discovery",
+        )

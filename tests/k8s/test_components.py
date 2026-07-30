@@ -111,6 +111,36 @@ class TestManifestComponents:
         refs = manifest_components(manifest)
         assert refs == [ComponentRef(kind="Service", name="123", api_version="1", namespace="True")]
 
+    def test_kubernetes_list_documents_are_flattened(self) -> None:
+        manifest = (
+            "apiVersion: v1\n"
+            "kind: List\n"
+            "items:\n"
+            "- apiVersion: v1\n"
+            "  kind: Service\n"
+            "  metadata:\n"
+            "    name: web\n"
+            "- apiVersion: apps/v1\n"
+            "  kind: Deployment\n"
+            "  metadata:\n"
+            "    name: api\n"
+        )
+        assert manifest_components(manifest) == [
+            ComponentRef(kind="Service", name="web", api_version="v1"),
+            ComponentRef(kind="Deployment", name="api", api_version="apps/v1"),
+        ]
+
+    def test_list_items_are_capped(self) -> None:
+        items = "".join(
+            f"- apiVersion: v1\n  kind: ConfigMap\n  metadata:\n    name: cm-{i}\n"
+            for i in range(MAX_COMPONENT_DOCS + 10)
+        )
+        refs = manifest_components(f"apiVersion: v1\nkind: List\nitems:\n{items}")
+        assert len(refs) == MAX_COMPONENT_DOCS
+
+    def test_list_without_items_yields_nothing(self) -> None:
+        assert manifest_components("apiVersion: v1\nkind: List\nitems: oops\n") == []
+
 
 class TestReferenceComponents:
     def test_parses_operator_status_refs(self) -> None:
@@ -242,3 +272,21 @@ class TestDocumentSplitting:
 
         manifest = "---\n" * (MAX_COMPONENT_DOCS * 4)
         assert len(list(_split_docs(manifest, MAX_COMPONENT_DOCS))) == MAX_COMPONENT_DOCS
+
+    def test_indented_marker_inside_block_scalar_does_not_split(self) -> None:
+        # YAML document markers are only valid at column 0; an indented
+        # "---" inside a ConfigMap's block scalar is content, and splitting
+        # there would cut the resource in half and lose its ref.
+        manifest = (
+            "data:\n  nested.yaml: |\n    ---\n    a: 1\n"
+            "kind: ConfigMap\nmetadata:\n  name: web-config\n"
+            "---\nkind: Service\nmetadata:\n  name: web\n"
+        )
+        assert manifest_components(manifest) == [
+            ComponentRef(kind="ConfigMap", name="web-config"),
+            ComponentRef(kind="Service", name="web"),
+        ]
+
+    def test_more_than_three_dashes_is_not_a_marker(self) -> None:
+        manifest = "kind: ConfigMap\nmetadata:\n  name: c\ndata:\n  x: |\n    ----\n"
+        assert manifest_components(manifest) == [ComponentRef(kind="ConfigMap", name="c")]

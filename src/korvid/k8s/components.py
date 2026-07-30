@@ -59,8 +59,8 @@ def _scalar(value: Any) -> str:
     return ""
 
 
-def _append(refs: list[ComponentRef], seen: set[ComponentRef], ref: ComponentRef) -> None:
-    if ref not in seen:
+def _append(refs: list[ComponentRef], seen: set[ComponentRef], ref: ComponentRef | None) -> None:
+    if ref is not None and ref not in seen:
         seen.add(ref)
         refs.append(ref)
 
@@ -69,8 +69,10 @@ def manifest_components(manifest: Any) -> list[ComponentRef]:
     """Component refs from a helm rendered ``manifest`` payload field.
 
     Documents are split on ``---`` separator lines and parsed one by one so
-    a single malformed document cannot hide the rest. Docs without a kind
-    or ``metadata.name`` are skipped; oversize input yields nothing.
+    a single malformed document cannot hide the rest. ``kind: List``
+    wrappers are flattened into their items (capped like top-level docs).
+    Docs without a kind or ``metadata.name`` are skipped; oversize input
+    yields nothing.
     """
     if (
         not isinstance(manifest, str)
@@ -88,34 +90,51 @@ def manifest_components(manifest: Any) -> list[ComponentRef]:
             continue
         if not isinstance(doc, dict):
             continue
-        kind = _scalar(doc.get("kind"))
-        meta = doc.get("metadata")
-        if not isinstance(meta, dict):
+        if _scalar(doc.get("kind")) == "List":
+            items = doc.get("items")
+            if isinstance(items, list):
+                for item in items[:MAX_COMPONENT_DOCS]:
+                    _append(refs, seen, _ref_from_doc(item))
             continue
-        name = _scalar(meta.get("name"))
-        if not kind or not name:
-            continue
-        ref = ComponentRef(
-            kind=kind,
-            name=name,
-            api_version=_scalar(doc.get("apiVersion")),
-            namespace=_scalar(meta.get("namespace")),
-        )
-        _append(refs, seen, ref)
+        _append(refs, seen, _ref_from_doc(doc))
     return refs
+
+
+def _ref_from_doc(doc: Any) -> ComponentRef | None:
+    """ComponentRef from one parsed document, or None when it has no kind
+    or ``metadata.name``."""
+    if not isinstance(doc, dict):
+        return None
+    kind = _scalar(doc.get("kind"))
+    meta = doc.get("metadata")
+    if not isinstance(meta, dict):
+        return None
+    name = _scalar(meta.get("name"))
+    if not kind or not name:
+        return None
+    return ComponentRef(
+        kind=kind,
+        name=name,
+        api_version=_scalar(doc.get("apiVersion")),
+        namespace=_scalar(meta.get("namespace")),
+    )
 
 
 def _doc_start_rest(line: str) -> str | None:
     """None when *line* is not a ``---`` document marker; else the content
     following the marker ('' for the bare and comment-trailed forms). Any
-    remainder is the next document's first content per YAML."""
-    stripped = line.strip()
-    if stripped == "---":
-        return ""
-    if stripped.startswith("--- "):
-        rest = stripped[4:].lstrip()
-        return "" if rest.startswith("#") else rest
-    return None
+    remainder is the next document's first content per YAML.
+
+    Markers are only valid at column 0 - an indented ``---`` is content
+    (for example inside a ConfigMap's block scalar), never a split point.
+    """
+    if not line.startswith("---"):
+        return None
+    rest = line[3:]
+    if rest and not rest[0].isspace():
+        return None  # e.g. "----" or "---x": not a document marker
+    rest = rest.strip()
+    return "" if rest.startswith("#") else rest
 
 
 def _split_docs(manifest: str, limit: int) -> Iterator[str]:

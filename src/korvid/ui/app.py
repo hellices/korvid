@@ -68,7 +68,12 @@ from korvid.core.sorting import SORT_COLUMNS, SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.transfer import TransferSpec
 from korvid.core.watch import WatchManager
-from korvid.k8s.components import ComponentRef, installplan_components, reference_components
+from korvid.k8s.components import (
+    MAX_COMPONENT_DOCS,
+    ComponentRef,
+    installplan_components,
+    reference_components,
+)
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan
 from korvid.k8s.errors import ApiStatusError
@@ -1173,6 +1178,8 @@ class KorvidApp(App[None]):
         command_bar.command_words = sorted(
             {*self.aliases, "ns", "namespaces", "ctx", "context", "contexts", "q", "quit"}
         )
+        # A kind discovered late can turn display-only tree nodes navigable.
+        self._refresh_hierarchy()
 
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
         self._render_pending.discard(message.kind)
@@ -2234,13 +2241,22 @@ class KorvidApp(App[None]):
         """Store lookup for the tree: a list only for views a live watch is
         actually feeding, else None - the builder must not claim "missing"
         from a bucket nothing fills. The watch must cover the *component's*
-        namespace; cluster-scoped components (ns "") use the tree's scope."""
+        namespace; cluster-scoped components (ns "") use the tree's scope.
+
+        Results are memoized per (view, watch scope) for this lookup's
+        lifetime (one tree build), so an all-namespaces watch serving many
+        component namespaces is fetched - and indexed by the builder, which
+        caches on bucket identity - exactly once."""
+        buckets: dict[tuple[str, str], list[Summary]] = {}
 
         def lookup(view: str, namespace: str) -> list[Summary] | None:
             active = self.watch_manager.active
             for view_scope in (namespace or scope, ALL_NAMESPACES):
                 if (view, view_scope) in active:
-                    return self.store.get(view, view_scope)
+                    key = (view, view_scope)
+                    if key not in buckets:
+                        buckets[key] = self.store.get(view, view_scope)
+                    return buckets[key]
             return None
 
         return lookup
@@ -2328,16 +2344,21 @@ class KorvidApp(App[None]):
         self, manifest: dict[str, Any], namespace: str
     ) -> list[ComponentRef]:
         """CSV fallback (issue #120 third source): Deployments whose
-        ownerReferences point at the CSV, from buckets a live watch feeds."""
+        ownerReferences point at the CSV, from buckets a live watch feeds.
+        Capped like the manifest parsers so a pathological bucket cannot
+        flood the tree."""
         uid = str((manifest.get("metadata") or {}).get("uid") or "")
         if not uid:
             return []
         lookup = self._hierarchy_lookup(self.current_scope)
-        return [
-            ComponentRef(kind="Deployment", name=str(obj.name), namespace=namespace)
-            for obj in lookup("deployments", namespace) or []
-            if obj.namespace == namespace and uid in getattr(obj, "owner_uids", ())
-        ]
+        refs: list[ComponentRef] = []
+        for obj in lookup("deployments", namespace) or []:
+            if obj.namespace != namespace or uid not in getattr(obj, "owner_uids", ()):
+                continue
+            refs.append(ComponentRef(kind="Deployment", name=str(obj.name), namespace=namespace))
+            if len(refs) >= MAX_COMPONENT_DOCS:
+                break
+        return refs
 
     async def _refs_from_installplan(
         self, manifest: dict[str, Any], namespace: str
