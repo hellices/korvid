@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from korvid.core.config import KorvidConfig
-from korvid.core.store import ResourceStore, Summary
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.components import ComponentRef
 from korvid.k8s.discovery import ResourceMeta
@@ -27,6 +27,7 @@ from .waits import until
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
+_SVC_META = ResourceMeta("Service", "services", "", "v1", True, ("svc",))
 SUB_META = ResourceMeta("Subscription", "subscriptions", OPERATORS_GROUP, "v1alpha1", True)
 CSV_META = ResourceMeta(
     "ClusterServiceVersion", "clusterserviceversions", OPERATORS_GROUP, "v1alpha1", True, ("csv",)
@@ -37,6 +38,7 @@ OPERATOR_META = ResourceMeta("Operator", "operators", OPERATORS_GROUP, "v1", Fal
 _ALIASES: dict[str, ResourceMeta] = {
     "pods": _PODS_META,
     "deployments": _DEPLOY_META,
+    "services": _SVC_META,
     "helm": HELM_RELEASES_META,
     "helmreleases": HELM_RELEASES_META,
     "helmrevisions": HELM_REVISIONS_META,
@@ -116,7 +118,8 @@ def make_app(
 
     async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
         for obj in data.get(kind, []):
-            yield ("ADDED", obj)
+            if scope == ALL_NAMESPACES or not obj.namespace or obj.namespace == scope:
+                yield ("ADDED", obj)
         while True:
             await asyncio.sleep(0.01)
 
@@ -451,6 +454,12 @@ async def test_enter_on_csv_opens_hierarchy_from_operator_labels() -> None:
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
         labels = _tree_labels(app)
         assert any("Deployment/argocd-operator-controller" in label for label in labels)
+        # The Operator's refs include the CSV itself; the root must not be
+        # re-listed as its own child (Enter there would loop back here).
+        assert not any(
+            label.startswith("ClusterServiceVersion/argocd-operator.v1.14.4")
+            for label in labels[1:]
+        )
 
 
 async def test_enter_without_components_accessor_falls_back_to_revision_drill() -> None:
@@ -496,3 +505,90 @@ async def test_jump_notifies_when_object_never_appears() -> None:
             lambda: any("ghost" in n for n in notices),
             label="give-up notification",
         )
+
+
+async def test_lookup_uses_a_watch_covering_the_component_namespace() -> None:
+    """A component declared in another namespace must not be judged by the
+    root-scope bucket: a watch on the root scope that cannot contain the
+    object must not produce a false '(missing)'."""
+    svc = GenericSummary(
+        name="ext",
+        namespace="other",
+        kind="Service",
+        created="2026-07-26T10:00:00Z",
+        uid="svc-ext",
+    )
+    data: dict[str, list[Summary]] = {**_HELM_DATA, "services": [svc]}
+    components = {"web": [ComponentRef(kind="Service", name="ext", namespace="other")]}
+    app, _ = make_app(data, components=components)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        # The root-scope services watch is live but cannot contain "ext".
+        await app.watch_manager.start("services", "default")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        assert any(label == "Service/ext" for label in _tree_labels(app))
+        assert not any("(missing)" in label for label in _tree_labels(app))
+
+
+async def test_jump_aborts_on_stale_context_epoch() -> None:
+    """A context switch that crosses a tree-goto must stop it before it
+    navigates to (or focuses) a same-named object in the new cluster."""
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        await app._jump_to_object("deployments", "default", "web-nginx", epoch=app._ctx_epoch - 1)
+        assert app.current_kind == "helmreleases"
+
+
+async def test_csv_without_operator_api_lists_owned_workloads() -> None:
+    """Third OLM source (issue #120): without the Operator API, Deployments
+    whose ownerReferences point at the CSV still populate the tree."""
+    csv = GenericSummary(
+        name="argocd-operator.v1.14.4",
+        namespace="operators",
+        kind="ClusterServiceVersion",
+        created="2026-07-26T10:00:00Z",
+        uid="csv-uid-1",
+    )
+    owned = GenericSummary(
+        name="argocd-operator-controller",
+        namespace="operators",
+        kind="Deployment",
+        created="2026-07-26T10:00:00Z",
+        uid="dep-owned",
+        owner_uids=("csv-uid-1",),
+    )
+    csv_manifest: dict[str, Any] = {
+        "kind": "ClusterServiceVersion",
+        "metadata": {"name": "argocd-operator.v1.14.4", "uid": "csv-uid-1"},
+    }
+    aliases_without_operator = {
+        k: v for k, v in _ALIASES.items() if k != f"operators.{OPERATORS_GROUP}"
+    }
+    app, _ = make_app(
+        {"clusterserviceversions": [csv], "deployments": [owned]},
+        manifests={"argocd-operator.v1.14.4": csv_manifest},
+        namespace="operators",
+        aliases=aliases_without_operator,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "clusterserviceversions", "clusterserviceversions")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="csv listed")
+        await app.watch_manager.start("deployments", "operators")
+        await until(
+            pilot,
+            lambda: len(app.store.get("deployments", "operators")) == 1,
+            label="deployments watched",
+        )
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        assert any("Deployment/argocd-operator-controller" in label for label in _tree_labels(app))

@@ -39,8 +39,9 @@ tree of everything that root installed and how the pieces hang together
   per open, nothing per node).
 - **Operator roots** prefer the cluster's own bookkeeping, in order: the
   Operator object's `status.components.refs` (includes the CSV, CRDs, and
-  RBAC), then the Subscription's InstallPlan `status.plan`. Where neither
-  API is available the tree degrades to the root alone.
+  RBAC), then the Subscription's InstallPlan `status.plan`, then — for a
+  CSV — watched Deployments whose ownerReferences point at it. Where no
+  source is available the tree degrades to the root alone.
 - **Runtime descendants** (Deployment → ReplicaSet → Pod) come from
   ownerReferences against the live store, so the tree shows what is
   running now, not just what was rendered. A declared object the store

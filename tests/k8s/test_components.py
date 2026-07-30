@@ -214,3 +214,31 @@ class TestParserWorkBounds:
         rest = "---\nkind: Service\nmetadata:\n  name: web\n"
         refs = manifest_components(bomb + "\n" + rest)
         assert refs == [ComponentRef(kind="Service", name="web")]
+
+
+class TestDocumentSplitting:
+    def test_separator_with_trailing_comment_starts_a_new_document(self) -> None:
+        manifest = (
+            "kind: Service\nmetadata:\n  name: web\n"
+            "--- # Source: chart/templates/cm.yaml\n"
+            "kind: ConfigMap\nmetadata:\n  name: web-config\n"
+        )
+        assert manifest_components(manifest) == [
+            ComponentRef(kind="Service", name="web"),
+            ComponentRef(kind="ConfigMap", name="web-config"),
+        ]
+
+    def test_separator_with_inline_content_starts_a_document_with_it(self) -> None:
+        # "--- value" starts a new document whose content is the remainder
+        # (YAML allows content on the marker line); the previous document
+        # must survive the split either way.
+        manifest = "kind: Service\nmetadata:\n  name: web\n--- not-a-mapping\n"
+        assert manifest_components(manifest) == [ComponentRef(kind="Service", name="web")]
+
+    def test_splitting_stops_at_the_inspection_cap(self) -> None:
+        # A separator-only payload must not materialize documents past the
+        # cap: the generator stops after MAX_COMPONENT_DOCS chunks.
+        from korvid.k8s.components import _split_docs
+
+        manifest = "---\n" * (MAX_COMPONENT_DOCS * 4)
+        assert len(list(_split_docs(manifest, MAX_COMPONENT_DOCS))) == MAX_COMPONENT_DOCS

@@ -2224,17 +2224,21 @@ class KorvidApp(App[None]):
             )
             return
         action, kind, ns, obj = result
-        job = self._describe_named if action == "describe" else self._jump_to_object
-        self.run_worker(job(kind, ns, obj), exclusive=True, group="hierarchy")
+        if action == "describe":
+            coro = self._describe_named(kind, ns, obj)
+        else:
+            coro = self._jump_to_object(kind, ns, obj, epoch=epoch)
+        self.run_worker(coro, exclusive=True, group="hierarchy")
 
-    def _hierarchy_lookup(self, scope: str) -> Callable[[str], list[Summary] | None]:
+    def _hierarchy_lookup(self, scope: str) -> Callable[[str, str], list[Summary] | None]:
         """Store lookup for the tree: a list only for views a live watch is
-        actually feeding (in the tree's scope or all-namespaces), else None -
-        the builder must not claim "missing" from a bucket nothing fills."""
+        actually feeding, else None - the builder must not claim "missing"
+        from a bucket nothing fills. The watch must cover the *component's*
+        namespace; cluster-scoped components (ns "") use the tree's scope."""
 
-        def lookup(view: str) -> list[Summary] | None:
+        def lookup(view: str, namespace: str) -> list[Summary] | None:
             active = self.watch_manager.active
-            for view_scope in (scope, ALL_NAMESPACES):
+            for view_scope in (namespace or scope, ALL_NAMESPACES):
                 if (view, view_scope) in active:
                     return self.store.get(view, view_scope)
             return None
@@ -2310,11 +2314,30 @@ class KorvidApp(App[None]):
             self.notify(f"hierarchy for {name} unavailable: {exc}", severity="error")
             return None
         refs = await self._refs_from_operator_object(manifest, namespace, root)
+        # The Operator's refs include the root object itself (the CSV, and
+        # sometimes the Subscription); a root listed as its own child would
+        # just loop Enter back to the same tree.
+        refs = [r for r in refs if (r.kind, r.name) != (root, name)]
         if refs:
             return refs
         if root == "Subscription":
             return await self._refs_from_installplan(manifest, namespace)
-        return []
+        return self._refs_from_owned_workloads(manifest, namespace)
+
+    def _refs_from_owned_workloads(
+        self, manifest: dict[str, Any], namespace: str
+    ) -> list[ComponentRef]:
+        """CSV fallback (issue #120 third source): Deployments whose
+        ownerReferences point at the CSV, from buckets a live watch feeds."""
+        uid = str((manifest.get("metadata") or {}).get("uid") or "")
+        if not uid:
+            return []
+        lookup = self._hierarchy_lookup(self.current_scope)
+        return [
+            ComponentRef(kind="Deployment", name=str(obj.name), namespace=namespace)
+            for obj in lookup("deployments", namespace) or []
+            if obj.namespace == namespace and uid in getattr(obj, "owner_uids", ())
+        ]
 
     async def _refs_from_installplan(
         self, manifest: dict[str, Any], namespace: str
@@ -2363,10 +2386,16 @@ class KorvidApp(App[None]):
                 return refs
         return []
 
-    async def _jump_to_object(self, kind: str, namespace: str, name: str) -> None:
+    async def _jump_to_object(
+        self, kind: str, namespace: str, name: str, *, epoch: int | None = None
+    ) -> None:
         """Navigate to *kind*'s view and put the cursor on the object - the
         tree's Enter lands where every normal action works unchanged. Rows
-        stream in after the navigate, so the cursor placement polls briefly."""
+        stream in after the navigate, so the cursor placement polls briefly.
+        A context switch crossing *epoch* aborts: the same-named object in
+        the new cluster is not what the user picked."""
+        if epoch is not None and self._ctx_switch_crossed(epoch):
+            return
         meta = self.aliases.get(kind)
         if meta is None:
             self.notify(f"{kind} is not a discovered view", severity="warning")
@@ -2374,6 +2403,8 @@ class KorvidApp(App[None]):
         await self._navigate(kind, namespace if meta.namespaced and namespace else None)
         row_key = f"{namespace}/{name}"
         for _ in range(self._jump_poll_attempts):
+            if epoch is not None and self._ctx_switch_crossed(epoch):
+                return
             if self.current_kind != kind:
                 return  # the user moved on - stop quietly
             if self._focus_row(row_key):

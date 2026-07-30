@@ -48,7 +48,7 @@ def _resolve(ref: ComponentRef) -> tuple[str, bool] | None:
 
 
 def _lookup_from(data: dict[str, list[_Live]]):  # type: ignore[no-untyped-def]  # test helper
-    def lookup(view: str) -> list[_Live] | None:
+    def lookup(view: str, namespace: str) -> list[_Live] | None:
         # None = the view is not watched; a list (even empty) = watched.
         return data.get(view)
 
@@ -273,3 +273,39 @@ async def test_update_tree_replaces_content_and_keeps_cursor() -> None:
         labels = [str(line.node.label) for line in tree._tree_lines]
         assert any("Deployment/web (missing)" in label for label in labels)
         assert tree.cursor_line == 1
+
+
+def test_lookup_receives_the_component_namespace() -> None:
+    """The caller selects a watch that covers the component's namespace -
+    the builder must hand it over, not the release namespace."""
+    calls: list[tuple[str, str]] = []
+
+    def lookup(view: str, namespace: str) -> list[_Live] | None:
+        calls.append((view, namespace))
+        return None
+
+    refs = [ComponentRef(kind="Service", name="web", namespace="other")]
+    build_hierarchy("helm/web", refs, namespace="default", resolve=_resolve, lookup=lookup)
+    assert calls == [("services", "other")]
+
+
+async def test_update_tree_follows_the_selected_node_across_reorder() -> None:
+    """A store update that inserts rows above the cursor must not leave the
+    cursor on a different object - Enter/d act on what the user selected."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        screen = HierarchyScreen("helm/web", _sample_root())
+        await app.push_screen(screen)
+        await pilot.pause()
+        await pilot.press("down")  # Deployment/web (line 1)
+        new_root = _sample_root()
+        new_root.children.insert(
+            0, HierarchyNode(label="Service/web", kind="services", namespace="default", name="web")
+        )
+        screen.update_tree(new_root)
+        await pilot.pause()
+        tree = app.screen.query_one(Tree)
+        cursor = tree.cursor_node
+        assert cursor is not None
+        assert cursor.data is not None
+        assert (cursor.data.kind, cursor.data.name) == ("deployments", "web")

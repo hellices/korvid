@@ -14,6 +14,8 @@ entry counts are capped, and duplicates are folded.
 
 from __future__ import annotations
 
+import io
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -77,7 +79,7 @@ def manifest_components(manifest: Any) -> list[ComponentRef]:
         return []
     refs: list[ComponentRef] = []
     seen: set[ComponentRef] = set()
-    for chunk in _split_docs(manifest)[:MAX_COMPONENT_DOCS]:
+    for chunk in _split_docs(manifest, MAX_COMPONENT_DOCS):
         try:
             doc = yaml.safe_load(chunk)
         except (yaml.YAMLError, RecursionError):
@@ -103,18 +105,36 @@ def manifest_components(manifest: Any) -> list[ComponentRef]:
     return refs
 
 
-def _split_docs(manifest: str) -> list[str]:
-    """Split a multi-doc YAML string on ``---`` document separator lines."""
-    docs: list[str] = []
+def _doc_start_rest(line: str) -> str | None:
+    """None when *line* is not a ``---`` document marker; else the content
+    following the marker ('' for the bare and comment-trailed forms). Any
+    remainder is the next document's first content per YAML."""
+    stripped = line.strip()
+    if stripped == "---":
+        return ""
+    if stripped.startswith("--- "):
+        rest = stripped[4:].lstrip()
+        return "" if rest.startswith("#") else rest
+    return None
+
+
+def _split_docs(manifest: str, limit: int) -> Iterator[str]:
+    """Lazily split a multi-doc YAML string on ``---`` separator lines,
+    yielding at most *limit* documents - a separator-only payload must not
+    materialize documents past the inspection cap."""
+    produced = 0
     current: list[str] = []
-    for line in manifest.splitlines():
-        if line.rstrip() == "---":
-            docs.append("\n".join(current))
-            current = []
+    for line in io.StringIO(manifest):
+        rest = _doc_start_rest(line.rstrip("\n"))
+        if rest is not None:
+            yield "\n".join(current)
+            produced += 1
+            if produced >= limit:
+                return
+            current = [rest] if rest else []
         else:
-            current.append(line)
-    docs.append("\n".join(current))
-    return docs
+            current.append(line.rstrip("\n"))
+    yield "\n".join(current)
 
 
 def reference_components(entries: Any) -> list[ComponentRef]:
