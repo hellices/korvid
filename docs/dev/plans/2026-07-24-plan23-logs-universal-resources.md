@@ -13,7 +13,7 @@
 - All constraints from `docs/dev/specs/2026-07-24-korvid-engineering-standards.md` and the phase-1 plan apply (mypy --strict, ruff, tach layers, `pytest.raises(match=)`, commit per green task, never `--no-verify`)
 - Third-party `ApiException` NEVER crosses the k8s layer — wrap as `ApiStatusError` (`src/korvid/k8s/errors.py`)
 - Textual imports **only** in `ui/`
-- familiar TUI conventions: `d`=describe, `s`=shell-in, `l`=logs, `0`=all namespaces, `D`=debug (reserved, later plan)
+- Key bindings: `d`=describe, `s`=shell-in, `l`=logs, `0`=all namespaces, `D`=debug (reserved, later plan)
 - ALL-namespaces sentinel is the string `"*"` — exported as `ALL_NAMESPACES` from `korvid.core.store`
 - Run `make check` before every commit; deptry runs in CI against declared deps only (direct imports must be declared in pyproject)
 

@@ -83,7 +83,7 @@ def resolve_context_name(context: str | None = None, config_file: str | None = N
 
     Used to pin kubectl subprocesses (shell/debug) with ``--context`` so a
     ``kubectl config use-context`` in another terminal cannot retarget them
-    at a different cluster mid-session (kubeconfig parity).
+    at a different cluster mid-session.
     """
     if context:
         return context

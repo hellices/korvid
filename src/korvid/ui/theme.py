@@ -1,7 +1,7 @@
 """Semantic color tokens shared by TUI widgets.
 
 Maps Kubernetes state strings to Rich styles so every widget colors the
-same state the same way (standard colour conventions).
+same state the same way.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ _ERROR_MARKERS = (
 # Restart counts above this render bold red instead of yellow.
 RESTARTS_RED_THRESHOLD = 5
 
-# Usage as a % of request: warn/critical thresholds (standard thresholds).
+# Usage as a % of request: warn/critical thresholds.
 USAGE_WARN_PERCENT = 70.0
 USAGE_CRITICAL_PERCENT = 90.0
 

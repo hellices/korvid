@@ -1024,7 +1024,7 @@ git commit -m "feat: selective watch manager with reconnect and failure reportin
 - Test: `tests/core/test_errors.py`, `tests/ui/test_messages.py` (+ `tests/ui/__init__.py`)
 
 **Interfaces:**
-- Produces (messages — the UI Bus vocabulary, harlequin pipeline pattern):
+- Produces (messages — the UI Bus vocabulary):
   - `NavigateCommand(view: str, namespace: str | None = None)` — e.g. `view="pods"`
   - `FilterCommand(pattern: str)` / `ClearFilter()`
   - `ResourcesUpdated(kind: str)`
@@ -1435,7 +1435,7 @@ class UnknownCommand(Message):
 
 `src/korvid/ui/command.py`:
 ```python
-"""`:` command grammar — familiar TUI conventions. UnknownCommand is the future agent fallthrough hook."""
+"""`:` command grammar. UnknownCommand is the future agent fallthrough hook."""
 
 from __future__ import annotations
 
@@ -1548,7 +1548,7 @@ Expected: all pass
 ```bash
 make check
 git add src/korvid/ui/ tests/ui/
-git commit -m "feat: colon command bar with familiar TUI command grammar"
+git commit -m "feat: colon command bar grammar"
 ```
 
 ---
