@@ -22,8 +22,12 @@ async def _wait_running(client: KubeClient, namespace: str, name: str) -> None:
 async def test_preview_resize_causes_no_persistent_mutation(
     client: KubeClient, namespace: str
 ) -> None:
-    if not await client.supports_pod_resize():
-        pytest.skip("cluster does not expose the pods/resize subresource")
+    # The dedicated AKS cluster runs k8s >= 1.33 (resize GA): a negative
+    # capability probe here is a discovery regression, not an environment to
+    # skip — skipping would silently drop all live resize coverage.
+    assert await client.supports_pod_resize(), (
+        "capability probe must detect pods/resize on the contract cluster"
+    )
     await client.create_object(POD, namespace, pod_manifest("resize-preview"))
     await _wait_running(client, namespace, "resize-preview")
     before = await client.get_object(POD, namespace, "resize-preview")
@@ -43,8 +47,12 @@ async def test_preview_resize_causes_no_persistent_mutation(
 
 
 async def test_execute_resize_mutates_exactly_once(client: KubeClient, namespace: str) -> None:
-    if not await client.supports_pod_resize():
-        pytest.skip("cluster does not expose the pods/resize subresource")
+    # The dedicated AKS cluster runs k8s >= 1.33 (resize GA): a negative
+    # capability probe here is a discovery regression, not an environment to
+    # skip — skipping would silently drop all live resize coverage.
+    assert await client.supports_pod_resize(), (
+        "capability probe must detect pods/resize on the contract cluster"
+    )
     await client.create_object(POD, namespace, pod_manifest("resize-execute"))
     await _wait_running(client, namespace, "resize-execute")
     before = await client.get_object(POD, namespace, "resize-execute")

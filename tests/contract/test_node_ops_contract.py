@@ -9,6 +9,7 @@ import pytest
 
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.drain import is_pdb_denial
 from korvid.k8s.errors import ApiStatusError
 
 from .conftest import NODE, POD, pod_manifest, preview_until_settled, run_labels, until
@@ -111,8 +112,13 @@ async def test_eviction_honours_pdb_then_succeeds(client: KubeClient, namespace:
     await until(pdb_active, timeout=60, message="PDB status should be computed")
 
     # Blocked: zero disruptions allowed -> API answers 429, pod survives.
-    with pytest.raises(ApiStatusError, match="429"):
+    # Not every 429 is a PDB denial (APF throttling answers 429 too), so
+    # assert the Status body identifies a DisruptionBudget cause.
+    with pytest.raises(ApiStatusError, match="429") as excinfo:
         await client.evict_pod(namespace, "evict-subject", uid=None)
+    assert is_pdb_denial(excinfo.value), (
+        f"429 must be a disruption-budget denial, got: {excinfo.value.body!r}"
+    )
     survivor = await client.get_object(POD, namespace, "evict-subject")
     assert "deletionTimestamp" not in survivor["metadata"]
 

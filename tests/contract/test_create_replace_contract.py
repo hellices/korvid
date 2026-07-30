@@ -12,6 +12,7 @@ shows zero mutation; the right uid mutates exactly once.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 
 import pytest
@@ -89,6 +90,10 @@ async def test_watch_sees_live_object_lifecycle(client: KubeClient, namespace: s
                     break
     finally:
         creator.cancel()
+        # Await the cancellation so the creator can't race namespace
+        # teardown or outlive the event loop.
+        with contextlib.suppress(asyncio.CancelledError):
+            await creator
 
     assert "watch-me" in seen, "watch must deliver the created object"
 
