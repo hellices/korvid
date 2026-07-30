@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -113,7 +114,10 @@ async def namespace(client: KubeClient) -> AsyncIterator[str]:
     still terminating from the previous test.
     """
     suffix = uuid.uuid4().hex[:6]
-    name = f"korvid-contract-{RUN_ID}".lower().replace("_", "-")[:56].rstrip("-") + f"-{suffix}"
+    # DNS-1123: local RUN_IDs may carry '_' or '.' (e.g. local-$USER); the
+    # workflow's numeric run ids are already clean.
+    safe_run_id = re.sub(r"[^a-z0-9-]", "-", RUN_ID.lower())
+    name = f"korvid-contract-{safe_run_id}"[:56].rstrip("-") + f"-{suffix}"
     manifest = {
         "apiVersion": "v1",
         "kind": "Namespace",

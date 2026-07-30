@@ -415,7 +415,7 @@ async def test_watch_objects_core_group_watch_list_path_is_api_v1() -> None:
 
     async def _fake_watch_call(*args: Any, **kwargs: Any) -> Any:
         watch_call_paths.append(args[0] if args else "")
-        return MagicMock()
+        return _raw_response(200, "OK", b"")
 
     mock_api.call_api = _fake_watch_call
 
@@ -1595,3 +1595,20 @@ async def test_stream_logs_raises_on_non_2xx_raw_response() -> None:
     ):
         async for _ in client.stream_logs("default", "my-pod", ""):
             pass
+    # The finally-close must also cover the error path (no leaked connection).
+    resp.close.assert_called_once()
+
+
+async def test_raw_watch_callable_raises_on_non_2xx_raw_response() -> None:
+    """kubernetes_asyncio's Watch never inspects resp.status: a non-2xx watch
+    response would be retried forever (empty body) or parsed as malformed
+    events, so the watch callable must raise before handing it to Watch."""
+    client = KubeClient()
+    body = b'{"kind":"Status","reason":"Forbidden","message":"denied"}'
+    mock_api = AsyncMock()
+    mock_api.call_api = AsyncMock(return_value=_raw_response(403, "Forbidden", body))
+
+    with patch.object(client, "_api", mock_api):
+        watch_func = client._make_raw_watch_callable("/api/v1/pods")
+        with pytest.raises(ApiStatusError, match="API 403: Forbidden"):
+            await watch_func(watch=True, _preload_content=False)

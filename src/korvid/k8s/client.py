@@ -1344,13 +1344,21 @@ class KubeClient(ReadOps, WriteOps):
             query_params: list[tuple[str, Any]] = [*extra_query, ("watch", "true")]
             if resource_version is not None:
                 query_params.append(("resourceVersion", resource_version))
-            return await api.call_api(
+            resp = await api.call_api(
                 path,
                 "GET",
                 auth_settings=["BearerToken"],
                 query_params=query_params,
                 _preload_content=False,
             )
+            # Watch never inspects resp.status: a non-2xx response would be
+            # retried forever (empty body) or surfaced as malformed events.
+            if not 200 <= int(getattr(resp, "status", 0) or 0) <= 299:
+                try:
+                    _raise_for_status(resp, await resp.read())
+                finally:
+                    resp.close()
+            return resp
 
         return _watch_call
 

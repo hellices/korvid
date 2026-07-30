@@ -114,16 +114,17 @@ jobs:
         run: uv run pytest -p no:randomly -m contract tests/contract/ -v
 
       - name: Collect diagnostics
-        if: failure()
+        if: failure() || cancelled()
         run: |
           mkdir -p diag
           kubectl get events -A --sort-by=.lastTimestamp > diag/events.txt || true
           kubectl get pods -A -o wide > diag/pods.txt || true
+          kubectl describe pods -A > diag/pods-describe.txt || true
           kubectl get nodes -o wide > diag/nodes.txt || true
           kubectl get ns -l app.kubernetes.io/managed-by=korvid-contract -o yaml > diag/namespaces.yaml || true
 
       - name: Upload diagnostics
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: contract-diagnostics
