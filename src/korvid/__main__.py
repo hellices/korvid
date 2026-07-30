@@ -817,6 +817,7 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
         list_namespaces=kube.list_namespaces,
         aliases=aliases,
         get_manifest=get_manifest,
+        get_helm_components=kube.get_helm_release_components,
         get_events=get_events,
         stream_logs=kube.stream_logs,
         write_ops=kube,

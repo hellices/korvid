@@ -12,7 +12,7 @@ view and shows the effective keys, including any remaps.
 | `?` | global | Help overlay — keybindings grouped by context plus `:` commands (Esc/q/`?` closes) |
 | `/` | table | Open filter — name, `~fuzzy`, `/regex/`, `!exclude`, `-l k=v`, `-s` hide Completed (Enter keeps, Esc clears) |
 | `/` | log pane | Open inline log search |
-| `Enter` | table | Drill down: pods → containers; deploy → replicasets (history) → pods; helm release → revisions |
+| `Enter` | table | Drill down: pods → containers; deploy → replicasets (history) → pods; helm release / Subscription / CSV → [hierarchy tree](helm-operators.md#hierarchy-tree) |
 | `Esc` | table | Pop one drill-down level |
 | `Ctrl-W` `v` / `w` / `q` | table | Split workspace into two panes / focus the other pane / close the focused pane |
 | `Shift-N/A/C/M` | table | Sort by name / age / CPU / MEM (repeat flips ▲/▼; sorts on data, not rendered strings) |
@@ -40,6 +40,7 @@ view and shows the effective keys, including any remaps.
 | `e` | table | Edit selected resource manifest in `$VISUAL`/`$EDITOR` (kubectl edit style; confirm dialog before the PUT) |
 | `i` | pods table | Open hint details overlay for a troubled pod (full container trouble + recent Warning events) |
 | `i` / `u` | helm table | Install a chart / upgrade the selected release (wizard + dry-run preview + confirm dialog; needs `helm` on `PATH`) |
+| `h` | helm table | Revision history of the selected release (the flat drill-down; Enter opens the hierarchy tree) |
 | `r` | helm revisions table | Roll back the release to the selected revision (confirm dialog; needs `helm` on `PATH`) |
 | `Ctrl-R` | chart picker | Manage chart repositories: list, add, refresh indexes |
 | `Ctrl-T` | pods table | Transfer a file to/from the selected container (exec tar stream; upload needs approval) |
@@ -68,7 +69,7 @@ Action names: `quit`, `help`, `open_command`, `open_filter`,
 `sort_by_mem`, `toggle_agent`, `delete_resource`, `rollout_restart`,
 `resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
 `cordon_node`, `uncordon_node`, `drain_node`, `port_forward`, `transfer`,
-`helm_install`, `helm_upgrade`, `helm_rollback`.
+`helm_install`, `helm_upgrade`, `helm_rollback`, `helm_history`.
 
 Unknown actions, duplicate keys, and keys that shadow another action's
 default produce a startup warning and are skipped — never a crash. The

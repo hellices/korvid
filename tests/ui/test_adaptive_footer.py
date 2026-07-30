@@ -463,6 +463,11 @@ async def test_helm_actions_direct_invocation_off_view_warns(tmp_path: Path) -> 
         await until(pilot, warned, label="rollback warned")
         assert len(app.screen_stack) == 1
 
+        app._notifications.clear()
+        await app.action_helm_history()
+        await until(pilot, warned, label="history warned")
+        assert app.current_kind == "pods"  # no drill-down happened
+
 
 async def test_helm_rollback_direct_on_releases_view_warns(tmp_path: Path) -> None:
     """Rollback resolves the selected row against the *revisions* store; on the

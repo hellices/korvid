@@ -16,7 +16,8 @@ and proposes writes **you** approve.
 
 **A keyboard-first cockpit.** Navigate any resource kind with `:` commands,
 filter with `/` (fuzzy, regex, label selectors), drill down with `Enter`
-(pods → containers, deploy → rs → pods, helm release → revisions), split the
+(pods → containers, deploy → rs → pods, helm release / operator → hierarchy
+tree of everything it installed), split the
 workspace into two panes, sort on live data. Pods show live CPU/MEM metrics
 colored against enforced limits, and a troubled pod explains itself in a
 hint strip built from real API data — before you ever open describe.

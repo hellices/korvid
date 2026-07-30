@@ -38,7 +38,7 @@ from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
 from textual.events import DescendantBlur, DescendantFocus, Key
 from textual.widgets import DataTable, Footer, Static
-from textual.widgets.data_table import CellDoesNotExist
+from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, get_current_worker
 
 from korvid.agent.events import AgentError
@@ -68,6 +68,12 @@ from korvid.core.sorting import SORT_COLUMNS, SortSpec, toggle_sort
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.transfer import RemoteEntry, TransferError, TransferSpec, list_remote_dir
 from korvid.core.watch import WatchManager
+from korvid.k8s.components import (
+    MAX_COMPONENT_DOCS,
+    ComponentRef,
+    installplan_components,
+    reference_components,
+)
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.drain import DrainPlan
 from korvid.k8s.errors import ApiStatusError
@@ -146,6 +152,7 @@ from korvid.ui.widgets.helm_chart_search import HelmChartSearchScreen
 from korvid.ui.widgets.helm_install import HelmInstallPrompt, HelmReleaseChoices
 from korvid.ui.widgets.helm_repos import HelmRepoScreen
 from korvid.ui.widgets.help_screen import HelpScreen, collect_help
+from korvid.ui.widgets.hierarchy_screen import HierarchyScreen, build_hierarchy
 from korvid.ui.widgets.hint_detail import HintDetailScreen
 from korvid.ui.widgets.hint_strip import HintStrip
 from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
@@ -561,6 +568,9 @@ class KorvidApp(App[None]):
         Binding("i", "helm_install", "Install chart", id="helm_install"),
         Binding("u", "helm_upgrade", "Upgrade", id="helm_upgrade"),
         Binding("r", "helm_rollback", "Rollback", id="helm_rollback"),
+        # Revision history moved off Enter (issue #120): Enter opens the
+        # hierarchy tree, `h` keeps the flat history drill-down.
+        Binding("h", "helm_history", "History", id="helm_history"),
         Binding("ctrl+t", "transfer", "Transfer", show=False, id="transfer"),
     ]
 
@@ -573,7 +583,12 @@ class KorvidApp(App[None]):
     #: A non-empty action id ties the row to a remappable binding so the help
     #: overlay shows the effective key (issue #35), not the default.
     HANDLER_KEY_HELP: ClassVar[tuple[tuple[str, str, str, str], ...]] = (
-        ("Table", "enter", "Drill down (pods → containers, deploy → rs → pods)", ""),
+        (
+            "Table",
+            "enter",
+            "Drill down (pods → containers, deploy → rs → pods, helm/operator → hierarchy tree)",
+            "",
+        ),
         ("Table", "escape", "Pop one drill-down level", ""),
         ("Table", "ctrl+w v", "Split workspace into two panes", ""),
         ("Table", "ctrl+w w", "Focus the other pane", ""),
@@ -615,6 +630,7 @@ class KorvidApp(App[None]):
         list_namespaces: Callable[[], Awaitable[list[str]]] | None = None,
         aliases: dict[str, ResourceMeta] | None = None,
         get_manifest: (Callable[[str, str | None, str], Awaitable[dict[str, Any]]] | None) = None,
+        get_helm_components: (Callable[[str, str], Awaitable[list[ComponentRef]]] | None) = None,
         get_events: EventsFetcher | None = None,
         stream_logs: Callable[..., AsyncIterator[LogLine]] | None = None,
         agent_runtime: AgentRuntime | None = None,
@@ -664,6 +680,7 @@ class KorvidApp(App[None]):
         #: changed under it.
         self._ctx_switch_note: str | None = None
         self._get_manifest = get_manifest
+        self._get_helm_components = get_helm_components
         self._get_events = get_events
         self._stream_logs = stream_logs
         self._write_ops = write_ops
@@ -850,6 +867,12 @@ class KorvidApp(App[None]):
         # Kinds with a table render already queued — coalesces the per-object
         # notifications of a LIST seed into a single rebuild (see _on_store_update).
         self._render_pending: set[str] = set()
+        # Rebuild inputs for an open HierarchyScreen: (title, refs, namespace,
+        # scope). Store updates rebuild the tree in place while it is open.
+        self._hierarchy_ctx: tuple[str, list[ComponentRef], str, str] | None = None
+        # Cursor-placement poll budget for hierarchy goto (50ms per attempt);
+        # an attribute so tests can shrink the give-up window.
+        self._jump_poll_attempts: int = 200
         # Hint-strip lifecycle (issue #97 U3b): the controller owns the event
         # cache and the parked-cursor refresh timer; widget access and worker
         # scheduling stay here, injected as narrow callables.
@@ -1155,10 +1178,13 @@ class KorvidApp(App[None]):
         command_bar.command_words = sorted(
             {*self.aliases, "ns", "namespaces", "ctx", "context", "contexts", "q", "quit"}
         )
+        # A kind discovered late can turn display-only tree nodes navigable.
+        self._refresh_hierarchy()
 
     def on_resources_updated(self, message: ResourcesUpdated) -> None:
         self._render_pending.discard(message.kind)
         self._render_table(message.kind)
+        self._refresh_hierarchy()
 
     def _prefetch_namespaces(self) -> None:
         """Warm the command-bar namespace completions in the background."""
@@ -1990,6 +2016,18 @@ class KorvidApp(App[None]):
         if not isinstance(event.data_table, ResourceTable):
             return
         if self.current_kind != "pods":
+            if self._hierarchy_root_kind() is not None:
+                # Helm release / OLM Subscription / CSV: Enter opens the
+                # component hierarchy tree (issue #120).
+                event.stop()
+                parts = str(event.row_key.value).split("/", 1)
+                if len(parts) == 2:
+                    self.run_worker(
+                        self._open_hierarchy(parts[0], parts[1]),
+                        exclusive=True,
+                        group="hierarchy",
+                    )
+                return
             if drill_child(self._canonical_kind(self.current_kind)) is None:
                 # No drill chain for this kind: leave Enter unconsumed so
                 # future handlers (e.g. a default describe) can claim it.
@@ -2132,6 +2170,319 @@ class KorvidApp(App[None]):
         self._render_table(pane.kind, only=pane)
         self._refresh_status()
         return True
+
+    def _hierarchy_root_kind(self) -> str | None:
+        """The current view's hierarchy root kind ("HelmRelease",
+        "Subscription", "ClusterServiceVersion"), or None when the view has
+        no component tree (issue #120). Helm requires the components
+        accessor; without it Enter falls back to the revision drill."""
+        meta = self.aliases.get(self._canonical_kind(self.current_kind))
+        if meta is None:
+            return None
+        ident = (meta.group, meta.plural)
+        if ident == (HELM_RELEASES_META.group, HELM_RELEASES_META.plural):
+            return "HelmRelease" if self._get_helm_components is not None else None
+        if ident == (OPERATORS_GROUP, "subscriptions"):
+            return "Subscription"
+        if ident == (OPERATORS_GROUP, "clusterserviceversions"):
+            return "ClusterServiceVersion"
+        return None
+
+    def _view_for_component(self, ref: ComponentRef) -> tuple[str, bool] | None:
+        """Canonical view alias plus namespacedness for a component ref, or
+        None when no real (non-synthetic) view was discovered for it. A
+        declared apiVersion must match the discovered group - two CRDs
+        sharing a Kind across groups must not resolve to the wrong view."""
+        group = ref.api_version.rpartition("/")[0]  # core "v1" -> ""
+        fallback: tuple[str, bool] | None = None
+        for alias, meta in self.aliases.items():
+            if meta.kind != ref.kind or meta.synthetic or self._canonical_kind(alias) != alias:
+                continue
+            if meta.group == group:
+                return alias, meta.namespaced
+            if not ref.api_version and fallback is None:
+                fallback = (alias, meta.namespaced)
+        return fallback
+
+    async def _hierarchy_refs(
+        self, root: str, namespace: str, name: str
+    ) -> list[ComponentRef] | None:
+        """Component refs for the root, or None when unavailable (notified)."""
+        if root == "HelmRelease":
+            fetch = self._get_helm_components
+            if fetch is None:
+                return None
+            try:
+                return await fetch(namespace, name)
+            except (ApiStatusError, ValueError) as exc:
+                self.notify(f"hierarchy for {name} unavailable: {exc}", severity="error")
+                return None
+        return await self._operator_component_refs(root, namespace, name)
+
+    def _on_hierarchy_pick(self, epoch: int, result: tuple[str, str, str, str] | None) -> None:
+        """A tree node action: jump to the object's view or describe it."""
+        self._hierarchy_ctx = None  # tree closed: stop live rebuilds
+        if result is None:
+            return
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            self.notify(
+                "hierarchy action cancelled - the kube context changed while the tree was open",
+                severity="warning",
+            )
+            return
+        action, kind, ns, obj = result
+        if action == "describe":
+            coro = self._describe_named(kind, ns, obj)
+        else:
+            coro = self._jump_to_object(kind, ns, obj, epoch=epoch)
+        self.run_worker(coro, exclusive=True, group="hierarchy")
+
+    def _hierarchy_lookup(self, scope: str) -> Callable[[str, str], list[Summary] | None]:
+        """Store lookup for the tree: a list only for views a live watch is
+        actually feeding, else None - the builder must not claim "missing"
+        from a bucket nothing fills. The watch must cover the *component's*
+        namespace; cluster-scoped components (ns "") use the tree's scope.
+
+        Results are memoized per (view, watch scope) for this lookup's
+        lifetime (one tree build), so an all-namespaces watch serving many
+        component namespaces is fetched - and indexed by the builder, which
+        caches on bucket identity - exactly once."""
+        buckets: dict[tuple[str, str], list[Summary]] = {}
+
+        def lookup(view: str, namespace: str) -> list[Summary] | None:
+            active = self.watch_manager.active
+            for view_scope in (namespace or scope, ALL_NAMESPACES):
+                if (view, view_scope) in active:
+                    key = (view, view_scope)
+                    if key not in buckets:
+                        buckets[key] = self.store.get(view, view_scope)
+                    return buckets[key]
+            return None
+
+        return lookup
+
+    def _refresh_hierarchy(self) -> None:
+        """Rebuild an open hierarchy tree from the current store state."""
+        ctx = self._hierarchy_ctx
+        screen = self.screen
+        if ctx is None or not isinstance(screen, HierarchyScreen):
+            return
+        title, refs, namespace, scope = ctx
+        screen.update_tree(
+            build_hierarchy(
+                title,
+                refs,
+                namespace=namespace,
+                resolve=self._view_for_component,
+                lookup=self._hierarchy_lookup(scope),
+            )
+        )
+
+    async def _open_hierarchy(self, namespace: str, name: str) -> None:
+        """Gather component refs for the selected root and push the tree.
+
+        The fetches span awaited gaps: the captured epoch cancels a tree (or
+        a node action) that would otherwise describe the old cluster after a
+        context switch completed underneath, and the captured pane view
+        keeps the tree from popping over a view the user moved to."""
+        root = self._hierarchy_root_kind()
+        if root is None or not self._ctx_reads_allowed():
+            return
+        epoch = self._ctx_epoch
+        pane = self._pane
+        kind, scope = pane.kind, pane.scope
+        refs = await self._hierarchy_refs(root, namespace, name)
+        if refs is None:
+            return
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            return
+        if self._pane is not pane or pane.kind != kind or pane.scope != scope:
+            return  # the user moved on while components were being fetched
+        if len(self.screen_stack) > 1:  # another dialog opened during the fetch
+            return
+        title = f"{root} {namespace}/{name}" if namespace else f"{root} {name}"
+        tree_root = build_hierarchy(
+            title,
+            refs,
+            namespace=namespace,
+            resolve=self._view_for_component,
+            lookup=self._hierarchy_lookup(scope),
+        )
+        self._hierarchy_ctx = (title, refs, namespace, scope)
+        await self.push_screen(
+            HierarchyScreen(title, tree_root), functools.partial(self._on_hierarchy_pick, epoch)
+        )
+
+    async def _operator_component_refs(
+        self, root: str, namespace: str, name: str
+    ) -> list[ComponentRef] | None:
+        """Component refs for an OLM root, in the issue #120 preference
+        order: Operator ``status.components.refs`` (live, includes CRDs and
+        RBAC), then the Subscription's InstallPlan ``status.plan``. Returns
+        None when the root manifest itself cannot be fetched (already
+        notified); an empty list renders a root-only tree."""
+        if self._get_manifest is None:
+            self.notify("Hierarchy unavailable in this session", severity="warning")
+            return None
+        try:
+            manifest = await self._get_manifest(self.current_kind, namespace or None, name)
+        except (ApiStatusError, ValueError) as exc:
+            self.notify(f"hierarchy for {name} unavailable: {exc}", severity="error")
+            return None
+        refs = await self._refs_from_operator_object(manifest, namespace, root)
+        # The Operator's refs include the root object itself (the CSV, and
+        # sometimes the Subscription); a root listed as its own child would
+        # just loop Enter back to the same tree. Match the full identity:
+        # OLM copies CSVs into other namespaces under the same name, and
+        # those copies are real components.
+        refs = [
+            r
+            for r in refs
+            if (r.kind, r.name) != (root, name) or (r.namespace and r.namespace != namespace)
+        ]
+        if refs:
+            return refs
+        if root == "Subscription":
+            return await self._refs_from_installplan(manifest, namespace)
+        return self._refs_from_owned_workloads(manifest, namespace)
+
+    def _refs_from_owned_workloads(
+        self, manifest: dict[str, Any], namespace: str
+    ) -> list[ComponentRef]:
+        """CSV fallback (issue #120 third source): Deployments whose
+        ownerReferences point at the CSV, from buckets a live watch feeds.
+        Capped like the manifest parsers so a pathological bucket cannot
+        flood the tree."""
+        uid = str((manifest.get("metadata") or {}).get("uid") or "")
+        if not uid:
+            return []
+        lookup = self._hierarchy_lookup(self.current_scope)
+        refs: list[ComponentRef] = []
+        for obj in lookup("deployments", namespace) or []:
+            if obj.namespace != namespace or uid not in getattr(obj, "owner_uids", ()):
+                continue
+            refs.append(ComponentRef(kind="Deployment", name=str(obj.name), namespace=namespace))
+            if len(refs) >= MAX_COMPONENT_DOCS:
+                break
+        return refs
+
+    async def _refs_from_installplan(
+        self, manifest: dict[str, Any], namespace: str
+    ) -> list[ComponentRef]:
+        """InstallPlan fallback: ``status.plan`` records exactly what the
+        install created (older OLM without the Operator API)."""
+        key = self._olm_alias_key("installplans")
+        ref = (manifest.get("status") or {}).get("installPlanRef") or {}
+        plan_name = str(ref.get("name") or "")
+        if key is None or not plan_name or self._get_manifest is None:
+            return []
+        plan_ns = str(ref.get("namespace") or namespace)
+        try:
+            plan = await self._get_manifest(key, plan_ns or None, plan_name)
+        except (ApiStatusError, ValueError):
+            return []
+        return installplan_components((plan.get("status") or {}).get("plan"))
+
+    async def _refs_from_operator_object(
+        self, manifest: dict[str, Any], namespace: str, root: str
+    ) -> list[ComponentRef]:
+        """Refs from the cluster-scoped Operator object named
+        ``{package}.{namespace}`` (Subscriptions) or via the
+        ``operators.coreos.com/<name>`` component labels OLM stamps on CSVs."""
+        key = self._olm_alias_key("operators")
+        if key is None or self._get_manifest is None:
+            return []
+        names: list[str] = []
+        if root == "Subscription":
+            package = str((manifest.get("spec") or {}).get("name") or "")
+            if package:
+                names.append(f"{package}.{namespace}")
+        labels = (manifest.get("metadata") or {}).get("labels") or {}
+        prefix = f"{OPERATORS_GROUP}/"
+        names += [
+            k.removeprefix(prefix) for k in labels if isinstance(k, str) and k.startswith(prefix)
+        ]
+        for op_name in dict.fromkeys(names):
+            try:
+                operator = await self._get_manifest(key, None, op_name)
+            except (ApiStatusError, ValueError):
+                continue  # Operator object missing: fall through to the next source
+            components = (operator.get("status") or {}).get("components") or {}
+            refs = reference_components(components.get("refs"))
+            if refs:
+                return refs
+        return []
+
+    async def _jump_to_object(
+        self, kind: str, namespace: str, name: str, *, epoch: int | None = None
+    ) -> None:
+        """Navigate to *kind*'s view and put the cursor on the object - the
+        tree's Enter lands where every normal action works unchanged. Rows
+        stream in after the navigate, so the cursor placement polls briefly.
+        A context switch crossing *epoch* aborts: the same-named object in
+        the new cluster is not what the user picked."""
+        if epoch is not None and self._ctx_switch_crossed(epoch):
+            return
+        meta = self.aliases.get(kind)
+        if meta is None:
+            self.notify(f"{kind} is not a discovered view", severity="warning")
+            return
+        await self._navigate(kind, namespace if meta.namespaced and namespace else None)
+        row_key = f"{namespace}/{name}"
+        for _ in range(self._jump_poll_attempts):
+            if epoch is not None and self._ctx_switch_crossed(epoch):
+                return
+            if self.current_kind != kind:
+                return  # the user moved on - stop quietly
+            if self._focus_row(row_key):
+                return
+            await asyncio.sleep(0.05)
+        self.notify(
+            f"{name} is not visible in {kind} - it may be gone or outside the current scope",
+            severity="warning",
+        )
+
+    def _focus_row(self, row_key: str) -> bool:
+        """Move the focused table's cursor to *row_key*; False when absent."""
+        table = self._focused_table()
+        try:
+            index = table.get_row_index(row_key)
+        except RowDoesNotExist:
+            return False
+        table.move_cursor(row=index)
+        return True
+
+    async def _describe_named(self, kind: str, namespace: str, name: str) -> None:
+        """Describe an object named by a hierarchy tree node (no table row
+        to read the selection from - `action_describe`'s selection-bound
+        path does not apply)."""
+        if self._get_manifest is None:
+            self.notify("Describe unavailable", severity="warning")
+            return
+        if not self._ctx_reads_allowed():
+            return
+        epoch = self._ctx_epoch
+        try:
+            manifest = await self._get_manifest(kind, namespace or None, name)
+        except ApiStatusError as exc:
+            self.notify(
+                explain_api_error(exc.status, exc.reason, kind, namespace or None),
+                severity="error",
+            )
+            return
+        except ValueError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        if self._ctx_switching or epoch != self._ctx_epoch:
+            return
+        title = f"{kind}/{namespace}/{name}" if namespace else f"{kind}/{name}"
+        if manifest.get("kind") == "Secret":
+            # Same masking rule as action_describe (spec §5 #9).
+            await self.push_screen(SecretScreen(title, manifest, audit=self._audit))
+            return
+        await self.push_screen(
+            DescribeScreen(title, manifest, [], footer_note=self._provider_footer(manifest))
+        )
 
     async def _build_container_rows(
         self, namespace: str, name: str
@@ -4966,6 +5317,19 @@ class KorvidApp(App[None]):
             return
         self._helm_upgrade_flow()
 
+    async def action_helm_history(self) -> None:
+        """h on the helm release browser: the flat revision drill-down.
+        Revision history moved off Enter when Enter became the hierarchy
+        tree (issue #120); rollback keeps working from the revisions view."""
+        if not self._helm_view_guard(HELM_RELEASES_META, "Helm history"):
+            return
+        namespace, name = self._selected_ns_name()
+        if namespace is None or name is None:
+            return
+        error = await self._drill_into(namespace, name)
+        if error is not None:
+            self.notify(error, severity="warning")
+
     def action_helm_rollback(self) -> None:
         """r on the helm revision drill-down: roll the release back to the
         selected revision (issue #31). Target captured synchronously with
@@ -7050,6 +7414,7 @@ class KorvidApp(App[None]):
         # The synthetic helm views (group "", client-side plurals).
         "helm_install": frozenset({(HELM_RELEASES_META.group, HELM_RELEASES_META.plural)}),
         "helm_upgrade": frozenset({(HELM_RELEASES_META.group, HELM_RELEASES_META.plural)}),
+        "helm_history": frozenset({(HELM_RELEASES_META.group, HELM_RELEASES_META.plural)}),
         "helm_rollback": frozenset({(HELM_REVISIONS_META.group, HELM_REVISIONS_META.plural)}),
     }
 
