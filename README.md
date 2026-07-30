@@ -2,7 +2,7 @@
 
 > A tool-using bird for your cluster.
 
-AI-native Kubernetes TUI — a k9s-style keyboard-first cockpit with an
+AI-native Kubernetes TUI — a keyboard-first cockpit with an
 embedded LLM agent that sees your screen, drives the UI, diagnoses issues,
 and proposes writes **you** approve.
 

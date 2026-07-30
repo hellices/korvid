@@ -1,11 +1,11 @@
 """Shell-in helper: builds kubectl exec/debug argv for dropping into a pod shell.
 
 All builders accept ``context`` to pin the kubectl subprocess to the kubeconfig
-context korvid connected with (k9s parity).  Without it kubectl reads
+context korvid connected with.  Without it kubectl reads
 ``current-context`` at invocation time, so switching contexts in another
 terminal would silently retarget the shell at a different cluster.  Note this
 pins the context *name* only — rewriting that context entry in kubeconfig while
-korvid runs is not defended (k9s has the same limitation).
+korvid runs is not defended.
 """
 
 from __future__ import annotations

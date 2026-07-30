@@ -1,4 +1,4 @@
-"""k9s-style namespace picker — opened by bare `:ns`, Enter selects, Esc dismisses."""
+"""Namespace picker — opened by bare `:ns`, Enter selects, Esc dismisses."""
 
 from __future__ import annotations
 

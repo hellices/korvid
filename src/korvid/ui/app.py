@@ -1985,7 +1985,7 @@ class KorvidApp(App[None]):
         )
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Enter drills down: pods -> containers (k9s convention); kinds with a
+        """Enter drills down: pods -> containers; kinds with a
         registered ownership child (deploy -> rs -> pods) push a drill level."""
         if not isinstance(event.data_table, ResourceTable):
             return

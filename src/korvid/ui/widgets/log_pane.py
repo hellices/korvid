@@ -2,7 +2,7 @@
 
 Multi-source streams (multi-container ``l`` or multi-pod ``L``) render one
 panel per source in a 2-column grid, each with a coloured ``pod/container``
-title. This answers the real k9s pain point (#1430 split views): comparing
+title. This answers a real community pain point (split-view log comparison): comparing
 several containers side-by-side instead of untangling one merged stream.
 
 Design notes
@@ -41,7 +41,7 @@ from korvid.ui.logformat import format_log_line
 MAX_PANELS = 8
 
 # Distinct colours cycled across sources so each panel title is attributable
-# at a glance (same idea as stern/k9s prefix colouring).
+# at a glance (same idea as stern's prefix colouring).
 _SOURCE_COLORS = (
     "bright_cyan",
     "bright_magenta",

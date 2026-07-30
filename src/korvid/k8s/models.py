@@ -62,19 +62,19 @@ def parse_memory(quantity: str) -> int:
 
 
 def format_cpu(cores: float) -> str:
-    """Render cores as millicores (k9s convention): 1.1 -> '1100m'."""
+    """Render cores as millicores: 1.1 -> '1100m'."""
     return f"{round(cores * 1000)}m"
 
 
 def format_memory(size: int) -> str:
-    """Render bytes as whole Mi (k9s convention); fall back to Ki below 1Mi."""
+    """Render bytes as whole Mi; fall back to Ki below 1Mi."""
     if 0 < size < 2**20:
         return f"{round(size / 2**10)}Ki"
     return f"{round(size / 2**20)}Mi"
 
 
 def format_age(created: str, now: datetime | None = None) -> str:
-    """K9s-style age string ("5m", "3h", "2d") from an RFC 3339 timestamp.
+    """Compact age string ("5m", "3h", "2d") from an RFC 3339 timestamp.
 
     Returns "-" when `created` is empty, unparsable, or in the future.
     """
@@ -261,7 +261,7 @@ class GenericSummary:
         )
 
     def age(self, now: datetime | None = None) -> str:
-        """Return k9s-style age string ("5m", "3h", "2d"); "-" when created is empty."""
+        """Return compact age string ("5m", "3h", "2d"); "-" when created is empty."""
         return format_age(self.created, now=now)
 
 
@@ -715,7 +715,7 @@ class PodSummary:
     custom: tuple[str, ...] = ()
 
     def age(self, now: datetime | None = None) -> str:
-        """Return k9s-style age string ("5m", "3h", "2d"); "-" when created is empty."""
+        """Return compact age string ("5m", "3h", "2d"); "-" when created is empty."""
         return format_age(self.created, now=now)
 
     @classmethod

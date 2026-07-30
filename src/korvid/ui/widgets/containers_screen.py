@@ -1,4 +1,4 @@
-"""k9s-style pod drill-down — Enter on a pod opens its container list.
+"""Pod drill-down — Enter on a pod opens its container list.
 
 Shows NAME / IMAGE / READY / STATE / RESTARTS per container (init containers
 included, marked with "(init)"). ``l`` streams that container's logs, ``s``

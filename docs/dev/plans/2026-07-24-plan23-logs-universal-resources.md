@@ -13,7 +13,7 @@
 - All constraints from `docs/dev/specs/2026-07-24-korvid-engineering-standards.md` and the phase-1 plan apply (mypy --strict, ruff, tach layers, `pytest.raises(match=)`, commit per green task, never `--no-verify`)
 - Third-party `ApiException` NEVER crosses the k8s layer — wrap as `ApiStatusError` (`src/korvid/k8s/errors.py`)
 - Textual imports **only** in `ui/`
-- k9s conventions: `d`=describe, `s`=shell-in, `l`=logs, `0`=all namespaces, `D`=debug (reserved, later plan)
+- Established TUI conventions: `d`=describe, `s`=shell-in, `l`=logs, `0`=all namespaces, `D`=debug (reserved, later plan)
 - ALL-namespaces sentinel is the string `"*"` — exported as `ALL_NAMESPACES` from `korvid.core.store`
 - Run `make check` before every commit; deptry runs in CI against declared deps only (direct imports must be declared in pyproject)
 
@@ -177,7 +177,7 @@ def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> l
 
 **Interfaces:**
 - Consumes: `ResourceMeta` from Task 1.
-- Produces: `GenericSummary(name, namespace, kind, created)` frozen dataclass with `from_manifest(kind: str, manifest: dict) -> GenericSummary` (created = `metadata.creationTimestamp` ISO string or `""`) and `age() -> str` (k9s style: `"5m"`, `"3h"`, `"2d"`; empty created → `"-"`); `KubeClient.watch_objects(meta: ResourceMeta, namespace: str | None) -> AsyncIterator[tuple[str, GenericSummary]]` (None = all namespaces; LIST-then-watch, same pattern as `watch_pods`); `KubeClient.get_object(meta, namespace, name) -> dict` (raw manifest); `KubeClient.list_events_for(namespace: str, name: str) -> list[dict]` (core v1 Events with `involvedObject.name==name`, via fieldSelector).
+- Produces: `GenericSummary(name, namespace, kind, created)` frozen dataclass with `from_manifest(kind: str, manifest: dict) -> GenericSummary` (created = `metadata.creationTimestamp` ISO string or `""`) and `age() -> str` (compact style: `"5m"`, `"3h"`, `"2d"`; empty created → `"-"`); `KubeClient.watch_objects(meta: ResourceMeta, namespace: str | None) -> AsyncIterator[tuple[str, GenericSummary]]` (None = all namespaces; LIST-then-watch, same pattern as `watch_pods`); `KubeClient.get_object(meta, namespace, name) -> dict` (raw manifest); `KubeClient.list_events_for(namespace: str, name: str) -> list[dict]` (core v1 Events with `involvedObject.name==name`, via fieldSelector).
 - Also: `PodSummary` gains `containers: tuple[str, ...] = ()` (from `spec.containers[].name`) — needed by the log viewer (Task 8).
 
 - [ ] **Step 1: Failing tests** — `GenericSummary.from_manifest` + `age()` (freeze time with a fixed `now` parameter: `age(now: datetime | None = None)`), `PodSummary.from_manifest` picks up container names, `watch_objects` LIST+watch against the `_FakeWatch` harness already in `tests/k8s/test_client.py` (reuse it; all-namespaces path asserts the URL/method call has no namespace arg), `get_object`/`list_events_for` ApiException wrapping with `pytest.raises(ApiStatusError, match=...)`.

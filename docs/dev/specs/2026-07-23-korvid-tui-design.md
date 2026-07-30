@@ -8,15 +8,15 @@
 
 ## 1. Vision
 
-**A Kubernetes diagnostic/operations cockpit where "k9s-style keyboard-first cluster control" and "a Claude Code-grade conversational AI agent" coexist on a single screen.**
+**A Kubernetes diagnostic/operations cockpit where keyboard-first cluster control and "a Claude Code-grade conversational AI agent" coexist on a single screen.**
 
-- Day-to-day: a fast, keyboard-first resource navigation/operation TUI, like k9s
+- Day-to-day: a fast, keyboard-first resource navigation/operation TUI, like established terminal Kubernetes tools
 - With the agent enabled: the agent investigates the cluster and **drives the TUI directly** (switching views, applying filters, opening logs) while showing its evidence as it diagnoses. Command execution goes through an approval gate
 - The user can take over with the keyboard at any moment — the TUI experience is never lost
 
 ### Why now (research findings, as of 2026-07)
 - No mature tool yet combines "full-screen TUI + conversational LLM + command execution" (the only attempt, ks-ai, remains a 7★ early-stage PoC)
-- The existing TUI ecosystem has no AI-integration roadmap (k9s native-integration PRs #3803 and #3426 did not reach merge) — this combination is naturally achievable when starting from a fresh design
+- The existing TUI ecosystem has no AI-integration roadmap (community native-integration attempts did not reach merge) — this combination is naturally achievable when starting from a fresh design
 - The Python/Textual stack is proven in production-grade TUIs (posting 12k★, elia 2.5k★, parllama active)
 - The biggest threat is general-purpose agents (Claude Code + K8s MCP) → differentiate through domain specialization: **automatic screen-context injection + TUI driving + approval/audit system**
 
@@ -24,10 +24,10 @@
 
 ## 2. Target Users / Core Scenarios
 
-**Target**: SREs, platform engineers, and backend developers who operate Kubernetes from the terminal (the same audience as k9s)
+**Target**: SREs, platform engineers, and backend developers who operate Kubernetes from the terminal
 
 Core scenarios:
-1. **Explore**: `:pods`, `/filter`, log tailing — as fast as or faster than k9s
+1. **Explore**: `:pods`, `/filter`, log tailing — as fast as or faster than existing terminal tools
 2. **Conversational diagnosis**: open the agent panel and ask "why is the checkout service returning 5xx?" → the agent investigates events/logs/specs, bringing relevant views onto the screen as evidence → proposes root cause + fix
 3. **Approval-based mutation**: the agent proposes `kubectl rollout restart ...` → diff/command preview → user approves → execution → audit log entry
 4. **Screen-context questions**: with the cursor on a CrashLoopBackOff pod, press a shortcut → "why is this pod dying?" is sent with context (full resource spec, recent events, log tail) attached automatically
@@ -91,14 +91,14 @@ Core scenarios:
 | TUI | Textual (v8+) | 36.7k★, actively maintained, composable layout (split panes for free), async-native |
 | K8s client | kubernetes-client/python v36+ (`kubernetes.aio`) | Official, async watch streams, integrates naturally with Textual's event loop |
 | LLM adapter | Thin in-house adapter (OpenAI-compatible + Anthropic + Gemini + Ollama) | litellm is heavy with dependency risk; the tool-use loop must be owned in-house |
-| Packaging | uv + `pipx/uvx` install; single binary (PyApp/PEX) considered later | Pursue the "single binary" strength that k9s demonstrates |
+| Packaging | uv + `pipx/uvx` install; single binary (PyApp/PEX) considered later | Pursue the "single binary" strength that leading terminal tools demonstrate |
 | Configuration | **Single `~/.config/korvid/config.yaml`** | A single file from day one — no config sprawl (§5 #7) |
 
 ---
 
 ## 5. Unmet Needs in Existing Tools → Design Requirements (Day-1)
 
-We verified, with measured data (issue numbers, 👍 counts), the needs that the community has long asked for in terminal Kubernetes workflows but that remain unmet. The k9s issue tracker is the best available data source for this demand — it is a map of demand that k9s proved, and korvid, being a fresh design, can address these needs from the start:
+We verified, with measured data (issue numbers, 👍 counts), the needs that the community has long asked for in terminal Kubernetes workflows but that remain unmet. The issue trackers of existing terminal Kubernetes tools are the best available data source for this demand — a map of proven demand that korvid, being a fresh design, can address from the start:
 
 | # | Unmet need (demand evidence) | korvid design response | Phase |
 |---|---|---|---|
@@ -118,15 +118,15 @@ We verified, with measured data (issue numbers, 👍 counts), the needs that the
 | 14 | Broad terminal compatibility (#3598) | Use Textual's theme/color system (safer than managing colors in-house) | Free win |
 | 15 | Deeper Helm workflows (#1841, 28👍) | Non-goal (MVP) — via plugins in Phase 3+ | Phase 3+ |
 
-**Proven k9s UX conventions to inherit**: the `:` command bar + vim-style navigation, instant ctx/ns switching, fast startup, `/` filtering (regex/fuzzy/label), one-key shell-in (`s`, `kubectl exec -it` via PTY suspend), describe view (`d`, `kubectl describe`-equivalent rendered from the object + events), previous logs (`p`), port-forward management, read-only mode. We follow these conventions as-is to minimize switching cost for users — **`d` stays describe as in k9s; the debug dialog uses `D` (all bindings remappable, §5 #3)**.
+**Proven terminal-TUI UX conventions to inherit**: the `:` command bar + vim-style navigation, instant ctx/ns switching, fast startup, `/` filtering (regex/fuzzy/label), one-key shell-in (`s`, `kubectl exec -it` via PTY suspend), describe view (`d`, `kubectl describe`-equivalent rendered from the object + events), previous logs (`p`), port-forward management, read-only mode. We follow these conventions as-is to minimize switching cost for users — **`d` stays describe; the debug dialog uses `D` (all bindings remappable, §5 #3)**.
 
-**Universal resource browsing (Day-1)**: any Kubernetes object kind — built-ins and CRDs — is reachable from the `:` command bar via API discovery (`:pods`, `:deploy`, `:crd`, `:<any-kind-or-shortname>`), the k9s model. Views are generic over a resource descriptor (columns + kind metadata), so new kinds cost data-mapping only, not new UI. **Namespace scope is first-class**: a view can target one namespace or all namespaces (`:pods all`, k9s `0` convention), and `/` filtering works identically in both scopes; all-namespace views add a NAMESPACE column.
+**Universal resource browsing (Day-1)**: any Kubernetes object kind — built-ins and CRDs — is reachable from the `:` command bar via API discovery (`:pods`, `:deploy`, `:crd`, `:<any-kind-or-shortname>`). Views are generic over a resource descriptor (columns + kind metadata), so new kinds cost data-mapping only, not new UI. **Namespace scope is first-class**: a view can target one namespace or all namespaces (`:pods all`, the `0` convention), and `/` filtering works identically in both scopes; all-namespace views add a NAMESPACE column.
 
 ---
 
 ## 6. Agent Design (the differentiating core)
 
-### 6.1 UX — "feels like Claude Code, keeps the k9s experience"
+### 6.1 UX — "feels like Claude Code, keeps the classic TUI experience"
 
 - `Ctrl-A` (tentative) toggles the agent panel — slides in as a right-side 30–40% panel. The rest of the screen remains a live TUI
 - **The panel is collapsible at any time** (same `Ctrl-A` toggle). Collapsing reclaims the full screen width for the resource views; the agent session — conversation history, in-flight tool calls, pending state — persists in the background
@@ -184,7 +184,7 @@ Non-disruptive debugging of running pods is a first-class feature. All three kub
 
 | Mode | Purpose | UX | Phase |
 |---|---|---|---|
-| **Ephemeral container** | Non-disruptive debugging of running pods. Essential for distroless/minimal images with no shell | `D` in the pod view → debug dialog → attach (`d` stays describe, matching k9s) | **MVP** |
+| **Ephemeral container** | Non-disruptive debugging of running pods. Essential for distroless/minimal images with no shell | `D` in the pod view → debug dialog → attach (`d` stays describe) | **MVP** |
 | Copy-of-pod (`--copy-to`) | Experiments without touching the original (swap command/image) | Mode selection in the dialog. On session end, confirm cleanup of the copied pod | Phase 2 |
 | Node debug | Node-level diagnosis (host namespaces) | `D` in the node view | Phase 2 |
 
@@ -193,7 +193,7 @@ Non-disruptive debugging of running pods is a first-class feature. All three kub
 - `--target` container selection (process namespace sharing target)
 - Profiles: `general` (default) / `netadmin` / `sysadmin` / `restricted` — the permission differences of each profile are explained in the dialog
 
-**Terminal attach**: MVP suspends the TUI → runs `kubectl debug -it` on a PTY → returns to the TUI on exit (the same proven pattern as k9s shell-in). An embedded terminal inside a split pane is considered in Phase 3.
+**Terminal attach**: MVP suspends the TUI → runs `kubectl debug -it` on a PTY → returns to the TUI on exit (the same proven shell-in pattern). An embedded terminal inside a split pane is considered in Phase 3.
 
 **Safety design**:
 - Injecting an ephemeral container mutates the pod spec (a write), so it goes through the **approval dialog + audit log**
@@ -284,7 +284,7 @@ Five diagnostic features deliverable at the level of the **vanilla Kubernetes AP
 1. ~~**Product name**~~ → **`korvid` finalized** (2026-07-23; naming research confirmed the GitHub K8s niche and PyPI are conflict-free. corvid = crow family, tool-using birds → a metaphor for agentic tool use)
 2. ~~Recommended default LLM provider~~ → **No default — strictly pluggable** (2026-07-24). Config injection activates a provider (Claude Code, GitHub Copilot, OpenAI, Anthropic, Gemini, OpenAI-compatible local); without one, agent mode and dependent features are cleanly disabled. Install/first-run strongly recommends configuring a provider (§6.3)
 3. ~~Distribution channels~~ → **PyPI first (install via `uv tool install korvid` / pipx), Homebrew tap in Phase 2** (2026-07-24). krew is out of scope (korvid is a standalone app, not a kubectl subcommand); single-binary packaging (PyInstaller/PyApp) stays a Phase 3 evaluation item
-4. ~~License~~ → **Apache-2.0** (2026-07-24). Open source. Matches the ecosystem standard (k9s, kubectl-ai, k8sgpt are all Apache-2.0) and avoids corporate AGPL blanket bans that would hurt adoption; a local TUI has little SaaS-wrapping exposure for AGPL to defend against
+4. ~~License~~ → **Apache-2.0** (2026-07-24). Open source. Matches the ecosystem standard (kubectl-ai, k8sgpt, and similar tools are all Apache-2.0) and avoids corporate AGPL blanket bans that would hurt adoption; a local TUI has little SaaS-wrapping exposure for AGPL to defend against
 5. **(Evaluation only) Cilium/Hubble network flow view** — technical feasibility confirmed: Hubble Relay gRPC (`GetFlows` streaming; insecure connection possible after port-forward), Python stubs can be generated from the protos, and the Hubble UI service map is itself built by aggregating flows, so the same approach is available. No existing tool renders a network topology in a TUI (a differentiation opportunity). However, given the fallback story for clusters without Hubble, TLS, and proto-maintenance risks, this stays an evaluation item for Phase 3 only (first candidate for the plugin API)
 
 ## 13. Cost Analysis: Extending an Existing Tool vs Building New
@@ -293,7 +293,7 @@ We compared three paths to realizing this scope from a cost perspective.
 
 ### Cost structure by path
 
-| | A. Upstream contribution (PRs to k9s) | B. Fork and modify | **C. Build new (chosen)** |
+| | A. Upstream contribution (PRs to an existing tool) | B. Fork and modify | **C. Build new (chosen)** |
 |---|---|---|---|
 | Initial cost | Looks low but carries maximum uncertainty | Onboarding onto a 34k★-scale Go codebase | Everything written from scratch |
 | Architectural fit | The agent panel and TUI driving require core structural changes — not possible via plugins (shell-out) | Converting a single-view stack (tview PageStack) into split panes means overhauling the rendering layer. The UI Bus and approval gate are also non-orthogonal to the existing event handling → core redesign | Optimized from the start for the target architecture (UI Bus, agent integration, split panes) |
