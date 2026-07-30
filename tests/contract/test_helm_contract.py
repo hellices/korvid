@@ -18,12 +18,12 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helmcli import HelmCLI
 
-from .conftest import RUN_ID
+from .conftest import SAFE_RUN_ID
 
 pytestmark = pytest.mark.contract
 
 SECRET = ResourceMeta(kind="Secret", plural="secrets", group="", version="v1", namespaced=True)
-RELEASE = f"korvid-contract-{RUN_ID}"[:53].rstrip("-").lower()
+RELEASE = f"korvid-contract-{SAFE_RUN_ID}"[:53].rstrip("-")
 
 
 @pytest.fixture(scope="module")

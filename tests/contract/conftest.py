@@ -23,6 +23,9 @@ from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
 
 RUN_ID = os.environ.get("KORVID_CONTRACT_RUN_ID", "")
+# DNS-1123-safe form for object names: local RUN_IDs may carry '_' or '.'
+# (e.g. local-$USER); the workflow's numeric run ids are already clean.
+SAFE_RUN_ID = re.sub(r"[^a-z0-9-]", "-", RUN_ID.lower())
 MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 MANAGED_BY_VALUE = "korvid-contract"
 RUN_LABEL = "korvid.dev/contract-run"
@@ -114,10 +117,7 @@ async def namespace(client: KubeClient) -> AsyncIterator[str]:
     still terminating from the previous test.
     """
     suffix = uuid.uuid4().hex[:6]
-    # DNS-1123: local RUN_IDs may carry '_' or '.' (e.g. local-$USER); the
-    # workflow's numeric run ids are already clean.
-    safe_run_id = re.sub(r"[^a-z0-9-]", "-", RUN_ID.lower())
-    name = f"korvid-contract-{safe_run_id}"[:56].rstrip("-") + f"-{suffix}"
+    name = f"korvid-contract-{SAFE_RUN_ID}"[:56].rstrip("-") + f"-{suffix}"
     manifest = {
         "apiVersion": "v1",
         "kind": "Namespace",
