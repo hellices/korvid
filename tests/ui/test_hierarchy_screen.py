@@ -30,6 +30,8 @@ class _Live:
     namespace: str
     uid: str = ""
     owner_uids: tuple[str, ...] = ()
+    phase: str = ""
+    ready: str = ""
 
 
 #: kind -> (view alias, namespaced)
@@ -95,6 +97,36 @@ def test_deployment_expands_runtime_descendants_by_owner_uids() -> None:
     rs = dep.children[0]
     assert [c.label for c in rs.children] == ["Pod/web-abc-1", "Pod/web-abc-2"]
     assert rs.children[0].kind == "pods"
+
+
+def test_live_status_decorates_runtime_descendants() -> None:
+    """Issue #120 decorations: per-kind status where the store has it -
+    ready counts on workloads, phase on pods."""
+    refs = [ComponentRef(kind="Deployment", name="web")]
+    data = {
+        "deployments": [_Live("web", "default", uid="dep-1")],
+        "replicasets": [
+            _Live("web-abc", "default", uid="rs-1", owner_uids=("dep-1",), ready="1/1")
+        ],
+        "pods": [
+            _Live("web-abc-1", "default", owner_uids=("rs-1",), phase="Running", ready="1/1"),
+        ],
+    }
+    root = build_hierarchy(
+        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
+    )
+    rs = root.children[0].children[0]
+    assert rs.label == "ReplicaSet/web-abc  1/1"
+    assert rs.children[0].label == "Pod/web-abc-1  Running 1/1"
+
+
+def test_live_status_decorates_declared_components() -> None:
+    refs = [ComponentRef(kind="Pod", name="standalone")]
+    data = {"pods": [_Live("standalone", "default", phase="Pending", ready="0/1")]}
+    root = build_hierarchy(
+        "helm/web", refs, namespace="default", resolve=_resolve, lookup=_lookup_from(data)
+    )
+    assert root.children[0].label == "Pod/standalone  Pending 0/1"
 
 
 def test_missing_live_object_is_marked() -> None:
@@ -309,3 +341,21 @@ async def test_update_tree_follows_the_selected_node_across_reorder() -> None:
         assert cursor is not None
         assert cursor.data is not None
         assert (cursor.data.kind, cursor.data.name) == ("deployments", "web")
+
+
+async def test_update_tree_preserves_collapsed_branches() -> None:
+    """A store update must not reopen branches the user collapsed - watched
+    workloads refresh continuously and collapse would be unusable."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        screen = HierarchyScreen("helm/web", _sample_root())
+        await app.push_screen(screen)
+        await pilot.pause()
+        tree = app.screen.query_one(Tree)
+        tree.root.children[0].collapse()  # Deployment/web
+        await pilot.pause()
+        screen.update_tree(_sample_root())
+        await pilot.pause()
+        labels = [str(line.node.label) for line in tree._tree_lines]
+        assert any("Deployment/web" in label for label in labels)
+        assert not any("Pod/web-1" in label for label in labels)

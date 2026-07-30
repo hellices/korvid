@@ -93,10 +93,14 @@ def manifest_components(manifest: Any) -> list[ComponentRef]:
         if _scalar(doc.get("kind")) == "List":
             items = doc.get("items")
             if isinstance(items, list):
-                for item in items[:MAX_COMPONENT_DOCS]:
+                # The output budget is shared across the whole manifest -
+                # many List wrappers must not multiply it.
+                for item in items[: MAX_COMPONENT_DOCS - len(refs)]:
                     _append(refs, seen, _ref_from_doc(item))
-            continue
-        _append(refs, seen, _ref_from_doc(doc))
+        else:
+            _append(refs, seen, _ref_from_doc(doc))
+        if len(refs) >= MAX_COMPONENT_DOCS:
+            break
     return refs
 
 

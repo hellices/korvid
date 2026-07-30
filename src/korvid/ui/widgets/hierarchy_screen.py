@@ -104,6 +104,17 @@ def _bucket_indexes(
     return entry[1], entry[2]
 
 
+def _status_suffix(obj: Any) -> str:
+    """Issue #120 decorations: per-kind status where the store has it -
+    pod phase and ready counts. Empty when the summary carries neither."""
+    if obj is None:
+        return ""
+    phase = str(getattr(obj, "phase", "") or "")
+    ready = str(getattr(obj, "ready", "") or "")
+    parts = [part for part in (phase, ready) if part]
+    return f"  {' '.join(parts)}" if parts else ""
+
+
 def _runtime_children(
     view: str,
     parent_uid: str,
@@ -122,7 +133,7 @@ def _runtime_children(
         name = str(getattr(obj, "name", ""))
         nodes.append(
             HierarchyNode(
-                label=f"{child_kind}/{name}",
+                label=f"{child_kind}/{name}{_status_suffix(obj)}",
                 kind=child_view,
                 namespace=namespace,
                 name=name,
@@ -171,7 +182,7 @@ def build_hierarchy(
         uid = str(getattr(live, "uid", "") or "")
         root.children.append(
             HierarchyNode(
-                label=f"{ref.kind}/{ref.name}{marker}",
+                label=f"{ref.kind}/{ref.name}{_status_suffix(live)}{marker}",
                 kind=view,
                 namespace=ns,
                 name=ref.name,
@@ -231,18 +242,47 @@ class HierarchyScreen(ModalScreen[tuple[str, str, str, str] | None]):
         """Rebuild from a fresh snapshot (store update while open). The
         cursor follows the previously selected *object* - a rebuild that
         inserts or removes rows above it must not change what Enter/`d`
-        act on; only when it disappeared does a bounded line stand in."""
+        act on; only when it disappeared does a bounded line stand in.
+        Branches the user collapsed stay collapsed across the rebuild."""
         self._root = root
         tree = self.query_one(Tree)
         target = self._cursor_identity(tree)
         cursor_line = tree.cursor_line
+        collapsed: set[tuple[str, str, str, str]] = set()
+        self._collect_collapsed(tree.root, collapsed)
         tree.root.remove_children()
         tree.root.set_label(root.label)
         tree.root.data = root
         self._populate(tree.root, root.children)
         tree.root.expand_all()
+        if collapsed:
+            self._restore_collapsed(tree.root, collapsed)
         line = -1 if target is None else self._dfs_find(tree.root, target, 0)[0]
         tree.cursor_line = line if line >= 0 else min(cursor_line, tree.last_line)
+
+    @staticmethod
+    def _identity_key(data: HierarchyNode) -> tuple[str, str, str, str]:
+        """Rebuild-stable identity: object coordinates for navigable nodes,
+        the label for display-only ones (same semantics as `_same_object`)."""
+        if data.kind:
+            return ("obj", data.kind, data.namespace, data.name)
+        return ("label", data.label, "", "")
+
+    def _collect_collapsed(
+        self, parent: TreeNode[HierarchyNode], out: set[tuple[str, str, str, str]]
+    ) -> None:
+        for child in parent.children:
+            if child.children and not child.is_expanded and child.data is not None:
+                out.add(self._identity_key(child.data))
+            self._collect_collapsed(child, out)
+
+    def _restore_collapsed(
+        self, parent: TreeNode[HierarchyNode], keys: set[tuple[str, str, str, str]]
+    ) -> None:
+        for child in parent.children:
+            if child.children and child.data is not None and self._identity_key(child.data) in keys:
+                child.collapse()
+            self._restore_collapsed(child, keys)
 
     @staticmethod
     def _cursor_identity(tree: Tree[HierarchyNode]) -> HierarchyNode | None:
@@ -254,17 +294,20 @@ class HierarchyScreen(ModalScreen[tuple[str, str, str, str] | None]):
     ) -> tuple[int, int]:
         """(line of the node matching *target*'s identity or -1, lines seen).
 
-        Counts nodes in display (preorder) sequence - everything is expanded
-        after a rebuild, so the count is the cursor line. Navigable nodes
-        match on (kind, namespace, name); display-only ones on label."""
+        Counts nodes in display (preorder) sequence, descending only into
+        expanded branches - the count is then the visible cursor line. A
+        target hidden inside a collapsed branch reports -1 (bounded-line
+        fallback). Navigable nodes match on (kind, namespace, name);
+        display-only ones on label."""
         for child in parent.children:
             counter += 1
             data = child.data
             if data is not None and self._same_object(data, target):
                 return counter, counter
-            found, counter = self._dfs_find(child, target, counter)
-            if found >= 0:
-                return found, counter
+            if child.is_expanded:
+                found, counter = self._dfs_find(child, target, counter)
+                if found >= 0:
+                    return found, counter
         return -1, counter
 
     @staticmethod

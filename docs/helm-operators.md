@@ -28,8 +28,8 @@ tree of everything that root installed and how the pieces hang together
 ```
 ▼ HelmRelease default/web
   ▼ Deployment/web-nginx
-    ▼ ReplicaSet/web-nginx-7d9c
-        Pod/web-nginx-7d9c-x2kf
+    ▼ ReplicaSet/web-nginx-7d9c  1/1
+        Pod/web-nginx-7d9c-x2kf  Running 1/1
     Service/web-nginx
     ConfigMap/web-nginx-config
 ```
@@ -44,8 +44,11 @@ tree of everything that root installed and how the pieces hang together
   source is available the tree degrades to the root alone.
 - **Runtime descendants** (Deployment → ReplicaSet → Pod) come from
   ownerReferences against the live store, so the tree shows what is
-  running now, not just what was rendered. A declared object the store
-  watches but cannot find is marked `(missing)`.
+  running now, not just what was rendered. Nodes carry live status where
+  the store has it (pod phase, ready counts); a declared object the store
+  watches but cannot find is marked `(missing)`. The tree refreshes with
+  the store while open, keeping the selected object and any branches you
+  collapsed.
 
 `Enter` on a node jumps to that kind's real view with the cursor on the
 object — logs, describe, edit, delete, and further drill-down all work

@@ -5240,6 +5240,8 @@ class KorvidApp(App[None]):
         """h on the helm release browser: the flat revision drill-down.
         Revision history moved off Enter when Enter became the hierarchy
         tree (issue #120); rollback keeps working from the revisions view."""
+        if not self._helm_view_guard(HELM_RELEASES_META, "Helm history"):
+            return
         namespace, name = self._selected_ns_name()
         if namespace is None or name is None:
             return

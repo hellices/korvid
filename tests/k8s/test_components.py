@@ -138,6 +138,21 @@ class TestManifestComponents:
         refs = manifest_components(f"apiVersion: v1\nkind: List\nitems:\n{items}")
         assert len(refs) == MAX_COMPONENT_DOCS
 
+    def test_cap_is_shared_across_list_documents(self) -> None:
+        """Many List docs must not multiply the budget: the cap bounds the
+        total output, not each wrapper independently."""
+
+        def list_doc(prefix: str) -> str:
+            items = "".join(
+                f"- apiVersion: v1\n  kind: ConfigMap\n  metadata:\n    name: {prefix}-{i}\n"
+                for i in range(MAX_COMPONENT_DOCS - 100)
+            )
+            return f"apiVersion: v1\nkind: List\nitems:\n{items}"
+
+        manifest = "\n---\n".join(list_doc(p) for p in ("a", "b", "c"))
+        refs = manifest_components(manifest)
+        assert len(refs) == MAX_COMPONENT_DOCS
+
     def test_list_without_items_yields_nothing(self) -> None:
         assert manifest_components("apiVersion: v1\nkind: List\nitems: oops\n") == []
 
