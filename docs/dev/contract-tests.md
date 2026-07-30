@@ -50,8 +50,10 @@ the infrastructure code deliberately lives outside this repository.
 
 ## Running locally
 
-You need data-plane access to the cluster (AKS RBAC role on it) and
-`kubelogin`:
+You need data-plane access to the cluster (AKS RBAC role on it),
+`kubelogin`, and Helm **3.13+** (`dry_run_install`/`dry_run_upgrade` pass
+`--hide-secret`, and `test_helm_release_lifecycle` skips silently when no
+`helm` binary is on `PATH`):
 
 ```bash
 az aks start -g rg-korvid-contract-test -n aks-korvid-contract-test

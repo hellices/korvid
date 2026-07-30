@@ -17,6 +17,13 @@ concurrency:
   group: korvid-k8s-contract
   cancel-in-progress: false
 
+env:
+  # The one cluster this workflow is allowed to touch. The guard steps
+  # fail closed when the (mutable) environment variables drift from
+  # these fixed, documented test-only names.
+  EXPECTED_RESOURCE_GROUP: rg-korvid-contract-test
+  EXPECTED_CLUSTER_NAME: aks-korvid-contract-test
+
 jobs:
   contract:
     # GitHub-hosted ephemeral runner — deliberately NOT the shared
@@ -36,11 +43,30 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Guard — refuse any target other than the documented test cluster
+        run: |
+          if [ "$AKS_RESOURCE_GROUP" != "$EXPECTED_RESOURCE_GROUP" ] || \
+             [ "$AKS_CLUSTER_NAME" != "$EXPECTED_CLUSTER_NAME" ]; then
+            echo "::error title=Cluster identity mismatch::environment variables point at $AKS_RESOURCE_GROUP/$AKS_CLUSTER_NAME, expected $EXPECTED_RESOURCE_GROUP/$EXPECTED_CLUSTER_NAME. Refusing to run destructive tests."
+            exit 1
+          fi
+
       - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Guard — verify test-only tags before touching the cluster
+        run: |
+          purpose=$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" \
+            --query 'tags.purpose' -o tsv)
+          production=$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" \
+            --query 'tags."production-use"' -o tsv)
+          if [ "$purpose" != "korvid-contract-testing" ] || [ "$production" != "prohibited" ]; then
+            echo "::error title=Not a test-only cluster::$AKS_CLUSTER_NAME is missing the purpose=korvid-contract-testing / production-use=prohibited tags. Refusing to run destructive tests."
+            exit 1
+          fi
 
       - name: Start AKS cluster
         run: |
@@ -82,6 +108,7 @@ jobs:
         run: uv run python -m tests.contract.janitor
 
       - name: Run contract suite
+        timeout-minutes: 30
         env:
           KORVID_CONTRACT_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: uv run pytest -p no:randomly -m contract tests/contract/ -v
@@ -110,8 +137,37 @@ jobs:
             rm -f "$KUBECONFIG"
           fi
 
+  # Separate job so the stop runs even when the contract job hits its
+  # timeout-minutes (GitHub kills the job before later always() steps,
+  # which would leave the stopped-at-rest cluster running and billing).
+  stop-cluster:
+    needs: contract
+    if: always()
+    runs-on: ubuntu-latest
+    environment: aks-contract-test
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+      AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+    steps:
+      - name: Guard — refuse any target other than the documented test cluster
+        run: |
+          if [ "$AKS_RESOURCE_GROUP" != "$EXPECTED_RESOURCE_GROUP" ] || \
+             [ "$AKS_CLUSTER_NAME" != "$EXPECTED_CLUSTER_NAME" ]; then
+            echo "::error title=Cluster identity mismatch::environment variables point at $AKS_RESOURCE_GROUP/$AKS_CLUSTER_NAME, expected $EXPECTED_RESOURCE_GROUP/$EXPECTED_CLUSTER_NAME. Refusing to stop an unexpected cluster."
+            exit 1
+          fi
+
+      - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
       - name: Stop AKS cluster
-        if: always()
         run: |
           az aks stop -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --no-wait
           for i in $(seq 1 30); do

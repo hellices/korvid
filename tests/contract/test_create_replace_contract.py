@@ -1,4 +1,13 @@
-"""Create/replace contract and discovery/watch semantics."""
+"""Create/replace contract and discovery/watch semantics.
+
+create/replace have no server-side dry-run preview in korvid's write
+surface (``WriteOps`` defines previews for scale/rollout/delete/resize/
+cordon only): the edit flow's approval dialog shows a locally computed
+diff, and the server-side guard for both flows is the ``uid``
+precondition. That precondition is exactly what these tests prove
+against the live API server — a wrong uid is refused (409) and read-back
+shows zero mutation; the right uid mutates exactly once.
+"""
 
 from __future__ import annotations
 
