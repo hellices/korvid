@@ -50,9 +50,15 @@ class _FakeResp:
         chunks: list[bytes],
         raise_at: int | None = None,
         raise_exc: Exception | None = None,
+        status: int = 200,
     ) -> None:
         self.content = _FakeContent(chunks, raise_at, raise_exc)
         self.closed = False
+        self.status = status
+        self.reason = "OK" if 200 <= status <= 299 else "Error"
+
+    async def read(self) -> bytes:
+        return b""
 
     def close(self) -> None:
         self.closed = True
