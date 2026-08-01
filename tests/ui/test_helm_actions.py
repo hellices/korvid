@@ -23,12 +23,13 @@ from korvid.k8s.helm import (
     HelmRevisionSummary,
     release_uid,
 )
-from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, HelmRepo
+from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, HelmPreviewUnsupported, HelmRepo
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.helm_chart_search import HelmChartSearchScreen
 from korvid.ui.widgets.helm_install import HelmInstallPrompt
 from korvid.ui.widgets.helm_repos import HelmRepoScreen
+from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 
 from .waits import until
@@ -56,7 +57,12 @@ class FakeHelm(HelmCLI):
         self.install_error: str | None = None
         self.uninstall_error: str | None = None
         self.diff_plugin = False
+        self.diff_error: str | None = None
+        self.diff_output = "+ UPGRADE-DIFF-LINE"
         self.values_seen: str | None = None
+        #: Exceptions raised by successive dry-run calls (install and
+        #: upgrade), consumed one per call; an empty list means success.
+        self.dry_run_excs: list[Exception] = []
         self.repos = [HelmRepo(name="bitnami", url="https://charts.bitnami.com/bitnami")]
 
     async def search_repo(self, keyword: str = "") -> list[ChartHit]:
@@ -95,6 +101,8 @@ class FakeHelm(HelmCLI):
         values_file: str | None = None,
     ) -> str:
         self.calls.append(("dry-run-install", release, chart, namespace, version))
+        if self.dry_run_excs:
+            raise self.dry_run_excs.pop(0)
         return "RENDERED-INSTALL-MANIFEST"
 
     async def install(
@@ -123,6 +131,8 @@ class FakeHelm(HelmCLI):
         reuse_values: bool = False,
     ) -> str:
         self.calls.append(("dry-run-upgrade", release, chart, namespace, version, reuse_values))
+        if self.dry_run_excs:
+            raise self.dry_run_excs.pop(0)
         return "RENDERED-UPGRADE-MANIFEST"
 
     async def upgrade(
@@ -150,7 +160,9 @@ class FakeHelm(HelmCLI):
         reuse_values: bool = False,
     ) -> str:
         self.calls.append(("diff-upgrade", release, chart, namespace, version, reuse_values))
-        return "+ UPGRADE-DIFF-LINE"
+        if self.diff_error is not None:
+            raise HelmError(self.diff_error)
+        return self.diff_output
 
     async def rollback(self, release: str, revision: int, namespace: str) -> str:
         self.calls.append(("rollback", release, revision, namespace))
@@ -503,6 +515,288 @@ async def test_install_with_edited_values_passes_values_file(tmp_path: Path) -> 
             label="install executed",
         )
         assert helm.values_seen == "replicaCount: 3\n"
+
+
+# ---------------------------------------------------------------------------
+# Dry-run render failures stop the flow before approval (issue #139)
+# ---------------------------------------------------------------------------
+
+_RENDER_ERROR = "execution error at (nginx/templates/NOTES.txt:2:3): 'image.repository' must be set"
+
+
+async def _drive_install_to_preview(pilot: Any, app: KorvidApp) -> None:
+    await _navigate(pilot, "helm", "helmreleases")
+    await pilot.press("i")
+    await _pick_first_chart(pilot, app)
+    await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+    await pilot.press("enter")
+
+
+async def test_install_dry_run_render_failure_stops_before_approval(tmp_path: Path) -> None:
+    """A failing dry-run render proves the real install would fail the same
+    way: the flow must stop with the helm stderr shown, not open an approval
+    dialog for a doomed install."""
+    helm = FakeHelm()
+    helm.dry_run_excs = [HelmError(_RENDER_ERROR)]
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(helm=helm, audit_path=audit_path)
+    async with app.run_test() as pilot:
+        await _drive_install_to_preview(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="failure dialog")
+        title = app.screen._pick_title  # type: ignore[attr-defined]  # test peeks the dialog
+        assert "image.repository" in title  # helm's actionable stderr is shown
+        await pilot.press("escape")  # cancel
+        await until(pilot, lambda: len(app.screen_stack) == 1, label="dialog closed")
+        await until(
+            pilot,
+            lambda: not any(w.group == "helm-write" and not w.is_finished for w in app.workers),
+            label="helm flow finished",
+        )
+        assert not any(call[0] == "install" for call in helm.calls)
+        assert not audit_path.exists()
+
+
+async def test_install_render_failure_edit_values_and_retry(tmp_path: Path) -> None:
+    """From the failure dialog, "edit values and retry" reopens the editor
+    and re-renders; a fixed render proceeds to the normal approval."""
+    helm = FakeHelm()
+    helm.dry_run_excs = [HelmError(_RENDER_ERROR)]
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(helm=helm, audit_path=audit_path)
+    templates_seen: list[str] = []
+
+    async def fake_editor(text: str) -> str | None:
+        templates_seen.append(text)
+        return "image:\n  repository: otel/opentelemetry-collector\n"
+
+    app._edit_text = fake_editor
+    async with app.run_test() as pilot:
+        await _drive_install_to_preview(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="failure dialog")
+        await pilot.press("enter")  # first option: edit values and retry
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        assert templates_seen
+        assert "values override for bitnami/nginx" in templates_seen[0]
+        preview = app.screen._preview  # type: ignore[attr-defined]  # test peeks the dialog
+        assert preview is not None
+        assert any("RENDERED-INSTALL-MANIFEST" in line for line in preview)
+        assert "edited in $EDITOR" in app.screen._operation  # type: ignore[attr-defined]  # test peeks
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any(call[0] == "install" for call in helm.calls),
+            label="install executed",
+        )
+        assert helm.values_seen == "image:\n  repository: otel/opentelemetry-collector\n"
+
+
+async def test_install_render_failure_retry_preserves_edited_values(tmp_path: Path) -> None:
+    """Retrying after a failed render must reopen the editor with the
+    previous inputs intact, not a blank template."""
+    helm = FakeHelm()
+    helm.dry_run_excs = [HelmError(_RENDER_ERROR), HelmError(_RENDER_ERROR)]
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    edits: list[str] = []
+
+    async def fake_editor(text: str) -> str | None:
+        edits.append(text)
+        return f"attempt: {len(edits)}\n"
+
+    app._edit_text = fake_editor
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await _pick_first_chart(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        from textual.widgets import Select
+
+        from korvid.ui.widgets.helm_install import VALUES_MODES
+
+        app.screen.query_one("#helm-values", Select).value = VALUES_MODES[1]
+        await pilot.press("enter")  # editor #1 -> dry-run fails
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="failure dialog")
+        await pilot.press("enter")  # edit values and retry -> editor #2 -> fails again
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, PickScreen) and len(edits) == 2,
+            label="second failure dialog",
+        )
+        assert edits[1] == "attempt: 1\n"  # previous inputs, not the template
+        await pilot.press("escape")
+        await until(pilot, lambda: len(app.screen_stack) == 1, label="cancelled")
+
+
+async def test_render_failure_retry_preserves_a_comments_only_buffer(tmp_path: Path) -> None:
+    """A buffer with only comments normalizes to "no override" for helm,
+    but the retry editor must still reopen with that buffer - the user's
+    commented notes are prior inputs too."""
+    helm = FakeHelm()
+    helm.dry_run_excs = [HelmError(_RENDER_ERROR)]
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    edits: list[str] = []
+
+    async def fake_editor(text: str) -> str | None:
+        edits.append(text)
+        if len(edits) == 1:
+            return "# my note: try image.repository next\n"
+        return "image:\n  repository: otel\n"
+
+    app._edit_text = fake_editor
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await _pick_first_chart(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        from textual.widgets import Select
+
+        from korvid.ui.widgets.helm_install import VALUES_MODES
+
+        app.screen.query_one("#helm-values", Select).value = VALUES_MODES[1]
+        await pilot.press("enter")  # editor #1 (comments only) -> dry-run fails
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="failure dialog")
+        await pilot.press("enter")  # edit values and retry
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        assert edits[1] == "# my note: try image.repository next\n"
+
+
+async def test_install_render_failure_retry_preview_without_editing(tmp_path: Path) -> None:
+    """ "retry preview" re-runs the dry-run unchanged — the escape hatch for
+    transient failures (registry blip) that clear on their own."""
+    helm = FakeHelm()
+    helm.dry_run_excs = [HelmError("connection refused fetching chart")]
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _drive_install_to_preview(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="failure dialog")
+        await pilot.press("down")  # second option: retry preview
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        assert sum(1 for call in helm.calls if call[0] == "dry-run-install") == 2
+
+
+async def test_old_helm_hide_secret_rejection_does_not_block_approval(tmp_path: Path) -> None:
+    """helm < 3.15 rejects the preview-only `--hide-secret` flag: that is a
+    preview incompatibility, not a verdict on the install (the real command
+    never carries the flag) — approval must stay available."""
+    helm = FakeHelm()
+    helm.dry_run_excs = [HelmPreviewUnsupported("Error: unknown flag: --hide-secret")]
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _drive_install_to_preview(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        preview = app.screen._preview  # type: ignore[attr-defined]  # test peeks the dialog
+        assert preview is not None
+        assert any("preview unavailable" in line for line in preview)
+
+
+async def test_install_preview_environmental_failure_notes_unavailable(tmp_path: Path) -> None:
+    """A non-helm preview failure (timeout etc.) must not block approval —
+    but the dialog says the preview was unavailable instead of silently
+    showing none."""
+    helm = FakeHelm()
+    helm.dry_run_excs = [TimeoutError()]
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _drive_install_to_preview(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        preview = app.screen._preview  # type: ignore[attr-defined]  # test peeks the dialog
+        assert preview is not None
+        assert any("preview unavailable" in line for line in preview)
+
+
+async def test_upgrade_diff_failure_falls_back_to_dry_run_preview(tmp_path: Path) -> None:
+    """A helm-diff plugin failure is not a verdict on the upgrade: fall back
+    to the plain --dry-run render instead of dropping the preview."""
+    helm = FakeHelm()
+    helm.diff_plugin = True
+    helm.diff_error = "diff plugin exploded"
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("u")
+        await _pick_first_chart(pilot, app, search_first=False)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        preview = app.screen._preview  # type: ignore[attr-defined]  # test peeks the dialog
+        assert preview is not None
+        assert any("RENDERED-UPGRADE-MANIFEST" in line for line in preview)
+        title = app.screen._preview_title  # type: ignore[attr-defined]  # test peeks the dialog
+        assert title == "helm upgrade --dry-run preview:"
+
+
+async def test_empty_diff_says_no_changes_not_preview_unavailable(tmp_path: Path) -> None:
+    """`helm diff upgrade` returns an empty diff when nothing changes: that
+    is a successful render whose answer is "no changes", not an incomplete
+    one - the dialog must not claim the preview was unavailable."""
+    helm = FakeHelm()
+    helm.diff_plugin = True
+    helm.diff_output = ""
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("u")
+        await _pick_first_chart(pilot, app, search_first=False)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        preview = app.screen._preview  # type: ignore[attr-defined]  # test peeks the dialog
+        # [] renders as ConfirmScreen's explicit "no changes reported" line
+        assert preview == []
+        title = app.screen._preview_title  # type: ignore[attr-defined]  # test peeks the dialog
+        assert title == "helm diff upgrade preview:"
+
+
+async def test_render_failure_dialog_keeps_options_reachable_with_long_stderr(
+    tmp_path: Path,
+) -> None:
+    """Multi-line helm stderr rides in the failure dialog's title: it must
+    scroll inside a capped area instead of pushing the choices off-screen."""
+    helm = FakeHelm()
+    helm.dry_run_excs = [HelmError("\n".join(f"error line {i}" for i in range(40)))]
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _drive_install_to_preview(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="failure dialog")
+        from textual.containers import VerticalScroll
+        from textual.widgets import OptionList
+
+        # the long title lives inside the capped scroll area...
+        scroll = app.screen.query_one("#pick-title-scroll", VerticalScroll)
+        assert scroll.query_one("#pick-title") is not None
+        # ...and the options stay reachable: picking cancel works normally
+        options = app.screen.query_one(OptionList)
+        assert options.option_count == 3
+        await pilot.press("down", "down", "enter")  # cancel
+        await until(pilot, lambda: len(app.screen_stack) == 1, label="cancelled")
+        assert not any(call[0] == "install" for call in helm.calls)
+
+
+async def test_upgrade_dry_run_render_failure_stops_before_approval(tmp_path: Path) -> None:
+    """The same stop-before-approval applies to upgrades."""
+    helm = FakeHelm()
+    helm.dry_run_excs = [HelmError(_RENDER_ERROR)]
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(helm=helm, audit_path=audit_path)
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("u")
+        await _pick_first_chart(pilot, app, search_first=False)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="failure dialog")
+        await pilot.press("escape")
+        await until(pilot, lambda: len(app.screen_stack) == 1, label="cancelled")
+        await until(
+            pilot,
+            lambda: not any(w.group == "helm-write" and not w.is_finished for w in app.workers),
+            label="helm flow finished",
+        )
+        assert not any(call[0] == "upgrade" for call in helm.calls)
+        assert not audit_path.exists()
 
 
 async def test_upgrade_key_reuses_wizard_with_fixed_release(tmp_path: Path) -> None:

@@ -51,8 +51,9 @@ the infrastructure code deliberately lives outside this repository.
 ## Running locally
 
 You need data-plane access to the cluster (AKS RBAC role on it),
-`kubelogin`, and Helm **3.13+** (`dry_run_install`/`dry_run_upgrade` pass
-`--hide-secret`, and `test_helm_release_lifecycle` skips silently when no
+`kubelogin`, and Helm **3.15+** (`dry_run_install`/`dry_run_upgrade` pass
+`--hide-secret` — older helm degrades to an error-only fallback render —
+and `test_helm_release_lifecycle` skips silently when no
 `helm` binary is on `PATH`):
 
 ```bash

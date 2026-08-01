@@ -29,6 +29,12 @@ class HelmError(Exception):
     """A helm invocation failed (non-zero exit, timeout, or bad output)."""
 
 
+class HelmPreviewUnsupported(HelmError):
+    """This helm binary rejected a *preview-only* flag (`--hide-secret`,
+    helm 3.15+): the failure says nothing about the mutation itself, which
+    never carries the flag - callers must not treat it as a render verdict."""
+
+
 @dataclass(frozen=True)
 class ChartHit:
     """One row of `helm search repo -o json`."""
@@ -215,17 +221,37 @@ class HelmCLI:
     ) -> str:
         """`helm install --dry-run`: rendered manifests, nothing applied.
 
-        `--hide-secret` (helm 3.13+) keeps generated Secret manifests out of
+        `--hide-secret` (helm 3.15+) keeps generated Secret manifests out of
         the preview - the approval dialog must not bypass korvid's masked
-        Secret display. On older helm the flag is unknown, the render fails,
-        and the dialog simply opens without a preview.
+        Secret display. On older helm the flag is unknown and the render
+        fails with `HelmPreviewUnsupported` after an error-only fallback
+        render (issue #139: only failures the *mutation* would share may
+        stop the approval flow, but they must keep stopping it).
         """
-        return await self._run(
+        return await self._dry_run(
             "install",
             *self._release_args(release, chart, namespace, version, values_file),
-            "--dry-run",
-            "--hide-secret",
         )
+
+    async def _dry_run(self, *args: str) -> str:
+        """One `--dry-run --hide-secret` render.
+
+        helm < 3.15 does not know the preview-only flag: fall back to a
+        render *without* it for the verdict alone - the unmasked output is
+        discarded (generated Secrets must never reach a preview) and a
+        successful fallback still raises `HelmPreviewUnsupported`, so the
+        caller shows no preview but a real render error keeps stopping the
+        approval flow (issue #139) on old helm too.
+        """
+        try:
+            return await self._run(*args, "--dry-run", "--hide-secret")
+        except HelmError as exc:
+            if "unknown flag" not in str(exc) or "--hide-secret" not in str(exc):
+                raise
+            # A failing fallback raises plain HelmError with the render's
+            # own stderr - exactly the verdict the mutation would share.
+            await self._run(*args, "--dry-run")
+            raise HelmPreviewUnsupported(str(exc)) from exc
 
     async def upgrade(
         self,
@@ -264,7 +290,7 @@ class HelmCLI:
         args = self._release_args(release, chart, namespace, version, values_file)
         if reuse_values:
             args.append("--reuse-values")
-        return await self._run("upgrade", *args, "--dry-run", "--hide-secret")
+        return await self._dry_run("upgrade", *args)
 
     async def diff_upgrade(
         self,

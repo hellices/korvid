@@ -83,7 +83,7 @@ from korvid.k8s.helm import (
     HelmReleaseSummary,
     HelmRevisionSummary,
 )
-from korvid.k8s.helmcli import ChartHit, HelmCLI
+from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, HelmPreviewUnsupported
 from korvid.k8s.logs import LogLine
 from korvid.k8s.managed import manager_of
 from korvid.k8s.metrics import MetricsPoller
@@ -380,6 +380,19 @@ def _chart_base(chart: str) -> str:
     if sep and tail[:1].isdigit():
         return base
     return chart
+
+
+@dataclasses.dataclass(frozen=True)
+class _HelmRenderFailure:
+    """A dry-run render that helm itself rejected (issue #139).
+
+    The dry-run runs the same command the approval would execute, so its
+    failure is the real failure delivered early — the flow must stop before
+    approval and show `error` (helm's stderr tail names the missing value)
+    instead of letting the user approve a doomed mutation.
+    """
+
+    error: str
 
 
 def _clip_preview(text: str) -> list[str] | None:
@@ -6565,35 +6578,43 @@ class KorvidApp(App[None]):
     ) -> None:
         """Optional values editing, dry-run/diff preview, then the standard
         approval dialog; the mutation itself runs through `_run_write`, so
-        the fail-closed audit rule applies unchanged."""
+        the fail-closed audit rule applies unchanged. A dry-run the helm
+        binary itself rejects stops the flow before approval (issue #139):
+        the same command would fail identically after approval, so the
+        user gets helm's stderr now, with the option to fix the values and
+        retry instead of approving a doomed mutation."""
         helm = self._helm
         if helm is None:  # gate already passed; helm cannot vanish, but be safe
             return
         values_text: str | None = None
+        editor_buffer: str | None = None
         if choices.edit_values:
-            template = (
-                f"# values override for {hit.name} {choices.version or hit.version}\n"
-                "# an empty file (or comments only) keeps the chart defaults\n"
+            proceed, values_text, editor_buffer = await self._helm_edit_values(
+                hit, choices, previous=None
             )
-            edit = self._edit_text or self._edit_in_external_editor
-            text = await edit(template)
-            if text is None:
+            if not proceed:
                 return  # editor failed or was aborted; already notified
-            meaningful = any(
-                line.strip() and not line.lstrip().startswith("#") for line in text.splitlines()
-            )
-            values_text = text if meaningful else None
-        # Rendering can take up to _HELM_PREVIEW_TIMEOUT (20s): show progress
-        # for exactly as long as the render is pending, or the UI looks
-        # frozen between the wizard and the approval dialog (issue #106).
-        with self._progress("rendering helm preview (dry-run)"):
-            rendered = await self._helm_change_preview(
-                helm, hit, choices, values_text, upgrade=upgrade
-            )
         action = "helm-upgrade" if upgrade else "helm-install"
-        if not self._helm_context_after_preview(action, choices, upgrade=upgrade, epoch=epoch):
+        outcome = await self._helm_preview_with_recovery(
+            helm,
+            hit,
+            choices,
+            values_text,
+            editor_buffer,
+            upgrade=upgrade,
+            epoch=epoch,
+            action=action,
+        )
+        if outcome is None:
             return
-        preview, preview_title = rendered if rendered is not None else (None, "")
+        rendered, values_text = outcome
+        if rendered is not None:
+            preview, preview_title = rendered
+        else:
+            # Environmental failure (timeout, unexpected error): approval
+            # stays available, but say so instead of a silent blank.
+            preview = ["(preview unavailable - the dry-run render did not complete)"]
+            preview_title = "helm preview:"
         verb = "UPGRADE" if upgrade else "INSTALL"
         version_label = choices.version or "latest"
         if values_text is not None:
@@ -6659,6 +6680,100 @@ class KorvidApp(App[None]):
             return False
         return True
 
+    async def _helm_edit_values(
+        self, hit: ChartHit, choices: HelmReleaseChoices, *, previous: str | None
+    ) -> tuple[bool, str | None, str | None]:
+        """(proceed, values override, raw buffer) from `$EDITOR`.
+
+        A retry after a failed render pre-fills the editor with the
+        previous *raw* buffer (issue #139) - a comments-only buffer
+        normalizes to "no override" for helm but stays prior input for the
+        next edit; False means the editor was aborted or failed and the
+        flow must stop.
+        """
+        template = previous
+        if template is None:
+            template = (
+                f"# values override for {hit.name} {choices.version or hit.version}\n"
+                "# an empty file (or comments only) keeps the chart defaults\n"
+            )
+        edit = self._edit_text or self._edit_in_external_editor
+        text = await edit(template)
+        if text is None:
+            return False, None, None
+        meaningful = any(
+            line.strip() and not line.lstrip().startswith("#") for line in text.splitlines()
+        )
+        return True, (text if meaningful else None), text
+
+    async def _helm_render_failure_choice(self, error: str, *, upgrade: bool) -> str:
+        """Stop-before-approval decision on a rejected dry-run (issue #139):
+        "edit", "retry", or "cancel" - Esc cancels. The picker is
+        informational, not an approval gate: whatever the choice, the
+        mutation still has to pass the ConfirmScreen approval afterwards."""
+        verb = "upgrade" if upgrade else "install"
+        title = f"helm {verb} --dry-run failed - the {verb} would fail the same way.\n\n{error}\n"
+        options = ["edit values and retry", "retry preview", "cancel"]
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[str | None] = loop.create_future()
+
+        def _done(choice: str | None) -> None:
+            if not fut.done():
+                fut.set_result(choice)
+
+        await self.push_screen(PickScreen(title, options), _done)
+        choice = await fut
+        if choice == options[0]:
+            return "edit"
+        if choice == options[1]:
+            return "retry"
+        return "cancel"
+
+    async def _helm_preview_with_recovery(
+        self,
+        helm: HelmCLI,
+        hit: ChartHit,
+        choices: HelmReleaseChoices,
+        values_text: str | None,
+        editor_buffer: str | None,
+        *,
+        upgrade: bool,
+        epoch: int,
+        action: str,
+    ) -> tuple[tuple[list[str], str] | None, str | None] | None:
+        """Render the preview, recovering from rejected dry-runs (issue #139).
+
+        Returns `(rendered, values_text)` once a render succeeds (or fails
+        only environmentally - `rendered` is then None), with `values_text`
+        carrying any fixes made through the failure dialog's edit path;
+        `editor_buffer` is the raw text last seen in `$EDITOR` (kept apart
+        from the normalized override so a comments-only buffer survives a
+        retry). None when the flow must stop (context lost, editor aborted,
+        or the user cancelled at the failure dialog).
+        """
+        while True:
+            # Rendering can take up to _HELM_PREVIEW_TIMEOUT (20s): show
+            # progress for exactly as long as the render is pending, or the
+            # UI looks frozen between the wizard and the approval dialog
+            # (issue #106).
+            with self._progress("rendering helm preview (dry-run)"):
+                rendered = await self._helm_change_preview(
+                    helm, hit, choices, values_text, upgrade=upgrade
+                )
+            if not self._helm_context_after_preview(action, choices, upgrade=upgrade, epoch=epoch):
+                return None
+            if not isinstance(rendered, _HelmRenderFailure):
+                return rendered, values_text
+            decision = await self._helm_render_failure_choice(rendered.error, upgrade=upgrade)
+            if decision == "cancel":
+                return None  # nothing was executed, nothing to audit
+            if decision == "edit":
+                proceed, values_text, editor_buffer = await self._helm_edit_values(
+                    hit, choices, previous=editor_buffer
+                )
+                if not proceed:
+                    return None
+
     async def _helm_apply_change(
         self,
         helm: HelmCLI,
@@ -6698,25 +6813,34 @@ class KorvidApp(App[None]):
         values_text: str | None,
         *,
         upgrade: bool,
-    ) -> tuple[list[str], str] | None:
+    ) -> tuple[list[str], str] | _HelmRenderFailure | None:
         """Preview lines plus their heading for the approval dialog: `helm
         diff upgrade` when the plugin exists (issue #31), else the plain
         `--dry-run` render - the heading names which one the user is looking
-        at. None on any failure - a preview must never block the approval
-        flow."""
+        at. A dry-run helm itself rejects returns `_HelmRenderFailure` - the
+        approval would run the same command, so the caller must stop instead
+        of approving a proven failure (issue #139). Environmental failures
+        (timeout, unexpected errors) return None - they say nothing about
+        the mutation, so a preview must never block the approval flow."""
 
         async def _render() -> tuple[str, str]:
             version = choices.version or None
             async with _temp_values_file(values_text) as values_file:
                 if upgrade and await helm.has_diff_plugin():
-                    return "helm diff upgrade preview:", await helm.diff_upgrade(
-                        choices.release,
-                        hit.name,
-                        choices.namespace,
-                        version=version,
-                        values_file=values_file,
-                        reuse_values=choices.reuse_values,
-                    )
+                    try:
+                        return "helm diff upgrade preview:", await helm.diff_upgrade(
+                            choices.release,
+                            hit.name,
+                            choices.namespace,
+                            version=version,
+                            values_file=values_file,
+                            reuse_values=choices.reuse_values,
+                        )
+                    except HelmError:
+                        # A diff-plugin failure is not a verdict on the
+                        # upgrade itself: fall back to the plain dry-run,
+                        # whose failure would be.
+                        logger.debug("helm diff failed; falling back to --dry-run", exc_info=True)
                 if upgrade:
                     return "helm upgrade --dry-run preview:", await helm.dry_run_upgrade(
                         choices.release,
@@ -6736,11 +6860,22 @@ class KorvidApp(App[None]):
 
         try:
             title, text = await asyncio.wait_for(_render(), _HELM_PREVIEW_TIMEOUT)
+        except HelmPreviewUnsupported:
+            # helm < 3.15 rejecting the preview-only --hide-secret flag is
+            # a preview incompatibility, not a verdict: the real command
+            # never carries the flag (see HelmCLI._dry_run).
+            logger.debug("helm preview failed; dialog opens without it", exc_info=True)
+            return None
+        except HelmError as exc:
+            return _HelmRenderFailure(str(exc))
         except Exception:
             logger.debug("helm preview failed; dialog opens without it", exc_info=True)
             return None
         lines = _clip_preview(text)
-        return (lines, title) if lines is not None else None
+        # [] is a *successful* empty render (helm diff: no changes) —
+        # ConfirmScreen states it explicitly; None stays reserved for
+        # failures, which the caller marks "preview unavailable".
+        return (lines if lines is not None else [], title)
 
     async def _helm_rollback_flow(
         self,

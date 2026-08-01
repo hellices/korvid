@@ -6,7 +6,7 @@ from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 
@@ -26,9 +26,14 @@ class PickScreen(ModalScreen[str | None]):
         width: auto;
         max-width: 80%;
         height: auto;
+        max-height: 80%;
         border: round $primary;
         padding: 1 2;
         background: $surface;
+    }
+    PickScreen #pick-title-scroll {
+        height: auto;
+        max-height: 50%;
     }
     PickScreen #pick-title {
         padding-bottom: 1;
@@ -48,8 +53,12 @@ class PickScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            # markup=False: titles may embed pod/container names from the cluster.
-            yield Static(self._pick_title, id="pick-title", markup=False)
+            # The title may carry multi-line detail (e.g. helm stderr in the
+            # render-failure dialog): scroll it inside a capped area so the
+            # options below always stay visible and reachable.
+            with VerticalScroll(id="pick-title-scroll"):
+                # markup=False: titles may embed pod/container names from the cluster.
+                yield Static(self._pick_title, id="pick-title", markup=False)
             yield OptionList(*self._options)
 
     def on_mount(self) -> None:
