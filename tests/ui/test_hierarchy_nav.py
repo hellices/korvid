@@ -4,6 +4,9 @@ Subscription/CSV opens the component tree; `h` keeps the revision history."""
 import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
+from unittest import mock
+
+from textual.app import ScreenStackError
 
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
@@ -422,6 +425,24 @@ async def test_return_is_refused_when_a_ctx_switch_starts_during_the_navigate() 
         finally:
             app._navigate = original  # type: ignore[method-assign]  # restore
             app._ctx_switching = False
+
+
+async def test_refresh_hierarchy_survives_an_empty_screen_stack() -> None:
+    """A ResourcesUpdated dispatched during app teardown reaches
+    _refresh_hierarchy after the screen stack is emptied: reading
+    App.screen then raises ScreenStackError and fails the whole run
+    (flaky-CI issue #147) - the refresh must treat 'no screen' as
+    'no tree open'."""
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        # Simulate the teardown interleaving deterministically: the message
+        # handler runs while the screen stack is already empty.
+        with mock.patch.object(
+            type(app), "screen", property(mock.Mock(side_effect=ScreenStackError))
+        ):
+            app._refresh_hierarchy()  # must not raise
+        assert True  # reaching here is the assertion: no ScreenStackError
 
 
 async def test_describe_from_tree_node() -> None:
