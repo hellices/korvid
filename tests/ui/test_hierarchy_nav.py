@@ -285,6 +285,56 @@ async def test_explicit_navigation_clears_the_hierarchy_return() -> None:
         assert not isinstance(app.screen, HierarchyScreen)
 
 
+async def test_escape_over_a_modal_keeps_the_hierarchy_return() -> None:
+    """Escape that closes another modal (help, describe, ...) on the jump
+    target must not consume the pending tree return - the *next* Escape on
+    the base view still reopens the tree."""
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        await pilot.press("down")
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await pilot.press("question_mark")  # help modal over the jump target
+        await until(pilot, lambda: len(app.screen_stack) > 1, label="help open")
+        await pilot.press("escape")  # closes help - must not eat the return
+        await until(pilot, lambda: len(app.screen_stack) == 1, label="help closed")
+        await pilot.press("escape")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="tree reopened")
+
+
+async def test_hierarchy_return_is_scoped_to_the_initiating_pane() -> None:
+    """The pending return belongs to the pane that jumped: Escape in the
+    other pane must not consume it or hijack that pane's view; back in the
+    initiating pane, Escape still reopens the tree."""
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        await pilot.press("down")
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await pilot.press("ctrl+w", "v")  # split: clone pane, focus pane 1
+        await until(pilot, lambda: len(app.query(ResourceTable)) == 2, label="split")
+        await pilot.press("escape")  # pane 1 shows the same kind - must not hijack
+        await pilot.pause()
+        assert not isinstance(app.screen, HierarchyScreen)
+        assert app._panes[1].kind == "deployments"  # pane 1 was not navigated away
+        await pilot.press("ctrl+w", "w")  # focus back to the initiating pane 0
+        await pilot.press("escape")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="tree reopened")
+        assert app._panes[0].kind == "helmreleases"
+
+
 async def test_describe_from_tree_node() -> None:
     app, describe_calls = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
