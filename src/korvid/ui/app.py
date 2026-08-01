@@ -6587,13 +6587,23 @@ class KorvidApp(App[None]):
         if helm is None:  # gate already passed; helm cannot vanish, but be safe
             return
         values_text: str | None = None
+        editor_buffer: str | None = None
         if choices.edit_values:
-            proceed, values_text = await self._helm_edit_values(hit, choices, previous=None)
+            proceed, values_text, editor_buffer = await self._helm_edit_values(
+                hit, choices, previous=None
+            )
             if not proceed:
                 return  # editor failed or was aborted; already notified
         action = "helm-upgrade" if upgrade else "helm-install"
         outcome = await self._helm_preview_with_recovery(
-            helm, hit, choices, values_text, upgrade=upgrade, epoch=epoch, action=action
+            helm,
+            hit,
+            choices,
+            values_text,
+            editor_buffer,
+            upgrade=upgrade,
+            epoch=epoch,
+            action=action,
         )
         if outcome is None:
             return
@@ -6672,12 +6682,14 @@ class KorvidApp(App[None]):
 
     async def _helm_edit_values(
         self, hit: ChartHit, choices: HelmReleaseChoices, *, previous: str | None
-    ) -> tuple[bool, str | None]:
-        """(proceed, values override) from `$EDITOR`.
+    ) -> tuple[bool, str | None, str | None]:
+        """(proceed, values override, raw buffer) from `$EDITOR`.
 
         A retry after a failed render pre-fills the editor with the
-        previous inputs (issue #139) instead of a blank template; False
-        means the editor was aborted or failed and the flow must stop.
+        previous *raw* buffer (issue #139) - a comments-only buffer
+        normalizes to "no override" for helm but stays prior input for the
+        next edit; False means the editor was aborted or failed and the
+        flow must stop.
         """
         template = previous
         if template is None:
@@ -6688,11 +6700,11 @@ class KorvidApp(App[None]):
         edit = self._edit_text or self._edit_in_external_editor
         text = await edit(template)
         if text is None:
-            return False, None
+            return False, None, None
         meaningful = any(
             line.strip() and not line.lstrip().startswith("#") for line in text.splitlines()
         )
-        return True, (text if meaningful else None)
+        return True, (text if meaningful else None), text
 
     async def _helm_render_failure_choice(self, error: str, *, upgrade: bool) -> str:
         """Stop-before-approval decision on a rejected dry-run (issue #139):
@@ -6723,6 +6735,7 @@ class KorvidApp(App[None]):
         hit: ChartHit,
         choices: HelmReleaseChoices,
         values_text: str | None,
+        editor_buffer: str | None,
         *,
         upgrade: bool,
         epoch: int,
@@ -6733,8 +6746,10 @@ class KorvidApp(App[None]):
         Returns `(rendered, values_text)` once a render succeeds (or fails
         only environmentally - `rendered` is then None), with `values_text`
         carrying any fixes made through the failure dialog's edit path;
-        None when the flow must stop (context lost, editor aborted, or the
-        user cancelled at the failure dialog).
+        `editor_buffer` is the raw text last seen in `$EDITOR` (kept apart
+        from the normalized override so a comments-only buffer survives a
+        retry). None when the flow must stop (context lost, editor aborted,
+        or the user cancelled at the failure dialog).
         """
         while True:
             # Rendering can take up to _HELM_PREVIEW_TIMEOUT (20s): show
@@ -6753,8 +6768,8 @@ class KorvidApp(App[None]):
             if decision == "cancel":
                 return None  # nothing was executed, nothing to audit
             if decision == "edit":
-                proceed, values_text = await self._helm_edit_values(
-                    hit, choices, previous=values_text
+                proceed, values_text, editor_buffer = await self._helm_edit_values(
+                    hit, choices, previous=editor_buffer
                 )
                 if not proceed:
                     return None

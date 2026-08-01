@@ -136,22 +136,51 @@ async def test_dry_run_install_appends_dry_run_flag() -> None:
 
 
 async def test_dry_run_hide_secret_rejection_raises_preview_unsupported() -> None:
-    """helm < 3.13 does not know the preview-only `--hide-secret` flag: its
+    """helm < 3.15 does not know the preview-only `--hide-secret` flag: its
     rejection must surface as HelmPreviewUnsupported so callers never
     mistake it for a render verdict (issue #139) - the real install and
-    upgrade never carry the flag."""
+    upgrade never carry the flag. The fallback render's output is discarded
+    (Secrets must stay masked), only its verdict is kept."""
     cli, execute = _cli()
-    execute.return_value = (1, "", "Error: unknown flag: --hide-secret\n")
+    execute.side_effect = [
+        (1, "", "Error: unknown flag: --hide-secret\n"),
+        (0, "SECRET-BEARING-MANIFEST", ""),  # fallback render succeeds
+    ]
     with (
         mock.patch("korvid.k8s.helmcli._execute", execute),
-        pytest.raises(HelmPreviewUnsupported, match="hide-secret"),
+        pytest.raises(HelmPreviewUnsupported, match="hide-secret") as excinfo,
     ):
         await cli.dry_run_install("web", "bitnami/nginx", "default")
+    # the unmasked render never leaks through the exception
+    assert "SECRET-BEARING-MANIFEST" not in str(excinfo.value)
+    fallback_argv = execute.await_args_list[1].args[0]
+    assert "--dry-run" in fallback_argv
+    assert "--hide-secret" not in fallback_argv
+
+
+async def test_old_helm_fallback_render_still_delivers_the_render_verdict() -> None:
+    """helm 3.13/3.14 (no --hide-secret) must not skip issue #139's
+    protection: the error-only fallback render re-runs without the flag and
+    a failing render surfaces as the plain HelmError verdict."""
+    cli, execute = _cli()
+    execute.side_effect = [
+        (1, "", "Error: unknown flag: --hide-secret\n"),
+        (1, "", "Error: execution error: 'image.repository' must be set\n"),
+    ]
+    with (
+        mock.patch("korvid.k8s.helmcli._execute", execute),
+        pytest.raises(HelmError, match=r"image\.repository") as excinfo,
+    ):
+        await cli.dry_run_install("web", "bitnami/nginx", "default")
+    assert not isinstance(excinfo.value, HelmPreviewUnsupported)
 
 
 async def test_dry_run_upgrade_hide_secret_rejection_raises_preview_unsupported() -> None:
     cli, execute = _cli()
-    execute.return_value = (1, "", "Error: unknown flag: --hide-secret\n")
+    execute.side_effect = [
+        (1, "", "Error: unknown flag: --hide-secret\n"),
+        (0, "rendered", ""),
+    ]
     with (
         mock.patch("korvid.k8s.helmcli._execute", execute),
         pytest.raises(HelmPreviewUnsupported, match="hide-secret"),

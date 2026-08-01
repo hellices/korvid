@@ -625,6 +625,39 @@ async def test_install_render_failure_retry_preserves_edited_values(tmp_path: Pa
         await until(pilot, lambda: len(app.screen_stack) == 1, label="cancelled")
 
 
+async def test_render_failure_retry_preserves_a_comments_only_buffer(tmp_path: Path) -> None:
+    """A buffer with only comments normalizes to "no override" for helm,
+    but the retry editor must still reopen with that buffer - the user's
+    commented notes are prior inputs too."""
+    helm = FakeHelm()
+    helm.dry_run_excs = [HelmError(_RENDER_ERROR)]
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    edits: list[str] = []
+
+    async def fake_editor(text: str) -> str | None:
+        edits.append(text)
+        if len(edits) == 1:
+            return "# my note: try image.repository next\n"
+        return "image:\n  repository: otel\n"
+
+    app._edit_text = fake_editor
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await _pick_first_chart(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        from textual.widgets import Select
+
+        from korvid.ui.widgets.helm_install import VALUES_MODES
+
+        app.screen.query_one("#helm-values", Select).value = VALUES_MODES[1]
+        await pilot.press("enter")  # editor #1 (comments only) -> dry-run fails
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="failure dialog")
+        await pilot.press("enter")  # edit values and retry
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        assert edits[1] == "# my note: try image.repository next\n"
+
+
 async def test_install_render_failure_retry_preview_without_editing(tmp_path: Path) -> None:
     """ "retry preview" re-runs the dry-run unchanged — the escape hatch for
     transient failures (registry blip) that clear on their own."""

@@ -77,7 +77,8 @@ cluster), so it is a typed form rather than an approval dialog.
 
 Install and upgrade render a preview before the confirmation
 dialog: install and upgrade run `--dry-run` (with `--hide-secret`, helm
-3.13+, so generated Secrets stay masked), and when the
+3.15+, so generated Secrets stay masked; older helm renders an
+error-only fallback without the flag, keeping the render verdict), and when the
 [helm-diff](https://github.com/databus23/helm-diff) plugin is installed,
 upgrade and rollback show a real diff against the live release instead
 (if the diff plugin fails, the plain `--dry-run` render steps in).
