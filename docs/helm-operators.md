@@ -79,9 +79,16 @@ Install and upgrade render a preview before the confirmation
 dialog: install and upgrade run `--dry-run` (with `--hide-secret`, helm
 3.13+, so generated Secrets stay masked), and when the
 [helm-diff](https://github.com/databus23/helm-diff) plugin is installed,
-upgrade and rollback show a real diff against the live release instead.
-If the preview render fails or times out, the confirmation dialog still
-opens — just without a preview.
+upgrade and rollback show a real diff against the live release instead
+(if the diff plugin fails, the plain `--dry-run` render steps in).
+When helm itself rejects the dry-run — a chart with mandatory values
+renders an `execution error` without them, for example — the flow stops
+*before* the confirmation dialog: the real install would fail the same
+way, so korvid shows helm's error and offers to reopen the values
+editor (with your previous inputs intact) or retry, instead of letting
+you approve a doomed command.  If the preview merely times out or fails
+for environmental reasons, the confirmation dialog still opens and
+notes that the preview was unavailable.
 Rollback has a preview **only** with the plugin — without it the
 confirmation dialog states the release and target revision but shows no
 manifest diff.
