@@ -401,3 +401,86 @@ async def test_header_click_on_unsortable_column_notifies() -> None:
             label="unsortable notified",
         )
         assert not any("▲" in label or "▼" in label for label in _header_labels(table))
+
+
+async def test_sort_picker_handles_custom_column_names_with_spaces() -> None:
+    from textual.widgets import OptionList
+
+    from korvid.core.config import KorvidConfig, ViewConfig
+    from korvid.k8s.columns import CustomColumn
+    from korvid.k8s.models import GenericSummary
+    from korvid.ui.widgets.pick_screen import PickScreen
+
+    team = CustomColumn("TEAM NAME", "label", "team")
+    config = KorvidConfig(namespace="default", views={"deployments": ViewConfig(columns=(team,))})
+    deploys: list[Summary] = [
+        GenericSummary(
+            name="api",
+            namespace="default",
+            kind="Deployment",
+            created="2026-07-26T08:00:00Z",
+            custom=("payments",),
+        ),
+        GenericSummary(
+            name="web",
+            namespace="default",
+            kind="Deployment",
+            created="2026-07-26T09:00:00Z",
+            custom=("billing",),
+        ),
+    ]
+    app = make_app([], extra_data={"deployments": deploys}, config=config)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        for ch in "deployments":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="deploys loaded")
+        await pilot.press("o")
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="picker open")
+        options = app.screen.query_one(OptionList)
+        assert options.option_count == 3  # name, age, TEAM NAME
+        await pilot.press("down", "down")  # TEAM NAME
+        await pilot.press("enter")
+        await until(pilot, lambda: _names(table) == ["web", "api"], label="TEAM NAME ascending")
+
+
+async def test_header_click_sorts_the_clicked_pane_not_the_focused_one() -> None:
+    """Split workspace: clicking a header must sort the pane that owns the
+    table, not whichever pane happens to hold focus."""
+    from textual.widgets import DataTable
+
+    app = make_app([_pod("beta"), _pod("alpha")])
+    async with app.run_test() as pilot:
+        table0 = app.query_one(ResourceTable)
+        await until(pilot, lambda: table0.row_count == 2, label="pods loaded")
+        await pilot.press("ctrl+w", "v")  # split; focus moves to pane 1
+        await until(pilot, lambda: len(app.query(ResourceTable)) == 2, label="split")
+        tables = list(app.query(ResourceTable))
+        pane0_table = next(t for t in tables if t.id == app._panes[0].table_id)
+        assert app._focused_pane == 1  # pane 1 focused, pane 0 clicked
+        key = next(iter(pane0_table.columns))
+        pane0_table.post_message(
+            DataTable.HeaderSelected(pane0_table, key, 0, pane0_table.columns[key].label)
+        )
+        await until(
+            pilot,
+            lambda: app._panes[0].sorts.get("pods") is not None,
+            label="clicked pane sorted",
+        )
+        assert app._panes[0].sorts["pods"].column == "name"
+        assert "pods" not in app._panes[1].sorts  # the focused pane untouched
+        # A second click flips the clicked pane to descending - visibly.
+        key = next(iter(pane0_table.columns))
+        pane0_table.post_message(
+            DataTable.HeaderSelected(pane0_table, key, 0, pane0_table.columns[key].label)
+        )
+        await until(
+            pilot,
+            lambda: (
+                [str(pane0_table.get_row_at(i)[0]) for i in range(pane0_table.row_count)]
+                == ["beta", "alpha"]
+            ),
+            label="clicked pane descending",
+        )

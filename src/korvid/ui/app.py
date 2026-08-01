@@ -7654,15 +7654,14 @@ class KorvidApp(App[None]):
             builtins = ("name", "age")
         return (*builtins, *custom)
 
-    def _apply_sort_column(self, column: str) -> None:
+    def _apply_sort_column(self, column: str, *, pane: PaneState | None = None) -> None:
         """Apply/flip *column* (builtin or custom, already validated for
-        the current view) and re-render."""
-        kind = self.current_kind
-        if column in SORT_COLUMNS:
-            self._toggle_sort(column)
-            return
-        self._sorts[kind] = toggle_sort(self._sorts.get(kind), column)
-        self._render_table(kind, only=self._pane)
+        *pane*'s view) on that pane and re-render. Defaults to the focused
+        pane; the header-click path passes the clicked table's pane."""
+        pane = pane if pane is not None else self._pane
+        kind = pane.kind
+        pane.sorts[kind] = toggle_sort(pane.sorts.get(kind), column)
+        self._render_table(kind, only=pane)
 
     def action_sort_picker(self) -> None:
         """`o` (issue #138): pick the sort column from a list instead of
@@ -7670,7 +7669,8 @@ class KorvidApp(App[None]):
         direction, exactly like `:sort`."""
         if len(self.screen_stack) > 1:
             return  # never stack over another dialog
-        kind = self.current_kind
+        pane = self._pane
+        kind = pane.kind
         columns = self._sortable_columns(kind)
         current = self._sorts.get(kind)
         options = [
@@ -7683,21 +7683,28 @@ class KorvidApp(App[None]):
         def _picked(choice: str | None) -> None:
             if choice is None:
                 return
-            column = choice.split(" ")[0]
-            if self.current_kind == kind and column in self._sortable_columns(kind):
-                self._apply_sort_column(column)
+            # Strip only the active-sort arrow: custom column names may
+            # legitimately contain spaces.
+            column = choice.removesuffix(" ▲").removesuffix(" ▼")
+            if pane in self._panes and pane.kind == kind and column in self._sortable_columns(kind):
+                self._apply_sort_column(column, pane=pane)
 
         self.push_screen(PickScreen(f"Sort {kind} by:", options), _picked)
 
     async def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
         """A header click sorts by that column (issue #138); clicking the
-        active column flips the direction, same as the keys."""
+        active column flips the direction, same as the keys. The sort lands
+        in the pane that owns the clicked table - not the focused one, so
+        the split workspace never sorts the wrong pane."""
         if not isinstance(event.data_table, ResourceTable):
             return
         event.stop()
+        pane = next((p for p in self._panes if p.table_id == event.data_table.id), None)
+        if pane is None:
+            return  # a table without a live pane (mid-teardown)
         # Labels may carry the ▲/▼ decoration of the active sort.
         label = str(event.label).removesuffix(" ▲").removesuffix(" ▼")
-        kind = self.current_kind
+        kind = pane.kind
         columns = self._sortable_columns(kind)
         builtin = _HEADER_SORT_COLUMNS.get(label)
         column = builtin if builtin in columns else (label if label in columns else None)
@@ -7707,7 +7714,7 @@ class KorvidApp(App[None]):
                 severity="warning",
             )
             return
-        self._apply_sort_column(column)
+        self._apply_sort_column(column, pane=pane)
 
     # ------------------------------------------------------------------
     # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,
