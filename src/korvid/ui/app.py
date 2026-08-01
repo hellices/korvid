@@ -2340,6 +2340,11 @@ class KorvidApp(App[None]):
             return False
         pane.hierarchy_return = None  # consumed - never replayed
         await self._navigate(ret.origin_view, ret.origin_scope)
+        if self._ctx_switch_crossed(ret.epoch):
+            # A :ctx switch started while the navigate held the nav lock:
+            # the refs describe the old cluster - do not expose the tree.
+            # The keystroke was still consumed (the navigation happened).
+            return True
         tree_root = build_hierarchy(
             ret.title,
             ret.refs,

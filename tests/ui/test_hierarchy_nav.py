@@ -389,6 +389,40 @@ async def test_return_origin_is_captured_at_tree_open_not_at_dismissal() -> None
         assert app.current_kind == "helmreleases"
 
 
+async def test_return_is_refused_when_a_ctx_switch_starts_during_the_navigate() -> None:
+    """The reopen path awaits a navigation: a context switch that starts
+    while it holds the nav lock must abort the reopen - pushing the old
+    cluster's tree over a tearing-down view would describe the wrong
+    cluster."""
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        await pilot.press("down")
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+
+        # A switch begins the moment the reopen's navigate runs.
+        original = app._navigate
+
+        async def navigate_then_switch(*args: object, **kwargs: object) -> None:
+            await original(*args, **kwargs)  # type: ignore[arg-type]  # passthrough wrapper
+            app._ctx_switching = True
+
+        app._navigate = navigate_then_switch  # type: ignore[method-assign]  # test seam
+        try:
+            await pilot.press("escape")
+            await pilot.pause(0.5)
+            assert not isinstance(app.screen, HierarchyScreen)
+        finally:
+            app._navigate = original  # type: ignore[method-assign]  # restore
+            app._ctx_switching = False
+
+
 async def test_describe_from_tree_node() -> None:
     app, describe_calls = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:
