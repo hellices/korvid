@@ -7707,7 +7707,10 @@ class KorvidApp(App[None]):
         kind = pane.kind
         columns = self._sortable_columns(kind)
         builtin = _HEADER_SORT_COLUMNS.get(label)
-        column = builtin if builtin in columns else (label if label in columns else None)
+        # Configured custom names may carry Rich markup ([red]TEAM[/]) that
+        # DataTable parses for display: match on the rendered plain text.
+        custom = next((name for name in columns if Text.from_markup(name).plain == label), None)
+        column = builtin if builtin in columns else custom
         if column is None:
             self.notify(
                 f"{label} is not sortable — sortable: {', '.join(columns)}",

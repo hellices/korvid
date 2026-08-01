@@ -484,3 +484,49 @@ async def test_header_click_sorts_the_clicked_pane_not_the_focused_one() -> None
             ),
             label="clicked pane descending",
         )
+
+
+async def test_header_click_matches_markup_bearing_custom_column_names() -> None:
+    """A configured column name may carry Rich markup ([red]TEAM[/]):
+    DataTable parses it for display, so the click event's label is the
+    plain text - the handler must still match it to the configured name."""
+    from textual.widgets import DataTable
+
+    from korvid.core.config import KorvidConfig, ViewConfig
+    from korvid.k8s.columns import CustomColumn
+    from korvid.k8s.models import GenericSummary
+
+    team = CustomColumn("[red]TEAM[/]", "label", "team")
+    config = KorvidConfig(namespace="default", views={"deployments": ViewConfig(columns=(team,))})
+    deploys: list[Summary] = [
+        GenericSummary(
+            name="api",
+            namespace="default",
+            kind="Deployment",
+            created="2026-07-26T08:00:00Z",
+            custom=("payments",),
+        ),
+        GenericSummary(
+            name="web",
+            namespace="default",
+            kind="Deployment",
+            created="2026-07-26T09:00:00Z",
+            custom=("billing",),
+        ),
+    ]
+    app = make_app([], extra_data={"deployments": deploys}, config=config)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        for ch in "deployments":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="deploys loaded")
+        keys = list(table.columns)
+        team_idx = [str(table.columns[k].label) for k in keys].index("TEAM")
+        table.post_message(
+            DataTable.HeaderSelected(
+                table, keys[team_idx], team_idx, table.columns[keys[team_idx]].label
+            )
+        )
+        await until(pilot, lambda: _names(table) == ["web", "api"], label="TEAM ascending")
