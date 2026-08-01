@@ -280,6 +280,28 @@ def _ns_pod(name: str, ns: str) -> PodSummary:
     return PodSummary(name=name, namespace=ns, phase="Running", ready="1/1", restarts=0, node=None)
 
 
+async def test_405_reports_once_without_retries_and_keeps_listed_rows() -> None:
+    """405 Method Not Allowed is as deterministic as 403 (the server will
+    never start supporting watch mid-retry) - but unlike a 403, the rows the
+    successful LIST already delivered stay visible (issue #141)."""
+    store = ResourceStore()
+    errors: list[str] = []
+    attempts: list[int] = []
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        attempts.append(1)
+        yield ("ADDED", _ns_pod("listed", "olm"))
+        raise ApiStatusError(405, "Method Not Allowed")
+
+    mgr = WatchManager(store, source, on_error=errors.append, retry_delay=0, max_retries=5)
+    await mgr.start("packagemanifests", "olm")
+    await asyncio.sleep(0.05)
+    assert len(attempts) == 1  # deterministic: no retry burn
+    assert len(errors) == 1
+    # the LISTed rows survive - only authorization denials purge the bucket
+    assert [s.name for s in store.get("packagemanifests", "olm")] == ["listed"]
+
+
 async def test_cluster_scope_403_reports_once_without_retries() -> None:
     """A Forbidden cluster-scope watch is deterministic: one attempt, one
     report, no retry loop and no per-namespace watch tasks."""

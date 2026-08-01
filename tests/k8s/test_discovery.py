@@ -74,8 +74,47 @@ async def test_discover_resources_filters_subresources_and_non_watchable() -> No
         metas = await client.discover_resources()
     by_plural = {m.plural: m for m in metas}
     assert by_plural["pods"].shortnames == ("po",)
+    assert by_plural["pods"].watchable
     assert by_plural["deployments"].group == "apps"
     assert "pods/log" not in by_plural  # subresources excluded
+
+
+async def test_discover_resources_keeps_list_only_kinds_as_unwatchable() -> None:
+    """Aggregated APIs like OLM's packageserver serve list but not watch
+    (issue #141): the kind must still be discovered - marked unwatchable so
+    the watch source polls instead - and kinds without even `list` stay
+    excluded."""
+    client = KubeClient()
+    packages: dict[str, Any] = {
+        "resources": [
+            {
+                "name": "packagemanifests",
+                "kind": "PackageManifest",
+                "namespaced": True,
+                "verbs": ["get", "list"],
+            },
+            {"name": "peeks", "kind": "Peek", "namespaced": True, "verbs": ["get"]},
+        ]
+    }
+    responses: dict[str, dict[str, Any]] = {
+        "/api/v1": _CORE,
+        "/apis": {
+            "groups": [
+                {"name": "packages.operators.coreos.com", "preferredVersion": {"version": "v1"}}
+            ]
+        },
+        "/apis/packages.operators.coreos.com/v1": packages,
+    }
+
+    async def fake_request(path: str) -> dict[str, Any]:
+        return responses[path]
+
+    with patch.object(client, "_request_json", side_effect=fake_request):
+        metas = await client.discover_resources()
+    by_plural = {m.plural: m for m in metas}
+    assert "packagemanifests" in by_plural
+    assert not by_plural["packagemanifests"].watchable
+    assert "peeks" not in by_plural  # no list verb: not a view
 
 
 async def test_discover_resources_skips_broken_group() -> None:
