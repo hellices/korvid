@@ -2271,8 +2271,18 @@ class KorvidApp(App[None]):
                 return None
         return await self._operator_component_refs(root, namespace, name)
 
-    def _on_hierarchy_pick(self, epoch: int, result: tuple[str, str, str, str] | None) -> None:
-        """A tree node action: jump to the object's view or describe it."""
+    def _on_hierarchy_pick(
+        self,
+        epoch: int,
+        origin: tuple[PaneState, str, str],
+        result: tuple[str, str, str, str] | None,
+    ) -> None:
+        """A tree node action: jump to the object's view or describe it.
+
+        ``origin`` is (pane, canonical view, scope) captured when the tree
+        was *opened* — the pane may show something else by dismissal time
+        (agent navigation is not blocked by the modal), and the return
+        must lead back to where the tree actually came from."""
         ctx = self._hierarchy_ctx
         self._hierarchy_ctx = None  # tree closed: stop live rebuilds
         if result is None:
@@ -2291,9 +2301,10 @@ class KorvidApp(App[None]):
                 # The jump must stay reversible (issue #135): Escape on the
                 # target reopens this tree over the view it was opened from.
                 title, refs, namespace, scope = ctx
-                self._pane.hierarchy_return = _HierarchyReturn(
-                    origin_view=self._canonical_kind(self.current_kind),
-                    origin_scope=self._pane.scope,
+                origin_pane, origin_view, origin_scope = origin
+                origin_pane.hierarchy_return = _HierarchyReturn(
+                    origin_view=origin_view,
+                    origin_scope=origin_scope,
                     title=title,
                     refs=refs,
                     namespace=namespace,
@@ -2337,9 +2348,10 @@ class KorvidApp(App[None]):
             lookup=self._hierarchy_lookup(ret.tree_scope),
         )
         self._hierarchy_ctx = (ret.title, ret.refs, ret.namespace, ret.tree_scope)
+        origin = (pane, ret.origin_view, ret.origin_scope)
         await self.push_screen(
             HierarchyScreen(ret.title, tree_root, initial_cursor=ret.picked),
-            functools.partial(self._on_hierarchy_pick, ret.epoch),
+            functools.partial(self._on_hierarchy_pick, ret.epoch, origin),
         )
         return True
 
@@ -2415,8 +2427,10 @@ class KorvidApp(App[None]):
             lookup=self._hierarchy_lookup(scope),
         )
         self._hierarchy_ctx = (title, refs, namespace, scope)
+        origin = (pane, self._canonical_kind(kind), scope)
         await self.push_screen(
-            HierarchyScreen(title, tree_root), functools.partial(self._on_hierarchy_pick, epoch)
+            HierarchyScreen(title, tree_root),
+            functools.partial(self._on_hierarchy_pick, epoch, origin),
         )
 
     async def _operator_component_refs(
