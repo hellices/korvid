@@ -1328,3 +1328,91 @@ async def test_escape_on_repo_screen_keeps_the_search_keyword(tmp_path: Path) ->
             pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="back to search"
         )
         assert app.screen.query_one("#chart-keyword", Input).value == "nginx"
+
+
+async def test_repo_browse_filters_to_the_exact_repo_prefix(tmp_path: Path) -> None:
+    """`helm search repo` substring-matches, so browsing `stable` would also
+    surface `my-stable/...` charts: the browse must filter hits to the exact
+    `repo/` name prefix."""
+    helm = FakeHelm()
+    helm.hits = [
+        ChartHit("stable/good", "1.0.0", "1.0", "in-scope"),
+        ChartHit("my-stable/sneaky", "2.0.0", "2.0", "substring match, other repo"),
+    ]
+    helm.repos = [HelmRepo(name="stable", url="https://charts.example/stable")]
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await until(
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="chart search"
+        )
+        await pilot.press("ctrl+r")
+        await until(pilot, lambda: isinstance(app.screen, HelmRepoScreen), label="repo screen")
+        await until(
+            pilot,
+            lambda: app.screen.query_one(OptionList).option_count == 1,
+            label="repos listed",
+        )
+        app.screen.query_one(OptionList).focus()
+        await pilot.press("down", "enter")
+        await until(
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="back to search"
+        )
+        await until(
+            pilot,
+            lambda: app.screen.query_one(OptionList).option_count == 1,
+            label="only in-scope chart listed",
+        )
+        options = app.screen.query_one(OptionList)
+        assert "stable/good" in str(options.get_option_at_index(0).prompt)
+        # a manual keyword search afterwards is unfiltered again
+        await pilot.press("enter")  # picks stable/good -> wizard; close it
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        await pilot.press("escape")
+
+
+async def test_repo_pick_is_rejected_while_a_mutation_is_pending(tmp_path: Path) -> None:
+    """A pending `helm repo add` owns the screen: Enter on a repo row must
+    not dismiss it mid-mutation (dismissal cancels the worker and kills the
+    subprocess)."""
+    import asyncio as aio
+
+    gate: aio.Event = aio.Event()
+
+    class GatedRepoAddHelm(FakeHelm):
+        async def repo_add(self, name: str, url: str) -> str:
+            await gate.wait()
+            return await super().repo_add(name, url)
+
+    helm = GatedRepoAddHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await until(
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="chart search"
+        )
+        await pilot.press("ctrl+r")
+        await until(pilot, lambda: isinstance(app.screen, HelmRepoScreen), label="repo screen")
+        await until(
+            pilot,
+            lambda: app.screen.query_one(OptionList).option_count == 1,
+            label="repos listed",
+        )
+        from textual.widgets import Input
+
+        app.screen.query_one("#repo-name", Input).value = "extra"
+        app.screen.query_one("#repo-url", Input).value = "https://charts.example/extra"
+        app.screen.query_one("#repo-url", Input).focus()
+        await pilot.press("enter")  # add starts, gated -> mutation pending
+        app.screen.query_one(OptionList).focus()
+        await pilot.press("down", "enter")  # browse attempt mid-mutation
+        await pilot.pause()
+        assert isinstance(app.screen, HelmRepoScreen)  # still owned by the add
+        gate.set()
+        await until(
+            pilot,
+            lambda: ("repo-add", "extra", "https://charts.example/extra") in helm.calls,
+            label="mutation completed",
+        )

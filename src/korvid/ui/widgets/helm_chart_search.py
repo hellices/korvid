@@ -123,18 +123,25 @@ class HelmChartSearchScreen(ModalScreen["ChartHit | None"]):
 
     def browse_repo(self, repo: str) -> None:
         """Scope the search to one repository (issue #137): the `repo/`
-        prefix convention, typed for you, searched immediately."""
+        prefix convention, typed for you, searched immediately.
+
+        `helm search repo` substring-matches, so `stable/` would also
+        surface `my-stable/...` charts: the results are filtered to the
+        exact name prefix. A manual re-search is unfiltered again.
+        """
         keyword = f"{repo}/"
         self.query_one("#chart-keyword", Input).value = keyword
-        self._start_search(keyword)
+        self._start_search(keyword, repo_scope=repo)
 
-    def _start_search(self, keyword: str) -> None:
+    def _start_search(self, keyword: str, *, repo_scope: str | None = None) -> None:
         self._search_seq += 1
         self.run_worker(
-            self._run_search(keyword, self._search_seq), exclusive=True, group="helm-chart-search"
+            self._run_search(keyword, self._search_seq, repo_scope),
+            exclusive=True,
+            group="helm-chart-search",
         )
 
-    async def _run_search(self, keyword: str, seq: int) -> None:
+    async def _run_search(self, keyword: str, seq: int, repo_scope: str | None = None) -> None:
         loading = self.query_one("#chart-loading", LoadingIndicator)
         status = self.query_one("#chart-status", Static)
         results = self.query_one("#chart-results", OptionList)
@@ -155,6 +162,8 @@ class HelmChartSearchScreen(ModalScreen["ChartHit | None"]):
                 loading.display = False
         if seq != self._search_seq:
             return
+        if repo_scope is not None:
+            hits = [hit for hit in hits if hit.name.startswith(f"{repo_scope}/")]
         if not hits:
             status.update(
                 f"no charts matched {keyword!r} — try another keyword or add a repository (Ctrl-R)"
