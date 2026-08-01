@@ -480,16 +480,20 @@ class KubeClient(ReadOps, WriteOps):
                         str(event["type"]),
                         self._object_summary(meta, event["raw_object"]),
                     )
-        except k8s_client.exceptions.ApiException as exc:
-            if int(exc.status or 0) == 405:
-                # Discovery advertised watch but the server refuses it: as
-                # deterministic as it gets - poll instead of letting the
-                # manager burn retries clearing and re-seeding the store.
-                logger.info("%s rejects watch (405); falling back to LIST polling", meta.plural)
-                async for event in self._poll_objects(meta, list_path, known):
-                    yield event
-                return
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+        except (k8s_client.exceptions.ApiException, ApiStatusError) as exc:
+            # The raw-watch adapter surfaces HTTP errors as ApiStatusError
+            # (via _raise_for_status); the kubernetes client's own paths
+            # raise ApiException - both carry .status/.reason, and the 405
+            # fallback must catch both.
+            status = int(getattr(exc, "status", 0) or 0)
+            if status != 405:
+                raise ApiStatusError(status, str(getattr(exc, "reason", "") or "")) from exc
+            # Discovery advertised watch but the server refuses it: as
+            # deterministic as it gets - poll instead of letting the
+            # manager burn retries clearing and re-seeding the store.
+            logger.info("%s rejects watch (405); falling back to LIST polling", meta.plural)
+            async for event in self._poll_objects(meta, list_path, known):
+                yield event
 
     async def _poll_objects(
         self, meta: ResourceMeta, list_path: str, known: dict[str, GenericSummary]

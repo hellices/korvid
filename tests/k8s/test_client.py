@@ -383,7 +383,33 @@ async def test_unwatchable_kind_polls_lists_and_diffs_instead_of_watching() -> N
 
 async def test_watch_405_falls_back_to_list_polling() -> None:
     """A server that advertises watch but rejects it with 405 (aggregated
-    API drift) degrades to polling instead of dying in the retry loop."""
+    API drift) degrades to polling instead of dying in the retry loop.
+    The raw-watch adapter surfaces the refusal as ApiStatusError (via
+    _raise_for_status), so that exact type must be caught."""
+    client = KubeClient()
+    meta = _deploy_meta()
+    snapshots = [
+        {"metadata": {"resourceVersion": "1"}, "items": [_generic("dep-a")]},
+        {"metadata": {}, "items": [_generic("dep-a"), _generic("dep-b")]},
+    ]
+    request_json_mock = AsyncMock(side_effect=snapshots)
+    fake_watch = _FakeWatch([], raise_at=0, raise_exc=ApiStatusError(405, "Method Not Allowed"))
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        events = await _take(client.watch_objects(meta, "default"), 3)
+
+    assert events[0] == ("ADDED", "dep-a")
+    assert ("ADDED", "dep-b") in events[1:]
+
+
+async def test_watch_405_api_exception_also_falls_back_to_polling() -> None:
+    """The kubernetes client's own ApiException(405) takes the same
+    fallback (both exception types cross the watch stream)."""
     client = KubeClient()
     meta = _deploy_meta()
     snapshots = [
@@ -405,6 +431,23 @@ async def test_watch_405_falls_back_to_list_polling() -> None:
 
     assert events[0] == ("ADDED", "dep-a")
     assert ("ADDED", "dep-b") in events[1:]
+
+
+async def test_watch_non_405_api_status_error_still_raises() -> None:
+    """A non-405 ApiStatusError from the raw adapter propagates unchanged."""
+    client = KubeClient()
+    meta = _deploy_meta()
+    list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "9"}, "items": []}
+    fake_watch = _FakeWatch([], raise_at=0, raise_exc=ApiStatusError(410, "Gone"))
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+        pytest.raises(ApiStatusError, match="Gone"),
+    ):
+        async for _ in client.watch_objects(meta, "default"):
+            pass
 
 
 async def test_watch_non_405_api_exception_still_raises() -> None:
