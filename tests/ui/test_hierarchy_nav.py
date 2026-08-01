@@ -306,6 +306,7 @@ async def test_escape_over_a_modal_keeps_the_hierarchy_return() -> None:
         await until(pilot, lambda: len(app.screen_stack) == 1, label="help closed")
         await pilot.press("escape")
         await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="tree reopened")
+        assert app.current_kind == "helmreleases"  # reopened over the origin view
 
 
 async def test_hierarchy_return_is_scoped_to_the_initiating_pane() -> None:
