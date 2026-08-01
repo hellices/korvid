@@ -233,6 +233,35 @@ async def test_screen_renders_expanded_tree() -> None:
         assert any("Pod/web-1" in label for label in labels)
 
 
+async def test_initial_cursor_lands_on_the_named_node() -> None:
+    """A tree reopened after a goto jump (issue #135) starts with the
+    cursor on the node that was picked, not on the root."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(
+            HierarchyScreen("helm/web", _sample_root(), initial_cursor=("pods", "default", "web-1"))
+        )
+        await pilot.pause()
+        tree = app.screen.query_one(Tree)
+        cursor = tree.cursor_node
+        assert cursor is not None
+        assert cursor.data is not None
+        assert (cursor.data.kind, cursor.data.name) == ("pods", "web-1")
+
+
+async def test_unknown_initial_cursor_keeps_the_default_position() -> None:
+    """A picked node that vanished from the rebuilt tree degrades to the
+    normal starting position instead of crashing or pointing nowhere."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(
+            HierarchyScreen("helm/web", _sample_root(), initial_cursor=("pods", "default", "gone"))
+        )
+        await pilot.pause()
+        tree = app.screen.query_one(Tree)
+        assert tree.cursor_line == 0
+
+
 async def test_enter_on_navigable_node_dismisses_with_goto() -> None:
     app = HostApp()
     async with app.run_test() as pilot:

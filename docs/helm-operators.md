@@ -52,7 +52,10 @@ tree of everything that root installed and how the pieces hang together
 
 `Enter` on a node jumps to that kind's real view with the cursor on the
 object — logs, describe, edit, delete, and further drill-down all work
-there unchanged. `d` describes the node directly; `Esc` returns to the
+there unchanged, and `Esc` there brings the tree back (over the view it
+was opened from, cursor still on the node you picked), so drilling into
+a component never strands you on an unfiltered list.  `d` describes the
+node directly; `Esc` inside the tree returns to the
 browser. The tree itself is read-only: every write still happens in the
 real views behind the usual approval gates.
 
