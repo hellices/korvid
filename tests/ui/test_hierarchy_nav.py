@@ -228,6 +228,63 @@ async def test_goto_from_tree_jumps_to_view_with_cursor() -> None:
         )
 
 
+async def test_escape_after_goto_reopens_the_tree_on_the_release_view() -> None:
+    """Regression for issue #135: jumping to a component must leave a way
+    back - Escape on the jump target reopens the hierarchy tree over the
+    origin view, cursor still on the picked node."""
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        await pilot.press("down")  # Deployment/web-nginx
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await pilot.press("escape")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="tree reopened")
+        # the tree reopens over the origin view, not the jump target
+        assert app.current_kind == "helmreleases"
+        # cursor back on the node that was picked
+        from textual.widgets import Tree
+
+        tree = app.screen.query_one(Tree)
+        cursor = tree.cursor_node
+        assert cursor is not None
+        assert cursor.data is not None
+        assert (cursor.data.kind, cursor.data.name) == ("deployments", "web-nginx")
+        # closing the reopened tree lands on the release view as usual
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, HierarchyScreen), label="closed")
+        assert app.current_kind == "helmreleases"
+        # the return is one-shot: another Escape must not resurrect the tree
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, HierarchyScreen)
+
+
+async def test_explicit_navigation_clears_the_hierarchy_return() -> None:
+    """A :view navigation abandons the pending tree return - Escape on the
+    new view must not teleport back to a tree the user walked away from."""
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        await pilot.press("down")
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await _navigate(pilot, "pods", "pods")
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, HierarchyScreen)
+
+
 async def test_describe_from_tree_node() -> None:
     app, describe_calls = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:

@@ -214,10 +214,19 @@ class HierarchyScreen(ModalScreen[tuple[str, str, str, str] | None]):
     }
     """
 
-    def __init__(self, title: str, root: HierarchyNode) -> None:
+    def __init__(
+        self,
+        title: str,
+        root: HierarchyNode,
+        *,
+        initial_cursor: tuple[str, str, str] | None = None,
+    ) -> None:
         super().__init__()
         self._title = title
         self._root = root
+        #: (kind, namespace, name) to put the cursor on at mount — a tree
+        #: reopened after a goto jump lands back on the picked node.
+        self._initial_cursor = initial_cursor
 
     def compose(self) -> ComposeResult:
         yield Footer()
@@ -228,6 +237,12 @@ class HierarchyScreen(ModalScreen[tuple[str, str, str, str] | None]):
         tree = self.query_one(Tree)
         self._populate(tree.root, self._root.children)
         tree.root.expand_all()
+        if self._initial_cursor is not None:
+            kind, namespace, name = self._initial_cursor
+            target = HierarchyNode(label="", kind=kind, namespace=namespace, name=name)
+            line, _ = self._dfs_find(tree.root, target, 0)
+            if line >= 0:
+                tree.cursor_line = line
         tree.focus()
 
     def _populate(self, parent: TreeNode[HierarchyNode], nodes: list[HierarchyNode]) -> None:

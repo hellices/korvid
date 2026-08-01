@@ -320,6 +320,25 @@ class ContextSwitchResult:
     protected_context: str | None = None
 
 
+@dataclasses.dataclass(frozen=True)
+class _HierarchyReturn:
+    """The way back to a hierarchy tree after a goto jump (issue #135).
+
+    Captured when a tree node's Enter navigates away: Escape on the jump
+    target (with no drill level left to pop) rebuilds the tree over the
+    origin view, cursor on the picked node. One-shot — consumed or dropped
+    on first use, and abandoned by any explicit navigation."""
+
+    origin_view: str  # canonical kind alias the tree was opened over
+    origin_scope: str  # that pane's namespace scope at pick time
+    title: str
+    refs: list[ComponentRef]
+    namespace: str
+    tree_scope: str  # store-lookup scope the tree was built with
+    picked: tuple[str, str, str]  # (kind alias, namespace, name) of the node
+    epoch: int
+
+
 _WriteParams = ParamSpec("_WriteParams")
 _WriteResult = TypeVar("_WriteResult")
 
@@ -883,6 +902,9 @@ class KorvidApp(App[None]):
         # Rebuild inputs for an open HierarchyScreen: (title, refs, namespace,
         # scope). Store updates rebuild the tree in place while it is open.
         self._hierarchy_ctx: tuple[str, list[ComponentRef], str, str] | None = None
+        #: Pending way back to a tree a goto jump navigated away from
+        #: (issue #135); consumed by Escape on the jump target.
+        self._hierarchy_return: _HierarchyReturn | None = None
         # Cursor-placement poll budget for hierarchy goto (50ms per attempt);
         # an attribute so tests can shrink the give-up window.
         self._jump_poll_attempts: int = 200
@@ -1356,7 +1378,13 @@ class KorvidApp(App[None]):
         # The stack clear happens inside the navigation lock so a concurrent
         # drill (agent path) can never interleave between clear and the
         # kind/scope transition, which would strand a filterless child view.
-        await self._navigate(message.view, message.namespace, drill_op=self._drill.clear)
+        await self._navigate(message.view, message.namespace, drill_op=self._abandon_drill_context)
+
+    def _abandon_drill_context(self) -> None:
+        """Explicit navigation walks away from drill *and* hierarchy-return
+        state (issue #135) - Escape afterwards must not teleport back."""
+        self._drill.clear()
+        self._hierarchy_return = None
 
     def _default_scope_for(self, view: str | None, namespace: str | None) -> str | None:
         """Catalog entries live in catalog namespaces (e.g. "olm"), not the
@@ -2234,6 +2262,7 @@ class KorvidApp(App[None]):
 
     def _on_hierarchy_pick(self, epoch: int, result: tuple[str, str, str, str] | None) -> None:
         """A tree node action: jump to the object's view or describe it."""
+        ctx = self._hierarchy_ctx
         self._hierarchy_ctx = None  # tree closed: stop live rebuilds
         if result is None:
             return
@@ -2247,8 +2276,52 @@ class KorvidApp(App[None]):
         if action == "describe":
             coro = self._describe_named(kind, ns, obj)
         else:
+            if ctx is not None:
+                # The jump must stay reversible (issue #135): Escape on the
+                # target reopens this tree over the view it was opened from.
+                title, refs, namespace, scope = ctx
+                self._hierarchy_return = _HierarchyReturn(
+                    origin_view=self._canonical_kind(self.current_kind),
+                    origin_scope=self._pane.scope,
+                    title=title,
+                    refs=refs,
+                    namespace=namespace,
+                    tree_scope=scope,
+                    picked=(kind, ns, obj),
+                    epoch=epoch,
+                )
             coro = self._jump_to_object(kind, ns, obj, epoch=epoch)
         self.run_worker(coro, exclusive=True, group="hierarchy")
+
+    async def _reopen_hierarchy_return(self) -> bool:
+        """Escape on a hierarchy jump target: rebuild the tree over its
+        origin view, cursor on the picked node (issue #135). False when
+        there is no pending return or the user has moved on - the return
+        is one-shot either way."""
+        ret = self._hierarchy_return
+        if ret is None:
+            return False
+        self._hierarchy_return = None  # consumed or dropped, never replayed
+        if self._ctx_switch_crossed(ret.epoch):
+            return False
+        if self._canonical_kind(self.current_kind) != ret.picked[0]:
+            return False  # the user navigated elsewhere; nothing to return to
+        if len(self.screen_stack) > 1:
+            return False
+        await self._navigate(ret.origin_view, ret.origin_scope)
+        tree_root = build_hierarchy(
+            ret.title,
+            ret.refs,
+            namespace=ret.namespace,
+            resolve=self._view_for_component,
+            lookup=self._hierarchy_lookup(ret.tree_scope),
+        )
+        self._hierarchy_ctx = (ret.title, ret.refs, ret.namespace, ret.tree_scope)
+        await self.push_screen(
+            HierarchyScreen(ret.title, tree_root, initial_cursor=ret.picked),
+            functools.partial(self._on_hierarchy_pick, ret.epoch),
+        )
+        return True
 
     def _hierarchy_lookup(self, scope: str) -> Callable[[str, str], list[Summary] | None]:
         """Store lookup for the tree: a list only for views a live watch is
@@ -4054,6 +4127,15 @@ class KorvidApp(App[None]):
         popped = await self._pop_drill()
         if popped:
             event.stop()
+            return
+        # No drill level left: a pending hierarchy return (issue #135)
+        # reopens the component tree the last goto jumped away from.
+        if await self._reopen_hierarchy_return():
+            event.stop()
+            # Without this the same Escape continues into binding
+            # processing and hits the freshly pushed tree's own
+            # escape=close binding, dismissing it on arrival.
+            event.prevent_default()
 
     # -- 2-pane split workspace (issue #48) ---------------------------------
 
