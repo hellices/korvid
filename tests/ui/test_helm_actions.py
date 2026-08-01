@@ -674,7 +674,7 @@ async def test_install_render_failure_retry_preview_without_editing(tmp_path: Pa
 
 
 async def test_old_helm_hide_secret_rejection_does_not_block_approval(tmp_path: Path) -> None:
-    """helm < 3.13 rejects the preview-only `--hide-secret` flag: that is a
+    """helm < 3.15 rejects the preview-only `--hide-secret` flag: that is a
     preview incompatibility, not a verdict on the install (the real command
     never carries the flag) — approval must stay available."""
     helm = FakeHelm()

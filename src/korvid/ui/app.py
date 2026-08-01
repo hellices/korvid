@@ -6861,7 +6861,7 @@ class KorvidApp(App[None]):
         try:
             title, text = await asyncio.wait_for(_render(), _HELM_PREVIEW_TIMEOUT)
         except HelmPreviewUnsupported:
-            # helm < 3.13 rejecting the preview-only --hide-secret flag is
+            # helm < 3.15 rejecting the preview-only --hide-secret flag is
             # a preview incompatibility, not a verdict: the real command
             # never carries the flag (see HelmCLI._dry_run).
             logger.debug("helm preview failed; dialog opens without it", exc_info=True)
