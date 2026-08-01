@@ -530,3 +530,45 @@ async def test_header_click_matches_markup_bearing_custom_column_names() -> None
             )
         )
         await until(pilot, lambda: _names(table) == ["web", "api"], label="TEAM ascending")
+
+
+async def test_sort_picker_matches_markup_bearing_custom_column_names() -> None:
+    """The option list renders Rich markup, so a pick of [red]TEAM[/] comes
+    back as its plain text - the callback must still resolve the configured
+    name (same rule as the header-click path)."""
+    from korvid.core.config import KorvidConfig, ViewConfig
+    from korvid.k8s.columns import CustomColumn
+    from korvid.k8s.models import GenericSummary
+    from korvid.ui.widgets.pick_screen import PickScreen
+
+    team = CustomColumn("[red]TEAM[/]", "label", "team")
+    config = KorvidConfig(namespace="default", views={"deployments": ViewConfig(columns=(team,))})
+    deploys: list[Summary] = [
+        GenericSummary(
+            name="api",
+            namespace="default",
+            kind="Deployment",
+            created="2026-07-26T08:00:00Z",
+            custom=("payments",),
+        ),
+        GenericSummary(
+            name="web",
+            namespace="default",
+            kind="Deployment",
+            created="2026-07-26T09:00:00Z",
+            custom=("billing",),
+        ),
+    ]
+    app = make_app([], extra_data={"deployments": deploys}, config=config)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        for ch in "deployments":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="deploys loaded")
+        await pilot.press("o")
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="picker open")
+        await pilot.press("down", "down")  # the custom column
+        await pilot.press("enter")
+        await until(pilot, lambda: _names(table) == ["web", "api"], label="TEAM ascending")
