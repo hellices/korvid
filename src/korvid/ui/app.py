@@ -298,6 +298,10 @@ _HELM_PREVIEW_MAX_LINES = 60
 #: instead.
 _HINT_EVENTS_TIMEOUT = 3.0
 
+#: Header label -> builtin sort column (issue #138): the reverse of the
+#: table's ▲/▼ decoration map, for header-click sorting.
+_HEADER_SORT_COLUMNS = {"NAME": "name", "AGE": "age", "CPU": "cpu", "MEM": "mem"}
+
 
 @dataclasses.dataclass(frozen=True)
 class ContextSwitchResult:
@@ -574,6 +578,9 @@ class KorvidApp(App[None]):
         Binding("C", "sort_by_cpu", "Sort CPU", show=False, id="sort_by_cpu--alt"),
         Binding("shift+m", "sort_by_mem", "Sort MEM", show=False, id="sort_by_mem"),
         Binding("M", "sort_by_mem", "Sort MEM", show=False, id="sort_by_mem--alt"),
+        # Interactive column picker (issue #138): every sortable column of
+        # the current view, no exact names to remember.
+        Binding("o", "sort_picker", "Sort by column", show=False, id="sort_picker"),
         Binding("ctrl+a", "toggle_agent", "AI", priority=True, id="toggle_agent"),
         Binding("ctrl+d", "delete_resource", "Delete", id="delete_resource"),
         Binding("r", "rollout_restart", "Restart", id="rollout_restart"),
@@ -7632,6 +7639,75 @@ class KorvidApp(App[None]):
             return
         self._sorts[kind] = toggle_sort(self._sorts.get(kind), matched)
         self._render_table(kind, only=self._pane)
+
+    def _sortable_columns(self, kind: str) -> tuple[str, ...]:
+        """Every column the current view can sort by (issue #138): the
+        visible builtins (cpu/mem only where a metrics feed exists, none
+        but name under `replace: true`) plus the view's custom columns."""
+        view = self._view_for(kind)
+        custom = tuple(column.name for column in view.columns) if view is not None else ()
+        if view is not None and view.replace:
+            builtins: tuple[str, ...] = ("name",)
+        elif kind == "pods":
+            builtins = SORT_COLUMNS
+        else:
+            builtins = ("name", "age")
+        return (*builtins, *custom)
+
+    def _apply_sort_column(self, column: str) -> None:
+        """Apply/flip *column* (builtin or custom, already validated for
+        the current view) and re-render."""
+        kind = self.current_kind
+        if column in SORT_COLUMNS:
+            self._toggle_sort(column)
+            return
+        self._sorts[kind] = toggle_sort(self._sorts.get(kind), column)
+        self._render_table(kind, only=self._pane)
+
+    def action_sort_picker(self) -> None:
+        """`o` (issue #138): pick the sort column from a list instead of
+        typing its exact name; re-picking the active column flips the
+        direction, exactly like `:sort`."""
+        if len(self.screen_stack) > 1:
+            return  # never stack over another dialog
+        kind = self.current_kind
+        columns = self._sortable_columns(kind)
+        current = self._sorts.get(kind)
+        options = [
+            f"{column} {'▼' if current.descending else '▲'}"
+            if current is not None and current.column == column
+            else column
+            for column in columns
+        ]
+
+        def _picked(choice: str | None) -> None:
+            if choice is None:
+                return
+            column = choice.split(" ")[0]
+            if self.current_kind == kind and column in self._sortable_columns(kind):
+                self._apply_sort_column(column)
+
+        self.push_screen(PickScreen(f"Sort {kind} by:", options), _picked)
+
+    async def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        """A header click sorts by that column (issue #138); clicking the
+        active column flips the direction, same as the keys."""
+        if not isinstance(event.data_table, ResourceTable):
+            return
+        event.stop()
+        # Labels may carry the ▲/▼ decoration of the active sort.
+        label = str(event.label).removesuffix(" ▲").removesuffix(" ▼")
+        kind = self.current_kind
+        columns = self._sortable_columns(kind)
+        builtin = _HEADER_SORT_COLUMNS.get(label)
+        column = builtin if builtin in columns else (label if label in columns else None)
+        if column is None:
+            self.notify(
+                f"{label} is not sortable — sortable: {', '.join(columns)}",
+                severity="warning",
+            )
+            return
+        self._apply_sort_column(column)
 
     # ------------------------------------------------------------------
     # Agent panel (Ctrl-A) — wiring only; rendering lives in AgentPanel,

@@ -253,3 +253,151 @@ async def test_shift_n_still_steps_search_when_describe_pane_open() -> None:
         await pilot.pause()
         # No sort was applied: order still the default and no indicator shown.
         assert not any("▲" in label or "▼" in label for label in _header_labels(table))
+
+
+# ---------------------------------------------------------------------------
+# Interactive column selection (issue #138): `o` opens a sort picker; a
+# header click sorts by that column. `:sort` and shift+N/A/C/M unchanged.
+# ---------------------------------------------------------------------------
+
+
+async def test_o_opens_sort_picker_and_applies_the_selected_column() -> None:
+    from korvid.ui.widgets.pick_screen import PickScreen
+
+    pods = [
+        replace(_pod("old"), created="2026-07-26T08:00:00Z"),
+        replace(_pod("young"), created="2026-07-26T11:00:00Z"),
+    ]
+    app = make_app(pods)
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        await pilot.press("o")
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="picker open")
+        # pods offer every builtin sortable column
+        from textual.widgets import OptionList
+
+        options = [
+            str(app.screen.query_one(OptionList).get_option_at_index(i).prompt)
+            for i in range(app.screen.query_one(OptionList).option_count)
+        ]
+        assert [o.split()[0] for o in options] == ["name", "age", "cpu", "mem"]
+        await pilot.press("down")  # age
+        await pilot.press("enter")
+        await until(pilot, lambda: _names(table) == ["young", "old"], label="newest first")
+        assert any(label.startswith("AGE") and "▼" in label for label in _header_labels(table))
+
+
+async def test_sort_picker_repick_flips_direction_and_marks_active() -> None:
+    from textual.widgets import OptionList
+
+    from korvid.ui.widgets.pick_screen import PickScreen
+
+    app = make_app([_pod("beta"), _pod("alpha")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        await pilot.press("o")
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="picker open")
+        await pilot.press("enter")  # name ascending
+        await until(pilot, lambda: _names(table) == ["alpha", "beta"], label="name ascending")
+        await pilot.press("o")
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="picker reopen")
+        options = [
+            str(app.screen.query_one(OptionList).get_option_at_index(i).prompt)
+            for i in range(app.screen.query_one(OptionList).option_count)
+        ]
+        assert options[0].startswith("name")
+        assert "▲" in options[0]  # active column is marked
+        await pilot.press("enter")  # re-pick flips to descending
+        await until(pilot, lambda: _names(table) == ["beta", "alpha"], label="name descending")
+
+
+async def test_sort_picker_lists_custom_columns_and_hides_metrics_off_pods() -> None:
+    from textual.widgets import OptionList
+
+    from korvid.core.config import KorvidConfig, ViewConfig
+    from korvid.k8s.columns import CustomColumn
+    from korvid.k8s.models import GenericSummary
+    from korvid.ui.widgets.pick_screen import PickScreen
+
+    team = CustomColumn("TEAM", "label", "team")
+    config = KorvidConfig(namespace="default", views={"deployments": ViewConfig(columns=(team,))})
+    deploys: list[Summary] = [
+        GenericSummary(
+            name="api",
+            namespace="default",
+            kind="Deployment",
+            created="2026-07-26T08:00:00Z",
+            custom=("payments",),
+        ),
+        GenericSummary(
+            name="web",
+            namespace="default",
+            kind="Deployment",
+            created="2026-07-26T09:00:00Z",
+            custom=("billing",),
+        ),
+    ]
+    app = make_app([], extra_data={"deployments": deploys}, config=config)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        for ch in "deployments":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="deploys loaded")
+        await pilot.press("o")
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="picker open")
+        options = [
+            str(app.screen.query_one(OptionList).get_option_at_index(i).prompt)
+            for i in range(app.screen.query_one(OptionList).option_count)
+        ]
+        # no cpu/mem off the pods view; the custom column is offered
+        assert [o.split()[0] for o in options] == ["name", "age", "TEAM"]
+        await pilot.press("down", "down")  # TEAM
+        await pilot.press("enter")
+        await until(pilot, lambda: _names(table) == ["web", "api"], label="TEAM ascending")
+
+
+async def test_header_click_sorts_by_that_column() -> None:
+    app = make_app([_pod("beta"), _pod("alpha")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        from textual.widgets import DataTable
+
+        name_key = next(iter(table.columns))
+        table.post_message(
+            DataTable.HeaderSelected(table, name_key, 0, table.columns[name_key].label)
+        )
+        await until(pilot, lambda: _names(table) == ["alpha", "beta"], label="name ascending")
+        # clicking the active column flips the direction
+        name_key = next(iter(table.columns))
+        table.post_message(
+            DataTable.HeaderSelected(table, name_key, 0, table.columns[name_key].label)
+        )
+        await until(pilot, lambda: _names(table) == ["beta", "alpha"], label="name descending")
+
+
+async def test_header_click_on_unsortable_column_notifies() -> None:
+    app = make_app([_pod("beta"), _pod("alpha")])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="pods loaded")
+        from textual.widgets import DataTable
+
+        keys = list(table.columns)
+        # READY is a pods column with no data-model sort key
+        ready_idx = [str(table.columns[k].label) for k in keys].index("READY")
+        table.post_message(
+            DataTable.HeaderSelected(
+                table, keys[ready_idx], ready_idx, table.columns[keys[ready_idx]].label
+            )
+        )
+        await until(
+            pilot,
+            lambda: any("not sortable" in n.message for n in app._notifications),
+            label="unsortable notified",
+        )
+        assert not any("▲" in label or "▼" in label for label in _header_labels(table))

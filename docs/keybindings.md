@@ -16,6 +16,7 @@ view and shows the effective keys, including any remaps.
 | `Esc` | table | Pop one drill-down level |
 | `Ctrl-W` `v` / `w` / `q` | table | Split workspace into two panes / focus the other pane / close the focused pane |
 | `Shift-N/A/C/M` | table | Sort by name / age / CPU / MEM (repeat flips ▲/▼; sorts on data, not rendered strings) |
+| `o` | table | Sort picker: choose any sortable column of the current view (builtins + custom columns) from a list; re-picking the active column flips ▲/▼. Clicking a column header sorts by it too |
 | `0` | global | Toggle all-namespaces view |
 | `1`-`9` | global | Jump to a favorite namespace (`favorite_namespaces` config, in order) |
 | `d` | table | Describe selected resource (manifest + events) |
@@ -66,7 +67,7 @@ Action names: `quit`, `help`, `open_command`, `open_filter`,
 `toggle_all_namespaces`, `describe`, `shell`, `logs`, `logs_multi`,
 `log_format`, `log_wrap`, `log_timestamps`, `log_save`, `log_previous`,
 `log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
-`sort_by_mem`, `toggle_agent`, `delete_resource`, `rollout_restart`,
+`sort_by_mem`, `sort_picker`, `toggle_agent`, `delete_resource`, `rollout_restart`,
 `resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
 `cordon_node`, `uncordon_node`, `drain_node`, `port_forward`, `transfer`,
 `helm_install`, `helm_upgrade`, `helm_rollback`, `helm_history`.
