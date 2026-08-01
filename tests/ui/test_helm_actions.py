@@ -1266,3 +1266,65 @@ async def test_stale_progress_cleanup_cannot_clear_the_replacements_label(
         second.__exit__(None, None, None)
         await pilot.pause()
         assert "second preview" not in str(app.query_one(StatusBar).render())
+
+
+async def test_enter_on_a_repo_row_browses_that_repos_charts(tmp_path: Path) -> None:
+    """Repo-centric browsing (issue #137): Enter on a repository row closes
+    the repo screen and scopes the chart search to that repo (the
+    `repoName/` prefix convention, typed for you)."""
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await until(
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="chart search"
+        )
+        await pilot.press("ctrl+r")
+        await until(pilot, lambda: isinstance(app.screen, HelmRepoScreen), label="repo screen")
+        await until(
+            pilot,
+            lambda: app.screen.query_one(OptionList).option_count == 1,
+            label="repos listed",
+        )
+        app.screen.query_one(OptionList).focus()
+        await pilot.press("down")  # highlight the bitnami repo row
+        await pilot.press("enter")  # pick it
+        await until(
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="back to search"
+        )
+        await until(
+            pilot, lambda: ("search", "bitnami/") in helm.calls, label="repo-scoped search ran"
+        )
+        from textual.widgets import Input
+
+        assert app.screen.query_one("#chart-keyword", Input).value == "bitnami/"
+        # the scoped results are pickable exactly like a keyword search
+        await until(
+            pilot,
+            lambda: app.screen.query_one(OptionList).option_count == 1,
+            label="charts listed",
+        )
+
+
+async def test_escape_on_repo_screen_keeps_the_search_keyword(tmp_path: Path) -> None:
+    """Closing the repo screen without picking a repo must not rewrite the
+    search keyword underneath."""
+    helm = FakeHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await until(
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="chart search"
+        )
+        from textual.widgets import Input
+
+        app.screen.query_one("#chart-keyword", Input).value = "nginx"
+        await pilot.press("ctrl+r")
+        await until(pilot, lambda: isinstance(app.screen, HelmRepoScreen), label="repo screen")
+        await pilot.press("escape")
+        await until(
+            pilot, lambda: isinstance(app.screen, HelmChartSearchScreen), label="back to search"
+        )
+        assert app.screen.query_one("#chart-keyword", Input).value == "nginx"

@@ -121,6 +121,13 @@ class HelmChartSearchScreen(ModalScreen["ChartHit | None"]):
         if self._on_manage_repos is not None:
             self._on_manage_repos()
 
+    def browse_repo(self, repo: str) -> None:
+        """Scope the search to one repository (issue #137): the `repo/`
+        prefix convention, typed for you, searched immediately."""
+        keyword = f"{repo}/"
+        self.query_one("#chart-keyword", Input).value = keyword
+        self._start_search(keyword)
+
     def _start_search(self, keyword: str) -> None:
         self._search_seq += 1
         self.run_worker(

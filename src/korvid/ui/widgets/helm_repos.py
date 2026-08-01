@@ -26,8 +26,13 @@ RepoAddFn = Callable[[str, str], Awaitable[str]]
 RepoUpdateFn = Callable[[], Awaitable[str]]
 
 
-class HelmRepoScreen(ModalScreen[None]):
-    """List / add / update helm chart repositories."""
+class HelmRepoScreen(ModalScreen[str | None]):
+    """List / add / update helm chart repositories.
+
+    Enter on a repository row dismisses with that repo's name — the chart
+    picker underneath scopes its search to the repo (issue #137). Esc
+    dismisses with None (management only, nothing picked).
+    """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("escape", "close", "Close", show=True),
@@ -92,6 +97,9 @@ class HelmRepoScreen(ModalScreen[None]):
         #: (which cancels its workers and kills the subprocess) is rejected
         #: until it finishes. A read-only list may be abandoned freely.
         self._mutating = False
+        #: rows currently shown in #repo-list, in display order — maps a
+        #: selected option index back to its repository.
+        self._repos: list[HelmRepo] = []
 
     def compose(self) -> ComposeResult:
         with VerticalScroll():
@@ -106,7 +114,7 @@ class HelmRepoScreen(ModalScreen[None]):
                     id="repo-url",
                 )
             yield Static(
-                "Enter: add — Ctrl-R: update indexes — Esc: close",
+                "Enter on a repo: browse its charts — Enter: add — Ctrl-R: update — Esc: close",
                 id="repo-status",
                 markup=False,
             )
@@ -123,6 +131,17 @@ class HelmRepoScreen(ModalScreen[None]):
             self._status("both a repository name and URL are required")
             return
         self._start(self._add_repo(name, url))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Enter on a repo row: hand the repo to the chart picker below
+        (issue #137) — browsing is read-only, but a pending mutation still
+        owns the screen until it finishes."""
+        event.stop()
+        if self._mutating:
+            self._status("still working — wait for the current operation to finish")
+            return
+        if 0 <= event.option_index < len(self._repos):
+            self.dismiss(self._repos[event.option_index].name)
 
     def action_close(self) -> None:
         if self._mutating:
@@ -166,6 +185,7 @@ class HelmRepoScreen(ModalScreen[None]):
             self._loading(False)
         listing = self.query_one("#repo-list", OptionList)
         listing.clear_options()
+        self._repos = list(repos)
         if not repos:
             self._status("no repositories configured — add one below")
             return

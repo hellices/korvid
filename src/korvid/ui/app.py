@@ -6690,26 +6690,38 @@ class KorvidApp(App[None]):
             self.push_screen(HelmInstallPrompt(hit, namespace=namespace, release=release), _chosen)
 
         title = f"Upgrade {release} with chart:" if release else "Install helm chart"
-        self.push_screen(
-            HelmChartSearchScreen(
-                helm.search_repo,
-                title=title,
-                initial=initial,
-                on_manage_repos=lambda: self._helm_open_repos(helm),
-            ),
-            _picked,
+        search_screen = HelmChartSearchScreen(
+            helm.search_repo,
+            title=title,
+            initial=initial,
+            on_manage_repos=lambda: self._helm_open_repos(helm, browse_in=search_screen),
         )
+        self.push_screen(search_screen, _picked)
 
-    def _helm_open_repos(self, helm: HelmCLI) -> None:
+    def _helm_open_repos(
+        self, helm: HelmCLI, *, browse_in: HelmChartSearchScreen | None = None
+    ) -> None:
         """Chart repository management (list/add/update). `helm repo` writes
         local helm config only — never the cluster — so the typed form in
-        the screen is the confirmation, not the write-approval gate."""
+        the screen is the confirmation, not the write-approval gate.
+
+        Enter on a repo row hands its name back (issue #137): the chart
+        picker in *browse_in* — when it is still the screen underneath —
+        scopes its search to that repository."""
+
+        def _picked(repo: str | None) -> None:
+            if repo is None or browse_in is None:
+                return
+            if self.screen is browse_in:
+                browse_in.browse_repo(repo)
+
         self.push_screen(
             HelmRepoScreen(
                 repo_list=helm.repo_list,
                 repo_add=helm.repo_add,
                 repo_update=helm.repo_update,
-            )
+            ),
+            _picked,
         )
 
     async def _helm_confirm_change(

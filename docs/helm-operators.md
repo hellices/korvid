@@ -77,6 +77,10 @@ empty search lists everything, and a loading indicator shows while
 `helm search repo` runs.  Repository management only touches the local
 helm configuration (`helm repo add`/`update` never talk to the
 cluster), so it is a typed form rather than an approval dialog.
+Pressing Enter on a repository row browses that repo's charts: the
+picker underneath scopes its search to the repo (the `repoName/`
+prefix, typed for you) — the natural "what does this repo serve?"
+step right after adding one.
 
 Install and upgrade render a preview before the confirmation
 dialog: install and upgrade run `--dry-run` (with `--hide-secret`, helm
