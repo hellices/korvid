@@ -81,7 +81,8 @@ dialog: install and upgrade run `--dry-run` (with `--hide-secret`, helm
 error-only fallback without the flag, keeping the render verdict), and when the
 [helm-diff](https://github.com/databus23/helm-diff) plugin is installed,
 upgrade and rollback show a real diff against the live release instead
-(if the diff plugin fails, the plain `--dry-run` render steps in).
+(if the diff plugin fails, upgrade falls back to the plain `--dry-run`
+render; rollback keeps its diff-only preview).
 When helm itself rejects the dry-run — a chart with mandatory values
 renders an `execution error` without them, for example — the flow stops
 *before* the confirmation dialog: the real install would fail the same

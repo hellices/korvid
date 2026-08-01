@@ -58,6 +58,7 @@ class FakeHelm(HelmCLI):
         self.uninstall_error: str | None = None
         self.diff_plugin = False
         self.diff_error: str | None = None
+        self.diff_output = "+ UPGRADE-DIFF-LINE"
         self.values_seen: str | None = None
         #: Exceptions raised by successive dry-run calls (install and
         #: upgrade), consumed one per call; an empty list means success.
@@ -161,7 +162,7 @@ class FakeHelm(HelmCLI):
         self.calls.append(("diff-upgrade", release, chart, namespace, version, reuse_values))
         if self.diff_error is not None:
             raise HelmError(self.diff_error)
-        return "+ UPGRADE-DIFF-LINE"
+        return self.diff_output
 
     async def rollback(self, release: str, revision: int, namespace: str) -> str:
         self.calls.append(("rollback", release, revision, namespace))
@@ -723,6 +724,54 @@ async def test_upgrade_diff_failure_falls_back_to_dry_run_preview(tmp_path: Path
         assert any("RENDERED-UPGRADE-MANIFEST" in line for line in preview)
         title = app.screen._preview_title  # type: ignore[attr-defined]  # test peeks the dialog
         assert title == "helm upgrade --dry-run preview:"
+
+
+async def test_empty_diff_says_no_changes_not_preview_unavailable(tmp_path: Path) -> None:
+    """`helm diff upgrade` returns an empty diff when nothing changes: that
+    is a successful render whose answer is "no changes", not an incomplete
+    one - the dialog must not claim the preview was unavailable."""
+    helm = FakeHelm()
+    helm.diff_plugin = True
+    helm.diff_output = ""
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await _rows_listed(pilot, app, 1)
+        await pilot.press("u")
+        await _pick_first_chart(pilot, app, search_first=False)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        preview = app.screen._preview  # type: ignore[attr-defined]  # test peeks the dialog
+        # [] renders as ConfirmScreen's explicit "no changes reported" line
+        assert preview == []
+        title = app.screen._preview_title  # type: ignore[attr-defined]  # test peeks the dialog
+        assert title == "helm diff upgrade preview:"
+
+
+async def test_render_failure_dialog_keeps_options_reachable_with_long_stderr(
+    tmp_path: Path,
+) -> None:
+    """Multi-line helm stderr rides in the failure dialog's title: it must
+    scroll inside a capped area instead of pushing the choices off-screen."""
+    helm = FakeHelm()
+    helm.dry_run_excs = [HelmError("\n".join(f"error line {i}" for i in range(40)))]
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _drive_install_to_preview(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="failure dialog")
+        from textual.containers import VerticalScroll
+        from textual.widgets import OptionList
+
+        # the long title lives inside the capped scroll area...
+        scroll = app.screen.query_one("#pick-title-scroll", VerticalScroll)
+        assert scroll.query_one("#pick-title") is not None
+        # ...and the options stay reachable: picking cancel works normally
+        options = app.screen.query_one(OptionList)
+        assert options.option_count == 3
+        await pilot.press("down", "down", "enter")  # cancel
+        await until(pilot, lambda: len(app.screen_stack) == 1, label="cancelled")
+        assert not any(call[0] == "install" for call in helm.calls)
 
 
 async def test_upgrade_dry_run_render_failure_stops_before_approval(tmp_path: Path) -> None:

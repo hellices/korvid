@@ -6872,7 +6872,10 @@ class KorvidApp(App[None]):
             logger.debug("helm preview failed; dialog opens without it", exc_info=True)
             return None
         lines = _clip_preview(text)
-        return (lines, title) if lines is not None else None
+        # [] is a *successful* empty render (helm diff: no changes) —
+        # ConfirmScreen states it explicitly; None stays reserved for
+        # failures, which the caller marks "preview unavailable".
+        return (lines if lines is not None else [], title)
 
     async def _helm_rollback_flow(
         self,
