@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 import yaml
 from rich.text import Text
-from textual.app import App, ComposeResult, SuspendNotSupported
+from textual.app import App, ComposeResult, ScreenStackError, SuspendNotSupported
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.coordinate import Coordinate
@@ -2387,7 +2387,13 @@ class KorvidApp(App[None]):
     def _refresh_hierarchy(self) -> None:
         """Rebuild an open hierarchy tree from the current store state."""
         ctx = self._hierarchy_ctx
-        screen = self.screen
+        try:
+            screen = self.screen
+        except ScreenStackError:
+            # A ResourcesUpdated dispatched during app teardown can land
+            # after the screen stack is emptied (flaky-CI issue #147):
+            # no screen simply means no tree to refresh.
+            return
         if ctx is None or not isinstance(screen, HierarchyScreen):
             return
         title, refs, namespace, scope = ctx
