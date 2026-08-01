@@ -34,6 +34,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
+from starlette.responses import Response
 from starlette.routing import Mount
 from starlette.types import Receive, Scope, Send
 
@@ -288,6 +289,20 @@ class KorvidMCPServer:
         )
 
         async def handle(scope: Scope, receive: Receive, send: Send) -> None:
+            # Only POST carries MCP traffic here. Stateless + JSON responses
+            # means no server-initiated messages ever exist, so the SDK's
+            # standalone GET SSE stream could only hang open — holding
+            # uvicorn's graceful shutdown hostage until the controller
+            # hard-cancels it mid-request ("Exception in ASGI application",
+            # issue #136). The MCP spec allows a server that offers no SSE
+            # stream to answer GET with 405, so refuse everything but POST
+            # before it reaches the session manager.
+            if scope["type"] == "http" and scope["method"] != "POST":
+                response = Response(
+                    "Method Not Allowed", status_code=405, headers={"Allow": "POST"}
+                )
+                await response(scope, receive, send)
+                return
             await manager.handle_request(scope, receive, send)
 
         @contextlib.asynccontextmanager

@@ -179,6 +179,74 @@ async def test_streamable_http_roundtrip(tmp_path: Path) -> None:
     assert not endpoint_file.exists()
 
 
+async def test_get_is_refused_with_405_instead_of_an_sse_stream() -> None:
+    """A standalone GET must be answered with 405, not an infinite SSE stream.
+
+    This server is stateless with JSON responses: it never sends
+    server-initiated messages, so the SDK's standalone GET SSE stream can
+    only ever hang open — holding uvicorn's graceful shutdown hostage until
+    the controller hard-cancels it (issue #136). The MCP spec allows a
+    server that offers no SSE stream to answer GET with 405.
+    """
+    import httpx
+
+    server = make_server(port=0)
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"http://127.0.0.1:{port}/mcp/",
+                headers={"Accept": "text/event-stream"},
+            )
+        assert resp.status_code == 405
+        assert "text/event-stream" not in resp.headers.get("content-type", "")
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_shutdown_completes_while_a_client_holds_a_get_connection() -> None:
+    """Graceful shutdown must finish even when a host has issued a GET.
+
+    Regression for issue #136: the SDK served GET as a never-ending SSE
+    stream, uvicorn's graceful shutdown waited forever on the connection,
+    and the controller's hard cancel tore down the stream mid-request —
+    "Exception in ASGI application" (CancelledError) on the TUI's terminal.
+    """
+    import httpx
+
+    server = make_server(port=0)
+    task = asyncio.create_task(server.run())
+    port = await asyncio.wait_for(server.wait_started(), timeout=10)
+
+    async def issue_get() -> None:
+        async with (
+            httpx.AsyncClient(timeout=30) as client,
+            client.stream(
+                "GET",
+                f"http://127.0.0.1:{port}/mcp/",
+                headers={"Accept": "text/event-stream"},
+            ) as resp,
+        ):
+            async for _ in resp.aiter_lines():  # drains nothing on a 405
+                pass
+
+    get_task = asyncio.create_task(issue_get())
+    try:
+        await asyncio.wait_for(get_task, timeout=10)
+        server.request_shutdown()
+        # Must complete gracefully — no hard-cancel fallback needed.
+        await asyncio.wait_for(task, timeout=5)
+        assert task.done()
+    finally:
+        if not get_task.done():
+            get_task.cancel()
+        server.request_shutdown()
+        if not task.done():
+            await asyncio.wait_for(task, timeout=10)
+
+
 async def test_hostile_origin_is_rejected() -> None:
     """DNS-rebinding protection: loopback binding alone does not stop a
     malicious webpage from reaching 127.0.0.1, so requests carrying a
