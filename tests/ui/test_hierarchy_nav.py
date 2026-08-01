@@ -335,6 +335,36 @@ async def test_hierarchy_return_is_scoped_to_the_initiating_pane() -> None:
         assert app._panes[0].kind == "helmreleases"
 
 
+async def test_a_jump_in_one_pane_does_not_erase_the_other_panes_return() -> None:
+    """Pending returns are per pane: opening a tree and jumping in pane B
+    must not overwrite pane A's way back."""
+    app, _ = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "helm", "helmreleases")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="release listed")
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="hierarchy open")
+        await pilot.press("down")
+        await pilot.press("enter")  # pane 0 jumps; its return is pending
+        await until(pilot, lambda: app.current_kind == "deployments", label="jumped")
+        await pilot.press("ctrl+w", "v")  # split: focus pane 1
+        await until(pilot, lambda: len(app.query(ResourceTable)) == 2, label="split")
+        await _navigate(pilot, "helm", "helmreleases")  # pane 1 to the helm view
+        await pilot.press("enter")  # pane 1 opens its own tree
+        await until(pilot, lambda: isinstance(app.screen, HierarchyScreen), label="tree 2 open")
+        await pilot.press("down")
+        await pilot.press("enter")  # pane 1 jumps too
+        await until(pilot, lambda: app._panes[1].kind == "deployments", label="pane 1 jumped")
+        await pilot.press("ctrl+w", "w")  # back to pane 0
+        await pilot.press("escape")
+        await until(
+            pilot, lambda: isinstance(app.screen, HierarchyScreen), label="pane 0 tree reopened"
+        )
+        assert app._panes[0].kind == "helmreleases"
+
+
 async def test_describe_from_tree_node() -> None:
     app, describe_calls = make_app(_HELM_DATA, components=_WEB_COMPONENTS)
     async with app.run_test() as pilot:

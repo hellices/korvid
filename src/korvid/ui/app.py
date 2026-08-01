@@ -326,12 +326,11 @@ class _HierarchyReturn:
 
     Captured when a tree node's Enter navigates away: Escape on the jump
     target (with no drill level left to pop) rebuilds the tree over the
-    origin view, cursor on the picked node. Owned by the pane that jumped
-    — other panes neither consume nor clear it. One-shot: consumed or
-    dropped on first eligible use, and abandoned when its pane explicitly
-    navigates away."""
+    origin view, cursor on the picked node. Lives on the pane that jumped
+    (`PaneState.hierarchy_return`) — panes neither see nor clear each
+    other's returns. One-shot: consumed or dropped on first eligible use,
+    and abandoned when its pane explicitly navigates away."""
 
-    pane: PaneState  # the pane the jump happened in (identity comparison)
     origin_view: str  # canonical kind alias the tree was opened over
     origin_scope: str  # that pane's namespace scope at pick time
     title: str
@@ -507,13 +506,19 @@ class PaneState:
         self.filter_pattern = ""
         self.resource_filter: ResourceFilter = parse_filter("")
         self.drill = NavigationStack()
+        #: Pending way back to a hierarchy tree a goto jump navigated away
+        #: from (issue #135); consumed by Escape in this pane. View state
+        #: like the drill stack - never shared across panes.
+        self.hierarchy_return: _HierarchyReturn | None = None
         #: Per-kind sort state - view state like the filter, so it belongs
         #: to the pane: sorting one pane must not reorder the other.
         self.sorts: dict[str, SortSpec] = {}
 
     def clone(self, table_id: str) -> PaneState:
         """A split starts as a clone of the focused view: same kind, scope,
-        filter and drill position - with independent state from then on."""
+        filter and drill position - with independent state from then on.
+        A pending hierarchy return is deliberately not cloned: it is a
+        one-shot ticket back to one tree, not repeatable view state."""
         pane = PaneState(self.kind, self.scope, table_id)
         pane.filter_pattern = self.filter_pattern
         pane.resource_filter = parse_filter(self.filter_pattern)
@@ -905,9 +910,6 @@ class KorvidApp(App[None]):
         # Rebuild inputs for an open HierarchyScreen: (title, refs, namespace,
         # scope). Store updates rebuild the tree in place while it is open.
         self._hierarchy_ctx: tuple[str, list[ComponentRef], str, str] | None = None
-        #: Pending way back to a tree a goto jump navigated away from
-        #: (issue #135); consumed by Escape on the jump target.
-        self._hierarchy_return: _HierarchyReturn | None = None
         # Cursor-placement poll budget for hierarchy goto (50ms per attempt);
         # an attribute so tests can shrink the give-up window.
         self._jump_poll_attempts: int = 200
@@ -1390,10 +1392,8 @@ class KorvidApp(App[None]):
             drill.clear()
             # Walking away also drops this pane's pending hierarchy-tree
             # return (issue #135) - Escape afterwards must not teleport
-            # back. Another pane's return is not ours to drop.
-            ret = self._hierarchy_return
-            if ret is not None and ret.pane is pane:
-                self._hierarchy_return = None
+            # back. Per-pane state: other panes' returns are untouched.
+            pane.hierarchy_return = None
 
         await self._navigate(message.view, message.namespace, drill_op=_abandon)
 
@@ -2291,8 +2291,7 @@ class KorvidApp(App[None]):
                 # The jump must stay reversible (issue #135): Escape on the
                 # target reopens this tree over the view it was opened from.
                 title, refs, namespace, scope = ctx
-                self._hierarchy_return = _HierarchyReturn(
-                    pane=self._pane,
+                self._pane.hierarchy_return = _HierarchyReturn(
                     origin_view=self._canonical_kind(self.current_kind),
                     origin_scope=self._pane.scope,
                     title=title,
@@ -2308,11 +2307,12 @@ class KorvidApp(App[None]):
     async def _reopen_hierarchy_return(self) -> bool:
         """Escape on a hierarchy jump target: rebuild the tree over its
         origin view, cursor on the picked node (issue #135). False when
-        there is no pending return or this Escape is not eligible to use
-        it — the return stays pending while another modal is open or a
-        different pane is focused, and is dropped only when its own pane
-        moved on (or the context/pane is gone)."""
-        ret = self._hierarchy_return
+        the focused pane has no pending return or this Escape is not
+        eligible to use it — the return stays pending while another modal
+        is open, and is dropped only when its pane moved on (kind change,
+        context switch)."""
+        pane = self._pane
+        ret = pane.hierarchy_return
         if ret is None:
             return False
         if len(self.screen_stack) > 1:
@@ -2320,16 +2320,14 @@ class KorvidApp(App[None]):
             # binding handles it) - the return stays pending for the next
             # Escape on the base view.
             return False
-        if self._pane is not ret.pane:
-            return False  # another pane's Escape never consumes the return
-        if self._ctx_switch_crossed(ret.epoch) or ret.pane not in self._panes:
-            self._hierarchy_return = None
+        if self._ctx_switch_crossed(ret.epoch):
+            pane.hierarchy_return = None
             return False
         if self._canonical_kind(self.current_kind) != ret.picked[0]:
-            # The owning pane navigated elsewhere; nothing to return to.
-            self._hierarchy_return = None
+            # The pane navigated elsewhere; nothing to return to.
+            pane.hierarchy_return = None
             return False
-        self._hierarchy_return = None  # consumed - never replayed
+        pane.hierarchy_return = None  # consumed - never replayed
         await self._navigate(ret.origin_view, ret.origin_scope)
         tree_root = build_hierarchy(
             ret.title,
