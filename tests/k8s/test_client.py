@@ -434,20 +434,25 @@ async def test_watch_405_api_exception_also_falls_back_to_polling() -> None:
 
 
 async def test_watch_non_405_api_status_error_still_raises() -> None:
-    """A non-405 ApiStatusError from the raw adapter propagates unchanged."""
+    """A non-405 ApiStatusError from the raw adapter propagates with its
+    status, reason and body intact - the body disambiguates same-status
+    responses (PDB denial vs APF throttling)."""
     client = KubeClient()
     meta = _deploy_meta()
     list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "9"}, "items": []}
-    fake_watch = _FakeWatch([], raise_at=0, raise_exc=ApiStatusError(410, "Gone"))
+    fake_watch = _FakeWatch(
+        [], raise_at=0, raise_exc=ApiStatusError(410, "Gone", '{"kind":"Status"}')
+    )
 
     with (
         patch.object(client, "_api", MagicMock()),
         patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
         patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
-        pytest.raises(ApiStatusError, match="Gone"),
+        pytest.raises(ApiStatusError, match="Gone") as excinfo,
     ):
         async for _ in client.watch_objects(meta, "default"):
             pass
+    assert excinfo.value.body == '{"kind":"Status"}'
 
 
 async def test_watch_non_405_api_exception_still_raises() -> None:

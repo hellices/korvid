@@ -487,7 +487,13 @@ class KubeClient(ReadOps, WriteOps):
             # fallback must catch both.
             status = int(getattr(exc, "status", 0) or 0)
             if status != 405:
-                raise ApiStatusError(status, str(getattr(exc, "reason", "") or "")) from exc
+                # Preserve .body: same-status disambiguation (PDB denial vs
+                # APF throttling) depends on it; ApiException carries one too.
+                raise ApiStatusError(
+                    status,
+                    str(getattr(exc, "reason", "") or ""),
+                    str(getattr(exc, "body", "") or ""),
+                ) from exc
             # Discovery advertised watch but the server refuses it: as
             # deterministic as it gets - poll instead of letting the
             # manager burn retries clearing and re-seeding the store.
