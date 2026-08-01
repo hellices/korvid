@@ -83,7 +83,7 @@ from korvid.k8s.helm import (
     HelmReleaseSummary,
     HelmRevisionSummary,
 )
-from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError
+from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, HelmPreviewUnsupported
 from korvid.k8s.logs import LogLine
 from korvid.k8s.managed import manager_of
 from korvid.k8s.metrics import MetricsPoller
@@ -6845,6 +6845,12 @@ class KorvidApp(App[None]):
 
         try:
             title, text = await asyncio.wait_for(_render(), _HELM_PREVIEW_TIMEOUT)
+        except HelmPreviewUnsupported:
+            # helm < 3.13 rejecting the preview-only --hide-secret flag is
+            # a preview incompatibility, not a verdict: the real command
+            # never carries the flag (see HelmCLI._dry_run).
+            logger.debug("helm preview failed; dialog opens without it", exc_info=True)
+            return None
         except HelmError as exc:
             return _HelmRenderFailure(str(exc))
         except Exception:

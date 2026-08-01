@@ -29,6 +29,12 @@ class HelmError(Exception):
     """A helm invocation failed (non-zero exit, timeout, or bad output)."""
 
 
+class HelmPreviewUnsupported(HelmError):
+    """This helm binary rejected a *preview-only* flag (`--hide-secret`,
+    helm 3.13+): the failure says nothing about the mutation itself, which
+    never carries the flag - callers must not treat it as a render verdict."""
+
+
 @dataclass(frozen=True)
 class ChartHit:
     """One row of `helm search repo -o json`."""
@@ -217,15 +223,27 @@ class HelmCLI:
 
         `--hide-secret` (helm 3.13+) keeps generated Secret manifests out of
         the preview - the approval dialog must not bypass korvid's masked
-        Secret display. On older helm the flag is unknown, the render fails,
-        and the dialog simply opens without a preview.
+        Secret display. On older helm the flag is unknown and the render
+        fails with `HelmPreviewUnsupported` so the dialog simply opens
+        without a preview (issue #139: only failures the *mutation* would
+        share may stop the approval flow).
         """
-        return await self._run(
+        return await self._dry_run(
             "install",
             *self._release_args(release, chart, namespace, version, values_file),
-            "--dry-run",
-            "--hide-secret",
         )
+
+    async def _dry_run(self, *args: str) -> str:
+        """One `--dry-run --hide-secret` render; the preview-only flag's
+        rejection is re-raised as `HelmPreviewUnsupported`."""
+        try:
+            return await self._run(*args, "--dry-run", "--hide-secret")
+        except HelmPreviewUnsupported:
+            raise
+        except HelmError as exc:
+            if "unknown flag" in str(exc) and "--hide-secret" in str(exc):
+                raise HelmPreviewUnsupported(str(exc)) from exc
+            raise
 
     async def upgrade(
         self,
@@ -264,7 +282,7 @@ class HelmCLI:
         args = self._release_args(release, chart, namespace, version, values_file)
         if reuse_values:
             args.append("--reuse-values")
-        return await self._run("upgrade", *args, "--dry-run", "--hide-secret")
+        return await self._dry_run("upgrade", *args)
 
     async def diff_upgrade(
         self,

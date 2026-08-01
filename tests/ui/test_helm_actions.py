@@ -23,7 +23,7 @@ from korvid.k8s.helm import (
     HelmRevisionSummary,
     release_uid,
 )
-from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, HelmRepo
+from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, HelmPreviewUnsupported, HelmRepo
 from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.confirm_screen import ConfirmScreen
 from korvid.ui.widgets.helm_chart_search import HelmChartSearchScreen
@@ -546,7 +546,11 @@ async def test_install_dry_run_render_failure_stops_before_approval(tmp_path: Pa
         assert "image.repository" in title  # helm's actionable stderr is shown
         await pilot.press("escape")  # cancel
         await until(pilot, lambda: len(app.screen_stack) == 1, label="dialog closed")
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: not any(w.group == "helm-write" and not w.is_finished for w in app.workers),
+            label="helm flow finished",
+        )
         assert not any(call[0] == "install" for call in helm.calls)
         assert not audit_path.exists()
 
@@ -636,6 +640,21 @@ async def test_install_render_failure_retry_preview_without_editing(tmp_path: Pa
         assert sum(1 for call in helm.calls if call[0] == "dry-run-install") == 2
 
 
+async def test_old_helm_hide_secret_rejection_does_not_block_approval(tmp_path: Path) -> None:
+    """helm < 3.13 rejects the preview-only `--hide-secret` flag: that is a
+    preview incompatibility, not a verdict on the install (the real command
+    never carries the flag) — approval must stay available."""
+    helm = FakeHelm()
+    helm.dry_run_excs = [HelmPreviewUnsupported("Error: unknown flag: --hide-secret")]
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _drive_install_to_preview(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        preview = app.screen._preview  # type: ignore[attr-defined]  # test peeks the dialog
+        assert preview is not None
+        assert any("preview unavailable" in line for line in preview)
+
+
 async def test_install_preview_environmental_failure_notes_unavailable(tmp_path: Path) -> None:
     """A non-helm preview failure (timeout etc.) must not block approval —
     but the dialog says the preview was unavailable instead of silently
@@ -689,7 +708,11 @@ async def test_upgrade_dry_run_render_failure_stops_before_approval(tmp_path: Pa
         await until(pilot, lambda: isinstance(app.screen, PickScreen), label="failure dialog")
         await pilot.press("escape")
         await until(pilot, lambda: len(app.screen_stack) == 1, label="cancelled")
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: not any(w.group == "helm-write" and not w.is_finished for w in app.workers),
+            label="helm flow finished",
+        )
         assert not any(call[0] == "upgrade" for call in helm.calls)
         assert not audit_path.exists()
 

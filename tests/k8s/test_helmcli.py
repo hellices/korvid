@@ -13,7 +13,14 @@ from unittest import mock
 
 import pytest
 
-from korvid.k8s.helmcli import ChartHit, HelmCLI, HelmError, HelmRepo, find_helm
+from korvid.k8s.helmcli import (
+    ChartHit,
+    HelmCLI,
+    HelmError,
+    HelmPreviewUnsupported,
+    HelmRepo,
+    find_helm,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -126,6 +133,43 @@ async def test_dry_run_install_appends_dry_run_flag() -> None:
     argv = execute.await_args_list[0].args[0]
     assert "--dry-run" in argv
     assert argv[1] == "install"
+
+
+async def test_dry_run_hide_secret_rejection_raises_preview_unsupported() -> None:
+    """helm < 3.13 does not know the preview-only `--hide-secret` flag: its
+    rejection must surface as HelmPreviewUnsupported so callers never
+    mistake it for a render verdict (issue #139) - the real install and
+    upgrade never carry the flag."""
+    cli, execute = _cli()
+    execute.return_value = (1, "", "Error: unknown flag: --hide-secret\n")
+    with (
+        mock.patch("korvid.k8s.helmcli._execute", execute),
+        pytest.raises(HelmPreviewUnsupported, match="hide-secret"),
+    ):
+        await cli.dry_run_install("web", "bitnami/nginx", "default")
+
+
+async def test_dry_run_upgrade_hide_secret_rejection_raises_preview_unsupported() -> None:
+    cli, execute = _cli()
+    execute.return_value = (1, "", "Error: unknown flag: --hide-secret\n")
+    with (
+        mock.patch("korvid.k8s.helmcli._execute", execute),
+        pytest.raises(HelmPreviewUnsupported, match="hide-secret"),
+    ):
+        await cli.dry_run_upgrade("web", "bitnami/nginx", "default")
+
+
+async def test_dry_run_render_error_stays_a_plain_helm_error() -> None:
+    """A real render failure must NOT be softened to the preview-only
+    class - it is the exact error the mutation would produce."""
+    cli, execute = _cli()
+    execute.return_value = (1, "", "Error: execution error: 'image.repository' must be set\n")
+    with (
+        mock.patch("korvid.k8s.helmcli._execute", execute),
+        pytest.raises(HelmError, match=r"image\.repository") as excinfo,
+    ):
+        await cli.dry_run_install("web", "bitnami/nginx", "default")
+    assert not isinstance(excinfo.value, HelmPreviewUnsupported)
 
 
 async def test_install_with_values_file() -> None:
