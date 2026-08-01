@@ -328,6 +328,152 @@ async def test_watch_objects_cluster_scoped_kind_ignores_namespace() -> None:
 
 
 # ---------------------------------------------------------------------------
+# watch_objects — list-only kinds poll instead of watching (issue #141)
+# ---------------------------------------------------------------------------
+
+
+def _pkg_meta() -> ResourceMeta:
+    return ResourceMeta(
+        "PackageManifest",
+        "packagemanifests",
+        "packages.operators.coreos.com",
+        "v1",
+        True,
+        watchable=False,
+    )
+
+
+async def _take(gen: Any, n: int) -> list[tuple[str, str]]:
+    """First *n* (event, name) pairs from an endless watch generator."""
+    out: list[tuple[str, str]] = []
+    async for ev, s in gen:
+        out.append((ev, s.name))
+        if len(out) >= n:
+            break
+    return out
+
+
+async def test_unwatchable_kind_polls_lists_and_diffs_instead_of_watching() -> None:
+    """A kind discovered without the watch verb (OLM packageserver) must be
+    kept fresh by periodic re-LIST diffing: upserts for present rows, a
+    DELETED for vanished ones - and the Watch API is never touched."""
+    client = KubeClient()
+    meta = _pkg_meta()
+    snapshots = [
+        {"metadata": {}, "items": [_generic("etcd"), _generic("kafka")]},
+        {"metadata": {}, "items": [_generic("etcd"), _generic("postgres")]},
+    ]
+    request_json_mock = AsyncMock(side_effect=snapshots)
+    watch_factory = MagicMock()
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+        patch("korvid.k8s.client.k8s_watch.Watch", watch_factory),
+    ):
+        events = await _take(client.watch_objects(meta, "olm"), 5)
+
+    assert events[:2] == [("ADDED", "etcd"), ("ADDED", "kafka")]
+    # Second LIST round: upserts for present rows, DELETED for the vanished one.
+    assert ("ADDED", "postgres") in events[2:]
+    assert ("DELETED", "kafka") in events[2:]
+    watch_factory.assert_not_called()
+
+
+async def test_watch_405_falls_back_to_list_polling() -> None:
+    """A server that advertises watch but rejects it with 405 (aggregated
+    API drift) degrades to polling instead of dying in the retry loop.
+    The raw-watch adapter surfaces the refusal as ApiStatusError (via
+    _raise_for_status), so that exact type must be caught."""
+    client = KubeClient()
+    meta = _deploy_meta()
+    snapshots = [
+        {"metadata": {"resourceVersion": "1"}, "items": [_generic("dep-a")]},
+        {"metadata": {}, "items": [_generic("dep-a"), _generic("dep-b")]},
+    ]
+    request_json_mock = AsyncMock(side_effect=snapshots)
+    fake_watch = _FakeWatch([], raise_at=0, raise_exc=ApiStatusError(405, "Method Not Allowed"))
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        events = await _take(client.watch_objects(meta, "default"), 3)
+
+    assert events[0] == ("ADDED", "dep-a")
+    assert ("ADDED", "dep-b") in events[1:]
+
+
+async def test_watch_405_api_exception_also_falls_back_to_polling() -> None:
+    """The kubernetes client's own ApiException(405) takes the same
+    fallback (both exception types cross the watch stream)."""
+    client = KubeClient()
+    meta = _deploy_meta()
+    snapshots = [
+        {"metadata": {"resourceVersion": "1"}, "items": [_generic("dep-a")]},
+        {"metadata": {}, "items": [_generic("dep-a"), _generic("dep-b")]},
+    ]
+    request_json_mock = AsyncMock(side_effect=snapshots)
+    fake_watch = _FakeWatch(
+        [], raise_at=0, raise_exc=ApiException(status=405, reason="Method Not Allowed")
+    )
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+        patch.object(client_mod, "LIST_POLL_INTERVAL", 0.0),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        events = await _take(client.watch_objects(meta, "default"), 3)
+
+    assert events[0] == ("ADDED", "dep-a")
+    assert ("ADDED", "dep-b") in events[1:]
+
+
+async def test_watch_non_405_api_status_error_still_raises() -> None:
+    """A non-405 ApiStatusError from the raw adapter propagates with its
+    status, reason and body intact - the body disambiguates same-status
+    responses (PDB denial vs APF throttling)."""
+    client = KubeClient()
+    meta = _deploy_meta()
+    list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "9"}, "items": []}
+    fake_watch = _FakeWatch(
+        [], raise_at=0, raise_exc=ApiStatusError(410, "Gone", '{"kind":"Status"}')
+    )
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+        pytest.raises(ApiStatusError, match="Gone") as excinfo,
+    ):
+        async for _ in client.watch_objects(meta, "default"):
+            pass
+    assert excinfo.value.body == '{"kind":"Status"}'
+
+
+async def test_watch_non_405_api_exception_still_raises() -> None:
+    """Only the deterministic 405 falls back to polling: other watch errors
+    keep propagating so the WatchManager's retry/report loop stays in charge."""
+    client = KubeClient()
+    meta = _deploy_meta()
+    list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "9"}, "items": []}
+    fake_watch = _FakeWatch([], raise_at=0, raise_exc=ApiException(status=500, reason="boom"))
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+        pytest.raises(ApiStatusError, match="boom"),
+    ):
+        async for _ in client.watch_objects(meta, "default"):
+            pass
+
+
+# ---------------------------------------------------------------------------
 # get_object
 # ---------------------------------------------------------------------------
 

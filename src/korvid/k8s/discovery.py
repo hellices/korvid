@@ -20,6 +20,10 @@ class ResourceMeta:
     #: (e.g. the helm browser reads Secrets). Permission probes target this;
     #: None means the view has no backing API resource to probe.
     backing: tuple[str, str] | None = None
+    #: False for kinds whose server offers `list` but not `watch` (aggregated
+    #: APIs like OLM's packageserver, issue #141): the watch source keeps
+    #: them fresh by periodic re-LIST diffing instead of a watch stream.
+    watchable: bool = True
 
     @property
     def api_base(self) -> str:

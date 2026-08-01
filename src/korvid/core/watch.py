@@ -31,6 +31,13 @@ def _is_forbidden(exc: Exception) -> bool:
     return isinstance(exc, ApiStatusError) and exc.status == 403
 
 
+def _is_method_not_allowed(exc: Exception) -> bool:
+    """405: the endpoint exists but will never serve this verb — as
+    deterministic as a 403 (issue #141), so retries gain nothing. Unlike a
+    403 the rows a successful LIST already delivered stay valid."""
+    return isinstance(exc, ApiStatusError) and exc.status == 405
+
+
 class WatchManager:
     def __init__(
         self,
@@ -108,7 +115,7 @@ class WatchManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # report + retry, never die silently
-                if _is_forbidden(exc):
+                if _is_forbidden(exc) or _is_method_not_allowed(exc):
                     return exc
                 failures += 1
                 logger.exception(

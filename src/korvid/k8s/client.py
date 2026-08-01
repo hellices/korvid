@@ -44,6 +44,11 @@ from korvid.k8s.writes import WriteOps
 
 logger = logging.getLogger(__name__)
 
+#: Re-LIST cadence for kinds without a watch endpoint (OLM's packageserver,
+#: issue #141): catalog-ish content changes rarely, so a slow poll keeps the
+#: view fresh without hammering an aggregated API.
+LIST_POLL_INTERVAL = 30.0
+
 
 def _path_segment(value: str) -> str:
     """Percent-encode *value* for safe use as a single URL path segment.
@@ -419,6 +424,13 @@ class KubeClient(ReadOps, WriteOps):
         except k8s_client.exceptions.ApiException as exc:
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 
+    def _list_path(self, meta: ResourceMeta, namespace: str | None) -> str:
+        """LIST/WATCH path for a kind; cluster-scoped kinds have no
+        namespaced path regardless of scope."""
+        if namespace is not None and meta.namespaced:
+            return f"{meta.api_base}/namespaces/{_path_segment(namespace)}/{meta.plural}"
+        return f"{meta.api_base}/{meta.plural}"
+
     async def watch_objects(
         self, meta: ResourceMeta, namespace: str | None
     ) -> AsyncIterator[tuple[str, GenericSummary]]:
@@ -427,22 +439,31 @@ class KubeClient(ReadOps, WriteOps):
         Contract mirrors watch_pods: pre-existing items are yielded as ADDED
         first, then live watch events from the snapshot resourceVersion.
         ApiException is wrapped as ApiStatusError at both the LIST and watch phases.
+
+        Kinds whose server offers no watch (``meta.watchable`` False, or a
+        server that advertises watch and then rejects it with 405 - OLM's
+        packageserver, issue #141) degrade to periodic re-LIST diffing: the
+        stream stays alive and incremental, so the view keeps rendering
+        without the clear/retry/die loop.
         """
         if self._api is None:
             raise RuntimeError("connect() first")
 
         # LIST phase --------------------------------------------------------
-        # Cluster-scoped kinds have no namespaced path regardless of scope.
-        if namespace is not None and meta.namespaced:
-            list_path = f"{meta.api_base}/namespaces/{_path_segment(namespace)}/{meta.plural}"
-        else:
-            list_path = f"{meta.api_base}/{meta.plural}"
-
+        list_path = self._list_path(meta, namespace)
         data = await self._request_json(list_path)
 
         resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
+        known: dict[str, GenericSummary] = {}
         for item in data.get("items", []):
-            yield ("ADDED", self._object_summary(meta, item))
+            summary = self._object_summary(meta, item)
+            known[f"{summary.namespace}/{summary.name}"] = summary
+            yield ("ADDED", summary)
+
+        if not meta.watchable:
+            async for event in self._poll_objects(meta, list_path, known):
+                yield event
+            return
 
         # Watch phase -------------------------------------------------------
         watch_kwargs: dict[str, Any] = {}
@@ -459,8 +480,49 @@ class KubeClient(ReadOps, WriteOps):
                         str(event["type"]),
                         self._object_summary(meta, event["raw_object"]),
                     )
-        except k8s_client.exceptions.ApiException as exc:
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+        except (k8s_client.exceptions.ApiException, ApiStatusError) as exc:
+            # The raw-watch adapter surfaces HTTP errors as ApiStatusError
+            # (via _raise_for_status); the kubernetes client's own paths
+            # raise ApiException - both carry .status/.reason, and the 405
+            # fallback must catch both.
+            status = int(getattr(exc, "status", 0) or 0)
+            if status != 405:
+                # Preserve .body: same-status disambiguation (PDB denial vs
+                # APF throttling) depends on it; ApiException carries one too.
+                raise ApiStatusError(
+                    status,
+                    str(getattr(exc, "reason", "") or ""),
+                    str(getattr(exc, "body", "") or ""),
+                ) from exc
+            # Discovery advertised watch but the server refuses it: as
+            # deterministic as it gets - poll instead of letting the
+            # manager burn retries clearing and re-seeding the store.
+            logger.info("%s rejects watch (405); falling back to LIST polling", meta.plural)
+            async for event in self._poll_objects(meta, list_path, known):
+                yield event
+
+    async def _poll_objects(
+        self, meta: ResourceMeta, list_path: str, known: dict[str, GenericSummary]
+    ) -> AsyncIterator[tuple[str, GenericSummary]]:
+        """Endless re-LIST diff stream for kinds without a watch endpoint.
+
+        Each round upserts every present row (ADDED doubles as MODIFIED in
+        the store) and emits DELETED for rows that vanished since the last
+        round, so the table stays incremental - never cleared. *known* is
+        seeded with the initial LIST's rows.
+        """
+        while True:
+            await asyncio.sleep(LIST_POLL_INTERVAL)
+            data = await self._request_json(list_path)
+            current: dict[str, GenericSummary] = {}
+            for item in data.get("items", []):
+                summary = self._object_summary(meta, item)
+                current[f"{summary.namespace}/{summary.name}"] = summary
+                yield ("ADDED", summary)
+            for key, old in known.items():
+                if key not in current:
+                    yield ("DELETED", old)
+            known = current
 
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         """LIST any resource kind and return GenericSummary items.
@@ -470,11 +532,7 @@ class KubeClient(ReadOps, WriteOps):
         """
         if self._api is None:
             raise RuntimeError("connect() first")
-        if namespace is not None and meta.namespaced:
-            list_path = f"{meta.api_base}/namespaces/{_path_segment(namespace)}/{meta.plural}"
-        else:
-            list_path = f"{meta.api_base}/{meta.plural}"
-        data = await self._request_json(list_path)
+        data = await self._request_json(self._list_path(meta, namespace))
         return [self._object_summary(meta, item) for item in data.get("items", [])]
 
     async def get_object(
@@ -1384,7 +1442,11 @@ class KubeClient(ReadOps, WriteOps):
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 
     async def discover_resources(self) -> list[ResourceMeta]:
-        """Return every list+watch-able resource from /api/v1 and /apis.
+        """Return every LIST-able resource from /api/v1 and /apis.
+
+        Kinds without a watch verb (aggregated APIs like OLM's
+        packageserver) are included with ``watchable=False`` — the watch
+        source keeps them fresh by polling (issue #141).
 
         Group version lists are fetched concurrently — sequential fetching adds
         one RTT per API group and dominates startup on clusters with many CRDs.
@@ -1457,7 +1519,7 @@ def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> l
         verbs: list[str] = r.get("verbs", [])
         if not isinstance(name, str) or not isinstance(kind, str) or namespaced is None:
             continue  # malformed entry must not kill discovery
-        if "/" in name or "list" not in verbs or "watch" not in verbs:
+        if "/" in name or "list" not in verbs:
             continue
         out.append(
             ResourceMeta(
@@ -1467,6 +1529,9 @@ def _parse_resource_list(data: dict[str, Any], *, group: str, version: str) -> l
                 version,
                 bool(namespaced),
                 tuple(r.get("shortNames") or ()),
+                # list-only aggregated APIs (OLM's packageserver) stay
+                # discoverable; the watch source polls them (issue #141).
+                watchable="watch" in verbs,
             )
         )
     return out
