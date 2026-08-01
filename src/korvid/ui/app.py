@@ -1378,13 +1378,17 @@ class KorvidApp(App[None]):
         # The stack clear happens inside the navigation lock so a concurrent
         # drill (agent path) can never interleave between clear and the
         # kind/scope transition, which would strand a filterless child view.
-        await self._navigate(message.view, message.namespace, drill_op=self._abandon_drill_context)
+        # The stack is bound *now*: a focus flip while this waits for the
+        # lock must not redirect the clear to another pane's drill.
+        drill = self._drill
 
-    def _abandon_drill_context(self) -> None:
-        """Explicit navigation walks away from drill *and* hierarchy-return
-        state (issue #135) - Escape afterwards must not teleport back."""
-        self._drill.clear()
-        self._hierarchy_return = None
+        def _abandon() -> None:
+            drill.clear()
+            # Walking away also drops any pending hierarchy-tree return
+            # (issue #135) - Escape afterwards must not teleport back.
+            self._hierarchy_return = None
+
+        await self._navigate(message.view, message.namespace, drill_op=_abandon)
 
     def _default_scope_for(self, view: str | None, namespace: str | None) -> str | None:
         """Catalog entries live in catalog namespaces (e.g. "olm"), not the
