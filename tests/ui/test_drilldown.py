@@ -192,6 +192,29 @@ async def test_escape_pops_one_drill_level() -> None:
         assert table.row_count == 2  # unfiltered deployments view again
 
 
+async def test_escape_that_closes_a_modal_does_not_pop_a_drill_level() -> None:
+    """Escape belongs to the modal on top: closing Help over a drilled
+    view must not also silently pop the drill level underneath."""
+    app = make_app(_default_data())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        assert app.current_kind == "replicasets"
+        await pilot.press("question_mark")  # help modal over the drill
+        await pilot.pause(0.2)
+        assert len(app.screen_stack) > 1
+        await pilot.press("escape")  # closes help - the drill must survive
+        await pilot.pause(0.2)
+        assert len(app.screen_stack) == 1
+        assert app.current_kind == "replicasets"
+        await pilot.press("escape")  # now Escape pops the drill as usual
+        await pilot.pause(0.2)
+        assert app.current_kind == "deployments"
+
+
 async def test_command_navigation_clears_drill_state() -> None:
     app = make_app(_default_data())
     async with app.run_test() as pilot:

@@ -4126,6 +4126,11 @@ class KorvidApp(App[None]):
             return
         if event.key != "escape":
             return
+        if len(self.screen_stack) > 1:
+            # A modal owns this Escape (its close binding handles it):
+            # neither a drill pop nor a hierarchy return may piggyback on
+            # the keystroke that merely dismissed Help or a dialog.
+            return
         filter_bar = self._filter_bar
         command_bar = self._command_bar
         namespace_picker = self._namespace_picker
