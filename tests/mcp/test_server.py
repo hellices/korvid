@@ -207,18 +207,22 @@ async def test_get_is_refused_with_405_instead_of_an_sse_stream() -> None:
 
 
 async def test_shutdown_completes_while_a_client_holds_a_get_connection() -> None:
-    """Graceful shutdown must finish even when a host has issued a GET.
+    """Graceful shutdown must finish even while a GET connection is open.
 
     Regression for issue #136: the SDK served GET as a never-ending SSE
     stream, uvicorn's graceful shutdown waited forever on the connection,
     and the controller's hard cancel tore down the stream mid-request —
     "Exception in ASGI application" (CancelledError) on the TUI's terminal.
+    The GET is held open (response headers received, body still streaming)
+    while shutdown is requested, so the old behavior fails this test by
+    timing out instead of merely racing the connection close.
     """
     import httpx
 
     server = make_server(port=0)
     task = asyncio.create_task(server.run())
     port = await asyncio.wait_for(server.wait_started(), timeout=10)
+    response_started = asyncio.Event()
 
     async def issue_get() -> None:
         async with (
@@ -229,22 +233,48 @@ async def test_shutdown_completes_while_a_client_holds_a_get_connection() -> Non
                 headers={"Accept": "text/event-stream"},
             ) as resp,
         ):
+            response_started.set()
             async for _ in resp.aiter_lines():  # drains nothing on a 405
                 pass
 
     get_task = asyncio.create_task(issue_get())
     try:
-        await asyncio.wait_for(get_task, timeout=10)
+        await asyncio.wait_for(response_started.wait(), timeout=10)
         server.request_shutdown()
         # Must complete gracefully — no hard-cancel fallback needed.
         await asyncio.wait_for(task, timeout=5)
         assert task.done()
+        await asyncio.wait_for(get_task, timeout=10)
     finally:
         if not get_task.done():
             get_task.cancel()
         server.request_shutdown()
         if not task.done():
             await asyncio.wait_for(task, timeout=10)
+
+
+async def test_hostile_origin_get_is_rejected_not_answered_405() -> None:
+    """DNS-rebinding protection must run before the GET refusal: a
+    non-loopback Origin on a GET is refused by the transport security
+    check (403), not acknowledged with the generic 405."""
+    import httpx
+
+    server = make_server(port=0)
+    task = asyncio.create_task(server.run())
+    try:
+        port = await asyncio.wait_for(server.wait_started(), timeout=10)
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"http://127.0.0.1:{port}/mcp/",
+                headers={
+                    "Origin": "http://evil.example",
+                    "Accept": "text/event-stream",
+                },
+            )
+        assert resp.status_code == 403
+    finally:
+        server.request_shutdown()
+        await asyncio.wait_for(task, timeout=10)
 
 
 async def test_hostile_origin_is_rejected() -> None:
