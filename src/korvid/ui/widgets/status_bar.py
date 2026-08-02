@@ -4,7 +4,7 @@ Long operations publish transient labels through the app's
 ``_progress_labels`` machinery; while any label is live the bar animates a
 small ASCII corvid next to it so a 20s helm dry-run visibly *moves*
 instead of reading as frozen. Frame cycling is a pure function
-(:func:`bird_frame`) so tests never assert on wall-clock timing.
+(`bird_frame`) so tests never assert on wall-clock timing.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ BIRD_INTERVAL = 0.5
 
 
 def bird_frame(tick: int) -> str:
-    """The frame for one animation tick; cycles through :data:`BIRD_FRAMES`."""
+    """The frame for one animation tick; cycles through `BIRD_FRAMES`."""
     return BIRD_FRAMES[tick % len(BIRD_FRAMES)]
 
 
