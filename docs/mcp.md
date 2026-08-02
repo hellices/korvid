@@ -50,6 +50,33 @@ claude mcp add --transport http korvid http://127.0.0.1:7878/mcp
 {"context_servers": {"korvid": {"url": "http://127.0.0.1:7878/mcp"}}}
 ```
 
+## Follow mode
+
+External hosts overwhelmingly call the *read* tools (those return the data
+they need), which by themselves move nothing on screen. **Follow mode**
+mirrors those reads in the TUI so you can watch the assistant work:
+
+| External read | Mirrored as |
+|---|---|
+| `list_resources` | navigate to that view/scope |
+| `get_resource`, `get_events` | describe pane on that object |
+| `get_logs` | log pane on that pod/container |
+| `diagnose_pod` | describe pane on the pod |
+| `list_operators` | navigate to subscriptions |
+
+Off by default — screen hijacking mid-task is worse than invisibility.
+Enable at startup with `mcp: {follow: true}` in the config, or live with
+`:mcp follow on|off` (bare `:mcp follow` toggles; bare `:mcp` reports both
+server and follow state). While active, the status bar's MCP label shows
+`·follow`.
+
+Mirroring is fire-and-forget: the MCP response never waits on (or fails
+with) the UI action, a failed read is never mirrored, and a mirror never
+opens a screen over an approval dialog — approvals are confirmed only by
+your keystrokes. With follow **off**, each external read still surfaces as
+a transient toast (`client-name: get_logs api-1 (ns prod)`), so nothing
+reads your cluster invisibly.
+
 ## External write proposals
 
 Off by default.  With

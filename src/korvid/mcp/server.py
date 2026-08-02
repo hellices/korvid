@@ -44,7 +44,9 @@ from starlette.types import Receive, Scope, Send
 
 from korvid.core.audit import interprocess_lock
 from korvid.core.mcp import MCPControllerBase
-from korvid.tools.executor import PROPOSAL_TOOL_NAMES, ToolExecutor
+from korvid.tools.executor import PROPOSAL_TOOL_NAMES, ToolExecutor, UIBridge
+from korvid.tools.follow import mirror_read, read_summary
+from korvid.tools.registry import TOOLS_BY_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +140,9 @@ class KorvidMCPServer:
         port: int = DEFAULT_MCP_PORT,
         endpoint_path: Path | None = None,
         capability_token: str | None = None,
+        ui: UIBridge | None = None,
+        follow_enabled: Callable[[], bool] | None = None,
+        note_activity: Callable[[str], None] | None = None,
     ) -> None:
         self._executor = executor
         self._tools = list(tools)
@@ -149,6 +154,16 @@ class KorvidMCPServer:
         #: echoing it has proven local same-user file access — the same trust
         #: level as the kubeconfig itself. None means proposals are disabled.
         self._capability_token = capability_token
+        #: MCP follow mode (issue #153): mirror external cluster reads in
+        #: the TUI. All three are optional wiring from the composition root;
+        #: without them reads stay response-only (the pre-#153 behavior).
+        self._ui = ui
+        self._follow_enabled = follow_enabled
+        self._note_activity = note_activity
+        #: Strong refs to in-flight fire-and-forget mirror tasks (asyncio
+        #: keeps only weak refs; an unreferenced task can be GC-collected
+        #: mid-flight).
+        self._follow_tasks: set[asyncio.Task[Any]] = set()
         #: Transport is stateless (no persistent MCP session), so proposals
         #: are keyed to the server run: one id per start, injected
         #: server-side and never taken from the caller. Every caller of one
@@ -208,7 +223,41 @@ class KorvidMCPServer:
             args["_client_name"] = client_name
             args["_client_version"] = client_version
         result = await self._executor.execute(name, args)
+        self._surface_read(name, args, result)
         return [types.TextContent(type="text", text=result)]
+
+    def _surface_read(self, name: str, args: dict[str, Any], result: str) -> None:
+        """Follow mode (issue #153): make external cluster reads visible.
+
+        With follow on and a successful read, mirror it in the TUI as a
+        fire-and-forget task - the MCP response neither waits on nor fails
+        with the UI action. Otherwise (follow off, no bridge, or a failed
+        read that must not steer the screen to a view it never loaded),
+        degrade to a transient activity note so the read is still seen.
+        ``ui_only`` tools already move the screen visibly; surfacing them
+        again would be noise.
+        """
+        tool = TOOLS_BY_NAME.get(name)
+        if tool is None or tool.effect != "cluster_read":
+            return
+        ui = self._ui
+        if (
+            ui is not None
+            and self._follow_enabled is not None
+            and self._follow_enabled()
+            and not result.startswith("ERROR:")
+        ):
+            task = asyncio.create_task(mirror_read(ui, name, args))
+            self._follow_tasks.add(task)
+            task.add_done_callback(self._follow_tasks.discard)
+            return
+        if self._note_activity is None:
+            return
+        client = self._client_info()[0] or "mcp"
+        try:
+            self._note_activity(f"{client}: {read_summary(name, args)}")
+        except Exception:  # display-only: never fail the tool call over it
+            logger.debug("MCP activity note failed", exc_info=True)
 
     def _authorize_proposal_call(self, args: dict[str, Any]) -> str | None:
         """Capability check for the write-proposal tools; error text or None.

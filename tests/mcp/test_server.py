@@ -20,6 +20,7 @@ from korvid.mcp.server import (
     default_endpoint_path,
 )
 from korvid.tools.executor import PROPOSAL_TOOLS, READ_TOOLS, UI_TOOLS, ToolExecutor
+from tests.tools.test_executor import FakeBridge
 
 
 class RecordingExecutor(ToolExecutor):
@@ -137,6 +138,108 @@ async def test_call_tool_rejects_names_outside_configured_surface() -> None:
         content = await server.call_tool(name, {"kind": "pods", "name": "x"})
         assert content[0].text == f"ERROR: tool not available over MCP: {name}"
     assert executor.calls == []
+
+
+# ---------------------------------------------------------------------------
+# MCP follow mode + activity notes (issue #153)
+# ---------------------------------------------------------------------------
+
+
+def make_follow_server(
+    executor: ToolExecutor,
+    ui: FakeBridge | None,
+    *,
+    follow: bool = True,
+    note_activity: Any = None,
+) -> KorvidMCPServer:
+    return KorvidMCPServer(
+        executor,
+        READ_TOOLS + UI_TOOLS,
+        port=0,
+        ui=ui,
+        follow_enabled=lambda: follow,
+        note_activity=note_activity,
+    )
+
+
+async def _drain_follow(server: KorvidMCPServer) -> None:
+    while server._follow_tasks:
+        await asyncio.gather(*server._follow_tasks)
+
+
+async def test_follow_mirrors_a_cluster_read_without_blocking_the_response() -> None:
+    executor = RecordingExecutor()
+    ui = FakeBridge()
+    server = make_follow_server(executor, ui)
+    content = await server.call_tool("get_logs", {"pod": "api-1", "namespace": "prod"})
+    assert content[0].text == "ok"  # the MCP response never waits on the UI
+    await _drain_follow(server)
+    assert ui.calls == [("open_logs", {"pod": "api-1", "namespace": "prod", "container": None})]
+
+
+async def test_follow_off_notes_activity_instead_of_mirroring() -> None:
+    executor = RecordingExecutor()
+    ui = FakeBridge()
+    notes: list[str] = []
+    server = make_follow_server(executor, ui, follow=False, note_activity=notes.append)
+    await server.call_tool("get_logs", {"pod": "api-1", "namespace": "prod"})
+    await _drain_follow(server)
+    assert ui.calls == []
+    assert len(notes) == 1
+    assert "get_logs" in notes[0]
+    assert "api-1" in notes[0]
+
+
+async def test_failed_read_is_not_mirrored() -> None:
+    """Navigating the TUI to a view whose read just failed would mislead;
+    the failure is still surfaced as activity."""
+    executor = RecordingExecutor()
+    executor.result = "ERROR: boom"
+    ui = FakeBridge()
+    notes: list[str] = []
+    server = make_follow_server(executor, ui, note_activity=notes.append)
+    await server.call_tool("list_resources", {"kind": "pods"})
+    await _drain_follow(server)
+    assert ui.calls == []
+    assert len(notes) == 1
+
+
+async def test_ui_only_tools_are_neither_mirrored_nor_noted() -> None:
+    """navigate/set_filter already move the screen visibly - double
+    surfacing them would be noise."""
+    executor = RecordingExecutor()
+    ui = FakeBridge()
+    notes: list[str] = []
+    server = make_follow_server(executor, ui, note_activity=notes.append)
+    await server.call_tool("navigate", {"view": "pods"})
+    await _drain_follow(server)
+    assert ui.calls == []  # the executor handled it; no extra mirror
+    assert notes == []
+
+
+async def test_follow_without_a_bridge_degrades_to_activity_notes() -> None:
+    executor = RecordingExecutor()
+    notes: list[str] = []
+    server = make_follow_server(executor, None, note_activity=notes.append)
+    await server.call_tool("list_resources", {"kind": "pods"})
+    await _drain_follow(server)
+    assert len(notes) == 1
+
+
+async def test_mirror_failure_never_breaks_the_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class ExplodingBridge(FakeBridge):
+        async def agent_open_logs(
+            self, pod: str, namespace: str, container: str | None = None
+        ) -> str:
+            raise RuntimeError("UI gone")
+
+    executor = RecordingExecutor()
+    server = make_follow_server(executor, ExplodingBridge())
+    content = await server.call_tool("get_logs", {"pod": "x", "namespace": "d"})
+    assert content[0].text == "ok"
+    await _drain_follow(server)  # raises nothing: fire-and-forget swallows
 
 
 # ---------------------------------------------------------------------------
