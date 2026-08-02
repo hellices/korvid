@@ -599,3 +599,81 @@ async def test_pop_abandons_when_the_view_changed_during_prewarm() -> None:
         assert await pop is True  # consumed, but did not override
         await pilot.pause(0.1)
         assert app.current_kind == "pods"  # the newer command won
+
+
+async def test_drill_abandons_when_a_same_target_navigation_lands_during_prewarm() -> None:
+    """`:view deployments` while already on deployments is still the newer
+    command (it clears drill state): a (kind, scope) tuple comparison alone
+    cannot see it - the per-pane navigation generation must."""
+    app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 0.3})
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        drill = asyncio.create_task(app._drill_into("default", "web"))
+        await until(
+            pilot,
+            lambda: ("replicasets", "default") in app.watch_manager.active,
+            label="prewarm started",
+        )
+        await app.on_navigate_command(NavigateCommand("deployments", None))  # same target
+        result = await drill
+        assert result is not None
+        assert "abandoned" in result
+        assert app.current_kind == "deployments"
+        assert not app._pane.drill.active  # the newer command's clear stands
+
+
+async def test_pane_closed_during_prewarm_reports_abandonment() -> None:
+    """agent_drill_down reports success on a None result: a pane closed
+    during the pre-warm must yield an accurate abandonment, not a false
+    'drilled into ...' with a breadcrumb."""
+    app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 0.3})
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        await pilot.press("ctrl+w")
+        await pilot.press("v")  # split so a pane *can* close
+        await pilot.pause(0.1)
+        drill = asyncio.create_task(app._drill_into("default", "web"))
+        await until(
+            pilot,
+            lambda: ("replicasets", "default") in app.watch_manager.active,
+            label="prewarm started",
+        )
+        await pilot.press("ctrl+w")
+        await pilot.press("q")  # close the initiating pane mid-wait
+        result = await drill
+        assert result is not None
+        assert "abandoned" in result
+        # the pre-warmed stream was reaped, not leaked
+        await until(
+            pilot,
+            lambda: ("replicasets", "default") not in app.watch_manager.active,
+            label="prewarm reaped",
+        )
+
+
+async def test_overlapping_drills_do_not_skip_each_others_prewarm() -> None:
+    """Two drills racing to the same (kind, scope): the second must wait on
+    its *own* readiness instead of treating the first's in-flight pre-warm
+    watch as warm - skipping recreated the empty-view flash."""
+    renders: list[tuple[str, int]] = []
+    app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 0.25})
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        _spy_renders(app, renders)
+        first = asyncio.create_task(app._drill_into("default", "web"))
+        await until(
+            pilot,
+            lambda: ("replicasets", "default") in app.watch_manager.active,
+            label="first prewarm started",
+        )
+        second = asyncio.create_task(app._drill_into("default", "api"))
+        results = [await first, await second]
+        await pilot.pause(0.1)
+        assert app.current_kind == "replicasets"
+        assert ("replicasets", 0) not in renders  # neither drill flashed empty
+        # exactly one drill landed; the loser abandoned with an accurate result
+        assert sum(1 for r in results if r is None) == 1
+        assert any(r is not None and "abandoned" in r for r in results)
