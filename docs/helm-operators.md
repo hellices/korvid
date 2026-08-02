@@ -68,6 +68,7 @@ When a `helm` binary is on `PATH`, the browser gains write actions
 |---|---|---|
 | `i` | `:helm` | Install: search-first chart picker (`helm search repo` per keyword), release/version/namespace wizard, optional values in `$EDITOR` |
 | `u` | `:helm` | Upgrade the selected release — same wizard, pinned to that release; the picker pre-searches the release's chart name; defaults to reusing the release's current values (`--reuse-values`) |
+| `F1` | install/upgrade wizard | The chart's README in a scrollable pager (`helm show readme`) |
 | `r` | revision drill-down | Roll back the release to the selected revision |
 | `Ctrl-D` | `:helm` | Uninstall the selected release (`helm uninstall`) |
 | `Ctrl-R` | chart picker | Manage chart repositories: list configured repos, add one (name + URL), refresh indexes (`helm repo update`) |
@@ -81,6 +82,19 @@ Pressing Enter on a repository row browses that repo's charts: the
 picker underneath scopes its search to the repo (the `repoName/`
 prefix, typed for you) — the natural "what does this repo serve?"
 step right after adding one.
+
+Installing a chart you don't know is no longer a blind flight: when
+the chart ships a `values.schema.json`, the wizard lists its
+**required values** (field path plus type or valid choices — e.g.
+`mode: daemonset | deployment | statefulset`) before you install, and
+`F1` opens the chart's README without leaving the wizard.  Choosing
+"edit in `$EDITOR`" opens on the chart's **own annotated default
+values** (`helm show values`) instead of an empty stub — edit what you
+need and save; content left unchanged (or reduced to comments) keeps
+the chart defaults with no override file.  All of it comes from the
+chart itself via `helm show`/`helm pull` — repo-local, no cluster
+access, and advisory: a chart without a schema or README simply shows
+nothing extra.
 
 Install and upgrade render a preview before the confirmation
 dialog: install and upgrade run `--dry-run` (with `--hide-secret`, helm

@@ -13,11 +13,33 @@ every mutating command behind the approval dialog and the fail-closed audit.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shutil
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 _STDERR_TAIL_LINES = 5
+
+#: Upper bound for a chart's values.schema.json (issue #151): the file is
+#: chart-controlled content, so refuse to read anything implausibly large
+#: (real schemas are a few KiB) instead of loading it into memory.
+_SCHEMA_MAX_BYTES = 1024 * 1024
+
+
+def _read_schema_file(path: Path) -> dict[str, Any] | None:
+    """Read and parse one values.schema.json; None for oversized, malformed
+    (including a recursion-bomb: deeply nested but valid JSON), or non-dict
+    content. Runs on a worker thread - never on the event loop."""
+    try:
+        if path.stat().st_size > _SCHEMA_MAX_BYTES:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def find_helm() -> str | None:
@@ -182,6 +204,48 @@ class HelmCLI:
         return await self._run("repo", "update")
 
     @staticmethod
+    def _version_args(version: str) -> list[str]:
+        return ["--version", version] if version else []
+
+    async def show_values(self, chart: str, version: str = "") -> str:
+        """`helm show values`: the chart's full annotated default values
+        (issue #151) - repo-local, no cluster access."""
+        return await self._run("show", "values", chart, *self._version_args(version))
+
+    async def show_readme(self, chart: str, version: str = "") -> str:
+        """`helm show readme`: the chart's README (issue #151)."""
+        return await self._run("show", "readme", chart, *self._version_args(version))
+
+    async def show_schema(self, chart: str, version: str = "") -> dict[str, Any] | None:
+        """The chart's `values.schema.json`, or None when it ships none.
+
+        `helm show` does not expose the schema, so the chart is pulled
+        (`helm pull --untar`) into a private temp dir and the file is read
+        from the unpacked chart; the directory is removed either way. The
+        schema is chart-controlled content and advisory (issue #151): any
+        failure - pull error, missing or oversized file, malformed JSON -
+        degrades to None, never an exception. Reading and parsing run on a
+        worker thread so a large schema cannot stall the event loop.
+        """
+        tmp = tempfile.mkdtemp(prefix="korvid-helm-schema-")
+        try:
+            await self._run(
+                "pull", chart, *self._version_args(version), "--untar", "--untardir", tmp
+            )
+            schemas = list(Path(tmp).glob("*/values.schema.json"))
+            if not schemas:
+                return None
+            return await asyncio.to_thread(_read_schema_file, schemas[0])
+        except (HelmError, OSError):
+            return None
+        finally:
+            # The untar tree is chart-controlled and can hold many files:
+            # remove it on a worker thread (shielded - an exclusive-worker
+            # cancellation mid-cleanup must still finish the removal).
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(asyncio.to_thread(shutil.rmtree, tmp, ignore_errors=True))
+
+    @staticmethod
     def _release_args(
         release: str,
         chart: str,
@@ -341,3 +405,48 @@ class HelmCLI:
     async def diff_rollback(self, release: str, revision: int, namespace: str) -> str:
         """`helm diff rollback` (plugin): live-vs-revision diff for previews."""
         return await self._run("diff", "rollback", release, str(revision), "--namespace", namespace)
+
+
+def _field_summary(prop: dict[str, Any]) -> str:
+    """One-line type/enum description for a required schema property.
+
+    Non-string enum members render as JSON (null/false), not Python
+    spelling - the display is meant to be copied into YAML."""
+    enum = prop.get("enum")
+    if isinstance(enum, list) and enum:
+        parts = [v if isinstance(v, str) else json.dumps(v) for v in enum]
+        return " | ".join(p for p in parts if p)
+    return str(prop.get("type") or "?")
+
+
+def required_values_from_schema(
+    schema: dict[str, Any] | None, *, _prefix: str = "", _depth: int = 0
+) -> list[tuple[str, str]]:
+    """(field path, type-or-enum) rows for a schema's required values.
+
+    Follows JSON Schema `required` + `properties` (issue #151): required
+    object fields recurse (bounded depth - schemas are untrusted chart
+    content), everything else renders its type or enum. Junk shapes yield
+    an empty list; the display is advisory, never a gate.
+    """
+    if not isinstance(schema, dict) or _depth > 3:
+        return []
+    required = schema.get("required")
+    properties = schema.get("properties")
+    if not isinstance(required, list) or not isinstance(properties, dict):
+        return []
+    rows: list[tuple[str, str]] = []
+    for name in required:
+        if not isinstance(name, str):
+            continue
+        path = f"{_prefix}{name}"
+        prop = properties.get(name)
+        if not isinstance(prop, dict):
+            rows.append((path, "?"))
+            continue
+        nested = required_values_from_schema(prop, _prefix=f"{path}.", _depth=_depth + 1)
+        if nested:
+            rows.extend(nested)
+        else:
+            rows.append((path, _field_summary(prop)))
+    return rows

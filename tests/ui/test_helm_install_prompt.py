@@ -263,3 +263,292 @@ async def test_install_mode_offers_no_reuse_option() -> None:
         await until(pilot, lambda: app.result != "unset", label="prompt dismissed")
         assert isinstance(app.result, HelmReleaseChoices)
         assert app.result.reuse_values is False
+
+
+# ---------------------------------------------------------------------------
+# Required values + README (issue #151): chart metadata surfaces in the wizard
+# ---------------------------------------------------------------------------
+
+_SCHEMA: "dict[str, object]" = {
+    "required": ["mode"],
+    "properties": {
+        "mode": {"type": "string", "enum": ["daemonset", "deployment", "statefulset", ""]},
+    },
+}
+
+
+async def _open_with_info(
+    app: HostApp,
+    *,
+    schema: "dict[str, object] | None" = _SCHEMA,
+    readme: str = "# Chart README\nSet mode before installing.",
+    schema_error: bool = False,
+    schema_calls: "list[str] | None" = None,
+) -> HelmInstallPrompt:
+    async def get_schema(chart: str, version: str) -> "dict[str, object] | None":
+        if schema_calls is not None:
+            schema_calls.append(version)
+        if schema_error:
+            raise RuntimeError("boom")
+        return schema
+
+    async def get_readme(chart: str, version: str) -> str:
+        return readme
+
+    prompt = HelmInstallPrompt(
+        _CHART,
+        namespace="default",
+        release=None,
+        get_schema=get_schema,
+        get_readme=get_readme,
+    )
+
+    def _done(v: object) -> None:
+        app.result = v
+
+    await app.push_screen(prompt, _done)
+    return prompt
+
+
+async def test_required_values_from_the_schema_render_in_the_wizard() -> None:
+    """A chart shipping values.schema.json gets a Required values section:
+    field path plus its enum/type - the pre-install answer to 'what must I
+    set?' (issue #151)."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open_with_info(app)
+        await _opened(app, pilot)
+        await until(
+            pilot,
+            lambda: "mode" in str(app.screen.query_one("#helm-required", Static).render()),
+            label="required section rendered",
+        )
+        text = str(app.screen.query_one("#helm-required", Static).render())
+        assert "daemonset" in text  # the enum names the valid choices
+
+
+async def test_wizard_without_schema_shows_no_required_section() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open_with_info(app, schema=None)
+        await _opened(app, pilot)
+        await until(
+            pilot,
+            lambda: not app.screen.query_one("#helm-required", Static).display,
+            label="required section hidden",
+        )
+
+
+async def test_schema_fetch_failure_degrades_silently() -> None:
+    """The schema is advisory: a fetch failure must not break the wizard or
+    block submitting."""
+    app = HostApp()
+    calls: list[str] = []
+    async with app.run_test() as pilot:
+        await _open_with_info(app, schema_error=True, schema_calls=calls)
+        await _opened(app, pilot)
+        # The failing provider must actually have been invoked - only then
+        # does the submit below prove the failure did not break anything.
+        await until(pilot, lambda: bool(calls), label="schema provider invoked")
+        app.screen.query_one("#helm-release", Input).focus()
+        await pilot.press("enter")
+        await until(pilot, lambda: app.result != "unset", label="submitted")
+        assert isinstance(app.result, HelmReleaseChoices)
+
+
+async def test_version_change_reloads_the_required_values() -> None:
+    """The version field stays editable after mount: the Required values
+    section must describe the version the install will actually use, so a
+    version edit clears it and refetches the schema for the new version."""
+    app = HostApp()
+    calls: list[str] = []
+    async with app.run_test() as pilot:
+        await _open_with_info(app, schema_calls=calls)
+        await _opened(app, pilot)
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#helm-required", Static).display,
+            label="initial section rendered",
+        )
+        assert calls == ["18.1.0"]
+        version = app.screen.query_one("#helm-version", Input)
+        version.focus()
+        version.value = "18.2.0"
+        # the stale section is hidden immediately, then refetched (debounced)
+        await until(
+            pilot,
+            lambda: not app.screen.query_one("#helm-required", Static).display,
+            label="stale section cleared",
+        )
+        await until(pilot, lambda: "18.2.0" in calls, label="schema refetched")
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#helm-required", Static).display,
+            label="section back for the new version",
+        )
+
+
+async def test_f1_opens_the_chart_readme() -> None:
+    """The chart's README opens in a scrollable modal from the wizard
+    (issue #151) - prerequisites and mandatory settings without leaving."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open_with_info(app)
+        await _opened(app, pilot)
+        await pilot.press("f1")
+        await until(pilot, lambda: app.screen is not prompt, label="readme screen open")
+        from textual.widgets import Static as _Static
+
+        body = " ".join(str(w.render()) for w in app.screen.query(_Static))
+        assert "Set mode before installing" in body
+        await pilot.press("escape")
+        await until(pilot, lambda: app.screen is prompt, label="back to wizard")
+
+
+async def test_wizard_without_info_providers_behaves_as_before() -> None:
+    """No injected providers (degraded session): the wizard renders and
+    submits exactly as before - no required section, README key inert."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await _opened(app, pilot)
+        await pilot.press("f1")
+        await pilot.pause()
+        assert app.screen is prompt  # no README to show, key does nothing
+        app.screen.query_one("#helm-release", Input).focus()
+        await pilot.press("enter")
+        await until(pilot, lambda: app.result != "unset", label="submitted")
+
+
+async def test_in_flight_stale_schema_cannot_resurface_during_the_debounce() -> None:
+    """A version edit hides the section and debounces the refetch - but the
+    *previous* version's still-in-flight fetch must not complete during
+    that window and re-display stale required values."""
+    import asyncio
+
+    gate = asyncio.Event()
+    calls: list[str] = []
+    completed: list[str] = []
+
+    async def gated_schema(chart: str, version: str) -> "dict[str, object] | None":
+        calls.append(version)
+        await gate.wait()
+        completed.append(version)
+        return _SCHEMA
+
+    app = HostApp()
+    prompt = HelmInstallPrompt(_CHART, namespace="default", release=None, get_schema=gated_schema)
+
+    def _done(v: object) -> None:
+        app.result = v
+
+    async with app.run_test() as pilot:
+        await app.push_screen(prompt, _done)
+        await _opened(app, pilot)
+        await until(pilot, lambda: bool(calls), label="initial fetch started")
+        version = app.screen.query_one("#helm-version", Input)
+        version.focus()
+        version.value = "18.2.0"  # edit while the mount fetch is in flight
+        # the edit was handled (debounce armed) before the stale fetch lands
+        await until(
+            pilot,
+            lambda: prompt._schema_debounce is not None,
+            label="edit handled, debounce armed",
+        )
+        gate.set()  # the stale fetch completes inside the debounce window
+        # observable state, not wall-clock: the *stale* fetch has finished
+        # (its worker resumed past the gate) and the section stayed hidden.
+        await until(pilot, lambda: "18.1.0" in completed, label="stale fetch completed")
+        assert not app.screen.query_one("#helm-required", Static).display
+        # the debounced refetch eventually renders the new version's schema
+        await until(pilot, lambda: "18.2.0" in completed, label="refetched")
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#helm-required", Static).display,
+            label="fresh section rendered",
+        )
+
+
+async def test_rapid_f1_presses_open_a_single_readme_screen() -> None:
+    """Two F1 presses while a slow `helm show readme` is in flight must not
+    stack two README modals - one Escape must land back on the wizard."""
+    import asyncio
+
+    gate = asyncio.Event()
+
+    async def slow_readme(chart: str, version: str) -> str:
+        await gate.wait()
+        return "# README"
+
+    app = HostApp()
+    prompt = HelmInstallPrompt(_CHART, namespace="default", release=None, get_readme=slow_readme)
+
+    def _done(v: object) -> None:
+        app.result = v
+
+    async with app.run_test() as pilot:
+        await app.push_screen(prompt, _done)
+        await _opened(app, pilot)
+        await pilot.press("f1")
+        await pilot.press("f1")  # second press while the first fetch hangs
+        gate.set()
+        await until(pilot, lambda: app.screen is not prompt, label="readme open")
+        # every README worker has finished: a late duplicate cannot be
+        # in flight anymore when the stack is inspected.
+        await until(
+            pilot,
+            lambda: (
+                not any(
+                    w.group == "helm-chart-readme" and not w.is_finished for w in prompt.workers
+                )
+            ),
+            label="readme workers finished",
+        )
+        from korvid.ui.widgets.helm_install import ChartReadmeScreen
+
+        stacked = [s for s in app.screen_stack if isinstance(s, ChartReadmeScreen)]
+        assert len(stacked) == 1
+        await pilot.press("escape")
+        await until(pilot, lambda: app.screen is prompt, label="back on the wizard")
+
+
+async def test_readme_for_a_stale_version_is_discarded() -> None:
+    """The version field stays editable while `helm show readme` runs: a
+    fetch finishing for an old version must not push documentation over a
+    wizard now configured for a different one."""
+    import asyncio
+
+    gate = asyncio.Event()
+    completed: list[str] = []
+
+    async def slow_readme(chart: str, version: str) -> str:
+        await gate.wait()
+        completed.append(version)
+        return f"# README {version}"
+
+    app = HostApp()
+    prompt = HelmInstallPrompt(_CHART, namespace="default", release=None, get_readme=slow_readme)
+
+    def _done(v: object) -> None:
+        app.result = v
+
+    async with app.run_test() as pilot:
+        await app.push_screen(prompt, _done)
+        await _opened(app, pilot)
+        await pilot.press("f1")  # fetch starts for 18.1.0
+        version = app.screen.query_one("#helm-version", Input)
+        version.value = "18.2.0"  # edited while the fetch hangs
+        gate.set()
+        await until(pilot, lambda: bool(completed), label="stale fetch completed")
+        await until(
+            pilot,
+            lambda: (
+                not any(
+                    w.group == "helm-chart-readme" and not w.is_finished for w in prompt.workers
+                )
+            ),
+            label="readme worker finished",
+        )
+        from korvid.ui.widgets.helm_install import ChartReadmeScreen
+
+        assert not any(isinstance(s, ChartReadmeScreen) for s in app.screen_stack)

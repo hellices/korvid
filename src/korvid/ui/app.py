@@ -6687,7 +6687,18 @@ class KorvidApp(App[None]):
                     group="helm-write",
                 )
 
-            self.push_screen(HelmInstallPrompt(hit, namespace=namespace, release=release), _chosen)
+            self.push_screen(
+                HelmInstallPrompt(
+                    hit,
+                    namespace=namespace,
+                    release=release,
+                    # Chart metadata (issue #151): required values from the
+                    # chart's schema and README access, both repo-local.
+                    get_schema=helm.show_schema,
+                    get_readme=helm.show_readme,
+                ),
+                _chosen,
+            )
 
         title = f"Upgrade {release} with chart:" if release else "Install helm chart"
         search_screen = HelmChartSearchScreen(
@@ -6739,9 +6750,10 @@ class KorvidApp(App[None]):
             return
         values_text: str | None = None
         editor_buffer: str | None = None
+        defaults_baseline: str | None = None
         if choices.edit_values:
-            proceed, values_text, editor_buffer = await self._helm_edit_values(
-                hit, choices, previous=None
+            proceed, values_text, editor_buffer, defaults_baseline = await self._helm_edit_values(
+                helm, hit, choices, previous=None
             )
             if not proceed:
                 return  # editor failed or was aborted; already notified
@@ -6752,6 +6764,7 @@ class KorvidApp(App[None]):
             choices,
             values_text,
             editor_buffer,
+            defaults_baseline,
             upgrade=upgrade,
             epoch=epoch,
             action=action,
@@ -6832,17 +6845,32 @@ class KorvidApp(App[None]):
         return True
 
     async def _helm_edit_values(
-        self, hit: ChartHit, choices: HelmReleaseChoices, *, previous: str | None
-    ) -> tuple[bool, str | None, str | None]:
-        """(proceed, values override, raw buffer) from `$EDITOR`.
+        self,
+        helm: HelmCLI,
+        hit: ChartHit,
+        choices: HelmReleaseChoices,
+        *,
+        previous: str | None,
+        defaults_baseline: str | None = None,
+    ) -> tuple[bool, str | None, str | None, str | None]:
+        """(proceed, values override, raw buffer, defaults baseline) from
+        `$EDITOR`.
 
-        A retry after a failed render pre-fills the editor with the
-        previous *raw* buffer (issue #139) - a comments-only buffer
-        normalizes to "no override" for helm but stays prior input for the
-        next edit; False means the editor was aborted or failed and the
-        flow must stop.
+        A first edit opens on the chart's own annotated defaults
+        (`helm show values`, issue #151) - the standard CLI workflow -
+        falling back to the old comment stub when the fetch fails. Content
+        matching the fetched defaults (or comments-only) keeps the chart
+        defaults: no override file is passed. The *baseline* rides along so
+        a retry after a failed render (issue #139, pre-filled with the
+        previous raw buffer) still recognizes unchanged defaults instead of
+        freezing them into the release. False means the editor was aborted
+        or failed and the flow must stop.
         """
         template = previous
+        if template is None:
+            with self._progress("fetching chart default values"):
+                defaults_baseline = await self._helm_default_values(helm, hit, choices)
+            template = defaults_baseline
         if template is None:
             template = (
                 f"# values override for {hit.name} {choices.version or hit.version}\n"
@@ -6851,11 +6879,32 @@ class KorvidApp(App[None]):
         edit = self._edit_text or self._edit_in_external_editor
         text = await edit(template)
         if text is None:
-            return False, None, None
+            return False, None, None, defaults_baseline
         meaningful = any(
             line.strip() and not line.lstrip().startswith("#") for line in text.splitlines()
         )
-        return True, (text if meaningful else None), text
+        if defaults_baseline is not None and text == defaults_baseline:
+            # Unchanged chart defaults are not an override (issue #151):
+            # passing them as -f would freeze today's defaults into the
+            # release for no reason.
+            meaningful = False
+        return True, (text if meaningful else None), text, defaults_baseline
+
+    async def _helm_default_values(
+        self, helm: HelmCLI, hit: ChartHit, choices: HelmReleaseChoices
+    ) -> str | None:
+        """`helm show values` output for the picked chart, or None when the
+        fetch fails (the caller falls back to the comment stub). The wizard
+        version passes through unchanged: an empty version means "latest",
+        matching what the install itself will resolve."""
+        try:
+            return await asyncio.wait_for(
+                helm.show_values(hit.name, choices.version),
+                _HELM_PREVIEW_TIMEOUT,
+            )
+        except (HelmError, TimeoutError):
+            logger.debug("helm show values failed; editor opens on the stub", exc_info=True)
+            return None
 
     async def _helm_render_failure_choice(self, error: str, *, upgrade: bool) -> str:
         """Stop-before-approval decision on a rejected dry-run (issue #139):
@@ -6887,6 +6936,7 @@ class KorvidApp(App[None]):
         choices: HelmReleaseChoices,
         values_text: str | None,
         editor_buffer: str | None,
+        defaults_baseline: str | None,
         *,
         upgrade: bool,
         epoch: int,
@@ -6899,8 +6949,10 @@ class KorvidApp(App[None]):
         carrying any fixes made through the failure dialog's edit path;
         `editor_buffer` is the raw text last seen in `$EDITOR` (kept apart
         from the normalized override so a comments-only buffer survives a
-        retry). None when the flow must stop (context lost, editor aborted,
-        or the user cancelled at the failure dialog).
+        retry) and `defaults_baseline` the fetched chart defaults, carried
+        across retries so an unchanged-defaults buffer never turns into a
+        frozen override. None when the flow must stop (context lost, editor
+        aborted, or the user cancelled at the failure dialog).
         """
         while True:
             # Rendering can take up to _HELM_PREVIEW_TIMEOUT (20s): show
@@ -6919,8 +6971,13 @@ class KorvidApp(App[None]):
             if decision == "cancel":
                 return None  # nothing was executed, nothing to audit
             if decision == "edit":
-                proceed, values_text, editor_buffer = await self._helm_edit_values(
-                    hit, choices, previous=editor_buffer
+                (
+                    proceed,
+                    values_text,
+                    editor_buffer,
+                    defaults_baseline,
+                ) = await self._helm_edit_values(
+                    helm, hit, choices, previous=editor_buffer, defaults_baseline=defaults_baseline
                 )
                 if not proceed:
                     return None

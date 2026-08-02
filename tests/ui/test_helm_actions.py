@@ -1416,3 +1416,190 @@ async def test_repo_pick_is_rejected_while_a_mutation_is_pending(tmp_path: Path)
             lambda: ("repo-add", "extra", "https://charts.example/extra") in helm.calls,
             label="mutation completed",
         )
+
+
+# ---------------------------------------------------------------------------
+# Chart metadata in the install flow (issue #151)
+# ---------------------------------------------------------------------------
+
+
+async def test_editor_prefills_with_the_charts_default_values(tmp_path: Path) -> None:
+    """'edit in $EDITOR' opens on `helm show values` output - the chart's
+    own annotated defaults, exactly like the CLI workflow - instead of the
+    2-line comment stub (issue #151)."""
+
+    class ShowValuesHelm(FakeHelm):
+        async def show_values(self, chart: str, version: str = "") -> str:
+            self.calls.append(("show-values", chart, version))
+            return '# Default values for nginx\nmode: ""\nreplicaCount: 1\n'
+
+    helm = ShowValuesHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    seen: list[str] = []
+
+    async def fake_editor(text: str) -> str | None:
+        seen.append(text)
+        return text  # unchanged content
+
+    app._edit_text = fake_editor
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await _pick_first_chart(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        from textual.widgets import Select
+
+        from korvid.ui.widgets.helm_install import VALUES_MODES
+
+        app.screen.query_one("#helm-values", Select).value = VALUES_MODES[1]
+        await pilot.press("enter")
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        assert seen
+        assert "replicaCount: 1" in seen[0]  # the chart's own defaults
+        assert ("show-values", "bitnami/nginx", "18.1.0") in helm.calls
+        # unchanged defaults == no override (issue #151): same semantics as
+        # the old comments-only stub - the dialog says chart defaults.
+        assert "values: chart defaults" in app.screen._operation  # type: ignore[attr-defined]  # test peeks
+
+
+async def test_editor_falls_back_to_the_stub_when_show_values_fails(tmp_path: Path) -> None:
+    class BrokenShowValuesHelm(FakeHelm):
+        async def show_values(self, chart: str, version: str = "") -> str:
+            raise HelmError("no such chart")
+
+    helm = BrokenShowValuesHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    seen: list[str] = []
+
+    async def fake_editor(text: str) -> str | None:
+        seen.append(text)
+        return None  # abort after capturing the template
+
+    app._edit_text = fake_editor
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await _pick_first_chart(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        from textual.widgets import Select
+
+        from korvid.ui.widgets.helm_install import VALUES_MODES
+
+        app.screen.query_one("#helm-values", Select).value = VALUES_MODES[1]
+        await pilot.press("enter")
+        await until(pilot, lambda: bool(seen), label="editor opened")
+        assert "values override for bitnami/nginx" in seen[0]  # the old stub
+
+
+async def test_wizard_receives_schema_and_readme_providers(tmp_path: Path) -> None:
+    """The app wires helm's show_schema/show_readme into the wizard: a chart
+    with a schema renders the Required values section end to end."""
+
+    class SchemaHelm(FakeHelm):
+        async def show_schema(self, chart: str, version: str = "") -> dict[str, Any] | None:
+            self.calls.append(("show-schema", chart, version))
+            return {
+                "required": ["mode"],
+                "properties": {"mode": {"type": "string", "enum": ["deployment"]}},
+            }
+
+        async def show_readme(self, chart: str, version: str = "") -> str:
+            return "# README"
+
+    helm = SchemaHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await _pick_first_chart(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        await until(
+            pilot,
+            lambda: "mode" in str(app.screen.query_one("#helm-required", Static).render()),
+            label="required section rendered",
+        )
+        assert ("show-schema", "bitnami/nginx", "18.1.0") in helm.calls
+
+
+async def test_editor_prefill_passes_an_empty_version_through_as_latest(tmp_path: Path) -> None:
+    """An empty wizard version means "latest" for the install: the values
+    prefill must ask helm for the same (no --version pin), not the
+    search-time version - the defaults must describe the chart helm will
+    actually install."""
+
+    class ShowValuesHelm(FakeHelm):
+        async def show_values(self, chart: str, version: str = "") -> str:
+            self.calls.append(("show-values", chart, version))
+            return "replicaCount: 1\n"
+
+    helm = ShowValuesHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+
+    async def fake_editor(text: str) -> str | None:
+        return None  # abort after the prefill fetch
+
+    app._edit_text = fake_editor
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await _pick_first_chart(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        from textual.widgets import Input, Select
+
+        from korvid.ui.widgets.helm_install import VALUES_MODES
+
+        app.screen.query_one("#helm-version", Input).value = ""  # latest
+        app.screen.query_one("#helm-values", Select).value = VALUES_MODES[1]
+        app.screen.query_one("#helm-release", Input).focus()
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: ("show-values", "bitnami/nginx", "") in helm.calls,
+            label="prefill fetched without a version pin",
+        )
+
+
+async def test_unchanged_defaults_stay_defaults_across_a_render_failure_retry(
+    tmp_path: Path,
+) -> None:
+    """The prefetched defaults baseline must survive the failure dialog's
+    'edit values and retry' loop: returning the defaults unchanged on the
+    retry pass must still mean 'chart defaults' - not freeze the whole
+    defaults file into the release as a custom override."""
+    defaults = "# defaults\nreplicaCount: 1\n"
+
+    class ShowValuesHelm(FakeHelm):
+        async def show_values(self, chart: str, version: str = "") -> str:
+            return defaults
+
+    helm = ShowValuesHelm()
+    helm.dry_run_excs = [HelmError(_RENDER_ERROR)]  # first render fails
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+
+    async def fake_editor(text: str) -> str | None:
+        return text  # both passes: return the buffer unchanged
+
+    app._edit_text = fake_editor
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await _pick_first_chart(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        from textual.widgets import Select
+
+        from korvid.ui.widgets.helm_install import VALUES_MODES
+
+        app.screen.query_one("#helm-values", Select).value = VALUES_MODES[1]
+        await pilot.press("enter")  # editor #1 -> dry-run fails
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="failure dialog")
+        await pilot.press("enter")  # edit values and retry -> editor #2, unchanged
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        # unchanged defaults are still 'chart defaults', not a frozen override
+        assert "values: chart defaults" in app.screen._operation  # type: ignore[attr-defined]  # test peeks
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any(call[0] == "install" for call in helm.calls),
+            label="install executed",
+        )
+        assert helm.values_seen is None  # no -f override was passed
