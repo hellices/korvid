@@ -903,3 +903,21 @@ async def test_shutdown_cancels_in_flight_mirror_tasks() -> None:
         if not run_task.done():
             server.request_shutdown()
             await run_task
+
+
+async def test_refused_mirror_falls_back_to_an_activity_note() -> None:
+    """A successful read whose mirror the UI refuses (e.g. list_operators
+    when `subscriptions` is not an alias) must not become invisible: the
+    detached task degrades to the activity toast."""
+
+    class RefusingBridge(FakeBridge):
+        async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+            return f"ERROR: unknown view {view!r}"
+
+    executor = RecordingExecutor()
+    notes: list[str] = []
+    server = make_follow_server(executor, RefusingBridge(), note_activity=notes.append)
+    await server.call_tool("list_operators", {})
+    await _drain_follow(server)
+    assert len(notes) == 1
+    assert "list_operators" in notes[0]

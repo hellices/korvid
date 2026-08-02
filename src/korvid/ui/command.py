@@ -25,6 +25,7 @@ _BUILTIN_COMMAND_HELP: tuple[tuple[str, str], ...] = (
     (":ai", "Open agent setup (also :agent)"),
     (":model [name]", "Show or switch the agent model"),
     (":mcp [on|off]", "Show MCP tool state, or toggle it live"),
+    (":mcp follow [on|off]", "Mirror external MCP reads in the TUI (toggle)"),
     (":proposals", "Review pending external write proposals"),
     (":pf", "List port-forwards (Ctrl-D stop, r re-attach)"),
     (":sort [column]", "Sort by a column (custom too); no argument clears"),

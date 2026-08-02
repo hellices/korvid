@@ -247,10 +247,23 @@ class KorvidMCPServer:
             and self._follow_enabled()
             and not result.startswith("ERROR:")
         ):
-            task = asyncio.create_task(mirror_read(ui, name, args))
+            task = asyncio.create_task(self._mirror_or_note(ui, name, args))
             self._follow_tasks.add(task)
             task.add_done_callback(self._follow_tasks.discard)
             return
+        self._note_read(name, args)
+
+    async def _mirror_or_note(self, ui: UIBridge, name: str, args: dict[str, Any]) -> None:
+        """One detached mirror: on a UI refusal (e.g. `subscriptions` is not
+        an alias in this cluster) or an unmapped read, degrade to the
+        activity note - a successful external read must never become
+        invisible just because its mirror could not land."""
+        outcome = await mirror_read(ui, name, args)
+        if outcome is not None and not outcome.startswith("ERROR"):
+            return
+        self._note_read(name, args)
+
+    def _note_read(self, name: str, args: dict[str, Any]) -> None:
         if self._note_activity is None:
             return
         client = self._client_info()[0] or "mcp"
