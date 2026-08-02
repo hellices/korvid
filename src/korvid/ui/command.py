@@ -28,27 +28,44 @@ _BUILTIN_COMMAND_HELP: tuple[tuple[str, str], ...] = (
     (":mcp follow [on|off]", "Mirror external MCP reads in the TUI (toggle)"),
     (":proposals", "Review pending external write proposals"),
     (":pf", "List port-forwards (Ctrl-D stop, r re-attach)"),
+    (":tp", "Telepresence status panel (also :telepresence)"),
     (":sort [column]", "Sort by a column (custom too); no argument clears"),
 )
-_RESERVED_BUILTINS = {"ai", "agent", "model", "mcp", "proposals", "pf", "sort"} | _CTX_KEYWORDS
+_RESERVED_BUILTINS = {
+    "ai",
+    "agent",
+    "model",
+    "mcp",
+    "proposals",
+    "pf",
+    "sort",
+    "tp",
+    "telepresence",
+} | _CTX_KEYWORDS
 
 
-def command_help() -> list[tuple[str, str]]:
+def command_help(*, telepresence: bool = True) -> list[tuple[str, str]]:
     """``(command, description)`` rows for the help overlay (issue #41).
 
     Kept next to `parse_command` so grammar changes update the help text in
-    the same review.
+    the same review. `telepresence=False` drops the `:tp` row - an absent
+    binary (or the kill-switch) means "no UI", and the help overlay must
+    not advertise a command that only answers with a warning (the name
+    stays reserved either way so a CRD alias cannot shadow it).
     """
     # Primary short form first, remaining aliases sorted for stability.
     ns = "|".join(["ns", *sorted(_NS_KEYWORDS - {"ns"})])
     ctx = "|".join([":ctx", *(f":{k}" for k in sorted(_CTX_KEYWORDS - {"ctx"}))])
+    builtins = [
+        row for row in _BUILTIN_COMMAND_HELP if telepresence or not row[0].startswith(":tp")
+    ]
     return [
         (":q", "Quit (also :quit)"),
         (f":{ns}", "Namespace picker, or :ns <name> to switch"),
         (ctx, "Context picker, or :ctx <name> to switch clusters"),
         (":<kind>", "Open a resource view (plural, singular, or alias)"),
         (":<kind> <ns>", "Open a view scoped to a namespace ('all' for every namespace)"),
-        *_BUILTIN_COMMAND_HELP,
+        *builtins,
     ]
 
 

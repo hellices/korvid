@@ -1071,3 +1071,22 @@ def test_context_is_protected_none_or_empty() -> None:
 
     assert context_is_protected(None, ("prod-*",)) is False
     assert context_is_protected("prod-a", ()) is False
+
+
+def test_telepresence_integration_defaults_on(tmp_path: Path) -> None:
+    cfg = load_config(tmp_path / "missing.yaml")
+    assert cfg.telepresence_enabled is True
+
+
+def test_telepresence_kill_switch(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text("integrations:\n  telepresence: off\n")
+    cfg = load_config(f)
+    assert cfg.telepresence_enabled is False
+
+
+def test_telepresence_non_boolean_stays_on(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text('integrations:\n  telepresence: "banana"\n')
+    cfg = load_config(f)
+    assert cfg.telepresence_enabled is True
