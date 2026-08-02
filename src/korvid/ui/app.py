@@ -4788,8 +4788,25 @@ class KorvidApp(App[None]):
         """Execute an approved write with fail-closed auditing (AGENTS.md):
         the intent record must persist *before* the mutation - if it cannot,
         the write is blocked. Returns a short outcome string ('done' /
-        'blocked: ...' / 'failed: ...') for callers that report back."""
+        'blocked: ...' / 'failed: ...') for callers that report back.
+
+        The whole span publishes an in-flight progress label (issue #143):
+        between approval and the outcome toast there was previously no
+        visible state at all."""
         kind = meta.plural
+        with self._progress(f"{action} {kind}/{name}"):
+            return await self._run_write_inner(action, meta, namespace, name, op, detail, kind)
+
+    async def _run_write_inner(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        op: Awaitable[None],
+        detail: str,
+        kind: str,
+    ) -> str:
         try:
             await self._audit_write(action, meta, namespace, name, detail, "intent")
         except Exception as exc:
