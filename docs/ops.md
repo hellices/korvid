@@ -133,9 +133,11 @@ dialog: a forward reads from the cluster, it never mutates it).
 When the `telepresence` binary is on PATH, `:tp` (or `:telepresence`)
 opens a read-only status panel: local daemon state, the connected
 session's context and traffic-manager version, and the active intercepts
-(workload, port, who).  Without the binary nothing changes — no UI, no
-startup cost; if the cluster runs a traffic-manager while the client is
-absent, a single dismissible hint mentions it once per session.
+(workload, port, who).  Without the binary nothing changes — no UI, and
+no telepresence process ever starts; the only background activity is one
+asynchronous Kubernetes API GET probing for a cluster-side
+traffic-manager, and when one is found while the client is absent, a
+single dismissible hint mentions it once per session.
 `integrations: {telepresence: off}` in the config disables the
 integration entirely.
 

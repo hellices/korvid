@@ -56,6 +56,9 @@ class TelepresenceStatus:
     #: CLI-reported failure line ({"error": …} / {"cmd", "err"} shapes); ""
     #: when the status parsed cleanly.
     error: str = ""
+    #: The daemon/connection name (multi-daemon mode): `list` needs
+    #: `--use <name>` to address one of several daemons.
+    daemon_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -94,6 +97,11 @@ def parse_status(payload: Any) -> TelepresenceStatus:
     """
     if isinstance(payload, dict) and "connections" in payload:
         return _pick_connection(payload.get("connections"))
+    return _parse_flat(payload)
+
+
+def _parse_flat(payload: Any) -> TelepresenceStatus:
+    """One connection's status (never recurses into nested wrappers)."""
     error = ""
     if isinstance(payload, dict):
         error = _str_of(payload, "error") or _str_of(payload, "err")
@@ -115,14 +123,21 @@ def parse_status(payload: Any) -> TelepresenceStatus:
         kubernetes_context=_str_of(user, "kubernetes_context"),
         traffic_manager_version=_str_of(manager, "version"),
         error=error,
+        daemon_name=_str_of(user, "name"),
     )
 
 
 def _pick_connection(connections: Any) -> TelepresenceStatus:
-    """The connected entry of a multi-daemon status, else the first one."""
+    """The connected entry of a multi-daemon status, else the first one.
+
+    Entries are parsed flat: a nested `connections` wrapper is not a shape
+    the CLI emits, and refusing to recurse keeps the "never raises"
+    contract safe from a nesting bomb (same class of guard as #152's
+    schema-depth bound).
+    """
     if not isinstance(connections, list) or not connections:
         return TelepresenceStatus(connected=False, user_running=False, root_running=False)
-    parsed = [parse_status(entry) for entry in connections]
+    parsed = [_parse_flat(entry) for entry in connections]
     return next((s for s in parsed if s.connected), parsed[0])
 
 
@@ -134,11 +149,19 @@ def _intercept_port(spec: dict[str, Any]) -> str:
     return _str_of(spec, "port_identifier")
 
 
+#: InterceptDispositionType ACTIVE (manager.proto): anything else is
+#: waiting/errored/removed and must not render as an *active* intercept.
+_DISPOSITION_ACTIVE = 1
+
+
 def parse_intercepts(payload: Any) -> list[ActiveIntercept]:
     """`telepresence list --format json` → active intercept rows.
 
-    The output is a bare array of WorkloadInfo objects; only workloads with
-    `intercept_info` entries produce rows. Junk shapes yield nothing.
+    The output is a bare array of WorkloadInfo objects; only workloads
+    whose `intercept_info` entries carry a real spec with disposition
+    ACTIVE (1) produce rows - WAITING/errored entries are not "active",
+    and a spec-less entry would only render a blank row. Junk shapes
+    yield nothing.
     """
     if not isinstance(payload, list):
         return []
@@ -153,6 +176,8 @@ def parse_intercepts(payload: Any) -> list[ActiveIntercept]:
             if not isinstance(info, dict):
                 continue
             spec = _dict_of(info, "spec")
+            if not spec or info.get("disposition") != _DISPOSITION_ACTIVE:
+                continue
             rows.append(
                 ActiveIntercept(
                     workload=_str_of(workload, "name"),
@@ -213,6 +238,11 @@ class TelepresenceCLI:
         user daemon to answer — call on explicit user action only."""
         return parse_status(await self._run_json("status"))
 
-    async def list_intercepts(self) -> list[ActiveIntercept]:
-        """Active intercepts (requires a connected session)."""
-        return parse_intercepts(await self._run_json("list"))
+    async def list_intercepts(self, daemon: str | None = None) -> list[ActiveIntercept]:
+        """Active intercepts (requires a connected session).
+
+        `daemon` scopes the query with `--use <name>`: with several daemons
+        running, a bare `list` refuses and asks for a match expression.
+        """
+        args = ["list"] if daemon is None else ["list", "--use", daemon]
+        return parse_intercepts(await self._run_json(*args))

@@ -727,6 +727,7 @@ class KorvidApp(App[None]):
         self._telepresence = telepresence
         self._probe_traffic_manager = probe_traffic_manager
         self._telepresence_hinted = False
+        self._telepresence_probing = False
         #: True while a context switch is tearing down / retargeting;
         #: refuses concurrent switches.
         self._ctx_switching = False
@@ -1997,6 +1998,9 @@ class KorvidApp(App[None]):
         # Rebind the helm wrapper: it pins --kube-context per instance, and
         # helm writes must follow the active cluster (None when helm is off).
         self._helm = result.helm
+        # The new cluster may run a telepresence traffic-manager the old one
+        # lacked: re-probe (a no-op once the session's hint was shown).
+        self.run_worker(self._maybe_hint_telepresence(), exclusive=False)
         if name != old:
             self._ctx_switch_note = (
                 f"kube context switched from {old or '(default)'} to {name};"
@@ -2988,9 +2992,14 @@ class KorvidApp(App[None]):
             with self._progress("querying telepresence"):
                 try:
                     status = await tp.status()
-                    intercepts = await tp.list_intercepts() if status.connected else []
+                    intercepts = (
+                        await tp.list_intercepts(daemon=status.daemon_name or None)
+                        if status.connected
+                        else []
+                    )
                 except TelepresenceError as exc:
-                    self.notify(str(exc), title="telepresence", severity="error")
+                    # stderr tails are hostile input for a markup toast.
+                    self.notify(str(exc), title="telepresence", severity="error", markup=False)
                     return
             await self.push_screen(TelepresenceScreen(status, intercepts))
 
@@ -3000,21 +3009,31 @@ class KorvidApp(App[None]):
         """One dim hint per session (issue #159): the cluster runs a
         traffic-manager but the local client is absent. The probe is an
         injected pure API check - never the telepresence binary; a missing
-        probe, a failure or the kill-switch all silently mean no hint."""
+        probe, a failure or the kill-switch all silently mean no hint.
+
+        Re-runnable until the hint actually shows: the startup cluster may
+        lack a manager while a later `:ctx` target runs one, so a
+        no-manager answer must not consume the session's single hint (an
+        in-flight guard still prevents duplicate probes).
+        """
         if (
             self._telepresence is not None
             or self._telepresence_hinted
+            or self._telepresence_probing
             or not self.config.telepresence_enabled
             or self._probe_traffic_manager is None
         ):
             return
-        self._telepresence_hinted = True
+        self._telepresence_probing = True
         try:
             present = await self._probe_traffic_manager()
         except Exception:
             return  # absent / forbidden / transient: all mean "no hint"
+        finally:
+            self._telepresence_probing = False
         if not present:
             return
+        self._telepresence_hinted = True
         self.notify(
             "telepresence traffic-manager detected in this cluster — install "
             "the client to inspect intercepts (`:tp`)",

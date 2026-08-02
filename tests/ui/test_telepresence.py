@@ -42,7 +42,7 @@ class FakeTelepresence:
         self.calls.append("status")
         return self.status_result
 
-    async def list_intercepts(self) -> list[ActiveIntercept]:
+    async def list_intercepts(self, daemon: str | None = None) -> list[ActiveIntercept]:
         self.calls.append("list")
         return self.intercepts_result
 
@@ -252,3 +252,76 @@ async def test_help_hides_tp_when_the_integration_is_unavailable() -> None:
     assert not any(":tp" in cmd for cmd, _ in without)
     with_tp = command_help(telepresence=True)
     assert any(":tp" in cmd for cmd, _ in with_tp)
+
+
+async def test_multi_daemon_panel_scopes_list_to_the_selected_daemon() -> None:
+    class RecordingTP(FakeTelepresence):
+        def __init__(self) -> None:
+            super().__init__(
+                status=TelepresenceStatus(
+                    connected=True,
+                    user_running=True,
+                    root_running=True,
+                    daemon_name="prod-conn",
+                )
+            )
+            self.list_daemons: list[str | None] = []
+
+        async def list_intercepts(self, daemon: str | None = None) -> list[ActiveIntercept]:
+            self.list_daemons.append(daemon)
+            return []
+
+    tp = RecordingTP()
+    app = make_app(telepresence=tp)
+    async with app.run_test() as pilot:
+        app._handle_telepresence_command()
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, TelepresenceScreen),
+            label="panel opened",
+        )
+        assert tp.list_daemons == ["prod-conn"]
+
+
+async def test_cli_error_notification_renders_without_markup() -> None:
+    """stderr tails are hostile input for a markup-enabled toast."""
+
+    class ExplodingTP(FakeTelepresence):
+        async def status(self) -> TelepresenceStatus:
+            from korvid.k8s.telepresence import TelepresenceError
+
+            raise TelepresenceError("connector [bold red]refused[/]")
+
+    app = make_app(telepresence=ExplodingTP())
+    async with app.run_test() as pilot:
+        app._handle_telepresence_command()
+        await until(
+            pilot,
+            lambda: any("refused" in n.message for n in app._notifications),
+            label="failure surfaced",
+        )
+        note = next(n for n in app._notifications if "refused" in n.message)
+        assert note.markup is False
+
+
+async def test_hint_retries_after_a_managerless_start() -> None:
+    """The startup cluster may lack a traffic-manager while a later :ctx
+    target runs one: a no-manager probe must not consume the session's
+    single hint."""
+    answers = {"present": False}
+
+    async def probe() -> bool:
+        return answers["present"]
+
+    app = make_app(telepresence=None, probe=probe)
+    async with app.run_test() as pilot:
+        await app._maybe_hint_telepresence()
+        await pilot.pause()
+        assert not any("traffic-manager" in n.message for n in app._notifications)
+        answers["present"] = True  # the cluster behind a :ctx switch has one
+        await app._maybe_hint_telepresence()
+        await until(
+            pilot,
+            lambda: any("traffic-manager detected" in n.message for n in app._notifications),
+            label="hint shown after the switch",
+        )

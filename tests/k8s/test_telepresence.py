@@ -239,3 +239,72 @@ def test_parse_status_multi_daemon_connections_shape() -> None:
     assert empty.connected is False
     junk = parse_status({"connections": "nope"})
     assert junk.connected is False
+
+
+def test_nested_connections_bomb_does_not_recurse() -> None:
+    """A connections entry embedding another connections wrapper must not
+    recurse (the 'Never raises' contract covers RecursionError): nested
+    wrappers are ignored, one level is the source's real shape."""
+    bomb: dict[str, Any] = {"connections": []}
+    inner = bomb
+    for _ in range(2000):
+        nxt: dict[str, Any] = {"connections": []}
+        inner["connections"] = [nxt]
+        inner = nxt
+    s = parse_status(bomb)
+    assert s.connected is False
+
+
+def test_multi_daemon_status_carries_the_daemon_name() -> None:
+    """list needs --use <name> when several daemons run: the selected
+    connection's daemon name must survive parsing."""
+    s = parse_status(
+        {
+            "connections": [
+                {
+                    "user_daemon": {
+                        "running": True,
+                        "status": "Connected",
+                        "name": "prod-conn",
+                    },
+                    "root_daemon": {"running": True},
+                    "traffic_manager": {"version": "2.30.1"},
+                }
+            ]
+        }
+    )
+    assert s.daemon_name == "prod-conn"
+
+
+async def test_list_intercepts_scopes_to_the_daemon_when_named() -> None:
+    cli, execute = _cli()
+    execute.return_value = (0, "[]", "")
+    with mock.patch("korvid.k8s.telepresence._execute", execute):
+        await cli.list_intercepts(daemon="prod-conn")
+    argv = execute.await_args_list[0].args[0]
+    assert argv == [
+        "/opt/homebrew/bin/telepresence",
+        "list",
+        "--use",
+        "prod-conn",
+        "--format",
+        "json",
+    ]
+
+
+def test_parse_intercepts_requires_active_disposition_and_spec() -> None:
+    """WAITING/errored intercepts and spec-less entries are not 'Active
+    intercepts': disposition 1 (ACTIVE) with a real spec is the bar."""
+    payload = [
+        {
+            "name": "web",
+            "namespace": "d",
+            "intercept_info": [
+                {"spec": {"name": "waiting"}, "disposition": 2},
+                {"disposition": 1},  # no spec: a blank row helps nobody
+                {"spec": {"name": "live", "client": "a@b"}, "disposition": 1},
+            ],
+        }
+    ]
+    rows = parse_intercepts(payload)
+    assert [r.name for r in rows] == ["live"]
