@@ -99,10 +99,11 @@ async def _mirror(ui: UIBridge, tool: str, args: Mapping[str, Any]) -> str | Non
             return None
         return await ui.agent_open_logs(pod, namespace, _str_or_none(args.get("container")))
     if tool == "diagnose_pod":
-        name = _str_or_none(args.get("name"))
-        if name is None:
+        # The registry schema names the target 'pod' (matching get_logs).
+        pod = _str_or_none(args.get("pod"))
+        if pod is None:
             return None
-        return await ui.agent_open_describe("pods", name, namespace)
+        return await ui.agent_open_describe("pods", pod, namespace)
     if tool == "list_operators":
         return await ui.agent_navigate("subscriptions", namespace or "all")
     return None

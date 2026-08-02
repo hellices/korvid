@@ -167,3 +167,24 @@ async def test_describe_refuses_while_an_approval_dialog_is_up() -> None:
         assert result.startswith("ERROR:")
         assert "approval" in result
         assert isinstance(app.screen, ConfirmScreen)  # the dialog kept focus
+
+
+async def test_navigate_and_logs_refuse_while_an_approval_dialog_is_up() -> None:
+    """Same 'user is deciding' rule as describe: a mirrored navigate would
+    swap the view under the dialog, and a mirrored log open would tear down
+    the log stream the user was watching beneath it."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        app.push_screen(ConfirmScreen("Scale deploy prod/api", "scale", preview=["1 -> 3"]))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ConfirmScreen),
+            label="approval dialog up",
+        )
+        nav = await app.agent_navigate("pods")
+        assert nav.startswith("ERROR:")
+        assert "approval" in nav
+        logs = await app.agent_open_logs("api-1", "default")
+        assert logs.startswith("ERROR:")
+        assert "approval" in logs
+        assert isinstance(app.screen, ConfirmScreen)  # the dialog kept focus

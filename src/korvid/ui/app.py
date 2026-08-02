@@ -8143,6 +8143,13 @@ class KorvidApp(App[None]):
         self.notify(summary, title="agent", severity="information", timeout=3)
 
     async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        if self._approval_dialog_active():
+            # Same "user is deciding" rule as describe: swapping the view
+            # beneath an approval dialog mid-decision is disorienting.
+            return (
+                "ERROR: an approval dialog is open — the user is deciding; "
+                "wait for their decision before changing the view"
+            )
         if isinstance(self.screen, DescribeScreen):
             # The user opened a describe modal and is reading it; switching
             # the table underneath while reporting 'switched' would lie about
@@ -8191,6 +8198,13 @@ class KorvidApp(App[None]):
         return "filter cleared"
 
     async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
+        if self._approval_dialog_active():
+            # Opening logs tears down the current log stream (the one the
+            # user may be watching beneath the dialog while deciding).
+            return (
+                "ERROR: an approval dialog is open — the user is deciding; "
+                "wait for their decision before opening logs"
+            )
         if self._stream_logs is None:
             return "ERROR: log streaming unavailable in this session"
         pane_gen = self._log_pane_gen

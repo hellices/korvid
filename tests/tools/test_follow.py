@@ -50,7 +50,8 @@ async def test_get_logs_mirrors_as_log_pane() -> None:
 
 async def test_diagnose_pod_mirrors_as_pod_describe() -> None:
     ui = FakeBridge()
-    await mirror_read(ui, "diagnose_pod", {"name": "api-1", "namespace": "prod"})
+    # the registry schema names the target 'pod' (not 'name')
+    await mirror_read(ui, "diagnose_pod", {"pod": "api-1", "namespace": "prod"})
     assert ui.calls == [("open_describe", {"kind": "pods", "name": "api-1", "namespace": "prod"})]
 
 
@@ -104,7 +105,7 @@ async def test_every_followable_tool_reaches_the_bridge(tool: str) -> None:
         "get_resource": {"kind": "pods", "name": "x", "namespace": "d"},
         "get_events": {"kind": "pods", "name": "x", "namespace": "d"},
         "get_logs": {"pod": "x", "namespace": "d"},
-        "diagnose_pod": {"name": "x", "namespace": "d"},
+        "diagnose_pod": {"pod": "x", "namespace": "d"},
         "list_operators": {},
     }[tool]
     ui = FakeBridge()
