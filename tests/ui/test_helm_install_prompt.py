@@ -428,10 +428,12 @@ async def test_in_flight_stale_schema_cannot_resurface_during_the_debounce() -> 
 
     gate = asyncio.Event()
     calls: list[str] = []
+    completed: list[str] = []
 
     async def gated_schema(chart: str, version: str) -> "dict[str, object] | None":
         calls.append(version)
         await gate.wait()
+        completed.append(version)
         return _SCHEMA
 
     app = HostApp()
@@ -454,10 +456,12 @@ async def test_in_flight_stale_schema_cannot_resurface_during_the_debounce() -> 
             label="edit handled, debounce armed",
         )
         gate.set()  # the stale fetch completes inside the debounce window
-        await pilot.pause(0.2)  # still inside the 0.5s debounce
+        # observable state, not wall-clock: the *stale* fetch has finished
+        # (its worker resumed past the gate) and the section stayed hidden.
+        await until(pilot, lambda: "18.1.0" in completed, label="stale fetch completed")
         assert not app.screen.query_one("#helm-required", Static).display
         # the debounced refetch eventually renders the new version's schema
-        await until(pilot, lambda: "18.2.0" in calls, label="refetched")
+        await until(pilot, lambda: "18.2.0" in completed, label="refetched")
         await until(
             pilot,
             lambda: app.screen.query_one("#helm-required", Static).display,
@@ -489,7 +493,17 @@ async def test_rapid_f1_presses_open_a_single_readme_screen() -> None:
         await pilot.press("f1")  # second press while the first fetch hangs
         gate.set()
         await until(pilot, lambda: app.screen is not prompt, label="readme open")
-        await pilot.pause(0.2)
+        # every README worker has finished: a late duplicate cannot be
+        # in flight anymore when the stack is inspected.
+        await until(
+            pilot,
+            lambda: (
+                not any(
+                    w.group == "helm-chart-readme" and not w.is_finished for w in prompt.workers
+                )
+            ),
+            label="readme workers finished",
+        )
         from korvid.ui.widgets.helm_install import ChartReadmeScreen
 
         stacked = [s for s in app.screen_stack if isinstance(s, ChartReadmeScreen)]

@@ -6889,10 +6889,12 @@ class KorvidApp(App[None]):
         self, helm: HelmCLI, hit: ChartHit, choices: HelmReleaseChoices
     ) -> str | None:
         """`helm show values` output for the picked chart, or None when the
-        fetch fails (the caller falls back to the comment stub)."""
+        fetch fails (the caller falls back to the comment stub). The wizard
+        version passes through unchanged: an empty version means "latest",
+        matching what the install itself will resolve."""
         try:
             return await asyncio.wait_for(
-                helm.show_values(hit.name, choices.version or hit.version),
+                helm.show_values(hit.name, choices.version),
                 _HELM_PREVIEW_TIMEOUT,
             )
         except (HelmError, TimeoutError):

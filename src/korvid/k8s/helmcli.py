@@ -23,6 +23,24 @@ from typing import Any
 
 _STDERR_TAIL_LINES = 5
 
+#: Upper bound for a chart's values.schema.json (issue #151): the file is
+#: chart-controlled content, so refuse to read anything implausibly large
+#: (real schemas are a few KiB) instead of loading it into memory.
+_SCHEMA_MAX_BYTES = 1024 * 1024
+
+
+def _read_schema_file(path: Path) -> dict[str, Any] | None:
+    """Read and parse one values.schema.json; None for oversized, malformed
+    (including a recursion-bomb: deeply nested but valid JSON), or non-dict
+    content. Runs on a worker thread - never on the event loop."""
+    try:
+        if path.stat().st_size > _SCHEMA_MAX_BYTES:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
 
 def find_helm() -> str | None:
     """Absolute path of the `helm` binary on PATH, or None when absent."""
@@ -204,8 +222,10 @@ class HelmCLI:
         `helm show` does not expose the schema, so the chart is pulled
         (`helm pull --untar`) into a private temp dir and the file is read
         from the unpacked chart; the directory is removed either way. The
-        schema is advisory (issue #151): any failure - pull error, missing
-        file, malformed JSON - degrades to None, never an exception.
+        schema is chart-controlled content and advisory (issue #151): any
+        failure - pull error, missing or oversized file, malformed JSON -
+        degrades to None, never an exception. Reading and parsing run on a
+        worker thread so a large schema cannot stall the event loop.
         """
         tmp = tempfile.mkdtemp(prefix="korvid-helm-schema-")
         try:
@@ -215,11 +235,8 @@ class HelmCLI:
             schemas = list(Path(tmp).glob("*/values.schema.json"))
             if not schemas:
                 return None
-            data = json.loads(schemas[0].read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else None
-        except (HelmError, OSError, ValueError, RecursionError):
-            # RecursionError: deeply nested but valid JSON from an
-            # untrusted chart can blow the parser's stack.
+            return await asyncio.to_thread(_read_schema_file, schemas[0])
+        except (HelmError, OSError):
             return None
         finally:
             with contextlib.suppress(OSError):
@@ -388,10 +405,14 @@ class HelmCLI:
 
 
 def _field_summary(prop: dict[str, Any]) -> str:
-    """One-line type/enum description for a required schema property."""
+    """One-line type/enum description for a required schema property.
+
+    Non-string enum members render as JSON (null/false), not Python
+    spelling - the display is meant to be copied into YAML."""
     enum = prop.get("enum")
     if isinstance(enum, list) and enum:
-        return " | ".join(str(v) for v in enum if str(v))
+        parts = [v if isinstance(v, str) else json.dumps(v) for v in enum]
+        return " | ".join(p for p in parts if p)
     return str(prop.get("type") or "?")
 
 

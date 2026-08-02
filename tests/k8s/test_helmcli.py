@@ -614,6 +614,38 @@ async def test_show_schema_returns_none_on_pathologically_nested_json() -> None:
     assert result is None
 
 
+async def test_show_schema_rejects_oversized_schema_files() -> None:
+    """values.schema.json is chart-controlled: a huge file must be rejected
+    by size before it is ever read into memory - advisory metadata degrades
+    to None, it never freezes or bloats the TUI."""
+    cli, _ = _cli()
+
+    async def fake_execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        dest = argv[argv.index("--untardir") + 1]
+        chart_dir = Path(dest) / "chart"
+        chart_dir.mkdir(parents=True)
+        big = '{"required": ["x"], "pad": "' + "a" * 2_000_000 + '"}'
+        (chart_dir / "values.schema.json").write_text(big)
+        return 0, "", ""
+
+    with mock.patch("korvid.k8s.helmcli._execute", side_effect=fake_execute):
+        result = await cli.show_schema("repo/chart", "1.2.3")
+    assert result is None
+
+
+async def test_field_summary_renders_non_string_enums_as_json() -> None:
+    """Enum members like null/false must render as JSON (copy-pastable into
+    YAML), not Python's None/False spelling."""
+    from korvid.k8s.helmcli import required_values_from_schema
+
+    schema = {
+        "required": ["flag"],
+        "properties": {"flag": {"enum": [None, False, "auto"]}},
+    }
+    rows = required_values_from_schema(schema)
+    assert rows == [("flag", "null | false | auto")]
+
+
 async def test_required_values_from_schema_extracts_paths_types_and_enums() -> None:
     """Schema -> display rows: top-level required fields with their type or
     enum; nested required objects recurse one level deep."""

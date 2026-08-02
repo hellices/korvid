@@ -1519,3 +1519,41 @@ async def test_wizard_receives_schema_and_readme_providers(tmp_path: Path) -> No
             label="required section rendered",
         )
         assert ("show-schema", "bitnami/nginx", "18.1.0") in helm.calls
+
+
+async def test_editor_prefill_passes_an_empty_version_through_as_latest(tmp_path: Path) -> None:
+    """An empty wizard version means "latest" for the install: the values
+    prefill must ask helm for the same (no --version pin), not the
+    search-time version - the defaults must describe the chart helm will
+    actually install."""
+
+    class ShowValuesHelm(FakeHelm):
+        async def show_values(self, chart: str, version: str = "") -> str:
+            self.calls.append(("show-values", chart, version))
+            return "replicaCount: 1\n"
+
+    helm = ShowValuesHelm()
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+
+    async def fake_editor(text: str) -> str | None:
+        return None  # abort after the prefill fetch
+
+    app._edit_text = fake_editor
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await _pick_first_chart(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        from textual.widgets import Input, Select
+
+        from korvid.ui.widgets.helm_install import VALUES_MODES
+
+        app.screen.query_one("#helm-version", Input).value = ""  # latest
+        app.screen.query_one("#helm-values", Select).value = VALUES_MODES[1]
+        app.screen.query_one("#helm-release", Input).focus()
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: ("show-values", "bitnami/nginx", "") in helm.calls,
+            label="prefill fetched without a version pin",
+        )
