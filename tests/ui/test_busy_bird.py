@@ -80,34 +80,31 @@ def _make_app(audit_path: Path | None = None) -> KorvidApp:
 
 async def test_progress_label_renders_a_bird_frame() -> None:
     app = _make_app()
-    async with app.run_test() as pilot:
-        app._set_progress("test", "rendering helm preview")
-        await pilot.pause()
+    async with app.run_test():
         bar = app.query_one(StatusBar)
+        # _set_progress renders synchronously; inspecting before yielding to
+        # the event loop keeps the frame deterministic on slow runners.
+        app._set_progress("test", "rendering helm preview")
         text = str(bar.render())
-        # Some frame is showing - which one depends on how many 500ms ticks
-        # elapsed on a slow runner, so accept any (no wall-clock assertions).
-        frame = next((f for f in BIRD_FRAMES if f in text), None)
-        assert frame is not None
+        assert BIRD_FRAMES[0] in text
         assert "rendering helm preview" in text
         # the bird leads the label (decided format)
-        assert text.index(frame) < text.index("rendering helm preview")
+        assert text.index(BIRD_FRAMES[0]) < text.index("rendering helm preview")
 
 
 async def test_animation_tick_swaps_the_frame_in_place() -> None:
     """The interval callback advances the frame without a new update_status
     call - invoked directly here (no wall-clock assertions)."""
     app = _make_app()
-    async with app.run_test() as pilot:
-        app._set_progress("test", "draining node")
-        await pilot.pause()
+    async with app.run_test():
         bar = app.query_one(StatusBar)
-        before = bird_frame(bar._tick)  # whatever frame is current on this runner
-        assert before in str(bar.render())
+        # synchronous render: frame 0 is showing before the loop runs
+        app._set_progress("test", "draining node")
+        assert BIRD_FRAMES[0] in str(bar.render())
         bar._advance_bird()  # what the timer does every 500ms
         text = str(bar.render())
-        assert bird_frame(bar._tick) in text
-        assert before not in text
+        assert BIRD_FRAMES[1] in text
+        assert BIRD_FRAMES[0] not in text
         assert "draining node" in text  # the label survived the swap
 
 
@@ -150,11 +147,11 @@ async def test_animation_stops_and_resets_when_progress_clears() -> None:
         assert bar._anim_timer is None  # stopped with the last owner
         text = str(bar.render())
         assert all(frame not in text for frame in BIRD_FRAMES)
-        # a new operation restarts the animation from a reset tick counter
+        # a new operation restarts from frame 0: _set_progress renders
+        # synchronously, so inspect before yielding to the interval timer.
         app._set_progress("test2", "next op")
-        await pilot.pause()
+        assert BIRD_FRAMES[0] in str(bar.render())
         assert bar._anim_timer is not None
-        assert any(frame in str(bar.render()) for frame in BIRD_FRAMES)
 
 
 # ---------------------------------------------------------------------------
