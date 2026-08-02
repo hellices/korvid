@@ -1,0 +1,203 @@
+"""list_resources column parity (issue #158): the tool line carries the
+same status facts the TUI table shows, so an MCP host never needs N+1
+get_resource calls to learn what one LIST already knew."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from korvid.k8s.discovery import PODS_META, ResourceMeta
+from korvid.k8s.models import (
+    CSVSummary,
+    GenericSummary,
+    OLMSubscriptionSummary,
+    PackageManifestSummary,
+    PodListSummary,
+    ReplicaSetSummary,
+    summary_for,
+)
+from korvid.tools.executor import ToolExecutor, summary_facts
+
+_RS_META = ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True)
+
+
+class ListingKube:
+    def __init__(self, summaries: list[GenericSummary]) -> None:
+        self.summaries = summaries
+
+    async def list_objects(self, meta: Any, namespace: str | None) -> list[GenericSummary]:
+        return self.summaries
+
+
+def _pod_manifest(**status: Any) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "web-1", "namespace": "prod", "uid": "u1"},
+        "spec": {"nodeName": "node-a", "containers": [{"name": "main"}]},
+        "status": {
+            "phase": "Running",
+            "containerStatuses": [
+                {"name": "main", "ready": True, "restartCount": 3, "state": {"running": {}}}
+            ],
+            **status,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# summary_for: pods get a pod-aware summary on the LIST path
+# ---------------------------------------------------------------------------
+
+
+def test_summary_for_pod_captures_status_facts() -> None:
+    s = summary_for("Pod", _pod_manifest())
+    assert isinstance(s, PodListSummary)
+    assert s.phase == "Running"
+    assert s.ready == "1/1"
+    assert s.restarts == 3
+    assert s.node == "node-a"
+
+
+def test_summary_for_pod_shows_waiting_reason_as_phase() -> None:
+    """The TUI STATUS column shows CrashLoopBackOff, not 'Running': the
+    tool must agree - this mismatch is the issue's headline failure."""
+    manifest = _pod_manifest(
+        containerStatuses=[
+            {
+                "name": "main",
+                "ready": False,
+                "restartCount": 7,
+                "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+            }
+        ],
+    )
+    s = summary_for("Pod", manifest)
+    assert isinstance(s, PodListSummary)
+    assert s.phase == "CrashLoopBackOff"
+    assert s.ready == "0/1"
+
+
+# ---------------------------------------------------------------------------
+# the facts line per typed summary
+# ---------------------------------------------------------------------------
+
+
+def test_pod_facts_line() -> None:
+    s = summary_for("Pod", _pod_manifest())
+    line = summary_facts(s)
+    assert "phase=Running" in line
+    assert "ready=1/1" in line
+    assert "restarts=3" in line
+    assert "node=node-a" in line
+
+
+def test_replicaset_facts_line() -> None:
+    s = ReplicaSetSummary(
+        name="web-6d9f",
+        namespace="prod",
+        kind="ReplicaSet",
+        created="",
+        revision="7",
+        desired=3,
+        current=3,
+        ready="2/3",
+    )
+    line = summary_facts(s)
+    assert "revision=7" in line
+    assert "desired=3" in line
+    assert "current=3" in line
+    assert "ready=2/3" in line
+
+
+def test_olm_facts_lines() -> None:
+    sub = OLMSubscriptionSummary(
+        name="op",
+        namespace="operators",
+        kind="Subscription",
+        created="",
+        channel="stable",
+        source="operatorhubio",
+        installed_csv="op.v1.2.3",
+        state="AtLatestKnown",
+    )
+    line = summary_facts(sub)
+    assert "channel=stable" in line
+    assert "csv=op.v1.2.3" in line
+    assert "state=AtLatestKnown" in line
+    csv = CSVSummary(
+        name="op.v1.2.3",
+        namespace="operators",
+        kind="ClusterServiceVersion",
+        created="",
+        version="1.2.3",
+        phase="Succeeded",
+        display_name="The Operator",
+    )
+    line = summary_facts(csv)
+    assert "version=1.2.3" in line
+    assert "phase=Succeeded" in line
+    pkg = PackageManifestSummary(
+        name="op",
+        namespace="olm",
+        kind="PackageManifest",
+        created="",
+        catalog="operatorhubio-catalog",
+        default_channel="stable",
+        channels=("stable", "beta"),
+    )
+    line = summary_facts(pkg)
+    assert "catalog=operatorhubio-catalog" in line
+    assert "stable" in line
+
+
+def test_generic_facts_show_desired_when_present() -> None:
+    s = GenericSummary(name="api", namespace="prod", kind="Deployment", created="", desired=4)
+    assert "desired=4" in summary_facts(s)
+    bare = GenericSummary(name="cm", namespace="prod", kind="ConfigMap", created="")
+    assert summary_facts(bare) == ""
+
+
+def test_every_typed_summary_has_a_facts_renderer() -> None:
+    """The contract (issue #158): a future typed summary must not silently
+    degrade back to name+age - it either registers a renderer or this
+    fails."""
+    import korvid.k8s.helm  # noqa: F401  # its summary subclasses join the contract
+    from korvid.tools.executor import _SUMMARY_FACTS
+
+    for sub in GenericSummary.__subclasses__():
+        assert sub in _SUMMARY_FACTS, f"{sub.__name__} has no list_resources facts renderer"
+
+
+# ---------------------------------------------------------------------------
+# the tool output end to end
+# ---------------------------------------------------------------------------
+
+
+async def test_list_resources_line_carries_pod_status() -> None:
+    kube = ListingKube([summary_for("Pod", _pod_manifest())])
+    ex = ToolExecutor(kube, {"pods": PODS_META})  # type: ignore[arg-type]  # read-only fake
+    out = await ex.execute("list_resources", {"kind": "pods"})
+    assert "prod/web-1" in out
+    assert "phase=Running" in out
+    assert "ready=1/1" in out
+
+
+async def test_list_resources_renders_custom_columns_with_names() -> None:
+    """User-configured columns (issue #45) reach the model as name=value."""
+    s = GenericSummary(
+        name="api",
+        namespace="prod",
+        kind="Deployment",
+        created="",
+        custom=("team-a", "x" * 500),
+    )
+    ex = ToolExecutor(
+        ListingKube([s]),  # type: ignore[arg-type]  # read-only fake
+        {"deployments": ResourceMeta("Deployment", "deployments", "apps", "v1", True)},
+        custom_columns={"deployments": ("TEAM", "NOTES")},
+    )
+    out = await ex.execute("list_resources", {"kind": "deployments"})
+    assert "TEAM=team-a" in out
+    assert "NOTES=" in out
+    assert "x" * 500 not in out  # clamped: hostile/oversized values stay bounded

@@ -377,8 +377,43 @@ _OLM_GROUP_PREFIX = "operators.coreos.com/"
 _PACKAGES_GROUP_PREFIX = "packages.operators.coreos.com/"
 
 
+@dataclass(frozen=True)
+class PodListSummary(GenericSummary):
+    """Pod summary for the tool LIST path (issue #158).
+
+    The TUI's pods view streams richer `PodSummary` objects through the
+    dedicated watch path; this subclass carries just the status columns
+    that table shows (STATUS / READY / RESTARTS / NODE) so `list_resources`
+    answers match the screen. It only ever flows through `list_objects` -
+    never the resource store.
+    """
+
+    phase: str = ""
+    ready: str = ""
+    restarts: int = 0
+    node: str = ""
+
+    @classmethod
+    def from_pod_manifest(cls, kind: str, manifest: dict[str, Any]) -> PodListSummary:
+        base = GenericSummary.from_manifest(kind, manifest)
+        meta = manifest.get("metadata") or {}
+        spec = _str_map(manifest.get("spec"))
+        status = _str_map(manifest.get("status"))
+        statuses: list[dict[str, Any]] = status.get("containerStatuses") or []
+        ready_count = sum(1 for s in statuses if s.get("ready"))
+        return cls(
+            **vars(base),
+            phase=_display_phase(meta, spec, status, statuses),
+            ready=f"{ready_count}/{len(statuses)}",
+            restarts=sum(int(s.get("restartCount", 0)) for s in statuses),
+            node=str(spec.get("nodeName") or ""),
+        )
+
+
 def summary_for(kind: str, manifest: dict[str, Any]) -> GenericSummary:
     """Build the richest summary available for *kind* (ReplicaSet gets history fields)."""
+    if kind == "Pod":
+        return PodListSummary.from_pod_manifest(kind, manifest)
     if kind == "ReplicaSet":
         return ReplicaSetSummary.from_manifest(kind, manifest)
     api_version = str(manifest.get("apiVersion") or "")

@@ -94,6 +94,13 @@ def _missing_extra_packages(extra_roots: frozenset[str]) -> list[str]:
     return sorted(pkg for pkg in extra_roots if importlib.util.find_spec(pkg) is None)
 
 
+def _custom_column_names(config: KorvidConfig) -> dict[str, tuple[str, ...]]:
+    """Configured custom column *names* per plural (issue #158): the client
+    computes the values onto GenericSummary.custom; the tool layer needs the
+    names to render them as name=value in list_resources."""
+    return {kind: tuple(col.name for col in view.columns) for kind, view in config.views.items()}
+
+
 class _MCPAppHooks:
     """Late-bound app hooks for MCP follow mode (issue #153).
 
@@ -153,6 +160,7 @@ def _build_mcp_controller(
                 # The only surface allowed to reach the write-proposal tools:
                 # this server enforces the capability token before dispatch.
                 proposal_tools=config.mcp_write_proposals,
+                custom_columns=_custom_column_names(config),
             ),
             mcp_tool_schemas(write_proposals=config.mcp_write_proposals),
             port=config.mcp_port,
@@ -482,7 +490,7 @@ def _build_agent_wiring(
     agent_runtime = (
         AgentRuntime(
             provider,
-            ToolExecutor(kube, aliases, ui=ui_proxy),
+            ToolExecutor(kube, aliases, ui=ui_proxy, custom_columns=_custom_column_names(config)),
             tools=profile.tools,
             max_iterations=profile.max_iterations,
             max_history_chars=profile.max_history_chars,
@@ -554,7 +562,7 @@ def _build_agent_wiring(
         profile_box[0] = new_profile.name
         return AgentRuntime(
             new_provider,
-            ToolExecutor(kube, aliases, ui=ui_proxy),
+            ToolExecutor(kube, aliases, ui=ui_proxy, custom_columns=_custom_column_names(config)),
             tools=new_profile.tools,
             max_iterations=new_profile.max_iterations,
             max_history_chars=new_profile.max_history_chars,

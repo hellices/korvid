@@ -1179,3 +1179,20 @@ async def test_mcp_controller_wires_follow_hooks() -> None:
     assert hooks.follow_enabled() is True
     hooks.note_activity("seen")
     assert fake_app.notes == ["seen"]
+
+
+async def test_mcp_executor_receives_custom_column_names() -> None:
+    """list_resources renders user-configured columns (issue #158): the
+    composition root hands the configured names to every executor."""
+    from korvid.__main__ import _build_mcp_controller, _custom_column_names
+    from korvid.core.config import KorvidConfig, ViewConfig
+    from korvid.k8s.client import KubeClient
+    from korvid.k8s.columns import CustomColumn
+
+    view = ViewConfig(columns=(CustomColumn(name="TEAM", source="label", expr="team"),))
+    config = KorvidConfig(mcp_enabled=True, mcp_port=1234, views={"deployments": view})
+    assert _custom_column_names(config) == {"deployments": ("TEAM",)}
+    controller = _build_mcp_controller(config, cast("KubeClient", object()), {}, None)
+    assert controller is not None
+    server = controller._factory()  # type: ignore[attr-defined]  # test introspection
+    assert server._executor._custom_columns == {"deployments": ("TEAM",)}
