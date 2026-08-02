@@ -263,3 +263,120 @@ async def test_install_mode_offers_no_reuse_option() -> None:
         await until(pilot, lambda: app.result != "unset", label="prompt dismissed")
         assert isinstance(app.result, HelmReleaseChoices)
         assert app.result.reuse_values is False
+
+
+# ---------------------------------------------------------------------------
+# Required values + README (issue #151): chart metadata surfaces in the wizard
+# ---------------------------------------------------------------------------
+
+_SCHEMA: "dict[str, object]" = {
+    "required": ["mode"],
+    "properties": {
+        "mode": {"type": "string", "enum": ["daemonset", "deployment", "statefulset", ""]},
+    },
+}
+
+
+async def _open_with_info(
+    app: HostApp,
+    *,
+    schema: "dict[str, object] | None" = _SCHEMA,
+    readme: str = "# Chart README\nSet mode before installing.",
+    schema_error: bool = False,
+) -> HelmInstallPrompt:
+    async def get_schema(chart: str, version: str) -> "dict[str, object] | None":
+        if schema_error:
+            raise RuntimeError("boom")
+        return schema
+
+    async def get_readme(chart: str, version: str) -> str:
+        return readme
+
+    prompt = HelmInstallPrompt(
+        _CHART,
+        namespace="default",
+        release=None,
+        get_schema=get_schema,
+        get_readme=get_readme,
+    )
+
+    def _done(v: object) -> None:
+        app.result = v
+
+    await app.push_screen(prompt, _done)
+    return prompt
+
+
+async def test_required_values_from_the_schema_render_in_the_wizard() -> None:
+    """A chart shipping values.schema.json gets a Required values section:
+    field path plus its enum/type - the pre-install answer to 'what must I
+    set?' (issue #151)."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open_with_info(app)
+        await _opened(app, pilot)
+        await until(
+            pilot,
+            lambda: "mode" in str(app.screen.query_one("#helm-required", Static).render()),
+            label="required section rendered",
+        )
+        text = str(app.screen.query_one("#helm-required", Static).render())
+        assert "daemonset" in text  # the enum names the valid choices
+
+
+async def test_wizard_without_schema_shows_no_required_section() -> None:
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open_with_info(app, schema=None)
+        await _opened(app, pilot)
+        await until(
+            pilot,
+            lambda: not app.screen.query_one("#helm-required", Static).display,
+            label="required section hidden",
+        )
+
+
+async def test_schema_fetch_failure_degrades_silently() -> None:
+    """The schema is advisory: a fetch failure must not break the wizard or
+    block submitting."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        await _open_with_info(app, schema_error=True)
+        await _opened(app, pilot)
+        await pilot.pause(0.1)
+        app.screen.query_one("#helm-release", Input).focus()
+        await pilot.press("enter")
+        await until(pilot, lambda: app.result != "unset", label="submitted")
+        assert isinstance(app.result, HelmReleaseChoices)
+
+
+async def test_f1_opens_the_chart_readme() -> None:
+    """The chart's README opens in a scrollable modal from the wizard
+    (issue #151) - prerequisites and mandatory settings without leaving."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open_with_info(app)
+        await _opened(app, pilot)
+        await pilot.press("f1")
+        await until(pilot, lambda: app.screen is not prompt, label="readme screen open")
+        from textual.widgets import Static as _Static
+
+        body = " ".join(str(w.render()) for w in app.screen.query(_Static))
+        assert "Set mode before installing" in body
+        await pilot.press("escape")
+        await until(pilot, lambda: app.screen is prompt, label="back to wizard")
+
+
+async def test_wizard_without_info_providers_behaves_as_before() -> None:
+    """No injected providers (degraded session): the wizard renders and
+    submits exactly as before - no required section, README key inert."""
+    app = HostApp()
+    async with app.run_test() as pilot:
+        prompt = await _open(app)
+        await _opened(app, pilot)
+        await pilot.press("f1")
+        await pilot.pause()
+        assert app.screen is prompt  # no README to show, key does nothing
+        app.screen.query_one("#helm-release", Input).focus()
+        await pilot.press("enter")
+        await until(pilot, lambda: app.result != "unset", label="submitted")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -504,3 +505,123 @@ async def test_repo_update_builds_argv() -> None:
         await cli.repo_update()
     argv = execute.await_args_list[0].args[0]
     assert argv[1:3] == ["repo", "update"]
+
+
+# ---------------------------------------------------------------------------
+# helm show family + chart schema (issue #151)
+# ---------------------------------------------------------------------------
+
+
+async def test_show_values_builds_argv_and_returns_stdout() -> None:
+    cli, execute = _cli()
+    execute.return_value = (0, '# Default values\nmode: ""\n', "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        out = await cli.show_values("open-telemetry/opentelemetry-collector", "0.165.0")
+    assert out.startswith("# Default values")
+    argv = execute.await_args_list[0].args[0]
+    assert argv[1:4] == ["show", "values", "open-telemetry/opentelemetry-collector"]
+    assert argv[4:6] == ["--version", "0.165.0"]
+
+
+async def test_show_values_omits_empty_version() -> None:
+    cli, execute = _cli()
+    execute.return_value = (0, "x: 1\n", "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        await cli.show_values("repo/chart", "")
+    argv = execute.await_args_list[0].args[0]
+    assert "--version" not in argv
+
+
+async def test_show_readme_builds_argv() -> None:
+    cli, execute = _cli()
+    execute.return_value = (0, "# Chart README\n", "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        out = await cli.show_readme("repo/chart", "1.2.3")
+    assert out.startswith("# Chart README")
+    argv = execute.await_args_list[0].args[0]
+    assert argv[1:4] == ["show", "readme", "repo/chart"]
+
+
+async def test_show_schema_pulls_chart_and_reads_schema() -> None:
+    """`helm show` does not expose values.schema.json: the schema comes from
+    `helm pull --untar` into a private temp dir, read and cleaned up."""
+    cli, _execute = _cli()
+    schema = {
+        "required": ["apiVersion", "mode"],
+        "properties": {"mode": {"type": "string", "enum": ["daemonset", "deployment"]}},
+    }
+
+    async def fake_execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        assert argv[1] == "pull"
+        assert argv[2] == "repo/chart"
+        assert "--untar" in argv
+        dest = argv[argv.index("--untardir") + 1]
+        chart_dir = Path(dest) / "chart"
+        chart_dir.mkdir(parents=True)
+        (chart_dir / "values.schema.json").write_text(json.dumps(schema))
+        return 0, "", ""
+
+    with mock.patch("korvid.k8s.helmcli._execute", side_effect=fake_execute):
+        result = await cli.show_schema("repo/chart", "1.2.3")
+    assert result == schema
+
+
+async def test_show_schema_returns_none_when_chart_has_no_schema() -> None:
+    cli, _ = _cli()
+
+    async def fake_execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        dest = argv[argv.index("--untardir") + 1]
+        (Path(dest) / "chart").mkdir(parents=True)
+        return 0, "", ""
+
+    with mock.patch("korvid.k8s.helmcli._execute", side_effect=fake_execute):
+        result = await cli.show_schema("repo/chart", "1.2.3")
+    assert result is None
+
+
+async def test_show_schema_returns_none_on_malformed_schema_json() -> None:
+    """A chart shipping broken JSON must not crash the wizard - the schema
+    is advisory."""
+    cli, _ = _cli()
+
+    async def fake_execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        dest = argv[argv.index("--untardir") + 1]
+        chart_dir = Path(dest) / "chart"
+        chart_dir.mkdir(parents=True)
+        (chart_dir / "values.schema.json").write_text("{not json")
+        return 0, "", ""
+
+    with mock.patch("korvid.k8s.helmcli._execute", side_effect=fake_execute):
+        result = await cli.show_schema("repo/chart", "1.2.3")
+    assert result is None
+
+
+async def test_required_values_from_schema_extracts_paths_types_and_enums() -> None:
+    """Schema -> display rows: top-level required fields with their type or
+    enum; nested required objects recurse one level deep."""
+    from korvid.k8s.helmcli import required_values_from_schema
+
+    schema = {
+        "required": ["mode", "image"],
+        "properties": {
+            "mode": {"type": "string", "enum": ["daemonset", "deployment", ""]},
+            "image": {
+                "type": "object",
+                "required": ["repository"],
+                "properties": {"repository": {"type": "string"}},
+            },
+            "optional": {"type": "string"},
+        },
+    }
+    rows = required_values_from_schema(schema)
+    assert ("mode", "daemonset | deployment") in rows
+    assert ("image.repository", "string") in rows
+    assert not any(path == "optional" for path, _ in rows)
+
+
+async def test_required_values_from_schema_handles_missing_or_junk() -> None:
+    from korvid.k8s.helmcli import required_values_from_schema
+
+    assert required_values_from_schema(None) == []
+    assert required_values_from_schema({}) == []
+    assert required_values_from_schema({"required": "not-a-list"}) == []

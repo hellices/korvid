@@ -6687,7 +6687,18 @@ class KorvidApp(App[None]):
                     group="helm-write",
                 )
 
-            self.push_screen(HelmInstallPrompt(hit, namespace=namespace, release=release), _chosen)
+            self.push_screen(
+                HelmInstallPrompt(
+                    hit,
+                    namespace=namespace,
+                    release=release,
+                    # Chart metadata (issue #151): required values from the
+                    # chart's schema and README access, both repo-local.
+                    get_schema=helm.show_schema,
+                    get_readme=helm.show_readme,
+                ),
+                _chosen,
+            )
 
         title = f"Upgrade {release} with chart:" if release else "Install helm chart"
         search_screen = HelmChartSearchScreen(
@@ -6741,7 +6752,7 @@ class KorvidApp(App[None]):
         editor_buffer: str | None = None
         if choices.edit_values:
             proceed, values_text, editor_buffer = await self._helm_edit_values(
-                hit, choices, previous=None
+                helm, hit, choices, previous=None
             )
             if not proceed:
                 return  # editor failed or was aborted; already notified
@@ -6832,17 +6843,29 @@ class KorvidApp(App[None]):
         return True
 
     async def _helm_edit_values(
-        self, hit: ChartHit, choices: HelmReleaseChoices, *, previous: str | None
+        self,
+        helm: HelmCLI,
+        hit: ChartHit,
+        choices: HelmReleaseChoices,
+        *,
+        previous: str | None,
     ) -> tuple[bool, str | None, str | None]:
         """(proceed, values override, raw buffer) from `$EDITOR`.
 
-        A retry after a failed render pre-fills the editor with the
-        previous *raw* buffer (issue #139) - a comments-only buffer
-        normalizes to "no override" for helm but stays prior input for the
-        next edit; False means the editor was aborted or failed and the
-        flow must stop.
+        A first edit opens on the chart's own annotated defaults
+        (`helm show values`, issue #151) - the standard CLI workflow -
+        falling back to the old comment stub when the fetch fails. Content
+        returned unchanged (or comments-only) keeps the chart defaults: no
+        override file is passed. A retry after a failed render pre-fills
+        the editor with the previous *raw* buffer (issue #139); False means
+        the editor was aborted or failed and the flow must stop.
         """
         template = previous
+        prefilled_defaults: str | None = None
+        if template is None:
+            with self._progress("fetching chart default values"):
+                prefilled_defaults = await self._helm_default_values(helm, hit, choices)
+            template = prefilled_defaults
         if template is None:
             template = (
                 f"# values override for {hit.name} {choices.version or hit.version}\n"
@@ -6855,7 +6878,26 @@ class KorvidApp(App[None]):
         meaningful = any(
             line.strip() and not line.lstrip().startswith("#") for line in text.splitlines()
         )
+        if prefilled_defaults is not None and text == prefilled_defaults:
+            # Unchanged chart defaults are not an override (issue #151):
+            # passing them as -f would freeze today's defaults into the
+            # release for no reason.
+            meaningful = False
         return True, (text if meaningful else None), text
+
+    async def _helm_default_values(
+        self, helm: HelmCLI, hit: ChartHit, choices: HelmReleaseChoices
+    ) -> str | None:
+        """`helm show values` output for the picked chart, or None when the
+        fetch fails (the caller falls back to the comment stub)."""
+        try:
+            return await asyncio.wait_for(
+                helm.show_values(hit.name, choices.version or hit.version),
+                _HELM_PREVIEW_TIMEOUT,
+            )
+        except (HelmError, TimeoutError):
+            logger.debug("helm show values failed; editor opens on the stub", exc_info=True)
+            return None
 
     async def _helm_render_failure_choice(self, error: str, *, upgrade: bool) -> str:
         """Stop-before-approval decision on a rejected dry-run (issue #139):
@@ -6920,7 +6962,7 @@ class KorvidApp(App[None]):
                 return None  # nothing was executed, nothing to audit
             if decision == "edit":
                 proceed, values_text, editor_buffer = await self._helm_edit_values(
-                    hit, choices, previous=editor_buffer
+                    helm, hit, choices, previous=editor_buffer
                 )
                 if not proceed:
                     return None

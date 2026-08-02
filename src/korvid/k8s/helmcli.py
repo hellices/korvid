@@ -13,9 +13,13 @@ every mutating command behind the approval dialog and the fail-closed audit.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shutil
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 _STDERR_TAIL_LINES = 5
 
@@ -182,6 +186,44 @@ class HelmCLI:
         return await self._run("repo", "update")
 
     @staticmethod
+    def _version_args(version: str) -> list[str]:
+        return ["--version", version] if version else []
+
+    async def show_values(self, chart: str, version: str = "") -> str:
+        """`helm show values`: the chart's full annotated default values
+        (issue #151) - repo-local, no cluster access."""
+        return await self._run("show", "values", chart, *self._version_args(version))
+
+    async def show_readme(self, chart: str, version: str = "") -> str:
+        """`helm show readme`: the chart's README (issue #151)."""
+        return await self._run("show", "readme", chart, *self._version_args(version))
+
+    async def show_schema(self, chart: str, version: str = "") -> dict[str, Any] | None:
+        """The chart's `values.schema.json`, or None when it ships none.
+
+        `helm show` does not expose the schema, so the chart is pulled
+        (`helm pull --untar`) into a private temp dir and the file is read
+        from the unpacked chart; the directory is removed either way. The
+        schema is advisory (issue #151): any failure - pull error, missing
+        file, malformed JSON - degrades to None, never an exception.
+        """
+        tmp = tempfile.mkdtemp(prefix="korvid-helm-schema-")
+        try:
+            await self._run(
+                "pull", chart, *self._version_args(version), "--untar", "--untardir", tmp
+            )
+            schemas = list(Path(tmp).glob("*/values.schema.json"))
+            if not schemas:
+                return None
+            data = json.loads(schemas[0].read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except (HelmError, OSError, ValueError):
+            return None
+        finally:
+            with contextlib.suppress(OSError):
+                shutil.rmtree(tmp)
+
+    @staticmethod
     def _release_args(
         release: str,
         chart: str,
@@ -341,3 +383,44 @@ class HelmCLI:
     async def diff_rollback(self, release: str, revision: int, namespace: str) -> str:
         """`helm diff rollback` (plugin): live-vs-revision diff for previews."""
         return await self._run("diff", "rollback", release, str(revision), "--namespace", namespace)
+
+
+def _field_summary(prop: dict[str, Any]) -> str:
+    """One-line type/enum description for a required schema property."""
+    enum = prop.get("enum")
+    if isinstance(enum, list) and enum:
+        return " | ".join(str(v) for v in enum if str(v))
+    return str(prop.get("type") or "?")
+
+
+def required_values_from_schema(
+    schema: dict[str, Any] | None, *, _prefix: str = "", _depth: int = 0
+) -> list[tuple[str, str]]:
+    """(field path, type-or-enum) rows for a schema's required values.
+
+    Follows JSON Schema `required` + `properties` (issue #151): required
+    object fields recurse (bounded depth - schemas are untrusted chart
+    content), everything else renders its type or enum. Junk shapes yield
+    an empty list; the display is advisory, never a gate.
+    """
+    if not isinstance(schema, dict) or _depth > 3:
+        return []
+    required = schema.get("required")
+    properties = schema.get("properties")
+    if not isinstance(required, list) or not isinstance(properties, dict):
+        return []
+    rows: list[tuple[str, str]] = []
+    for name in required:
+        if not isinstance(name, str):
+            continue
+        path = f"{_prefix}{name}"
+        prop = properties.get(name)
+        if not isinstance(prop, dict):
+            rows.append((path, "?"))
+            continue
+        nested = required_values_from_schema(prop, _prefix=f"{path}.", _depth=_depth + 1)
+        if nested:
+            rows.extend(nested)
+        else:
+            rows.append((path, _field_summary(prop)))
+    return rows
