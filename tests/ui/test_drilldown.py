@@ -529,3 +529,73 @@ async def test_drill_prewarm_skips_the_wait_when_the_watch_is_live() -> None:
         await pilot.press("enter")
         await until(pilot, lambda: app.current_kind == "replicasets", label="drilled")
         assert "replicasets" not in starts  # live watch reused, not restarted
+
+
+async def test_drill_abandons_when_a_newer_navigation_lands_during_prewarm() -> None:
+    """The pre-warm widens the window between Enter and the locked
+    transaction: a `:view` issued meanwhile is the newer command and must
+    win - the stale drill must not override it or strand a level."""
+    app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 0.3})
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        drill = asyncio.create_task(app._drill_into("default", "web"))
+        await until(
+            pilot,
+            lambda: ("replicasets", "default") in app.watch_manager.active,
+            label="prewarm started",
+        )
+        await app.on_navigate_command(NavigateCommand("pods", None))
+        result = await drill
+        assert result is not None  # an accurate outcome, not a false success
+        assert "abandoned" in result
+        await pilot.pause(0.1)
+        assert app.current_kind == "pods"  # the newer command won
+        assert not app._pane.drill.active  # no stranded drill level
+        # the pre-warmed replicasets stream was reaped, not leaked
+        assert ("replicasets", "default") not in app.watch_manager.active
+
+
+async def test_drill_abandons_across_a_context_epoch_change() -> None:
+    """A context switch during the pre-warm invalidates the captured UID
+    (it names an object in the old cluster): the drill must abandon."""
+    app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 0.3})
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        drill = asyncio.create_task(app._drill_into("default", "web"))
+        await until(
+            pilot,
+            lambda: ("replicasets", "default") in app.watch_manager.active,
+            label="prewarm started",
+        )
+        app._ctx_epoch += 1  # what a :ctx switch does
+        result = await drill
+        assert result is not None
+        assert "abandoned" in result
+        assert app.current_kind == "deployments"  # stayed put
+        assert not app._pane.drill.active
+
+
+async def test_pop_abandons_when_the_view_changed_during_prewarm() -> None:
+    """Esc's pop pre-warms the parent kind: a navigation landing during
+    that wait cleared the drill stack - the stale pop must not navigate."""
+    delays = {"deployments": 0.0}
+    app = _make_slow_app(_default_data(), delay_kinds=delays)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        await pilot.press("down")
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "replicasets", label="drilled")
+        delays["deployments"] = 0.3  # slow re-LIST on the way back
+        pop = asyncio.create_task(app._pop_drill())
+        await until(
+            pilot,
+            lambda: ("deployments", "default") in app.watch_manager.active,
+            label="pop prewarm started",
+        )
+        await app.on_navigate_command(NavigateCommand("pods", None))
+        assert await pop is True  # consumed, but did not override
+        await pilot.pause(0.1)
+        assert app.current_kind == "pods"  # the newer command won

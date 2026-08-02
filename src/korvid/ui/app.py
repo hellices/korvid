@@ -2248,6 +2248,12 @@ class KorvidApp(App[None]):
         # Capture before waiting on the lock: focus may move (or the pane may
         # close) while this drill queues behind another navigation.
         pane = self._pane
+        # Staleness anchors (review on #160): the pre-warm below can wait up
+        # to a second, so a newer :view/:ns/:ctx may land first. The drill
+        # was issued against *this* view in *this* cluster - anything else
+        # under the lock means the newer command wins and the drill abandons.
+        origin = (pane.kind, pane.scope)
+        epoch = self._ctx_epoch
         # Warm the child view first (issue #157): wait - bounded - until the
         # rows this drill will show exist, so the switch renders once with
         # content instead of flashing an empty table while the LIST runs.
@@ -2261,6 +2267,15 @@ class KorvidApp(App[None]):
             async with self._nav_lock:
                 if pane not in self._panes:
                     return None  # the initiating pane was closed while queued
+                if (
+                    (pane.kind, pane.scope) != origin
+                    or self._ctx_switching
+                    or epoch != self._ctx_epoch
+                ):
+                    return (
+                        "the view changed while preparing the drill — drill abandoned "
+                        "(the newer navigation takes priority)"
+                    )
                 pane.drill.push(level)
                 try:
                     await self._navigate_locked(pane, child, None)
@@ -2286,6 +2301,10 @@ class KorvidApp(App[None]):
         peeked = pane.drill.peek()
         if peeked is None:
             return False
+        # Staleness anchors (review on #160): same rule as the push side -
+        # the Esc was issued against this view in this cluster.
+        origin = (pane.kind, pane.scope)
+        epoch = self._ctx_epoch
         # Warm the parent view first (issue #157): its watch was stopped
         # when we drilled away, so navigating straight back would re-LIST
         # into an empty flash. Any parent row is enough to render.
@@ -2295,6 +2314,16 @@ class KorvidApp(App[None]):
             async with self._nav_lock:
                 if pane not in self._panes:
                     return False  # the initiating pane was closed while queued
+                if (
+                    (pane.kind, pane.scope) != origin
+                    or self._ctx_switching
+                    or epoch != self._ctx_epoch
+                    or pane.drill.peek() is not peeked
+                ):
+                    # A newer navigation landed during the pre-warm: it wins.
+                    # Consume the Esc (True) so it does not cascade into the
+                    # hierarchy-return fallback against the changed view.
+                    return True
                 popped = pane.drill.pop()
                 if popped is None:
                     return False
