@@ -325,3 +325,30 @@ async def test_hint_retries_after_a_managerless_start() -> None:
             lambda: any("traffic-manager detected" in n.message for n in app._notifications),
             label="hint shown after the switch",
         )
+
+
+async def test_probe_result_from_the_old_context_is_discarded() -> None:
+    """A probe still in flight across a :ctx switch answers for the old
+    cluster: its result must be discarded (no stale hint) and the switch's
+    re-probe must not be lost."""
+    gate = asyncio.Event()
+    answers = [True, False]  # old cluster has a manager; the new one does not
+
+    async def probe() -> bool:
+        await gate.wait()
+        return answers.pop(0)
+
+    app = make_app(telepresence=None, probe=probe)
+    async with app.run_test() as pilot:
+        first = asyncio.create_task(app._maybe_hint_telepresence())
+        await pilot.pause()
+        app._ctx_epoch += 1  # what a :ctx switch does
+        second = asyncio.create_task(app._maybe_hint_telepresence())  # switch re-probe
+        await pilot.pause()
+        gate.set()
+        await first
+        await second
+        await pilot.pause()
+        # the old cluster's True answer is stale - no hint for the new one
+        assert not any("traffic-manager detected" in n.message for n in app._notifications)
+        assert not answers  # the queued re-probe really ran after the first

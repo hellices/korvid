@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 from dataclasses import dataclass
 from typing import Any
@@ -191,6 +192,18 @@ def parse_intercepts(payload: Any) -> list[ActiveIntercept]:
     return rows
 
 
+def _stdout_error(stdout: str) -> str:
+    """The structured {"error"/"err": …} reason from a failed command's
+    stdout; "" when it is not that shape."""
+    try:
+        payload = json.loads(stdout or "")
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return _str_of(payload, "error") or _str_of(payload, "err")
+
+
 async def _execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
     """Run one subprocess to completion: (exit code, stdout, stderr)."""
     try:
@@ -226,8 +239,13 @@ class TelepresenceCLI:
         argv = [self._binary, *args, "--format", "json"]
         code, stdout, stderr = await _execute(argv, self._timeout)
         if code != 0:
-            tail = "\n".join(stderr.strip().splitlines()[-_STDERR_TAIL_LINES:]).strip()
-            raise TelepresenceError(tail or f"telepresence exited with code {code}")
+            # --format json writes failures as {"error": …} on stdout with a
+            # silent stderr: prefer the structured reason over the exit code.
+            raise TelepresenceError(
+                _stdout_error(stdout)
+                or "\n".join(stderr.strip().splitlines()[-_STDERR_TAIL_LINES:]).strip()
+                or f"telepresence exited with code {code}"
+            )
         try:
             return json.loads(stdout or "{}")
         except json.JSONDecodeError as exc:
@@ -235,14 +253,16 @@ class TelepresenceCLI:
 
     async def status(self) -> TelepresenceStatus:
         """Connection state. Note: telepresence itself may start its local
-        user daemon to answer — call on explicit user action only."""
+        user daemon to answer - call on explicit user action only."""
         return parse_status(await self._run_json("status"))
 
     async def list_intercepts(self, daemon: str | None = None) -> list[ActiveIntercept]:
         """Active intercepts (requires a connected session).
 
-        `daemon` scopes the query with `--use <name>`: with several daemons
+        `daemon` scopes the query with `--use`: with several daemons
         running, a bare `list` refuses and asks for a match expression.
+        The flag takes a Go regexp, so the name is escaped and anchored -
+        'prod' must never also match 'prod2'.
         """
-        args = ["list"] if daemon is None else ["list", "--use", daemon]
+        args = ["list"] if daemon is None else ["list", "--use", f"^{re.escape(daemon)}$"]
         return parse_intercepts(await self._run_json(*args))

@@ -728,6 +728,7 @@ class KorvidApp(App[None]):
         self._probe_traffic_manager = probe_traffic_manager
         self._telepresence_hinted = False
         self._telepresence_probing = False
+        self._telepresence_reprobe = False
         #: True while a context switch is tearing down / retargeting;
         #: refuses concurrent switches.
         self._ctx_switching = False
@@ -3012,27 +3013,36 @@ class KorvidApp(App[None]):
         probe, a failure or the kill-switch all silently mean no hint.
 
         Re-runnable until the hint actually shows: the startup cluster may
-        lack a manager while a later `:ctx` target runs one, so a
-        no-manager answer must not consume the session's single hint (an
-        in-flight guard still prevents duplicate probes).
+        lack a manager while a later `:ctx` target runs one. Results are
+        epoch-bound - a probe answering for a context that was already left
+        is discarded - and a re-probe requested while one is in flight is
+        queued instead of lost.
         """
         if (
             self._telepresence is not None
             or self._telepresence_hinted
-            or self._telepresence_probing
             or not self.config.telepresence_enabled
             or self._probe_traffic_manager is None
         ):
             return
+        if self._telepresence_probing:
+            # A :ctx switch mid-probe: run again once the old probe (whose
+            # answer describes the old cluster) unwinds.
+            self._telepresence_reprobe = True
+            return
         self._telepresence_probing = True
+        epoch = self._ctx_epoch
         try:
             present = await self._probe_traffic_manager()
         except Exception:
             return  # absent / forbidden / transient: all mean "no hint"
         finally:
             self._telepresence_probing = False
-        if not present:
-            return
+            if self._telepresence_reprobe:
+                self._telepresence_reprobe = False
+                self.run_worker(self._maybe_hint_telepresence(), exclusive=False)
+        if not present or epoch != self._ctx_epoch:
+            return  # no manager, or the answer describes a left context
         self._telepresence_hinted = True
         self.notify(
             "telepresence traffic-manager detected in this cluster — install "

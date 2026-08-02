@@ -286,7 +286,7 @@ async def test_list_intercepts_scopes_to_the_daemon_when_named() -> None:
         "/opt/homebrew/bin/telepresence",
         "list",
         "--use",
-        "prod-conn",
+        "^prod\\-conn$",  # escaped + anchored: --use is a Go regexp match
         "--format",
         "json",
     ]
@@ -308,3 +308,29 @@ def test_parse_intercepts_requires_active_disposition_and_spec() -> None:
     ]
     rows = parse_intercepts(payload)
     assert [r.name for r in rows] == ["live"]
+
+
+async def test_daemon_selector_is_escaped_and_anchored() -> None:
+    """--use is a Go regexp match: 'prod' would also match 'prod2', and
+    dots match anything - the name must be escaped and anchored."""
+    cli, execute = _cli()
+    execute.return_value = (0, "[]", "")
+    with mock.patch("korvid.k8s.telepresence._execute", execute):
+        await cli.list_intercepts(daemon="prod.us-1")
+    argv = execute.await_args_list[0].args[0]
+    use = argv[argv.index("--use") + 1]
+    assert use.startswith("^")
+    assert use.endswith("$")
+    assert "\\." in use  # the dot matches a literal dot only
+
+
+async def test_formatted_failure_error_comes_from_stdout() -> None:
+    """--format json writes failures as {'error': …} on stdout with a
+    silent stderr: the exit-code fallback must not eat the real reason."""
+    cli, execute = _cli()
+    execute.return_value = (1, '{"error": "connector: no running daemon"}', "")
+    with (
+        mock.patch("korvid.k8s.telepresence._execute", execute),
+        pytest.raises(TelepresenceError, match="no running daemon"),
+    ):
+        await cli.status()
