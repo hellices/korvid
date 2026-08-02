@@ -8,10 +8,13 @@ from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.models import GenericSummary, PodSummary, ReplicaSetSummary
+from korvid.k8s.relations import owned_by
 from korvid.ui.app import KorvidApp
 from korvid.ui.messages import FilterCommand, NavigateCommand
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.status_bar import StatusBar
+
+from .waits import until
 
 _PODS_META = ResourceMeta("Pod", "pods", "", "v1", True, ("po",))
 _DEPLOY_META = ResourceMeta("Deployment", "deployments", "apps", "v1", True, ("deploy",))
@@ -348,15 +351,19 @@ async def test_concurrent_drill_and_navigate_stay_consistent() -> None:
         await pilot.pause(0.1)
         await _navigate(pilot, "deployments")
         gate = asyncio.Event()
+        entered = asyncio.Event()
         orig_stop = app.watch_manager.stop
 
         async def slow_stop(kind: str, scope: str) -> None:
+            entered.set()
             await gate.wait()
             await orig_stop(kind, scope)
 
         app.watch_manager.stop = slow_stop  # type: ignore[method-assign]  # test seam to widen the race window
         drill = asyncio.create_task(app.agent_drill_down("web"))
-        await asyncio.sleep(0.02)  # drill enters the lock and blocks in stop()
+        # The drill pre-warms before taking the lock (issue #157): wait until
+        # it is really inside the critical section, blocked in stop().
+        await asyncio.wait_for(entered.wait(), timeout=5)
         nav = asyncio.create_task(app.on_navigate_command(NavigateCommand("pods", None)))
         await asyncio.sleep(0.02)
         gate.set()
@@ -371,3 +378,154 @@ async def test_concurrent_drill_and_navigate_stay_consistent() -> None:
         assert table.row_count == 2
         status = str(app.query_one(StatusBar).content)
         assert "deployments/" not in status
+
+
+# ---------------------------------------------------------------------------
+# drill pre-warm (issue #157): no empty-view flash between push/pop and rows
+# ---------------------------------------------------------------------------
+
+
+def _make_slow_app(
+    data: dict[str, list[Summary]],
+    *,
+    delay_kinds: dict[str, float],
+    starts: list[str] | None = None,
+) -> KorvidApp:
+    """App whose watch source stalls before LISTing `delay_kinds[kind]`
+    seconds - a stand-in for the network RTT that produced the empty flash."""
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        if starts is not None:
+            starts.append(kind)
+        delay = delay_kinds.get(kind, 0.0)
+        if delay:
+            await asyncio.sleep(delay)
+        for obj in data.get(kind, []):
+            yield ("ADDED", obj)
+        while True:
+            await asyncio.sleep(0.01)
+
+    async def list_namespaces() -> list[str]:
+        return ["default"]
+
+    return KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, source),
+        list_namespaces=list_namespaces,
+        aliases=dict(_ALIASES),
+    )
+
+
+def _spy_renders(app: KorvidApp, renders: list[tuple[str, int]]) -> None:
+    original = type(app)._render_pane
+
+    def spy(self, kind, pane, table, *, empty_state):  # type: ignore[no-untyped-def]  # test seam
+        rows = self.store.get(kind, pane.scope)
+        drill_uid = pane.drill.parent_uid
+        if drill_uid is not None and kind == pane.drill.child_kind:
+            rows = [r for r in rows if owned_by(r, drill_uid)]
+        renders.append((kind, len(rows)))
+        original(self, kind, pane, table, empty_state=empty_state)
+
+    app._render_pane = spy.__get__(app)  # type: ignore[method-assign]  # test seam
+
+
+async def test_drill_push_never_renders_an_empty_child_view() -> None:
+    """The old flow switched the pane first and LISTed after: one visibly
+    empty replicasets render, then the fill. The pre-warm starts the child
+    watch before the switch, so the first child render already has rows."""
+    renders: list[tuple[str, int]] = []
+    app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 0.15})
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        _spy_renders(app, renders)
+        await pilot.press("down")  # api -> web
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "replicasets", label="drilled")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="owned rows visible")
+        assert ("replicasets", 0) not in renders
+
+
+async def test_drill_pop_never_renders_an_empty_parent_view() -> None:
+    """Esc re-LISTs the parent kind (its watch stopped when we drilled
+    away): the pre-warm must cover the pop direction too."""
+    delays = {"deployments": 0.0}
+    renders: list[tuple[str, int]] = []
+    app = _make_slow_app(_default_data(), delay_kinds=delays)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        await pilot.press("down")
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "replicasets", label="drilled")
+        delays["deployments"] = 0.15  # the re-LIST on the way back is slow
+        _spy_renders(app, renders)
+        await pilot.press("escape")
+        await until(pilot, lambda: app.current_kind == "deployments", label="popped")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="parents visible")
+        assert ("deployments", 0) not in renders
+
+
+async def test_drill_prewarm_shows_a_progress_label_while_waiting() -> None:
+    """The bounded wait must read as *working*, not frozen: the status bar
+    carries a loading label (which the corvid busy indicator animates)."""
+    app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 0.3})
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        # Drive the drill as a task: pilot.press would await the whole
+        # transition, leaving no window to observe the in-flight label.
+        drill = asyncio.create_task(app._drill_into("default", "web"))
+        await until(
+            pilot,
+            lambda: any("replicasets" in v for v in app._progress_labels.values()),
+            label="loading label published",
+        )
+        assert app.current_kind == "deployments"  # still on the parent view
+        assert (await drill) is None
+        assert app.current_kind == "replicasets"
+        assert not app._progress_labels  # cleared once the switch landed
+
+
+async def test_drill_prewarm_times_out_and_still_switches() -> None:
+    """A cluster that never answers must not wedge the drill: after the
+    bounded wait the transition proceeds exactly as before the pre-warm."""
+    data = _default_data()
+    data["replicasets"] = []  # LIST returns nothing to own
+    app = _make_slow_app(data, delay_kinds={})
+    app.DRILL_PREWARM_TIMEOUT = 0.1
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        await pilot.press("down")
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "replicasets", label="switched anyway")
+        table = app.query_one(ResourceTable)
+        assert table.row_count == 0  # genuinely empty child view is correct
+
+
+async def test_drill_prewarm_skips_the_wait_when_the_watch_is_live() -> None:
+    """A (kind, scope) another pane already watches has a warm bucket: the
+    drill must not re-clear it or wait."""
+    starts: list[str] = []
+    app = _make_slow_app(_default_data(), delay_kinds={}, starts=starts)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        await pilot.press("ctrl+w")
+        await pilot.press("v")  # split: both panes on deployments
+        await pilot.pause(0.1)
+        await _navigate(pilot, "replicasets")  # focused pane -> rs watch live
+        await pilot.press("ctrl+w")
+        await pilot.press("w")  # focus back to the deployments pane
+        await pilot.pause(0.1)
+        starts.clear()
+        await pilot.press("down")
+        await pilot.press("enter")
+        await until(pilot, lambda: app.current_kind == "replicasets", label="drilled")
+        assert "replicasets" not in starts  # live watch reused, not restarted
