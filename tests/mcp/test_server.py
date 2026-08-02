@@ -872,3 +872,34 @@ async def test_client_info_is_sanitized_before_crossing_the_boundary() -> None:
         assert "\x1b" not in value
         assert len(value) <= 120
     assert name.startswith("evil")
+
+
+async def test_shutdown_cancels_in_flight_mirror_tasks() -> None:
+    """Detached mirror tasks must not outlive the server run: after
+    shutdown a `:ctx` switch retargets the client/alias map, and a stale
+    mirror resuming against the new context would act cross-context."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingBridge(FakeBridge):
+        async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+            started.set()
+            await release.wait()  # simulates a mirror stuck on the UI lock
+            return "ok"
+
+    executor = RecordingExecutor()
+    server = make_follow_server(executor, BlockingBridge())
+    run_task = asyncio.create_task(server.run())
+    try:
+        await server.wait_started()
+        await server.call_tool("list_resources", {"kind": "pods"})
+        await asyncio.wait_for(started.wait(), timeout=5)
+        assert server._follow_tasks  # the mirror is in flight
+        server.request_shutdown()
+        await asyncio.wait_for(run_task, timeout=10)
+        assert not server._follow_tasks  # cancelled and awaited, not leaked
+    finally:
+        release.set()
+        if not run_task.done():
+            server.request_shutdown()
+            await run_task

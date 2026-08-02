@@ -259,6 +259,15 @@ class KorvidMCPServer:
         except Exception:  # display-only: never fail the tool call over it
             logger.debug("MCP activity note failed", exc_info=True)
 
+    async def _cancel_follow_tasks(self) -> None:
+        """Cancel and reap every in-flight mirror task (run() teardown)."""
+        tasks = [task for task in self._follow_tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if self._follow_tasks:
+            await asyncio.gather(*self._follow_tasks, return_exceptions=True)
+        self._follow_tasks.clear()
+
     def _authorize_proposal_call(self, args: dict[str, Any]) -> str | None:
         """Capability check for the write-proposal tools; error text or None.
 
@@ -416,6 +425,13 @@ class KorvidMCPServer:
                     self._started.set()
                     tg.cancel_scope.cancel()
         finally:
+            # Mirror tasks must not outlive the run: after shutdown a :ctx
+            # switch retargets the Kubernetes client/alias map, and a stale
+            # mirror resuming against the new context would act
+            # cross-context. Shielded like the endpoint cleanup below so a
+            # cancellation arriving mid-teardown still reaps them.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(self._cancel_follow_tasks())
             # Same offload as publication: the flock may wait on another
             # korvid instance.  Shielded + suppressed so a cancellation
             # arriving mid-cleanup still lets the worker thread finish

@@ -97,6 +97,12 @@ async def _mirror(ui: UIBridge, tool: str, args: Mapping[str, Any]) -> str | Non
         pod = _str_or_none(args.get("pod"))
         if pod is None or namespace is None:
             return None
+        # Deliberate divergence when `container` is omitted: the read
+        # resolves the pod's *first* container, while a None mirror opens
+        # the whole pod's log pane - a superset that always contains the
+        # stream that was read. The mirror has no cluster access to repeat
+        # the first-container resolution, and the fuller pane is the more
+        # useful thing to watch.
         return await ui.agent_open_logs(pod, namespace, _str_or_none(args.get("container")))
     if tool == "diagnose_pod":
         # The registry schema names the target 'pod' (matching get_logs).
