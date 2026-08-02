@@ -129,6 +129,25 @@ def test_collapsed_line_budgets_keys_to_the_width() -> None:
     assert "Forward" in wide.plain  # everything fits when the width allows
 
 
+def test_collapsed_line_truncates_when_even_the_fixed_parts_overflow() -> None:
+    """Last-resort degradation: a terminal narrower than logo + view + hint
+    still gets one physical line, not a wrapped bar."""
+    long_view = "verylongcustomresourceplural.example.io"
+    text = build_collapsed(long_view, [], "~", width=24)
+    assert cell_len(text.plain) <= 24
+
+
+def test_view_specific_verbs_outrank_generic_fillers_everywhere() -> None:
+    """helm History and node Uncordon are view verbs: they must never lose
+    a collapsed slot to the generic help/filter/cmd tail."""
+    history = _entry("helm_history", "h", "History")
+    uncordon = _entry("uncordon_node", "u", "Uncordon")
+    generic = _entry("help", "?", "Help")
+    picked = collapsed_entries([generic, history, uncordon])
+    assert picked.index(history) < picked.index(generic)
+    assert picked.index(uncordon) < picked.index(generic)
+
+
 def test_prelayout_render_is_collapsed_even_when_configured_expanded() -> None:
     """Before the first resize the widget's width is 0: rendering expanded
     for that frame would flash a wrapped legend on narrow terminals, so an

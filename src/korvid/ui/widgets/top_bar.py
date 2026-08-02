@@ -65,8 +65,10 @@ PRIORITY_ACTIONS: tuple[str, ...] = (
     "helm_install",
     "helm_upgrade",
     "helm_rollback",
+    "helm_history",
     "operator_install",
     "cordon_node",
+    "uncordon_node",
     "drain_node",
     "rollout_restart",
     "scale_resource",
@@ -147,6 +149,10 @@ def build_collapsed(view: str, entries: list[KeyEntry], toggle_key: str, width: 
     text.append("  ")
     text.append(f" {toggle_key} ", style="reverse dim")
     text.append(" more", style="dim")
+    if width > 0 and cell_len(text.plain) > width:
+        # Last resort (terminal narrower than logo + view + hint): hard
+        # truncation still beats a wrapped bar.
+        text.truncate(width, overflow="ellipsis")
     return text
 
 
