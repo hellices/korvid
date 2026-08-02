@@ -51,6 +51,10 @@ class NavigationStack:
         """Remove the top level; the popped parent_kind is the view to show."""
         return self._levels.pop() if self._levels else None
 
+    def peek(self) -> DrillLevel | None:
+        """The top level without removing it; None when not drilled."""
+        return self._levels[-1] if self._levels else None
+
     def clear(self) -> None:
         self._levels.clear()
 
