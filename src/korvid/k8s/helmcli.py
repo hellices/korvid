@@ -239,8 +239,11 @@ class HelmCLI:
         except (HelmError, OSError):
             return None
         finally:
-            with contextlib.suppress(OSError):
-                shutil.rmtree(tmp)
+            # The untar tree is chart-controlled and can hold many files:
+            # remove it on a worker thread (shielded - an exclusive-worker
+            # cancellation mid-cleanup must still finish the removal).
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(asyncio.to_thread(shutil.rmtree, tmp, ignore_errors=True))
 
     @staticmethod
     def _release_args(

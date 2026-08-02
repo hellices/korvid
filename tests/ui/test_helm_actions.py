@@ -1557,3 +1557,49 @@ async def test_editor_prefill_passes_an_empty_version_through_as_latest(tmp_path
             lambda: ("show-values", "bitnami/nginx", "") in helm.calls,
             label="prefill fetched without a version pin",
         )
+
+
+async def test_unchanged_defaults_stay_defaults_across_a_render_failure_retry(
+    tmp_path: Path,
+) -> None:
+    """The prefetched defaults baseline must survive the failure dialog's
+    'edit values and retry' loop: returning the defaults unchanged on the
+    retry pass must still mean 'chart defaults' - not freeze the whole
+    defaults file into the release as a custom override."""
+    defaults = "# defaults\nreplicaCount: 1\n"
+
+    class ShowValuesHelm(FakeHelm):
+        async def show_values(self, chart: str, version: str = "") -> str:
+            return defaults
+
+    helm = ShowValuesHelm()
+    helm.dry_run_excs = [HelmError(_RENDER_ERROR)]  # first render fails
+    app = make_app(helm=helm, audit_path=tmp_path / "audit.jsonl")
+
+    async def fake_editor(text: str) -> str | None:
+        return text  # both passes: return the buffer unchanged
+
+    app._edit_text = fake_editor
+    async with app.run_test() as pilot:
+        await _navigate(pilot, "helm", "helmreleases")
+        await pilot.press("i")
+        await _pick_first_chart(pilot, app)
+        await until(pilot, lambda: isinstance(app.screen, HelmInstallPrompt), label="wizard")
+        from textual.widgets import Select
+
+        from korvid.ui.widgets.helm_install import VALUES_MODES
+
+        app.screen.query_one("#helm-values", Select).value = VALUES_MODES[1]
+        await pilot.press("enter")  # editor #1 -> dry-run fails
+        await until(pilot, lambda: isinstance(app.screen, PickScreen), label="failure dialog")
+        await pilot.press("enter")  # edit values and retry -> editor #2, unchanged
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="approval")
+        # unchanged defaults are still 'chart defaults', not a frozen override
+        assert "values: chart defaults" in app.screen._operation  # type: ignore[attr-defined]  # test peeks
+        await pilot.press("y")
+        await until(
+            pilot,
+            lambda: any(call[0] == "install" for call in helm.calls),
+            label="install executed",
+        )
+        assert helm.values_seen is None  # no -f override was passed

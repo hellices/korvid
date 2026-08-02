@@ -510,3 +510,45 @@ async def test_rapid_f1_presses_open_a_single_readme_screen() -> None:
         assert len(stacked) == 1
         await pilot.press("escape")
         await until(pilot, lambda: app.screen is prompt, label="back on the wizard")
+
+
+async def test_readme_for_a_stale_version_is_discarded() -> None:
+    """The version field stays editable while `helm show readme` runs: a
+    fetch finishing for an old version must not push documentation over a
+    wizard now configured for a different one."""
+    import asyncio
+
+    gate = asyncio.Event()
+    completed: list[str] = []
+
+    async def slow_readme(chart: str, version: str) -> str:
+        await gate.wait()
+        completed.append(version)
+        return f"# README {version}"
+
+    app = HostApp()
+    prompt = HelmInstallPrompt(_CHART, namespace="default", release=None, get_readme=slow_readme)
+
+    def _done(v: object) -> None:
+        app.result = v
+
+    async with app.run_test() as pilot:
+        await app.push_screen(prompt, _done)
+        await _opened(app, pilot)
+        await pilot.press("f1")  # fetch starts for 18.1.0
+        version = app.screen.query_one("#helm-version", Input)
+        version.value = "18.2.0"  # edited while the fetch hangs
+        gate.set()
+        await until(pilot, lambda: bool(completed), label="stale fetch completed")
+        await until(
+            pilot,
+            lambda: (
+                not any(
+                    w.group == "helm-chart-readme" and not w.is_finished for w in prompt.workers
+                )
+            ),
+            label="readme worker finished",
+        )
+        from korvid.ui.widgets.helm_install import ChartReadmeScreen
+
+        assert not any(isinstance(s, ChartReadmeScreen) for s in app.screen_stack)

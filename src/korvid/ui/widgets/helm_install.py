@@ -288,6 +288,11 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
         except Exception:
             self.notify("chart README unavailable", severity="warning")
             return
+        if self.query_one("#helm-version", Input).value.strip() != version:
+            # The version was edited while the fetch ran: this README
+            # documents a chart the wizard no longer targets. F1 again
+            # fetches the current version's docs.
+            return
         self.app.push_screen(ChartReadmeScreen(self._chart.name, text))
 
     def _collect(self) -> HelmReleaseChoices | None:

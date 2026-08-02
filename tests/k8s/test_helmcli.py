@@ -675,3 +675,31 @@ async def test_required_values_from_schema_handles_missing_or_junk() -> None:
     assert required_values_from_schema(None) == []
     assert required_values_from_schema({}) == []
     assert required_values_from_schema({"required": "not-a-list"}) == []
+
+
+async def test_show_schema_cleanup_runs_off_the_event_loop() -> None:
+    """The untar tree is chart-controlled and can hold many files: its
+    removal must run on a worker thread, never freezing the TUI loop."""
+    import threading
+
+    cli, _ = _cli()
+    cleanup_threads: list[bool] = []
+    real_rmtree = mock.DEFAULT
+
+    async def fake_execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        dest = argv[argv.index("--untardir") + 1]
+        (Path(dest) / "chart").mkdir(parents=True)
+        return 0, "", ""
+
+    main_thread = threading.current_thread()
+
+    def spy_rmtree(path: object, **kwargs: object) -> None:
+        cleanup_threads.append(threading.current_thread() is not main_thread)
+
+    with (
+        mock.patch("korvid.k8s.helmcli._execute", side_effect=fake_execute),
+        mock.patch("korvid.k8s.helmcli.shutil.rmtree", side_effect=spy_rmtree),
+    ):
+        await cli.show_schema("repo/chart", "1.2.3")
+    del real_rmtree
+    assert cleanup_threads == [True]
