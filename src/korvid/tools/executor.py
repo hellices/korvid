@@ -645,6 +645,18 @@ class ToolExecutor:
             lines.append(line)
         return "\n".join(lines)
 
+    async def _helm_list_releases(self, args: dict[str, Any]) -> str:
+        """Installed helm releases with status (issue #161): parsed from the
+        cluster's release Secrets - same path as the TUI's helm browser, so
+        the tool line and the table always agree."""
+        namespace: str | None = args.get("namespace")
+        releases = await self._kube.list_helm_releases(namespace)
+        if not releases:
+            return "(none)"
+        return "\n".join(
+            f"{r.namespace}/{r.name}  -  age={r.age()}  {summary_facts(r)}" for r in releases
+        )
+
     async def _list_operators(self, args: dict[str, Any]) -> str:
         """Catalog packages + installed subscriptions, straight from the
         cluster's own OLM objects (issue #29: no hardcoded operator

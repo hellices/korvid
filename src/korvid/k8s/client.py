@@ -595,6 +595,23 @@ class KubeClient(ReadOps, WriteOps):
             for out in tracker.apply(event_type, release_from_secret(secret)):
                 yield out
 
+    async def list_helm_releases(self, namespace: str | None) -> list[HelmReleaseSummary]:
+        """Latest revision per release, LIST-only (the helm_list_releases
+        tool, issue #161): same Secret parsing as the browser's synthetic
+        kind — no helm binary involved."""
+        if self._api is None:
+            raise RuntimeError("connect() first")
+        base = self._helm_secrets_base(namespace)
+        data = await self._request_json(f"{base}?{urlencode(self._helm_secrets_query())}")
+        latest: dict[tuple[str, str], HelmReleaseSummary] = {}
+        for item in data.get("items", []):
+            release = release_from_secret(item)
+            key = (release.namespace, release.name)
+            current = latest.get(key)
+            if current is None or release.revision > current.revision:
+                latest[key] = release
+        return sorted(latest.values(), key=lambda r: (r.namespace, r.name))
+
     async def watch_helm_revisions(
         self, namespace: str | None
     ) -> AsyncIterator[tuple[str, HelmRevisionSummary]]:

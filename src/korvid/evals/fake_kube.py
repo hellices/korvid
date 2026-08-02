@@ -20,6 +20,7 @@ from typing import Any
 from korvid.evals.scenario import SCENARIO_NOW, TIMESTAMP_PATTERN, Scenario
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.helm import HELM_SECRET_TYPE, HelmReleaseSummary, release_from_secret
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, summary_for
 from korvid.k8s.reads import ReadOps
@@ -118,6 +119,24 @@ class FakeKubeClient(ReadOps):
                 # managedFields) without affecting later reads.
                 return deepcopy(manifest)
         raise ApiStatusError(404, f"{meta.plural} {namespace or ''}/{name} not found")
+
+    async def list_helm_releases(self, namespace: str | None) -> list[HelmReleaseSummary]:
+        """Latest revision per release from helm-owned Secrets in the scenario."""
+        latest: dict[tuple[str, str], HelmReleaseSummary] = {}
+        for manifest in self._objects:
+            if str(manifest.get("type") or "") != HELM_SECRET_TYPE:
+                continue
+            metadata = manifest.get("metadata") or {}
+            if (metadata.get("labels") or {}).get("owner") != "helm":
+                continue
+            if namespace is not None and str(metadata.get("namespace") or "") != namespace:
+                continue
+            release = release_from_secret(manifest)
+            key = (release.namespace, release.name)
+            current = latest.get(key)
+            if current is None or release.revision > current.revision:
+                latest[key] = release
+        return sorted(latest.values(), key=lambda r: (r.namespace, r.name))
 
     async def list_events_for(
         self,

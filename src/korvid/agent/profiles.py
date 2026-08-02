@@ -83,6 +83,10 @@ _SMALL_DESCRIPTIONS: dict[str, str] = {
     "list_operators": (
         "List OLM operator packages and installed subscriptions with their status. Read-only."
     ),
+    "helm_list_releases": (
+        "List installed Helm releases with revision, status, chart and app "
+        "version. Read-only; parsed from cluster Secrets."
+    ),
     "open_logs": "Open the live log pane for a pod on the user's screen.",
     "resize_pod": (
         "Request an in-place CPU/memory resize of a running pod (Kubernetes "

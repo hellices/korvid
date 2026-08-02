@@ -107,6 +107,7 @@ async def test_every_followable_tool_reaches_the_bridge(tool: str) -> None:
         "get_logs": {"pod": "x", "namespace": "d"},
         "diagnose_pod": {"pod": "x", "namespace": "d"},
         "list_operators": {},
+        "helm_list_releases": {},
     }[tool]
     ui = FakeBridge()
     result = await mirror_read(ui, tool, args)
@@ -137,3 +138,10 @@ def test_read_summary_sanitizes_and_bounds_hostile_arguments() -> None:
     assert "\x1b" not in line
     assert "\u202e" not in line  # bidi override cannot reorder the toast
     assert len(line) <= 200
+
+
+async def test_helm_list_releases_mirrors_as_the_helm_view() -> None:
+    ui = FakeBridge()
+    result = await mirror_read(ui, "helm_list_releases", {"namespace": "prod"})
+    assert result is not None
+    assert ui.calls == [("navigate", {"view": "helm", "namespace": "prod"})]

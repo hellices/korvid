@@ -31,6 +31,7 @@ FOLLOWABLE_TOOLS: frozenset[str] = frozenset(
         "get_logs",
         "get_events",
         "list_operators",
+        "helm_list_releases",
         "diagnose_pod",
     }
 )
@@ -99,8 +100,18 @@ async def mirror_read(ui: UIBridge, tool: str, args: Mapping[str, Any]) -> str |
         return None
 
 
+#: Reads that mirror as a plain view navigation: tool -> view alias.
+_NAVIGATE_MIRRORS: dict[str, str] = {
+    "list_operators": "subscriptions",
+    "helm_list_releases": "helm",
+}
+
+
 async def _mirror(ui: UIBridge, tool: str, args: Mapping[str, Any]) -> str | None:
     namespace = _str_or_none(args.get("namespace"))
+    view = _NAVIGATE_MIRRORS.get(tool)
+    if view is not None:
+        return await ui.agent_navigate(view, namespace or "all")
     if tool == "list_resources":
         kind = _str_or_none(args.get("kind"))
         if kind is None:
@@ -130,6 +141,4 @@ async def _mirror(ui: UIBridge, tool: str, args: Mapping[str, Any]) -> str | Non
         if pod is None:
             return None
         return await ui.agent_open_describe("pods", pod, namespace)
-    if tool == "list_operators":
-        return await ui.agent_navigate("subscriptions", namespace or "all")
     return None
