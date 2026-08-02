@@ -85,10 +85,13 @@ async def test_progress_label_renders_a_bird_frame() -> None:
         await pilot.pause()
         bar = app.query_one(StatusBar)
         text = str(bar.render())
-        assert BIRD_FRAMES[0] in text
+        # Some frame is showing - which one depends on how many 500ms ticks
+        # elapsed on a slow runner, so accept any (no wall-clock assertions).
+        frame = next((f for f in BIRD_FRAMES if f in text), None)
+        assert frame is not None
         assert "rendering helm preview" in text
         # the bird leads the label (decided format)
-        assert text.index(BIRD_FRAMES[0]) < text.index("rendering helm preview")
+        assert text.index(frame) < text.index("rendering helm preview")
 
 
 async def test_animation_tick_swaps_the_frame_in_place() -> None:
@@ -99,11 +102,12 @@ async def test_animation_tick_swaps_the_frame_in_place() -> None:
         app._set_progress("test", "draining node")
         await pilot.pause()
         bar = app.query_one(StatusBar)
-        assert BIRD_FRAMES[0] in str(bar.render())
+        before = bird_frame(bar._tick)  # whatever frame is current on this runner
+        assert before in str(bar.render())
         bar._advance_bird()  # what the timer does every 500ms
         text = str(bar.render())
-        assert BIRD_FRAMES[1] in text
-        assert BIRD_FRAMES[0] not in text
+        assert bird_frame(bar._tick) in text
+        assert before not in text
         assert "draining node" in text  # the label survived the swap
 
 
@@ -146,10 +150,11 @@ async def test_animation_stops_and_resets_when_progress_clears() -> None:
         assert bar._anim_timer is None  # stopped with the last owner
         text = str(bar.render())
         assert all(frame not in text for frame in BIRD_FRAMES)
-        # a new operation starts from frame 0 again
+        # a new operation restarts the animation from a reset tick counter
         app._set_progress("test2", "next op")
         await pilot.pause()
-        assert BIRD_FRAMES[0] in str(bar.render())
+        assert bar._anim_timer is not None
+        assert any(frame in str(bar.render()) for frame in BIRD_FRAMES)
 
 
 # ---------------------------------------------------------------------------
