@@ -3,6 +3,8 @@
 import asyncio
 from collections.abc import AsyncIterator
 
+import pytest
+
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
 from korvid.core.watch import WatchManager
@@ -677,3 +679,106 @@ async def test_overlapping_drills_do_not_skip_each_others_prewarm() -> None:
         # exactly one drill landed; the loser abandoned with an accurate result
         assert sum(1 for r in results if r is None) == 1
         assert any(r is not None and "abandoned" in r for r in results)
+
+
+async def test_cancelled_prewarm_releases_its_lease_and_watch() -> None:
+    """A drill task cancelled mid-pre-warm (e.g. app teardown, :ctx) must
+    not leave a permanent lease - that would block stream reaping for every
+    later drill on the same (kind, scope) - nor leak the started watch."""
+    app = _make_slow_app(_default_data(), delay_kinds={"replicasets": 5.0})
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        drill = asyncio.create_task(app._drill_into("default", "web"))
+        await until(
+            pilot,
+            lambda: ("replicasets", "default") in app.watch_manager.active,
+            label="prewarm started",
+        )
+        drill.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await drill
+        await until(
+            pilot,
+            lambda: not app._prewarm_leases,
+            label="lease released",
+        )
+        assert ("replicasets", "default") not in app.watch_manager.active
+
+
+async def test_two_level_pop_waits_for_rows_the_drill_filter_will_show() -> None:
+    """Popping pods -> replicasets keeps the deployment-UID filter: an
+    unrelated ReplicaSet arriving first must not satisfy the readiness and
+    flash a zero-row filtered view."""
+    data = _default_data()
+    store = ResourceStore()
+    rs_lists = {"n": 0}
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
+        if kind == "replicasets":
+            rs_lists["n"] += 1
+            if rs_lists["n"] > 1:  # the re-LIST on the way back
+                yield ("ADDED", _rs("api-777", "rs-9", "dep-9"))  # unrelated first
+                await asyncio.sleep(0.2)
+        for obj in data.get(kind, []):
+            yield ("ADDED", obj)
+        while True:
+            await asyncio.sleep(0.01)
+
+    async def list_namespaces() -> list[str]:
+        return ["default"]
+
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default"),
+        store=store,
+        watch_manager=WatchManager(store, source),
+        list_namespaces=list_namespaces,
+        aliases=dict(_ALIASES),
+    )
+    renders: list[tuple[str, int]] = []
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "deployments")
+        await pilot.press("down")
+        await pilot.press("enter")  # web -> replicasets
+        await until(pilot, lambda: app.current_kind == "replicasets", label="rs level")
+        await pilot.press("enter")  # -> pods
+        await until(pilot, lambda: app.current_kind == "pods", label="pods level")
+        _spy_renders(app, renders)
+        await pilot.press("escape")
+        await until(pilot, lambda: app.current_kind == "replicasets", label="popped to rs")
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 2, label="owned rows visible")
+        assert ("replicasets", 0) not in renders
+
+
+async def test_prewarm_restarts_a_dead_watch_even_when_pane_backed() -> None:
+    """A pane displaying the target is only warm while its watch lives: a
+    teardown racing the check must not skip the start and the wait."""
+    app = make_app(_default_data())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "replicasets")
+        await app.watch_manager.stop("replicasets", "default")  # teardown race stand-in
+        await app._prewarm_view("replicasets", "default", lambda rows: bool(rows))
+        assert ("replicasets", "default") in app.watch_manager.active  # restarted
+        await app._stop_watch_if_unused("replicasets", "default")
+        # still displayed by the pane: the release must not reap it
+        assert ("replicasets", "default") in app.watch_manager.active
+
+
+async def test_navigation_teardown_honors_outstanding_prewarm_leases() -> None:
+    """_navigate_locked stops the view it leaves - unless a drill pre-warm
+    still holds a lease on that stream; killing it would force the drill's
+    own navigate to re-LIST into the empty flash."""
+    app = make_app(_default_data())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _navigate(pilot, "replicasets")
+        app._prewarm_leases[("replicasets", "default")] = 1  # an in-flight drill's lease
+        await app.on_navigate_command(NavigateCommand("pods", None))
+        await pilot.pause(0.1)
+        assert app.current_kind == "pods"
+        assert ("replicasets", "default") in app.watch_manager.active  # lease honored
+        await app._stop_watch_if_unused("replicasets", "default")  # last release
+        assert ("replicasets", "default") not in app.watch_manager.active  # now reaped

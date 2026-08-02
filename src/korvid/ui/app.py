@@ -1493,7 +1493,11 @@ class KorvidApp(App[None]):
             # Another pane may still be watching the old (kind, scope):
             # stopping it would freeze that pane's view (issue #48).
             others = {(p.kind, p.scope) for p in self._panes if p is not pane}
-            if old not in others:
+            if old not in others and self._prewarm_leases.get(old, 0) == 0:
+                # An outstanding drill pre-warm lease keeps the stream alive
+                # (issue #157): killing it here would force that drill's own
+                # navigate to re-LIST into the empty flash. The last lease
+                # release reaps it if no pane ends up displaying it.
                 await self.watch_manager.stop(*old)
             pane.kind = new_kind
             pane.scope = new_scope
@@ -2218,7 +2222,11 @@ class KorvidApp(App[None]):
         """
         key = (kind, scope)
         self._prewarm_leases[key] = self._prewarm_leases.get(key, 0) + 1
-        if any((p.kind, p.scope) == key for p in self._panes):
+        # Pane-backed *and* live: a pane's watch mid-teardown (a concurrent
+        # navigation awaiting stop()) leaves the pane tuple unchanged while
+        # the stream is already gone - skipping then would recreate the
+        # empty flash. Require the watch itself.
+        if any((p.kind, p.scope) == key for p in self._panes) and key in self.watch_manager.active:
             return
         await self.watch_manager.start(kind, scope)
         deadline = monotonic() + self.DRILL_PREWARM_TIMEOUT
@@ -2288,13 +2296,16 @@ class KorvidApp(App[None]):
         # Warm the child view first (issue #157): wait - bounded - until the
         # rows this drill will show exist, so the switch renders once with
         # content instead of flashing an empty table while the LIST runs.
+        # Inside the try: a cancellation mid-pre-warm must still release the
+        # lease (the acquire is synchronous before the first await, so the
+        # finally never releases a lease that was not taken).
         prewarm_scope = pane.scope
-        await self._prewarm_view(
-            child,
-            prewarm_scope,
-            lambda rows: any(owned_by(r, uid) for r in rows),
-        )
         try:
+            await self._prewarm_view(
+                child,
+                prewarm_scope,
+                lambda rows: any(owned_by(r, uid) for r in rows),
+            )
             async with self._nav_lock:
                 if pane not in self._panes:
                     # An accurate outcome (review on #160): a None here reads
@@ -2343,10 +2354,24 @@ class KorvidApp(App[None]):
         nav_gen = pane.nav_gen
         # Warm the parent view first (issue #157): its watch was stopped
         # when we drilled away, so navigating straight back would re-LIST
-        # into an empty flash. Any parent row is enough to render.
+        # into an empty flash. Readiness is what the post-pop view will
+        # actually show: a remaining drill level keeps filtering by its
+        # parent UID (pods -> replicasets keeps the deployment filter), so
+        # an unrelated row must not satisfy the wait; only a pop back to
+        # the root accepts any row.
+        under = pane.drill.copy()
+        under.pop()
+        uid_after = under.parent_uid
+        if uid_after is None:
+            ready: Callable[[list[Summary]], bool] = bool
+        else:
+
+            def ready(rows: list[Summary]) -> bool:
+                return any(owned_by(r, uid_after) for r in rows)
+
         prewarm_scope = pane.scope
-        await self._prewarm_view(peeked.parent_kind, prewarm_scope, lambda rows: bool(rows))
         try:
+            await self._prewarm_view(peeked.parent_kind, prewarm_scope, ready)
             async with self._nav_lock:
                 if pane not in self._panes:
                     return False  # the initiating pane was closed while queued
