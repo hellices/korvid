@@ -2821,7 +2821,10 @@ class KorvidApp(App[None]):
         with follow off, this is the only trace an external host leaves on
         screen. Display only — never raises into the caller."""
         with contextlib.suppress(Exception):
-            self.notify(line, title="MCP", severity="information", timeout=3)
+            # markup=False: parts of the line are caller-controlled (pod and
+            # namespace names from the MCP host) - Rich tags must render
+            # literally, never restyle or forge toast content.
+            self.notify(line, title="MCP", severity="information", timeout=3, markup=False)
 
     def _handle_mcp_command(self, args: list[str]) -> None:
         """`:mcp` shows server state; `:mcp on` / `:mcp off` toggle it live."""

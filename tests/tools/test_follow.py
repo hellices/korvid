@@ -124,3 +124,16 @@ def test_read_summary_names_the_target_and_scope() -> None:
         == "get_resource deploy/api (ns prod)"
     )
     assert read_summary("list_operators", {}) == "list_operators (ns all)"
+
+
+def test_read_summary_sanitizes_and_bounds_hostile_arguments() -> None:
+    """The summary crosses into a status toast: caller-controlled values
+    must not inject newlines/control characters or bloat the line."""
+    line = read_summary(
+        "get_logs",
+        {"pod": "evil\napproved: scale ok\x1b[2Jdone" + "x" * 500, "namespace": "d\u202ecba"},
+    )
+    assert "\n" not in line
+    assert "\x1b" not in line
+    assert "\u202e" not in line  # bidi override cannot reorder the toast
+    assert len(line) <= 200

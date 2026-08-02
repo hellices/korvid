@@ -46,22 +46,42 @@ def _str_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+#: Per-field display cap for the activity summary: long enough for any real
+#: resource name (K8s caps them at 253), short enough that a hostile value
+#: cannot bloat the toast.
+_SUMMARY_FIELD_LIMIT = 80
+
+
+def _display(value: str, *, limit: int = _SUMMARY_FIELD_LIMIT) -> str:
+    """Flatten and bound one caller-controlled display field.
+
+    Summaries cross into a status toast: replace every non-printable
+    character (newlines, ANSI escapes, bidi controls) with a space and cap
+    the length so a hostile MCP caller cannot forge extra toast lines or
+    reorder/bloat the text. Rich markup stays inert because the toast
+    renders with markup disabled.
+    """
+    text = "".join(ch if ch.isprintable() else " " for ch in value)
+    return text[:limit]
+
+
 def read_summary(tool: str, args: Mapping[str, Any]) -> str:
     """One activity-feed line for a cluster read.
 
     E.g. `get_logs api-1 (ns prod)`, `list_resources pods (ns all)` - short
     enough for a transient toast, specific enough to know what an external
-    host just looked at.
+    host just looked at. Caller-controlled fields are sanitized and bounded
+    (`_display`).
     """
     kind = _str_or_none(args.get("kind"))
     target = _str_or_none(args.get("pod")) or _str_or_none(args.get("name"))
     namespace = _str_or_none(args.get("namespace"))
     parts = [tool]
     if kind and target:
-        parts.append(f"{kind}/{target}")
+        parts.append(f"{_display(kind)}/{_display(target)}")
     elif kind or target:
-        parts.append(kind or target or "")
-    parts.append(f"(ns {namespace or 'all'})")
+        parts.append(_display(kind or target or ""))
+    parts.append(f"(ns {_display(namespace or 'all')})")
     return " ".join(parts)
 
 

@@ -188,3 +188,18 @@ async def test_navigate_and_logs_refuse_while_an_approval_dialog_is_up() -> None
         assert logs.startswith("ERROR:")
         assert "approval" in logs
         assert isinstance(app.screen, ConfirmScreen)  # the dialog kept focus
+
+
+async def test_activity_toast_renders_without_rich_markup() -> None:
+    """Args arrive from the MCP caller: `[red]...[/]` in a pod name must
+    show literally, not restyle the toast."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        app.note_mcp_activity("mcp: get_logs [bold red]FAKE APPROVAL[/] (ns d)")
+        await until(
+            pilot,
+            lambda: any("FAKE APPROVAL" in n.message for n in app._notifications),
+            label="toast recorded",
+        )
+        note = next(n for n in app._notifications if "FAKE APPROVAL" in n.message)
+        assert note.markup is False
