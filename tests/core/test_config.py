@@ -355,6 +355,27 @@ def test_mcp_write_proposals_default_off(tmp_path: Path) -> None:
     assert cfg.mcp_write_proposals is False
 
 
+def test_mcp_follow_default_off(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text("mcp:\n  enabled: true\n")
+    cfg = load_config(f)
+    assert cfg.mcp_follow is False
+
+
+def test_mcp_follow_requires_literal_true(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text('mcp:\n  follow: "yes"\n')
+    cfg = load_config(f)
+    assert cfg.mcp_follow is False
+
+
+def test_mcp_follow_enabled(tmp_path: Path) -> None:
+    f = tmp_path / "config.yaml"
+    f.write_text("mcp:\n  follow: true\n")
+    cfg = load_config(f)
+    assert cfg.mcp_follow is True
+
+
 def test_mcp_write_proposals_requires_literal_true(tmp_path: Path) -> None:
     f = tmp_path / "config.yaml"
     f.write_text('mcp:\n  write_proposals: "yes"\n')

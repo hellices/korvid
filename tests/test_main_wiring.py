@@ -1140,3 +1140,42 @@ def test_mcp_only_install_does_not_compose_the_agent(
     assert provider_box == [None]
     assert "korvid.agent.runtime" not in sys.modules
     assert "korvid.agent.profiles" not in sys.modules
+
+
+async def test_mcp_controller_wires_follow_hooks() -> None:
+    """MCP follow mode (issue #153): the factory hands the late-bound app
+    hooks and the shared UI proxy to every server it builds; before the app
+    exists the hooks degrade to 'follow off' and dropped notes."""
+    from korvid.__main__ import _build_mcp_controller, _MCPAppHooks
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.client import KubeClient
+    from korvid.mcp.server import MCPController
+
+    hooks = _MCPAppHooks()
+    config = KorvidConfig(mcp_enabled=True, mcp_port=1234)
+    bridge = _FakeApp()
+    controller = _build_mcp_controller(
+        config, cast("KubeClient", object()), {}, bridge, mcp_hooks=hooks
+    )
+    assert isinstance(controller, MCPController)
+    server = controller._factory()
+    assert server._ui is bridge
+    assert server._follow_enabled == hooks.follow_enabled  # bound to the hooks
+    assert server._note_activity == hooks.note_activity
+    assert hooks.follow_enabled() is False  # app not attached yet
+    hooks.note_activity("dropped")  # must not raise
+
+    class _App:
+        mcp_follow_enabled = True
+
+        def __init__(self) -> None:
+            self.notes: list[str] = []
+
+        def note_mcp_activity(self, line: str) -> None:
+            self.notes.append(line)
+
+    fake_app = _App()
+    hooks.app = cast("Any", fake_app)  # duck-typed stand-in for KorvidApp
+    assert hooks.follow_enabled() is True
+    hooks.note_activity("seen")
+    assert fake_app.notes == ["seen"]

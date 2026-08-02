@@ -75,6 +75,10 @@ class KorvidConfig:
     #: tools over MCP. Off by default; the tools only queue proposals — every
     #: mutation still requires explicit approval inside the TUI.
     mcp_write_proposals: bool = False
+    #: `mcp.follow` (issue #153): start with MCP follow mode on — external
+    #: cluster reads arriving over MCP are mirrored in the TUI. Runtime
+    #: toggle: `:mcp follow on|off`.
+    mcp_follow: bool = False
     #: kubectl debug image overrides (issue #52): air-gapped / private registry.
     #: `debug_images is None` means unconfigured; an explicit empty mapping is
     #: a deliberate restriction (only default/custom images are offered).
@@ -189,6 +193,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         mcp_enabled=mcp_raw.get("enabled") is True,
         mcp_port=_parse_port(mcp_raw.get("port")),
         mcp_write_proposals=mcp_raw.get("write_proposals") is True,
+        mcp_follow=mcp_raw.get("follow") is True,
         debug_default_image=_opt_str(debug_raw.get("default_image")),
         debug_images=debug_images,
         node_shell_image=_opt_str(node_shell_raw.get("image")),

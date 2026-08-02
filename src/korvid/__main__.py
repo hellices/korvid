@@ -94,11 +94,32 @@ def _missing_extra_packages(extra_roots: frozenset[str]) -> list[str]:
     return sorted(pkg for pkg in extra_roots if importlib.util.find_spec(pkg) is None)
 
 
+class _MCPAppHooks:
+    """Late-bound app hooks for MCP follow mode (issue #153).
+
+    Built (like `_UIBridgeProxy`) before the app exists; the composition
+    root points `app` at the live instance right after construction. Until
+    then follow reads as off and activity notes are dropped - external
+    reads simply stay response-only, never an error.
+    """
+
+    def __init__(self) -> None:
+        self.app: KorvidApp | None = None
+
+    def follow_enabled(self) -> bool:
+        return self.app is not None and self.app.mcp_follow_enabled
+
+    def note_activity(self, line: str) -> None:
+        if self.app is not None:
+            self.app.note_mcp_activity(line)
+
+
 def _build_mcp_controller(
     config: KorvidConfig,
     kube: KubeClient,
     aliases: dict[str, ResourceMeta],
     ui: UIBridge | None,
+    mcp_hooks: _MCPAppHooks | None = None,
 ) -> MCPControllerBase | None:
     """Import and wire the MCP adapter only when its extra is installed.
 
@@ -137,6 +158,11 @@ def _build_mcp_controller(
             port=config.mcp_port,
             endpoint_path=default_endpoint_path(),
             capability_token=token,
+            # Follow mode (issue #153): mirror external cluster reads via
+            # the same serialized UI proxy the ui_only tools use.
+            ui=ui,
+            follow_enabled=mcp_hooks.follow_enabled if mcp_hooks is not None else None,
+            note_activity=mcp_hooks.note_activity if mcp_hooks is not None else None,
         )
 
     return MCPController(factory)
@@ -802,7 +828,8 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
         )
     )
 
-    mcp_controller = _build_mcp_controller(config, kube, aliases, ui_proxy)
+    mcp_hooks = _MCPAppHooks()
+    mcp_controller = _build_mcp_controller(config, kube, aliases, ui_proxy, mcp_hooks=mcp_hooks)
     proposal_store = _build_proposal_store(config)
 
     # `:ctx` switching (issue #36): the closure needs the app (for discovery
@@ -851,6 +878,9 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.
     ui_proxy.target = AppUIBridge(app)
+    # Follow mode (issue #153): the MCP server reads follow state from and
+    # sends activity notes to the live app.
+    mcp_hooks.app = app
 
     await _start_mcp_if_enabled(config, mcp_controller)
 

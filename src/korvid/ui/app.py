@@ -731,6 +731,9 @@ class KorvidApp(App[None]):
         self._audit = audit
         self._check_permission = check_permission
         self._mcp = mcp
+        #: MCP follow mode (issue #153): mirror external cluster reads in
+        #: the TUI. Config seeds the state; `:mcp follow on|off` toggles it.
+        self._mcp_follow: bool = config.mcp_follow
         #: External MCP write proposals (issue #110): shared with the MCP
         #: server; None when the feature is disabled.
         self._proposal_store = proposal_store
@@ -2795,6 +2798,34 @@ class KorvidApp(App[None]):
 
         self.run_worker(_switch(), exclusive=False)
 
+    def _handle_mcp_follow_command(self, args: list[str]) -> None:
+        """`:mcp follow [on|off]` (issue #153): toggle mirroring of external
+        cluster reads in the TUI. Bare `:mcp follow` flips the state."""
+        if args and args[0].lower() not in ("on", "off"):
+            self.notify("Usage: :mcp follow [on|off]", severity="warning")
+            return
+        self._mcp_follow = args[0].lower() == "on" if args else not self._mcp_follow
+        state = "on" if self._mcp_follow else "off"
+        self.notify(
+            f"MCP follow {state} — external reads are {'mirrored on screen' if self._mcp_follow else 'no longer mirrored'}"
+        )
+        self._refresh_status()
+
+    @property
+    def mcp_follow_enabled(self) -> bool:
+        """Current follow-mode state; read by the MCP server's wiring."""
+        return self._mcp_follow
+
+    def note_mcp_activity(self, line: str) -> None:
+        """Transient activity note for an external MCP read (issue #153):
+        with follow off, this is the only trace an external host leaves on
+        screen. Display only — never raises into the caller."""
+        with contextlib.suppress(Exception):
+            # markup=False: parts of the line are caller-controlled (pod and
+            # namespace names from the MCP host) - Rich tags must render
+            # literally, never restyle or forge toast content.
+            self.notify(line, title="MCP", severity="information", timeout=3, markup=False)
+
     def _handle_mcp_command(self, args: list[str]) -> None:
         """`:mcp` shows server state; `:mcp on` / `:mcp off` toggle it live."""
         mcp = self._mcp
@@ -2805,12 +2836,20 @@ class KorvidApp(App[None]):
             )
             return
         if not args:
-            self.notify(mcp.status())
+            follow = "follow on" if self._mcp_follow else "follow off"
+            self.notify(f"{mcp.status()} · {follow}")
             return
         action = args[0].lower()
-        if action not in ("on", "off"):
-            self.notify("Usage: :mcp [on|off]", severity="warning")
+        if action == "follow":
+            self._handle_mcp_follow_command(args[1:])
             return
+        if action not in ("on", "off"):
+            self.notify("Usage: :mcp [on|off] | :mcp follow [on|off]", severity="warning")
+            return
+        self._toggle_mcp_server(mcp, action)
+
+    def _toggle_mcp_server(self, mcp: MCPControllerBase, action: str) -> None:
+        """Start/stop the MCP server live (`:mcp on` / `:mcp off`)."""
         if self._ctx_switching:
             # The switch quiesced the server before swapping the client and
             # alias map; a toggle landing mid-swap could restart it against
@@ -7584,6 +7623,8 @@ class KorvidApp(App[None]):
         if self._agent_runtime is not None and self._agent_blocked_in_protected():
             label = "AI blocked"
         mcp_label = self._mcp.status() if self._mcp is not None else ""
+        if mcp_label and self._mcp is not None and self._mcp.running and self._mcp_follow:
+            mcp_label += " ·follow"
         self._status_bar.update_status(
             self.config.kube_context,
             self.current_scope,
@@ -8105,6 +8146,13 @@ class KorvidApp(App[None]):
         self.notify(summary, title="agent", severity="information", timeout=3)
 
     async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
+        if self._approval_dialog_active():
+            # Same "user is deciding" rule as describe: swapping the view
+            # beneath an approval dialog mid-decision is disorienting.
+            return (
+                "ERROR: an approval dialog is open — the user is deciding; "
+                "wait for their decision before changing the view"
+            )
         if isinstance(self.screen, DescribeScreen):
             # The user opened a describe modal and is reading it; switching
             # the table underneath while reporting 'switched' would lie about
@@ -8152,32 +8200,55 @@ class KorvidApp(App[None]):
         self._mark_agent_action("filter cleared")
         return "filter cleared"
 
+    @staticmethod
+    def _agent_log_targets(
+        known: list[tuple[str, str, str]], namespace: str, pod: str, container: str | None
+    ) -> list[tuple[str, str, str]] | str:
+        """The (ns, pod, container) triples to stream, or an "ERROR: ..."."""
+        if not known:
+            # Validate before _cancel_log_tasks: a hallucinated pod name
+            # must not tear down the streams the user is watching.
+            return f"ERROR: pod {namespace}/{pod} not found (check the name and namespace)"
+        if container:
+            names = [c for _, _, c in known if c]
+            if names and container not in names:
+                return (
+                    f"ERROR: container {container!r} not found in pod "
+                    f"{namespace}/{pod} (containers: {', '.join(names)})"
+                )
+            return [(namespace, pod, container)]
+        return known
+
     async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
+        if self._approval_dialog_active():
+            # Opening logs tears down the current log stream (the one the
+            # user may be watching beneath the dialog while deciding).
+            return (
+                "ERROR: an approval dialog is open — the user is deciding; "
+                "wait for their decision before opening logs"
+            )
         if self._stream_logs is None:
             return "ERROR: log streaming unavailable in this session"
         pane_gen = self._log_pane_gen
         try:
             known = await self._agent_pod_triples(namespace, pod)
-            if not known:
-                # Validate before _cancel_log_tasks: a hallucinated pod name
-                # must not tear down the streams the user is watching.
-                return f"ERROR: pod {namespace}/{pod} not found (check the name and namespace)"
-            if container:
-                names = [c for _, _, c in known if c]
-                if names and container not in names:
-                    return (
-                        f"ERROR: container {container!r} not found in pod "
-                        f"{namespace}/{pod} (containers: {', '.join(names)})"
-                    )
-                triples = [(namespace, pod, container)]
-            else:
-                triples = known
+            triples = self._agent_log_targets(known, namespace, pod, container)
+            if isinstance(triples, str):
+                return triples
             if pane_gen != self._log_pane_gen:
                 # The user (or another turn) changed the log pane while we were
                 # resolving containers — user keystrokes take priority.
                 return (
                     "ERROR: the log pane changed while resolving containers "
                     "(user action takes priority) — retry if still needed"
+                )
+            if self._approval_dialog_active():
+                # The pre-check can go stale during the awaited lookup: an
+                # approval dialog that opened meanwhile still wins before
+                # the destructive log-pane teardown below.
+                return (
+                    "ERROR: an approval dialog is open — the user is deciding; "
+                    "wait for their decision before opening logs"
                 )
             await self._cancel_log_tasks()
             if pane_gen != self._log_pane_gen:
@@ -8282,15 +8353,48 @@ class KorvidApp(App[None]):
             f"({self._drill.breadcrumb()})"
         )
 
-    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
+    def _approval_dialog_active(self) -> bool:
+        """True while a write-approval dialog or write-parameter wizard owns
+        the screen: agent- or follow-driven screens must never steal its
+        keystroke focus, and every one of these feeds a cluster write."""
+        return isinstance(
+            self.screen,
+            (
+                ConfirmScreen,
+                ReplicasPrompt,
+                ImagePrompt,
+                ResizePrompt,
+                OperatorInstallPrompt,
+                HelmInstallPrompt,
+            ),
+        )
+
+    def _describe_precheck(self, kind: str, namespace: str | None) -> ResourceMeta | str:
+        """Guards + target resolution for agent_open_describe: the meta to
+        describe, or an "ERROR: ..." string."""
+        if self._approval_dialog_active():
+            # Security invariant: approval dialogs are confirmed only by
+            # user keystrokes. A describe pushed on top (agent- or MCP
+            # follow-driven) would steal that focus mid-approval.
+            return (
+                "ERROR: an approval dialog is open — the user is deciding; "
+                "wait for their decision before opening screens"
+            )
         if self._get_manifest is None:
             return "ERROR: describe unavailable in this session"
-        key = kind.strip().lower()
-        meta = self.aliases.get(key)
+        meta = self.aliases.get(kind.strip().lower())
         if meta is None:
             return f"ERROR: unknown kind {kind!r} — not a resource kind in this cluster"
         if meta.namespaced and not namespace:
             return f"ERROR: kind {kind!r} is namespaced — provide the 'namespace' argument"
+        return meta
+
+    async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
+        meta = self._describe_precheck(kind, namespace)
+        if isinstance(meta, str):
+            return meta
+        if self._get_manifest is None:  # re-narrowed for typing; precheck guarantees it
+            return "ERROR: describe unavailable in this session"
         # Snapshot the visible state: if the user pushes a screen or navigates
         # while the fetches below are pending, abort instead of covering it.
         top_screen = self.screen_stack[-1] if self.screen_stack else None
