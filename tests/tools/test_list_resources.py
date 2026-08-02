@@ -260,3 +260,23 @@ def test_grandchild_summary_uses_its_parents_renderer() -> None:
 
     s = SpecialPod(name="w", namespace="d", kind="Pod", created="", phase="Running", ready="1/1")
     assert "phase=Running" in summary_facts(s)
+
+
+def test_helm_revision_facts_include_app_version() -> None:
+    """The Helm revision table shows APP VERSION: the renderer #161 will
+    expose must agree with the TUI from day one."""
+    from korvid.k8s.helm import HelmRevisionSummary
+    from korvid.tools.executor import summary_facts as facts
+
+    s = HelmRevisionSummary(
+        name="web.v3",
+        namespace="d",
+        kind="HelmRevision",
+        created="",
+        release="web",
+        revision=3,
+        status="superseded",
+        chart="web-1.2.3",
+        app_version="2.7.1",
+    )
+    assert "app_version=2.7.1" in facts(s)

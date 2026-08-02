@@ -135,6 +135,7 @@ def _helm_revision_facts(s: HelmRevisionSummary) -> str:
         f"revision={s.revision}",
         f"status={_clamp(s.status) or '?'}",
         f"chart={_clamp(s.chart)}",
+        f"app_version={_clamp(s.app_version)}",
     ]
     if s.description:
         parts.append(f"description={_clamp(s.description)}")
