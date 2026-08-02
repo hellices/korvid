@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import yaml
+from rich.cells import cell_len
 
 from korvid.core.config import KorvidConfig, load_config, save_topbar_state
 from korvid.core.store import ResourceStore, Summary
@@ -110,6 +111,34 @@ def test_narrow_terminal_forces_the_collapsed_form() -> None:
     assert "Sort" in wide.plain  # group titles = expanded
     assert "Sort" not in narrow.plain
     assert "more" in narrow.plain  # collapsed form
+
+
+def test_collapsed_line_budgets_keys_to_the_width() -> None:
+    """The collapsed bar stays one physical line: keys that do not fit the
+    terminal width are dropped instead of wrapping (TopBar is height:auto)."""
+    entries = [
+        _entry("describe", "d", "Describe"),
+        _entry("logs", "l", "Logs"),
+        _entry("shell", "s", "Shell"),
+        _entry("port_forward", "f", "Forward"),
+    ]
+    narrow = build_collapsed("pods", entries, "~", width=44)
+    assert cell_len(narrow.plain) <= 44
+    assert "more" in narrow.plain  # the expand hint always survives
+    wide = build_collapsed("pods", entries, "~", width=200)
+    assert "Forward" in wide.plain  # everything fits when the width allows
+
+
+def test_prelayout_render_is_collapsed_even_when_configured_expanded() -> None:
+    """Before the first resize the widget's width is 0: rendering expanded
+    for that frame would flash a wrapped legend on narrow terminals, so an
+    unknown width always yields the collapsed form."""
+    text = build_legend(
+        "pods", [_entry("sort_picker", "o", "By column")], expanded=True, width=0, toggle_key="~"
+    ).plain
+    assert "more" in text
+    assert "Sort" not in text  # no group titles = not the expanded form
+    assert LOGO_MARK in text
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +252,19 @@ async def test_toggle_persists_through_the_injected_callback() -> None:
         await until(pilot, lambda: saved == [True], label="expanded persisted")
         await pilot.press("tilde")
         await until(pilot, lambda: saved == [True, False], label="collapsed persisted")
+
+
+async def test_toggle_hint_reflects_a_remapped_key() -> None:
+    """`keybindings: {toggle_topbar: f8}` must move the advertised hint
+    too - a stale `~ more` would point at a key that no longer works."""
+    app = make_app(config=KorvidConfig(namespace="default", keybindings={"toggle_topbar": "f8"}))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await until(pilot, lambda: "more" in _bar_text(app), label="collapsed bar rendered")
+        text = _bar_text(app)
+        assert "f8" in text
+        # and the remapped key actually toggles
+        await pilot.press("f8")
+        await until(pilot, lambda: "Nav" in _bar_text(app), label="expanded via remapped key")
 
 
 # ---------------------------------------------------------------------------

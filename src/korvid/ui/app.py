@@ -7524,6 +7524,16 @@ class KorvidApp(App[None]):
             )
         return entries
 
+    def _topbar_toggle_key(self) -> str:
+        """The effective toggle key's display form: resolved by action from
+        the active bindings so a `toggle_topbar` remap moves the advertised
+        hint with it (`active_bindings` is keyed by declared key names like
+        "tilde", never by the display form)."""
+        for active in self.screen.active_bindings.values():
+            if active.binding.action == "toggle_topbar":
+                return self.get_key_display(active.binding)
+        return "~"
+
     def _refresh_top_bar(self) -> None:
         """Re-render the grouped legend for the current view (issue #142)."""
         bars = self.query(TopBar)
@@ -7533,9 +7543,7 @@ class KorvidApp(App[None]):
             self.current_kind,
             self._legend_entries(),
             expanded=self._topbar_expanded,
-            toggle_key=self.get_key_display(self.active_bindings["~"].binding)
-            if "~" in self.active_bindings
-            else "~",
+            toggle_key=self._topbar_toggle_key(),
         )
 
     def action_toggle_topbar(self) -> None:

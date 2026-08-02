@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual.widgets import Static
 
@@ -72,6 +73,7 @@ PRIORITY_ACTIONS: tuple[str, ...] = (
     "port_forward",
     "transfer",
     "hint_details",
+    "help",
     "open_filter",
     "open_command",
 )
@@ -119,13 +121,24 @@ def _append_key(text: Text, key: str, description: str) -> None:
     text.append(f" {description}", style="dim")
 
 
-def build_collapsed(view: str, entries: list[KeyEntry], toggle_key: str) -> Text:
-    """One-line bar: logo, view, top keys, more-hint."""
+def build_collapsed(view: str, entries: list[KeyEntry], toggle_key: str, width: int = 0) -> Text:
+    """One-line bar: logo, view, top keys, more-hint.
+
+    A positive `width` is a hard budget: keys that would wrap the line are
+    dropped (the logo, view name and the more-hint always stay). Zero means
+    the width is not known yet - show the priority cut unbudgeted.
+    """
     text = Text()
     text.append(LOGO_MARK, style="bold cyan")
     text.append("  ")
     text.append(view, style="bold")
+    hint_len = 2 + cell_len(f" {toggle_key} ") + cell_len(" more")
+    used = cell_len(text.plain)
     for entry in collapsed_entries(entries):
+        entry_len = 2 + cell_len(f" {entry.key} ") + cell_len(f" {entry.description}")
+        if width > 0 and used + entry_len + hint_len > width:
+            break
+        used += entry_len
         text.append("  ")
         _append_key(text, entry.key, entry.description)
     text.append("  ")
@@ -166,7 +179,7 @@ def build_legend(
     the terminal is wide enough (narrow terminals collapse automatically)."""
     if expanded and width >= MIN_EXPANDED_WIDTH:
         return build_expanded(view, entries)
-    return build_collapsed(view, entries, toggle_key)
+    return build_collapsed(view, entries, toggle_key, width)
 
 
 class TopBar(Static):
@@ -200,7 +213,10 @@ class TopBar(Static):
         self._render_bar()
 
     def _render_bar(self) -> None:
-        width = self.size.width or MIN_EXPANDED_WIDTH
+        # size.width is 0 before the first layout: build_legend then renders
+        # the collapsed form, so a narrow terminal never flashes a wrapped
+        # expanded legend; on_resize re-renders with the real width.
+        width = self.size.width
         self.update(
             build_legend(
                 self._view,
