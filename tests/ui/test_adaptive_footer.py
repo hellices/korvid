@@ -13,8 +13,6 @@ from pathlib import Path
 from typing import Any
 
 from textual.binding import Binding
-from textual.widgets import Footer
-from textual.widgets._footer import FooterKey
 
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
@@ -323,8 +321,9 @@ async def test_help_overlay_documents_offview_keys() -> None:
 
 
 def _footer_descriptions(app: KorvidApp) -> set[str]:
-    footer = app.query_one(Footer)
-    return {key.description for key in footer.query(FooterKey)}
+    # The grouped TopBar replaced the stock Footer (issue #142); the legend
+    # entries still come exclusively from check_action-filtered bindings.
+    return {entry.description for entry in app._legend_entries()}
 
 
 async def test_footer_legend_follows_view_changes() -> None:

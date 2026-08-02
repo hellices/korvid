@@ -1,15 +1,20 @@
 # Keybindings
 
-All keys, grouped by the context they act in. The footer legend adapts to the
-current view: only the keys that act on the resource kind on screen are shown
-(helm's `i`/`u`/`r`, node ops' `c`/`u`/`D`, workload restart/scale, …), and
-off-view keys are inert. The in-app help overlay (`?`) always documents every
-view and shows the effective keys, including any remaps.
+All keys, grouped by the context they act in. The top bar's key legend
+adapts to the current view: only the keys that act on the resource kind on
+screen are shown (helm's `i`/`u`/`r`, node ops' `c`/`u`/`D`, workload
+restart/scale, …), and off-view keys are inert. The bar starts collapsed —
+the corvid mark, the view name and the few most relevant keys — and `~`
+expands it to the full grouped legend (Nav · Sort · Actions · Logs · Panes ·
+Agent); the choice persists to `ui.topbar` in the config, and narrow
+terminals collapse automatically. The in-app help overlay (`?`) always
+documents every view and shows the effective keys, including any remaps.
 
 | Key | Context | Action |
 |-----|---------|--------|
 | `:` | global | Open command bar — accepts `pods`, `deploy all`, `helm`, `ns <name>`, `ctx <name>`, `ai`, `model`, `q` |
 | `?` | global | Help overlay — keybindings grouped by context plus `:` commands (Esc/q/`?` closes) |
+| `~` | global | Collapse/expand the top bar's grouped key legend (persists to `ui.topbar`) |
 | `/` | table | Open filter — name, `~fuzzy`, `/regex/`, `!exclude`, `-l k=v`, `-s` hide Completed (Enter keeps, Esc clears) |
 | `/` | log pane | Open inline log search |
 | `Enter` | table | Drill down: pods → containers; deploy → replicasets (history) → pods; helm release / Subscription / CSV → [hierarchy tree](helm-operators.md#hierarchy-tree) |
@@ -67,7 +72,7 @@ Action names: `quit`, `help`, `open_command`, `open_filter`,
 `toggle_all_namespaces`, `describe`, `shell`, `logs`, `logs_multi`,
 `log_format`, `log_wrap`, `log_timestamps`, `log_save`, `log_previous`,
 `log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
-`sort_by_mem`, `sort_picker`, `toggle_agent`, `delete_resource`, `rollout_restart`,
+`sort_by_mem`, `sort_picker`, `toggle_topbar`, `toggle_agent`, `delete_resource`, `rollout_restart`,
 `resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
 `cordon_node`, `uncordon_node`, `drain_node`, `port_forward`, `transfer`,
 `helm_install`, `helm_upgrade`, `helm_rollback`, `helm_history`.

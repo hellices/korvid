@@ -67,6 +67,7 @@ _ACTION_GROUPS: dict[str, tuple[str, ...]] = {
     "sort_by_cpu": ("Table",),
     "sort_by_mem": ("Table",),
     "sort_picker": ("Table",),
+    "toggle_topbar": ("Global",),
     "log_format": ("Logs",),
     "log_wrap": ("Logs",),
     "log_timestamps": ("Logs",),
