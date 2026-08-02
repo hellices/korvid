@@ -231,6 +231,7 @@ _READ_ORDER = [
     "get_logs",
     "get_events",
     "list_operators",
+    "helm_list_releases",
     "diagnose_pod",
 ]
 _UI_ORDER = ["navigate", "set_filter", "open_logs", "open_describe", "drill_down"]

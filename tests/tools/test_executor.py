@@ -34,6 +34,7 @@ def test_read_tools_schema_names() -> None:
         "get_logs",
         "get_events",
         "list_operators",
+        "helm_list_releases",
         "diagnose_pod",
     ]
 

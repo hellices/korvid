@@ -280,3 +280,52 @@ def test_helm_revision_facts_include_app_version() -> None:
         app_version="2.7.1",
     )
     assert "app_version=2.7.1" in facts(s)
+
+
+# ---------------------------------------------------------------------------
+# helm_list_releases (issue #161)
+# ---------------------------------------------------------------------------
+
+
+async def test_helm_list_releases_renders_release_facts() -> None:
+    from korvid.k8s.helm import HelmReleaseSummary
+
+    class HelmKube:
+        async def list_helm_releases(self, namespace: str | None) -> list[HelmReleaseSummary]:
+            assert namespace == "prod"
+            return [
+                HelmReleaseSummary(
+                    name="web",
+                    namespace="prod",
+                    kind="HelmRelease",
+                    created="",
+                    revision=3,
+                    status="deployed",
+                    chart="web-1.2.3",
+                    app_version="2.7.1",
+                )
+            ]
+
+    ex = ToolExecutor(HelmKube(), {})  # type: ignore[arg-type]  # read-only fake
+    out = await ex.execute("helm_list_releases", {"namespace": "prod"})
+    assert "prod/web" in out
+    assert "revision=3" in out
+    assert "status=deployed" in out
+    assert "chart=web-1.2.3" in out
+    assert "app_version=2.7.1" in out
+
+
+async def test_helm_list_releases_empty_and_error() -> None:
+    class EmptyKube:
+        async def list_helm_releases(self, namespace: str | None) -> list[Any]:
+            return []
+
+    ex = ToolExecutor(EmptyKube(), {})  # type: ignore[arg-type]  # read-only fake
+    assert await ex.execute("helm_list_releases", {}) == "(none)"
+
+    class ExplodingKube:
+        async def list_helm_releases(self, namespace: str | None) -> list[Any]:
+            raise RuntimeError("boom")
+
+    ex = ToolExecutor(ExplodingKube(), {})  # type: ignore[arg-type]  # read-only fake
+    assert (await ex.execute("helm_list_releases", {})).startswith("ERROR:")

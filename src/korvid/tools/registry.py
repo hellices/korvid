@@ -397,6 +397,38 @@ TOOL_DEFS: list[ToolDef] = [
         },
     ),
     ToolDef(
+        name="helm_list_releases",
+        effect="cluster_read",
+        dispatch="_helm_list_releases",
+        surfaces=_ALL_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "helm_list_releases",
+                "description": (
+                    "List installed Helm releases with their status: one line"
+                    " per release - revision, status (deployed/failed/"
+                    "pending-…), chart and app version. Read-only, parsed"
+                    " from the cluster's own release Secrets (no helm binary"
+                    " involved); installing or upgrading a release is done by"
+                    " the user through the UI."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {
+                            "type": "string",
+                            "description": (
+                                "Namespace to scope releases to. Omit for all namespaces."
+                            ),
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+    ),
+    ToolDef(
         name="diagnose_pod",
         effect="cluster_read",
         dispatch="_diagnose_pod",

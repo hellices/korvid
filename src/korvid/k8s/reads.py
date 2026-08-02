@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.helm import HelmReleaseSummary
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary
 
@@ -30,6 +31,10 @@ class ReadOps(abc.ABC):
         self, meta: ResourceMeta, namespace: str | None, name: str
     ) -> dict[str, Any]:
         """Fetch the raw manifest for a single object; 404 → ApiStatusError."""
+
+    @abc.abstractmethod
+    async def list_helm_releases(self, namespace: str | None) -> list[HelmReleaseSummary]:
+        """Latest revision per helm release (Secret-parsed, no helm binary)."""
 
     @abc.abstractmethod
     async def list_events_for(

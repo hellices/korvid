@@ -511,3 +511,39 @@ class TestGetHelmReleaseComponents:
             pytest.raises(ApiStatusError, match="not found"),
         ):
             await client.get_helm_release_components("default", "ghost")
+
+
+class TestListHelmReleases:
+    """LIST-only release listing for the helm_list_releases tool (#161)."""
+
+    async def test_latest_revision_per_release(self) -> None:
+        client = KubeClient()
+        list_resp: dict[str, Any] = {
+            "items": [
+                _secret("web", 1, "superseded"),
+                _secret("web", 3, "deployed"),
+                _secret("api", 2, "failed"),
+            ]
+        }
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        ):
+            releases = await client.list_helm_releases("default")
+        assert [(r.name, r.revision, r.status) for r in releases] == [
+            ("api", 2, "failed"),
+            ("web", 3, "deployed"),
+        ]
+
+    async def test_cluster_wide_when_namespace_is_none(self) -> None:
+        client = KubeClient()
+        request_json = AsyncMock(return_value={"items": []})
+        with (
+            patch.object(client, "_api", MagicMock()),
+            patch.object(client, "_request_json", request_json),
+        ):
+            assert await client.list_helm_releases(None) == []
+        assert request_json.await_args is not None
+        path = request_json.await_args.args[0]
+        assert path.startswith("/api/v1/secrets?")
+        assert "labelSelector=owner%3Dhelm" in path  # helm-owned Secrets only

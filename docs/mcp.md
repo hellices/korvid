@@ -7,7 +7,8 @@ Start with `korvid --mcp` (or set `mcp: {enabled: true}` in
 external agents — VS Code Copilot Chat, Claude Code, Cursor, Zed — over a
 [Streamable HTTP MCP](https://modelcontextprotocol.io) server bound to
 `127.0.0.1:7878` (`mcp: {port: N}` to change).  External hosts can list
-resources, fetch manifests, logs, and events, and drive the TUI you are
+resources, fetch manifests, logs, events, and helm release status, and
+drive the TUI you are
 looking at (navigate, filter, open logs/describe).  Write tools are **not**
 exposed: cluster mutations stay behind the in-TUI confirmation dialog.
 An opt-in *proposal* flow lets external agents queue writes for your review
@@ -63,6 +64,7 @@ mirrors those reads in the TUI so you can watch the assistant work:
 | `get_logs` | log pane on that pod/container |
 | `diagnose_pod` | describe pane on the pod |
 | `list_operators` | navigate to subscriptions |
+| `helm_list_releases` | navigate to the helm release browser |
 
 Off by default — screen hijacking mid-task is worse than invisibility.
 Enable at startup with `mcp: {follow: true}` in the config, or live with
