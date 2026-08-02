@@ -237,6 +237,39 @@ async def test_group_members_follow_the_view() -> None:
         assert "Install chart" not in _bar_text(app)
 
 
+async def test_enter_drill_hint_is_gated_by_drill_capability() -> None:
+    """`enter: drill` only where Enter actually drills: pods do, nodes have
+    neither a hierarchy nor a drill child so advertising it would lie."""
+    app = make_app()
+    async with app.run_test(size=(160, 40)) as pilot:
+        await pilot.press("tilde")
+        await until(pilot, lambda: "drill" in _bar_text(app), label="pods advertise drill")
+        await pilot.press("colon")
+        for ch in "nodes":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await until(pilot, lambda: "Cordon" in _bar_text(app), label="nodes view live")
+        assert "drill" not in _bar_text(app)
+
+
+async def test_failed_persistence_warns_instead_of_silently_reverting() -> None:
+    """A toggle that cannot be saved must say so: without a warning the bar
+    looks toggled but silently reverts on the next start."""
+
+    def broken_save(expanded: bool) -> None:
+        raise OSError("read-only config")
+
+    app = make_app(save_topbar=broken_save)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("tilde")
+        await until(
+            pilot,
+            lambda: any("save" in n.message.lower() for n in app._notifications),
+            label="save-failure warning notified",
+        )
+        assert "Nav" in _bar_text(app)  # the in-memory toggle still applied
+
+
 async def test_config_expanded_starts_expanded() -> None:
     app = make_app(config=KorvidConfig(namespace="default", ui_topbar_expanded=True))
     async with app.run_test(size=(120, 40)) as pilot:

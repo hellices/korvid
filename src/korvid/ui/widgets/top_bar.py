@@ -83,12 +83,15 @@ COLLAPSED_KEYS = 4
 
 #: Handler keys (no Binding object) the bar still advertises: Enter/Escape
 #: drive drilling, ctrl+w drives the pane chord. Presentation only — the
-#: help overlay stays the exhaustive reference.
+#: help overlay stays the exhaustive reference. The Enter entry is gated
+#: by `can_drill`: views with neither a hierarchy nor a drill child must
+#: not advertise a key that does nothing there.
 _STATIC_ENTRIES: tuple[tuple[str, str, str], ...] = (
-    ("Nav", "enter", "drill"),
     ("Nav", "esc", "back"),
     ("Panes", "ctrl+w", "v/w/q split"),
 )
+
+_DRILL_ENTRY: tuple[str, str, str] = ("Nav", "enter", "drill")
 
 
 @dataclass(frozen=True)
@@ -147,18 +150,19 @@ def build_collapsed(view: str, entries: list[KeyEntry], toggle_key: str, width: 
     return text
 
 
-def build_expanded(view: str, entries: list[KeyEntry]) -> Text:
+def build_expanded(view: str, entries: list[KeyEntry], *, can_drill: bool = True) -> Text:
     """The full grouped legend: fixed group order, per-view members."""
     groups: dict[str, list[KeyEntry]] = {}
     for entry in entries:
         groups.setdefault(group_of(entry.action), []).append(entry)
+    static_entries = ((_DRILL_ENTRY,) if can_drill else ()) + _STATIC_ENTRIES
     text = Text()
     text.append(LOGO_MARK, style="bold cyan")
     text.append("  ")
     text.append(view, style="bold")
     for name in GROUP_ORDER:
         members = groups.get(name, [])
-        statics = [(k, d) for g, k, d in _STATIC_ENTRIES if g == name]
+        statics = [(k, d) for g, k, d in static_entries if g == name]
         if not members and not statics:
             continue
         text.append("  │  ", style="dim")
@@ -173,12 +177,18 @@ def build_expanded(view: str, entries: list[KeyEntry]) -> Text:
 
 
 def build_legend(
-    view: str, entries: list[KeyEntry], *, expanded: bool, width: int, toggle_key: str
+    view: str,
+    entries: list[KeyEntry],
+    *,
+    expanded: bool,
+    width: int,
+    toggle_key: str,
+    can_drill: bool = True,
 ) -> Text:
     """The bar content for one render: expanded only when toggled *and*
     the terminal is wide enough (narrow terminals collapse automatically)."""
     if expanded and width >= MIN_EXPANDED_WIDTH:
-        return build_expanded(view, entries)
+        return build_expanded(view, entries, can_drill=can_drill)
     return build_collapsed(view, entries, toggle_key, width)
 
 
@@ -198,18 +208,26 @@ class TopBar(Static):
     expanded: bool = False
     _view: str = ""
     _toggle_key: str = "~"
+    _can_drill: bool = True
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self._entries: list[KeyEntry] = []
 
     def update_legend(
-        self, view: str, entries: list[KeyEntry], *, expanded: bool, toggle_key: str
+        self,
+        view: str,
+        entries: list[KeyEntry],
+        *,
+        expanded: bool,
+        toggle_key: str,
+        can_drill: bool = True,
     ) -> None:
         self._view = view
         self._entries = list(entries)
         self.expanded = expanded
         self._toggle_key = toggle_key
+        self._can_drill = can_drill
         self._render_bar()
 
     def _render_bar(self) -> None:
@@ -224,6 +242,7 @@ class TopBar(Static):
                 expanded=self.expanded,
                 width=width,
                 toggle_key=self._toggle_key,
+                can_drill=self._can_drill,
             )
         )
 

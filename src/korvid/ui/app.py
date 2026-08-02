@@ -7534,6 +7534,17 @@ class KorvidApp(App[None]):
                 return self.get_key_display(active.binding)
         return "~"
 
+    def _topbar_can_drill(self) -> bool:
+        """True when Enter drills on the current view: pods -> containers,
+        hierarchy roots -> component tree, or a registered ownership child
+        (mirrors on_data_table_row_selected, which otherwise leaves Enter
+        unconsumed - such views must not advertise `enter: drill`)."""
+        if self.current_kind == "pods":
+            return True
+        if self._hierarchy_root_kind() is not None:
+            return True
+        return drill_child(self._canonical_kind(self.current_kind)) is not None
+
     def _refresh_top_bar(self) -> None:
         """Re-render the grouped legend for the current view (issue #142)."""
         bars = self.query(TopBar)
@@ -7544,6 +7555,7 @@ class KorvidApp(App[None]):
             self._legend_entries(),
             expanded=self._topbar_expanded,
             toggle_key=self._topbar_toggle_key(),
+            can_drill=self._topbar_can_drill(),
         )
 
     def action_toggle_topbar(self) -> None:
@@ -7551,9 +7563,15 @@ class KorvidApp(App[None]):
         choice persists to config through the injected save callback."""
         self._topbar_expanded = not self._topbar_expanded
         self._refresh_top_bar()
-        if self._save_topbar is not None:
-            with contextlib.suppress(Exception):
-                self._save_topbar(self._topbar_expanded)
+        if self._save_topbar is None:
+            return
+        try:
+            self._save_topbar(self._topbar_expanded)
+        except Exception as exc:  # in-memory toggle stays; disk is stale
+            self.notify(
+                f"Top bar toggled, but save failed: {exc} — the previous state returns on restart",
+                severity="warning",
+            )
 
     def _refresh_status(self) -> None:
         # The top bar shows the view name: keep it in step with every
