@@ -69,7 +69,12 @@ _FACT_VALUE_LIMIT = 80
 
 
 def _clamp(value: str) -> str:
-    return value if len(value) <= _FACT_VALUE_LIMIT else value[: _FACT_VALUE_LIMIT - 1] + "…"
+    """One printable, bounded line: values may come from arbitrary
+    annotations/JSONPath (custom columns) or cluster object fields -
+    newlines/control characters must not forge extra result rows, and one
+    hostile value must not dominate the result budget."""
+    flat = "".join(ch if ch.isprintable() else " " for ch in value)
+    return flat if len(flat) <= _FACT_VALUE_LIMIT else flat[: _FACT_VALUE_LIMIT - 1] + "…"
 
 
 def _pod_facts(s: PodListSummary) -> str:
