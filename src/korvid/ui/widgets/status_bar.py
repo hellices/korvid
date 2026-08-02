@@ -1,7 +1,7 @@
 """Status bar + the corvid busy indicator (issue #143).
 
 Long operations publish transient labels through the app's
-``_progress_labels`` machinery; while any label is live the bar animates a
+`_progress_labels` machinery; while any label is live the bar animates a
 small ASCII corvid next to it so a 20s helm dry-run visibly *moves*
 instead of reading as frozen. Frame cycling is a pure function
 (`bird_frame`) so tests never assert on wall-clock timing.
@@ -78,11 +78,12 @@ class StatusBar(Static):
             self._tick = 0
 
     def _advance_bird(self) -> None:
-        """One timer tick: swap the frame in place (no layout change)."""
+        """One timer tick: swap the equal-width frame in place. Repaint
+        only (`layout=False`) - 500ms ticks must not schedule layout."""
         self._tick += 1
-        self._render_line()
+        self._render_line(layout=False)
 
-    def _render_line(self) -> None:
+    def _render_line(self, *, layout: bool = True) -> None:
         (
             context,
             namespace,
@@ -108,4 +109,4 @@ class StatusBar(Static):
             line.append("  ")
         line.append(f"ctx:{ctx}  ns:{namespace}  ⚡{agent_label}{mcp}{flt}{prog}{props}{trail}")
         self.set_class(protected, "protected")
-        self.update(line)
+        self.update(line, layout=layout)

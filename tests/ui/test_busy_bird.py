@@ -8,6 +8,9 @@ import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import pytest
+from textual.widgets import Static
+
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore, Summary
@@ -102,6 +105,32 @@ async def test_animation_tick_swaps_the_frame_in_place() -> None:
         assert BIRD_FRAMES[1] in text
         assert BIRD_FRAMES[0] not in text
         assert "draining node" in text  # the label survived the swap
+
+
+async def test_animation_tick_does_not_schedule_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Frame swaps are equal-width in-place updates: a tick every 500ms must
+    not schedule a layout pass, only a repaint. Status changes still lay out."""
+    app = _make_app()
+    async with app.run_test() as pilot:
+        app._set_progress("test", "draining node")
+        await pilot.pause()
+        bar = app.query_one(StatusBar)
+        calls: list[bool] = []
+        original = Static.update
+
+        def spy(self: Static, content: object = "", *, layout: bool = True) -> None:
+            calls.append(layout)
+            original(self, content, layout=layout)  # type: ignore[arg-type]  # spy passthrough
+
+        monkeypatch.setattr(Static, "update", spy)
+        bar._advance_bird()
+        assert calls == [False]  # animation: repaint only
+        calls.clear()
+        app._set_progress("test", "still draining")
+        await pilot.pause()
+        assert True in calls  # real status changes still lay out
 
 
 async def test_animation_stops_and_resets_when_progress_clears() -> None:
