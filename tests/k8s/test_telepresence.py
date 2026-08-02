@@ -191,3 +191,51 @@ def test_find_telepresence_uses_which() -> None:
         assert find_telepresence() == "/x/telepresence"
     with mock.patch("korvid.k8s.telepresence.shutil.which", return_value=None):
         assert find_telepresence() is None
+
+
+def test_parse_status_containerized_daemon_shape() -> None:
+    """Docker-hosted daemons report one combined top-level 'daemon' object
+    instead of user_daemon/root_daemon (status.go's InDocker branch)."""
+    s = parse_status(
+        {
+            "daemon": {
+                "running": True,
+                "status": "Connected",
+                "version": "2.30.1",
+                "kubernetes_context": "prod",
+            },
+            "traffic_manager": {"name": "traffic-manager", "version": "2.30.1"},
+        }
+    )
+    assert s.connected is True
+    assert s.user_running is True
+    assert s.root_running is True  # one combined daemon serves both roles
+    assert s.kubernetes_context == "prod"
+    assert s.traffic_manager_version == "2.30.1"
+
+
+def test_parse_status_multi_daemon_connections_shape() -> None:
+    """--use / multi-daemon mode wraps everything in {'connections': […]};
+    the connected entry wins over a disconnected one."""
+    disconnected = {
+        "user_daemon": {"running": False},
+        "root_daemon": {"running": False},
+        "traffic_manager": {"name": "", "version": "", "traffic_agent": ""},
+    }
+    connected = {
+        "user_daemon": {
+            "running": True,
+            "status": "Connected",
+            "version": "2.30.1",
+            "kubernetes_context": "prod",
+        },
+        "root_daemon": {"running": True},
+        "traffic_manager": {"name": "traffic-manager", "version": "2.30.1"},
+    }
+    s = parse_status({"connections": [disconnected, connected]})
+    assert s.connected is True
+    assert s.kubernetes_context == "prod"
+    empty = parse_status({"connections": []})
+    assert empty.connected is False
+    junk = parse_status({"connections": "nope"})
+    assert junk.connected is False

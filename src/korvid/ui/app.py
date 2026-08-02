@@ -1366,7 +1366,9 @@ class KorvidApp(App[None]):
             handler_keys=handler_keys,
             overrides=overrides,
         )
-        self.push_screen(HelpScreen(groups, command_help()))
+        self.push_screen(
+            HelpScreen(groups, command_help(telepresence=self._telepresence is not None))
+        )
 
     def action_open_command(self) -> None:
         # Dismiss the filter bar first so no invisible filter stays active.

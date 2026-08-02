@@ -87,13 +87,23 @@ def parse_status(payload: Any) -> TelepresenceStatus:
 
     Never raises: the shape varies by daemon/connection state and version
     ({"error": …} and {"cmd", "err"} failure forms both observed live), so
-    every field degrades independently.
+    every field degrades independently. Three source-emitted layouts are
+    normalized (status.go): the flat user_daemon/root_daemon form, the
+    containerized combined `daemon` form, and the multi-daemon
+    `{"connections": […]}` wrapper (the first connected entry wins).
     """
+    if isinstance(payload, dict) and "connections" in payload:
+        return _pick_connection(payload.get("connections"))
     error = ""
     if isinstance(payload, dict):
         error = _str_of(payload, "error") or _str_of(payload, "err")
     user = _dict_of(payload, "user_daemon")
     root = _dict_of(payload, "root_daemon")
+    combined = _dict_of(payload, "daemon")
+    if combined:
+        # Docker-hosted daemons: one object serves both roles.
+        user = combined
+        root = combined
     manager = _dict_of(payload, "traffic_manager")
     return TelepresenceStatus(
         # The user daemon reports an explicit "Connected" status string;
@@ -106,6 +116,14 @@ def parse_status(payload: Any) -> TelepresenceStatus:
         traffic_manager_version=_str_of(manager, "version"),
         error=error,
     )
+
+
+def _pick_connection(connections: Any) -> TelepresenceStatus:
+    """The connected entry of a multi-daemon status, else the first one."""
+    if not isinstance(connections, list) or not connections:
+        return TelepresenceStatus(connected=False, user_running=False, root_running=False)
+    parsed = [parse_status(entry) for entry in connections]
+    return next((s for s in parsed if s.connected), parsed[0])
 
 
 def _intercept_port(spec: dict[str, Any]) -> str:

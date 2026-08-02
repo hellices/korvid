@@ -241,3 +241,14 @@ async def test_no_hint_when_manager_absent_or_client_present() -> None:
         await with_client._maybe_hint_telepresence()
         await pilot.pause()
         assert not any("traffic-manager" in n.message for n in with_client._notifications)
+
+
+async def test_help_hides_tp_when_the_integration_is_unavailable() -> None:
+    """Absent binary (or kill-switch) = 'no UI': the help overlay must not
+    advertise a command that only answers with a warning."""
+    from korvid.ui.command import command_help
+
+    without = command_help(telepresence=False)
+    assert not any(":tp" in cmd for cmd, _ in without)
+    with_tp = command_help(telepresence=True)
+    assert any(":tp" in cmd for cmd, _ in with_tp)
