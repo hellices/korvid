@@ -136,8 +136,10 @@ session's context and traffic-manager version, and the active intercepts
 (workload, port, who).  Without the binary nothing changes — no UI, and
 no telepresence process ever starts; the only background activity is one
 asynchronous Kubernetes API GET probing for a cluster-side
-traffic-manager, and when one is found while the client is absent, a
-single dismissible hint mentions it once per session.
+traffic-manager (repeated once per context switch until a hint has been
+shown), and when a manager is found while the client is absent, a single
+dismissible hint mentions it once per session (a restart picks up a
+newly installed client).
 `integrations: {telepresence: off}` in the config disables the
 integration entirely.
 

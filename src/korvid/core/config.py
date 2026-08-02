@@ -98,7 +98,9 @@ class KorvidConfig:
     ui_topbar_expanded: bool = False
     #: `integrations.telepresence` kill-switch (issue #159): False disables
     #: detection, the status panel and the install hint entirely. On by
-    #: default - detection alone is a `shutil.which` plus one API GET.
+    #: default - detection is one `shutil.which` at startup; with the
+    #: client absent, the install-hint probe adds one API GET per context
+    #: (until a hint has been shown).
     telepresence_enabled: bool = True
     #: Human-readable config problems (e.g. an invalid custom column) that
     #: the UI surfaces once at startup instead of crashing or hiding them.

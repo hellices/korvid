@@ -262,7 +262,11 @@ class TelepresenceCLI:
         `daemon` scopes the query with `--use`: with several daemons
         running, a bare `list` refuses and asks for a match expression.
         The flag takes a Go regexp, so the name is escaped and anchored -
-        'prod' must never also match 'prod2'.
+        'prod' must never also match 'prod2'. `--intercepts` filters
+        server-side: an unfiltered list can reach tens of MB on a large
+        cluster and time the query out for nothing.
         """
-        args = ["list"] if daemon is None else ["list", "--use", f"^{re.escape(daemon)}$"]
+        args = ["list", "--intercepts"]
+        if daemon is not None:
+            args += ["--use", f"^{re.escape(daemon)}$"]
         return parse_intercepts(await self._run_json(*args))

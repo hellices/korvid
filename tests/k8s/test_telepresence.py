@@ -163,7 +163,7 @@ async def test_list_intercepts_builds_argv_and_parses() -> None:
         rows = await cli.list_intercepts()
     assert len(rows) == 1
     argv = execute.await_args_list[0].args[0]
-    assert argv == ["/opt/homebrew/bin/telepresence", "list", "--format", "json"]
+    assert argv == ["/opt/homebrew/bin/telepresence", "list", "--intercepts", "--format", "json"]
 
 
 async def test_nonzero_exit_raises_telepresence_error() -> None:
@@ -285,6 +285,7 @@ async def test_list_intercepts_scopes_to_the_daemon_when_named() -> None:
     assert argv == [
         "/opt/homebrew/bin/telepresence",
         "list",
+        "--intercepts",  # unfiltered list can reach 20MB on large clusters
         "--use",
         "^prod\\-conn$",  # escaped + anchored: --use is a Go regexp match
         "--format",

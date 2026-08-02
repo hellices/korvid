@@ -3046,7 +3046,7 @@ class KorvidApp(App[None]):
         self._telepresence_hinted = True
         self.notify(
             "telepresence traffic-manager detected in this cluster — install "
-            "the client to inspect intercepts (`:tp`)",
+            "the client and restart korvid to inspect intercepts (`:tp`)",
             severity="information",
             timeout=8,
         )
