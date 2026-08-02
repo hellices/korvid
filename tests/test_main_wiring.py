@@ -1196,3 +1196,19 @@ async def test_mcp_executor_receives_custom_column_names() -> None:
     assert controller is not None
     server = controller._factory()  # type: ignore[attr-defined]  # test introspection
     assert server._executor._custom_columns == {"deployments": ("TEAM",)}
+
+
+def test_telepresence_wiring_respects_detection_and_kill_switch() -> None:
+    """Optional integration (issue #159): absent binary or the config
+    kill-switch yields None; a detected binary yields a CLI wrapper."""
+    from unittest import mock
+
+    from korvid.__main__ import _build_telepresence
+    from korvid.core.config import KorvidConfig
+    from korvid.k8s.telepresence import TelepresenceCLI
+
+    with mock.patch("korvid.__main__.find_telepresence", return_value=None):
+        assert _build_telepresence(KorvidConfig()) is None
+    with mock.patch("korvid.__main__.find_telepresence", return_value="/x/telepresence"):
+        assert isinstance(_build_telepresence(KorvidConfig()), TelepresenceCLI)
+        assert _build_telepresence(KorvidConfig(telepresence_enabled=False)) is None

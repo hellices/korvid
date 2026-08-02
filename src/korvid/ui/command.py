@@ -28,9 +28,20 @@ _BUILTIN_COMMAND_HELP: tuple[tuple[str, str], ...] = (
     (":mcp follow [on|off]", "Mirror external MCP reads in the TUI (toggle)"),
     (":proposals", "Review pending external write proposals"),
     (":pf", "List port-forwards (Ctrl-D stop, r re-attach)"),
+    (":tp", "Telepresence status panel (also :telepresence)"),
     (":sort [column]", "Sort by a column (custom too); no argument clears"),
 )
-_RESERVED_BUILTINS = {"ai", "agent", "model", "mcp", "proposals", "pf", "sort"} | _CTX_KEYWORDS
+_RESERVED_BUILTINS = {
+    "ai",
+    "agent",
+    "model",
+    "mcp",
+    "proposals",
+    "pf",
+    "sort",
+    "tp",
+    "telepresence",
+} | _CTX_KEYWORDS
 
 
 def command_help() -> list[tuple[str, str]]:

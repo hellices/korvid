@@ -128,6 +128,23 @@ silently the way a hand-run `kubectl port-forward` does.  Every forward is
 torn down when korvid exits, and start/stop are audit-logged (no approval
 dialog: a forward reads from the cluster, it never mutates it).
 
+## Telepresence (optional)
+
+When the `telepresence` binary is on PATH, `:tp` (or `:telepresence`)
+opens a read-only status panel: local daemon state, the connected
+session's context and traffic-manager version, and the active intercepts
+(workload, port, who).  Without the binary nothing changes — no UI, no
+startup cost; if the cluster runs a traffic-manager while the client is
+absent, a single dismissible hint mentions it once per session.
+`integrations: {telepresence: off}` in the config disables the
+integration entirely.
+
+Queries run only when you open the panel — never on a background poll —
+because the telepresence CLI itself starts its local user daemon to
+answer.  Intercept start/stop stays in the telepresence CLI for now:
+korvid's panel is phase 1 (visibility), and rerouting live traffic will
+arrive behind the standard approval gate if the panel proves useful.
+
 ## File transfer
 
 `Ctrl-T` on a pod opens a transfer dialog (multi-container pods show a

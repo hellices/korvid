@@ -98,6 +98,7 @@ from korvid.k8s.olm import (
 )
 from korvid.k8s.portforward import FORWARDABLE_KINDS, forward_target_gvr
 from korvid.k8s.relations import drill_child, owned_by
+from korvid.k8s.telepresence import TelepresenceCLI, TelepresenceError
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.tools.executor import UIBridge
 from korvid.tools.proposals import (
@@ -165,6 +166,7 @@ from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.secret_screen import SecretScreen
 from korvid.ui.widgets.status_bar import StatusBar
+from korvid.ui.widgets.telepresence_screen import TelepresenceScreen
 from korvid.ui.widgets.top_bar import KeyEntry, TopBar
 from korvid.ui.widgets.transfer_screen import TransferProgressScreen, TransferScreen
 
@@ -705,6 +707,8 @@ class KorvidApp(App[None]):
         helm: HelmCLI | None = None,
         proposal_store: ProposalStore | None = None,
         save_topbar: Callable[[bool], None] | None = None,
+        telepresence: TelepresenceCLI | None = None,
+        probe_traffic_manager: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -718,6 +722,11 @@ class KorvidApp(App[None]):
         self._list_contexts = list_contexts
         self._probe_context = probe_context
         self._switch_context = switch_context
+        #: Optional telepresence integration (issue #159): None = binary
+        #: absent or kill-switched; the `:tp` panel simply reports that.
+        self._telepresence = telepresence
+        self._probe_traffic_manager = probe_traffic_manager
+        self._telepresence_hinted = False
         #: True while a context switch is tearing down / retargeting;
         #: refuses concurrent switches.
         self._ctx_switching = False
@@ -1214,6 +1223,9 @@ class KorvidApp(App[None]):
         # Safety net: never leave the splash up if the watch produces nothing
         # (e.g. connection failure) — swap to the table after a short grace.
         self.set_timer(5.0, self._dismiss_splash)
+        # Telepresence install hint (issue #159): fire-and-forget probe; a
+        # failed or slow GET never delays startup.
+        self.run_worker(self._maybe_hint_telepresence(), exclusive=False)
 
     #: Minimum time the startup splash stays visible in a real terminal.
     #: Skipped in headless (test) mode so Pilot tests see the table at once.
@@ -2871,6 +2883,9 @@ class KorvidApp(App[None]):
         if head == "mcp":
             self._handle_mcp_command(parts[1:])
             return
+        if head in {"tp", "telepresence"}:
+            self._handle_telepresence_command()
+            return
         if head == "proposals":
             self._open_proposal_review()
             return
@@ -2952,6 +2967,58 @@ class KorvidApp(App[None]):
             self.notify(f"Agent model set to {new_settings.model}")
 
         self.run_worker(_switch(), exclusive=False)
+
+    def _handle_telepresence_command(self) -> None:
+        """`:tp` / `:telepresence` (issue #159): open the read-only status
+        panel. Queries run only here, on the explicit user action - the
+        telepresence CLI spawns its local user daemon to answer, so korvid
+        never polls it in the background."""
+        tp = self._telepresence
+        if tp is None:
+            self.notify(
+                "telepresence not available — binary not on PATH, or disabled "
+                "via `integrations: {telepresence: off}`",
+                severity="warning",
+            )
+            return
+
+        async def _open() -> None:
+            with self._progress("querying telepresence"):
+                try:
+                    status = await tp.status()
+                    intercepts = await tp.list_intercepts() if status.connected else []
+                except TelepresenceError as exc:
+                    self.notify(str(exc), title="telepresence", severity="error")
+                    return
+            await self.push_screen(TelepresenceScreen(status, intercepts))
+
+        self.run_worker(_open(), exclusive=True, group="telepresence")
+
+    async def _maybe_hint_telepresence(self) -> None:
+        """One dim hint per session (issue #159): the cluster runs a
+        traffic-manager but the local client is absent. The probe is an
+        injected pure API check - never the telepresence binary; a missing
+        probe, a failure or the kill-switch all silently mean no hint."""
+        if (
+            self._telepresence is not None
+            or self._telepresence_hinted
+            or not self.config.telepresence_enabled
+            or self._probe_traffic_manager is None
+        ):
+            return
+        self._telepresence_hinted = True
+        try:
+            present = await self._probe_traffic_manager()
+        except Exception:
+            return  # absent / forbidden / transient: all mean "no hint"
+        if not present:
+            return
+        self.notify(
+            "telepresence traffic-manager detected in this cluster — install "
+            "the client to inspect intercepts (`:tp`)",
+            severity="information",
+            timeout=8,
+        )
 
     def _handle_mcp_follow_command(self, args: list[str]) -> None:
         """`:mcp follow [on|off]` (issue #153): toggle mirroring of external

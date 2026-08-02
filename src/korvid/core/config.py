@@ -96,6 +96,10 @@ class KorvidConfig:
     #: grouped legend; anything else (or unset) starts collapsed. The
     #: runtime toggle persists the choice back through save_topbar_state.
     ui_topbar_expanded: bool = False
+    #: `integrations.telepresence` kill-switch (issue #159): False disables
+    #: detection, the status panel and the install hint entirely. On by
+    #: default - detection alone is a `shutil.which` plus one API GET.
+    telepresence_enabled: bool = True
     #: Human-readable config problems (e.g. an invalid custom column) that
     #: the UI surfaces once at startup instead of crashing or hiding them.
     warnings: tuple[str, ...] = ()
@@ -136,6 +140,10 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     node_shell_raw: dict[str, Any] = node_shell_value if isinstance(node_shell_value, dict) else {}
     ui_value = raw.get("ui")
     ui_raw: dict[str, Any] = ui_value if isinstance(ui_value, dict) else {}
+    integrations_value = raw.get("integrations")
+    integrations_raw: dict[str, Any] = (
+        integrations_value if isinstance(integrations_value, dict) else {}
+    )
     images_value = debug_raw.get("images")
     debug_images: dict[str, str] | None
     if "images" not in debug_raw:
@@ -193,6 +201,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         mcp_enabled=mcp_raw.get("enabled") is True,
         mcp_port=_parse_port(mcp_raw.get("port")),
         mcp_write_proposals=mcp_raw.get("write_proposals") is True,
+        telepresence_enabled=integrations_raw.get("telepresence") is not False,
         mcp_follow=mcp_raw.get("follow") is True,
         debug_default_image=_opt_str(debug_raw.get("default_image")),
         debug_images=debug_images,

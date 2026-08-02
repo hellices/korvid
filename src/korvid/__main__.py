@@ -41,10 +41,17 @@ from korvid.k8s.client import (
 )
 from korvid.k8s.csp import ProviderInfo, detect_provider
 from korvid.k8s.discovery import PODS_META, ResourceMeta, build_alias_map
+from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HELM_RELEASES_META, HELM_REVISIONS_META
 from korvid.k8s.helmcli import HelmCLI, find_helm
 from korvid.k8s.metrics import MetricsPoller
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP
+from korvid.k8s.telepresence import (
+    TRAFFIC_MANAGER_NAME,
+    TRAFFIC_MANAGER_NAMESPACE,
+    TelepresenceCLI,
+    find_telepresence,
+)
 from korvid.tools.executor import (
     ToolExecutor,
     UIBridge,
@@ -664,6 +671,33 @@ def _build_helm(config: KorvidConfig) -> HelmCLI | None:
     return HelmCLI(binary, kube_context=config.kube_context)
 
 
+def _build_telepresence(config: KorvidConfig) -> TelepresenceCLI | None:
+    """Wrap a detected telepresence binary (issue #159), or None when the
+    binary is absent or the kill-switch (`integrations.telepresence: off`)
+    disabled the integration."""
+    if not config.telepresence_enabled:
+        return None
+    binary = find_telepresence()
+    if binary is None:
+        return None
+    return TelepresenceCLI(binary)
+
+
+def _make_traffic_manager_probe(kube: KubeClient) -> Callable[[], Awaitable[bool]]:
+    """Cluster-side telepresence detection (issue #159): a pure API GET for
+    the traffic-manager deployment - never the telepresence binary."""
+
+    async def probe() -> bool:
+        meta = ResourceMeta("Deployment", "deployments", "apps", "v1", True)
+        try:
+            await kube.get_object(meta, TRAFFIC_MANAGER_NAMESPACE, TRAFFIC_MANAGER_NAME)
+        except ApiStatusError:
+            return False  # absent or forbidden: either way, no hint
+        return True
+
+    return probe
+
+
 def _protected_context_name(config: KorvidConfig, context: str | None) -> str | None:
     """The effective context's name when it matches `protected_contexts`
     (issue #83), None otherwise. *context* is explicit (not read from config)
@@ -879,6 +913,8 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
             config, kube, aliases, app_box, discovery_box, retarget_agent
         ),
         helm=_build_helm(config),
+        telepresence=_build_telepresence(config),
+        probe_traffic_manager=_make_traffic_manager_probe(kube),
         proposal_store=proposal_store,
         save_topbar=lambda expanded: save_topbar_state(DEFAULT_CONFIG_PATH, expanded=expanded),
     )
