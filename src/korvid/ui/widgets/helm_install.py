@@ -239,6 +239,10 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
             return
         if event.value.strip() == self._schema_version_requested:
             return  # mount-time echo of the prefilled version: already fetching
+        # Invalidate the generation *now*: the previous version's in-flight
+        # fetch must not complete inside the debounce window and re-display
+        # stale required values over the hide below.
+        self._schema_seq += 1
         self.query_one("#helm-required", Static).display = False
         if self._schema_debounce is not None:
             self._schema_debounce.stop()
@@ -271,7 +275,10 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
         if self._get_readme is None:
             return
         version = self.query_one("#helm-version", Input).value.strip()
-        self.run_worker(self._open_readme(version), group="helm-chart-info")
+        # Exclusive in its own group: rapid F1 presses during a slow fetch
+        # must supersede the pending request, never stack two modals - and
+        # must not cancel an unrelated schema load.
+        self.run_worker(self._open_readme(version), exclusive=True, group="helm-chart-readme")
 
     async def _open_readme(self, version: str) -> None:
         if self._get_readme is None:  # pragma: no cover - guarded by the caller

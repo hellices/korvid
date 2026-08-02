@@ -418,3 +418,81 @@ async def test_wizard_without_info_providers_behaves_as_before() -> None:
         app.screen.query_one("#helm-release", Input).focus()
         await pilot.press("enter")
         await until(pilot, lambda: app.result != "unset", label="submitted")
+
+
+async def test_in_flight_stale_schema_cannot_resurface_during_the_debounce() -> None:
+    """A version edit hides the section and debounces the refetch - but the
+    *previous* version's still-in-flight fetch must not complete during
+    that window and re-display stale required values."""
+    import asyncio
+
+    gate = asyncio.Event()
+    calls: list[str] = []
+
+    async def gated_schema(chart: str, version: str) -> "dict[str, object] | None":
+        calls.append(version)
+        await gate.wait()
+        return _SCHEMA
+
+    app = HostApp()
+    prompt = HelmInstallPrompt(_CHART, namespace="default", release=None, get_schema=gated_schema)
+
+    def _done(v: object) -> None:
+        app.result = v
+
+    async with app.run_test() as pilot:
+        await app.push_screen(prompt, _done)
+        await _opened(app, pilot)
+        await until(pilot, lambda: bool(calls), label="initial fetch started")
+        version = app.screen.query_one("#helm-version", Input)
+        version.focus()
+        version.value = "18.2.0"  # edit while the mount fetch is in flight
+        # the edit was handled (debounce armed) before the stale fetch lands
+        await until(
+            pilot,
+            lambda: prompt._schema_debounce is not None,
+            label="edit handled, debounce armed",
+        )
+        gate.set()  # the stale fetch completes inside the debounce window
+        await pilot.pause(0.2)  # still inside the 0.5s debounce
+        assert not app.screen.query_one("#helm-required", Static).display
+        # the debounced refetch eventually renders the new version's schema
+        await until(pilot, lambda: "18.2.0" in calls, label="refetched")
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#helm-required", Static).display,
+            label="fresh section rendered",
+        )
+
+
+async def test_rapid_f1_presses_open_a_single_readme_screen() -> None:
+    """Two F1 presses while a slow `helm show readme` is in flight must not
+    stack two README modals - one Escape must land back on the wizard."""
+    import asyncio
+
+    gate = asyncio.Event()
+
+    async def slow_readme(chart: str, version: str) -> str:
+        await gate.wait()
+        return "# README"
+
+    app = HostApp()
+    prompt = HelmInstallPrompt(_CHART, namespace="default", release=None, get_readme=slow_readme)
+
+    def _done(v: object) -> None:
+        app.result = v
+
+    async with app.run_test() as pilot:
+        await app.push_screen(prompt, _done)
+        await _opened(app, pilot)
+        await pilot.press("f1")
+        await pilot.press("f1")  # second press while the first fetch hangs
+        gate.set()
+        await until(pilot, lambda: app.screen is not prompt, label="readme open")
+        await pilot.pause(0.2)
+        from korvid.ui.widgets.helm_install import ChartReadmeScreen
+
+        stacked = [s for s in app.screen_stack if isinstance(s, ChartReadmeScreen)]
+        assert len(stacked) == 1
+        await pilot.press("escape")
+        await until(pilot, lambda: app.screen is prompt, label="back on the wizard")
