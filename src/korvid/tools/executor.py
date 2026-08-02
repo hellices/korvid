@@ -14,7 +14,16 @@ from korvid.core.portforward import controller_owner
 from korvid.core.secrets import mask_secret_manifest
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
-from korvid.k8s.models import parse_quantity
+from korvid.k8s.helm import HelmReleaseSummary, HelmRevisionSummary
+from korvid.k8s.models import (
+    CSVSummary,
+    GenericSummary,
+    OLMSubscriptionSummary,
+    PackageManifestSummary,
+    PodListSummary,
+    ReplicaSetSummary,
+    parse_quantity,
+)
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
 from korvid.k8s.reads import ReadOps
 from korvid.tools.diagnose import (
@@ -51,6 +60,119 @@ def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
 
 
 _MIDDLE_TRUNCATION_MARKER = "\n… [middle truncated — profile result budget]\n"
+
+
+#: Per-value clamp for list_resources facts: long enough for any real
+#: resource name/version, short enough that one hostile custom-column
+#: value cannot dominate the result budget.
+_FACT_VALUE_LIMIT = 80
+
+
+def _clamp(value: str) -> str:
+    """One printable, bounded line: values may come from arbitrary
+    annotations/JSONPath (custom columns) or cluster object fields -
+    newlines/control characters must not forge extra result rows, and one
+    hostile value must not dominate the result budget."""
+    flat = "".join(ch if ch.isprintable() else " " for ch in value)
+    return flat if len(flat) <= _FACT_VALUE_LIMIT else flat[: _FACT_VALUE_LIMIT - 1] + "…"
+
+
+def _pod_facts(s: PodListSummary) -> str:
+    parts = [
+        f"phase={_clamp(s.phase) or '?'}",
+        f"ready={_clamp(s.ready) or '?'}",
+        f"restarts={s.restarts}",
+    ]
+    if s.node:
+        parts.append(f"node={_clamp(s.node)}")
+    return " ".join(parts)
+
+
+def _replicaset_facts(s: ReplicaSetSummary) -> str:
+    # revision comes from a freely writable annotation: clamp like the rest.
+    return (
+        f"revision={_clamp(s.revision)} desired={s.desired}"
+        f" current={s.current} ready={_clamp(s.ready)}"
+    )
+
+
+def _subscription_facts(s: OLMSubscriptionSummary) -> str:
+    return (
+        f"channel={_clamp(s.channel) or '?'} source={_clamp(s.source) or '?'}"
+        f" csv={_clamp(s.installed_csv) or '?'} state={_clamp(s.state) or '?'}"
+    )
+
+
+def _csv_facts(s: CSVSummary) -> str:
+    parts = [f"version={_clamp(s.version) or '?'}", f"phase={_clamp(s.phase) or '?'}"]
+    if s.display_name:
+        parts.append(f"display={_clamp(s.display_name)}")
+    return " ".join(parts)
+
+
+def _package_facts(s: PackageManifestSummary) -> str:
+    return (
+        f"catalog={_clamp(s.catalog) or '?'}"
+        f" default_channel={_clamp(s.default_channel) or '?'}"
+        f" channels={_clamp(','.join(s.channels)) or '?'}"
+    )
+
+
+def _generic_facts(s: GenericSummary) -> str:
+    return f"desired={s.desired}" if s.desired is not None else ""
+
+
+def _helm_release_facts(s: HelmReleaseSummary) -> str:
+    return (
+        f"revision={s.revision} status={_clamp(s.status) or '?'}"
+        f" chart={_clamp(s.chart)} app_version={_clamp(s.app_version)}"
+    )
+
+
+def _helm_revision_facts(s: HelmRevisionSummary) -> str:
+    parts = [
+        f"release={_clamp(s.release)}",
+        f"revision={s.revision}",
+        f"status={_clamp(s.status) or '?'}",
+        f"chart={_clamp(s.chart)}",
+        f"app_version={_clamp(s.app_version)}",
+    ]
+    if s.description:
+        parts.append(f"description={_clamp(s.description)}")
+    return " ".join(parts)
+
+
+#: The column-parity contract (issue #158): every typed summary registers
+#: the facts the TUI table shows for its kind, so list_resources answers
+#: match the screen. tests/tools/test_list_resources.py asserts every
+#: GenericSummary subclass appears here - a new typed summary cannot
+#: silently degrade back to name+age.
+_SUMMARY_FACTS: dict[type[GenericSummary], Callable[[Any], str]] = {
+    PodListSummary: _pod_facts,
+    ReplicaSetSummary: _replicaset_facts,
+    OLMSubscriptionSummary: _subscription_facts,
+    CSVSummary: _csv_facts,
+    PackageManifestSummary: _package_facts,
+    # Helm's synthetic kinds are not reachable through list_resources today
+    # (a follow-up adds a helm listing tool), but the contract keeps their
+    # facts registered so that tool renders release status on day one.
+    HelmReleaseSummary: _helm_release_facts,
+    HelmRevisionSummary: _helm_revision_facts,
+}
+
+
+def summary_facts(s: GenericSummary) -> str:
+    """The status facts for one list_resources line, mirroring the TUI's
+    columns for that kind; "" when the kind has nothing beyond name+age.
+
+    Dispatch walks the MRO so a subclass of a typed summary inherits its
+    parent's renderer instead of silently degrading to the generic facts.
+    """
+    for klass in type(s).__mro__:
+        renderer = _SUMMARY_FACTS.get(klass)
+        if renderer is not None:
+            return renderer(s)
+    return _generic_facts(s)
 
 
 def compact_result(result: str, limit: int) -> str:
@@ -368,11 +490,16 @@ class ToolExecutor:
         ui: UIBridge | None = None,
         *,
         proposal_tools: bool = False,
+        custom_columns: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         self._kube = kube
         self._aliases = aliases
         self._ui = ui
         self._proposal_tools = proposal_tools
+        #: Configured custom column *names* per plural (issue #45): values
+        #: arrive on GenericSummary.custom from the client; the names let
+        #: list_resources render them as name=value for the model.
+        self._custom_columns = dict(custom_columns or {})
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         """Dispatch a tool call; never raises — exceptions are returned as 'ERROR: ...'."""
@@ -503,7 +630,20 @@ class ToolExecutor:
         summaries = await self._kube.list_objects(meta, namespace)
         if not summaries:
             return "(none)"
-        return "\n".join(f"{s.namespace}/{s.name}  -  age={s.age()}" for s in summaries)
+        column_names = self._custom_columns.get(meta.plural, ())
+        lines = []
+        for s in summaries:
+            line = f"{s.namespace}/{s.name}  -  age={s.age()}"
+            facts = summary_facts(s)
+            if facts:
+                line += f"  {facts}"
+            # User-configured columns (issue #45): the same extra facts the
+            # user asked their table to show reach the model, clamped so a
+            # hostile value cannot dominate the result budget.
+            for column, value in zip(column_names, s.custom, strict=False):
+                line += f"  {column}={_clamp(value)}"
+            lines.append(line)
+        return "\n".join(lines)
 
     async def _list_operators(self, args: dict[str, Any]) -> str:
         """Catalog packages + installed subscriptions, straight from the
