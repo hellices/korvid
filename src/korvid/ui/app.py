@@ -8200,6 +8200,25 @@ class KorvidApp(App[None]):
         self._mark_agent_action("filter cleared")
         return "filter cleared"
 
+    @staticmethod
+    def _agent_log_targets(
+        known: list[tuple[str, str, str]], namespace: str, pod: str, container: str | None
+    ) -> list[tuple[str, str, str]] | str:
+        """The (ns, pod, container) triples to stream, or an "ERROR: ..."."""
+        if not known:
+            # Validate before _cancel_log_tasks: a hallucinated pod name
+            # must not tear down the streams the user is watching.
+            return f"ERROR: pod {namespace}/{pod} not found (check the name and namespace)"
+        if container:
+            names = [c for _, _, c in known if c]
+            if names and container not in names:
+                return (
+                    f"ERROR: container {container!r} not found in pod "
+                    f"{namespace}/{pod} (containers: {', '.join(names)})"
+                )
+            return [(namespace, pod, container)]
+        return known
+
     async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
         if self._approval_dialog_active():
             # Opening logs tears down the current log stream (the one the
@@ -8213,26 +8232,23 @@ class KorvidApp(App[None]):
         pane_gen = self._log_pane_gen
         try:
             known = await self._agent_pod_triples(namespace, pod)
-            if not known:
-                # Validate before _cancel_log_tasks: a hallucinated pod name
-                # must not tear down the streams the user is watching.
-                return f"ERROR: pod {namespace}/{pod} not found (check the name and namespace)"
-            if container:
-                names = [c for _, _, c in known if c]
-                if names and container not in names:
-                    return (
-                        f"ERROR: container {container!r} not found in pod "
-                        f"{namespace}/{pod} (containers: {', '.join(names)})"
-                    )
-                triples = [(namespace, pod, container)]
-            else:
-                triples = known
+            triples = self._agent_log_targets(known, namespace, pod, container)
+            if isinstance(triples, str):
+                return triples
             if pane_gen != self._log_pane_gen:
                 # The user (or another turn) changed the log pane while we were
                 # resolving containers — user keystrokes take priority.
                 return (
                     "ERROR: the log pane changed while resolving containers "
                     "(user action takes priority) — retry if still needed"
+                )
+            if self._approval_dialog_active():
+                # The pre-check can go stale during the awaited lookup: an
+                # approval dialog that opened meanwhile still wins before
+                # the destructive log-pane teardown below.
+                return (
+                    "ERROR: an approval dialog is open — the user is deciding; "
+                    "wait for their decision before opening logs"
                 )
             await self._cancel_log_tasks()
             if pane_gen != self._log_pane_gen:
@@ -8338,9 +8354,20 @@ class KorvidApp(App[None]):
         )
 
     def _approval_dialog_active(self) -> bool:
-        """True while a write-approval dialog owns the screen: agent- or
-        follow-driven screens must never steal its keystroke focus."""
-        return isinstance(self.screen, (ConfirmScreen, ReplicasPrompt, ImagePrompt))
+        """True while a write-approval dialog or write-parameter wizard owns
+        the screen: agent- or follow-driven screens must never steal its
+        keystroke focus, and every one of these feeds a cluster write."""
+        return isinstance(
+            self.screen,
+            (
+                ConfirmScreen,
+                ReplicasPrompt,
+                ImagePrompt,
+                ResizePrompt,
+                OperatorInstallPrompt,
+                HelmInstallPrompt,
+            ),
+        )
 
     def _describe_precheck(self, kind: str, namespace: str | None) -> ResourceMeta | str:
         """Guards + target resolution for agent_open_describe: the meta to

@@ -203,3 +203,50 @@ async def test_activity_toast_renders_without_rich_markup() -> None:
         )
         note = next(n for n in app._notifications if "FAKE APPROVAL" in n.message)
         assert note.markup is False
+
+
+async def test_guard_covers_every_write_flow_modal() -> None:
+    """ResizePrompt / OperatorInstallPrompt / HelmInstallPrompt feed write
+    confirmation just like ReplicasPrompt: a followed describe must not
+    push over any of them."""
+    from korvid.ui.widgets.resize_prompt import ResizePrompt
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        await app.push_screen(
+            ResizePrompt(
+                "pods/api-1",
+                containers=[("main", {"requests": {"cpu": "100m", "memory": "64Mi"}})],
+            )
+        )
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, ResizePrompt),
+            label="resize prompt up",
+        )
+        result = await app.agent_open_describe("pods", "api-1", "default")
+        assert result.startswith("ERROR:")
+        assert "approval" in result
+        assert isinstance(app.screen, ResizePrompt)
+
+
+async def test_logs_recheck_the_approval_guard_after_the_pod_lookup() -> None:
+    """The pre-check can go stale during the awaited pod/container lookup:
+    an approval dialog opening in that window must still stop the log-pane
+    teardown."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        app._stream_logs = lambda *a, **k: None  # type: ignore[assignment]  # gate opener; never reached
+
+        async def lookup(namespace: str, pod: str) -> list[tuple[str, str, str]]:
+            # the dialog opens while the lookup is in flight
+            app.push_screen(ConfirmScreen("Scale deploy prod/api", "scale", preview=["1 -> 3"]))
+            await asyncio.sleep(0)
+            return [(namespace, pod, "main")]
+
+        app._agent_pod_triples = lookup  # type: ignore[method-assign]  # test seam
+        result = await app.agent_open_logs("api-1", "default")
+        assert result.startswith("ERROR:")
+        assert "approval" in result
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)  # dialog untouched
