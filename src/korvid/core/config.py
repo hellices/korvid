@@ -88,6 +88,10 @@ class KorvidConfig:
     #: Custom table columns per resource kind (issue #45), keyed by the
     #: plural kind name as used in `:` navigation (e.g. "pods").
     views: dict[str, ViewConfig] = field(default_factory=dict)
+    #: `ui.topbar` (issue #142): "expanded" starts the top bar with the full
+    #: grouped legend; anything else (or unset) starts collapsed. The
+    #: runtime toggle persists the choice back through save_topbar_state.
+    ui_topbar_expanded: bool = False
     #: Human-readable config problems (e.g. an invalid custom column) that
     #: the UI surfaces once at startup instead of crashing or hiding them.
     warnings: tuple[str, ...] = ()
@@ -126,6 +130,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     debug_raw: dict[str, Any] = debug_value if isinstance(debug_value, dict) else {}
     node_shell_value = raw.get("node_shell")
     node_shell_raw: dict[str, Any] = node_shell_value if isinstance(node_shell_value, dict) else {}
+    ui_value = raw.get("ui")
+    ui_raw: dict[str, Any] = ui_value if isinstance(ui_value, dict) else {}
     images_value = debug_raw.get("images")
     debug_images: dict[str, str] | None
     if "images" not in debug_raw:
@@ -188,6 +194,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         node_shell_image=_opt_str(node_shell_raw.get("image")),
         node_shell_namespace=_opt_str(node_shell_raw.get("namespace")),
         views=views,
+        ui_topbar_expanded=ui_raw.get("topbar") == "expanded",
         warnings=tuple(warnings),
     )
 
@@ -233,6 +240,21 @@ def save_agent_config(
     else:
         agent.pop("api_key_env", None)
     raw["agent"] = agent
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(path, yaml.safe_dump(raw, sort_keys=False))
+
+
+def save_topbar_state(path: Path, *, expanded: bool) -> None:
+    """Persist the top bar collapse/expand choice (issue #142), preserving
+    unrelated keys (same read-modify-write shape as save_agent_config)."""
+    raw: dict[str, Any] = {}
+    if path.is_file():
+        loaded = yaml.safe_load(path.read_text())
+        raw = loaded if isinstance(loaded, dict) else {}
+    existing = raw.get("ui")
+    ui: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    ui["topbar"] = "expanded" if expanded else "collapsed"
+    raw["ui"] = ui
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(path, yaml.safe_dump(raw, sort_keys=False))
 

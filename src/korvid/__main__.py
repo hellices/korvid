@@ -27,6 +27,7 @@ from korvid.core.config import (
     context_is_protected,
     load_config,
     save_agent_config,
+    save_topbar_state,
 )
 from korvid.core.mcp import MCPControllerBase
 from korvid.core.portforward import ForwardRegistry
@@ -844,6 +845,7 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
         ),
         helm=_build_helm(config),
         proposal_store=proposal_store,
+        save_topbar=lambda expanded: save_topbar_state(DEFAULT_CONFIG_PATH, expanded=expanded),
     )
     app_box.append(app)
     # Late-bind the UI bridge: from here on the agent's UI-control tools

@@ -37,7 +37,7 @@ from textual.containers import Horizontal
 from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
 from textual.events import DescendantBlur, DescendantFocus, Key
-from textual.widgets import DataTable, Footer, Static
+from textual.widgets import DataTable, Static
 from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, get_current_worker
 
@@ -165,6 +165,7 @@ from korvid.ui.widgets.resize_prompt import ResizePrompt
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.secret_screen import SecretScreen
 from korvid.ui.widgets.status_bar import StatusBar
+from korvid.ui.widgets.top_bar import KeyEntry, TopBar
 from korvid.ui.widgets.transfer_screen import TransferProgressScreen, TransferScreen
 
 _DEFAULT_ALIASES: dict[str, ResourceMeta] = {
@@ -538,6 +539,8 @@ class KorvidApp(App[None]):
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("q", "quit", "Quit", id="quit"),
         Binding("question_mark", "help", "Help", id="help"),
+        # Top bar collapse/expand (issue #142): the grouped legend's toggle.
+        Binding("tilde", "toggle_topbar", "Legend", show=False, id="toggle_topbar"),
         Binding("colon", "open_command", "Command", id="open_command"),
         Binding("slash", "open_filter", "Filter/Search", id="open_filter"),
         Binding("0", "toggle_all_namespaces", "All NS", id="toggle_all_namespaces"),
@@ -662,13 +665,6 @@ class KorvidApp(App[None]):
     }
     """
 
-    # CSS (not DEFAULT_CSS) so it outranks Footer's own `dock: bottom` default.
-    CSS = """
-    Footer {
-        dock: top;
-    }
-    """
-
     def __init__(
         self,
         config: KorvidConfig,
@@ -702,6 +698,7 @@ class KorvidApp(App[None]):
         switch_context: Callable[[str | None], Awaitable[ContextSwitchResult]] | None = None,
         helm: HelmCLI | None = None,
         proposal_store: ProposalStore | None = None,
+        save_topbar: Callable[[bool], None] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -737,6 +734,10 @@ class KorvidApp(App[None]):
         #: External MCP write proposals (issue #110): shared with the MCP
         #: server; None when the feature is disabled.
         self._proposal_store = proposal_store
+        #: Top bar collapse/expand (issue #142): seeded from `ui.topbar`,
+        #: toggled at runtime, persisted through the injected callback.
+        self._topbar_expanded = config.ui_topbar_expanded
+        self._save_topbar = save_topbar
         self._edit_text = edit_text
         self._metrics = metrics
         self._forwards = forwards
@@ -1051,9 +1052,10 @@ class KorvidApp(App[None]):
         return self.query_one(AgentPanel)
 
     def compose(self) -> ComposeResult:
-        # Footer is docked top (see CSS): the key legend replaces the stock
-        # Header so shortcuts are visible where users look first.
-        yield Footer()
+        # The grouped top bar (issue #142) replaces the stock Footer at the
+        # top: the key legend lives where users look first, grouped and
+        # collapsible instead of one flat run of uniform keys.
+        yield TopBar()
         yield SplashLogo()
         # The workspace hosts one or two side-by-side panes (issue #48);
         # pane 1 is composed here, pane 2 mounts on `ctrl+w v`.
@@ -1128,6 +1130,12 @@ class KorvidApp(App[None]):
         # AUTO_FOCUS skips the hidden #workspace container: the table must
         # take initial focus explicitly or keys land on the CommandBar.
         self.query_one("#pane-0", ResourceTable).focus()
+        # The top bar re-renders whenever the active bindings change (view
+        # navigation, log pane open/close) - the same signal the stock
+        # Footer subscribed to, so check_action stays the single source of
+        # which keys are visible (issue #142).
+        self.screen.bindings_updated_signal.subscribe(self, self._on_bindings_updated)
+        self._refresh_top_bar()
         self._apply_keybindings()
         # Wire the `known` closure into CommandBar so parse_command can resolve aliases.
         command_bar = self._command_bar
@@ -7490,7 +7498,59 @@ class KorvidApp(App[None]):
         # The pane controls gate on pane visibility (issue #114).
         self.refresh_bindings()
 
+    def _on_bindings_updated(self, _screen: object) -> None:
+        self._refresh_top_bar()
+
+    def _legend_entries(self) -> list[KeyEntry]:
+        """The visible bindings as top-bar entries: pre-filtered by
+        Textual's binding machinery (check_action / _ACTION_VIEWS - the
+        single visibility source), deduplicated across --alt spellings and
+        parametrised favorites."""
+        entries: list[KeyEntry] = []
+        seen: set[str] = set()
+        for active in self.screen.active_bindings.values():
+            binding = active.binding
+            base = (binding.id or binding.action).removesuffix("--alt")
+            action = binding.action.partition("(")[0]
+            if action == "favorite_namespace" or base in seen:
+                continue
+            seen.add(base)
+            entries.append(
+                KeyEntry(
+                    key=self.get_key_display(binding),
+                    action=action,
+                    description=binding.description,
+                )
+            )
+        return entries
+
+    def _refresh_top_bar(self) -> None:
+        """Re-render the grouped legend for the current view (issue #142)."""
+        bars = self.query(TopBar)
+        if not bars:
+            return
+        bars.first(TopBar).update_legend(
+            self.current_kind,
+            self._legend_entries(),
+            expanded=self._topbar_expanded,
+            toggle_key=self.get_key_display(self.active_bindings["~"].binding)
+            if "~" in self.active_bindings
+            else "~",
+        )
+
+    def action_toggle_topbar(self) -> None:
+        """`~` (issue #142): collapse/expand the grouped key legend; the
+        choice persists to config through the injected save callback."""
+        self._topbar_expanded = not self._topbar_expanded
+        self._refresh_top_bar()
+        if self._save_topbar is not None:
+            with contextlib.suppress(Exception):
+                self._save_topbar(self._topbar_expanded)
+
     def _refresh_status(self) -> None:
+        # The top bar shows the view name: keep it in step with every
+        # status refresh (navigation always lands here).
+        self._refresh_top_bar()
         # Availability comes from the actual runtime, not the config flag —
         # create_provider may return None (unknown provider, missing base_url/
         # model) while agent_enabled is still true in config.
