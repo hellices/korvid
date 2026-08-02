@@ -283,8 +283,11 @@ async def _open_with_info(
     schema: "dict[str, object] | None" = _SCHEMA,
     readme: str = "# Chart README\nSet mode before installing.",
     schema_error: bool = False,
+    schema_calls: "list[str] | None" = None,
 ) -> HelmInstallPrompt:
     async def get_schema(chart: str, version: str) -> "dict[str, object] | None":
+        if schema_calls is not None:
+            schema_calls.append(version)
         if schema_error:
             raise RuntimeError("boom")
         return schema
@@ -340,14 +343,49 @@ async def test_schema_fetch_failure_degrades_silently() -> None:
     """The schema is advisory: a fetch failure must not break the wizard or
     block submitting."""
     app = HostApp()
+    calls: list[str] = []
     async with app.run_test() as pilot:
-        await _open_with_info(app, schema_error=True)
+        await _open_with_info(app, schema_error=True, schema_calls=calls)
         await _opened(app, pilot)
-        await pilot.pause(0.1)
+        # The failing provider must actually have been invoked - only then
+        # does the submit below prove the failure did not break anything.
+        await until(pilot, lambda: bool(calls), label="schema provider invoked")
         app.screen.query_one("#helm-release", Input).focus()
         await pilot.press("enter")
         await until(pilot, lambda: app.result != "unset", label="submitted")
         assert isinstance(app.result, HelmReleaseChoices)
+
+
+async def test_version_change_reloads_the_required_values() -> None:
+    """The version field stays editable after mount: the Required values
+    section must describe the version the install will actually use, so a
+    version edit clears it and refetches the schema for the new version."""
+    app = HostApp()
+    calls: list[str] = []
+    async with app.run_test() as pilot:
+        await _open_with_info(app, schema_calls=calls)
+        await _opened(app, pilot)
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#helm-required", Static).display,
+            label="initial section rendered",
+        )
+        assert calls == ["18.1.0"]
+        version = app.screen.query_one("#helm-version", Input)
+        version.focus()
+        version.value = "18.2.0"
+        # the stale section is hidden immediately, then refetched (debounced)
+        await until(
+            pilot,
+            lambda: not app.screen.query_one("#helm-required", Static).display,
+            label="stale section cleared",
+        )
+        await until(pilot, lambda: "18.2.0" in calls, label="schema refetched")
+        await until(
+            pilot,
+            lambda: app.screen.query_one("#helm-required", Static).display,
+            label="section back for the new version",
+        )
 
 
 async def test_f1_opens_the_chart_readme() -> None:

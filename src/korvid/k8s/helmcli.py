@@ -217,7 +217,9 @@ class HelmCLI:
                 return None
             data = json.loads(schemas[0].read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else None
-        except (HelmError, OSError, ValueError):
+        except (HelmError, OSError, ValueError, RecursionError):
+            # RecursionError: deeply nested but valid JSON from an
+            # untrusted chart can blow the parser's stack.
             return None
         finally:
             with contextlib.suppress(OSError):

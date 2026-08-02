@@ -20,6 +20,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widgets import Button, Input, Select, Static
 
 from korvid.k8s.helmcli import ChartHit, required_values_from_schema
@@ -143,6 +144,11 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
         # this prompt; a buffered Enter must not submit it with defaults
         # before the user has seen it (same guard as OperatorInstallPrompt).
         self._created_time = Message().time
+        #: schema fetch generation + debounce timer (issue #151): version
+        #: edits refetch, stale results never overwrite newer ones.
+        self._schema_seq = 0
+        self._schema_debounce: Timer | None = None
+        self._schema_version_requested: str | None = None
 
     @property
     def _upgrade(self) -> bool:
@@ -206,9 +212,39 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
                 widget.focus()
                 break
         if self._get_schema is not None:
-            self.run_worker(self._load_required_values(), group="helm-chart-info")
+            self._start_schema_load()
 
-    async def _load_required_values(self) -> None:
+    def _start_schema_load(self) -> None:
+        """(Re)fetch the schema for the current version field content.
+
+        Exclusive worker + generation counter: a stale fetch (older
+        version, slower pull) can neither survive as a worker nor
+        overwrite a newer result's section."""
+        self._schema_seq += 1
+        self._schema_version_requested = self.query_one("#helm-version", Input).value.strip()
+        self.run_worker(
+            self._load_required_values(self._schema_seq),
+            exclusive=True,
+            group="helm-chart-schema",
+        )
+
+    @on(Input.Changed, "#helm-version")
+    def _version_changed(self, event: Input.Changed) -> None:
+        """The version stays editable after mount: the Required values
+        section must describe the version the install will use. Hide the
+        stale section immediately, then refetch debounced - a chart pull
+        per keystroke would thrash subprocesses."""
+        event.stop()
+        if self._get_schema is None:
+            return
+        if event.value.strip() == self._schema_version_requested:
+            return  # mount-time echo of the prefilled version: already fetching
+        self.query_one("#helm-required", Static).display = False
+        if self._schema_debounce is not None:
+            self._schema_debounce.stop()
+        self._schema_debounce = self.set_timer(0.5, self._start_schema_load)
+
+    async def _load_required_values(self, seq: int) -> None:
         """Fetch values.schema.json required fields (issue #151) - advisory:
         every failure degrades to no section, never blocks the wizard."""
         version = self.query_one("#helm-version", Input).value.strip()
@@ -218,11 +254,14 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
             schema = await self._get_schema(self._chart.name, version)
         except Exception:
             return
+        if seq != self._schema_seq:
+            return  # a newer fetch owns the section now
         rows = required_values_from_schema(schema)
+        section = self.query_one("#helm-required", Static)
         if not rows:
+            section.display = False
             return
         lines = "\n".join(f"  {path}: {kind}" for path, kind in rows)
-        section = self.query_one("#helm-required", Static)
         section.update(f"Required values (from the chart's schema):\n{lines}")
         section.display = True
 

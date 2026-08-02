@@ -596,6 +596,24 @@ async def test_show_schema_returns_none_on_malformed_schema_json() -> None:
     assert result is None
 
 
+async def test_show_schema_returns_none_on_pathologically_nested_json() -> None:
+    """Chart schemas are untrusted: JSON nested deep enough to blow the
+    parser's recursion limit must degrade to None, not crash."""
+    cli, _ = _cli()
+    bomb = "[" * 100_000 + "]" * 100_000
+
+    async def fake_execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        dest = argv[argv.index("--untardir") + 1]
+        chart_dir = Path(dest) / "chart"
+        chart_dir.mkdir(parents=True)
+        (chart_dir / "values.schema.json").write_text(bomb)
+        return 0, "", ""
+
+    with mock.patch("korvid.k8s.helmcli._execute", side_effect=fake_execute):
+        result = await cli.show_schema("repo/chart", "1.2.3")
+    assert result is None
+
+
 async def test_required_values_from_schema_extracts_paths_types_and_enums() -> None:
     """Schema -> display rows: top-level required fields with their type or
     enum; nested required objects recurse one level deep."""
