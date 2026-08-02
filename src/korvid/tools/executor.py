@@ -78,25 +78,33 @@ def _clamp(value: str) -> str:
 
 
 def _pod_facts(s: PodListSummary) -> str:
-    parts = [f"phase={s.phase or '?'}", f"ready={s.ready or '?'}", f"restarts={s.restarts}"]
+    parts = [
+        f"phase={_clamp(s.phase) or '?'}",
+        f"ready={_clamp(s.ready) or '?'}",
+        f"restarts={s.restarts}",
+    ]
     if s.node:
         parts.append(f"node={_clamp(s.node)}")
     return " ".join(parts)
 
 
 def _replicaset_facts(s: ReplicaSetSummary) -> str:
-    return f"revision={s.revision} desired={s.desired} current={s.current} ready={s.ready}"
+    # revision comes from a freely writable annotation: clamp like the rest.
+    return (
+        f"revision={_clamp(s.revision)} desired={s.desired}"
+        f" current={s.current} ready={_clamp(s.ready)}"
+    )
 
 
 def _subscription_facts(s: OLMSubscriptionSummary) -> str:
     return (
-        f"channel={s.channel or '?'} source={s.source or '?'}"
-        f" csv={s.installed_csv or '?'} state={s.state or '?'}"
+        f"channel={_clamp(s.channel) or '?'} source={_clamp(s.source) or '?'}"
+        f" csv={_clamp(s.installed_csv) or '?'} state={_clamp(s.state) or '?'}"
     )
 
 
 def _csv_facts(s: CSVSummary) -> str:
-    parts = [f"version={s.version or '?'}", f"phase={s.phase or '?'}"]
+    parts = [f"version={_clamp(s.version) or '?'}", f"phase={_clamp(s.phase) or '?'}"]
     if s.display_name:
         parts.append(f"display={_clamp(s.display_name)}")
     return " ".join(parts)
@@ -104,7 +112,8 @@ def _csv_facts(s: CSVSummary) -> str:
 
 def _package_facts(s: PackageManifestSummary) -> str:
     return (
-        f"catalog={s.catalog or '?'} default_channel={s.default_channel or '?'}"
+        f"catalog={_clamp(s.catalog) or '?'}"
+        f" default_channel={_clamp(s.default_channel) or '?'}"
         f" channels={_clamp(','.join(s.channels)) or '?'}"
     )
 
@@ -115,7 +124,7 @@ def _generic_facts(s: GenericSummary) -> str:
 
 def _helm_release_facts(s: HelmReleaseSummary) -> str:
     return (
-        f"revision={s.revision} status={s.status or '?'}"
+        f"revision={s.revision} status={_clamp(s.status) or '?'}"
         f" chart={_clamp(s.chart)} app_version={_clamp(s.app_version)}"
     )
 
@@ -124,7 +133,7 @@ def _helm_revision_facts(s: HelmRevisionSummary) -> str:
     parts = [
         f"release={_clamp(s.release)}",
         f"revision={s.revision}",
-        f"status={s.status or '?'}",
+        f"status={_clamp(s.status) or '?'}",
         f"chart={_clamp(s.chart)}",
     ]
     if s.description:
@@ -153,9 +162,16 @@ _SUMMARY_FACTS: dict[type[GenericSummary], Callable[[Any], str]] = {
 
 def summary_facts(s: GenericSummary) -> str:
     """The status facts for one list_resources line, mirroring the TUI's
-    columns for that kind; "" when the kind has nothing beyond name+age."""
-    renderer = _SUMMARY_FACTS.get(type(s), _generic_facts)
-    return renderer(s)
+    columns for that kind; "" when the kind has nothing beyond name+age.
+
+    Dispatch walks the MRO so a subclass of a typed summary inherits its
+    parent's renderer instead of silently degrading to the generic facts.
+    """
+    for klass in type(s).__mro__:
+        renderer = _SUMMARY_FACTS.get(klass)
+        if renderer is not None:
+            return renderer(s)
+    return _generic_facts(s)
 
 
 def compact_result(result: str, limit: int) -> str:

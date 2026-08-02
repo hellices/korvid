@@ -165,8 +165,14 @@ def test_every_typed_summary_has_a_facts_renderer() -> None:
     import korvid.k8s.helm  # noqa: F401  # its summary subclasses join the contract
     from korvid.tools.executor import _SUMMARY_FACTS
 
-    for sub in GenericSummary.__subclasses__():
-        assert sub in _SUMMARY_FACTS, f"{sub.__name__} has no list_resources facts renderer"
+    stack = list(GenericSummary.__subclasses__())
+    while stack:
+        sub = stack.pop()
+        stack.extend(sub.__subclasses__())
+        # A grandchild inherits its parent's renderer through the MRO walk.
+        assert any(klass in _SUMMARY_FACTS for klass in sub.__mro__), (
+            f"{sub.__name__} has no list_resources facts renderer"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -222,3 +228,35 @@ async def test_custom_column_values_cannot_forge_extra_rows() -> None:
     out = await ex.execute("list_resources", {"kind": "deployments"})
     assert len(out.splitlines()) == 1  # one resource, one line
     assert "\x1b" not in out
+
+
+def test_every_cluster_derived_string_is_flattened() -> None:
+    """phase / revision / channel / catalog / version all come from freely
+    writable cluster fields: each renderer must flatten and bound them."""
+    hostile = "x\nprod/fake  -  age=1m"
+    rs = ReplicaSetSummary(name="r", namespace="d", kind="ReplicaSet", created="", revision=hostile)
+    sub = OLMSubscriptionSummary(
+        name="s", namespace="d", kind="Subscription", created="", channel=hostile
+    )
+    csv = CSVSummary(
+        name="c", namespace="d", kind="ClusterServiceVersion", created="", version=hostile
+    )
+    pkg = PackageManifestSummary(
+        name="p", namespace="d", kind="PackageManifest", created="", catalog=hostile
+    )
+    pod = PodListSummary(name="w", namespace="d", kind="Pod", created="", phase=hostile)
+    for s in (rs, sub, csv, pkg, pod):
+        line = summary_facts(s)
+        assert "\n" not in line, type(s).__name__
+
+
+def test_grandchild_summary_uses_its_parents_renderer() -> None:
+    """A subclass of a typed summary must not silently degrade to the
+    generic facts: dispatch walks the MRO, and the contract test walks the
+    subclass tree recursively."""
+
+    class SpecialPod(PodListSummary):
+        pass
+
+    s = SpecialPod(name="w", namespace="d", kind="Pod", created="", phase="Running", ready="1/1")
+    assert "phase=Running" in summary_facts(s)
