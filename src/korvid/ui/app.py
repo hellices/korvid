@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import functools
 import json
@@ -764,6 +765,10 @@ class KorvidApp(App[None]):
         #: calls - log-pane swaps and describes must never interleave.
         #: None (tests, degraded wiring) falls back to a direct adapter.
         self._agent_follow_bridge = agent_follow_bridge
+        #: App-owned execution context (issue #165), captured in on_mount;
+        #: None until then (pre-mount bridge calls run directly - they can
+        #: only come from tests driving the app before it is ready).
+        self._app_context: contextvars.Context | None = None
         #: External MCP write proposals (issue #110): shared with the MCP
         #: server; None when the feature is disabled.
         self._proposal_store = proposal_store
@@ -1164,6 +1169,13 @@ class KorvidApp(App[None]):
             self.notify(warning, title="Keybindings", severity="warning")
 
     async def on_mount(self) -> None:
+        # Snapshot the app-owned execution context (issue #165): on_mount
+        # runs inside Textual's message pump, so this snapshot carries
+        # `active_app` (and the pump ContextVars). AppUIBridge marshals
+        # every foreign call - MCP requests, follow mirrors - onto a copy
+        # of it, because composing a widget tree outside it raises
+        # NoActiveAppError and terminates the app.
+        self._app_context = contextvars.copy_context()
         # AUTO_FOCUS skips the hidden #workspace container: the table must
         # take initial focus explicitly or keys land on the CommandBar.
         self.query_one("#pane-0", ResourceTable).focus()
@@ -9783,25 +9795,57 @@ class AppUIBridge(UIBridge):
     Textual's `App` metaclass conflicts with `ABCMeta`, so the app cannot
     inherit `UIBridge` directly — this thin adapter conforms nominally and
     delegates to the app's bridge methods.
+
+    Every call is marshaled onto the app-owned execution context (issue
+    #165): MCP requests (and the follow mirrors they spawn) arrive in
+    tasks whose context lacks Textual's `active_app` ContextVar, and
+    composing a widget tree there (`DescribeScreen`'s `VerticalScroll`)
+    raised `NoActiveAppError` and terminated the app. Marshaling at this
+    single boundary also fixes the downstream-task hazard: log-stream
+    tasks spawned inside a dispatched call inherit the app context instead
+    of carrying the MCP request context for the stream's lifetime.
     """
 
     def __init__(self, app: KorvidApp) -> None:
         self._app = app
 
+    async def _dispatch(self, coro: Coroutine[Any, Any, str]) -> str:
+        """Run one bridge coroutine inside a copy of the app context.
+
+        A fresh copy per call: a `contextvars.Context` cannot be entered
+        concurrently, and the serialized proxy is not the only caller
+        (the in-app agent path may overlap a queued MCP call's dispatch).
+        Cancellation propagates into the inner task so shutdown never
+        strands UI work.
+        """
+        snapshot = self._app._app_context
+        if snapshot is None:  # pre-mount (tests): no context to restore
+            return await coro
+        task = asyncio.get_running_loop().create_task(
+            coro, context=snapshot.run(contextvars.copy_context)
+        )
+        try:
+            return await task
+        except asyncio.CancelledError:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            raise
+
     async def agent_navigate(self, view: str, namespace: str | None = None) -> str:
-        return await self._app.agent_navigate(view, namespace)
+        return await self._dispatch(self._app.agent_navigate(view, namespace))
 
     async def agent_set_filter(self, pattern: str) -> str:
-        return await self._app.agent_set_filter(pattern)
+        return await self._dispatch(self._app.agent_set_filter(pattern))
 
     async def agent_open_logs(self, pod: str, namespace: str, container: str | None = None) -> str:
-        return await self._app.agent_open_logs(pod, namespace, container)
+        return await self._dispatch(self._app.agent_open_logs(pod, namespace, container))
 
     async def agent_open_describe(self, kind: str, name: str, namespace: str | None = None) -> str:
-        return await self._app.agent_open_describe(kind, name, namespace)
+        return await self._dispatch(self._app.agent_open_describe(kind, name, namespace))
 
     async def agent_drill_down(self, name: str) -> str:
-        return await self._app.agent_drill_down(name)
+        return await self._dispatch(self._app.agent_drill_down(name))
 
     async def agent_request_write(
         self,
@@ -9812,8 +9856,8 @@ class AppUIBridge(UIBridge):
         replicas: int | None = None,
         resources: dict[str, dict[str, dict[str, str]]] | None = None,
     ) -> str:
-        return await self._app.agent_request_write(
-            action, kind, name, namespace, replicas, resources
+        return await self._dispatch(
+            self._app.agent_request_write(action, kind, name, namespace, replicas, resources)
         )
 
     async def agent_submit_write_proposal(
@@ -9829,20 +9873,24 @@ class AppUIBridge(UIBridge):
         client_name: str = "",
         client_version: str = "",
     ) -> str:
-        return await self._app.agent_submit_write_proposal(
-            action,
-            kind,
-            name,
-            namespace,
-            replicas,
-            resources,
-            session_id=session_id,
-            client_name=client_name,
-            client_version=client_version,
+        return await self._dispatch(
+            self._app.agent_submit_write_proposal(
+                action,
+                kind,
+                name,
+                namespace,
+                replicas,
+                resources,
+                session_id=session_id,
+                client_name=client_name,
+                client_version=client_version,
+            )
         )
 
     async def agent_get_write_proposal(self, proposal_id: str) -> str:
-        return await self._app.agent_get_write_proposal(proposal_id)
+        return await self._dispatch(self._app.agent_get_write_proposal(proposal_id))
 
     async def agent_cancel_write_proposal(self, proposal_id: str, *, session_id: str = "") -> str:
-        return await self._app.agent_cancel_write_proposal(proposal_id, session_id=session_id)
+        return await self._dispatch(
+            self._app.agent_cancel_write_proposal(proposal_id, session_id=session_id)
+        )
