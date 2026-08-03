@@ -925,6 +925,9 @@ class KorvidApp(App[None]):
                 profile=config.agent_profile or "full",
             )
         self._agent_task: asyncio.Task[None] | None = None
+        #: True after :ai off (issue #167): the agent was configured and
+        #: explicitly disconnected — reconnect hint, not the setup wipe.
+        self._agent_disconnected = False
         # Interrupt-and-submit (issue #170): the latest correction typed
         # while a turn runs; started once the cancelled turn is finalized.
         self._agent_replacement: str | None = None
@@ -2995,6 +2998,9 @@ class KorvidApp(App[None]):
         if self._disconnect_agent is not None:
             self._disconnect_agent()
         self._agent_runtime = None
+        # Disconnected-but-configured (vs never-configured): visibility
+        # toggles must show the reconnect hint, never the setup wipe.
+        self._agent_disconnected = True
         self._refresh_status()
         self._agent_panel.show_reconnect_hint()
         self.notify("Agent disconnected — run :ai to reconnect")
@@ -3013,6 +3019,7 @@ class KorvidApp(App[None]):
                 self._agent_configurator,
                 apply_settings=self._apply_agent_settings,
                 current_profile=self._configured_agent_profile,
+                current_settings=self._agent_settings,
             )
         )
 
@@ -3306,6 +3313,7 @@ class KorvidApp(App[None]):
             )
             return False
         self._agent_runtime = runtime
+        self._agent_disconnected = False  # reconnected (issue #167)
         self._agent_model_name = settings.model
         self._agent_settings = settings
         self._agent_profile = settings.profile
@@ -8397,7 +8405,13 @@ class KorvidApp(App[None]):
             return
         panel.display = True
         if self._agent_runtime is None:
-            panel.show_setup_hint()
+            if self._agent_disconnected:
+                # Disconnected-but-configured (:ai off, issue #167): the
+                # transcript must survive visibility toggles — never the
+                # setup wipe meant for a never-configured agent.
+                panel.show_reconnect_hint()
+            else:
+                panel.show_setup_hint()
             return
         if self._agent_model_name:
             runtime = self._agent_runtime

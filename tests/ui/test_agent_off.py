@@ -126,3 +126,81 @@ async def test_ctrl_a_stays_a_pure_visibility_toggle() -> None:
         await pilot.press("ctrl+a")
         assert panel.display is False
         assert app._agent_runtime is runtime  # visibility never touches state
+
+
+async def test_ctrl_a_after_off_keeps_the_transcript() -> None:
+    """Ctrl+A must stay a pure visibility toggle after :ai off: reopening
+    the panel shows the reconnect hint without erasing the conversation
+    (review on #180)."""
+    runtime = StubRuntime(
+        [TextDelta(text="all good"), TurnComplete(input_tokens=1, output_tokens=1, estimated=False)]
+    )
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")
+        inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
+        inp.value = "how are my pods?"
+        await pilot.press("enter")
+        await until(pilot, lambda: "all good" in _panel_text(app), label="turn done")
+        app.on_unknown_command(UnknownCommand("ai off"))
+        await pilot.pause()
+        await pilot.press("ctrl+a")  # hide
+        await pilot.press("ctrl+a")  # …and reopen
+        assert "all good" in _panel_text(app)  # transcript survived the toggle
+        assert ":ai" in _panel_text(app)  # reconnect hint, not the setup wipe
+        await pilot.press("ctrl+a")
+        await pilot.press("ctrl+a")
+        assert _panel_text(app).count("run :ai to reconnect") == 1  # no hint spam
+
+
+async def test_bare_ai_after_off_prefills_the_wizard() -> None:
+    """The wizard opened after :ai off starts from the kept settings —
+    the user reconnects by confirming, not re-entering (review on #180)."""
+    from typing import Any as _Any
+
+    from korvid.agent.setup import AgentSettings
+    from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
+
+    class NoopConfigurator:
+        async def begin_device_login(self) -> _Any:
+            raise NotImplementedError
+
+        async def finish_device_login(self) -> None:
+            raise NotImplementedError
+
+        async def test(self, settings: _Any) -> str:
+            return "ok"
+
+        async def list_models(self, settings: _Any) -> list[str]:
+            return []
+
+        async def save(self, settings: _Any) -> None:
+            pass
+
+    runtime = StubRuntime([TurnComplete(input_tokens=0, output_tokens=0, estimated=False)])
+    app = make_app(runtime, agent_configurator=NoopConfigurator())
+    settings = AgentSettings(
+        provider="ollama",
+        auth_method="none",
+        base_url="http://my-ollama:11434/v1",
+        model="qwen3:8b",
+    )
+    app._agent_settings = settings
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("ai off"))
+        await pilot.pause()
+        app.on_unknown_command(UnknownCommand("ai"))
+        await pilot.pause()
+        assert isinstance(app.screen, AgentSetupScreen)
+        screen = app.screen
+        from textual.widgets import OptionList
+
+        provider_list = screen.query_one("#setup-provider", OptionList)
+        highlighted = provider_list.highlighted
+        assert highlighted is not None
+        assert provider_list.get_option_at_index(highlighted).id == "ollama"
+        # accept the highlighted provider: the endpoint step starts from the
+        # kept base URL, not the provider default
+        await pilot.press("enter")
+        base = screen.query_one("#setup-base-url", Input)
+        assert base.value == "http://my-ollama:11434/v1"

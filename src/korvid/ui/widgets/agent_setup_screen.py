@@ -76,6 +76,7 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
         configurator: AgentConfigurator,
         apply_settings: Callable[[AgentSettings], bool] | None = None,
         current_profile: str | None = None,
+        current_settings: AgentSettings | None = None,
     ) -> None:
         super().__init__()
         self._configurator = configurator
@@ -84,6 +85,10 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
         # explicit choice is preserved; only an unset profile receives the
         # Ollama `small` suggestion (issue #71).
         self._current_profile = current_profile
+        # Kept settings from a configured (possibly :ai off'd) agent
+        # (issue #167): the wizard starts from them so reconnecting is
+        # confirm-through, not re-entry.
+        self._current_settings = current_settings
         self._provider = ""
         self._auth_method = ""
         self._base_url: str | None = None
@@ -122,6 +127,10 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
             self.query_one(widget_id).display = False
         provider_list = self.query_one("#setup-provider", OptionList)
         provider_list.highlighted = 0
+        if self._current_settings is not None:
+            providers = list(_DEFAULTS)
+            if self._current_settings.provider in providers:
+                provider_list.highlighted = providers.index(self._current_settings.provider)
         provider_list.focus()
 
     # ------------------------------------------------------------------
@@ -171,6 +180,11 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
             self.run_worker(self._copilot_connect(), exclusive=True)
             return
         _, base_url, _ = _DEFAULTS[self._provider]
+        current = self._current_settings
+        if current is not None and current.provider == self._provider and current.base_url:
+            # Same provider as the kept settings: start from the kept
+            # endpoint, not the provider default (issue #167 reconnect).
+            base_url = current.base_url
         self._ask(f"Where is your {self._provider} endpoint?")
         base_input = self.query_one("#setup-base-url", Input)
         base_input.value = base_url
@@ -185,6 +199,13 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
             if self._auth_method == "api_key":
                 self._ask("Which environment variable holds your API key?")
                 env_input = self.query_one("#setup-api-key-env", Input)
+                current = self._current_settings
+                if (
+                    current is not None
+                    and current.provider == self._provider
+                    and current.api_key_env
+                ):
+                    env_input.value = current.api_key_env
                 env_input.display = True
                 env_input.focus()
             else:
@@ -249,6 +270,10 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
     def _show_model_step(self, models: list[str]) -> None:
         self._models = models
         default_model = _DEFAULTS[self._provider][2]
+        current = self._current_settings
+        if current is not None and current.provider == self._provider and current.model:
+            # Reconnect flow (issue #167): the kept model beats the default.
+            default_model = current.model
         if models:
             self._ask(f"Choose a model ({len(models)} available)")
             self.query_one("#setup-model-filter", Input).display = True
