@@ -376,14 +376,16 @@ async def test_setup_hint_disables_input() -> None:
         assert ":ai" in _log_text(app)
 
 
-async def test_input_disabled_during_turn_reenabled_on_complete() -> None:
+async def test_input_stays_enabled_during_turn_and_after_complete() -> None:
+    """Since issue #170 the input never locks during a turn: typing while
+    the agent runs is interrupt-and-submit, not an error."""
     app = PanelApp()
     async with app.run_test() as pilot:
         panel = app.query_one(AgentPanel)
         inp = app.query_one("#agent-input", Input)
         panel.begin_turn("hi")
         await pilot.pause()
-        assert inp.disabled is True
+        assert inp.disabled is False
         panel.apply_event(TurnComplete(input_tokens=1, output_tokens=1, estimated=False))
         await pilot.pause()
         assert inp.disabled is False

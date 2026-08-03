@@ -26,6 +26,20 @@ dialog expires without executing anything.  Every executed write — yours or
 agent-requested — is recorded in the fail-closed
 [audit log](ops.md#the-safety-model).
 
+## Stopping and correcting a turn
+
+The input stays enabled while the agent works.  Press `Ctrl-X` to stop the
+running turn: the partial answer stays in the transcript marked
+`⏹ interrupted`, in-flight tool lines are marked, and token usage is
+committed (estimated for the interrupted stream).  Typing a new prompt while
+the agent runs is **interrupt-and-submit** — the correction is echoed
+immediately, the old turn is cancelled, and a fresh turn starts with the new
+prompt (only the latest submission is kept).  The conversation history is
+repaired so the model never sees a half-finished tool exchange.  Interrupts
+respect the write gate: a pending approval dialog is dismissed without
+executing, while a write the user already approved always runs to completion
+and is audited.
+
 ## Cloud-provider awareness
 
 At startup korvid detects the cluster's cloud provider from

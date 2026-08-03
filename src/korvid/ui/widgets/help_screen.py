@@ -77,6 +77,7 @@ _ACTION_GROUPS: dict[str, tuple[str, ...]] = {
     # N steps back through hits in a pane, sorts by name in the table.
     "log_search_prev": ("Logs", "Table"),
     "toggle_agent": ("Agent",),
+    "interrupt_agent": ("Agent",),
     "helm_install": ("Helm",),
     "helm_upgrade": ("Helm",),
     "helm_rollback": ("Helm",),

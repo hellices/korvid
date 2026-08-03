@@ -595,6 +595,14 @@ class KorvidApp(App[None]):
         # the current view, no exact names to remember.
         Binding("o", "sort_picker", "Sort by column", show=False, id="sort_picker"),
         Binding("ctrl+a", "toggle_agent", "AI", priority=True, id="toggle_agent"),
+        Binding(
+            "ctrl+x",
+            "interrupt_agent",
+            "Stop agent",
+            priority=True,
+            show=False,
+            id="interrupt_agent",
+        ),
         Binding("ctrl+d", "delete_resource", "Delete", id="delete_resource"),
         Binding("r", "rollout_restart", "Restart", id="rollout_restart"),
         Binding(
@@ -913,6 +921,11 @@ class KorvidApp(App[None]):
                 profile=config.agent_profile or "full",
             )
         self._agent_task: asyncio.Task[None] | None = None
+        # Interrupt-and-submit (issue #170): the latest correction typed
+        # while a turn runs; started once the cancelled turn is finalized.
+        self._agent_replacement: str | None = None
+        self._agent_turn_finalized = False
+        self._shutting_down = False
         # Serializes view/scope switches: keyboard NavigateCommands and the
         # agent's navigate tool share this handler, which yields while
         # stopping/starting watches — interleaving would corrupt state.
@@ -8387,11 +8400,73 @@ class KorvidApp(App[None]):
             return
         if self._agent_runtime is None:
             return
-        if self._agent_task is not None and not self._agent_task.done():
-            return
         panel = self._agent_panel
-        panel.begin_turn(message.text)
-        self._agent_task = asyncio.create_task(self._run_agent_turn(message.text))
+        if self._agent_task is not None and not self._agent_task.done():
+            # Interrupt-and-submit (issue #170): echo the correction now,
+            # remember only the latest one, and cancel the running turn —
+            # the replacement starts once the cancelled task settles (a
+            # done callback, so it drains even when the cancel lands
+            # before the task's coroutine ever ran).
+            panel.echo_user(message.text)
+            self._agent_replacement = message.text
+            if self._agent_task.cancelling() == 0:
+                # Never re-inject cancellation into a task that is already
+                # cancelling: a second CancelledError can interrupt the
+                # cleanup itself (review on #175). The depth-one queue
+                # above already holds the newest correction.
+                self._agent_task.cancel()
+            return
+        self._agent_replacement = None  # a direct turn supersedes any queue
+        self._start_agent_turn(message.text, echo=True)
+
+    def _start_agent_turn(self, text: str, *, echo: bool) -> None:
+        panel = self._agent_panel
+        panel.stop_key = self._interrupt_key()
+        panel.begin_turn(text, echo=echo)
+        self._agent_turn_finalized = False
+        task = asyncio.create_task(self._run_agent_turn(text))
+        task.add_done_callback(self._drain_agent_replacement)
+        self._agent_task = task
+
+    def _drain_agent_replacement(self, task: asyncio.Task[None]) -> None:
+        """Start the queued interrupt-and-submit correction once the
+        cancelled turn's task settles — including the race where the task
+        was cancelled before its coroutine (and thus its CancelledError
+        handler) ever ran. Scoped to the current owner: a stale callback
+        from a superseded task must not consume the queue or start a
+        second concurrent turn."""
+        if task is not self._agent_task:
+            return
+        if task.cancelled() and not self._agent_turn_finalized:
+            # Cancelled before the coroutine's first step: its own
+            # CancelledError handler never ran, so finalize here — the
+            # runtime is untouched (finalize is inert then) but the panel
+            # must still leave its running state.
+            self._finish_interrupted_turn(self._agent_runtime, self._agent_panel)
+        replacement, self._agent_replacement = self._agent_replacement, None
+        if replacement is None or self._ctx_switching or self._shutting_down:
+            return
+        self._start_agent_turn(replacement, echo=False)
+
+    def _interrupt_key(self) -> str:
+        """The effective stop key's name, resolved by action from the active
+        bindings so an `interrupt_agent` remap moves the advertised hint."""
+        for active in self.screen.active_bindings.values():
+            if active.binding.action == "interrupt_agent":
+                return active.binding.key
+        return "ctrl+x"
+
+    def action_interrupt_agent(self) -> None:
+        """Stop the running agent turn (issue #170). No-op when idle. A
+        stop while an interrupt-and-submit is already draining discards
+        the queued replacement (the user changed their mind about it) and
+        never re-injects cancellation into the draining task."""
+        task = self._agent_task
+        if task is None or task.done():
+            return
+        self._agent_replacement = None
+        if task.cancelling() == 0:
+            task.cancel()
 
     def _selected_row_name(self) -> str | None:
         table = self._focused_table()
@@ -8441,12 +8516,35 @@ class KorvidApp(App[None]):
         # Agent follow: started cluster reads awaiting their result, keyed
         # by call id (the finish event does not carry the arguments).
         pending_reads: dict[str, tuple[str, str]] = {}
+        gen = runtime.run_turn(user_text, screen_context)
         try:
-            async for event in runtime.run_turn(user_text, screen_context):
+            async for event in gen:
                 panel.apply_event(event)
                 await self._maybe_follow_agent_read(event, pending_reads)
+        except asyncio.CancelledError:
+            # Close the generator first: if the cancel landed between
+            # yields the generator is still suspended, and finalize must
+            # not race a later resume that appends to the history.
+            closer = getattr(gen, "aclose", None)
+            if closer is not None:
+                with contextlib.suppress(BaseException):
+                    await closer()
+            self._finish_interrupted_turn(runtime, panel)
+            raise
         except Exception as exc:
             panel.apply_event(AgentError(message=str(exc)))
+
+    def _finish_interrupted_turn(self, runtime: Any, panel: AgentPanel) -> None:
+        """Settle an interrupted turn: repair the conversation history and
+        mark the transcript (issue #170). The queued replacement, if any, is
+        drained by the task's done callback — not here, because a task
+        cancelled before its coroutine first ran never reaches this code."""
+        self._agent_turn_finalized = True
+        finalize = getattr(runtime, "finalize_interrupt", None)
+        if finalize is not None:
+            event = finalize()
+            if not self._shutting_down:
+                panel.apply_event(event)
 
     async def _maybe_follow_agent_read(
         self,
@@ -8854,11 +8952,39 @@ class KorvidApp(App[None]):
             return (
                 f"denied: the user declined the {action} request for {self._gvr_label(meta)}/{name}"
             )
-        outcome = await self._run_write(action, meta, ns, name, op(uid), detail=detail)
+        outcome = await self._run_write_shielded(action, meta, ns, name, op(uid), detail=detail)
         if outcome != "done":
             return f"ERROR: {action} {self._gvr_label(meta)}/{name} {outcome}"
         self._mark_agent_action(f"{action} → {self._gvr_label(meta)}/{name}")
         return f"approved and executed: {action} {self._gvr_label(meta)}/{name}"
+
+    async def _run_write_shielded(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        op: Awaitable[None],
+        *,
+        detail: str,
+    ) -> str:
+        """Run an approved agent write to completion even if the turn is
+        interrupted mid-flight (issue #170): a half-applied, half-audited
+        mutation is worse than finishing what the user explicitly approved.
+        Every wait stays shielded — repeated cancellations are absorbed until
+        the write reaches a terminal state, then cancellation is re-raised."""
+        write = asyncio.ensure_future(self._run_write(action, meta, ns, name, op, detail=detail))
+        interrupted = False
+        while not write.done():
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                if write.cancelled():
+                    raise
+                interrupted = True
+        if interrupted:
+            raise asyncio.CancelledError
+        return write.result()
 
     async def _preview_for_action(
         self,
@@ -9646,16 +9772,26 @@ class KorvidApp(App[None]):
             preview=preview,
             managed_note=managed_note,
         )
-        await self.push_screen(screen, _done)
-        # Recheck after mounting: surfacing the dialog (or push_screen itself)
-        # can consume the last of the budget, and a fixed minimum here would
-        # quietly extend the expiry contract past _APPROVAL_TIMEOUT.
-        remaining = deadline - loop.time()
         try:
+            await self.push_screen(screen, _done)
+            # Recheck after mounting: surfacing the dialog (or push_screen
+            # itself) can consume the last of the budget, and a fixed minimum
+            # here would quietly extend the expiry contract past
+            # _APPROVAL_TIMEOUT.
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError
             confirmed = await asyncio.wait_for(fut, timeout=remaining)
             return "approved" if confirmed else "declined"
+        except asyncio.CancelledError:
+            # Turn interrupted (issue #170): never leave an orphaned dialog
+            # whose 'y' would resolve a dead future. The write cannot run.
+            # push_screen is inside the guarded region so a cancel landing
+            # during the mount itself still dismisses the dialog.
+            if self.screen is screen:
+                with contextlib.suppress(Exception):
+                    self.pop_screen()
+            raise
         except TimeoutError:
             # Late keystrokes are a no-op (the future is already resolved),
             # but clear the dialog when possible so it doesn't linger.
@@ -9769,7 +9905,22 @@ class KorvidApp(App[None]):
             await asyncio.gather(*self._dispatch_tasks, return_exceptions=True)
         self._dispatch_tasks.clear()
 
+    async def _settle_agent_task(self) -> None:
+        """Shutdown teardown of the agent turn: mark the app shutting down
+        (finalization must not touch the torn-down transcript or start a
+        replacement) and let the task drain. An explicit stop may already
+        have the task cancelling — re-injecting cancellation would abort
+        that cleanup mid-flight."""
+        self._shutting_down = True
+        if self._agent_task is None:
+            return
+        if self._agent_task.cancelling() == 0:
+            self._agent_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._agent_task
+
     async def on_unmount(self) -> None:
+        self._shutting_down = True
         await self._reap_dispatches()
         # Cancel any active log stream tasks before the event loop shuts down.
         # A proposal must never outlive the session that previewed it; close
@@ -9782,10 +9933,7 @@ class KorvidApp(App[None]):
             self._ns_prefetch_task.cancel()
         if self._ctx_prefetch_task is not None:
             self._ctx_prefetch_task.cancel()
-        if self._agent_task is not None:
-            self._agent_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._agent_task
+        await self._settle_agent_task()
         tasks = list(self._log_tasks)
         for task in tasks:
             task.cancel()

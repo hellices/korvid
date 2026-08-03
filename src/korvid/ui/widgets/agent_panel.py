@@ -25,6 +25,7 @@ from korvid.agent.events import (
     ToolCallFinished,
     ToolCallStarted,
     TurnComplete,
+    TurnInterrupted,
 )
 from korvid.tools.executor import UI_TOOL_NAMES, WRITE_TOOL_NAMES
 from korvid.ui.messages import AgentPromptSubmitted
@@ -178,6 +179,10 @@ class AgentPanel(Vertical):
         self._tool_widgets: dict[str, ChatEntry] = {}
         self._tool_args: dict[str, str] = {}
         self.status_text = ""
+        # The advertised stop key (issue #170): the app resolves the
+        # effective `interrupt_agent` binding so a remap moves the hint.
+        self.stop_key = "ctrl+x"
+        self._interrupt_marked = False
         self._status_timer: Timer | None = None
         self._spinner_frame = 0
 
@@ -229,15 +234,46 @@ class AgentPanel(Vertical):
         chat.mount(ChatEntry(_SETUP_HINT, raw=_SETUP_HINT, classes="agent-msg"))
         self.query_one("#agent-input", Input).disabled = True
 
-    def begin_turn(self, user_text: str) -> None:
-        self._mount_entry(ChatEntry(Text(user_text), raw=user_text, classes="user-msg"))
-        self.query_one("#agent-input", Input).disabled = True
+    def echo_user(self, text: str) -> None:
+        """Show a user message immediately, before its turn starts.
+
+        Interrupt-and-submit (issue #170) echoes the correction the moment
+        it is typed; the replacement turn then begins with `echo=False` so
+        the message is not repeated. When a turn is still draining, the
+        interrupted turn's transcript is settled first so the ⏹ marker
+        attaches to the partial output, never to the echoed correction.
+        """
+        if self._status_timer is not None and not self._interrupt_marked:
+            self._mark_interrupted()
+        self._mount_entry(ChatEntry(Text(text), raw=text, classes="user-msg"))
+
+    def _mark_interrupted(self) -> None:
+        """Settle the interrupted turn's transcript: final-render the
+        partial stream, mark unfinished tool lines, and append the ⏹
+        marker adjacent to the output it describes."""
+        self._end_stream()
+        self._mark_tools_interrupted()
+        self._mount_entry(
+            ChatEntry(
+                Text("⏹ interrupted", style="dim"),
+                raw="⏹ interrupted",
+                classes="agent-msg",
+            )
+        )
+        self._interrupt_marked = True
+
+    def begin_turn(self, user_text: str, *, echo: bool = True) -> None:
+        if echo:
+            self.echo_user(user_text)
+        # The input stays enabled during the turn (issue #170): typing a
+        # correction mid-turn is interrupt-and-submit, not an error.
         self._stream_widget = None
         self._stream_text = ""
         self._stream_dirty = False
         # Drop tool state from any previous turn: a late ToolCallFinished from
         # an errored turn must not touch this turn's transcript.
         self._tool_widgets.clear()
+        self._interrupt_marked = False
         self._tool_args.clear()
         if self._flush_timer is not None:
             self._flush_timer.stop()
@@ -281,6 +317,29 @@ class AgentPanel(Vertical):
             self._stop_flush_timer()
             self._clear_status()
             self.query_one("#agent-input", Input).disabled = False
+            self.set_header(
+                self._model,
+                self._tok_in + event.input_tokens,
+                self._tok_out + event.output_tokens,
+                self._estimated or event.estimated,
+                profile=self._profile,
+            )
+        elif isinstance(event, TurnInterrupted):
+            # A stop is a normal outcome, not an error: the partial answer
+            # stays in the transcript and in-flight tool lines are marked.
+            # Interrupt-and-submit already settled the transcript when the
+            # correction was echoed — never mount a second marker there.
+            self._stop_flush_timer()
+            if not self._interrupt_marked:
+                self._mark_interrupted()
+            self._interrupt_marked = False
+            self._clear_status()
+            # Focus returns to the input even when the stop key was pressed
+            # elsewhere (it is a global binding): the natural next step
+            # after stopping a turn is typing the correction.
+            inp = self.query_one("#agent-input", Input)
+            inp.disabled = False
+            inp.focus()
             self.set_header(
                 self._model,
                 self._tok_in + event.input_tokens,
@@ -352,10 +411,23 @@ class AgentPanel(Vertical):
                 f"{marker} {label} — {event.summary}",
             )
 
+    def _mark_tools_interrupted(self) -> None:
+        """Mark tool lines that never got a finish event as interrupted."""
+        for entry in self._tool_widgets.values():
+            label = entry.raw.rstrip("…")
+            entry.set_content(
+                Text.assemble((label, "dim"), (" — interrupted", "dim")),
+                f"{label} — interrupted",
+            )
+        self._tool_widgets.clear()
+        self._tool_args.clear()
+
     # --- status / spinner ---------------------------------------------------
 
     def _set_status(self, text: str) -> None:
-        self.status_text = text
+        # The stop hint rides along in the status line so the affordance is
+        # discoverable exactly when it applies (issue #170).
+        self.status_text = f"{text}… · {self.stop_key} stop"
         if self._status_timer is None:
             self._status_timer = self.set_interval(0.1, self._tick_spinner)
         self._tick_spinner()
@@ -371,5 +443,5 @@ class AgentPanel(Vertical):
         frame = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
         self._spinner_frame += 1
         self.query_one("#agent-status", Static).update(
-            Text(f"{frame} {self.status_text}…", style="dim")
+            Text(f"{frame} {self.status_text}", style="dim")
         )
