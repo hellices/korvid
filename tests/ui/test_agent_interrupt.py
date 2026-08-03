@@ -244,6 +244,27 @@ async def test_rapid_corrections_inject_cancellation_only_once() -> None:
         await until(pilot, lambda: runtime.calls[-1:] == ["third"], label="latest ran")
 
 
+async def test_immediate_stop_before_the_turn_first_runs_clears_busy_state() -> None:
+    """An explicit stop in the same tick the turn was created cancels the
+    task before its coroutine (and CancelledError handler) ever runs — the
+    panel must still leave its running state (review on #175)."""
+    from korvid.ui.messages import AgentPromptSubmitted
+
+    runtime = BlockingRuntime()
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")
+        app.on_agent_prompt_submitted(AgentPromptSubmitted("first"))
+        task = app._agent_task
+        assert task is not None
+        app.action_interrupt_agent()  # same tick: the coroutine never ran
+        await until(pilot, lambda: task.done(), label="task settled")
+        panel = app.query_one(AgentPanel)
+        await until(pilot, lambda: panel.status_text == "", label="status cleared")
+        assert not runtime.calls  # the turn never reached the runtime
+        assert "interrupted" in _panel_text(app)
+
+
 async def test_stale_done_callback_cannot_consume_the_replacement() -> None:
     """The drain callback must be scoped to the task that completed: a
     callback from a superseded task must neither consume the queued

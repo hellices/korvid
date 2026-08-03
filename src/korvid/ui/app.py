@@ -924,6 +924,7 @@ class KorvidApp(App[None]):
         # Interrupt-and-submit (issue #170): the latest correction typed
         # while a turn runs; started once the cancelled turn is finalized.
         self._agent_replacement: str | None = None
+        self._agent_turn_finalized = False
         self._shutting_down = False
         # Serializes view/scope switches: keyboard NavigateCommands and the
         # agent's navigate tool share this handler, which yields while
@@ -8422,6 +8423,7 @@ class KorvidApp(App[None]):
         panel = self._agent_panel
         panel.stop_key = self._interrupt_key()
         panel.begin_turn(text, echo=echo)
+        self._agent_turn_finalized = False
         task = asyncio.create_task(self._run_agent_turn(text))
         task.add_done_callback(self._drain_agent_replacement)
         self._agent_task = task
@@ -8435,6 +8437,12 @@ class KorvidApp(App[None]):
         second concurrent turn."""
         if task is not self._agent_task:
             return
+        if task.cancelled() and not self._agent_turn_finalized:
+            # Cancelled before the coroutine's first step: its own
+            # CancelledError handler never ran, so finalize here — the
+            # runtime is untouched (finalize is inert then) but the panel
+            # must still leave its running state.
+            self._finish_interrupted_turn(self._agent_runtime, self._agent_panel)
         replacement, self._agent_replacement = self._agent_replacement, None
         if replacement is None or self._ctx_switching or self._shutting_down:
             return
@@ -8527,6 +8535,7 @@ class KorvidApp(App[None]):
         mark the transcript (issue #170). The queued replacement, if any, is
         drained by the task's done callback — not here, because a task
         cancelled before its coroutine first ran never reaches this code."""
+        self._agent_turn_finalized = True
         finalize = getattr(runtime, "finalize_interrupt", None)
         if finalize is not None:
             event = finalize()
