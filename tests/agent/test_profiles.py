@@ -157,9 +157,21 @@ def test_small_profile_prompt_pins_measured_failure_mode_rules() -> None:
     assert "shows the method only" in prompt
     assert "call the tool instead" in prompt
     assert "name the checks that pass" in prompt
-    # 2. healthy is a valid verdict; stopped restarts are history
+    # round 4 measured the OOM parrot surviving the method-only marker
+    # (liveness kills still answered with the example's OOM text), so the
+    # example itself now demonstrates the 137 discrimination: probe kill,
+    # quoted event reason, no OOM anywhere in the example
+    assert "liveness probe failed" in prompt
+    assert "oom" not in prompt.split("worked example")[1]
+    # round 5 fixed the liveness parrot but dropped the exit-code citation
+    # habit (oom-killed answers stopped naming 137) and healthy verdicts
+    # still hedged; the example now cites the exit code alongside the
+    # event reason, and a ready pod's answer must start with healthy
+    assert "last exit 137" in prompt
+    assert "start your answer with healthy" in prompt
+    # 2. healthy is a valid verdict; stopped restarts are history — made
+    #    mechanical in round 5: ready now means healthy now
     assert "healthy" in prompt
-    assert "recovered" in prompt
     assert "history, not a live fault" in prompt
     # 3. copy decisive reasons word-for-word
     assert "word-for-word" in prompt
