@@ -15,6 +15,7 @@ import dataclasses
 import importlib.util
 import logging
 import secrets
+import ssl
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -476,6 +477,7 @@ def _build_agent_wiring(
     from korvid.agent.profiles import build_profile
     from korvid.agent.runtime import AgentRuntime
     from korvid.providers.configurator import ProviderConfigurator
+    from korvid.providers.net import make_http_client_factory
     from korvid.providers.ollama import OllamaOptions
     from korvid.providers.registry import create_provider
     from korvid.providers.token_store import TokenStore
@@ -508,6 +510,7 @@ def _build_agent_wiring(
         api_key_env=config.agent_api_key_env,
         oauth_token=oauth,
         ollama=ollama_options,
+        ca_bundle=config.network_ca_bundle,
     )
     # Ownership transfers immediately: if anything below raises (executor,
     # runtime, configurator), the teardown guard still closes the provider
@@ -552,7 +555,13 @@ def _build_agent_wiring(
             profile=settings.profile,
         )
 
-    configurator = ProviderConfigurator(token_store, persist)
+    configurator = ProviderConfigurator(
+        token_store,
+        persist,
+        # The wizard's connection test must share the live providers' trust
+        # (issue #168): one builder, one CA bundle, no way to disagree.
+        http_client_factory=make_http_client_factory(config.network_ca_bundle),
+    )
     close_tasks: set[asyncio.Task[None]] = set()
 
     def rebuild_agent(settings: AgentSettings) -> AgentRuntime | None:
@@ -572,6 +581,7 @@ def _build_agent_wiring(
             # does not edit agent.ollama.*, so the values cannot go stale. If
             # config reload is ever added, re-derive the options here.
             ollama=ollama_options,
+            ca_bundle=config.network_ca_bundle,
         )
         provider_box[0] = new_provider
         if new_provider is None:
@@ -652,10 +662,26 @@ def _make_disconnect_agent(
     return disconnect_agent
 
 
+def _validate_ca_bundle(path: str | None) -> None:
+    """Fail startup actionably when `network.ca_bundle` cannot be loaded.
+
+    Missing, unreadable, and malformed bundles must never silently fall
+    back to default trust (issue #168) — a user who configured a corporate
+    CA needs to know it is not in effect, not debug TLS errors later.
+    """
+    if path is None:
+        return
+    try:
+        ssl.create_default_context(cafile=path)
+    except (OSError, ssl.SSLError) as exc:
+        raise SystemExit(f"korvid: network.ca_bundle {path!r} could not be loaded: {exc}") from exc
+
+
 def _load_startup_config(
     readonly: bool, mcp: bool = False, namespace: str | None = None
 ) -> KorvidConfig:
     config = load_config()
+    _validate_ca_bundle(config.network_ca_bundle)
     if readonly:
         config = dataclasses.replace(config, readonly=True)
     if mcp:

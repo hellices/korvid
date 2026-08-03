@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -270,3 +271,45 @@ def test_github_copilot_default_method_is_device_login() -> None:
         oauth_token="gho_tok",
     )
     assert provider is not None
+
+
+def test_create_provider_threads_ca_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """network.ca_bundle reaches both provider adapters (issue #168)."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "korvid test CA")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    ca = tmp_path / "ca.pem"
+    ca.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "k")
+    for provider_name in ("openai", "ollama"):
+        provider = create_provider(
+            enabled=True,
+            provider=provider_name,
+            auth_method="api_key" if provider_name == "openai" else "none",
+            base_url="https://llm.corp/v1",
+            model="m",
+            api_key_env="KORVID_TEST_KEY" if provider_name == "openai" else None,
+            ca_bundle=str(ca),
+        )
+        assert provider is not None
+        assert isinstance(provider, OllamaProvider | OpenAICompatProvider)
+        assert provider._ca_bundle == str(ca)  # reaches the adapter's client build

@@ -33,7 +33,7 @@ class FakeRepoOps:
     def __init__(self, repos: list[HelmRepo] | None = None) -> None:
         self.repos = repos if repos is not None else [_BITNAMI]
         self.add_error: str | None = None
-        self.added: list[tuple[str, str]] = []
+        self.added: list[tuple[str, str, str | None]] = []
         self.updates = 0
         self.gate: asyncio.Event | None = None
         self.add_gate: asyncio.Event | None = None
@@ -44,13 +44,13 @@ class FakeRepoOps:
             await self.gate.wait()
         return list(self.repos)
 
-    async def repo_add(self, name: str, url: str) -> str:
+    async def repo_add(self, name: str, url: str, ca_file: str | None = None) -> str:
         self.add_started += 1
         if self.add_gate is not None:
             await self.add_gate.wait()
         if self.add_error is not None:
             raise HelmError(self.add_error)
-        self.added.append((name, url))
+        self.added.append((name, url, ca_file))
         self.repos.append(HelmRepo(name=name, url=url))
         return f'"{name}" has been added to your repositories'
 
@@ -117,7 +117,7 @@ async def test_add_repo_calls_helm_and_refreshes_list() -> None:
         await pilot.press("enter")
         await until(
             pilot,
-            lambda: ops.added == [("jetstack", "https://charts.jetstack.io")],
+            lambda: ops.added == [("jetstack", "https://charts.jetstack.io", None)],
             label="repo added",
         )
         await _listed(app, pilot, 2)
@@ -205,7 +205,7 @@ async def test_actions_are_rejected_while_a_repo_mutation_is_pending() -> None:
         ops.add_gate.set()
         await until(
             pilot,
-            lambda: ops.added == [("jetstack", "https://charts.jetstack.io")],
+            lambda: ops.added == [("jetstack", "https://charts.jetstack.io", None)],
             label="add completed despite the queued update",
         )
         assert ops.updates == 0
@@ -236,8 +236,48 @@ async def test_escape_is_rejected_while_a_repo_mutation_is_pending() -> None:
         ops.add_gate.set()
         await until(
             pilot,
-            lambda: ops.added == [("jetstack", "https://charts.jetstack.io")],
+            lambda: ops.added == [("jetstack", "https://charts.jetstack.io", None)],
             label="add completed despite the escape",
         )
         await pilot.press("escape")  # idle again: closes normally
         await until(pilot, lambda: app.screen is not screen, label="screen closed")
+
+
+async def test_add_repo_passes_an_optional_ca_file() -> None:
+    """Internal chart repositories signed by a corporate CA (issue #168):
+    the optional CA path reaches `helm repo add --ca-file` untouched."""
+    app = HostApp()
+    ops = FakeRepoOps([_BITNAMI])
+    async with app.run_test() as pilot:
+        screen = await _open(app, ops)
+        await _listed(app, pilot, 1)
+        screen.query_one("#repo-name", Input).value = "internal"
+        screen.query_one("#repo-url", Input).value = "https://charts.corp.example"
+        screen.query_one("#repo-ca", Input).value = "/etc/korvid/company-ca.pem"
+        screen.query_one("#repo-ca", Input).focus()
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: (
+                ops.added
+                == [("internal", "https://charts.corp.example", "/etc/korvid/company-ca.pem")]
+            ),
+            label="repo added with CA",
+        )
+
+
+async def test_add_repo_without_ca_passes_none() -> None:
+    app = HostApp()
+    ops = FakeRepoOps([_BITNAMI])
+    async with app.run_test() as pilot:
+        screen = await _open(app, ops)
+        await _listed(app, pilot, 1)
+        screen.query_one("#repo-name", Input).value = "jetstack"
+        screen.query_one("#repo-url", Input).value = "https://charts.jetstack.io"
+        screen.query_one("#repo-url", Input).focus()
+        await pilot.press("enter")
+        await until(
+            pilot,
+            lambda: ops.added == [("jetstack", "https://charts.jetstack.io", None)],
+            label="repo added without CA",
+        )

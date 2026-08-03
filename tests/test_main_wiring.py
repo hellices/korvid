@@ -1257,3 +1257,27 @@ async def test_disconnect_agent_releases_the_provider(monkeypatch: object) -> No
     assert closed == [True]  # released in the background, not leaked
     disconnect()  # idempotent when already off
     assert provider_box[0] is None
+
+
+def test_validate_ca_bundle_accepts_none_and_rejects_missing(tmp_path: Any) -> None:
+    """network.ca_bundle (issue #168): unset is fine; a missing bundle fails
+    startup actionably, naming the configured path — never a silent
+    fallback to default trust."""
+    import pytest
+
+    from korvid.__main__ import _validate_ca_bundle
+
+    _validate_ca_bundle(None)  # unset: default trust, no error
+    with pytest.raises(SystemExit, match=r"nope\.pem"):
+        _validate_ca_bundle(str(tmp_path / "nope.pem"))
+
+
+def test_validate_ca_bundle_rejects_malformed(tmp_path: Any) -> None:
+    import pytest
+
+    from korvid.__main__ import _validate_ca_bundle
+
+    bad = tmp_path / "garbage.pem"
+    bad.write_text("this is not a certificate")
+    with pytest.raises(SystemExit, match=r"garbage\.pem"):
+        _validate_ca_bundle(str(bad))

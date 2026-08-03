@@ -22,7 +22,7 @@ from korvid.k8s.helmcli import HelmError, HelmRepo
 from korvid.ui.widgets.confirm_screen import FreshKeysInput
 
 RepoListFn = Callable[[], Awaitable[list[HelmRepo]]]
-RepoAddFn = Callable[[str, str], Awaitable[str]]
+RepoAddFn = Callable[[str, str, str | None], Awaitable[str]]
 RepoUpdateFn = Callable[[], Awaitable[str]]
 
 
@@ -113,6 +113,13 @@ class HelmRepoScreen(ModalScreen[str | None]):
                     placeholder="https://… — Enter adds the repository",
                     id="repo-url",
                 )
+            # Corporate CA for internal chart servers (issue #168): passed
+            # to `helm repo add --ca-file`; helm owns the persisted config.
+            yield FreshKeysInput(
+                self._created_time,
+                placeholder="CA file for a private-CA repository (optional)",
+                id="repo-ca",
+            )
             yield Static(
                 "Enter on a repo: browse its charts — Enter: add — Ctrl-R: update — Esc: close",
                 id="repo-status",
@@ -127,10 +134,11 @@ class HelmRepoScreen(ModalScreen[str | None]):
         event.stop()
         name = self.query_one("#repo-name", Input).value.strip()
         url = self.query_one("#repo-url", Input).value.strip()
+        ca_file = self.query_one("#repo-ca", Input).value.strip() or None
         if not name or not url:
             self._status("both a repository name and URL are required")
             return
-        self._start(self._add_repo(name, url))
+        self._start(self._add_repo(name, url, ca_file))
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         """Enter on a repo row: hand the repo to the chart picker below
@@ -192,11 +200,11 @@ class HelmRepoScreen(ModalScreen[str | None]):
         listing.add_options([f"{repo.name}  {repo.url}" for repo in repos])
         self._status(f"{len(repos)} repositories")
 
-    async def _add_repo(self, name: str, url: str) -> None:
+    async def _add_repo(self, name: str, url: str, ca_file: str | None) -> None:
         self._loading(True)
         self._status(f"Adding repository {name!r}…")
         try:
-            result = await self._repo_add(name, url)
+            result = await self._repo_add(name, url, ca_file)
         except HelmError as exc:
             self._status(str(exc))
             return
@@ -204,6 +212,7 @@ class HelmRepoScreen(ModalScreen[str | None]):
             self._loading(False)
         self.query_one("#repo-name", Input).value = ""
         self.query_one("#repo-url", Input).value = ""
+        self.query_one("#repo-ca", Input).value = ""
         self._status(result.strip() or f"repository {name!r} added")
         await self._refresh_list()
 

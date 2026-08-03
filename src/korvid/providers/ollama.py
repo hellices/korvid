@@ -20,6 +20,7 @@ import httpx
 
 from korvid.agent.credentials import CredentialSource
 from korvid.agent.provider import LLMProvider
+from korvid.providers.net import build_verify
 from korvid.providers.openai_compat import ProviderError
 
 logger = logging.getLogger(__name__)
@@ -67,12 +68,14 @@ class OllamaProvider(LLMProvider):
         client: httpx.AsyncClient | None = None,
         *,
         options: OllamaOptions | None = None,
+        ca_bundle: str | None = None,
     ) -> None:
         self._base_url = normalize_base_url(base_url)
         self._model = model
         self._credentials = credentials
         self._client = client  # injected or lazily created on first call
         self._owns_client = client is None
+        self._ca_bundle = ca_bundle
         self._options = options or OllamaOptions()
         # Monotonic counter for generated tool-call ids: ids must stay
         # unique across completions within one agent conversation.
@@ -93,6 +96,9 @@ class OllamaProvider(LLMProvider):
             # token on large local models.
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(300.0, connect=10.0),
+                # Corporate CA trust (issue #168): built from the same
+                # helper as the :ai wizard's test client.
+                verify=build_verify(self._ca_bundle),
             )
         return self._client
 

@@ -1102,3 +1102,22 @@ def test_telepresence_non_boolean_stays_on(tmp_path: Path) -> None:
     f.write_text('integrations:\n  telepresence: "banana"\n')
     cfg = load_config(f)
     assert cfg.telepresence_enabled is True
+
+
+def test_network_ca_bundle_parses(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("network:\n  ca_bundle: /etc/korvid/company-ca.pem\n")
+    cfg = load_config(cfg_path)
+    assert cfg.network_ca_bundle == "/etc/korvid/company-ca.pem"
+
+
+def test_network_ca_bundle_defaults_to_none(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("namespace: default\n")
+    assert load_config(cfg_path).network_ca_bundle is None
+
+
+def test_network_section_tolerates_non_mapping(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("network: nonsense\n")
+    assert load_config(cfg_path).network_ca_bundle is None

@@ -703,3 +703,38 @@ async def test_show_schema_cleanup_runs_off_the_event_loop() -> None:
         await cli.show_schema("repo/chart", "1.2.3")
     del real_rmtree
     assert cleanup_threads == [True]
+
+
+async def test_repo_add_appends_ca_file_only_when_configured(tmp_path: Path) -> None:
+    """Corporate CA trust for internal chart repositories (issue #168):
+    --ca-file rides the fixed argv builder only when a CA was given."""
+    ca = tmp_path / "ca.pem"
+    ca.write_text("PEM")
+    cli, execute = _cli()
+    execute.return_value = (0, '"internal" has been added to your repositories\n', "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        await cli.repo_add("internal", "https://charts.corp.example", ca_file=str(ca))
+    argv = execute.await_args_list[0].args[0]
+    assert argv[1:5] == ["repo", "add", "internal", "https://charts.corp.example"]
+    assert argv[5:7] == ["--ca-file", str(ca)]
+
+
+async def test_repo_add_without_ca_file_keeps_argv_unchanged() -> None:
+    cli, execute = _cli()
+    execute.return_value = (0, "added\n", "")
+    with mock.patch("korvid.k8s.helmcli._execute", execute):
+        await cli.repo_add("bitnami", "https://charts.bitnami.com/bitnami")
+    argv = execute.await_args_list[0].args[0]
+    assert "--ca-file" not in argv
+
+
+async def test_repo_add_rejects_a_missing_ca_file_before_spawning(tmp_path: Path) -> None:
+    cli, execute = _cli()
+    with (
+        mock.patch("korvid.k8s.helmcli._execute", execute),
+        pytest.raises(HelmError, match=r"nope\.pem"),
+    ):
+        await cli.repo_add(
+            "internal", "https://charts.corp.example", ca_file=str(tmp_path / "nope.pem")
+        )
+    execute.assert_not_awaited()  # validated before any subprocess
