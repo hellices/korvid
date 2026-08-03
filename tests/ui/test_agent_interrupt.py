@@ -325,6 +325,23 @@ async def test_interrupt_marker_precedes_the_echo_when_nothing_streamed() -> Non
         assert text.index("interrupted") < text.index("actually check namespace foo")
 
 
+async def test_double_correction_before_drain_adds_one_marker() -> None:
+    """Two corrections queued before the old task settles must not stack a
+    second ⏹ marker — only the latest correction is retained, so a second
+    marker would imply the first correction ran and was interrupted."""
+    from korvid.ui.messages import AgentPromptSubmitted
+
+    runtime = BlockingRuntime()
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        await _start_turn(app, pilot, "first")
+        await until(pilot, lambda: len(runtime.calls) == 1, label="turn running")
+        app.on_agent_prompt_submitted(AgentPromptSubmitted("second"))
+        app.on_agent_prompt_submitted(AgentPromptSubmitted("third"))
+        await until(pilot, lambda: runtime.calls[-1:] == ["third"], label="latest ran")
+        assert _panel_text(app).count("interrupted") == 1
+
+
 async def test_stale_done_callback_cannot_consume_the_replacement() -> None:
     """The drain callback must be scoped to the task that completed: a
     callback from a superseded task must neither consume the queued

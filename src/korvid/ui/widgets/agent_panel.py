@@ -243,7 +243,7 @@ class AgentPanel(Vertical):
         interrupted turn's transcript is settled first so the ⏹ marker
         attaches to the partial output, never to the echoed correction.
         """
-        if self._status_timer is not None:
+        if self._status_timer is not None and not self._interrupt_marked:
             self._mark_interrupted()
         self._mount_entry(ChatEntry(Text(text), raw=text, classes="user-msg"))
 
