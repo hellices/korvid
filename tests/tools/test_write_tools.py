@@ -7,7 +7,8 @@ ConfirmScreen the *user* must approve with a real keystroke.
 
 from typing import Any
 
-from korvid.agent.runtime import SYSTEM_PROMPT, WRITE_PROMPT, AgentRuntime
+from korvid.agent.prompts import SYSTEM_PROMPT, WRITE_PROMPT
+from korvid.agent.runtime import AgentRuntime
 from korvid.tools.executor import (
     READ_TOOLS,
     UI_TOOLS,

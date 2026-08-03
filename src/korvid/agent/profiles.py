@@ -17,7 +17,14 @@ import copy
 from dataclasses import dataclass
 from typing import Any
 
-from korvid.agent.runtime import MAX_HISTORY_CHARS, SYSTEM_PROMPT, UI_DRIVE_PROMPT
+from korvid.agent.prompts import (
+    SMALL_SYSTEM_PROMPT,
+    SMALL_TOOL_DESCRIPTIONS,
+    SMALL_UI_PROMPT,
+    SYSTEM_PROMPT,
+    UI_DRIVE_PROMPT,
+)
+from korvid.agent.runtime import MAX_HISTORY_CHARS
 from korvid.tools.registry import agent_tool_schemas
 
 PROFILE_NAMES = ("full", "small")
@@ -40,59 +47,9 @@ SMALL_MAX_RESULT_CHARS = 3_000
 #: not a suggestion.
 SMALL_MAX_TOOL_CALLS_PER_ITERATION = 1
 
-#: Short role statement, explicit grounding rules, and ONE worked example
-#: (question -> tool call -> result -> grounded answer) instead of the
-#: longer frontier instruction list.
-SMALL_SYSTEM_PROMPT = (
-    "You are korvid's Kubernetes diagnostic agent, embedded in a live TUI. "
-    "Use tools to inspect cluster state and cite evidence from tool results. "
-    "Call one tool at a time and wait for its result before deciding the "
-    "next step. Never invent resource names: use only names from the screen "
-    "context or from tool results. "
-    "Worked example — user: why does pod checkout-1 in namespace shop keep "
-    'restarting? -> you call diagnose_pod with {"pod": "checkout-1", '
-    '"namespace": "shop"} -> the result shows lastState terminated '
-    "exit=137 (OOMKilled) -> you answer: checkout-1 is OOMKilled (exit "
-    "code 137); its container exceeds the memory limit, so raise the limit "
-    "or reduce usage."
-)
-
-#: The full UI_DRIVE_PROMPT advertises all five UI tools; the small profile
-#: offers only the two evidence-showing ones, and the model must never be
-#: told about capabilities it was not offered.
-SMALL_UI_PROMPT = (
-    "You can also show evidence on the user's screen: open_logs (show a "
-    "pod's live logs) and open_describe (show a resource's manifest and "
-    "events). These change nothing in the cluster. Keep your text concise; "
-    "the screen carries the detail."
-)
-
-#: The two evidence-showing UI tools the small profile offers are encoded
-#: in the registry's `small_agent` surface (korvid.tools.registry).
-
-#: Concise description overrides for schemas that are verbose in the full
-#: profile — every request retransmits the schemas, so on a 4k-token
-#: serving context the wording is a real cost (EasyTool). The effect is
-#: measurable per endpoint with the #69 harness (`--profile small`).
-_SMALL_DESCRIPTIONS: dict[str, str] = {
-    "diagnose_pod": (
-        "One-call diagnosis of a broken pod: container states, exit codes, "
-        "restart counts, failing conditions, Warning events, node/PVC "
-        "context, and log excerpts. Prefer this first when a pod is failing."
-    ),
-    "list_operators": (
-        "List OLM operator packages and installed subscriptions with their status. Read-only."
-    ),
-    "helm_list_releases": (
-        "List installed Helm releases with revision, status, chart and app "
-        "version. Read-only; parsed from cluster Secrets."
-    ),
-    "open_logs": "Open the live log pane for a pod on the user's screen.",
-    "resize_pod": (
-        "Request an in-place CPU/memory resize of a running pod (Kubernetes "
-        "1.35+). Runs only after the user approves it in the TUI dialog."
-    ),
-}
+#: All prompt wording — the full/small role statements, UI-drive variants,
+#: and the small profile's concise tool-description overrides — lives in
+#: korvid.agent.prompts; this module owns budgets and surface selection.
 
 
 @dataclass(frozen=True)
@@ -128,7 +85,7 @@ def _trim(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     trimmed = copy.deepcopy(tools)
     for tool in trimmed:
         function = tool["function"]
-        override = _SMALL_DESCRIPTIONS.get(function["name"])
+        override = SMALL_TOOL_DESCRIPTIONS.get(function["name"])
         if override is not None:
             function["description"] = override
     return trimmed

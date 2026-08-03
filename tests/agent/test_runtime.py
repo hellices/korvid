@@ -3,7 +3,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, TurnComplete
-from korvid.agent.runtime import MAX_HISTORY_TURNS, NO_WRITE_PROMPT, AgentRuntime
+from korvid.agent.prompts import NO_WRITE_PROMPT
+from korvid.agent.runtime import MAX_HISTORY_TURNS, AgentRuntime
 
 
 class ScriptedProvider:

@@ -16,61 +16,14 @@ from korvid.agent.events import (
     ToolCallStarted,
     TurnComplete,
 )
+from korvid.agent.prompts import compose_system_prompt
 from korvid.tools.executor import (
     READ_TOOLS,
-    UI_TOOL_NAMES,
-    WRITE_TOOL_NAMES,
     cap_result,
     compact_result,
 )
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = (
-    "You are korvid's Kubernetes diagnostic agent, embedded in a live TUI the "
-    "user is looking at right now. "
-    "Use tools to inspect cluster state, cite evidence from tool results, "
-    "and never guess resource state."
-)
-
-# Appended when no write tools are armed (readonly mode or writes not wired):
-# instead of a bare refusal the agent offers the exact kubectl command.
-NO_WRITE_PROMPT = (
-    "You have no write tools in this session: when the user asks you to "
-    "modify cluster state (scale, edit, delete, restart, apply), say write "
-    "actions are not enabled and give the exact kubectl command they can run "
-    "themselves instead."
-)
-
-# Appended only when the approval-gated write tools are armed. The armed
-# tool names are prepended dynamically in __init__ so the instruction never
-# omits a conditionally registered tool (resize_pod) or advertises one that
-# was not offered.
-WRITE_PROMPT = (
-    "These never execute directly: each call opens an "
-    "approval dialog in the TUI, and the operation runs only if the user "
-    "approves it with a keystroke. State clearly what you are about to "
-    "request and why before calling a write tool, and report the outcome "
-    "(approved, denied, expired, or failed) afterwards. Never retry a denied "
-    "or expired request unless the user explicitly asks: an expired request "
-    "means nobody answered the dialog, and reissuing it would keep reopening "
-    "approval dialogs the user is not acting on."
-)
-
-# Appended only when the runtime is armed with the UI-control tools, so the
-# model is never told about capabilities the provider was not offered.
-UI_DRIVE_PROMPT = (
-    "You can also drive the TUI itself: navigate (switch the resource view), "
-    "set_filter (narrow the visible rows), open_logs (show a pod's live logs "
-    "on screen), open_describe (show a resource's manifest and events), and "
-    "drill_down (from a deployment into its replicaset history, from a "
-    "replicaset into its pods, or from a helm release into its revision "
-    "history — following ownership). "
-    "Prefer showing evidence on screen with these tools while you narrate — "
-    "for example, when you find a failing pod, open its logs or describe view "
-    "so the user sees exactly what you see. These screen tools change nothing "
-    "in the cluster. Keep your text concise; the screen carries the detail."
-)
 
 # History is trimmed to the most recent turns to bound token cost; a turn
 # begins at a "user" message, so trimming never splits assistant/tool pairs.
@@ -129,40 +82,6 @@ def _estimate_missing_usage(state: _StreamState, prompt_estimate: int) -> None:
         state.out_tok = _stream_output_chars(state) // 4
 
 
-def _compose_system_prompt(
-    tools: list[dict[str, Any]],
-    cluster_context: str | None,
-    *,
-    system_prompt: str | None = None,
-    ui_prompt: str | None = None,
-) -> str:
-    """System prompt for the armed tool set and detected environment.
-
-    Shared by ``__init__`` and ``retarget`` so a runtime that survives a
-    `:ctx` switch describes the *new* cluster and tool set, not the one it
-    was built against. Capability profiles (issue #71) swap the role
-    statement and the UI-drive instruction via `system_prompt`/`ui_prompt`;
-    the write/no-write clause stays conditional on what is actually armed,
-    whichever profile.
-    """
-    prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
-    if cluster_context:
-        # Detected-environment note (e.g. cloud provider, issue #30):
-        # placed right after the role statement so provider-specific
-        # requests are grounded before any tool instructions.
-        prompt = f"{prompt} {cluster_context}"
-    armed = {t.get("function", {}).get("name") for t in tools}
-    if armed & UI_TOOL_NAMES:
-        prompt = f"{prompt} {ui_prompt if ui_prompt is not None else UI_DRIVE_PROMPT}"
-    armed_writes = sorted(armed & WRITE_TOOL_NAMES)
-    if armed_writes:
-        names = ", ".join(armed_writes)
-        prompt = f"{prompt} You can request cluster writes with {names}. {WRITE_PROMPT}"
-    else:
-        prompt = f"{prompt} {NO_WRITE_PROMPT}"
-    return prompt
-
-
 class AgentRuntime:
     """Drives the provider + tools loop, emitting typed AgentEvent objects."""
 
@@ -192,7 +111,7 @@ class AgentRuntime:
         # UI-drive instruction (issue #71), not reset them to the defaults.
         self._system_prompt_override = system_prompt
         self._ui_prompt_override = ui_prompt
-        prompt = _compose_system_prompt(
+        prompt = compose_system_prompt(
             self._tools,
             cluster_context,
             system_prompt=system_prompt,
@@ -231,7 +150,7 @@ class AgentRuntime:
         self._tools_chars = len(json.dumps(self._tools))
         self._messages[0] = {
             "role": "system",
-            "content": _compose_system_prompt(
+            "content": compose_system_prompt(
                 tools,
                 cluster_context,
                 system_prompt=self._system_prompt_override,
