@@ -69,8 +69,9 @@ def test_crash_cap_stops_a_deterministic_crash_loop(
     runner = FlakyRunner(failures=100)
     with pytest.raises(RuntimeError, match="boom"):
         _run_with_recovery(runner, allow_restart=True, prompt=lambda: "y", clock=lambda: 0.0)
-    # cap crashes within the window are prompted; the next one stops the loop
-    assert runner.calls == RESTART_CAP + 1
+    # the documented cap: the RESTART_CAP-th crash within the window stops
+    # the loop — crashes 1..CAP-1 are prompted, crash CAP is not
+    assert runner.calls == RESTART_CAP
     assert "not restarting" in capsys.readouterr().err
 
 
@@ -115,6 +116,21 @@ def test_system_exit_propagates_without_prompting() -> None:
         _run_with_recovery(runner, allow_restart=True, prompt=prompt, clock=lambda: 0.0)
 
 
+def test_restart_prompt_writes_to_stderr(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Interactivity keys off stdin/stderr, so the question must go to
+    stderr — a redirected stdout would otherwise swallow it (and be
+    contaminated by it)."""
+    from korvid.__main__ import _restart_prompt
+
+    monkeypatch.setattr("builtins.input", lambda: "y")
+    assert _restart_prompt() == "y"
+    captured = capsys.readouterr()
+    assert "restart?" in captured.err
+    assert captured.out == ""
+
+
 def test_traceback_is_logged_on_every_crash(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -123,3 +139,46 @@ def test_traceback_is_logged_on_every_crash(
         _run_with_recovery(runner, allow_restart=True, prompt=lambda: "y", clock=lambda: 0.0)
     assert any("crashed" in r.message for r in caplog.records)
     assert any(r.exc_info for r in caplog.records)  # full traceback recorded
+
+
+async def test_startup_failure_after_connect_closes_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wiring exception between `kube.connect()` and the run loop must not
+    leak the connected client into a recovery restart (review on #179)."""
+    import korvid.__main__ as main_mod
+    from korvid.core.config import KorvidConfig
+
+    class FakeKube:
+        def __init__(self, **kwargs: object) -> None:
+            self.closed = False
+
+        async def connect(self, context: str | None) -> None:
+            return None
+
+        async def close(self) -> None:
+            self.closed = True
+
+    created: list[FakeKube] = []
+
+    def make_kube(**kwargs: object) -> FakeKube:
+        kube = FakeKube(**kwargs)
+        created.append(kube)
+        return kube
+
+    monkeypatch.setattr(main_mod, "KubeClient", make_kube)
+    monkeypatch.setattr(
+        main_mod,
+        "_load_startup_config",
+        lambda readonly, mcp, namespace: KorvidConfig(namespace="default"),
+    )
+
+    async def boom(kube: object, *, readonly: bool = False) -> bool:
+        raise RuntimeError("startup probe failed")
+
+    monkeypatch.setattr(main_mod, "_probe_pod_resize", boom)
+
+    with pytest.raises(RuntimeError, match="startup probe failed"):
+        await main_mod._run()
+    assert created  # the client was built…
+    assert created[0].closed  # …and the connected client never leaks
