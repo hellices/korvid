@@ -103,7 +103,7 @@ def test_keyboard_interrupt_propagates_without_prompting() -> None:
     def prompt() -> str:
         raise AssertionError("prompt must never be called on KeyboardInterrupt")
 
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(KeyboardInterrupt, match=r"^$"):
         _run_with_recovery(runner, allow_restart=True, prompt=prompt, clock=lambda: 0.0)
 
 
@@ -114,7 +114,7 @@ def test_system_exit_propagates_without_prompting() -> None:
     def prompt() -> str:
         raise AssertionError("prompt must never be called on SystemExit")
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit, match="2"):
         _run_with_recovery(runner, allow_restart=True, prompt=prompt, clock=lambda: 0.0)
 
 
