@@ -49,6 +49,22 @@ _MAX_CATALOG_PACKAGES = 60
 _TRUNCATION_SUFFIX = "\n… [truncated — narrow the query]"
 
 
+def _reject_slash_name(value: str, field: str) -> str:
+    """Reject a 'namespace/name' composite before it burns an API 404.
+
+    Kubernetes object names can never contain '/' (DNS subdomain rules),
+    but models — small ones especially — paste composites from row keys or
+    prose into the name field. Failing locally with wording that teaches
+    the split costs no cluster round-trip and no loop iteration.
+    """
+    if "/" in value:
+        raise ValueError(
+            f"invalid {field} {value!r}: Kubernetes names never contain '/'. "
+            f"If this is 'namespace/name', pass 'namespace' and '{field}' separately."
+        )
+    return value
+
+
 def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
     """Enforce the tool-result ingest cap; shared by every path that feeds
     a result into conversation history. Profiles may pass a tighter
@@ -716,7 +732,7 @@ class ToolExecutor:
 
     async def _get_resource(self, args: dict[str, Any]) -> str:
         kind = str(args["kind"]).strip().lower()
-        name = str(args["name"])
+        name = _reject_slash_name(str(args["name"]), "name")
         namespace: str | None = args.get("namespace")
         meta = self._api_meta(kind)
         # A namespaced kind without a namespace would hit an invalid
@@ -728,7 +744,7 @@ class ToolExecutor:
         return yaml.safe_dump(manifest, default_flow_style=False, allow_unicode=True)
 
     async def _get_logs(self, args: dict[str, Any]) -> str:
-        pod = str(args["pod"])
+        pod = _reject_slash_name(str(args["pod"]), "pod")
         namespace = str(args["namespace"])
         container: str = str(args.get("container") or "")
         raw_tail = args.get("tail_lines", 100)
@@ -754,7 +770,7 @@ class ToolExecutor:
     async def _get_events(self, args: dict[str, Any]) -> str:
         kind = str(args["kind"]).strip().lower()
         namespace = str(args["namespace"])
-        name = str(args["name"])
+        name = _reject_slash_name(str(args["name"]), "name")
         meta = self._api_meta(kind)
         # Fetch the live object so events are scoped to this exact incarnation
         # (kind + UID), not merely anything sharing the name.
@@ -984,7 +1000,7 @@ class ToolExecutor:
         ``MAX_RESULT_CHARS`` without the shared prefix-truncation ever
         eating the final log evidence.
         """
-        name = str(args["pod"])
+        name = _reject_slash_name(str(args["pod"]), "pod")
         namespace = str(args["namespace"])
         pods_meta = self._api_meta("pods")
         pod = await self._kube.get_object(pods_meta, namespace, name)

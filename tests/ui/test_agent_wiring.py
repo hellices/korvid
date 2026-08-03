@@ -131,6 +131,31 @@ async def test_screen_context_includes_current_view() -> None:
         assert "scope=default" in ctx
 
 
+async def test_screen_context_splits_selected_namespace_from_name() -> None:
+    """Row keys are 'namespace/name' composites; fed verbatim as
+    `selected=` they teach the model to paste the whole string as a pod
+    name (observed: get_resource name='default/otel-…' -> 404). The
+    context must hand the model the two fields it actually needs."""
+    runtime = StubRuntime([TurnComplete(input_tokens=0, output_tokens=0, estimated=True)])
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+a")
+        inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
+        inp.value = "q"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert runtime.calls
+        ctx = runtime.calls[0][1]
+        selected = next(
+            (part for part in ctx.split() if part.startswith("selected=")), "selected=-"
+        )
+        assert "/" not in selected.removeprefix("selected=")
+        if selected != "selected=-":
+            assert "selected_ns=" in ctx
+
+
 async def test_second_submit_ignored_while_turn_running() -> None:
     runtime = StubRuntime([TextDelta(text="thinking")], block=True)
     app = make_app(runtime)

@@ -47,6 +47,35 @@ def test_read_tools_all_have_type_function() -> None:
         assert "parameters" in tool["function"]
 
 
+class _ExplodingKube:
+    """Fails the test if any cluster call is made."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"cluster reached via {name} — slash guard must reject first")
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("get_resource", {"kind": "pods", "name": "default/web-1", "namespace": "app"}),
+        ("get_events", {"kind": "pods", "name": "default/web-1", "namespace": "app"}),
+        ("get_logs", {"pod": "default/web-1", "namespace": "app"}),
+        ("diagnose_pod", {"pod": "default/web-1", "namespace": "app"}),
+    ],
+)
+async def test_slash_in_name_is_rejected_with_guidance_before_any_api_call(
+    tool: str, args: dict[str, Any]
+) -> None:
+    """Small models paste 'namespace/name' composites (from row keys or
+    prose) as the name and burn an iteration on a 404. Kubernetes names
+    can never contain '/', so reject locally with wording that teaches
+    the model to split the two fields."""
+    out = await make_executor(_ExplodingKube()).execute(tool, args)
+    assert out.startswith("ERROR:")
+    assert "never contain '/'" in out
+    assert "separately" in out
+
+
 async def test_get_resource_masks_secret_data() -> None:
     kube = FakeKube()
     kube.manifest = {

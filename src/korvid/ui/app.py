@@ -8381,12 +8381,22 @@ class KorvidApp(App[None]):
         """What the agent is told about the screen: the focused pane in
         detail plus a one-line summary of the other pane (issue #48), so
         context stays bounded in a split workspace."""
+        selected = self._selected_row_name() or "-"
+        selected_ns = ""
+        if "/" in selected:
+            # Row keys are 'namespace/name' composites; fed verbatim they
+            # teach the model to paste the whole string as a resource name
+            # (observed: get_resource name='default/otel-…' -> 404). Hand
+            # over the two fields the tool calls actually take.
+            selected_ns, _, selected = selected.partition("/")
         context = (
             f"context={self.config.kube_context or '-'} "
             f"view={self.current_kind} scope={self.current_scope} "
-            f"selected={self._selected_row_name() or '-'} "
-            f"filter={self.filter_pattern or '-'}"
+            f"selected={selected}"
         )
+        if selected_ns:
+            context += f" selected_ns={selected_ns}"
+        context += f" filter={self.filter_pattern or '-'}"
         if len(self._panes) == 2:
             other = self._panes[1 - self._focused_pane]
             context += f" other_pane={other.kind} other_scope={other.scope}"
