@@ -1,0 +1,257 @@
+name: Release
+
+# Signed PyPI releases with SBOMs and verified offline bundles (issue #169).
+# Triggered only by an annotated vX.Y.Z tag; the tag must match
+# pyproject.toml or nothing is built. One build's artifacts are promoted to
+# both PyPI (OIDC Trusted Publishing — no stored token) and the GitHub
+# Release. Every gate below is fail-closed for publication.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: korvid-runners
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          # Publishing workflow: caching is a poisoning vector (zizmor).
+          enable-cache: false
+      - id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(uv run --no-project python scripts/release/check_version.py "$TAG")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: uv sync --locked --dev --all-extras
+      - run: uv run ruff check src/ tests/
+      - run: uv run mypy
+      - run: uv run tach check
+      - run: uvx deptry src/
+      - run: uv run pytest --cov --cov-fail-under=80
+      # Vulnerability audit against the locked resolution (fail-closed).
+      - run: uv export --frozen --no-emit-project --no-dev -o requirements.txt
+      - run: uvx pip-audit -r requirements.txt --disable-pip
+
+  build:
+    needs: verify
+    runs-on: korvid-runners
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          # Publishing workflow: caching is a poisoning vector (zizmor).
+          enable-cache: false
+      # Built exactly once; these files are promoted to PyPI and the
+      # GitHub Release without rebuilding.
+      - run: uv build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  smoke:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dist
+          path: dist
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the built wheel into a clean venv and smoke-test
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install "dist/korvid-${VERSION}-py3-none-any.whl"
+          /tmp/smoke/bin/python -c "import korvid"
+          /tmp/smoke/bin/korvid --help
+
+  sbom:
+    needs: [verify, build]
+    runs-on: korvid-runners
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          # Publishing workflow: caching is a poisoning vector (zizmor).
+          enable-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dist
+          path: dist
+      # CycloneDX SBOM over korvid plus the full locked runtime graph
+      # (all extras, no dev), generated from the committed uv.lock.
+      - run: uv export --frozen --all-extras --no-dev -o requirements-sbom.txt
+      - run: uvx cyclonedx-py requirements requirements-sbom.txt --of JSON -o sbom.cdx.json
+      - name: Release metadata (source, python, platform, lockfile digest)
+        env:
+          COMMIT: ${{ github.sha }}
+        run: |
+          uv run --no-project python scripts/release/metadata.py \
+            --output release-metadata.json --commit "$COMMIT"
+      - name: Checksums over every published file
+        run: |
+          cp dist/* .
+          shasum -a 256 korvid-* sbom.cdx.json release-metadata.json > SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom
+          path: |
+            sbom.cdx.json
+            release-metadata.json
+            SHA256SUMS
+          if-no-files-found: error
+
+  offline:
+    needs: [verify, build]
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    # Native runners on purpose: each wheelhouse must contain real install
+    # candidates for its platform, not cross-platform guesses.
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          # Publishing workflow: caching is a poisoning vector (zizmor).
+          enable-cache: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dist
+          path: dist
+      - name: Build the platform wheelhouse from the locked resolution
+        shell: bash
+        run: |
+          uv export --frozen --all-extras --no-dev --no-emit-project -o requirements-offline.txt
+          python -m pip install --upgrade pip wheel
+          python -m pip wheel -r requirements-offline.txt -w wheelhouse
+          cp dist/*.whl wheelhouse/
+      - name: SBOM for the bundle (same locked graph)
+        shell: bash
+        run: uvx cyclonedx-py requirements requirements-offline.txt --of JSON -o sbom.cdx.json
+      - name: Assemble the bundle
+        id: assemble
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          RUNNER_OS_NAME: ${{ runner.os }}
+          PYVER: ${{ matrix.python-version }}
+        run: |
+          case "$RUNNER_OS_NAME" in
+            Linux) platform_tag="linux-x86_64" ;;
+            Windows) platform_tag="windows-x86_64" ;;
+            *) echo "unsupported runner $RUNNER_OS_NAME"; exit 1 ;;
+          esac
+          archive=$(python scripts/release/bundle.py \
+            --version "$VERSION" --platform-tag "$platform_tag" \
+            --python-tag "$PYVER" --wheels wheelhouse \
+            --sbom sbom.cdx.json --output out)
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "bundle_dir=out/korvid-$VERSION-offline-$platform_tag-py$PYVER" >> "$GITHUB_OUTPUT"
+      - name: Verify offline (checksums, --no-index install, negative check)
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          BUNDLE_DIR: ${{ steps.assemble.outputs.bundle_dir }}
+          # Belt and braces: even a bug that dropped --no-index must not
+          # find an index during verification.
+          PIP_INDEX_URL: http://127.0.0.1:1/
+        run: |
+          python scripts/release/offline_verify.py --bundle "$BUNDLE_DIR" --version "$VERSION"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: offline-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: ${{ steps.assemble.outputs.archive }}
+          if-no-files-found: error
+
+  attest:
+    needs: [build, sbom, offline]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: artifacts
+      - name: Flatten artifact tree
+        run: |
+          mkdir release-files
+          find artifacts -type f -exec cp {} release-files/ \;
+          ls -l release-files
+      # Verifiable build provenance for the wheel, sdist, SBOM, checksums,
+      # metadata, and every offline archive.
+      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
+        with:
+          subject-path: release-files/*
+
+  publish-pypi:
+    needs: [verify, smoke, sbom, offline, attest]
+    runs-on: ubuntu-latest
+    # Protected environment: PyPI Trusted Publishing binds to this exact
+    # workflow + environment; there is no API token anywhere.
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: dist/
+
+  github-release:
+    needs: [verify, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: artifacts
+      - name: Create the GitHub Release with the exact same artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir release-files
+          find artifacts -type f -exec cp {} release-files/ \;
+          gh release create "$TAG" release-files/* \
+            --repo "$REPO" \
+            --title "korvid $TAG" \
+            --verify-tag \
+            --generate-notes

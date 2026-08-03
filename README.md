@@ -141,6 +141,29 @@ an install hint. Explicitly enabling a feature whose extra is missing
 (`--mcp`, `agent.provider` in config) fails at startup with an actionable
 message. `[entra]` adds Entra ID auth for Azure OpenAI.
 
+### Releases
+
+Tagged releases (`vX.Y.Z`) publish signed artifacts to PyPI via OIDC
+Trusted Publishing and attach the same files to the GitHub Release:
+wheel, sdist, `SHA256SUMS`, a CycloneDX SBOM covering the full locked
+dependency graph, build-provenance attestations, and offline wheelhouse
+bundles for Linux/Windows x86-64 on Python 3.11–3.13. Once the first
+release lands, install with:
+
+```sh
+uv tool install 'korvid[all]==X.Y.Z'   # or: pip install 'korvid[all]==X.Y.Z'
+```
+
+Verify a downloaded artifact against its checksum and provenance:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+gh attestation verify korvid-X.Y.Z-py3-none-any.whl --repo hellices/korvid
+```
+
+Offline installation from the wheelhouse bundles is documented in the
+[air-gapped guide](docs/airgap.md#offline-installation-bundles).
+
 ### Development
 
 ```sh
