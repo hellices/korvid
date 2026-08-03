@@ -757,6 +757,12 @@ class KorvidApp(App[None]):
         #: screen sits idle while the agent reads "behind its back". Config
         #: seeds the state (default on); `:ai follow on|off` toggles it.
         self._agent_follow: bool = config.agent_follow
+        #: The shared serialized UI bridge (the composition root's
+        #: `_UIBridgeProxy`): agent-follow mirrors route through it so they
+        #: serialize with the agent's own UI tools and concurrent MCP UI
+        #: calls - log-pane swaps and describes must never interleave.
+        #: None (tests, degraded wiring) falls back to a direct adapter.
+        self._agent_follow_bridge: UIBridge | None = None
         #: External MCP write proposals (issue #110): shared with the MCP
         #: server; None when the feature is disabled.
         self._proposal_store = proposal_store
@@ -8453,7 +8459,7 @@ class KorvidApp(App[None]):
             return  # small models emit broken JSON; the read still answered
         if not isinstance(arguments, dict):
             return
-        await mirror_read(AppUIBridge(self), name, arguments)
+        await mirror_read(self._agent_follow_bridge or AppUIBridge(self), name, arguments)
 
     # ------------------------------------------------------------------
     # UIBridge implementation (spec §4.1 UI Bus): the agent drives the

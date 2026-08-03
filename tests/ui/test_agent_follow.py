@@ -137,3 +137,32 @@ async def test_mirror_refuses_to_cover_a_describe_screen_the_user_is_reading() -
         await app._run_agent_turn("what is wrong with web-1?")
         await pilot.pause()
         assert app.screen is reading  # the user's screen was not covered
+
+
+async def test_mirror_routes_through_the_injected_serialized_bridge() -> None:
+    """Agent-follow mirrors must go through the shared `_UIBridgeProxy`
+    (the composition root's serialized bridge), not a fresh AppUIBridge:
+    the proxy's lock is what keeps agent and MCP UI operations - log-pane
+    swaps, describes - from interleaving."""
+    import asyncio
+
+    from korvid.__main__ import _UIBridgeProxy
+    from korvid.ui.app import AppUIBridge
+
+    app = make_app()
+    proxy = _UIBridgeProxy()
+    app._agent_follow_bridge = proxy
+    app._agent_runtime = _ScriptedRuntime(_read_events())  # type: ignore[assignment]  # fake
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        proxy.target = AppUIBridge(app)
+        # An in-flight MCP UI operation holds the proxy's lock: the mirror
+        # must queue behind it instead of interleaving.
+        await proxy._lock.acquire()
+        turn = asyncio.create_task(app._run_agent_turn("what is wrong with web-1?"))
+        await pilot.pause(0.05)
+        assert not isinstance(app.screen, DescribeScreen)  # still queued
+        proxy._lock.release()
+        await turn
+        await pilot.pause()
+        assert isinstance(app.screen, DescribeScreen)  # landed after the lock
