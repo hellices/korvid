@@ -176,7 +176,7 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
         agent_api_key_env="KORVID_TEST_KEY",
     )
     kube_stub = cast("Any", object())  # wiring never touches kube before a tool call
-    runtime, _, _, _, _, proxy = _build_agent_wiring(config, kube_stub, {})
+    runtime, _, _, _, _, _, proxy = _build_agent_wiring(config, kube_stub, {})
     assert runtime is not None
     names = [t["function"]["name"] for t in runtime._tools]
     assert "navigate" in names
@@ -186,7 +186,7 @@ def test_agent_wiring_includes_ui_tools(monkeypatch: object) -> None:
     assert executor._ui is proxy
 
     # readonly strips every write tool: the model is never told they exist.
-    ro_runtime, _, _, _, _, _ = _build_agent_wiring(
+    ro_runtime, _, _, _, _, _, _ = _build_agent_wiring(
         dataclasses.replace(config, readonly=True), kube_stub, {}
     )
     assert ro_runtime is not None
@@ -218,15 +218,17 @@ def test_agent_wiring_gates_resize_tool_on_discovery(monkeypatch: object) -> Non
     )
     kube_stub = cast("Any", object())
 
-    runtime, _, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=True)
+    runtime, _, _, _, _, _, _ = _build_agent_wiring(
+        config, kube_stub, {}, pod_resize_supported=True
+    )
     assert runtime is not None
     assert "resize_pod" in [t["function"]["name"] for t in runtime._tools]
 
-    gated, _, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
+    gated, _, _, _, _, _, _ = _build_agent_wiring(config, kube_stub, {}, pod_resize_supported=False)
     assert gated is not None
     assert "resize_pod" not in [t["function"]["name"] for t in gated._tools]
 
-    ro, _, _, _, _, _ = _build_agent_wiring(
+    ro, _, _, _, _, _, _ = _build_agent_wiring(
         dataclasses.replace(config, readonly=True), kube_stub, {}, pod_resize_supported=True
     )
     assert ro is not None
@@ -518,7 +520,7 @@ async def test_agent_wiring_injects_cluster_context(monkeypatch: object) -> None
     )
     kube_stub = cast("Any", object())
     note = "This cluster runs on Azure (AKS managed)."
-    runtime, _, rebuild, retarget, _, _ = _build_agent_wiring(
+    runtime, _, rebuild, retarget, _, _, _ = _build_agent_wiring(
         config, kube_stub, {}, cluster_context=note
     )
     assert runtime is not None
@@ -800,7 +802,7 @@ async def test_agent_wiring_applies_the_small_profile(monkeypatch: object) -> No
         agent_profile="small",
     )
     kube_stub = cast("Any", object())
-    runtime, _, rebuild, _, _, _ = _build_agent_wiring(
+    runtime, _, rebuild, _, _, _, _ = _build_agent_wiring(
         config, kube_stub, {}, pod_resize_supported=True
     )
     assert runtime is not None
@@ -859,7 +861,7 @@ async def test_ctx_retarget_keeps_the_small_profile_surface(monkeypatch: object)
         agent_profile="small",
     )
     kube_stub = cast("Any", object())
-    runtime, _, _, retarget, _, _ = _build_agent_wiring(
+    runtime, _, _, retarget, _, _, _ = _build_agent_wiring(
         config, kube_stub, {}, pod_resize_supported=False
     )
     assert runtime is not None
@@ -1056,7 +1058,7 @@ def test_missing_agent_extra_degrades_when_not_enabled(
     from korvid.k8s.client import KubeClient
 
     _uninstall_packages(monkeypatch, *_AGENT_ROOTS)
-    runtime, configurator, rebuild, retarget, provider_box, _ = _build_agent_wiring(
+    runtime, configurator, rebuild, retarget, _, provider_box, _ = _build_agent_wiring(
         KorvidConfig(), cast("KubeClient", object()), {}
     )
     assert runtime is None
@@ -1131,7 +1133,7 @@ def test_mcp_only_install_does_not_compose_the_agent(
         if cached in ("korvid.agent.runtime", "korvid.agent.profiles"):
             monkeypatch.delitem(sys.modules, cached)
 
-    runtime, configurator, rebuild, _, provider_box, _ = _build_agent_wiring(
+    runtime, configurator, rebuild, _, _, provider_box, _ = _build_agent_wiring(
         KorvidConfig(), cast("KubeClient", object()), {}
     )
     assert runtime is None
@@ -1212,3 +1214,46 @@ def test_telepresence_wiring_respects_detection_and_kill_switch() -> None:
     with mock.patch("korvid.__main__.find_telepresence", return_value="/x/telepresence"):
         assert isinstance(_build_telepresence(KorvidConfig()), TelepresenceCLI)
         assert _build_telepresence(KorvidConfig(telepresence_enabled=False)) is None
+
+
+async def test_disconnect_agent_releases_the_provider(monkeypatch: object) -> None:
+    """`:ai off` (issue #167): the disconnect closure empties the provider
+    box (so teardown/rebuild never touch the dead provider) and closes the
+    old provider in the background."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+    )
+    kube_stub = cast("Any", object())
+    runtime, _, _, _, disconnect, provider_box, _ = _build_agent_wiring(config, kube_stub, {})
+    assert runtime is not None
+    provider = provider_box[0]
+    assert provider is not None
+    closed: list[bool] = []
+
+    async def fake_aclose() -> None:
+        closed.append(True)
+
+    mp.setattr(provider, "aclose", fake_aclose)
+    disconnect()
+    assert provider_box[0] is None  # the box never points at a dead provider
+    for _ in range(10):
+        if closed:
+            break
+        await asyncio.sleep(0.01)
+    assert closed == [True]  # released in the background, not leaked
+    disconnect()  # idempotent when already off
+    assert provider_box[0] is None

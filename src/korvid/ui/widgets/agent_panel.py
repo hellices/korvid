@@ -234,6 +234,18 @@ class AgentPanel(Vertical):
         chat.mount(ChatEntry(_SETUP_HINT, raw=_SETUP_HINT, classes="agent-msg"))
         self.query_one("#agent-input", Input).disabled = True
 
+    def show_reconnect_hint(self) -> None:
+        """Disconnected state (issue #167): the transcript stays, prompt
+        submission is disabled, and the way back is named."""
+        self._mount_entry(
+            ChatEntry(
+                Text("agent off — run :ai to reconnect", style="dim"),
+                raw="agent off — run :ai to reconnect",
+                classes="agent-msg",
+            )
+        )
+        self.query_one("#agent-input", Input).disabled = True
+
     def echo_user(self, text: str) -> None:
         """Show a user message immediately, before its turn starts.
 

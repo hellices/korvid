@@ -159,6 +159,18 @@ API — use the Anthropic API entry above for Claude models.
 
 Without configuration, `Ctrl-A` shows a setup hint pointing at `:ai`.
 
+### Turning the agent off and on
+
+`Ctrl-A` only toggles the panel's *visibility* — the runtime stays
+connected.  To actually disconnect for the session, use `:ai off`: the
+provider connection is released, the status bar flips to `AI off`, and
+prompt submission is disabled while the transcript stays visible.  The
+configured provider, model, profile, and credentials are all kept (nothing
+is rewritten in `config.yaml`), so a bare `:ai` reopens the wizard with the
+current settings and reconnects when applied.  `:ai off` is refused while a
+turn is running — stop the turn first (`Ctrl-X`) — and is a no-op when the
+agent is already off.
+
 ## Capability profiles
 
 Small local models (3B–14B) handle the agent's default surface — up to 15

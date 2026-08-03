@@ -698,6 +698,7 @@ class KorvidApp(App[None]):
         agent_model_name: str | None = None,
         agent_configurator: AgentConfigurator | None = None,
         rebuild_agent: Callable[[AgentSettings], AgentRuntime | None] | None = None,
+        disconnect_agent: Callable[[], None] | None = None,
         agent_available: bool = True,
         write_ops: WriteOps | None = None,
         audit: AuditLog | None = None,
@@ -899,6 +900,9 @@ class KorvidApp(App[None]):
         self._agent_model_name = agent_model_name
         self._agent_configurator = agent_configurator
         self._rebuild_agent = rebuild_agent
+        #: Releases the live provider on `:ai off` (issue #167) — session
+        #: state only; persisted configuration is untouched.
+        self._disconnect_agent = disconnect_agent
         #: False when the [agent] extra is absent (issue #73): the agent
         #: panel is not mounted and :ai/:model/Ctrl-A are not offered.
         self._agent_available = agent_available
@@ -2929,6 +2933,9 @@ class KorvidApp(App[None]):
             if len(parts) > 1 and parts[1].lower() == "follow":
                 self._handle_agent_follow_command(parts[2:])
                 return
+            if len(parts) > 1 and parts[1].lower() == "off":
+                self._handle_agent_off()
+                return
             self._open_agent_setup()
             return
         if head == "model" and self._agent_available:
@@ -2967,6 +2974,30 @@ class KorvidApp(App[None]):
             " — not found in this cluster's API (CRD not installed?)",
             severity="warning",
         )
+
+    def _handle_agent_off(self) -> None:
+        """`:ai off` (issue #167): disconnect the runtime for this session.
+
+        Keeps the configured provider/model/profile/credentials so bare
+        `:ai` reconnects without re-entry; never rewrites `agent.enabled`
+        or the persisted config. Refused while a turn runs — cancelling
+        midway is the interrupt key's job, not a state command's.
+        """
+        if self._agent_runtime is None:
+            self.notify("Agent is already off")
+            return
+        if self._agent_task is not None and not self._agent_task.done():
+            self.notify(
+                "Agent is busy — wait for the turn to finish (or stop it) before :ai off",
+                severity="warning",
+            )
+            return
+        if self._disconnect_agent is not None:
+            self._disconnect_agent()
+        self._agent_runtime = None
+        self._refresh_status()
+        self._agent_panel.show_reconnect_hint()
+        self.notify("Agent disconnected — run :ai to reconnect")
 
     def _open_agent_setup(self) -> None:
         if self._agent_configurator is None:

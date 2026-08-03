@@ -411,6 +411,7 @@ def _agent_unavailable_wiring(
     None,
     None,
     Callable[[AgentRuntime | None, bool, str | None], None],
+    Callable[[], None],
     list[LLMProvider | None],
     _UIBridgeProxy,
 ]:
@@ -432,7 +433,7 @@ def _agent_unavailable_wiring(
     ) -> None:
         return None
 
-    return None, None, None, _retarget_noop, provider_box, ui_proxy
+    return None, None, None, _retarget_noop, lambda: None, provider_box, ui_proxy
 
 
 def _build_agent_wiring(
@@ -448,6 +449,7 @@ def _build_agent_wiring(
     AgentConfigurator | None,
     Callable[[AgentSettings], AgentRuntime | None] | None,
     Callable[[AgentRuntime | None, bool, str | None], None],
+    Callable[[], None],
     list[LLMProvider | None],
     _UIBridgeProxy,
 ]:
@@ -621,7 +623,33 @@ def _build_agent_wiring(
             )
             runtime.retarget(tools=retarget_profile.tools, cluster_context=cluster_context)
 
-    return agent_runtime, configurator, rebuild_agent, retarget_agent, provider_box, ui_proxy
+    return (
+        agent_runtime,
+        configurator,
+        rebuild_agent,
+        retarget_agent,
+        _make_disconnect_agent(provider_box, close_tasks),
+        provider_box,
+        ui_proxy,
+    )
+
+
+def _make_disconnect_agent(
+    provider_box: list[LLMProvider | None], close_tasks: set[asyncio.Task[None]]
+) -> Callable[[], None]:
+    """`:ai off` (issue #167): release the live provider for the session.
+
+    Persisted configuration is untouched, so a later wizard rebuild
+    reconnects with the kept settings. Idempotent when already off.
+    """
+
+    def disconnect_agent() -> None:
+        old = provider_box[0]
+        provider_box[0] = None
+        if old is not None:
+            _close_provider_in_background(old, close_tasks)
+
+    return disconnect_agent
 
 
 def _load_startup_config(
@@ -910,15 +938,17 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
     # the agent system prompt and the Service/Ingress describe footer.
     provider_info = await _probe_cloud_provider(kube)
 
-    agent_runtime, configurator, rebuild_agent, retarget_agent, _, ui_proxy = _build_agent_wiring(
-        config,
-        kube,
-        aliases,
-        pod_resize_supported=pod_resize_supported,
-        cluster_context=cluster_context_note(provider_info),
-        # Ownership lands in the teardown guard's box the moment the
-        # provider exists, so partial agent wiring is also cleaned up.
-        provider_box=state.provider_box,
+    agent_runtime, configurator, rebuild_agent, retarget_agent, disconnect_agent, _, ui_proxy = (
+        _build_agent_wiring(
+            config,
+            kube,
+            aliases,
+            pod_resize_supported=pod_resize_supported,
+            cluster_context=cluster_context_note(provider_info),
+            # Ownership lands in the teardown guard's box the moment the
+            # provider exists, so partial agent wiring is also cleaned up.
+            provider_box=state.provider_box,
+        )
     )
 
     mcp_hooks = _MCPAppHooks()
@@ -949,6 +979,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
         agent_model_name=config.agent_model,
         agent_configurator=configurator,
         rebuild_agent=rebuild_agent,
+        disconnect_agent=disconnect_agent,
         # The wiring returns no configurator only when the [agent] extra is
         # absent — the app then hides the agent panel and its commands.
         agent_available=configurator is not None,
