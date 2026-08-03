@@ -139,9 +139,9 @@ async def test_private_ca_endpoint_needs_the_bundle(tmp_path: Path) -> None:
 
 async def test_factory_and_providers_share_one_trust_builder(tmp_path: Path) -> None:
     """The :ai connection test and the live providers build their clients
-    through the same CA-aware transport — they cannot disagree about
-    trust, and all three name the configured bundle on failure."""
-    from korvid.providers.net import _CANamedTransport
+    through the same CA-aware client — they cannot disagree about trust,
+    and all three name the configured bundle on failure."""
+    from korvid.providers.net import _CANamedClient
     from korvid.providers.ollama import OllamaProvider
     from korvid.providers.openai_compat import OpenAICompatProvider
 
@@ -151,12 +151,11 @@ async def test_factory_and_providers_share_one_trust_builder(tmp_path: Path) -> 
     ollama = OllamaProvider(base_url="https://ollama.corp", model="m", ca_bundle=str(ca_pem))
     clients = [factory_client, openai._get_client(), ollama._get_client()]
     try:
-        transports = [client._transport for client in clients]
-        assert len(transports) == 3  # wizard test + both live providers
+        assert len(clients) == 3  # wizard test + both live providers
         # Same builder → same verification posture for wizard and runtime.
-        assert all(isinstance(t, _CANamedTransport) for t in transports)
+        assert all(isinstance(c, _CANamedClient) for c in clients)
         assert all(
-            t._ca_bundle_path == str(ca_pem) for t in transports if isinstance(t, _CANamedTransport)
+            c._ca_bundle_path == str(ca_pem) for c in clients if isinstance(c, _CANamedClient)
         )
     finally:
         for client in clients:
@@ -211,3 +210,17 @@ async def test_verification_failure_names_the_configured_bundle(tmp_path: Path) 
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+async def test_ca_bundle_keeps_environment_proxy_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Configuring network.ca_bundle must not turn off standard proxy
+    environment behavior (HTTP(S)_PROXY / NO_PROXY) — a custom transport
+    would (review on #181)."""
+    ca_pem, _, _ = _mint_ca_and_server_cert(tmp_path)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp.example:3128")
+    async with make_http_client_factory(str(ca_pem))() as client:
+        # httpx materializes env proxies as mounted transports; a client
+        # built with transport= skips that discovery entirely.
+        assert client._mounts  # the proxy mount exists alongside the CA trust
