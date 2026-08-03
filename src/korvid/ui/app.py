@@ -8555,6 +8555,13 @@ class KorvidApp(App[None]):
                 "ERROR: an approval dialog is open — the user is deciding; "
                 "wait for their decision before opening logs"
             )
+        if isinstance(self.screen, DescribeScreen):
+            # Same user-priority rule as describe/navigate/drill: opening
+            # logs swaps the streams beneath the modal the user is reading.
+            return (
+                "ERROR: a describe screen is open — the user is reading it; "
+                "ask them to close it (Esc) before opening logs"
+            )
         if self._stream_logs is None:
             return "ERROR: log streaming unavailable in this session"
         pane_gen = self._log_pane_gen

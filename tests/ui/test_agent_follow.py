@@ -52,7 +52,7 @@ async def test_successful_agent_read_is_mirrored_as_describe() -> None:
 async def test_failed_agent_read_is_not_mirrored() -> None:
     """A 404'd read must not steer the screen to a view it never loaded."""
     app = make_app()
-    app._agent_runtime = _ScriptedRuntime(_read_events(ok=False))  # type: ignore[assignment]
+    app._agent_runtime = _ScriptedRuntime(_read_events(ok=False))  # type: ignore[assignment]  # fake
     async with app.run_test() as pilot:
         await pilot.pause()
         await app._run_agent_turn("what is wrong with web-1?")
@@ -174,3 +174,30 @@ async def test_mirror_routes_through_the_injected_serialized_bridge() -> None:
         await turn
         await pilot.pause()
         assert isinstance(app.screen, DescribeScreen)  # landed after the lock
+
+
+async def test_log_mirror_refuses_while_a_describe_screen_is_open() -> None:
+    """Same user-priority rule for the get_logs mapping: opening logs
+    tears down the streams beneath the describe modal the user is
+    reading - the mirror must refuse, not swap them."""
+    app = make_app()
+    events: list[AgentEvent] = [
+        ToolCallStarted(
+            call_id="c1",
+            name="get_logs",
+            arguments='{"pod": "web-1", "namespace": "default"}',
+        ),
+        ToolCallFinished(call_id="c1", name="get_logs", ok=True, summary=""),
+    ]
+    app._agent_runtime = _ScriptedRuntime(events)  # type: ignore[assignment]  # fake
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = await app.agent_open_describe("pods", "web-2", "default")
+        assert not first.startswith("ERROR:")
+        await pilot.pause()
+        reading = app.screen
+        assert isinstance(reading, DescribeScreen)
+        await app._run_agent_turn("show me web-1 logs")
+        await pilot.pause()
+        assert app.screen is reading  # the modal kept focus
+        assert not app._log_pane.display  # no stream opened beneath it
