@@ -8701,6 +8701,15 @@ class KorvidApp(App[None]):
                 "ERROR: an approval dialog is open — the user is deciding; "
                 "wait for their decision before opening screens"
             )
+        if isinstance(self.screen, DescribeScreen):
+            # Same user-priority rule as agent_navigate/agent_drill_down
+            # (and the docs/agent.md follow contract): a describe screen on
+            # top is being read — covering it with another would replace
+            # the content mid-read. User action takes priority.
+            return (
+                "ERROR: a describe screen is open — the user is reading it; "
+                "ask them to close it (Esc) before opening another"
+            )
         if self._get_manifest is None:
             return "ERROR: describe unavailable in this session"
         meta = self.aliases.get(kind.strip().lower())

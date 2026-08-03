@@ -76,6 +76,26 @@ async def test_slash_in_name_is_rejected_with_guidance_before_any_api_call(
     assert "separately" in out
 
 
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("get_resource", {"kind": "pods", "name": "web-1", "namespace": "default/web-1"}),
+        ("get_events", {"kind": "pods", "name": "web-1", "namespace": "default/web-1"}),
+        ("get_logs", {"pod": "web-1", "namespace": "default/web-1"}),
+        ("diagnose_pod", {"pod": "web-1", "namespace": "default/web-1"}),
+    ],
+)
+async def test_slash_in_namespace_is_rejected_symmetrically(
+    tool: str, args: dict[str, Any]
+) -> None:
+    """The inverse paste also happens: the composite lands in the
+    namespace field. Namespace names can never contain '/' either -
+    same local rejection, same teaching, no API round-trip."""
+    out = await make_executor(_ExplodingKube()).execute(tool, args)
+    assert out.startswith("ERROR:")
+    assert "never contain '/'" in out
+
+
 async def test_get_resource_masks_secret_data() -> None:
     kube = FakeKube()
     kube.manifest = {

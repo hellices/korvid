@@ -116,3 +116,24 @@ def test_agent_follow_config_defaults_on() -> None:
     from korvid.core.config import KorvidConfig
 
     assert KorvidConfig().agent_follow is True
+
+
+async def test_mirror_refuses_to_cover_a_describe_screen_the_user_is_reading() -> None:
+    """docs/agent.md contract: 'a mirror is refused while … a describe
+    screen you are reading is open'. The user opens a describe modal while
+    a turn is in flight - a successful get_resource must not push another
+    describe over it."""
+    app = make_app()
+    app._agent_runtime = _ScriptedRuntime(_read_events())  # type: ignore[assignment]  # fake
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # The user is already reading a describe screen (e.g. pressed `d`
+        # after hiding the chat panel) when the agent's read lands.
+        first = await app.agent_open_describe("pods", "web-2", "default")
+        assert not first.startswith("ERROR:")
+        await pilot.pause()
+        assert isinstance(app.screen, DescribeScreen)
+        reading = app.screen
+        await app._run_agent_turn("what is wrong with web-1?")
+        await pilot.pause()
+        assert app.screen is reading  # the user's screen was not covered

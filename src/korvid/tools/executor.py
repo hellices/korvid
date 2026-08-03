@@ -52,17 +52,18 @@ _TRUNCATION_SUFFIX = "\n… [truncated — narrow the query]"
 def _reject_slash_name(value: str, field: str) -> str:
     """Reject a 'namespace/name' composite before it reaches the cluster.
 
-    Kubernetes object names can never contain '/' (DNS subdomain rules),
-    but models — small ones especially — paste composites from row keys or
-    prose into the name field. The call still consumes its agent-loop
-    iteration like any errored tool call; what failing locally buys is no
-    API round-trip and recovery guidance that teaches the split instead
-    of a bare 404.
+    Kubernetes object and namespace names can never contain '/' (DNS
+    subdomain rules), but models — small ones especially — paste
+    composites from row keys or prose into either field. The call still
+    consumes its agent-loop iteration like any errored tool call; what
+    failing locally buys is no API round-trip and recovery guidance that
+    teaches the split instead of a bare 404.
     """
     if "/" in value:
         raise ValueError(
             f"invalid {field} {value!r}: Kubernetes names never contain '/'. "
-            f"If this is 'namespace/name', pass 'namespace' and '{field}' separately."
+            "If this is 'namespace/name', pass the namespace and the name "
+            "separately, each in its own field."
         )
     return value
 
@@ -736,6 +737,8 @@ class ToolExecutor:
         kind = str(args["kind"]).strip().lower()
         name = _reject_slash_name(str(args["name"]), "name")
         namespace: str | None = args.get("namespace")
+        if namespace is not None:
+            namespace = _reject_slash_name(str(namespace), "namespace")
         meta = self._api_meta(kind)
         # A namespaced kind without a namespace would hit an invalid
         # cluster-scoped path — give the model an actionable error instead.
@@ -747,7 +750,7 @@ class ToolExecutor:
 
     async def _get_logs(self, args: dict[str, Any]) -> str:
         pod = _reject_slash_name(str(args["pod"]), "pod")
-        namespace = str(args["namespace"])
+        namespace = _reject_slash_name(str(args["namespace"]), "namespace")
         container: str = str(args.get("container") or "")
         raw_tail = args.get("tail_lines", 100)
         tail_lines = max(1, min(500, int(raw_tail)))
@@ -771,7 +774,7 @@ class ToolExecutor:
 
     async def _get_events(self, args: dict[str, Any]) -> str:
         kind = str(args["kind"]).strip().lower()
-        namespace = str(args["namespace"])
+        namespace = _reject_slash_name(str(args["namespace"]), "namespace")
         name = _reject_slash_name(str(args["name"]), "name")
         meta = self._api_meta(kind)
         # Fetch the live object so events are scoped to this exact incarnation
@@ -1003,7 +1006,7 @@ class ToolExecutor:
         eating the final log evidence.
         """
         name = _reject_slash_name(str(args["pod"]), "pod")
-        namespace = str(args["namespace"])
+        namespace = _reject_slash_name(str(args["namespace"]), "namespace")
         pods_meta = self._api_meta("pods")
         pod = await self._kube.get_object(pods_meta, namespace, name)
         head_sections: list[tuple[str, list[str]]] = [
