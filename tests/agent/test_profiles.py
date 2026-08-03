@@ -10,7 +10,8 @@ from korvid.agent.profiles import (
     AgentProfile,
     build_profile,
 )
-from korvid.agent.runtime import MAX_HISTORY_CHARS, SYSTEM_PROMPT, UI_DRIVE_PROMPT
+from korvid.agent.prompts import SYSTEM_PROMPT, UI_DRIVE_PROMPT
+from korvid.agent.runtime import MAX_HISTORY_CHARS
 from korvid.tools.executor import READ_TOOLS, RESIZE_TOOLS, UI_TOOLS, WRITE_TOOLS
 
 
@@ -100,6 +101,39 @@ def test_small_profile_prompt_has_example_and_grounding_rules() -> None:
     assert "never invent" in prompt
     assert "diagnose_pod" in profile.system_prompt  # the worked example
     assert len(profile.system_prompt) < len(SYSTEM_PROMPT) + len(UI_DRIVE_PROMPT) * 2
+
+
+def test_small_profile_prompt_pins_tools_only_and_recovery_rules() -> None:
+    """Observed small-model failures (issue: 404 loops): stale names reused
+    from earlier turns, name/namespace pairs mixed across resources, and
+    describe calls issued without listing first. The prompt must pin the
+    tools-only boundary, list-before-inspect grounding, and 404 recovery -
+    asserted as the defining phrases, not independent tokens a deleted
+    sentence could still satisfy."""
+    profile = build_profile("small", readonly=False, resize_supported=True)
+    prompt = profile.system_prompt.lower()
+    # tools-only boundary: the whole defining clause
+    assert "only through the provided tools" in prompt
+    assert "no shell, no kubectl" in prompt
+    # list-before-inspect grounding, without reinforcing the composite bug:
+    # list rows are 'namespace/name' and must be split into the two fields
+    assert "list_resources first" in prompt
+    assert "split that into the separate namespace and name fields" in prompt
+    assert "never paste the combined value" in prompt
+    # 404 recovery: re-list, never retry the same call
+    assert "re-list instead of retrying" in prompt
+
+
+def test_full_profile_prompt_pins_tools_only_and_grounding_rules() -> None:
+    """Same invariants for the frontier prompt: the agent explores only
+    through session tools and never fabricates names or namespaces -
+    pinned as the defining phrases."""
+    prompt = SYSTEM_PROMPT.lower()
+    assert "only through the tools provided" in prompt
+    assert "no shell" in prompt
+    assert "never invent resource names or namespaces" in prompt
+    assert "paired with the namespace" in prompt
+    assert "404" in prompt or "notfound" in prompt
 
 
 def test_small_ui_prompt_names_only_the_offered_tools() -> None:

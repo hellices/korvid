@@ -41,7 +41,7 @@ from textual.widgets import DataTable, Static
 from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, get_current_worker
 
-from korvid.agent.events import AgentError
+from korvid.agent.events import AgentError, AgentEvent, ToolCallFinished, ToolCallStarted
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog
 from korvid.core.config import KorvidConfig, ViewConfig
@@ -101,6 +101,7 @@ from korvid.k8s.relations import drill_child, owned_by
 from korvid.k8s.telepresence import TelepresenceCLI, TelepresenceError
 from korvid.k8s.writes import WriteOps, restart_stamp
 from korvid.tools.executor import UIBridge
+from korvid.tools.follow import FOLLOWABLE_TOOLS, mirror_read
 from korvid.tools.proposals import (
     ProposalClosedError,
     ProposalLimitError,
@@ -709,6 +710,7 @@ class KorvidApp(App[None]):
         save_topbar: Callable[[bool], None] | None = None,
         telepresence: TelepresenceCLI | None = None,
         probe_traffic_manager: Callable[[], Awaitable[bool]] | None = None,
+        agent_follow_bridge: UIBridge | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -751,6 +753,17 @@ class KorvidApp(App[None]):
         #: MCP follow mode (issue #153): mirror external cluster reads in
         #: the TUI. Config seeds the state; `:mcp follow on|off` toggles it.
         self._mcp_follow: bool = config.mcp_follow
+        #: Agent follow: mirror the built-in agent's cluster reads on screen
+        #: — small models rarely volunteer the UI tools, so without this the
+        #: screen sits idle while the agent reads "behind its back". Config
+        #: seeds the state (default on); `:ai follow on|off` toggles it.
+        self._agent_follow: bool = config.agent_follow
+        #: The shared serialized UI bridge (the composition root's
+        #: `_UIBridgeProxy`): agent-follow mirrors route through it so they
+        #: serialize with the agent's own UI tools and concurrent MCP UI
+        #: calls - log-pane swaps and describes must never interleave.
+        #: None (tests, degraded wiring) falls back to a direct adapter.
+        self._agent_follow_bridge = agent_follow_bridge
         #: External MCP write proposals (issue #110): shared with the MCP
         #: server; None when the feature is disabled.
         self._proposal_store = proposal_store
@@ -2882,6 +2895,9 @@ class KorvidApp(App[None]):
         parts = message.text.strip().split()
         head = parts[0] if parts else ""
         if head in {"ai", "agent"} and self._agent_available:
+            if len(parts) > 1 and parts[1].lower() == "follow":
+                self._handle_agent_follow_command(parts[2:])
+                return
             self._open_agent_setup()
             return
         if head == "model" and self._agent_available:
@@ -3063,6 +3079,19 @@ class KorvidApp(App[None]):
             f"MCP follow {state} — external reads are {'mirrored on screen' if self._mcp_follow else 'no longer mirrored'}"
         )
         self._refresh_status()
+
+    def _handle_agent_follow_command(self, args: list[str]) -> None:
+        """`:ai follow [on|off]`: toggle mirroring of the built-in agent's
+        cluster reads on screen. Bare `:ai follow` flips the state."""
+        if args and args[0].lower() not in ("on", "off"):
+            self.notify("Usage: :ai follow [on|off]", severity="warning")
+            return
+        self._agent_follow = args[0].lower() == "on" if args else not self._agent_follow
+        state = "on" if self._agent_follow else "off"
+        self.notify(
+            f"Agent follow {state} — the agent's reads are "
+            f"{'mirrored on screen' if self._agent_follow else 'no longer mirrored'}"
+        )
 
     @property
     def mcp_follow_enabled(self) -> bool:
@@ -8359,12 +8388,22 @@ class KorvidApp(App[None]):
         """What the agent is told about the screen: the focused pane in
         detail plus a one-line summary of the other pane (issue #48), so
         context stays bounded in a split workspace."""
+        selected = self._selected_row_name() or "-"
+        selected_ns = ""
+        if "/" in selected:
+            # Row keys are 'namespace/name' composites; fed verbatim they
+            # teach the model to paste the whole string as a resource name
+            # (observed: get_resource name='default/otel-…' -> 404). Hand
+            # over the two fields the tool calls actually take.
+            selected_ns, _, selected = selected.partition("/")
         context = (
             f"context={self.config.kube_context or '-'} "
             f"view={self.current_kind} scope={self.current_scope} "
-            f"selected={self._selected_row_name() or '-'} "
-            f"filter={self.filter_pattern or '-'}"
+            f"selected={selected}"
         )
+        if selected_ns:
+            context += f" selected_ns={selected_ns}"
+        context += f" filter={self.filter_pattern or '-'}"
         if len(self._panes) == 2:
             other = self._panes[1 - self._focused_pane]
             context += f" other_pane={other.kind} other_scope={other.scope}"
@@ -8381,11 +8420,47 @@ class KorvidApp(App[None]):
             # switch once; afterwards the context= field carries the truth.
             screen_context += f" NOTE: {self._ctx_switch_note}"
             self._ctx_switch_note = None
+        # Agent follow: started cluster reads awaiting their result, keyed
+        # by call id (the finish event does not carry the arguments).
+        pending_reads: dict[str, tuple[str, str]] = {}
         try:
             async for event in runtime.run_turn(user_text, screen_context):
                 panel.apply_event(event)
+                await self._maybe_follow_agent_read(event, pending_reads)
         except Exception as exc:
             panel.apply_event(AgentError(message=str(exc)))
+
+    async def _maybe_follow_agent_read(
+        self,
+        event: AgentEvent,
+        pending: dict[str, tuple[str, str]],
+    ) -> None:
+        """Mirror a successful agent cluster read on screen (agent follow).
+
+        Small local models rarely volunteer the UI tools — they call the
+        data-returning reads and answer in text while the screen sits
+        idle. With follow on, each successful read is mirrored through the
+        same UIBridge mapping MCP follow uses (issue #153). Best-effort:
+        `mirror_read` never raises, and the bridge guards (approval
+        dialogs, screens the user is reading) refuse rather than cover.
+        """
+        if isinstance(event, ToolCallStarted):
+            if event.name in FOLLOWABLE_TOOLS:
+                pending[event.call_id] = (event.name, event.arguments)
+            return
+        if not isinstance(event, ToolCallFinished):
+            return
+        started = pending.pop(event.call_id, None)
+        if started is None or not event.ok or not self._agent_follow:
+            return
+        name, raw_arguments = started
+        try:
+            arguments = json.loads(raw_arguments) if raw_arguments else {}
+        except json.JSONDecodeError:
+            return  # small models emit broken JSON; the read still answered
+        if not isinstance(arguments, dict):
+            return
+        await mirror_read(self._agent_follow_bridge or AppUIBridge(self), name, arguments)
 
     # ------------------------------------------------------------------
     # UIBridge implementation (spec §4.1 UI Bus): the agent drives the
@@ -8479,6 +8554,13 @@ class KorvidApp(App[None]):
             return (
                 "ERROR: an approval dialog is open — the user is deciding; "
                 "wait for their decision before opening logs"
+            )
+        if isinstance(self.screen, DescribeScreen):
+            # Same user-priority rule as describe/navigate/drill: opening
+            # logs swaps the streams beneath the modal the user is reading.
+            return (
+                "ERROR: a describe screen is open — the user is reading it; "
+                "ask them to close it (Esc) before opening logs"
             )
         if self._stream_logs is None:
             return "ERROR: log streaming unavailable in this session"
@@ -8632,6 +8714,15 @@ class KorvidApp(App[None]):
             return (
                 "ERROR: an approval dialog is open — the user is deciding; "
                 "wait for their decision before opening screens"
+            )
+        if isinstance(self.screen, DescribeScreen):
+            # Same user-priority rule as agent_navigate/agent_drill_down
+            # (and the docs/agent.md follow contract): a describe screen on
+            # top is being read — covering it with another would replace
+            # the content mid-read. User action takes priority.
+            return (
+                "ERROR: a describe screen is open — the user is reading it; "
+                "ask them to close it (Esc) before opening another"
             )
         if self._get_manifest is None:
             return "ERROR: describe unavailable in this session"

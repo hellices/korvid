@@ -49,6 +49,25 @@ _MAX_CATALOG_PACKAGES = 60
 _TRUNCATION_SUFFIX = "\n… [truncated — narrow the query]"
 
 
+def _reject_slash_name(value: str, field: str) -> str:
+    """Reject a 'namespace/name' composite before it reaches the cluster.
+
+    Kubernetes object and namespace names can never contain '/' (DNS
+    subdomain rules), but models — small ones especially — paste
+    composites from row keys or prose into either field. The call still
+    consumes its agent-loop iteration like any errored tool call; what
+    failing locally buys is no API round-trip and recovery guidance that
+    teaches the split instead of a bare 404.
+    """
+    if "/" in value:
+        raise ValueError(
+            f"invalid {field} {value!r}: Kubernetes names never contain '/'. "
+            "If this is 'namespace/name', pass the namespace and the name "
+            "separately, each in its own field."
+        )
+    return value
+
+
 def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
     """Enforce the tool-result ingest cap; shared by every path that feeds
     a result into conversation history. Profiles may pass a tighter
@@ -716,8 +735,10 @@ class ToolExecutor:
 
     async def _get_resource(self, args: dict[str, Any]) -> str:
         kind = str(args["kind"]).strip().lower()
-        name = str(args["name"])
+        name = _reject_slash_name(str(args["name"]), "name")
         namespace: str | None = args.get("namespace")
+        if namespace is not None:
+            namespace = _reject_slash_name(str(namespace), "namespace")
         meta = self._api_meta(kind)
         # A namespaced kind without a namespace would hit an invalid
         # cluster-scoped path — give the model an actionable error instead.
@@ -728,8 +749,8 @@ class ToolExecutor:
         return yaml.safe_dump(manifest, default_flow_style=False, allow_unicode=True)
 
     async def _get_logs(self, args: dict[str, Any]) -> str:
-        pod = str(args["pod"])
-        namespace = str(args["namespace"])
+        pod = _reject_slash_name(str(args["pod"]), "pod")
+        namespace = _reject_slash_name(str(args["namespace"]), "namespace")
         container: str = str(args.get("container") or "")
         raw_tail = args.get("tail_lines", 100)
         tail_lines = max(1, min(500, int(raw_tail)))
@@ -753,8 +774,8 @@ class ToolExecutor:
 
     async def _get_events(self, args: dict[str, Any]) -> str:
         kind = str(args["kind"]).strip().lower()
-        namespace = str(args["namespace"])
-        name = str(args["name"])
+        namespace = _reject_slash_name(str(args["namespace"]), "namespace")
+        name = _reject_slash_name(str(args["name"]), "name")
         meta = self._api_meta(kind)
         # Fetch the live object so events are scoped to this exact incarnation
         # (kind + UID), not merely anything sharing the name.
@@ -984,8 +1005,8 @@ class ToolExecutor:
         ``MAX_RESULT_CHARS`` without the shared prefix-truncation ever
         eating the final log evidence.
         """
-        name = str(args["pod"])
-        namespace = str(args["namespace"])
+        name = _reject_slash_name(str(args["pod"]), "pod")
+        namespace = _reject_slash_name(str(args["namespace"]), "namespace")
         pods_meta = self._api_meta("pods")
         pod = await self._kube.get_object(pods_meta, namespace, name)
         head_sections: list[tuple[str, list[str]]] = [

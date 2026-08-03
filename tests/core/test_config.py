@@ -35,6 +35,18 @@ def test_explicit_agent_off_wins(tmp_path: Path) -> None:
     assert cfg.agent_enabled is False  # explicit off switch (design doc §6.3-4)
 
 
+def test_agent_follow_defaults_on_and_only_explicit_false_disables(tmp_path: Path) -> None:
+    """`agent.follow` mirrors the agent's cluster reads on screen; it is on
+    by default (small models rarely volunteer the UI tools) and only a
+    literal `false` disables it."""
+    assert KorvidConfig().agent_follow is True
+    f = tmp_path / "config.yaml"
+    f.write_text("agent:\n  provider: anthropic\n  follow: false\n")
+    assert load_config(f).agent_follow is False
+    f.write_text("agent:\n  provider: anthropic\n  follow: banana\n")
+    assert load_config(f).agent_follow is True
+
+
 def test_readonly_defaults_false_and_loads_from_yaml(tmp_path: Path) -> None:
     assert KorvidConfig().readonly is False
     f = tmp_path / "config.yaml"

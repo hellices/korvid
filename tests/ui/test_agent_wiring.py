@@ -16,6 +16,7 @@ from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.messages import AgentPromptSubmitted
 from korvid.ui.widgets.agent_panel import AgentPanel
+from tests.ui.waits import until
 
 
 def _pod(name: str) -> PodSummary:
@@ -129,6 +130,36 @@ async def test_screen_context_includes_current_view() -> None:
         ctx = runtime.calls[0][1]
         assert "view=pods" in ctx
         assert "scope=default" in ctx
+
+
+async def test_screen_context_splits_selected_namespace_from_name() -> None:
+    """Row keys are 'namespace/name' composites; fed verbatim as
+    `selected=` they teach the model to paste the whole string as a pod
+    name (observed: get_resource name='default/otel-…' -> 404). The
+    context must hand the model the two fields it actually needs."""
+    runtime = StubRuntime([TurnComplete(input_tokens=0, output_tokens=0, estimated=True)])
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        # Wait for the watch to land the row: on an empty table the context
+        # reads `selected=-` and this test would pass without exercising
+        # the split (review on #172).
+        await until(
+            pilot,
+            lambda: (
+                "selected=web-1" in app._screen_context()
+                or "selected=default/web-1" in app._screen_context()
+            ),
+            label="pod row selected",
+        )
+        await pilot.press("ctrl+a")
+        inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
+        inp.value = "q"
+        await pilot.press("enter")
+        await until(pilot, lambda: runtime.calls, label="agent turn started")
+        ctx = runtime.calls[0][1]
+        assert "selected=web-1" in ctx
+        assert "selected_ns=default" in ctx
+        assert "selected=default/web-1" not in ctx
 
 
 async def test_second_submit_ignored_while_turn_running() -> None:

@@ -915,6 +915,10 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
         helm=_build_helm(config),
         telepresence=_build_telepresence(config),
         probe_traffic_manager=_make_traffic_manager_probe(kube),
+        # Agent follow mirrors route through the same serialized proxy: the
+        # built-in agent and concurrent MCP UI calls must never interleave
+        # (log-pane swaps and describes are not overlap-safe).
+        agent_follow_bridge=ui_proxy,
         proposal_store=proposal_store,
         save_topbar=lambda expanded: save_topbar_state(DEFAULT_CONFIG_PATH, expanded=expanded),
     )

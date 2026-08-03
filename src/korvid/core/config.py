@@ -69,6 +69,11 @@ class KorvidConfig:
     #: `agent.disable_in_protected` (issue #83): refuse agent prompts entirely
     #: while a protected context is active.
     agent_disable_in_protected: bool = False
+    #: `agent.follow`: mirror the built-in agent's successful cluster reads
+    #: on screen (like MCP follow, issue #153, but for the in-app chat).
+    #: Small local models rarely volunteer the UI tools, so this defaults
+    #: on; runtime toggle: `:ai follow on|off`.
+    agent_follow: bool = True
     mcp_enabled: bool = False
     mcp_port: int = 7878
     #: `mcp.write_proposals` (issue #110): expose the external write-proposal
@@ -200,6 +205,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         readonly=raw.get("readonly") is True,
         protected_contexts=_parse_protected_contexts(raw.get("protected_contexts")),
         agent_disable_in_protected=agent_raw.get("disable_in_protected") is True,
+        agent_follow=agent_raw.get("follow") is not False,
         mcp_enabled=mcp_raw.get("enabled") is True,
         mcp_port=_parse_port(mcp_raw.get("port")),
         mcp_write_proposals=mcp_raw.get("write_proposals") is True,
