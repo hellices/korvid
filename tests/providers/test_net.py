@@ -117,6 +117,7 @@ async def test_private_ca_endpoint_needs_the_bundle(tmp_path: Path) -> None:
 
     server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
     server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # no legacy TLS
     server_ctx.load_cert_chain(certfile=str(cert_pem), keyfile=str(key_pem))
     server.socket = server_ctx.wrap_socket(server.socket, server_side=True)
     port = server.server_address[1]
@@ -137,36 +138,26 @@ async def test_private_ca_endpoint_needs_the_bundle(tmp_path: Path) -> None:
 
 
 async def test_factory_and_providers_share_one_trust_builder(tmp_path: Path) -> None:
-    """The :ai connection test and the live providers derive their verify
-    from the same builder — they cannot disagree about CA trust."""
-    ca_pem, _, _ = _mint_ca_and_server_cert(tmp_path)
-    captured: list[object] = []
-
-    class SpyClient(httpx.AsyncClient):
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            captured.append(kwargs.get("verify"))
-            super().__init__(timeout=5.0)
-
-    import korvid.providers.net as net_mod
-
-    real_client = httpx.AsyncClient
-    try:
-        httpx.AsyncClient = SpyClient  # type: ignore[misc]  # spy on ctor kwargs
-        net_mod.make_http_client_factory(str(ca_pem))()
-    finally:
-        httpx.AsyncClient = real_client  # type: ignore[misc]  # restore
-
+    """The :ai connection test and the live providers build their clients
+    through the same CA-aware transport — they cannot disagree about
+    trust, and all three name the configured bundle on failure."""
+    from korvid.providers.net import _CANamedTransport
     from korvid.providers.ollama import OllamaProvider
     from korvid.providers.openai_compat import OpenAICompatProvider
 
+    ca_pem, _, _ = _mint_ca_and_server_cert(tmp_path)
+    factory_client = make_http_client_factory(str(ca_pem))()
     openai = OpenAICompatProvider(base_url="https://llm.corp/v1", model="m", ca_bundle=str(ca_pem))
     ollama = OllamaProvider(base_url="https://ollama.corp", model="m", ca_bundle=str(ca_pem))
-    clients = [openai._get_client(), ollama._get_client()]
+    clients = [factory_client, openai._get_client(), ollama._get_client()]
     try:
-        assert captured  # the factory built a client…
-        assert isinstance(captured[0], ssl.SSLContext)
+        transports = [client._transport for client in clients]
+        assert len(transports) == 3  # wizard test + both live providers
         # Same builder → same verification posture for wizard and runtime.
-        assert all(isinstance(v, ssl.SSLContext) for v in captured)
+        assert all(isinstance(t, _CANamedTransport) for t in transports)
+        assert all(
+            t._ca_bundle_path == str(ca_pem) for t in transports if isinstance(t, _CANamedTransport)
+        )
     finally:
         for client in clients:
             await client.aclose()
@@ -184,3 +175,39 @@ async def test_injected_clients_keep_precedence(tmp_path: Path) -> None:
     )
     assert provider._get_client() is injected
     await injected.aclose()
+
+
+async def test_verification_failure_names_the_configured_bundle(tmp_path: Path) -> None:
+    """A valid-but-wrong bundle must fail naming the configured path — an
+    SSLContext forgets where it came from, so the transport carries it
+    (issue #168: actionable error when TLS verification fails)."""
+    _ca_pem, cert_pem, key_pem = _mint_ca_and_server_cert(tmp_path)
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    wrong_ca, _, _ = _mint_ca_and_server_cert(other_dir)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # http.server API name
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # no legacy TLS
+    server_ctx.load_cert_chain(certfile=str(cert_pem), keyfile=str(key_pem))
+    server.socket = server_ctx.wrap_socket(server.socket, server_side=True)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        async with make_http_client_factory(str(wrong_ca))() as client:
+            with pytest.raises(httpx.ConnectError, match=r"network\.ca_bundle") as excinfo:
+                await client.get(f"https://localhost:{port}/")
+        assert str(wrong_ca) in str(excinfo.value)  # the path the user set
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()

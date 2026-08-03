@@ -14,7 +14,7 @@ import httpx
 
 from korvid.agent.credentials import CredentialSource
 from korvid.agent.provider import LLMProvider
-from korvid.providers.net import build_verify
+from korvid.providers.net import make_client
 
 
 class ProviderError(Exception):
@@ -46,12 +46,10 @@ class OpenAICompatProvider(LLMProvider):
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(60.0, connect=10.0),
-                # Corporate CA trust (issue #168): built from the same
-                # helper as the :ai wizard's test client.
-                verify=build_verify(self._ca_bundle),
-            )
+            # Corporate CA trust (issue #168): built from the same helper
+            # as the :ai wizard's test client; verification failures name
+            # the configured bundle path.
+            self._client = make_client(self._ca_bundle, timeout=httpx.Timeout(60.0, connect=10.0))
         return self._client
 
     async def aclose(self) -> None:

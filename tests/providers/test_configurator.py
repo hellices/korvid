@@ -378,3 +378,24 @@ async def test_list_models_copilot_reuses_one_http_client(
     )
     assert await cfg.list_models(settings) == ["gpt-4o"]
     assert created == 1
+
+
+async def test_probe_threads_the_configured_ca_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wizard's connection test builds its probe provider with the same
+    network.ca_bundle the live agent uses — a private-CA endpoint must not
+    list models and then fail the required completion probe (issue #168
+    review on #181)."""
+    captured: dict[str, Any] = {}
+
+    def fake_create(**kwargs: Any) -> ScriptedProvider:
+        captured.update(kwargs)
+        return ScriptedProvider([{"type": "text_delta", "text": "ok"}, {"type": "done"}])
+
+    monkeypatch.setattr("korvid.providers.configurator.create_provider", fake_create)
+    cfg = ProviderConfigurator(
+        _store(tmp_path), persist=lambda s: None, ca_bundle="/etc/korvid/company-ca.pem"
+    )
+    assert await cfg.test(_SETTINGS) == "ok"
+    assert captured["ca_bundle"] == "/etc/korvid/company-ca.pem"

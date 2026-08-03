@@ -561,6 +561,7 @@ def _build_agent_wiring(
         # The wizard's connection test must share the live providers' trust
         # (issue #168): one builder, one CA bundle, no way to disagree.
         http_client_factory=make_http_client_factory(config.network_ca_bundle),
+        ca_bundle=config.network_ca_bundle,
     )
     close_tasks: set[asyncio.Task[None]] = set()
 

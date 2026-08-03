@@ -36,11 +36,16 @@ class ProviderConfigurator(AgentConfigurator):
         persist: Callable[[AgentSettings], None],
         flow_factory: Callable[[], GitHubDeviceFlow] = GitHubDeviceFlow,
         http_client_factory: Callable[[], httpx.AsyncClient] = _default_http_client,
+        ca_bundle: str | None = None,
     ) -> None:
         self._store = token_store
         self._persist = persist
         self._flow_factory = flow_factory
         self._http_client_factory = http_client_factory
+        # network.ca_bundle (issue #168): the probe provider must be built
+        # with the same trust as the live agent — the wizard's test and the
+        # runtime can never disagree about the CA.
+        self._ca_bundle = ca_bundle
         self._flow: GitHubDeviceFlow | None = None
         self._prompt: DeviceCodePrompt | None = None
 
@@ -151,6 +156,7 @@ class ProviderConfigurator(AgentConfigurator):
             model=settings.model,
             api_key_env=settings.api_key_env,
             oauth_token=oauth,
+            ca_bundle=self._ca_bundle,
         )
         if provider is None:
             raise RuntimeError("configuration incomplete — provider could not be created")

@@ -20,7 +20,7 @@ import httpx
 
 from korvid.agent.credentials import CredentialSource
 from korvid.agent.provider import LLMProvider
-from korvid.providers.net import build_verify
+from korvid.providers.net import make_client
 from korvid.providers.openai_compat import ProviderError
 
 logger = logging.getLogger(__name__)
@@ -94,12 +94,7 @@ class OllamaProvider(LLMProvider):
             # A generous read timeout: a cold start (model load after
             # keep_alive expiry) can take well over a minute to the first
             # token on large local models.
-            self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(300.0, connect=10.0),
-                # Corporate CA trust (issue #168): built from the same
-                # helper as the :ai wizard's test client.
-                verify=build_verify(self._ca_bundle),
-            )
+            self._client = make_client(self._ca_bundle, timeout=httpx.Timeout(300.0, connect=10.0))
         return self._client
 
     async def aclose(self) -> None:

@@ -86,9 +86,10 @@ curl --cacert /etc/korvid/company-ca.pem https://llm.corp.example/v1/models
 # 2. Helm repositories all point inside (no public URLs left):
 helm repo list
 
-# 3. Cluster image sources: every image referenced by running pods should
+# 3. Cluster image sources: every image referenced by running pods —
+#    including init and ephemeral (kubectl debug) containers — should
 #    resolve to the internal mirror:
-kubectl get pods -A -o jsonpath='{range .items[*].spec.containers[*]}{.image}{"\n"}{end}' \
+kubectl get pods -A -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.ephemeralContainers[*]}{.image}{"\n"}{end}{end}' \
   | sort -u | grep -v registry.corp.example || echo "all images internal"
 
 # 4. Debug images configured to the internal registry:
