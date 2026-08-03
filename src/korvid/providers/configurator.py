@@ -14,6 +14,7 @@ from korvid.providers.github_copilot import (
     DeviceCodePrompt,
     GitHubDeviceFlow,
 )
+from korvid.providers.net import make_client
 from korvid.providers.ollama import normalize_base_url
 from korvid.providers.registry import build_credentials, create_provider
 from korvid.providers.token_store import TokenStore
@@ -35,12 +36,15 @@ class ProviderConfigurator(AgentConfigurator):
         token_store: TokenStore,
         persist: Callable[[AgentSettings], None],
         flow_factory: Callable[[], GitHubDeviceFlow] = GitHubDeviceFlow,
-        http_client_factory: Callable[[], httpx.AsyncClient] = _default_http_client,
+        http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
         ca_bundle: str | None = None,
     ) -> None:
         self._store = token_store
         self._persist = persist
         self._flow_factory = flow_factory
+        # Test seam: an injected factory serves every listing path. Without
+        # one, endpoint calls are CA-aware and public GitHub calls keep
+        # default trust (see _endpoint_client/_public_client).
         self._http_client_factory = http_client_factory
         # network.ca_bundle (issue #168): the probe provider must be built
         # with the same trust as the live agent — the wizard's test and the
@@ -48,6 +52,21 @@ class ProviderConfigurator(AgentConfigurator):
         self._ca_bundle = ca_bundle
         self._flow: GitHubDeviceFlow | None = None
         self._prompt: DeviceCodePrompt | None = None
+
+    def _endpoint_client(self) -> httpx.AsyncClient:
+        """Client for the user's OpenAI-compatible/Ollama endpoint: shares
+        the live providers' `network.ca_bundle` trust (issue #168)."""
+        if self._http_client_factory is not None:
+            return self._http_client_factory()
+        return make_client(self._ca_bundle, timeout=15.0)
+
+    def _public_client(self) -> httpx.AsyncClient:
+        """Client for GitHub Copilot discovery: public endpoints on default
+        trust, matching the live github-copilot provider, which ignores
+        `ca_bundle` — a private-only bundle must not break GitHub calls."""
+        if self._http_client_factory is not None:
+            return self._http_client_factory()
+        return _default_http_client()
 
     async def begin_device_login(self) -> DeviceLoginPrompt:
         flow = self._flow_factory()
@@ -91,7 +110,7 @@ class ProviderConfigurator(AgentConfigurator):
             return []
         # One client serves both round-trips (token exchange + /models GET)
         # so the connection pool is shared; the credential source closes it.
-        client = self._http_client_factory()
+        client = self._public_client()
         creds = CopilotCredentialSource(oauth, client=client)
         try:
             headers = await creds.headers()
@@ -117,7 +136,7 @@ class ProviderConfigurator(AgentConfigurator):
         creds = build_credentials(settings.provider, settings.auth_method, settings.api_key_env)
         try:
             headers = await creds.headers() if creds is not None else {}
-            async with self._http_client_factory() as client:
+            async with self._endpoint_client() as client:
                 resp = await client.get(f"{settings.base_url.rstrip('/')}/models", headers=headers)
         finally:
             if creds is not None:
@@ -134,7 +153,7 @@ class ProviderConfigurator(AgentConfigurator):
         creds = build_credentials(settings.provider, settings.auth_method, settings.api_key_env)
         try:
             headers = await creds.headers() if creds is not None else {}
-            async with self._http_client_factory() as client:
+            async with self._endpoint_client() as client:
                 resp = await client.get(
                     f"{normalize_base_url(settings.base_url)}/api/tags", headers=headers
                 )

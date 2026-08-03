@@ -67,8 +67,9 @@ def make_client(ca_bundle: str | None, timeout: httpx.Timeout | float) -> httpx.
 
     With a bundle configured, request-time verification failures are
     re-raised naming the configured path; without one, httpx default trust
-    applies untouched. Standard `SSL_CERT_FILE`/proxy environment behavior
-    is preserved either way.
+    (which consults `SSL_CERT_FILE`) applies untouched. Environment proxy
+    discovery (`HTTP(S)_PROXY`/`NO_PROXY`) is preserved in both modes; a
+    configured bundle *replaces* the default CA source by design.
     """
     if ca_bundle is None:
         return httpx.AsyncClient(timeout=timeout)

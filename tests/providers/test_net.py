@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import http.server
+import os
 import ssl
 import threading
 from pathlib import Path
@@ -224,3 +225,18 @@ async def test_ca_bundle_keeps_environment_proxy_discovery(
         # httpx materializes env proxies as mounted transports; a client
         # built with transport= skips that discovery entirely.
         assert client._mounts  # the proxy mount exists alongside the CA trust
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="POSIX permission semantics (root reads anything)",
+)
+def test_unreadable_bundle_fails_actionably(tmp_path: Path) -> None:
+    secret = tmp_path / "secret.pem"
+    secret.write_text("PEM")
+    secret.chmod(0)
+    try:
+        with pytest.raises(ValueError, match=r"secret\.pem"):
+            build_verify(str(secret))
+    finally:
+        secret.chmod(0o600)  # let pytest clean the tmp dir

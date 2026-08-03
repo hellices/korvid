@@ -477,7 +477,6 @@ def _build_agent_wiring(
     from korvid.agent.profiles import build_profile
     from korvid.agent.runtime import AgentRuntime
     from korvid.providers.configurator import ProviderConfigurator
-    from korvid.providers.net import make_http_client_factory
     from korvid.providers.ollama import OllamaOptions
     from korvid.providers.registry import create_provider
     from korvid.providers.token_store import TokenStore
@@ -558,9 +557,9 @@ def _build_agent_wiring(
     configurator = ProviderConfigurator(
         token_store,
         persist,
-        # The wizard's connection test must share the live providers' trust
-        # (issue #168): one builder, one CA bundle, no way to disagree.
-        http_client_factory=make_http_client_factory(config.network_ca_bundle),
+        # network.ca_bundle (issue #168): endpoint calls (probe + model
+        # listing) share the live providers' trust; GitHub Copilot
+        # discovery keeps default trust like the live copilot provider.
         ca_bundle=config.network_ca_bundle,
     )
     close_tasks: set[asyncio.Task[None]] = set()

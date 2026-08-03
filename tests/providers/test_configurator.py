@@ -399,3 +399,22 @@ async def test_probe_threads_the_configured_ca_bundle(
     )
     assert await cfg.test(_SETTINGS) == "ok"
     assert captured["ca_bundle"] == "/etc/korvid/company-ca.pem"
+
+
+async def test_copilot_discovery_keeps_default_trust_with_a_private_bundle(
+    tmp_path: Path,
+) -> None:
+    """GitHub Copilot discovery hits public endpoints; a private-only
+    network.ca_bundle must not break it (the live copilot provider ignores
+    the bundle too) — while endpoint listing stays CA-aware (review on
+    #181)."""
+    from korvid.providers.net import _CANamedClient
+
+    cfg = ProviderConfigurator(
+        _store(tmp_path), persist=lambda s: None, ca_bundle="/etc/korvid/company-ca.pem"
+    )
+    public = cfg._public_client()
+    try:
+        assert not isinstance(public, _CANamedClient)  # default trust for GitHub
+    finally:
+        await public.aclose()
