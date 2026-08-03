@@ -7,8 +7,9 @@ simple single-function calls but fall behind sharply on multi-function
 selection, they degrade with context length far below their advertised
 windows, and 1-2 in-context demonstrations improve their multi-step tool
 use more than longer instruction lists do (ReAct). The `small` profile
-gives them a surface they can actually handle; `full` reproduces the
-pre-profile wiring byte-for-byte so the frontier experience is unchanged.
+gives them a surface they can actually handle; `full` keeps the frontier
+tool surface and budgets unchanged (its prompt wording, like `small`'s,
+lives in korvid.agent.prompts and evolves with observed failures).
 """
 
 from __future__ import annotations

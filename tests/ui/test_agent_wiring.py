@@ -16,6 +16,7 @@ from korvid.k8s.models import PodSummary
 from korvid.ui.app import KorvidApp
 from korvid.ui.messages import AgentPromptSubmitted
 from korvid.ui.widgets.agent_panel import AgentPanel
+from tests.ui.waits import until
 
 
 def _pod(name: str) -> PodSummary:
@@ -139,21 +140,26 @@ async def test_screen_context_splits_selected_namespace_from_name() -> None:
     runtime = StubRuntime([TurnComplete(input_tokens=0, output_tokens=0, estimated=True)])
     app = make_app(runtime)
     async with app.run_test() as pilot:
-        await pilot.pause()
+        # Wait for the watch to land the row: on an empty table the context
+        # reads `selected=-` and this test would pass without exercising
+        # the split (review on #172).
+        await until(
+            pilot,
+            lambda: (
+                "selected=web-1" in app._screen_context()
+                or "selected=default/web-1" in app._screen_context()
+            ),
+            label="pod row selected",
+        )
         await pilot.press("ctrl+a")
         inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
         inp.value = "q"
         await pilot.press("enter")
-        await pilot.pause()
-        await pilot.pause()
-        assert runtime.calls
+        await until(pilot, lambda: runtime.calls, label="agent turn started")
         ctx = runtime.calls[0][1]
-        selected = next(
-            (part for part in ctx.split() if part.startswith("selected=")), "selected=-"
-        )
-        assert "/" not in selected.removeprefix("selected=")
-        if selected != "selected=-":
-            assert "selected_ns=" in ctx
+        assert "selected=web-1" in ctx
+        assert "selected_ns=default" in ctx
+        assert "selected=default/web-1" not in ctx
 
 
 async def test_second_submit_ignored_while_turn_running() -> None:

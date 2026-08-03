@@ -50,12 +50,14 @@ _TRUNCATION_SUFFIX = "\n… [truncated — narrow the query]"
 
 
 def _reject_slash_name(value: str, field: str) -> str:
-    """Reject a 'namespace/name' composite before it burns an API 404.
+    """Reject a 'namespace/name' composite before it reaches the cluster.
 
     Kubernetes object names can never contain '/' (DNS subdomain rules),
     but models — small ones especially — paste composites from row keys or
-    prose into the name field. Failing locally with wording that teaches
-    the split costs no cluster round-trip and no loop iteration.
+    prose into the name field. The call still consumes its agent-loop
+    iteration like any errored tool call; what failing locally buys is no
+    API round-trip and recovery guidance that teaches the split instead
+    of a bare 404.
     """
     if "/" in value:
         raise ValueError(

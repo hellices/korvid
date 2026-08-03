@@ -186,6 +186,28 @@ header shows `[small]` so you always know which
 mode is live. Compare the profiles on your own endpoint with the eval
 harness: `python -m korvid.evals --profile small` (see below).
 
+## Follow mode
+
+Small models rarely volunteer the screen tools (`open_describe`,
+`open_logs`) — they call the data-returning reads and answer in text
+while the TUI sits idle. Agent follow mode mirrors each successful
+cluster read from a chat turn on screen, using the same mapping as MCP
+follow mode: `list_resources` navigates the view, `get_resource` /
+`get_events` / `diagnose_pod` open the describe view, and `get_logs`
+opens the live log pane.
+
+Follow is **on by default**. Disable it in `config.yaml`:
+
+```yaml
+agent:
+  follow: false   # default: true
+```
+
+or toggle it live with `:ai follow off` / `:ai follow on` (bare
+`:ai follow` flips the state). Mirroring never interrupts what you are
+doing: failed reads (e.g. a 404) move nothing, and a mirror is refused
+while an approval dialog or a describe screen you are reading is open.
+
 ## Agent eval harness
 
 `korvid.evals` measures how well a model diagnoses cluster faults through
