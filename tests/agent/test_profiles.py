@@ -124,6 +124,36 @@ def test_small_profile_prompt_pins_tools_only_and_recovery_rules() -> None:
     assert "re-list instead of retrying" in prompt
 
 
+def test_small_profile_prompt_pins_measured_failure_mode_rules() -> None:
+    """Baseline eval failures on qwen3:4b (24-scenario pack, small profile)
+    exposed four prompt-fixable behaviors; each rule below is pinned by its
+    defining phrase so a reworded prompt cannot silently drop it.
+
+    1. exit-code over-anchoring: a liveness-probe kill (exit 137) was
+       misdiagnosed as OOM because the worked example taught 137=OOMKilled.
+    2. healthy resources: all three negative controls failed — old restart
+       history was reported as a live fault, and no plain healthy verdict
+       was given.
+    3. reason-string citation: a correct backoff-limit diagnosis failed the
+       grade because the decisive `BackoffLimitExceeded` reason was never
+       quoted.
+    4. one-hop-short exploration: unbound-PVC and service-endpoint answers
+       stopped at the pointer instead of fetching the object it named.
+    """
+    profile = build_profile("small", readonly=False, resize_supported=True)
+    prompt = profile.system_prompt.lower()
+    # 1. the reason string, not the exit code, names the cause
+    assert "reason string" in prompt
+    assert "not the exit code" in prompt
+    # 2. healthy is a valid verdict; stopped restarts are history
+    assert "healthy" in prompt
+    assert "history, not a live fault" in prompt
+    # 3. quote decisive reasons verbatim
+    assert "quote" in prompt
+    # 4. fetch the object a result points at before answering
+    assert "fetch it before answering" in prompt
+
+
 def test_full_profile_prompt_pins_tools_only_and_grounding_rules() -> None:
     """Same invariants for the frontier prompt: the agent explores only
     through session tools and never fabricates names or namespaces -

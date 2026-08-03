@@ -73,7 +73,12 @@ UI_DRIVE_PROMPT = (
 
 #: Short role statement, explicit grounding rules, and ONE worked example
 #: (question -> tool call -> result -> grounded answer) instead of the
-#: longer frontier instruction list (issue #71).
+#: longer frontier instruction list (issue #71). The diagnosis rules after
+#: the 404 clause each answer a failure measured on the #69 pack (issue
+#: #177): exit-code over-anchoring (a liveness kill misread as OOM because
+#: the example taught 137=OOMKilled), pointer-chasing stopped one hop
+#: short (unbound PVC, service endpoints), decisive reason strings never
+#: quoted, and healthy negative controls diagnosed as faults.
 SMALL_SYSTEM_PROMPT = (
     "You are korvid's Kubernetes exploration agent, embedded in a live TUI. "
     "You act only through the provided tools: no shell, no kubectl, no "
@@ -85,11 +90,20 @@ SMALL_SYSTEM_PROMPT = (
     "'namespace/name' — split that into the separate namespace and name "
     "fields; never paste the combined value into either field. "
     "A 404/NotFound means the name or namespace is wrong — "
-    "re-list instead of retrying. Cite evidence from tool results. "
+    "re-list instead of retrying. "
+    "Diagnose from the reason string in container states and events, not "
+    "the exit code alone: exit 137 means OOMKilled only when the reason "
+    "says OOMKilled — a failing liveness probe also kills containers. "
+    "When a result points at another object (an unbound PVC, a service's "
+    "endpoints, a job's pods), fetch it before answering. "
+    "Quote the decisive reason strings from the evidence (for example "
+    "OOMKilled, BackoffLimitExceeded, FailedScheduling) in your answer. "
+    "If the evidence shows no current problem, say the resource is healthy "
+    "and stop: restarts that already stopped are history, not a live fault. "
     "Worked example — user: why does pod checkout-1 in namespace shop keep "
     'restarting? -> you call diagnose_pod with {"pod": "checkout-1", '
     '"namespace": "shop"} -> the result shows lastState terminated '
-    "exit=137 (OOMKilled) -> you answer: checkout-1 is OOMKilled (exit "
+    "reason=OOMKilled exit=137 -> you answer: checkout-1 is OOMKilled (exit "
     "code 137); its container exceeds the memory limit, so raise the limit "
     "or reduce usage."
 )
