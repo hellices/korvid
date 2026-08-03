@@ -107,26 +107,32 @@ def test_small_profile_prompt_pins_tools_only_and_recovery_rules() -> None:
     """Observed small-model failures (issue: 404 loops): stale names reused
     from earlier turns, name/namespace pairs mixed across resources, and
     describe calls issued without listing first. The prompt must pin the
-    tools-only boundary, list-before-inspect grounding, and 404 recovery."""
+    tools-only boundary, list-before-inspect grounding, and 404 recovery -
+    asserted as the defining phrases, not independent tokens a deleted
+    sentence could still satisfy."""
     profile = build_profile("small", readonly=False, resize_supported=True)
     prompt = profile.system_prompt.lower()
-    assert "only" in prompt  # tools-only boundary
-    assert "provided tools" in prompt
-    assert "no shell" in prompt
-    assert "kubectl" in prompt
-    assert "list_resources" in profile.system_prompt  # list-before-inspect
-    assert "404" in prompt or "notfound" in prompt  # recovery, not retry
+    # tools-only boundary: the whole defining clause
+    assert "only through the provided tools" in prompt
+    assert "no shell, no kubectl" in prompt
+    # list-before-inspect grounding
+    assert "call list_resources first" in prompt
+    assert "copy names exactly" in prompt
+    # name/namespace pairing
+    assert "name and namespace appear together" in prompt
+    # 404 recovery: re-list, never retry the same call
+    assert "re-list instead of retrying" in prompt
 
 
 def test_full_profile_prompt_pins_tools_only_and_grounding_rules() -> None:
     """Same invariants for the frontier prompt: the agent explores only
-    through session tools and never fabricates names or namespaces."""
+    through session tools and never fabricates names or namespaces -
+    pinned as the defining phrases."""
     prompt = SYSTEM_PROMPT.lower()
-    assert "only" in prompt
-    assert "tools" in prompt
+    assert "only through the tools provided" in prompt
     assert "no shell" in prompt
-    assert "never invent" in prompt
-    assert "namespace" in prompt
+    assert "never invent resource names or namespaces" in prompt
+    assert "paired with the namespace" in prompt
     assert "404" in prompt or "notfound" in prompt
 
 
