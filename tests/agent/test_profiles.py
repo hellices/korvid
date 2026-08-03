@@ -115,11 +115,11 @@ def test_small_profile_prompt_pins_tools_only_and_recovery_rules() -> None:
     # tools-only boundary: the whole defining clause
     assert "only through the provided tools" in prompt
     assert "no shell, no kubectl" in prompt
-    # list-before-inspect grounding
-    assert "call list_resources first" in prompt
-    assert "copy names exactly" in prompt
-    # name/namespace pairing
-    assert "name and namespace appear together" in prompt
+    # list-before-inspect grounding, without reinforcing the composite bug:
+    # list rows are 'namespace/name' and must be split into the two fields
+    assert "list_resources first" in prompt
+    assert "split that into the separate namespace and name fields" in prompt
+    assert "never paste the combined value" in prompt
     # 404 recovery: re-list, never retry the same call
     assert "re-list instead of retrying" in prompt
 

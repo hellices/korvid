@@ -710,6 +710,7 @@ class KorvidApp(App[None]):
         save_topbar: Callable[[bool], None] | None = None,
         telepresence: TelepresenceCLI | None = None,
         probe_traffic_manager: Callable[[], Awaitable[bool]] | None = None,
+        agent_follow_bridge: UIBridge | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -762,7 +763,7 @@ class KorvidApp(App[None]):
         #: serialize with the agent's own UI tools and concurrent MCP UI
         #: calls - log-pane swaps and describes must never interleave.
         #: None (tests, degraded wiring) falls back to a direct adapter.
-        self._agent_follow_bridge: UIBridge | None = None
+        self._agent_follow_bridge = agent_follow_bridge
         #: External MCP write proposals (issue #110): shared with the MCP
         #: server; None when the feature is disabled.
         self._proposal_store = proposal_store

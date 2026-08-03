@@ -915,6 +915,10 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
         helm=_build_helm(config),
         telepresence=_build_telepresence(config),
         probe_traffic_manager=_make_traffic_manager_probe(kube),
+        # Agent follow mirrors route through the same serialized proxy: the
+        # built-in agent and concurrent MCP UI calls must never interleave
+        # (log-pane swaps and describes are not overlap-safe).
+        agent_follow_bridge=ui_proxy,
         proposal_store=proposal_store,
         save_topbar=lambda expanded: save_topbar_state(DEFAULT_CONFIG_PATH, expanded=expanded),
     )
@@ -922,10 +926,6 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
     # Late-bind the UI bridge: from here on the agent's UI-control tools
     # (navigate/set_filter/open_logs/open_describe) land in this app.
     ui_proxy.target = AppUIBridge(app)
-    # Agent follow mirrors route through the same serialized proxy: the
-    # built-in agent and concurrent MCP UI calls must never interleave
-    # (log-pane swaps and describes are not overlap-safe).
-    app._agent_follow_bridge = ui_proxy
     # Follow mode (issue #153): the MCP server reads follow state from and
     # sends activity notes to the live app.
     mcp_hooks.app = app

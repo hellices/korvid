@@ -149,9 +149,11 @@ async def test_mirror_routes_through_the_injected_serialized_bridge() -> None:
     from korvid.__main__ import _UIBridgeProxy
     from korvid.ui.app import AppUIBridge
 
+    from .waits import until
+
     app = make_app()
     proxy = _UIBridgeProxy()
-    app._agent_follow_bridge = proxy
+    app._agent_follow_bridge = proxy  # ctor param in production wiring
     app._agent_runtime = _ScriptedRuntime(_read_events())  # type: ignore[assignment]  # fake
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -160,7 +162,13 @@ async def test_mirror_routes_through_the_injected_serialized_bridge() -> None:
         # must queue behind it instead of interleaving.
         await proxy._lock.acquire()
         turn = asyncio.create_task(app._run_agent_turn("what is wrong with web-1?"))
-        await pilot.pause(0.05)
+        # Condition polling (AGENTS.md): wait until the mirror is really
+        # blocked on the lock before asserting nothing landed.
+        await until(
+            pilot,
+            lambda: bool(getattr(proxy._lock, "_waiters", None)),
+            label="mirror queued on the proxy lock",
+        )
         assert not isinstance(app.screen, DescribeScreen)  # still queued
         proxy._lock.release()
         await turn
