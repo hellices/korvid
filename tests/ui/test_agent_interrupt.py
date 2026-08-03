@@ -131,6 +131,63 @@ async def test_stop_hint_appears_in_the_running_status() -> None:
         assert "ctrl+x" in panel.status_text
 
 
+async def test_stop_hint_tracks_a_remapped_interrupt_key() -> None:
+    """The advertised stop key must follow a `keybindings:` remap — a hint
+    naming a key that no longer stops the turn is worse than none."""
+    from korvid.core.config import KorvidConfig
+    from korvid.core.store import ResourceStore
+    from korvid.core.watch import WatchManager
+
+    runtime: Any = BlockingRuntime()  # duck-typed stand-in, as in make_app
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[Any]:
+        if False:  # pragma: no cover - typing seam: makes this an async generator
+            yield ("ADDED", None)
+        while True:
+            await asyncio.sleep(0.01)
+
+    app = KorvidApp(
+        config=KorvidConfig(namespace="default", keybindings={"interrupt_agent": "ctrl+g"}),
+        store=store,
+        watch_manager=WatchManager(store, source),
+        agent_runtime=runtime,
+        agent_model_name="test-model",
+    )
+    async with app.run_test() as pilot:
+        await _start_turn(app, pilot, "check")
+        panel = app.query_one(AgentPanel)
+        await until(pilot, lambda: "stop" in panel.status_text, label="stop hint shown")
+        assert "ctrl+g" in panel.status_text
+        assert "ctrl+x" not in panel.status_text
+        # and the remapped key actually stops the turn
+        await pilot.press("ctrl+g")
+        await until(pilot, lambda: runtime.finalized == 1, label="remapped key stops")
+
+
+async def test_cancel_before_the_turn_coroutine_runs_still_starts_replacement() -> None:
+    """A replacement task cancelled before the event loop first enters its
+    coroutine never runs its CancelledError handler — the queued correction
+    must still be drained (review on #175)."""
+    from korvid.ui.messages import AgentPromptSubmitted
+
+    runtime = BlockingRuntime()
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+a")
+        # Both submissions land in the same tick: the first turn's task is
+        # created but its coroutine has not run when the second arrives and
+        # cancels it.
+        app.on_agent_prompt_submitted(AgentPromptSubmitted("first"))
+        assert app._agent_task is not None
+        app.on_agent_prompt_submitted(AgentPromptSubmitted("second"))
+        await until(
+            pilot,
+            lambda: runtime.calls[-1:] == ["second"],
+            label="queued correction started",
+        )
+
+
 async def test_interrupted_tool_line_is_marked() -> None:
     runtime = BlockingRuntime(
         events=[ToolCallStarted(call_id="c1", name="get_logs", arguments="{}")]
@@ -233,3 +290,59 @@ async def test_interrupt_after_approval_lets_the_write_finish(tmp_path: Any) -> 
         assert rec.calls == [("delete", "deployments", "default", "web")]
         lines = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert lines[-1]["outcome"] == "success"  # audit trail is complete
+
+
+async def test_repeated_cancels_never_kill_an_approved_write(tmp_path: Any) -> None:
+    """A second cancellation arriving while the first is being absorbed must
+    not propagate into the approved write: every wait stays shielded until
+    the write reaches a terminal state (review on #175)."""
+    import json
+
+    import pytest
+
+    from korvid.k8s.discovery import ResourceMeta
+    from korvid.ui.widgets.confirm_screen import ConfirmScreen
+    from tests.ui.test_agent_write import Recorder, _expand_panel
+    from tests.ui.test_agent_write import make_app as make_write_app
+
+    class SlowRecorder(Recorder):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.gate = asyncio.Event()
+
+        async def delete_object(
+            self,
+            meta: ResourceMeta,
+            namespace: str | None,
+            name: str,
+            *,
+            uid: str | None = None,
+        ) -> None:
+            self.started.set()
+            await self.gate.wait()
+            await super().delete_object(meta, namespace, name, uid=uid)
+
+    rec = SlowRecorder()
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_write_app(rec, audit_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        _expand_panel(app)
+        task = asyncio.ensure_future(
+            app.agent_request_write("delete", "deployments", "web", namespace="default")
+        )
+        await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog shown")
+        await pilot.press("y")
+        await until(pilot, lambda: rec.started.is_set(), label="write in flight")
+        task.cancel()
+        await pilot.pause()  # the first CancelledError is being absorbed…
+        task.cancel()  # …when a second cancellation arrives
+        await pilot.pause()
+        rec.gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await until(pilot, lambda: bool(rec.calls), label="write completed")
+        assert rec.calls == [("delete", "deployments", "default", "web")]
+        lines = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        assert lines[-1]["outcome"] == "success"  # never intent-with-no-outcome

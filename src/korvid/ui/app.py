@@ -8403,13 +8403,40 @@ class KorvidApp(App[None]):
         if self._agent_task is not None and not self._agent_task.done():
             # Interrupt-and-submit (issue #170): echo the correction now,
             # remember only the latest one, and cancel the running turn —
-            # the replacement starts once the old turn is finalized.
+            # the replacement starts once the cancelled task settles (a
+            # done callback, so it drains even when the cancel lands
+            # before the task's coroutine ever ran).
             panel.echo_user(message.text)
             self._agent_replacement = message.text
             self._agent_task.cancel()
             return
-        panel.begin_turn(message.text)
-        self._agent_task = asyncio.create_task(self._run_agent_turn(message.text))
+        self._start_agent_turn(message.text, echo=True)
+
+    def _start_agent_turn(self, text: str, *, echo: bool) -> None:
+        panel = self._agent_panel
+        panel.stop_key = self._interrupt_key()
+        panel.begin_turn(text, echo=echo)
+        task = asyncio.create_task(self._run_agent_turn(text))
+        task.add_done_callback(self._drain_agent_replacement)
+        self._agent_task = task
+
+    def _drain_agent_replacement(self, _task: asyncio.Task[None]) -> None:
+        """Start the queued interrupt-and-submit correction once the
+        cancelled turn's task settles — including the race where the task
+        was cancelled before its coroutine (and thus its CancelledError
+        handler) ever ran."""
+        replacement, self._agent_replacement = self._agent_replacement, None
+        if replacement is None or self._ctx_switching or self._shutting_down:
+            return
+        self._start_agent_turn(replacement, echo=False)
+
+    def _interrupt_key(self) -> str:
+        """The effective stop key's name, resolved by action from the active
+        bindings so an `interrupt_agent` remap moves the advertised hint."""
+        for active in self.screen.active_bindings.values():
+            if active.binding.action == "interrupt_agent":
+                return active.binding.key
+        return "ctrl+x"
 
     def action_interrupt_agent(self) -> None:
         """Stop the running agent turn (issue #170). No-op when idle."""
@@ -8484,18 +8511,15 @@ class KorvidApp(App[None]):
             panel.apply_event(AgentError(message=str(exc)))
 
     def _finish_interrupted_turn(self, runtime: Any, panel: AgentPanel) -> None:
-        """Settle an interrupted turn: repair history, mark the transcript,
-        and start the queued replacement, if any (issue #170)."""
+        """Settle an interrupted turn: repair the conversation history and
+        mark the transcript (issue #170). The queued replacement, if any, is
+        drained by the task's done callback — not here, because a task
+        cancelled before its coroutine first ran never reaches this code."""
         finalize = getattr(runtime, "finalize_interrupt", None)
         if finalize is not None:
             event = finalize()
             if not self._shutting_down:
                 panel.apply_event(event)
-        replacement, self._agent_replacement = self._agent_replacement, None
-        if replacement is None or self._ctx_switching or self._shutting_down:
-            return
-        panel.begin_turn(replacement, echo=False)
-        self._agent_task = asyncio.create_task(self._run_agent_turn(replacement))
 
     async def _maybe_follow_agent_read(
         self,
@@ -8903,24 +8927,39 @@ class KorvidApp(App[None]):
             return (
                 f"denied: the user declined the {action} request for {self._gvr_label(meta)}/{name}"
             )
-        # Once approved, the audited write runs to completion even if the
-        # turn is interrupted mid-flight (issue #170): a half-applied,
-        # half-audited mutation is worse than finishing what the user
-        # explicitly approved.
-        write = asyncio.ensure_future(
-            self._run_write(action, meta, ns, name, op(uid), detail=detail)
-        )
-        try:
-            outcome = await asyncio.shield(write)
-        except asyncio.CancelledError:
-            if not write.cancelled():
-                with contextlib.suppress(Exception):
-                    await write
-            raise
+        outcome = await self._run_write_shielded(action, meta, ns, name, op(uid), detail=detail)
         if outcome != "done":
             return f"ERROR: {action} {self._gvr_label(meta)}/{name} {outcome}"
         self._mark_agent_action(f"{action} → {self._gvr_label(meta)}/{name}")
         return f"approved and executed: {action} {self._gvr_label(meta)}/{name}"
+
+    async def _run_write_shielded(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        ns: str | None,
+        name: str,
+        op: Awaitable[None],
+        *,
+        detail: str,
+    ) -> str:
+        """Run an approved agent write to completion even if the turn is
+        interrupted mid-flight (issue #170): a half-applied, half-audited
+        mutation is worse than finishing what the user explicitly approved.
+        Every wait stays shielded — repeated cancellations are absorbed until
+        the write reaches a terminal state, then cancellation is re-raised."""
+        write = asyncio.ensure_future(self._run_write(action, meta, ns, name, op, detail=detail))
+        interrupted = False
+        while not write.done():
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                if write.cancelled():
+                    raise
+                interrupted = True
+        if interrupted:
+            raise asyncio.CancelledError
+        return write.result()
 
     async def _preview_for_action(
         self,

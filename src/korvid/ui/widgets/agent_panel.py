@@ -179,6 +179,9 @@ class AgentPanel(Vertical):
         self._tool_widgets: dict[str, ChatEntry] = {}
         self._tool_args: dict[str, str] = {}
         self.status_text = ""
+        # The advertised stop key (issue #170): the app resolves the
+        # effective `interrupt_agent` binding so a remap moves the hint.
+        self.stop_key = "ctrl+x"
         self._status_timer: Timer | None = None
         self._spinner_frame = 0
 
@@ -402,7 +405,7 @@ class AgentPanel(Vertical):
     def _set_status(self, text: str) -> None:
         # The stop hint rides along in the status line so the affordance is
         # discoverable exactly when it applies (issue #170).
-        self.status_text = f"{text}… · ctrl+x stop"
+        self.status_text = f"{text}… · {self.stop_key} stop"
         if self._status_timer is None:
             self._status_timer = self.set_interval(0.1, self._tick_spinner)
         self._tick_spinner()
