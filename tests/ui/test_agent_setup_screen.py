@@ -537,3 +537,26 @@ async def test_reconnect_normalizes_registry_provider_aliases() -> None:
         await pilot.press("enter")  # accept openai-compat → endpoint step
         base = app.screen.query_one("#setup-base-url", Input)
         assert base.value == "https://api.my-proxy.example/v1"
+
+
+async def test_reconnect_preserves_a_no_auth_method() -> None:
+    """A no-auth OpenAI-compatible endpoint (e.g. local vLLM) must keep
+    auth_method='none' on confirm-through — never reset to api_key and
+    prompt for a nonexistent key env (review on #180)."""
+    settings = AgentSettings(
+        provider="vllm",
+        auth_method="none",
+        base_url="http://localhost:8000/v1",
+        model="qwen",
+    )
+    app = _HostWithSettings(FakeConfigurator(), settings)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # accept openai-compat (alias-normalized)
+        await pilot.press("enter")  # accept the kept endpoint
+        await _pump(pilot)
+        screen = app.screen
+        assert isinstance(screen, AgentSetupScreen)
+        assert screen._auth_method == "none"
+        env_input = screen.query_one("#setup-api-key-env", Input)
+        assert env_input.display is False  # never asked for a key env

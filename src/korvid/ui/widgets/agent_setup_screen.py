@@ -194,6 +194,16 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
                 auth_list.focus()
                 return
             self._auth_method = _DEFAULTS[self._provider][0]
+            current = self._current_settings
+            if (
+                current is not None
+                and self._current_canonical == self._provider
+                and current.auth_method
+            ):
+                # Confirm-through reconnect keeps the retained auth method:
+                # a no-auth endpoint (local vLLM) must not be reset to
+                # api_key and prompted for a nonexistent key env.
+                self._auth_method = current.auth_method
             self._after_auth_method()
         elif event.option_list.id == "setup-auth":
             self._auth_method = str(event.option.prompt)
