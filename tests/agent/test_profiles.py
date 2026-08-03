@@ -142,16 +142,31 @@ def test_small_profile_prompt_pins_measured_failure_mode_rules() -> None:
     """
     profile = build_profile("small", readonly=False, resize_supported=True)
     prompt = profile.system_prompt.lower()
-    # 1. the reason string, not the exit code, names the cause
+    # 1. the reason string, not the exit code, names the cause — and a
+    #    liveness kill is attributed to the kubelet, not memory (the weak
+    #    first-round wording still produced an OOM misdiagnosis); round 2
+    #    measured contrastive rule-outs ("not OOM, but...") tripping the
+    #    misdiagnosis gate, so ruled-out faults must go unmentioned
     assert "reason string" in prompt
     assert "not the exit code" in prompt
+    assert "kubelet killed" in prompt
+    assert "never name faults you ruled out" in prompt
+    # round 3 measured the example's OOM answer parroted verbatim for a
+    # liveness kill, plans narrated instead of tool calls, and healthy
+    # verdicts too terse to name the passing checks
+    assert "shows the method only" in prompt
+    assert "call the tool instead" in prompt
+    assert "name the checks that pass" in prompt
     # 2. healthy is a valid verdict; stopped restarts are history
     assert "healthy" in prompt
+    assert "recovered" in prompt
     assert "history, not a live fault" in prompt
-    # 3. quote decisive reasons verbatim
-    assert "quote" in prompt
-    # 4. fetch the object a result points at before answering
+    # 3. copy decisive reasons word-for-word
+    assert "word-for-word" in prompt
+    # 4. fetch the object a result points at before answering — including
+    #    a PVC's storage class (round-1 answers stopped at the PVC)
     assert "fetch it before answering" in prompt
+    assert "storage class" in prompt
 
 
 def test_full_profile_prompt_pins_tools_only_and_grounding_rules() -> None:
