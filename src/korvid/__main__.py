@@ -15,6 +15,8 @@ import dataclasses
 import importlib.util
 import logging
 import secrets
+import sys
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -193,14 +195,16 @@ def _build_proposal_store(config: KorvidConfig) -> ProposalStore | None:
 
 
 async def _shutdown(
-    discovery_task: asyncio.Task[None], provider: LLMProvider | None, kube: KubeClient
+    discovery_task: asyncio.Task[None] | None, provider: LLMProvider | None, kube: KubeClient
 ) -> None:
     """Tear down background work and owned clients; each step is attempted
-    even if an earlier one raises."""
+    even if an earlier one raises. *discovery_task* is None when startup
+    wiring failed before discovery began (issue #166)."""
     try:
-        discovery_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await discovery_task
+        if discovery_task is not None:
+            discovery_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await discovery_task
     finally:
         try:
             if provider is not None:
@@ -398,7 +402,10 @@ async def _probe_cloud_provider(kube: KubeClient) -> ProviderInfo:
 
 
 def _agent_unavailable_wiring(
-    config: KorvidConfig, missing: list[str], ui_proxy: _UIBridgeProxy
+    config: KorvidConfig,
+    missing: list[str],
+    ui_proxy: _UIBridgeProxy,
+    provider_box: list[LLMProvider | None],
 ) -> tuple[
     None,
     None,
@@ -425,7 +432,7 @@ def _agent_unavailable_wiring(
     ) -> None:
         return None
 
-    return None, None, None, _retarget_noop, [None], ui_proxy
+    return None, None, None, _retarget_noop, provider_box, ui_proxy
 
 
 def _build_agent_wiring(
@@ -435,6 +442,7 @@ def _build_agent_wiring(
     *,
     pod_resize_supported: bool = False,
     cluster_context: str | None = None,
+    provider_box: list[LLMProvider | None] | None = None,
 ) -> tuple[
     AgentRuntime | None,
     AgentConfigurator | None,
@@ -451,9 +459,14 @@ def _build_agent_wiring(
     agent fails with an actionable install hint.
     """
     ui_proxy = _UIBridgeProxy()
+    # The caller may hand in the box that its teardown guard reads (issue
+    # #166): the provider is owned by that box from the moment it exists,
+    # so a failure in the *rest* of the agent wiring still cleans it up.
+    if provider_box is None:
+        provider_box = [None]
     missing = _missing_extra_packages(_AGENT_EXTRA_ROOTS)
     if missing:
-        return _agent_unavailable_wiring(config, missing, ui_proxy)
+        return _agent_unavailable_wiring(config, missing, ui_proxy, provider_box)
 
     # Deferred behind the capability probe: the embedded-agent loop is only
     # composed when this wiring is actually built (issue #73 requires
@@ -494,6 +507,10 @@ def _build_agent_wiring(
         oauth_token=oauth,
         ollama=ollama_options,
     )
+    # Ownership transfers immediately: if anything below raises (executor,
+    # runtime, configurator), the teardown guard still closes the provider
+    # (a GitHub Copilot provider eagerly holds a credential HTTP client).
+    provider_box[0] = provider
     agent_runtime = (
         AgentRuntime(
             provider,
@@ -512,8 +529,8 @@ def _build_agent_wiring(
         else None
     )
 
-    # Mutable holder so rebuild_agent/_shutdown always see the live provider.
-    provider_box: list[LLMProvider | None] = [provider]
+    # Mutable holder (shared with the caller's teardown guard) so
+    # rebuild_agent/_shutdown always see the live provider.
     # Per-cluster agent inputs: a `:ctx` switch replaces both, so a wizard
     # rebuild after the switch must not resurrect the old cluster's prompt
     # note or capability-gated tool set. The profile name rides along so a
@@ -648,7 +665,7 @@ async def _start_mcp_if_enabled(config: KorvidConfig, controller: MCPControllerB
 
 async def _teardown(
     controller: MCPControllerBase | None,
-    discovery_task: asyncio.Task[None],
+    discovery_task: asyncio.Task[None] | None,
     provider: LLMProvider | None,
     kube: KubeClient,
 ) -> None:
@@ -824,12 +841,45 @@ def _make_get_manifest(
     return get_manifest
 
 
+@dataclasses.dataclass
+class _RunState:
+    """What `_run`'s teardown guard must release — filled progressively by
+    `_wire_and_run` so a wiring failure releases exactly what was built."""
+
+    mcp: MCPControllerBase | None = None
+    provider_box: list[LLMProvider | None] = dataclasses.field(default_factory=lambda: [None])
+    discovery_box: list[asyncio.Task[None]] = dataclasses.field(default_factory=list)
+
+
 async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None = None) -> None:
     config = _load_startup_config(readonly, mcp, namespace)
     # Custom columns (issue #45) are extracted from raw manifests inside the
     # client — the manifests are discarded once summaries are built.
     kube = KubeClient(custom_columns={kind: view.columns for kind, view in config.views.items()})
     await kube.connect(config.kube_context)
+    # Everything below runs under the client's teardown guard: a wiring or
+    # probe failure between connect and the run loop must not leak the
+    # connected client (or a built provider/MCP controller) into a
+    # crash-recovery restart (issue #166). The state is filled as wiring
+    # progresses, so teardown releases exactly what was built.
+    state = _RunState()
+    try:
+        await _wire_and_run(config, kube, state)
+    finally:
+        await _teardown(
+            state.mcp,
+            state.discovery_box[0] if state.discovery_box else None,
+            state.provider_box[0],
+            kube,
+        )
+
+
+async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState) -> None:
+    """Wire everything that depends on the connected client and run the app.
+
+    Fills *state* as pieces come alive so `_run`'s teardown guard can
+    release exactly what was built, however far wiring got.
+    """
     store = ResourceStore()
 
     # Start with pods only so the UI appears immediately; full discovery runs
@@ -860,25 +910,27 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
     # the agent system prompt and the Service/Ingress describe footer.
     provider_info = await _probe_cloud_provider(kube)
 
-    agent_runtime, configurator, rebuild_agent, retarget_agent, provider_box, ui_proxy = (
-        _build_agent_wiring(
-            config,
-            kube,
-            aliases,
-            pod_resize_supported=pod_resize_supported,
-            cluster_context=cluster_context_note(provider_info),
-        )
+    agent_runtime, configurator, rebuild_agent, retarget_agent, _, ui_proxy = _build_agent_wiring(
+        config,
+        kube,
+        aliases,
+        pod_resize_supported=pod_resize_supported,
+        cluster_context=cluster_context_note(provider_info),
+        # Ownership lands in the teardown guard's box the moment the
+        # provider exists, so partial agent wiring is also cleaned up.
+        provider_box=state.provider_box,
     )
 
     mcp_hooks = _MCPAppHooks()
     mcp_controller = _build_mcp_controller(config, kube, aliases, ui_proxy, mcp_hooks=mcp_hooks)
+    state.mcp = mcp_controller
     proposal_store = _build_proposal_store(config)
 
     # `:ctx` switching (issue #36): the closure needs the app (for discovery
     # restarts) and the live discovery task, both created below — boxes
     # late-bind them, mirroring ui_proxy.target.
     app_box: list[KorvidApp] = []
-    discovery_box: list[asyncio.Task[None]] = []
+    discovery_box = state.discovery_box
 
     app = KorvidApp(
         config=config,
@@ -933,12 +985,65 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
     await _start_mcp_if_enabled(config, mcp_controller)
 
     discovery_box.append(asyncio.create_task(_discover_in_background(kube, aliases, app)))
-    try:
-        await app.run_async()
-    finally:
-        # discovery_box[0] is the *live* task: a `:ctx` switch may have
-        # replaced the one started above.
-        await _teardown(mcp_controller, discovery_box[0], provider_box[0], kube)
+    # Teardown lives in `_run`'s guard: discovery_box[0] is read there as the
+    # *live* task — a `:ctx` switch may have replaced the one started above.
+    await app.run_async()
+
+
+RESTART_CAP = 3
+RESTART_WINDOW_SECONDS = 60.0
+
+
+def _run_with_recovery(
+    runner: Callable[[], None],
+    *,
+    allow_restart: bool,
+    prompt: Callable[[], str],
+    clock: Callable[[], float],
+) -> None:
+    """Crash-recovery loop at the composition root (issue #166).
+
+    Runs *runner* (one full `asyncio.run(_run(...))` attempt — a fresh event
+    loop, fresh wiring, fresh clients) and, when it dies with an unexpected
+    exception, logs the traceback and offers a restart. Clean exits,
+    `KeyboardInterrupt`, and `SystemExit` propagate untouched. A cap of
+    `RESTART_CAP` crashes within `RESTART_WINDOW_SECONDS` stops a
+    deterministic crash loop; with *allow_restart* false (non-interactive
+    stdin/stderr or `--no-restart`) the exception re-raises immediately,
+    preserving today's exit-non-zero behavior.
+    """
+    crash_times: list[float] = []
+    while True:
+        try:
+            runner()
+            return
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            logging.getLogger(__name__).exception("korvid crashed: %s", exc)
+            if not allow_restart:
+                raise
+            now = clock()
+            crash_times = [t for t in crash_times if now - t <= RESTART_WINDOW_SECONDS]
+            crash_times.append(now)
+            if len(crash_times) >= RESTART_CAP:
+                print(
+                    f"korvid crashed {len(crash_times)} times within"
+                    f" {RESTART_WINDOW_SECONDS:.0f}s — not restarting.",
+                    file=sys.stderr,
+                )
+                raise
+            print(f"korvid crashed: {exc}", file=sys.stderr)
+            answer = prompt().strip().lower()
+            if answer not in ("", "y", "yes"):
+                raise
+
+
+def _restart_prompt() -> str:
+    # Interactivity keys off stdin/stderr; a redirected stdout must neither
+    # swallow the question nor be contaminated by it.
+    print("korvid crashed — restart? [Y/n] ", end="", file=sys.stderr, flush=True)
+    return input()
 
 
 def main() -> None:
@@ -961,8 +1066,21 @@ def main() -> None:
         help="Expose read + UI-drive tools to external MCP hosts over"
         " Streamable HTTP on 127.0.0.1 (port from config mcp.port, default 7878).",
     )
+    parser.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="Exit on a fatal error instead of offering to restart (issue #166).",
+    )
     args = parser.parse_args()
-    asyncio.run(_run(readonly=args.readonly, mcp=args.mcp, namespace=args.namespace))
+    interactive = sys.stdin.isatty() and sys.stderr.isatty()
+    _run_with_recovery(
+        # Each attempt is a fresh asyncio.run: new event loop, new wiring,
+        # new clients — nothing survives from a crashed run.
+        lambda: asyncio.run(_run(readonly=args.readonly, mcp=args.mcp, namespace=args.namespace)),
+        allow_restart=interactive and not args.no_restart,
+        prompt=_restart_prompt,
+        clock=time.monotonic,
+    )
 
 
 if __name__ == "__main__":
