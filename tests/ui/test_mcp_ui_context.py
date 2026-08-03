@@ -73,16 +73,33 @@ async def test_downstream_log_tasks_carry_the_app_context() -> None:
     """The audit's latent defect: log-stream tasks spawned by an
     MCP-driven agent_open_logs must carry `active_app` - a future error
     path composing a widget from a stream task must not become a
-    delayed crash."""
-    app = make_app()
+    delayed crash. Inheritance is observed from *inside* a spawned
+    stream (`Task.get_context()` is 3.12-only; the repo supports 3.11)."""
+    from collections.abc import AsyncIterator
+    from typing import Any
+
+    from korvid.k8s.logs import LogLine
+
+    seen: list[object] = []
+
+    app = make_app(with_logs=False)
+
+    async def recording_stream(
+        namespace: str, pod: str, container: str, **kwargs: Any
+    ) -> AsyncIterator[LogLine]:
+        seen.append(active_app.get(None))
+        yield LogLine(pod=pod, container=container, text="hello", timestamp=None)
+        while True:
+            await asyncio.sleep(0.01)
+
+    app._stream_logs = recording_stream  # test seam: duck-typed stream source
     async with app.run_test() as pilot:
         await pilot.pause()
         bridge = AppUIBridge(app)
         result = await _in_empty_context(bridge.agent_open_logs("web-1", "default"))
         assert not result.startswith("ERROR:")
-        await until(pilot, lambda: bool(app._log_tasks), label="stream tasks spawned")
-        for task in app._log_tasks:
-            assert task.get_context().get(active_app) is app
+        await until(pilot, lambda: bool(seen), label="stream task ran")
+        assert seen == [app]  # the spawned stream sees the app context
 
 
 async def test_concurrent_bridge_calls_from_foreign_contexts_stay_serialized() -> None:
@@ -181,3 +198,20 @@ async def test_real_mcp_http_open_describe_and_follow_mirror() -> None:
         finally:
             server.request_shutdown()
             await asyncio.wait_for(run_task, timeout=10)
+
+
+async def test_premount_bridge_call_refuses_instead_of_running_foreign() -> None:
+    """The None-snapshot case is reachable in production: the MCP endpoint
+    goes live before app.run_async(), so a call can arrive before on_mount
+    captured the context. Running the coroutine directly would execute the
+    widget operation in the foreign ASGI context during Textual startup -
+    refuse as UI-not-ready instead (and never leak an unawaited coroutine)."""
+    import warnings
+
+    app = make_app()
+    bridge = AppUIBridge(app)  # no run_test: the app is not mounted yet
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # an unclosed coroutine would warn
+        result = await bridge.agent_open_describe("pods", "web-1", "default")
+    assert result.startswith("ERROR:")
+    assert "not ready" in result

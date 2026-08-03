@@ -9819,8 +9819,15 @@ class AppUIBridge(UIBridge):
         strands UI work.
         """
         snapshot = self._app._app_context
-        if snapshot is None:  # pre-mount (tests): no context to restore
-            return await coro
+        if snapshot is None:
+            # Reachable in production: the MCP endpoint goes live before
+            # app.run_async(), so a call can land before on_mount captured
+            # the context. Running the coroutine here would execute the
+            # widget operation in the foreign ASGI context during Textual
+            # startup - refuse instead (and close the coroutine so it
+            # never warns as un-awaited).
+            coro.close()
+            return "ERROR: UI not ready — the app is still starting; retry shortly"
         task = asyncio.get_running_loop().create_task(
             coro, context=snapshot.run(contextvars.copy_context)
         )
