@@ -22,7 +22,7 @@ class BlockingRuntime:
     interruption contract (finalize_interrupt)."""
 
     def __init__(self, events: list[AgentEvent] | None = None) -> None:
-        self._events = events or [TextDelta(text="let me check")]
+        self._events = [TextDelta(text="let me check")] if events is None else events
         self.calls: list[str] = []
         self.finalized = 0
         self.total_tokens = (0, 0)
@@ -263,6 +263,66 @@ async def test_immediate_stop_before_the_turn_first_runs_clears_busy_state() -> 
         await until(pilot, lambda: panel.status_text == "", label="status cleared")
         assert not runtime.calls  # the turn never reached the runtime
         assert "interrupted" in _panel_text(app)
+
+
+async def test_stop_then_immediate_shutdown_injects_cancellation_once() -> None:
+    """on_unmount must not re-inject cancellation into a task an explicit
+    stop already has draining its cleanup — a second CancelledError aborts
+    the provider cleanup mid-flight (review on #175)."""
+
+    class SlowCleanupRuntime(BlockingRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cleanup_done = False
+
+        async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
+            self.calls.append(user_text)
+            try:
+                yield TextDelta(text="let me check")
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0.05)  # provider cleanup on close
+                self.cleanup_done = True
+
+    runtime = SlowCleanupRuntime()
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        await _start_turn(app, pilot, "check")
+        await until(pilot, lambda: bool(runtime.calls), label="turn running")
+        app.action_interrupt_agent()
+        # exit immediately — shutdown runs while the stop is still draining
+    assert runtime.cleanup_done
+
+
+async def test_interrupt_marker_owns_the_partial_not_the_replacement() -> None:
+    """Interrupt-and-submit echoes the correction before the old turn
+    drains: the ⏹ marker must attach to the partial assistant output, never
+    trail the echoed replacement as if describing it (review on #175)."""
+    runtime = BlockingRuntime()  # streams "let me check", then blocks
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        inp = await _start_turn(app, pilot, "first question")
+        await until(pilot, lambda: "let me check" in _panel_text(app), label="streaming")
+        inp.value = "actually check namespace foo"
+        await pilot.press("enter")
+        await until(pilot, lambda: len(runtime.calls) == 2, label="replacement started")
+        text = _panel_text(app)
+        assert text.index("interrupted") < text.index("actually check namespace foo")
+
+
+async def test_interrupt_marker_precedes_the_echo_when_nothing_streamed() -> None:
+    """Even with no partial output to mark in place, the marker must land
+    before the echoed replacement, not after it."""
+    runtime = BlockingRuntime(events=[])  # blocks before any output
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        inp = await _start_turn(app, pilot, "first question")
+        await until(pilot, lambda: len(runtime.calls) == 1, label="turn running")
+        inp.value = "actually check namespace foo"
+        await pilot.press("enter")
+        await until(pilot, lambda: len(runtime.calls) == 2, label="replacement started")
+        text = _panel_text(app)
+        assert text.index("interrupted") < text.index("actually check namespace foo")
 
 
 async def test_stale_done_callback_cannot_consume_the_replacement() -> None:

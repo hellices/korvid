@@ -9901,9 +9901,21 @@ class KorvidApp(App[None]):
             await asyncio.gather(*self._dispatch_tasks, return_exceptions=True)
         self._dispatch_tasks.clear()
 
+    async def _settle_agent_task(self) -> None:
+        """Shutdown teardown of the agent turn: mark the app shutting down
+        (finalization must not touch the torn-down transcript or start a
+        replacement) and let the task drain. An explicit stop may already
+        have the task cancelling — re-injecting cancellation would abort
+        that cleanup mid-flight."""
+        self._shutting_down = True
+        if self._agent_task is None:
+            return
+        if self._agent_task.cancelling() == 0:
+            self._agent_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._agent_task
+
     async def on_unmount(self) -> None:
-        # Interrupt finalization must not touch the (torn-down) transcript
-        # or start a replacement turn once shutdown has begun.
         self._shutting_down = True
         await self._reap_dispatches()
         # Cancel any active log stream tasks before the event loop shuts down.
@@ -9917,10 +9929,7 @@ class KorvidApp(App[None]):
             self._ns_prefetch_task.cancel()
         if self._ctx_prefetch_task is not None:
             self._ctx_prefetch_task.cancel()
-        if self._agent_task is not None:
-            self._agent_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._agent_task
+        await self._settle_agent_task()
         tasks = list(self._log_tasks)
         for task in tasks:
             task.cancel()

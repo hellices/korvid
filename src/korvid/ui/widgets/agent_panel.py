@@ -182,6 +182,7 @@ class AgentPanel(Vertical):
         # The advertised stop key (issue #170): the app resolves the
         # effective `interrupt_agent` binding so a remap moves the hint.
         self.stop_key = "ctrl+x"
+        self._interrupt_marked = False
         self._status_timer: Timer | None = None
         self._spinner_frame = 0
 
@@ -238,9 +239,28 @@ class AgentPanel(Vertical):
 
         Interrupt-and-submit (issue #170) echoes the correction the moment
         it is typed; the replacement turn then begins with `echo=False` so
-        the message is not repeated.
+        the message is not repeated. When a turn is still draining, the
+        interrupted turn's transcript is settled first so the ⏹ marker
+        attaches to the partial output, never to the echoed correction.
         """
+        if self._status_timer is not None:
+            self._mark_interrupted()
         self._mount_entry(ChatEntry(Text(text), raw=text, classes="user-msg"))
+
+    def _mark_interrupted(self) -> None:
+        """Settle the interrupted turn's transcript: final-render the
+        partial stream, mark unfinished tool lines, and append the ⏹
+        marker adjacent to the output it describes."""
+        self._end_stream()
+        self._mark_tools_interrupted()
+        self._mount_entry(
+            ChatEntry(
+                Text("⏹ interrupted", style="dim"),
+                raw="⏹ interrupted",
+                classes="agent-msg",
+            )
+        )
+        self._interrupt_marked = True
 
     def begin_turn(self, user_text: str, *, echo: bool = True) -> None:
         if echo:
@@ -253,6 +273,7 @@ class AgentPanel(Vertical):
         # Drop tool state from any previous turn: a late ToolCallFinished from
         # an errored turn must not touch this turn's transcript.
         self._tool_widgets.clear()
+        self._interrupt_marked = False
         self._tool_args.clear()
         if self._flush_timer is not None:
             self._flush_timer.stop()
@@ -306,16 +327,12 @@ class AgentPanel(Vertical):
         elif isinstance(event, TurnInterrupted):
             # A stop is a normal outcome, not an error: the partial answer
             # stays in the transcript and in-flight tool lines are marked.
-            self._end_stream()
+            # Interrupt-and-submit already settled the transcript when the
+            # correction was echoed — never mount a second marker there.
             self._stop_flush_timer()
-            self._mark_tools_interrupted()
-            self._mount_entry(
-                ChatEntry(
-                    Text("⏹ interrupted", style="dim"),
-                    raw="⏹ interrupted",
-                    classes="agent-msg",
-                )
-            )
+            if not self._interrupt_marked:
+                self._mark_interrupted()
+            self._interrupt_marked = False
             self._clear_status()
             # Focus returns to the input even when the stop key was pressed
             # elsewhere (it is a global binding): the natural next step
