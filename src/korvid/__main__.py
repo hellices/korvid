@@ -15,6 +15,8 @@ import dataclasses
 import importlib.util
 import logging
 import secrets
+import sys
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -941,6 +943,59 @@ async def _run(readonly: bool = False, mcp: bool = False, namespace: str | None 
         await _teardown(mcp_controller, discovery_box[0], provider_box[0], kube)
 
 
+RESTART_CAP = 3
+RESTART_WINDOW_SECONDS = 60.0
+
+
+def _run_with_recovery(
+    runner: Callable[[], None],
+    *,
+    allow_restart: bool,
+    prompt: Callable[[], str],
+    clock: Callable[[], float],
+) -> None:
+    """Crash-recovery loop at the composition root (issue #166).
+
+    Runs *runner* (one full `asyncio.run(_run(...))` attempt — a fresh event
+    loop, fresh wiring, fresh clients) and, when it dies with an unexpected
+    exception, logs the traceback and offers a restart. Clean exits,
+    `KeyboardInterrupt`, and `SystemExit` propagate untouched. A cap of
+    `RESTART_CAP` crashes within `RESTART_WINDOW_SECONDS` stops a
+    deterministic crash loop; with *allow_restart* false (non-interactive
+    stdin/stderr or `--no-restart`) the exception re-raises immediately,
+    preserving today's exit-non-zero behavior.
+    """
+    crash_times: list[float] = []
+    while True:
+        try:
+            runner()
+            return
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            logging.getLogger(__name__).exception("korvid crashed: %s", exc)
+            if not allow_restart:
+                raise
+            now = clock()
+            crash_times = [t for t in crash_times if now - t <= RESTART_WINDOW_SECONDS]
+            crash_times.append(now)
+            if len(crash_times) > RESTART_CAP:
+                print(
+                    f"korvid crashed {len(crash_times)} times within"
+                    f" {RESTART_WINDOW_SECONDS:.0f}s — not restarting.",
+                    file=sys.stderr,
+                )
+                raise
+            print(f"korvid crashed: {exc}", file=sys.stderr)
+            answer = prompt().strip().lower()
+            if answer not in ("", "y", "yes"):
+                raise
+
+
+def _restart_prompt() -> str:
+    return input("korvid crashed — restart? [Y/n] ")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="korvid", description="Kubernetes TUI with an agent.")
     parser.add_argument(
@@ -961,8 +1016,21 @@ def main() -> None:
         help="Expose read + UI-drive tools to external MCP hosts over"
         " Streamable HTTP on 127.0.0.1 (port from config mcp.port, default 7878).",
     )
+    parser.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="Exit on a fatal error instead of offering to restart (issue #166).",
+    )
     args = parser.parse_args()
-    asyncio.run(_run(readonly=args.readonly, mcp=args.mcp, namespace=args.namespace))
+    interactive = sys.stdin.isatty() and sys.stderr.isatty()
+    _run_with_recovery(
+        # Each attempt is a fresh asyncio.run: new event loop, new wiring,
+        # new clients — nothing survives from a crashed run.
+        lambda: asyncio.run(_run(readonly=args.readonly, mcp=args.mcp, namespace=args.namespace)),
+        allow_restart=interactive and not args.no_restart,
+        prompt=_restart_prompt,
+        clock=time.monotonic,
+    )
 
 
 if __name__ == "__main__":

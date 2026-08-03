@@ -75,6 +75,18 @@ Protection is re-evaluated on every `:ctx` switch.  With
 `agent.disable_in_protected: true` the agent prompt is rejected outright in
 protected contexts.
 
+### Crash recovery
+
+If a fatal exception escapes the TUI, korvid restores the terminal, logs
+the traceback, and asks `korvid crashed — restart? [Y/n]` instead of just
+dying.  A restart rebuilds everything from scratch — a fresh event loop,
+Kubernetes client, agent provider, and MCP server; nothing from the crashed
+run is reused, and no approval state or pending proposal survives (the
+append-only audit log is unaffected).  Repeated immediate crashes stop the
+loop (3 crashes within 60 seconds) so a deterministic startup failure
+cannot spin.  In non-interactive environments, or with `--no-restart`,
+korvid keeps the old behavior: exit non-zero with the traceback logged.
+
 ## Dry-run previews
 
 Before a delete, scale, resize, cordon/uncordon, or rollout restart dialog opens, korvid replays the
