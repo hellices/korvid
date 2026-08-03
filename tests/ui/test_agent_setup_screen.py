@@ -480,3 +480,60 @@ async def test_explicit_small_profile_survives_a_cloud_provider() -> None:
         screen._auth_method = "api_key"
         settings = screen._draft_settings("gpt-4o-mini")
         assert settings.profile == "small"
+
+
+class _HostWithSettings(App[None]):
+    def __init__(self, configurator: FakeConfigurator, current_settings: AgentSettings) -> None:
+        super().__init__()
+        self.configurator = configurator
+        self.current_settings = current_settings
+
+    def on_mount(self) -> None:
+        self.push_screen(
+            AgentSetupScreen(self.configurator, current_settings=self.current_settings)
+        )
+
+
+async def test_reconnect_prefills_azure_auth_method() -> None:
+    """Azure + Entra kept settings must pre-highlight the auth choice: a
+    confirm-through reconnect must not silently switch to api_key
+    (review on #180)."""
+    settings = AgentSettings(
+        provider="azure",
+        auth_method="entra",
+        base_url="https://my.openai.azure.com",
+        model="gpt-4o",
+    )
+    app = _HostWithSettings(FakeConfigurator(), settings)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        provider_list = app.screen.query_one("#setup-provider", OptionList)
+        assert provider_list.highlighted is not None
+        assert provider_list.get_option_at_index(provider_list.highlighted).id == "azure"
+        await pilot.press("enter")  # accept azure → auth step
+        auth_list = app.screen.query_one("#setup-auth", OptionList)
+        assert auth_list.display is True
+        assert auth_list.highlighted is not None
+        assert str(auth_list.get_option_at_index(auth_list.highlighted).prompt) == "entra"
+
+
+async def test_reconnect_normalizes_registry_provider_aliases() -> None:
+    """Settings configured with a registry alias (openai, vllm, github,
+    anthropic, claude) must map onto the wizard's openai-compat entry and
+    still prefill the endpoint (review on #180)."""
+    settings = AgentSettings(
+        provider="openai",
+        auth_method="api_key",
+        base_url="https://api.my-proxy.example/v1",
+        model="gpt-4o-mini",
+        api_key_env="MY_KEY",
+    )
+    app = _HostWithSettings(FakeConfigurator(), settings)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        provider_list = app.screen.query_one("#setup-provider", OptionList)
+        assert provider_list.highlighted is not None
+        assert provider_list.get_option_at_index(provider_list.highlighted).id == "openai-compat"
+        await pilot.press("enter")  # accept openai-compat → endpoint step
+        base = app.screen.query_one("#setup-base-url", Input)
+        assert base.value == "https://api.my-proxy.example/v1"

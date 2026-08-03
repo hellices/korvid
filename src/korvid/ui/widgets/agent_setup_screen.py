@@ -38,6 +38,23 @@ _PROVIDER_LABELS: dict[str, str] = {
     "ollama": "ollama — local models, native API (no auth)",
 }
 
+# Registry aliases (providers/registry.py) that all resolve to the wizard's
+# openai-compat entry: settings configured under an alias must still
+# pre-highlight and prefill the wizard on reconnect (issue #167).
+_OPENAI_COMPAT_ALIASES = frozenset({"openai", "vllm", "github", "anthropic", "claude"})
+
+
+def _canonical_provider(name: str | None) -> str | None:
+    """The wizard entry a configured provider name maps onto, or None."""
+    if not name:
+        return None
+    lowered = name.strip().lower()
+    if lowered in _DEFAULTS:
+        return lowered
+    if lowered in _OPENAI_COMPAT_ALIASES:
+        return "openai-compat"
+    return None
+
 
 class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
     """Conversational wizard: one question at a time + completed-step checklist."""
@@ -87,8 +104,12 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
         self._current_profile = current_profile
         # Kept settings from a configured (possibly :ai off'd) agent
         # (issue #167): the wizard starts from them so reconnecting is
-        # confirm-through, not re-entry.
+        # confirm-through, not re-entry. Registry aliases normalize onto
+        # the wizard's canonical entries for highlighting/prefilling.
         self._current_settings = current_settings
+        self._current_canonical = _canonical_provider(
+            current_settings.provider if current_settings is not None else None
+        )
         self._provider = ""
         self._auth_method = ""
         self._base_url: str | None = None
@@ -127,10 +148,8 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
             self.query_one(widget_id).display = False
         provider_list = self.query_one("#setup-provider", OptionList)
         provider_list.highlighted = 0
-        if self._current_settings is not None:
-            providers = list(_DEFAULTS)
-            if self._current_settings.provider in providers:
-                provider_list.highlighted = providers.index(self._current_settings.provider)
+        if self._current_canonical is not None:
+            provider_list.highlighted = list(_DEFAULTS).index(self._current_canonical)
         provider_list.focus()
 
     # ------------------------------------------------------------------
@@ -163,6 +182,15 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
                 auth_list = self.query_one("#setup-auth", OptionList)
                 auth_list.display = True
                 auth_list.highlighted = 0
+                current = self._current_settings
+                if (
+                    self._current_canonical == "azure"
+                    and current is not None
+                    and current.auth_method == "entra"
+                ):
+                    # Confirm-through reconnect must not silently switch
+                    # the retained Entra flow to api_key (issue #167).
+                    auth_list.highlighted = 1
                 auth_list.focus()
                 return
             self._auth_method = _DEFAULTS[self._provider][0]
@@ -181,7 +209,7 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
             return
         _, base_url, _ = _DEFAULTS[self._provider]
         current = self._current_settings
-        if current is not None and current.provider == self._provider and current.base_url:
+        if current is not None and self._current_canonical == self._provider and current.base_url:
             # Same provider as the kept settings: start from the kept
             # endpoint, not the provider default (issue #167 reconnect).
             base_url = current.base_url
@@ -202,7 +230,7 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
                 current = self._current_settings
                 if (
                     current is not None
-                    and current.provider == self._provider
+                    and self._current_canonical == self._provider
                     and current.api_key_env
                 ):
                     env_input.value = current.api_key_env
@@ -271,7 +299,7 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
         self._models = models
         default_model = _DEFAULTS[self._provider][2]
         current = self._current_settings
-        if current is not None and current.provider == self._provider and current.model:
+        if current is not None and self._current_canonical == self._provider and current.model:
             # Reconnect flow (issue #167): the kept model beats the default.
             default_model = current.model
         if models:
