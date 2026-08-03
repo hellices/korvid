@@ -402,7 +402,10 @@ async def _probe_cloud_provider(kube: KubeClient) -> ProviderInfo:
 
 
 def _agent_unavailable_wiring(
-    config: KorvidConfig, missing: list[str], ui_proxy: _UIBridgeProxy
+    config: KorvidConfig,
+    missing: list[str],
+    ui_proxy: _UIBridgeProxy,
+    provider_box: list[LLMProvider | None],
 ) -> tuple[
     None,
     None,
@@ -429,7 +432,7 @@ def _agent_unavailable_wiring(
     ) -> None:
         return None
 
-    return None, None, None, _retarget_noop, [None], ui_proxy
+    return None, None, None, _retarget_noop, provider_box, ui_proxy
 
 
 def _build_agent_wiring(
@@ -439,6 +442,7 @@ def _build_agent_wiring(
     *,
     pod_resize_supported: bool = False,
     cluster_context: str | None = None,
+    provider_box: list[LLMProvider | None] | None = None,
 ) -> tuple[
     AgentRuntime | None,
     AgentConfigurator | None,
@@ -455,9 +459,14 @@ def _build_agent_wiring(
     agent fails with an actionable install hint.
     """
     ui_proxy = _UIBridgeProxy()
+    # The caller may hand in the box that its teardown guard reads (issue
+    # #166): the provider is owned by that box from the moment it exists,
+    # so a failure in the *rest* of the agent wiring still cleans it up.
+    if provider_box is None:
+        provider_box = [None]
     missing = _missing_extra_packages(_AGENT_EXTRA_ROOTS)
     if missing:
-        return _agent_unavailable_wiring(config, missing, ui_proxy)
+        return _agent_unavailable_wiring(config, missing, ui_proxy, provider_box)
 
     # Deferred behind the capability probe: the embedded-agent loop is only
     # composed when this wiring is actually built (issue #73 requires
@@ -498,6 +507,10 @@ def _build_agent_wiring(
         oauth_token=oauth,
         ollama=ollama_options,
     )
+    # Ownership transfers immediately: if anything below raises (executor,
+    # runtime, configurator), the teardown guard still closes the provider
+    # (a GitHub Copilot provider eagerly holds a credential HTTP client).
+    provider_box[0] = provider
     agent_runtime = (
         AgentRuntime(
             provider,
@@ -516,8 +529,8 @@ def _build_agent_wiring(
         else None
     )
 
-    # Mutable holder so rebuild_agent/_shutdown always see the live provider.
-    provider_box: list[LLMProvider | None] = [provider]
+    # Mutable holder (shared with the caller's teardown guard) so
+    # rebuild_agent/_shutdown always see the live provider.
     # Per-cluster agent inputs: a `:ctx` switch replaces both, so a wizard
     # rebuild after the switch must not resurrect the old cluster's prompt
     # note or capability-gated tool set. The profile name rides along so a
@@ -897,18 +910,16 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
     # the agent system prompt and the Service/Ingress describe footer.
     provider_info = await _probe_cloud_provider(kube)
 
-    agent_runtime, configurator, rebuild_agent, retarget_agent, provider_box, ui_proxy = (
-        _build_agent_wiring(
-            config,
-            kube,
-            aliases,
-            pod_resize_supported=pod_resize_supported,
-            cluster_context=cluster_context_note(provider_info),
-        )
+    agent_runtime, configurator, rebuild_agent, retarget_agent, _, ui_proxy = _build_agent_wiring(
+        config,
+        kube,
+        aliases,
+        pod_resize_supported=pod_resize_supported,
+        cluster_context=cluster_context_note(provider_info),
+        # Ownership lands in the teardown guard's box the moment the
+        # provider exists, so partial agent wiring is also cleaned up.
+        provider_box=state.provider_box,
     )
-    # The wiring's box is live (an :ai rebuild replaces its provider);
-    # expose it so teardown always closes the *current* provider.
-    state.provider_box = provider_box
 
     mcp_hooks = _MCPAppHooks()
     mcp_controller = _build_mcp_controller(config, kube, aliases, ui_proxy, mcp_hooks=mcp_hooks)

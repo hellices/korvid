@@ -5,6 +5,8 @@ non-interactive or explicitly disabled."""
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from korvid.__main__ import (
@@ -182,3 +184,131 @@ async def test_startup_failure_after_connect_closes_the_client(
         await main_mod._run()
     assert created  # the client was built…
     assert created[0].closed  # …and the connected client never leaks
+
+
+def _main_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    argv: list[str],
+    stdin_tty: bool,
+    stderr_tty: bool,
+) -> bool:
+    """Run main() with the recovery loop stubbed; return the allow_restart
+    it was gated with."""
+    import types
+
+    import korvid.__main__ as main_mod
+
+    captured: dict[str, bool] = {}
+
+    def fake_recovery(
+        runner: object, *, allow_restart: bool, prompt: object, clock: object
+    ) -> None:
+        captured["allow_restart"] = allow_restart
+
+    monkeypatch.setattr(main_mod, "_run_with_recovery", fake_recovery)
+    monkeypatch.setattr(sys, "argv", ["korvid", *argv])
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: stdin_tty))
+    monkeypatch.setattr(sys, "stderr", types.SimpleNamespace(isatty=lambda: stderr_tty))
+    main_mod.main()
+    return captured["allow_restart"]
+
+
+def test_main_enables_restart_only_on_a_full_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _main_gate(monkeypatch, argv=[], stdin_tty=True, stderr_tty=True) is True
+
+
+def test_main_disables_restart_when_stdin_is_not_a_tty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _main_gate(monkeypatch, argv=[], stdin_tty=False, stderr_tty=True) is False
+
+
+def test_main_disables_restart_when_stderr_is_not_a_tty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _main_gate(monkeypatch, argv=[], stdin_tty=True, stderr_tty=False) is False
+
+
+def test_main_disables_restart_with_the_no_restart_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _main_gate(monkeypatch, argv=["--no-restart"], stdin_tty=True, stderr_tty=True) is False
+
+
+async def test_provider_created_before_a_later_wiring_failure_is_released(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider is owned by the teardown guard's box the moment it
+    exists — a failure in the rest of the agent wiring (executor, runtime,
+    configurator) must still close it (review on #179)."""
+    import korvid.__main__ as main_mod
+
+    class FakeProvider:
+        pass
+
+    fake = FakeProvider()
+
+    def build_wiring(*args: object, **kwargs: object) -> object:
+        provider_box = kwargs["provider_box"]
+        assert isinstance(provider_box, list)
+        provider_box[0] = fake  # provider exists…
+        raise RuntimeError("agent wiring failed after provider creation")
+
+    monkeypatch.setattr(main_mod, "_build_agent_wiring", build_wiring)
+
+    class FakeKube:
+        def __init__(self, **kwargs: object) -> None:
+            self.closed = False
+
+        async def connect(self, context: str | None) -> None:
+            return None
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def list_events_for(self, *a: object, **k: object) -> list[object]:
+            return []
+
+    closed: list[object] = []
+
+    class FakeKubeFactory:
+        def __call__(self, **kwargs: object) -> FakeKube:
+            kube = FakeKube(**kwargs)
+            closed.append(kube)
+            return kube
+
+    from korvid.core.config import KorvidConfig
+
+    monkeypatch.setattr(main_mod, "KubeClient", FakeKubeFactory())
+    monkeypatch.setattr(
+        main_mod,
+        "_load_startup_config",
+        lambda readonly, mcp, namespace: KorvidConfig(namespace="default"),
+    )
+
+    async def ok_probe(kube: object, *, readonly: bool = False) -> bool:
+        return False
+
+    monkeypatch.setattr(main_mod, "_probe_pod_resize", ok_probe)
+
+    from korvid.k8s.csp import ProviderInfo
+
+    async def ok_csp(kube: object) -> ProviderInfo:
+        return ProviderInfo(provider="unknown", distribution=None)
+
+    monkeypatch.setattr(main_mod, "_probe_cloud_provider", ok_csp)
+
+    provider_seen: list[object] = []
+
+    async def fake_teardown(
+        controller: object, discovery: object, provider: object, kube: object
+    ) -> None:
+        provider_seen.append(provider)
+        await kube.close()  # type: ignore[attr-defined]  # fake in test
+
+    monkeypatch.setattr(main_mod, "_teardown", fake_teardown)
+
+    with pytest.raises(RuntimeError, match="agent wiring failed"):
+        await main_mod._run()
+    assert provider_seen == [fake]  # …and teardown was handed exactly it
