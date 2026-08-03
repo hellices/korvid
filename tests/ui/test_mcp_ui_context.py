@@ -227,9 +227,14 @@ async def test_drill_down_crosses_the_boundary_safely() -> None:
 
     app = make_drill_app(_default_data())
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
         await app.on_navigate_command(NavigateCommand("deployments", None))
-        await pilot.pause(0.1)
+        # Condition polling (tests/ui/waits.py): the drill consumes the
+        # deployment rows, so wait for the watch data - never a fixed sleep.
+        await until(
+            pilot,
+            lambda: bool(app.store.get("deployments", app.current_scope)),
+            label="deployments loaded",
+        )
         bridge = AppUIBridge(app)
         result = await _in_empty_context(bridge.agent_drill_down("web"))
         assert not result.startswith("ERROR:")
@@ -264,3 +269,36 @@ async def test_cancelled_foreign_caller_reaps_the_dispatched_task() -> None:
         with pytest.raises(asyncio.CancelledError):
             await caller
         await asyncio.wait_for(cleaned.wait(), timeout=5)  # reaped, not stranded
+
+
+async def test_app_shutdown_reaps_in_flight_dispatches_and_refuses_new_work() -> None:
+    """The MCP server outlives run_async(): a request racing on_unmount
+    must not leave work alive against an unmounted app. Shutdown cancels
+    and reaps in-flight dispatches (their finally runs) and later calls
+    refuse as not-ready."""
+    entered = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    app = make_app()
+
+    async def blocking_describe(kind: str, name: str, namespace: str | None = None) -> str:
+        entered.set()
+        try:
+            await asyncio.Event().wait()  # blocks until cancelled
+            return "ok"
+        finally:
+            cleaned.set()
+
+    app.agent_open_describe = blocking_describe  # type: ignore[method-assign]  # test seam
+    bridge = AppUIBridge(app)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        caller = _in_empty_context(bridge.agent_open_describe("pods", "web-1", "default"))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+    # run_test's exit unmounted the app: the in-flight dispatch was
+    # cancelled and awaited during on_unmount, not stranded.
+    await asyncio.wait_for(cleaned.wait(), timeout=5)
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    late = await bridge.agent_open_describe("pods", "web-1", "default")
+    assert late.startswith("ERROR:")  # post-shutdown work is refused

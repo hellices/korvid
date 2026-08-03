@@ -771,6 +771,10 @@ class KorvidApp(App[None]):
         #: live before app.run_async()) - it must never run a bridge
         #: coroutine directly in the caller's foreign context.
         self._app_context: contextvars.Context | None = None
+        #: In-flight AppUIBridge dispatches (issue #165): on_unmount cancels
+        #: and reaps them so a foreign caller racing shutdown cannot leave
+        #: work alive against an unmounted app.
+        self._dispatch_tasks: set[asyncio.Task[str]] = set()
         #: External MCP write proposals (issue #110): shared with the MCP
         #: server; None when the feature is disabled.
         self._proposal_store = proposal_store
@@ -9752,7 +9756,21 @@ class KorvidApp(App[None]):
                 self._enqueue_forward_audit("port-forward-stop", record.spec, teardown=True)
         return records
 
+    async def _reap_dispatches(self) -> None:
+        """Refuse new foreign UI work and reap in-flight bridge dispatches
+        (issue #165): the MCP server stays live until after run_async()
+        returns, so a request racing teardown could otherwise spawn work
+        (log streams) after the unmount sweeps and leave it alive against
+        an unmounted app."""
+        self._app_context = None
+        for pending in [t for t in self._dispatch_tasks if not t.done()]:
+            pending.cancel()
+        if self._dispatch_tasks:
+            await asyncio.gather(*self._dispatch_tasks, return_exceptions=True)
+        self._dispatch_tasks.clear()
+
     async def on_unmount(self) -> None:
+        await self._reap_dispatches()
         # Cancel any active log stream tasks before the event loop shuts down.
         # A proposal must never outlive the session that previewed it; close
         # the store first so an in-flight submission cannot land after the
@@ -9822,17 +9840,18 @@ class AppUIBridge(UIBridge):
         """
         snapshot = self._app._app_context
         if snapshot is None:
-            # Reachable in production: the MCP endpoint goes live before
-            # app.run_async(), so a call can land before on_mount captured
-            # the context. Running the coroutine here would execute the
-            # widget operation in the foreign ASGI context during Textual
-            # startup - refuse instead (and close the coroutine so it
-            # never warns as un-awaited).
+            # Reachable in production on both edges: the MCP endpoint goes
+            # live before app.run_async() (pre-mount), and on_unmount
+            # invalidates the snapshot so a request racing teardown cannot
+            # spawn work against an unmounted app. Refuse instead (and
+            # close the coroutine so it never warns as un-awaited).
             coro.close()
-            return "ERROR: UI not ready — the app is still starting; retry shortly"
+            return "ERROR: UI not ready — the app is starting or shutting down; retry shortly"
         task = asyncio.get_running_loop().create_task(
             coro, context=snapshot.run(contextvars.copy_context)
         )
+        self._app._dispatch_tasks.add(task)
+        task.add_done_callback(self._app._dispatch_tasks.discard)
         try:
             return await task
         except asyncio.CancelledError:
