@@ -317,7 +317,12 @@ class AgentPanel(Vertical):
                 )
             )
             self._clear_status()
-            self.query_one("#agent-input", Input).disabled = False
+            # Focus returns to the input even when the stop key was pressed
+            # elsewhere (it is a global binding): the natural next step
+            # after stopping a turn is typing the correction.
+            inp = self.query_one("#agent-input", Input)
+            inp.disabled = False
+            inp.focus()
             self.set_header(
                 self._model,
                 self._tok_in + event.input_tokens,

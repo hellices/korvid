@@ -8408,8 +8408,14 @@ class KorvidApp(App[None]):
             # before the task's coroutine ever ran).
             panel.echo_user(message.text)
             self._agent_replacement = message.text
-            self._agent_task.cancel()
+            if self._agent_task.cancelling() == 0:
+                # Never re-inject cancellation into a task that is already
+                # cancelling: a second CancelledError can interrupt the
+                # cleanup itself (review on #175). The depth-one queue
+                # above already holds the newest correction.
+                self._agent_task.cancel()
             return
+        self._agent_replacement = None  # a direct turn supersedes any queue
         self._start_agent_turn(message.text, echo=True)
 
     def _start_agent_turn(self, text: str, *, echo: bool) -> None:
@@ -8420,11 +8426,15 @@ class KorvidApp(App[None]):
         task.add_done_callback(self._drain_agent_replacement)
         self._agent_task = task
 
-    def _drain_agent_replacement(self, _task: asyncio.Task[None]) -> None:
+    def _drain_agent_replacement(self, task: asyncio.Task[None]) -> None:
         """Start the queued interrupt-and-submit correction once the
         cancelled turn's task settles — including the race where the task
         was cancelled before its coroutine (and thus its CancelledError
-        handler) ever ran."""
+        handler) ever ran. Scoped to the current owner: a stale callback
+        from a superseded task must not consume the queue or start a
+        second concurrent turn."""
+        if task is not self._agent_task:
+            return
         replacement, self._agent_replacement = self._agent_replacement, None
         if replacement is None or self._ctx_switching or self._shutting_down:
             return
@@ -8439,9 +8449,11 @@ class KorvidApp(App[None]):
         return "ctrl+x"
 
     def action_interrupt_agent(self) -> None:
-        """Stop the running agent turn (issue #170). No-op when idle."""
+        """Stop the running agent turn (issue #170). No-op when idle or
+        when the turn is already cancelling (re-injected cancellation can
+        interrupt the cleanup itself)."""
         task = self._agent_task
-        if task is not None and not task.done():
+        if task is not None and not task.done() and task.cancelling() == 0:
             task.cancel()
 
     def _selected_row_name(self) -> str | None:
@@ -9747,12 +9759,13 @@ class KorvidApp(App[None]):
             preview=preview,
             managed_note=managed_note,
         )
-        await self.push_screen(screen, _done)
-        # Recheck after mounting: surfacing the dialog (or push_screen itself)
-        # can consume the last of the budget, and a fixed minimum here would
-        # quietly extend the expiry contract past _APPROVAL_TIMEOUT.
-        remaining = deadline - loop.time()
         try:
+            await self.push_screen(screen, _done)
+            # Recheck after mounting: surfacing the dialog (or push_screen
+            # itself) can consume the last of the budget, and a fixed minimum
+            # here would quietly extend the expiry contract past
+            # _APPROVAL_TIMEOUT.
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError
             confirmed = await asyncio.wait_for(fut, timeout=remaining)
@@ -9760,6 +9773,8 @@ class KorvidApp(App[None]):
         except asyncio.CancelledError:
             # Turn interrupted (issue #170): never leave an orphaned dialog
             # whose 'y' would resolve a dead future. The write cannot run.
+            # push_screen is inside the guarded region so a cancel landing
+            # during the mount itself still dismisses the dialog.
             if self.screen is screen:
                 with contextlib.suppress(Exception):
                     self.pop_screen()

@@ -210,6 +210,58 @@ async def test_stop_while_idle_is_a_no_op() -> None:
         assert not runtime.calls  # nothing started, nothing crashed
 
 
+async def test_stop_from_outside_the_input_returns_focus_to_it() -> None:
+    """interrupt_agent is a priority global binding: stopping a turn while
+    focus sits on the resource table must hand focus back to the input so
+    the correction can be typed immediately."""
+    runtime = BlockingRuntime()
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        inp = await _start_turn(app, pilot, "check")
+        await until(pilot, lambda: bool(runtime.calls), label="turn running")
+        app.set_focus(None)  # focus leaves the panel
+        await pilot.press("ctrl+x")
+        await until(pilot, lambda: runtime.finalized == 1, label="finalized")
+        assert app.focused is inp
+
+
+async def test_rapid_corrections_inject_cancellation_only_once() -> None:
+    """A later correction while the old turn is already cancelling must not
+    re-inject CancelledError — a second delivery can interrupt the
+    cancellation cleanup itself (review on #175)."""
+    from korvid.ui.messages import AgentPromptSubmitted
+
+    runtime = BlockingRuntime()
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        await _start_turn(app, pilot, "first")
+        await until(pilot, lambda: len(runtime.calls) == 1, label="turn running")
+        task = app._agent_task
+        assert task is not None
+        app.on_agent_prompt_submitted(AgentPromptSubmitted("second"))
+        app.on_agent_prompt_submitted(AgentPromptSubmitted("third"))
+        assert task.cancelling() == 1  # cancellation was not re-injected
+        await until(pilot, lambda: runtime.calls[-1:] == ["third"], label="latest ran")
+
+
+async def test_stale_done_callback_cannot_consume_the_replacement() -> None:
+    """The drain callback must be scoped to the task that completed: a
+    callback from a superseded task must neither consume the queued
+    replacement nor start a second concurrent turn (review on #175)."""
+    runtime = BlockingRuntime()
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        await _start_turn(app, pilot, "first")
+        await until(pilot, lambda: len(runtime.calls) == 1, label="turn running")
+        stale = asyncio.create_task(asyncio.sleep(0))
+        await stale
+        app._agent_replacement = "queued"
+        app._drain_agent_replacement(stale)  # not the current agent task
+        await pilot.pause()
+        assert len(runtime.calls) == 1  # no second turn was launched
+        assert app._agent_replacement == "queued"  # left for the real owner
+
+
 # --- write safety (issue #170): interrupt vs the approval gate -------------
 
 
