@@ -71,7 +71,7 @@ When a `helm` binary is on `PATH`, the browser gains write actions
 | `F1` | install/upgrade wizard | The chart's README in a scrollable pager (`helm show readme`) |
 | `r` | revision drill-down | Roll back the release to the selected revision |
 | `Ctrl-D` | `:helm` | Uninstall the selected release (`helm uninstall`) |
-| `Ctrl-R` | chart picker | Manage chart repositories: list configured repos, add one (name + URL), refresh indexes (`helm repo update`) |
+| `Ctrl-R` | chart picker | Manage chart repositories: list configured repos, add one (name + URL, plus an optional CA file for a private-CA repository — passed to `helm repo add --ca-file`), refresh indexes (`helm repo update`) |
 
 The chart picker opens instantly and fetches charts per keyword — an
 empty search lists everything, and a loading indicator shows while

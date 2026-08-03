@@ -157,6 +157,12 @@ the OS keyring (falling back to a `0600` file at
 `~/.config/korvid/credentials.json`).  Claude Code is a CLI product, not an
 API — use the Anthropic API entry above for Claude models.
 
+For endpoints signed by a corporate/private CA (internal Ollama, vLLM, or
+an OpenAI-compatible gateway), set `network.ca_bundle` in `config.yaml` —
+the same trust covers the live agent and the wizard's connection test, and
+verification can never be disabled.  See the
+[air-gapped guide](airgap.md) for details.
+
 Without configuration, `Ctrl-A` shows a setup hint pointing at `:ai`.
 
 ### Turning the agent off and on

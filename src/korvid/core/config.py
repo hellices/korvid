@@ -107,6 +107,12 @@ class KorvidConfig:
     #: client absent, the install-hint probe adds one API GET per context
     #: (until a hint has been shown).
     telepresence_enabled: bool = True
+    #: `network.ca_bundle` (issue #168): default trust bundle for
+    #: korvid-owned agent HTTPS clients (OpenAI-compatible, native Ollama,
+    #: and the :ai wizard's connection test). Standard environment behavior
+    #: (SSL_CERT_FILE, proxy variables) applies when unset. There is no
+    #: insecure mode: an unloadable bundle fails startup actionably.
+    network_ca_bundle: str | None = None
     #: Human-readable config problems (e.g. an invalid custom column) that
     #: the UI surfaces once at startup instead of crashing or hiding them.
     warnings: tuple[str, ...] = ()
@@ -151,6 +157,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     integrations_raw: dict[str, Any] = (
         integrations_value if isinstance(integrations_value, dict) else {}
     )
+    network_value = raw.get("network")
+    network_raw: dict[str, Any] = network_value if isinstance(network_value, dict) else {}
     images_value = debug_raw.get("images")
     debug_images: dict[str, str] | None
     if "images" not in debug_raw:
@@ -210,6 +218,7 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         mcp_port=_parse_port(mcp_raw.get("port")),
         mcp_write_proposals=mcp_raw.get("write_proposals") is True,
         telepresence_enabled=integrations_raw.get("telepresence") is not False,
+        network_ca_bundle=_opt_str(network_raw.get("ca_bundle")),
         mcp_follow=mcp_raw.get("follow") is True,
         debug_default_image=_opt_str(debug_raw.get("default_image")),
         debug_images=debug_images,

@@ -378,3 +378,43 @@ async def test_list_models_copilot_reuses_one_http_client(
     )
     assert await cfg.list_models(settings) == ["gpt-4o"]
     assert created == 1
+
+
+async def test_probe_threads_the_configured_ca_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wizard's connection test builds its probe provider with the same
+    network.ca_bundle the live agent uses — a private-CA endpoint must not
+    list models and then fail the required completion probe (issue #168
+    review on #181)."""
+    captured: dict[str, Any] = {}
+
+    def fake_create(**kwargs: Any) -> ScriptedProvider:
+        captured.update(kwargs)
+        return ScriptedProvider([{"type": "text_delta", "text": "ok"}, {"type": "done"}])
+
+    monkeypatch.setattr("korvid.providers.configurator.create_provider", fake_create)
+    cfg = ProviderConfigurator(
+        _store(tmp_path), persist=lambda s: None, ca_bundle="/etc/korvid/company-ca.pem"
+    )
+    assert await cfg.test(_SETTINGS) == "ok"
+    assert captured["ca_bundle"] == "/etc/korvid/company-ca.pem"
+
+
+async def test_copilot_discovery_keeps_default_trust_with_a_private_bundle(
+    tmp_path: Path,
+) -> None:
+    """GitHub Copilot discovery hits public endpoints; a private-only
+    network.ca_bundle must not break it (the live copilot provider ignores
+    the bundle too) — while endpoint listing stays CA-aware (review on
+    #181)."""
+    from korvid.providers.net import _CANamedClient
+
+    cfg = ProviderConfigurator(
+        _store(tmp_path), persist=lambda s: None, ca_bundle="/etc/korvid/company-ca.pem"
+    )
+    public = cfg._public_client()
+    try:
+        assert not isinstance(public, _CANamedClient)  # default trust for GitHub
+    finally:
+        await public.aclose()

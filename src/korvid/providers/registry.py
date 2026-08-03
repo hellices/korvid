@@ -43,6 +43,7 @@ def create_provider(
     api_key_env: str | None,
     oauth_token: str | None = None,
     ollama: OllamaOptions | None = None,
+    ca_bundle: str | None = None,
 ) -> LLMProvider | None:
     """Build an LLM provider from neutral values, or None when unconfigured/misconfigured."""
     if not enabled:
@@ -73,11 +74,13 @@ def create_provider(
             model=model,
             credentials=credentials,
             options=ollama or OllamaOptions(),
+            ca_bundle=ca_bundle,
         )
     return OpenAICompatProvider(
         base_url=base_url,
         model=model,
         credentials=credentials,
+        ca_bundle=ca_bundle,
     )
 
 

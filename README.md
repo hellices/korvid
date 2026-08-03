@@ -99,6 +99,9 @@ Full key reference: [docs/keybindings.md](docs/keybindings.md).
   to VS Code, Claude Code, Cursor, or Zed; write tools are never exposed.
   An opt-in proposal flow lets external agents queue writes that execute
   only after your keystroke in the TUI.
+- **[Air-gapped operation](docs/airgap.md)** — internal LLM/Helm/OLM/image
+  endpoints, corporate CA trust (`network.ca_bundle`, Helm `--ca-file`),
+  responsibility boundaries, and a readiness checklist.
 
 ## Status
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -194,10 +195,22 @@ class HelmCLI:
             repos.append(HelmRepo(name=str(item.get("name", "")), url=str(item.get("url", ""))))
         return repos
 
-    async def repo_add(self, name: str, url: str) -> str:
+    async def repo_add(self, name: str, url: str, ca_file: str | None = None) -> str:
         """`helm repo add` - a local helm-config write (no cluster access);
-        the caller collects name and URL through an explicit typed form."""
-        return await self._run("repo", "add", name, url)
+        the caller collects name and URL through an explicit typed form.
+
+        `ca_file` (issue #168) is the repository's private CA for internal
+        chart servers: validated as a readable file *before* any subprocess
+        is spawned, then appended through the fixed argv builder — never a
+        shell. Helm remains the owner of persisted repository config.
+        """
+        args = ["repo", "add", name, url]
+        if ca_file is not None:
+            path = Path(ca_file)
+            if not path.is_file() or not os.access(path, os.R_OK):
+                raise HelmError(f"CA file {ca_file!r} is not a readable file")
+            args += ["--ca-file", ca_file]
+        return await self._run(*args)
 
     async def repo_update(self) -> str:
         """`helm repo update` - refresh the local index of every repo."""

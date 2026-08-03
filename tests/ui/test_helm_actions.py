@@ -78,7 +78,7 @@ class FakeHelm(HelmCLI):
         self.calls.append(("repo-list",))
         return list(self.repos)
 
-    async def repo_add(self, name: str, url: str) -> str:
+    async def repo_add(self, name: str, url: str, ca_file: str | None = None) -> str:
         self.calls.append(("repo-add", name, url))
         return f'"{name}" has been added to your repositories'
 
@@ -1381,7 +1381,7 @@ async def test_repo_pick_is_rejected_while_a_mutation_is_pending(tmp_path: Path)
     gate: aio.Event = aio.Event()
 
     class GatedRepoAddHelm(FakeHelm):
-        async def repo_add(self, name: str, url: str) -> str:
+        async def repo_add(self, name: str, url: str, ca_file: str | None = None) -> str:
             await gate.wait()
             return await super().repo_add(name, url)
 
