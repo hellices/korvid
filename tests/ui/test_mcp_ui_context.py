@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 
+import pytest
 from textual._context import active_app
 
 from korvid.ui.app import AppUIBridge
@@ -215,3 +216,51 @@ async def test_premount_bridge_call_refuses_instead_of_running_foreign() -> None
         result = await bridge.agent_open_describe("pods", "web-1", "default")
     assert result.startswith("ERROR:")
     assert "not ready" in result
+
+
+async def test_drill_down_crosses_the_boundary_safely() -> None:
+    """The issue's drill-down acceptance criterion: a real deployment ->
+    replicasets transition driven from an empty context."""
+    from korvid.ui.messages import NavigateCommand
+    from tests.ui.test_drilldown import _default_data
+    from tests.ui.test_drilldown import make_app as make_drill_app
+
+    app = make_drill_app(_default_data())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app.on_navigate_command(NavigateCommand("deployments", None))
+        await pilot.pause(0.1)
+        bridge = AppUIBridge(app)
+        result = await _in_empty_context(bridge.agent_drill_down("web"))
+        assert not result.startswith("ERROR:")
+        await until(pilot, lambda: app.current_kind == "replicasets", label="drilled")
+
+
+async def test_cancelled_foreign_caller_reaps_the_dispatched_task() -> None:
+    """The issue's shutdown criterion: cancelling the foreign caller while
+    a dispatched bridge coroutine is in flight cancels and awaits the
+    inner task - its finally runs, and nothing stays pending."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    app = make_app()
+
+    async def blocking_describe(kind: str, name: str, namespace: str | None = None) -> str:
+        entered.set()
+        try:
+            await release.wait()
+            return "ok"
+        finally:
+            cleaned.set()  # the inner task's finally must run on cancel
+
+    app.agent_open_describe = blocking_describe  # type: ignore[method-assign]  # test seam
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        bridge = AppUIBridge(app)
+        caller = _in_empty_context(bridge.agent_open_describe("pods", "web-1", "default"))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        await asyncio.wait_for(cleaned.wait(), timeout=5)  # reaped, not stranded

@@ -766,8 +766,10 @@ class KorvidApp(App[None]):
         #: None (tests, degraded wiring) falls back to a direct adapter.
         self._agent_follow_bridge = agent_follow_bridge
         #: App-owned execution context (issue #165), captured in on_mount;
-        #: None until then (pre-mount bridge calls run directly - they can
-        #: only come from tests driving the app before it is ready).
+        #: None until then. AppUIBridge._dispatch refuses pre-mount calls
+        #: as 'UI not ready' (production-reachable: the MCP endpoint goes
+        #: live before app.run_async()) - it must never run a bridge
+        #: coroutine directly in the caller's foreign context.
         self._app_context: contextvars.Context | None = None
         #: External MCP write proposals (issue #110): shared with the MCP
         #: server; None when the feature is disabled.
