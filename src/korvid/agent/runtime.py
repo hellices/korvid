@@ -15,6 +15,7 @@ from korvid.agent.events import (
     ToolCallFinished,
     ToolCallStarted,
     TurnComplete,
+    TurnInterrupted,
 )
 from korvid.agent.prompts import compose_system_prompt
 from korvid.tools.executor import (
@@ -32,6 +33,11 @@ MAX_HISTORY_TURNS = 8
 # Turn count alone does not bound request size: one turn can hold up to
 # max_iterations tool results of MAX_RESULT_CHARS each.
 MAX_HISTORY_CHARS = 120_000
+
+#: Bound for the marked partial text an interrupted turn records (issue
+#: #170): enough for the model to understand what it was saying, small
+#: enough that interrupting cannot bloat history.
+INTERRUPT_PARTIAL_CHARS = 2_000
 
 
 class _Provider(Protocol):
@@ -136,6 +142,16 @@ class AgentRuntime:
         self._total_in = 0
         self._total_out = 0
         self._estimated = False
+        # Interruption bookkeeping (issue #170): run_turn keeps these
+        # current so finalize_interrupt can repair state after the driving
+        # task was cancelled at an arbitrary await point.
+        self._turn_active = False
+        self._iteration_base = 0
+        self._live_state: _StreamState | None = None
+        self._live_prompt_estimate = 0
+        self._turn_in = 0
+        self._turn_out = 0
+        self._turn_usage_missing = False
 
     def retarget(self, *, tools: list[dict[str, Any]], cluster_context: str | None) -> None:
         """Re-arm the runtime for a new cluster (issue #36, `:ctx`).
@@ -345,6 +361,59 @@ class AgentRuntime:
         self._trim_history()
         return sum(_message_chars(m) for m in self._messages) > self._max_history_chars
 
+    def finalize_interrupt(self) -> TurnInterrupted:
+        """Repair state after the driving task cancelled a turn (issue #170).
+
+        The generator was cancelled at an arbitrary await point, so the
+        in-flight iteration may have left a partial footprint. Repairs:
+
+        - truncate everything the in-flight iteration appended (an
+          assistant message whose tool_calls lack results would break the
+          provider protocol; completed prior iterations stay),
+        - record a bounded, clearly marked interrupted assistant note
+          (with capped partial text when any streamed) - never the raw
+          partial, which would replay as a completed answer,
+        - commit usage: provider-reported counts exactly; a partial
+          stream without usage is estimated the same way the error path
+          estimates (the transmitted prompt was real cost).
+
+        Inert when no turn is active (a completed turn is never repaired).
+        """
+        if not self._turn_active:
+            return TurnInterrupted(input_tokens=0, output_tokens=0, estimated=False)
+        self._turn_active = False
+        del self._messages[self._iteration_base :]
+        state = self._live_state
+        self._live_state = None
+        partial = state.text if state is not None else ""
+        if partial:
+            note = (
+                partial[:INTERRUPT_PARTIAL_CHARS]
+                + "\n\n[response interrupted by the user before completion]"
+            )
+        else:
+            note = "[interrupted by the user]"
+        self._messages.append({"role": "assistant", "content": note})
+        in_flight_in = 0
+        in_flight_out = 0
+        estimated = self._turn_usage_missing
+        if state is not None:
+            if state.has_usage:
+                in_flight_in = state.in_tok
+                in_flight_out = state.out_tok
+            elif state.text or state.tool_calls:
+                # Same rule as the stream-error path: output before dying
+                # means the prompt was really transmitted.
+                in_flight_in = self._live_prompt_estimate
+                in_flight_out = _stream_output_chars(state) // 4
+                estimated = True
+        total_in = self._turn_in + in_flight_in
+        total_out = self._turn_out + in_flight_out
+        self._total_in += total_in
+        self._total_out += total_out
+        self._estimated = self._estimated or estimated
+        return TurnInterrupted(input_tokens=total_in, output_tokens=total_out, estimated=estimated)
+
     async def run_turn(
         self,
         user_text: str,
@@ -377,8 +446,18 @@ class AgentRuntime:
         # Token counts are exact only when EVERY iteration reported usage;
         # one missing iteration makes the whole turn an estimate.
         usage_missing = False
+        # Arm interruption bookkeeping (issue #170): from here on a
+        # cancellation is repairable by finalize_interrupt.
+        self._turn_active = True
+        self._iteration_base = len(self._messages)
+        self._live_state = None
+        self._live_prompt_estimate = 0
+        self._turn_in = 0
+        self._turn_out = 0
+        self._turn_usage_missing = False
         for iteration in range(self._max_iterations):
             if self._over_history_budget(iteration):
+                self._turn_active = False
                 self._total_in += turn_in
                 self._total_out += turn_out
                 self._estimated = self._estimated or usage_missing
@@ -393,6 +472,8 @@ class AgentRuntime:
                 )
                 return
             state = _StreamState()
+            self._iteration_base = len(self._messages)
+            self._live_state = state
             # Estimate of the prompt this iteration sends — used only when
             # the provider omits usage, so token totals never read as zero
             # input for a request that was really transmitted. Counts what
@@ -401,11 +482,13 @@ class AgentRuntime:
             prompt_estimate = (
                 self._tools_chars + sum(_message_chars(message) for message in self._messages)
             ) // 4
+            self._live_prompt_estimate = prompt_estimate
             try:
                 stream = self._provider.complete(self._messages, self._tools)
                 async for event in self._consume_stream(stream, state):
                     yield event
             except Exception as exc:
+                self._turn_active = False
                 # Tokens spent in earlier iterations (and the partial stream)
                 # are real cost — account for them before bailing out. A
                 # stream that produced output before dying definitely had
@@ -426,11 +509,18 @@ class AgentRuntime:
             turn_in += state.in_tok
             turn_out += state.out_tok
             usage_missing = usage_missing or not state.has_usage
+            # This iteration's stream is complete: its usage is committed
+            # and its state must no longer be double-counted on interrupt.
+            self._turn_in = turn_in
+            self._turn_out = turn_out
+            self._turn_usage_missing = usage_missing
+            self._live_state = None
 
             assistant_msg = self._assistant_message(state)
             self._messages.append(assistant_msg)
 
             if not state.tool_calls:
+                self._turn_active = False
                 self._total_in += turn_in
                 self._total_out += turn_out
                 self._estimated = self._estimated or usage_missing
@@ -444,6 +534,7 @@ class AgentRuntime:
             async for event in self._dispatch_tools(state.tool_calls):
                 yield event
 
+        self._turn_active = False
         self._total_in += turn_in
         self._total_out += turn_out
         self._estimated = self._estimated or usage_missing

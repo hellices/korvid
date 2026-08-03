@@ -162,7 +162,10 @@ async def test_screen_context_splits_selected_namespace_from_name() -> None:
         assert "selected=default/web-1" not in ctx
 
 
-async def test_second_submit_ignored_while_turn_running() -> None:
+async def test_second_submit_interrupts_and_replaces_running_turn() -> None:
+    """Since issue #170 a submission while a turn runs is
+    interrupt-and-submit: the old turn is cancelled and the new prompt
+    starts a fresh turn."""
     runtime = StubRuntime([TextDelta(text="thinking")], block=True)
     app = make_app(runtime)
     async with app.run_test() as pilot:
@@ -172,11 +175,13 @@ async def test_second_submit_ignored_while_turn_running() -> None:
         inp.value = "first"
         await pilot.press("enter")
         await pilot.pause()
-        # Input is disabled during a turn, but simulate a direct message anyway.
         panel.post_message(AgentPromptSubmitted("second"))
-        await pilot.pause()
-        await pilot.pause()
-        assert [c[0] for c in runtime.calls] == ["first"]
+        await until(
+            pilot,
+            lambda: [c[0] for c in runtime.calls] == ["first", "second"],
+            label="replacement turn started",
+        )
+        assert [c[0] for c in runtime.calls] == ["first", "second"]
 
 
 async def test_status_bar_reflects_runtime_not_config_flag() -> None:

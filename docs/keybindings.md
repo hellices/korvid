@@ -51,6 +51,7 @@ documents every view and shows the effective keys, including any remaps.
 | `Ctrl-R` | chart picker | Manage chart repositories: list, add, refresh indexes |
 | `Ctrl-T` | pods table | Transfer a file to/from the selected container (exec tar stream; upload needs approval) |
 | `Ctrl-A` | global | Toggle AI agent panel |
+| `Ctrl-X` | global | Stop the running agent turn (the partial answer stays; typing a new prompt while the agent runs interrupts and replaces the turn) |
 | `q` | global | Quit |
 | `Esc` | log pane | Close pane (or dismiss search / filter bar) |
 
@@ -72,7 +73,7 @@ Action names: `quit`, `help`, `open_command`, `open_filter`,
 `toggle_all_namespaces`, `describe`, `shell`, `logs`, `logs_multi`,
 `log_format`, `log_wrap`, `log_timestamps`, `log_save`, `log_previous`,
 `log_search_next`, `log_search_prev`, `sort_by_age`, `sort_by_cpu`,
-`sort_by_mem`, `sort_picker`, `toggle_topbar`, `toggle_agent`, `delete_resource`, `rollout_restart`,
+`sort_by_mem`, `sort_picker`, `toggle_topbar`, `toggle_agent`, `interrupt_agent`, `delete_resource`, `rollout_restart`,
 `resize_pod`, `scale_resource`, `edit_resource`, `hint_details`, `operator_install`,
 `cordon_node`, `uncordon_node`, `drain_node`, `port_forward`, `transfer`,
 `helm_install`, `helm_upgrade`, `helm_rollback`, `helm_history`.

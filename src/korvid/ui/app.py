@@ -595,6 +595,14 @@ class KorvidApp(App[None]):
         # the current view, no exact names to remember.
         Binding("o", "sort_picker", "Sort by column", show=False, id="sort_picker"),
         Binding("ctrl+a", "toggle_agent", "AI", priority=True, id="toggle_agent"),
+        Binding(
+            "ctrl+x",
+            "interrupt_agent",
+            "Stop agent",
+            priority=True,
+            show=False,
+            id="interrupt_agent",
+        ),
         Binding("ctrl+d", "delete_resource", "Delete", id="delete_resource"),
         Binding("r", "rollout_restart", "Restart", id="rollout_restart"),
         Binding(
@@ -913,6 +921,10 @@ class KorvidApp(App[None]):
                 profile=config.agent_profile or "full",
             )
         self._agent_task: asyncio.Task[None] | None = None
+        # Interrupt-and-submit (issue #170): the latest correction typed
+        # while a turn runs; started once the cancelled turn is finalized.
+        self._agent_replacement: str | None = None
+        self._shutting_down = False
         # Serializes view/scope switches: keyboard NavigateCommands and the
         # agent's navigate tool share this handler, which yields while
         # stopping/starting watches — interleaving would corrupt state.
@@ -8387,11 +8399,23 @@ class KorvidApp(App[None]):
             return
         if self._agent_runtime is None:
             return
-        if self._agent_task is not None and not self._agent_task.done():
-            return
         panel = self._agent_panel
+        if self._agent_task is not None and not self._agent_task.done():
+            # Interrupt-and-submit (issue #170): echo the correction now,
+            # remember only the latest one, and cancel the running turn —
+            # the replacement starts once the old turn is finalized.
+            panel.echo_user(message.text)
+            self._agent_replacement = message.text
+            self._agent_task.cancel()
+            return
         panel.begin_turn(message.text)
         self._agent_task = asyncio.create_task(self._run_agent_turn(message.text))
+
+    def action_interrupt_agent(self) -> None:
+        """Stop the running agent turn (issue #170). No-op when idle."""
+        task = self._agent_task
+        if task is not None and not task.done():
+            task.cancel()
 
     def _selected_row_name(self) -> str | None:
         table = self._focused_table()
@@ -8441,12 +8465,37 @@ class KorvidApp(App[None]):
         # Agent follow: started cluster reads awaiting their result, keyed
         # by call id (the finish event does not carry the arguments).
         pending_reads: dict[str, tuple[str, str]] = {}
+        gen = runtime.run_turn(user_text, screen_context)
         try:
-            async for event in runtime.run_turn(user_text, screen_context):
+            async for event in gen:
                 panel.apply_event(event)
                 await self._maybe_follow_agent_read(event, pending_reads)
+        except asyncio.CancelledError:
+            # Close the generator first: if the cancel landed between
+            # yields the generator is still suspended, and finalize must
+            # not race a later resume that appends to the history.
+            closer = getattr(gen, "aclose", None)
+            if closer is not None:
+                with contextlib.suppress(BaseException):
+                    await closer()
+            self._finish_interrupted_turn(runtime, panel)
+            raise
         except Exception as exc:
             panel.apply_event(AgentError(message=str(exc)))
+
+    def _finish_interrupted_turn(self, runtime: Any, panel: AgentPanel) -> None:
+        """Settle an interrupted turn: repair history, mark the transcript,
+        and start the queued replacement, if any (issue #170)."""
+        finalize = getattr(runtime, "finalize_interrupt", None)
+        if finalize is not None:
+            event = finalize()
+            if not self._shutting_down:
+                panel.apply_event(event)
+        replacement, self._agent_replacement = self._agent_replacement, None
+        if replacement is None or self._ctx_switching or self._shutting_down:
+            return
+        panel.begin_turn(replacement, echo=False)
+        self._agent_task = asyncio.create_task(self._run_agent_turn(replacement))
 
     async def _maybe_follow_agent_read(
         self,
@@ -8854,7 +8903,20 @@ class KorvidApp(App[None]):
             return (
                 f"denied: the user declined the {action} request for {self._gvr_label(meta)}/{name}"
             )
-        outcome = await self._run_write(action, meta, ns, name, op(uid), detail=detail)
+        # Once approved, the audited write runs to completion even if the
+        # turn is interrupted mid-flight (issue #170): a half-applied,
+        # half-audited mutation is worse than finishing what the user
+        # explicitly approved.
+        write = asyncio.ensure_future(
+            self._run_write(action, meta, ns, name, op(uid), detail=detail)
+        )
+        try:
+            outcome = await asyncio.shield(write)
+        except asyncio.CancelledError:
+            if not write.cancelled():
+                with contextlib.suppress(Exception):
+                    await write
+            raise
         if outcome != "done":
             return f"ERROR: {action} {self._gvr_label(meta)}/{name} {outcome}"
         self._mark_agent_action(f"{action} → {self._gvr_label(meta)}/{name}")
@@ -9656,6 +9718,13 @@ class KorvidApp(App[None]):
                 raise TimeoutError
             confirmed = await asyncio.wait_for(fut, timeout=remaining)
             return "approved" if confirmed else "declined"
+        except asyncio.CancelledError:
+            # Turn interrupted (issue #170): never leave an orphaned dialog
+            # whose 'y' would resolve a dead future. The write cannot run.
+            if self.screen is screen:
+                with contextlib.suppress(Exception):
+                    self.pop_screen()
+            raise
         except TimeoutError:
             # Late keystrokes are a no-op (the future is already resolved),
             # but clear the dialog when possible so it doesn't linger.
@@ -9770,6 +9839,9 @@ class KorvidApp(App[None]):
         self._dispatch_tasks.clear()
 
     async def on_unmount(self) -> None:
+        # Interrupt finalization must not touch the (torn-down) transcript
+        # or start a replacement turn once shutdown has begun.
+        self._shutting_down = True
         await self._reap_dispatches()
         # Cancel any active log stream tasks before the event loop shuts down.
         # A proposal must never outlive the session that previewed it; close
