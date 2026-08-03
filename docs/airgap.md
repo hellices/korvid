@@ -88,12 +88,15 @@ helm repo list
 
 # 3. Cluster image sources: every image referenced by running pods —
 #    including init and ephemeral (kubectl debug) containers — should
-#    resolve to the internal mirror. Fail loudly if kubectl itself fails,
-#    so a connectivity/auth error is never mistaken for "all internal":
-images=$(kubectl get pods -A -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.ephemeralContainers[*]}{.image}{"\n"}{end}{end}') \
-  || { echo "kubectl failed — cannot verify images"; false; }
-printf '%s\n' "$images" | sort -u | grep -v registry.corp.example \
-  || echo "all images internal"
+#    resolve to the internal mirror. Branch on kubectl success so a
+#    connectivity/auth error is never mistaken for "all internal", and
+#    anchor the registry prefix so look-alike hostnames don't count:
+if images=$(kubectl get pods -A -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.ephemeralContainers[*]}{.image}{"\n"}{end}{end}'); then
+  printf '%s\n' "$images" | sort -u | grep -v '^registry\.corp\.example/' \
+    || echo "all images internal"
+else
+  echo "kubectl failed — cannot verify images"
+fi
 
 # 4. Debug images configured to the internal registry:
 grep -A3 '^debug:' ~/.config/korvid/config.yaml
