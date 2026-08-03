@@ -71,6 +71,7 @@ async def test_interrupt_during_a_stalled_stream_closes_it_promptly() -> None:
     with contextlib.suppress(asyncio.CancelledError):
         await task
     await asyncio.wait_for(provider.closed.wait(), timeout=5)
+    assert provider.closed.is_set()  # the stalled stream was closed promptly
 
 
 async def test_finalize_marks_partial_text_and_never_commits_it_as_complete() -> None:

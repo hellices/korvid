@@ -342,6 +342,25 @@ async def test_double_correction_before_drain_adds_one_marker() -> None:
         assert _panel_text(app).count("interrupted") == 1
 
 
+async def test_stop_while_a_replacement_is_queued_discards_it() -> None:
+    """Ctrl+X after an interrupt-and-submit but before the old task settles
+    means the user changed their mind: the queued correction must not start
+    once the task drains (review on #175)."""
+    from korvid.ui.messages import AgentPromptSubmitted
+
+    runtime = BlockingRuntime()
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        await _start_turn(app, pilot, "first")
+        await until(pilot, lambda: len(runtime.calls) == 1, label="turn running")
+        app.on_agent_prompt_submitted(AgentPromptSubmitted("second"))
+        app.action_interrupt_agent()  # same tick: the queue must be dropped
+        await until(pilot, lambda: runtime.finalized >= 1, label="turn finalized")
+        await pilot.pause()
+        assert runtime.calls == ["first"]  # the replacement never started
+        assert app._agent_replacement is None
+
+
 async def test_stale_done_callback_cannot_consume_the_replacement() -> None:
     """The drain callback must be scoped to the task that completed: a
     callback from a superseded task must neither consume the queued

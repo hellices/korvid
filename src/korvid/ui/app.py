@@ -8457,11 +8457,15 @@ class KorvidApp(App[None]):
         return "ctrl+x"
 
     def action_interrupt_agent(self) -> None:
-        """Stop the running agent turn (issue #170). No-op when idle or
-        when the turn is already cancelling (re-injected cancellation can
-        interrupt the cleanup itself)."""
+        """Stop the running agent turn (issue #170). No-op when idle. A
+        stop while an interrupt-and-submit is already draining discards
+        the queued replacement (the user changed their mind about it) and
+        never re-injects cancellation into the draining task."""
         task = self._agent_task
-        if task is not None and not task.done() and task.cancelling() == 0:
+        if task is None or task.done():
+            return
+        self._agent_replacement = None
+        if task.cancelling() == 0:
             task.cancel()
 
     def _selected_row_name(self) -> str | None:
