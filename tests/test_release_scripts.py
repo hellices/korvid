@@ -195,6 +195,25 @@ def test_sha256sums_detect_missing_files(tmp_path: Path) -> None:
         offline_verify.verify_sha256sums(tmp_path)
 
 
+def test_sha256sums_reject_an_unlisted_extra_wheel(tmp_path: Path) -> None:
+    (tmp_path / "korvid.whl").write_bytes(b"korvid")
+    bundle.write_sha256sums(tmp_path, ["korvid.whl"])
+    (tmp_path / "injected-newer.whl").write_bytes(b"injected")
+    with pytest.raises(ValueError, match="unlisted"):
+        offline_verify.verify_sha256sums(tmp_path)
+
+
+def test_sha256sums_reject_a_path_outside_the_bundle(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    root.mkdir()
+    outside = tmp_path / "outside.whl"
+    outside.write_bytes(b"outside")
+    digest = hashlib.sha256(outside.read_bytes()).hexdigest()
+    (root / "SHA256SUMS").write_text(f"{digest}  ../outside.whl\n")
+    with pytest.raises(ValueError, match="unsafe"):
+        offline_verify.verify_sha256sums(root)
+
+
 # --- bundle assembly --------------------------------------------------------
 
 

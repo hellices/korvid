@@ -53,18 +53,41 @@ def extract_bundle(archive: Path, destination: Path) -> Path:
 
 
 def verify_sha256sums(root: Path) -> None:
-    """Validate every entry of root/SHA256SUMS; raise ValueError on any
-    missing or tampered file."""
+    """Require an exact, safe manifest of every bundled file.
+
+    Rejects missing/tampered files, paths escaping *root*, duplicate
+    entries, and extra unlisted files (an injected newer wheel must never
+    become a pip candidate).
+    """
+    root_resolved = root.resolve()
+    listed: set[str] = set()
     for line in (root / "SHA256SUMS").read_text().splitlines():
         if not line.strip():
             continue
         expected, _, name = line.partition("  ")
-        path = root / name
+        path = (root / name).resolve()
+        if path != root_resolved and root_resolved not in path.parents:
+            raise ValueError(f"unsafe SHA256SUMS path outside bundle: {name}")
+        normalized = path.relative_to(root_resolved).as_posix()
+        if normalized in listed:
+            raise ValueError(f"duplicate SHA256SUMS entry: {normalized}")
+        listed.add(normalized)
         if not path.is_file():
-            raise ValueError(f"SHA256SUMS entry missing from bundle: {name}")
+            raise ValueError(f"SHA256SUMS entry missing from bundle: {normalized}")
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
         if actual != expected:
-            raise ValueError(f"checksum mismatch for {name}")
+            raise ValueError(f"checksum mismatch for {normalized}")
+    bundled = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and path.name != "SHA256SUMS"
+    }
+    unlisted = bundled - listed
+    if unlisted:
+        raise ValueError(f"bundle contains unlisted files: {sorted(unlisted)}")
+    missing = listed - bundled
+    if missing:
+        raise ValueError(f"SHA256SUMS lists missing files: {sorted(missing)}")
 
 
 def pick_removable_wheel(wheels: Path) -> Path:
