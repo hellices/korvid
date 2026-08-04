@@ -18,9 +18,13 @@ grading:
     - tool: get_resource
       args: {kind: deployments, name: api, namespace: shop}
       contains: ProgressDeadlineExceeded
-    - tool: diagnose_pod
-      args: {pod: api-8f6b-1, namespace: shop}
-      contains: ImagePullBackOff
+    -
+      - tool: diagnose_pod
+        args: {pod: api-8f6b-1, namespace: shop}
+        contains: ImagePullBackOff
+      - tool: diagnose_workload
+        args: {kind: deployments, name: api, namespace: shop}
+        contains: ImagePullBackOff
 cluster:
   objects:
     - kind: Deployment

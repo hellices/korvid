@@ -34,6 +34,17 @@ def test_bundled_pack_loads_and_covers_the_planned_fault_matrix() -> None:
     assert 3 <= len(negative_controls) <= 5
 
 
+def test_stuck_rollout_accepts_the_compound_workload_evidence_path() -> None:
+    scenario = next(item for item in BUNDLED if item.id == "stuck-rollout")
+    assert any(
+        evidence.tool == "diagnose_workload"
+        and evidence.args == {"kind": "deployments", "name": "api", "namespace": "shop"}
+        and evidence.contains == "ImagePullBackOff"
+        for group in scenario.expected_evidence
+        for evidence in group
+    )
+
+
 @pytest.mark.parametrize("scenario", BUNDLED, ids=lambda s: s.id)
 async def test_bundled_evidence_is_reachable_through_the_real_tools(
     scenario: Scenario,
