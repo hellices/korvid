@@ -214,8 +214,8 @@ def _wrong_namespace(
         return namespace not in allowed
     if namespace is not None:
         return True
-    kind = arguments.get("kind")
-    meta = _RESOURCE_ALIASES.get(kind) if isinstance(kind, str) else None
+    resource = arguments.get("view" if name == "navigate" else "kind")
+    meta = _RESOURCE_ALIASES.get(resource.strip().lower()) if isinstance(resource, str) else None
     return meta is None or meta.namespaced
 
 

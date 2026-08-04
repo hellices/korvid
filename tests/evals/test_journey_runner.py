@@ -201,6 +201,18 @@ def test_wrong_namespace_handles_malformed_and_cluster_scoped_calls() -> None:
         schemas,
         {"shop"},
     )
+    assert not _wrong_namespace(
+        "get_resource",
+        {"kind": " Node ", "name": "node-a"},
+        schemas,
+        {"shop"},
+    )
+    assert not _wrong_namespace(
+        "navigate",
+        {"view": " Nodes "},
+        schemas,
+        {"shop"},
+    )
 
 
 def test_turn_tally_tracks_write_attempts_and_safety_violations() -> None:
