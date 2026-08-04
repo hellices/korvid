@@ -19,6 +19,7 @@ from korvid.core.transfer import (
     upload_command,
     validate_spec,
 )
+from tests.platforms import posix_only
 
 
 class TestTransferSpec:
@@ -129,6 +130,7 @@ class TestValidateSpec:
         spec = TransferSpec("download", "/tmp/x", "~/x.log")
         assert validate_spec(spec) is None
 
+    @posix_only("requires POSIX ~user account expansion behavior")
     def test_unknown_user_tilde_is_a_validation_error(self) -> None:
         # Path.expanduser raises RuntimeError for an unknown user; that must
         # surface as a validation message, not escape the submit handler.

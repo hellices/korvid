@@ -1,5 +1,6 @@
 """Tests for shared platform helpers and CI workflow invariants."""
 
+import ast
 import os
 from pathlib import Path
 
@@ -26,6 +27,42 @@ def test_posix_only_returns_a_skipif_mark_with_the_given_reason() -> None:
     assert mark.mark.name == "skipif"
     assert mark.mark.args == (not POSIX,)
     assert mark.mark.kwargs == {"reason": "POSIX permissions required"}
+
+
+def _find_test_function(module: ast.Module, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    for node in ast.walk(module):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    raise AssertionError(f"expected to find test function {name}")
+
+
+def _decorates_with_posix_only(node: ast.FunctionDef | ast.AsyncFunctionDef, reason: str) -> bool:
+    for decorator in node.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        if not isinstance(decorator.func, ast.Name) or decorator.func.id != "posix_only":
+            continue
+        if len(decorator.args) != 1 or decorator.keywords:
+            continue
+        if isinstance(decorator.args[0], ast.Constant) and decorator.args[0].value == reason:
+            return True
+    return False
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "test_name"),
+    [
+        ("tests/core/test_transfer.py", "test_unknown_user_tilde_is_a_validation_error"),
+        ("tests/ui/test_transfer_picker.py", "test_unexpandable_tilde_falls_back_to_home"),
+    ],
+)
+def test_posix_user_tilde_cases_use_the_shared_marker(relative_path: str, test_name: str) -> None:
+    module = ast.parse(read_text_utf8(Path(__file__).parents[1] / relative_path))
+
+    assert _decorates_with_posix_only(
+        _find_test_function(module, test_name),
+        "requires POSIX ~user account expansion behavior",
+    )
 
 
 def _ci_workflow() -> str:

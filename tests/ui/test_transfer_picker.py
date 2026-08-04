@@ -20,6 +20,7 @@ from korvid.ui.app import KorvidApp
 from korvid.ui.widgets.path_picker import LocalPathPickerScreen, RemotePathPickerScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from korvid.ui.widgets.transfer_screen import TransferScreen
+from tests.platforms import posix_only
 from tests.ui.test_app import make_app
 from tests.ui.test_transfer import SUCCESS, FakeExecOpener, _dialog, _pod
 from tests.ui.waits import until
@@ -266,6 +267,7 @@ class TestBrowseGating:
             await pilot.pause()
             assert app.screen is dialog
 
+    @posix_only("requires POSIX ~user account expansion behavior")
     async def test_unexpandable_tilde_falls_back_to_home(self) -> None:
         # Path.expanduser raises RuntimeError for "~no_such_user/f": browsing
         # must fall back to home, not escape the dialog handler.
