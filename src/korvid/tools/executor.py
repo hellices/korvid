@@ -1132,6 +1132,8 @@ class ToolExecutor:
             key=lambda pod: self._rollout_pod_sort_key(pod, rs_by_uid),
             reverse=True,
         )
+        selected = non_ready[: self._DIAGNOSE_MAX_WORKLOAD_PODS]
+        omitted = non_ready[self._DIAGNOSE_MAX_WORKLOAD_PODS :]
 
         sections: list[tuple[str, list[str]]] = [
             (
@@ -1140,6 +1142,10 @@ class ToolExecutor:
                     *identity_lines(workload),
                     self._deployment_status_line(workload),
                 ],
+            ),
+            (
+                "SELECTED NON-READY PODS",
+                [f"POD DIAGNOSIS — {namespace}/{pod.name}" for pod in selected] or ["(none found)"],
             ),
             (
                 "WORKLOAD CONDITIONS (failing first)",
@@ -1163,10 +1169,6 @@ class ToolExecutor:
                 for line in self._budget_section([self._clamp_line(line) for line in lines])
             )
 
-        if not non_ready:
-            report.extend(["POD DIAGNOSES", "  (no non-ready owned pods found)"])
-        selected = non_ready[: self._DIAGNOSE_MAX_WORKLOAD_PODS]
-        omitted = non_ready[self._DIAGNOSE_MAX_WORKLOAD_PODS :]
         omitted_line = (
             f"({len(omitted)} more non-ready pod(s) not expanded: "
             + ", ".join(pod.name for pod in omitted)

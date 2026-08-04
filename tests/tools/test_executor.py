@@ -12,7 +12,14 @@ from korvid.k8s.discovery import PODS_META
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import summary_for
-from korvid.tools.executor import MAX_RESULT_CHARS, READ_TOOLS, UI_TOOLS, ToolExecutor, UIBridge
+from korvid.tools.executor import (
+    MAX_RESULT_CHARS,
+    READ_TOOLS,
+    UI_TOOLS,
+    ToolExecutor,
+    UIBridge,
+    compact_result,
+)
 from korvid.tools.registry import TOOLS_BY_NAME, ToolDef
 
 
@@ -1583,6 +1590,7 @@ async def test_diagnose_workload_budget_keeps_every_selected_pod_header() -> Non
     assert len(out) <= MAX_RESULT_CHARS
     for name in ("api-1", "api-2", "api-3"):
         assert f"POD DIAGNOSIS — default/{name}" in out
+        assert f"POD DIAGNOSIS — default/{name}" in compact_result(out, 3_000)
 
 
 async def test_diagnose_workload_prefers_newest_replicaset_pods() -> None:
