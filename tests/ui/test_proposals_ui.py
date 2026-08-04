@@ -232,11 +232,14 @@ async def test_review_approve_executes_with_the_bound_uid(tmp_path: Path) -> Non
         await until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
         await pilot.press("y")
         await until(pilot, lambda: rec.calls != [])
+
+        def _executed() -> bool:
+            found = store.get(pid)
+            return found is not None and found[1] == "executed"
+
+        await until(pilot, _executed, label="proposal executed")
     assert rec.calls == [("delete", "deployments", "default", "web")]
     assert rec.uids == ["uid-1"]
-    found = store.get(pid)
-    assert found is not None
-    assert found[1] == "executed"
     entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
     details = " ".join(e.get("detail", "") for e in entries)
     assert "external_mcp" in details
@@ -1227,11 +1230,12 @@ async def test_proposal_outcome_audits_bind_to_the_proposal_context(tmp_path: Pa
 
 async def test_proposals_changed_during_teardown_does_not_raise(tmp_path: Path) -> None:
     """ExternalProposalsChanged arriving after StatusBar is unmounted must
-    not raise NoMatches — the handler suppresses it during teardown.
+    not raise NoMatches — _refresh_status handles it internally.
 
     Removes the StatusBar while the app message pump is active, then calls
     the handler directly; a spy on _refresh_status proves the code path
-    executed (not silently discarded) and that the suppress caught NoMatches.
+    executed (not silently discarded) and that _refresh_status caught
+    the NoMatches from the missing StatusBar.
     """
     from unittest.mock import patch
 
@@ -1258,3 +1262,22 @@ async def test_proposals_changed_during_teardown_does_not_raise(tmp_path: Path) 
         with patch.object(app, "_refresh_status", spy_refresh):
             app.on_external_proposals_changed(ExternalProposalsChanged())
         assert refresh_calls, "_refresh_status must be called (NoMatches suppressed, not skipped)"
+
+
+async def test_refresh_status_tolerates_missing_status_bar(tmp_path: Path) -> None:
+    """_refresh_status is called from 20+ sites (MCP switch worker,
+    navigation, proposals handler, etc.); all must survive when StatusBar
+    is unmounted during teardown. Removing the widget while the app is
+    live and calling _refresh_status directly exercises the guard."""
+    from korvid.ui.widgets.status_bar import StatusBar
+
+    app = make_app(Recorder(), tmp_path / "a.jsonl", None)
+    async with app.run_test():
+        # Confirm normal refresh works with the bar present.
+        app._refresh_status()  # must not raise
+        # Remove StatusBar to simulate teardown.
+        bar = app.query_one(StatusBar)
+        await bar.remove()
+        # Must not raise NoMatches — any caller (MCP _switch, proposals
+        # handler, navigation, etc.) hitting this after teardown is safe.
+        app._refresh_status()

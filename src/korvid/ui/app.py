@@ -7979,17 +7979,22 @@ class KorvidApp(App[None]):
         mcp_label = self._mcp.status() if self._mcp is not None else ""
         if mcp_label and self._mcp is not None and self._mcp.running and self._mcp_follow:
             mcp_label += " ·follow"
-        self._status_bar.update_status(
-            self.config.kube_context,
-            self.current_scope,
-            label,
-            breadcrumb=self._drill.breadcrumb(),
-            mcp_label=mcp_label,
-            filter_label=self._resource_filter.describe(),
-            progress_label=" · ".join(label for label in self._progress_labels.values() if label),
-            proposals_label=self._proposals_label(),
-            protected=self._protected_context is not None,
-        )
+        try:
+            self._status_bar.update_status(
+                self.config.kube_context,
+                self.current_scope,
+                label,
+                breadcrumb=self._drill.breadcrumb(),
+                mcp_label=mcp_label,
+                filter_label=self._resource_filter.describe(),
+                progress_label=" · ".join(
+                    label for label in self._progress_labels.values() if label
+                ),
+                proposals_label=self._proposals_label(),
+                protected=self._protected_context is not None,
+            )
+        except NoMatches:
+            return  # StatusBar unmounted during teardown
 
     def _proposals_label(self) -> str:
         """Status-bar text for pending external write proposals (issue #110):
@@ -8008,8 +8013,7 @@ class KorvidApp(App[None]):
         return f"{len(pending)} proposals (next from {source}: {target}) — :proposals"
 
     def on_external_proposals_changed(self, message: ExternalProposalsChanged) -> None:
-        with contextlib.suppress(NoMatches):  # teardown: StatusBar already unmounted
-            self._refresh_status()
+        self._refresh_status()
 
     async def on_external_proposal_expired(self, message: ExternalProposalExpired) -> None:
         """Audit a proposal the lazy TTL sweep expired: it reached a terminal
