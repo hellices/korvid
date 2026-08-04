@@ -299,6 +299,9 @@ def test_agent_options_rejects_unsupported_objects(tmp_path: Path) -> None:
         ("api-key", "api_key"),
         ("Authorization", "authorization"),
         ("credential", "credential"),
+        # Finding #3 round 2: compound keys containing multi-token reserved segments
+        ("client_api_key", "api_key"),
+        ("my_api_key_rotation", "api_key"),
     ],
 )
 def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, expected: str) -> None:
@@ -306,6 +309,16 @@ def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, exp
     assert cfg.agent_options == {}
     assert cfg.agent_options_error is not None
     assert expected in cfg.agent_options_error
+
+
+def test_agent_options_accepts_non_secret_compound_keys(tmp_path: Path) -> None:
+    """Compound keys that do NOT contain a reserved segment must pass."""
+    cfg = _load_agent_options_config(
+        tmp_path, {"client_key": "v", "api_version": "v2", "timeout": "30"}
+    )
+    assert cfg.agent_options_error is None
+    assert "client_key" in cfg.agent_options
+    assert "api_version" in cfg.agent_options
 
 
 def test_agent_options_non_ascii_macron_password_rejected_as_non_ascii(tmp_path: Path) -> None:
@@ -1378,3 +1391,50 @@ def test_network_section_tolerates_non_mapping(tmp_path: Path) -> None:
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text("network: nonsense\n")
     assert load_config(cfg_path).network_ca_bundle is None
+
+
+# ---------------------------------------------------------------------------
+# Finding #5: Provider name canonicalization at config load
+# ---------------------------------------------------------------------------
+
+
+def test_provider_name_canonicalized_at_load(tmp_path: Path) -> None:
+    """Config load must canonicalize provider names so github_copilot
+    receives device-login default and compositions root loads OAuth."""
+    f = tmp_path / "config.yaml"
+    f.write_text("agent:\n  provider: github_copilot\n  model: gpt-4o\n")
+    cfg = load_config(f)
+    assert cfg.agent_provider == "github-copilot"
+    assert cfg.agent_auth_method == "device-login"
+
+
+def test_provider_name_case_variant_canonicalized(tmp_path: Path) -> None:
+    """Mixed case and dot separators are canonicalized."""
+    f = tmp_path / "config.yaml"
+    f.write_text("agent:\n  provider: GitHub.Copilot\n  model: m\n")
+    cfg = load_config(f)
+    assert cfg.agent_provider == "github-copilot"
+    assert cfg.agent_auth_method == "device-login"
+
+
+def test_canonicalize_provider_name_parity() -> None:
+    """The core _canonicalize_provider_name must produce the same output
+    as providers.plugin_registry.normalize_provider_name for
+    representative built-in and plugin names."""
+    from korvid.core.config import _canonicalize_provider_name
+    from korvid.providers.plugin_registry import normalize_provider_name
+
+    names = [
+        "github-copilot",
+        "GitHub_Copilot",
+        "openai_compat",
+        "OpenAI.Compat",
+        "OLLAMA",
+        "Company_LLM",
+        "  azure  ",
+        "my--custom..provider",
+    ]
+    for name in names:
+        assert _canonicalize_provider_name(name) == normalize_provider_name(name), (
+            f"parity failed for {name!r}"
+        )

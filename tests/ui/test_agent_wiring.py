@@ -553,7 +553,14 @@ async def test_apply_agent_settings_notifies_on_plugin_error() -> None:
     app = make_app(runtime=None, model=None, rebuild_agent=boom)
     async with app.run_test() as pilot:
         app._apply_agent_settings(settings)
-        await pilot.pause()
+        await until(
+            pilot,
+            lambda: any(
+                "rebuild failed" in m.lower() or "plugin" in m.lower()
+                for m in (n.message for n in app._notifications)
+            ),
+            label="plugin error notification",
+        )
         msgs = [n.message for n in app._notifications]
         assert any("rebuild failed" in m.lower() or "plugin" in m.lower() for m in msgs)
 

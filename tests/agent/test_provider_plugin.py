@@ -298,3 +298,68 @@ async def test_validated_stream_huge_exception_is_bounded() -> None:
             pass
     msg = str(exc_info.value)
     assert len(msg.encode("utf-8")) <= 2200
+
+
+# --- Finding #2 (round 2): aclose() exception translation ---
+
+
+async def test_validated_aclose_translates_secret_exception() -> None:
+    """ValidatedPluginProvider.aclose() must translate underlying exceptions
+    to fixed/bounded ProviderPluginContractError without raw payload."""
+
+    class _ExplodingCloseProvider(LLMProvider):
+        @property
+        def name(self) -> str:
+            return "boom-closer"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "done"}
+
+        async def aclose(self) -> None:
+            raise RuntimeError("SECRET_CREDENTIAL_abc123" * 20)
+
+    wrapped = ValidatedPluginProvider(_ExplodingCloseProvider())
+    with pytest.raises(ProviderPluginContractError, match="close failed") as exc_info:
+        await wrapped.aclose()
+    msg = str(exc_info.value)
+    assert "SECRET_CREDENTIAL" not in msg
+
+
+async def test_validated_aclose_preserves_exactly_once_guard() -> None:
+    """Second aclose() on a ValidatedPluginProvider must be swallowed
+    even after the first one raised."""
+
+    class _OneShotExploder(LLMProvider):
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        @property
+        def name(self) -> str:
+            return "one-shot"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "done"}
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("boom")
+
+    inner = _OneShotExploder()
+    wrapped = ValidatedPluginProvider(inner)
+    with pytest.raises(ProviderPluginContractError, match="close failed"):
+        await wrapped.aclose()
+    # Second close must be a no-op (exactly-once guard)
+    await wrapped.aclose()
+    assert inner.close_calls == 1

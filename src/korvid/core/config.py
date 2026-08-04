@@ -39,6 +39,18 @@ _SECRET_OPTION_KEY_SEGMENTS = (
     "credential",
 )
 
+_PROVIDER_SEPARATOR_RE = re.compile(r"[-_.]+")
+
+
+def _canonicalize_provider_name(name: str) -> str:
+    """Canonicalize a provider name: lowercase, collapse [-_.] to hyphens, strip.
+
+    Pure-stdlib mirror of ``providers.plugin_registry.normalize_provider_name``
+    so ``core/`` can normalize before dispatch without importing ``providers/``
+    (tach layer rules: core must not import providers).
+    """
+    return _PROVIDER_SEPARATOR_RE.sub("-", name.strip().lower())
+
 
 @dataclass(frozen=True)
 class ViewConfig:
@@ -148,7 +160,13 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     # User-edited configs can hold scalars where mappings are expected;
     # treat anything that is not a mapping as absent instead of crashing.
     agent_raw: dict[str, Any] = agent_value if isinstance(agent_value, dict) else {}
-    provider: str | None = agent_raw.get("provider")
+    provider_raw: str | None = agent_raw.get("provider")
+    # Canonicalize early: github_copilot, GitHub.Copilot etc. all become
+    # github-copilot so auth-method defaults and the composition root's
+    # OAuth token lookup match without case/separator awareness.
+    provider: str | None = (
+        _canonicalize_provider_name(provider_raw) if isinstance(provider_raw, str) else None
+    )
     # Auto-activation: provider present -> on, unless explicitly disabled (§6.3).
     enabled = bool(provider) and agent_raw.get("enabled", True) is not False
     api_key_env = _opt_str(agent_raw.get("api_key_env"))
@@ -573,7 +591,14 @@ def _raise_if_secret_key_segment(key: str, *, path: str) -> None:
     normalized = unicodedata.normalize("NFKD", key).casefold().strip()
     normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
     normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
-    tokens = {normalized, *(token for token in normalized.split("_") if token)}
+    parts = [p for p in normalized.split("_") if p]
+    # Build all single tokens plus consecutive multi-token subsequences
+    # so multi-token reserved segments like "api_key" match compound keys
+    # like "client_api_key".
+    tokens: set[str] = {normalized}
+    for i in range(len(parts)):
+        for j in range(i + 1, len(parts) + 1):
+            tokens.add("_".join(parts[i:j]))
     for segment in _SECRET_OPTION_KEY_SEGMENTS:
         if segment in tokens:
             raise _AgentOptionsError(

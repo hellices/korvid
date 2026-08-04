@@ -345,9 +345,10 @@ async def test_plugin_credentials_closed_on_construction_failure(
 
 async def test_credential_close_consumes_exceptions_without_secret_leak(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """If credential.aclose() raises, the error is consumed/logged
-    without leaking secret payload."""
+    without leaking secret payload in logs."""
     from unittest.mock import MagicMock
 
     from korvid.agent.provider_plugin import ProviderPluginMetadata
@@ -391,7 +392,10 @@ async def test_credential_close_consumes_exceptions_without_secret_leak(
     for _ in range(10):
         await asyncio.sleep(0)
     assert close_called == [True]
-    # No unhandled-task-exception: the done callback consumed it
+    # No unhandled-task-exception: the done callback consumed it.
+    # Caplog must NOT contain the secret payload or unbounded traceback.
+    full_log = caplog.text
+    assert "SUPER_SECRET_TOKEN" not in full_log
 
 
 def test_unknown_without_registry_returns_none() -> None:
@@ -681,3 +685,49 @@ def test_normalized_variant_never_queries_plugin_registry() -> None:
     assert isinstance(p, OpenAICompatProvider)
     registry.load_selected.assert_not_called()
     registry.create.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Finding #4: Plugin auth misconfiguration → ProviderPluginError
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_auth_misconfigured_raises_provider_plugin_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_AuthMisconfigured on the third-party path must raise ProviderPluginError
+    (not log+None), so initial startup warning and rebuild error surface work."""
+    from unittest.mock import MagicMock
+
+    from korvid.agent.provider_plugin import ProviderPluginMetadata
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    meta = ProviderPluginMetadata(
+        api_version=1, name="my-llm", display_name="My", auth_methods=("api_key",)
+    )
+    registry = MagicMock()
+    registry.load_selected.return_value = MagicMock(metadata=meta)
+
+    with pytest.raises(ProviderPluginError, match="auth misconfigured"):
+        create_provider(
+            enabled=True,
+            provider="my-llm",
+            auth_method="api_key",
+            base_url="http://x/v1",
+            model="m",
+            api_key_env="MISSING_KEY_ENV",  # not set → _AuthMisconfigured
+            plugin_registry=registry,
+        )
+
+
+def test_builtin_auth_misconfigured_still_returns_none() -> None:
+    """Built-in providers must keep their log+None behaviour on auth failure."""
+    p = create_provider(
+        enabled=True,
+        provider="openai",
+        auth_method="api_key",
+        base_url="http://x/v1",
+        model="m",
+        api_key_env="NONEXISTENT_KEY_abc",
+    )
+    assert p is None

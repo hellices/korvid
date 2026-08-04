@@ -261,7 +261,10 @@ def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Task
     def _reap(t: asyncio.Task[None]) -> None:
         tasks.discard(t)
         if not t.cancelled() and t.exception() is not None:
-            logger.debug("old provider close failed", exc_info=t.exception())
+            # Consume the exception with a fixed message only — never log
+            # exc_info or the exception message (plugin payloads may contain
+            # secrets or unbounded text).
+            logger.debug("old provider close failed")
 
     task.add_done_callback(_reap)
 

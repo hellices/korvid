@@ -170,9 +170,10 @@ def _create_via_plugin(
     credentials: CredentialSource | None = None
     try:
         credentials = build_credentials(name, auth_method, api_key_env)
-    except _AuthMisconfigured as exc:
-        logger.warning("%s — agent disabled", exc)
-        return None
+    except _AuthMisconfigured:
+        from korvid.providers.plugin_registry import ProviderPluginError as _PPE
+
+        raise _PPE(f"provider plugin {name!r}: auth misconfigured") from None
 
     config = ProviderPluginConfig(
         base_url=base_url,
@@ -215,7 +216,10 @@ def _close_credentials(credentials: CredentialSource | None) -> None:
     def _reap(t: asyncio.Task[None]) -> None:
         _cred_close_tasks.discard(t)
         if not t.cancelled() and t.exception() is not None:
-            logger.debug("credential close failed", exc_info=t.exception())
+            # Consume the exception with a fixed message only — never log
+            # exc_info or the exception message (may contain secrets/tokens
+            # from a third-party credential source).
+            logger.debug("credential close failed")
 
     task.add_done_callback(_reap)
 

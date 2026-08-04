@@ -57,6 +57,25 @@ async def test_close_errors_are_consumed() -> None:
     assert not tasks
 
 
+async def test_close_background_does_not_log_secret_payload(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Background provider close must log a fixed message, never the raw
+    exception payload which may contain secrets from third-party plugins."""
+    from korvid.agent.provider import LLMProvider
+
+    class _SecretBoomProvider:
+        async def aclose(self) -> None:
+            raise RuntimeError("SUPER_SECRET_API_KEY_leak_attempt" * 5)
+
+    tasks: set[asyncio.Task[None]] = set()
+    _close_provider_in_background(cast("LLMProvider", _SecretBoomProvider()), tasks)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not tasks
+    assert "SUPER_SECRET_API_KEY" not in caplog.text
+
+
 # --- Slice 3: late-bound UI bridge proxy ---
 
 
@@ -1800,3 +1819,48 @@ def test_options_error_fails_rebuild_for_plugin_provider(
             options={},
             options_error="agent.options must be ASCII keys only",
         )
+
+
+# ---------------------------------------------------------------------------
+# Finding #5: github_copilot variant loads OAuth via canonical name
+# ---------------------------------------------------------------------------
+
+
+def test_github_copilot_variant_loads_oauth_token(monkeypatch: object) -> None:
+    """A config with 'github_copilot' (underscore) must canonicalize to
+    'github-copilot' so the composition root loads the OAuth token."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    # Config with the canonical name (produced by load_config canonicalization)
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="github-copilot",
+        agent_auth_method="device-login",
+        agent_model="gpt-4o",
+    )
+    kube_stub = cast("Any", object())
+
+    # Patch TokenStore.load to track what key is requested and return None
+    # (simulating no stored token).
+    loaded_keys: list[str] = []
+    from korvid.providers import token_store as ts_mod
+
+    def _tracking_load(self: Any, key: str) -> str | None:
+        loaded_keys.append(key)
+        return None  # no token stored
+
+    mp.setattr(ts_mod.TokenStore, "load", _tracking_load)
+
+    runtime, _, _, _, _, provider_box, _ = _build_agent_wiring(config, kube_stub, {})
+    # The composition root must have asked for "github-oauth" because the
+    # canonical name matched "github-copilot".
+    assert "github-oauth" in loaded_keys
+    # No token stored → provider is None.
+    assert runtime is None
+    assert provider_box[0] is None

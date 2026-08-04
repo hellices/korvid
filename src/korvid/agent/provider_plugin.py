@@ -94,7 +94,10 @@ class ValidatedPluginProvider(LLMProvider):
         if self._closed:
             return
         self._closed = True
-        await self._provider.aclose()
+        try:
+            await self._provider.aclose()
+        except Exception:
+            raise ProviderPluginContractError("provider plugin close failed") from None
 
 
 def _bounded_exception(label: str) -> str:
