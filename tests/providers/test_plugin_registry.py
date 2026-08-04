@@ -220,7 +220,7 @@ class TestCollisionDetection:
 
 
 class TestMetadataValidation:
-    def test_wrong_api_version(self, plugin_site: Any, tmp_path: Path) -> None:
+    def test_wrong_api_version(self, plugin_site: Any) -> None:
         """Plugin with wrong api_version is rejected with a bounded error."""
 
         class _BadVersionPlugin(ProviderPlugin):
@@ -246,17 +246,17 @@ class TestMetadataValidation:
             with pytest.raises(ProviderPluginError, match="api_version"):
                 reg.load_selected("company-llm")
 
-    def test_auth_method_mismatch(self, plugin_site: Any, tmp_path: Path) -> None:
-        """Config's auth_method not in metadata's auth_methods is rejected."""
+    def test_metadata_name_mismatch(self, plugin_site: Any) -> None:
+        """Plugin whose metadata.name doesn't match the entry-point name is rejected."""
 
-        class _NarrowAuthPlugin(ProviderPlugin):
+        class _WrongNamePlugin(ProviderPlugin):
             @property
             def metadata(self) -> ProviderPluginMetadata:
                 return ProviderPluginMetadata(
                     api_version=PROVIDER_PLUGIN_API_VERSION,
-                    name="company-llm",
-                    display_name="Narrow",
-                    auth_methods=("oauth",),
+                    name="totally-different",
+                    display_name="Wrong",
+                    auth_methods=("api_key",),
                 )
 
             def create(
@@ -266,7 +266,112 @@ class TestMetadataValidation:
 
         with patch(
             "korvid.providers.plugin_registry._load_entry_point",
-            return_value=_NarrowAuthPlugin,
+            return_value=_WrongNamePlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match=r"metadata\.name") as exc_info:
+                reg.load_selected("company-llm")
+            assert "totally-different" not in str(exc_info.value)
+
+    def test_auth_methods_outside_allowlist_rejected(self, plugin_site: Any) -> None:
+        """auth_methods containing a value outside the API-v1 allowlist is rejected."""
+
+        class _BadAuthPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="BadAuth",
+                    auth_methods=("api_key", "oauth"),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_BadAuthPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="auth_methods"):
+                reg.load_selected("company-llm")
+
+    def test_auth_methods_duplicate_rejected(self, plugin_site: Any) -> None:
+        """Duplicate entries in auth_methods are rejected."""
+
+        class _DuplicateAuthPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="DupAuth",
+                    auth_methods=("api_key", "api_key"),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_DuplicateAuthPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="duplicate"):
+                reg.load_selected("company-llm")
+
+    def test_auth_methods_non_string_rejected(self, plugin_site: Any) -> None:
+        """Non-string entries in auth_methods are rejected."""
+
+        class _NonStrAuthPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="NonStr",
+                    auth_methods=("api_key", 42),  # type: ignore[arg-type]  # deliberate bad type
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_NonStrAuthPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="auth_methods"):
+                reg.load_selected("company-llm")
+
+    def test_auth_method_mismatch_at_create(self, plugin_site: Any) -> None:
+        """Config's auth_method not in metadata's auth_methods is rejected at create()."""
+
+        class _EntraOnlyPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="EntraOnly",
+                    auth_methods=("entra",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_EntraOnlyPlugin,
         ):
             reg = ProviderPluginRegistry()
             reg.load_selected("company-llm")
@@ -279,6 +384,30 @@ class TestMetadataValidation:
             )
             with pytest.raises(ProviderPluginError, match=r"auth.*method"):
                 reg.create("company-llm", config, None)
+
+    def test_malformed_metadata_raises_bounded_with_secret(self, plugin_site: Any) -> None:
+        """metadata property raising with a secret payload produces bounded error."""
+
+        class _ExplodingMetaPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                raise ValueError("SUPER_SECRET_KEY_abc123xyz" * 10)
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_ExplodingMetaPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="metadata") as exc_info:
+                reg.load_selected("company-llm")
+            msg = str(exc_info.value)
+            assert "SUPER_SECRET_KEY" not in msg
+            assert len(msg) <= 200
 
 
 class TestImportFailure:
@@ -300,6 +429,46 @@ class TestImportFailure:
                 reg.load_selected("broken-llm")
             # Error must NOT contain full traceback/secrets
             assert len(str(exc_info.value)) < 300
+
+
+class TestLongLabelBounding:
+    def test_long_entry_point_name_is_bounded(self, tmp_path: Path) -> None:
+        """Entry-point name exceeding _MAX_ERROR_LENGTH is truncated in error."""
+        long_name = "a" * 500
+        _build_dist_info(
+            tmp_path,
+            dist_name="long_provider",
+            version="1.0",
+            entry_point_name=long_name,
+            entry_point_value="nonexistent_module:SomePlugin",
+        )
+        with patch(
+            "korvid.providers.plugin_registry._discover_entry_points",
+            side_effect=lambda: _discover_from_path(tmp_path),
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError) as exc_info:
+                reg.load_selected(long_name)
+            assert len(str(exc_info.value)) <= 200
+
+    def test_long_distribution_name_is_bounded(self, tmp_path: Path) -> None:
+        """Distribution name exceeding safe length is truncated in error."""
+        long_dist = "d" * 120
+        _build_dist_info(
+            tmp_path,
+            dist_name=long_dist,
+            version="1.0",
+            entry_point_name="my-plugin",
+            entry_point_value="nonexistent_module:Missing",
+        )
+        with patch(
+            "korvid.providers.plugin_registry._discover_entry_points",
+            side_effect=lambda: _discover_from_path(tmp_path),
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError) as exc_info:
+                reg.load_selected("my-plugin")
+            assert len(str(exc_info.value)) <= 200
 
 
 class TestWrongObjectType:
@@ -353,6 +522,80 @@ class TestFactoryFailure:
                 reg.create("company-llm", config, None)
             # Must NOT leak the secret
             assert "SECRET_TOKEN_LEAK_ATTEMPT" not in str(exc_info.value)
+            assert len(str(exc_info.value)) <= 200
+
+    def test_plugin_raised_provider_plugin_error_is_translated(
+        self, plugin_site: Any, registry: ProviderPluginRegistry
+    ) -> None:
+        """A ProviderPluginError raised by plugin.create() with secrets must be translated."""
+
+        class _PluginErrorPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="PPE",
+                    auth_methods=("api_key",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise ProviderPluginError("SECRET_CREDENTIAL_xyz789 leaked in error")
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_PluginErrorPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="api_key",
+                api_key_env=None,
+                options={},
+            )
+            with pytest.raises(ProviderPluginError, match="factory failed") as exc_info:
+                reg.create("company-llm", config, None)
+            assert "SECRET_CREDENTIAL" not in str(exc_info.value)
+
+    def test_non_llmprovider_factory_output_rejected(
+        self, plugin_site: Any, registry: ProviderPluginRegistry
+    ) -> None:
+        """Plugin.create() returning a non-LLMProvider is translated to ProviderPluginError."""
+
+        class _BadReturnPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="BadReturn",
+                    auth_methods=("none",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                return "not-a-provider"  # type: ignore[return-value]
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_BadReturnPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="none",
+                api_key_env=None,
+                options={},
+            )
+            with pytest.raises(ProviderPluginError, match="must return an LLMProvider"):
+                reg.create("company-llm", config, None)
 
 
 # ---------------------------------------------------------------------------
