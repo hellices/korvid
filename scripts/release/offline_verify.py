@@ -20,9 +20,36 @@ import hashlib
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import venv
+import zipfile
 from pathlib import Path
+
+
+def extract_bundle(archive: Path, destination: Path) -> Path:
+    """Unpack the published archive and return its single bundle root."""
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True)
+    if archive.suffix == ".zip":
+        base = destination.resolve()
+        with zipfile.ZipFile(archive) as zipped:
+            for name in zipped.namelist():
+                target = (destination / name).resolve()
+                if target != base and base not in target.parents:
+                    raise ValueError(f"{archive.name}: unsafe archive member {name!r}")
+            zipped.extractall(destination)
+    else:
+        # Python 3.12+ warns when no extraction policy is explicit; the
+        # data filter also rejects traversal, devices, and unsafe links.
+        with tarfile.open(archive) as tar:
+            tar.extractall(destination, filter="data")
+    roots = [path for path in destination.iterdir() if path.is_dir()]
+    loose_files = [path for path in destination.iterdir() if path.is_file()]
+    if len(roots) != 1 or loose_files:
+        raise ValueError(f"{archive.name}: expected exactly one top-level bundle directory")
+    return roots[0]
 
 
 def verify_sha256sums(root: Path) -> None:
@@ -53,6 +80,13 @@ def _venv_python(env_dir: Path) -> Path:
     return exe / ("python.exe" if sys.platform == "win32" else "python")
 
 
+def _venv_launcher(env_dir: Path, *, platform_name: str | None = None) -> Path:
+    """The installed `korvid` console launcher for the target platform."""
+    platform_name = platform_name or sys.platform
+    exe = env_dir / ("Scripts" if platform_name == "win32" else "bin")
+    return exe / ("korvid.exe" if platform_name == "win32" else "korvid")
+
+
 def _pip_install(python: Path, wheels: Path, spec: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -77,17 +111,9 @@ def _run(args: list[str]) -> None:
         raise SystemExit(f"command failed: {args}\n{result.stdout}\n{result.stderr}")
 
 
-def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bundle", required=True, help="unpacked bundle directory")
-    parser.add_argument("--version", help="expected korvid version (from the tag)")
-    args = parser.parse_args(argv)
-    root = Path(args.bundle)
-    if not root.is_dir():
-        print(f"bundle directory not found: {root}", file=sys.stderr)
-        return 1
+def _verify_bundle(root: Path, version: str | None) -> None:
     wheels = root / "wheels"
-    spec = f"korvid[all,entra]=={args.version}" if args.version else "korvid[all,entra]"
+    spec = f"korvid[all,entra]=={version}" if version else "korvid[all,entra]"
 
     print("1/3 verifying SHA256SUMS…")
     verify_sha256sums(root)
@@ -101,7 +127,9 @@ def main(argv: list[str]) -> int:
         if result.returncode != 0:
             raise SystemExit(f"offline install failed:\n{result.stdout}\n{result.stderr}")
         _run([str(python), "-c", "import korvid"])
-        _run([str(python), "-m", "korvid", "--help"])
+        # Exercise the wheel's entry-point metadata and platform launcher,
+        # not merely the importable module (issue #169 review on #182).
+        _run([str(_venv_launcher(env_dir)), "--help"])
 
     print("3/3 negative check: one dependency wheel removed must fail…")
     victim = pick_removable_wheel(wheels)
@@ -118,6 +146,33 @@ def main(argv: list[str]) -> int:
                 " reaching a network index or cache"
             )
     print("offline bundle verified")
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--bundle", help="unpacked bundle directory")
+    source.add_argument("--archive", help="published .tar.gz or .zip archive")
+    parser.add_argument("--version", help="expected korvid version (from the tag)")
+    args = parser.parse_args(argv)
+
+    if args.bundle:
+        root = Path(args.bundle)
+        if not root.is_dir():
+            print(f"bundle directory not found: {root}", file=sys.stderr)
+            return 1
+        _verify_bundle(root, args.version)
+        return 0
+
+    archive = Path(args.archive)
+    if not archive.is_file():
+        print(f"bundle archive not found: {archive}", file=sys.stderr)
+        return 1
+    # Verify the exact published archive after fresh extraction — never the
+    # pre-archive staging directory (issue #169 review on #182).
+    with tempfile.TemporaryDirectory() as tmp:
+        root = extract_bundle(archive, Path(tmp) / "extracted")
+        _verify_bundle(root, args.version)
     return 0
 
 
