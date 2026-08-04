@@ -78,7 +78,7 @@ protected contexts.
 ### Crash recovery
 
 If a fatal exception escapes the TUI, korvid restores the terminal, logs
-the traceback, and asks `korvid crashed — restart? [Y/n]` instead of just
+the traceback, and asks `korvid crashed -- restart? [Y/n]` instead of just
 dying.  A restart rebuilds everything from scratch — a fresh event loop,
 Kubernetes client, agent provider, and MCP server; nothing from the crashed
 run is reused, and no approval state or pending proposal survives (the

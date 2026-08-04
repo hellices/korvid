@@ -185,3 +185,5 @@ uv sync --dev --all-extras   # create .venv with locked deps + all extras
 uv run korvid                # run against your current kubeconfig context
 make check                   # lint + mypy --strict + tach + tests
 ```
+
+Contributor docs: [Windows contributor notes](docs/windows.md).

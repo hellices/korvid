@@ -69,6 +69,14 @@ def _ci_workflow() -> str:
     return read_text_utf8(Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml")
 
 
+def _readme() -> str:
+    return read_text_utf8(Path(__file__).parents[1] / "README.md")
+
+
+def _windows_doc() -> str:
+    return read_text_utf8(Path(__file__).parents[1] / "docs" / "windows.md")
+
+
 def test_assert_pinned_action_ref_accepts_full_lowercase_commit_shas() -> None:
     workflow = "- uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1"
 
@@ -117,3 +125,37 @@ def test_ci_workflow_defines_the_required_windows_test_job() -> None:
     assert 'python-version: "3.12"' in segment
     assert "uv sync --locked --dev --all-extras" in segment
     assert "uv run pytest -q" in segment
+
+
+def test_readme_links_windows_contributor_notes() -> None:
+    readme = _readme()
+
+    assert "[Windows contributor notes](docs/windows.md)" in readme
+
+
+def test_windows_doc_records_verified_support_contract() -> None:
+    doc = _windows_doc()
+
+    for snippet in (
+        "uv sync --dev --all-extras",
+        "uv run pytest -q",
+        "windows-test",
+        "30930727214",
+        "3373 passed / 37 skipped / 0 failures",
+        "21 opt-in contract-suite skips",
+        "16 capability skips",
+        "`~user`",
+        "Developer Mode",
+        "symlink",
+        "SuspendNotSupported",
+        "legacy_windows=False",
+        'newline=""',
+        "`->`",
+        "`--`",
+        "0o600",
+        "ACL",
+        "do not claim ACL confidentiality",
+        "op_factory",
+        "cancelled writes",
+    ):
+        assert snippet in doc
