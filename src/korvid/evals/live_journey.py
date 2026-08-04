@@ -19,6 +19,16 @@ from korvid.tools.executor import ToolExecutor
 
 EXPECTED_CONTEXT = "aks-korvid-contract-test"
 NAMESPACE_PREFIX = "korvid-agent-eval-"
+MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
+MANAGED_BY_VALUE = "korvid-agent-eval"
+RUN_LABEL = "korvid.dev/eval-run"
+NAMESPACE_META = ResourceMeta(
+    kind="Namespace",
+    plural="namespaces",
+    group="",
+    version="v1",
+    namespaced=False,
+)
 
 
 def guard_live_target(context: str, namespace: str) -> None:
@@ -31,6 +41,19 @@ def guard_live_target(context: str, namespace: str) -> None:
         raise ValueError(
             f"live journey namespace prefix must be {NAMESPACE_PREFIX!r}, got {namespace!r}"
         )
+
+
+def guard_namespace_ownership(
+    namespace: str,
+    manifest: dict[str, Any],
+) -> None:
+    """Verify the trusted Namespace object belongs to this exact eval run."""
+    labels = (manifest.get("metadata") or {}).get("labels") or {}
+    if labels.get(MANAGED_BY_LABEL) != MANAGED_BY_VALUE:
+        raise ValueError(f"live journey namespace needs {MANAGED_BY_LABEL}={MANAGED_BY_VALUE}")
+    expected_run = namespace.removeprefix(NAMESPACE_PREFIX)
+    if labels.get(RUN_LABEL) != expected_run:
+        raise ValueError(f"live journey namespace {RUN_LABEL} must be {expected_run!r}")
 
 
 def _retarget_evidence(
@@ -184,6 +207,8 @@ class LiveJourneyEnvironment:
         client = KubeClient()
         await client.connect(context=context)
         try:
+            manifest = await client.get_object(NAMESPACE_META, None, namespace)
+            guard_namespace_ownership(namespace, manifest)
             resources = await client.discover_resources()
         except Exception:
             await client.close()

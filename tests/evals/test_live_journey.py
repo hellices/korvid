@@ -14,6 +14,7 @@ from korvid.evals.live_journey import (
     NamespaceBoundReadOps,
     build_live_aliases,
     guard_live_target,
+    guard_namespace_ownership,
     retarget_journey_namespace,
 )
 from korvid.evals.scenario import Scenario
@@ -33,6 +34,35 @@ def test_guard_live_target_accepts_only_dedicated_cluster_and_owned_namespace() 
         guard_live_target("aks-shared-runners", "korvid-agent-eval-run-123")
     with pytest.raises(ValueError, match="namespace prefix"):
         guard_live_target("aks-korvid-contract-test", "default")
+
+
+def test_namespace_ownership_requires_managed_and_matching_run_labels() -> None:
+    namespace = "korvid-agent-eval-run-123"
+    guard_namespace_ownership(
+        namespace,
+        {
+            "metadata": {
+                "labels": {
+                    "app.kubernetes.io/managed-by": "korvid-agent-eval",
+                    "korvid.dev/eval-run": "run-123",
+                }
+            }
+        },
+    )
+    with pytest.raises(ValueError, match="managed-by"):
+        guard_namespace_ownership(namespace, {"metadata": {"labels": {}}})
+    with pytest.raises(ValueError, match="eval-run"):
+        guard_namespace_ownership(
+            namespace,
+            {
+                "metadata": {
+                    "labels": {
+                        "app.kubernetes.io/managed-by": "korvid-agent-eval",
+                        "korvid.dev/eval-run": "another-run",
+                    }
+                }
+            },
+        )
 
 
 def test_retarget_journey_namespace_updates_turns_evidence_and_forbidden_targets() -> None:

@@ -16,6 +16,11 @@ Qwen3 8B's task row is a single run and the conversation pack currently has
 three journeys, so the recommendation remains provisional until #176 completes
 three task repetitions and expands the pack to eight journeys.
 
+Qwen3-Coder 30B-A3B task repetitions were `20/23`, `19/23`, and `20/23`
+(`87.0%`, `82.6%`, `87.0%`). Mean success was `85.5%`; population variance
+was `4.20 percentage-points²` (standard deviation `2.05pp`). Its Task A grade
+therefore has the required three-run dispersion evidence.
+
 ## Detailed Findings
 
 ### Qwen3 8B
