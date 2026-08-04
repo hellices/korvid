@@ -29,6 +29,7 @@ from korvid.k8s.reads import ReadOps
 from korvid.tools.diagnose import (
     condition_lines,
     container_state_lines,
+    current_health_line,
     identity_lines,
     log_excerpt,
     node_condition_line,
@@ -856,7 +857,7 @@ class ToolExecutor:
         return f"owner: {parent[0]} {parent[1]} (via {kind_name} {name})"
 
     async def _diagnose_related(self, namespace: str, pod: dict[str, Any]) -> list[str]:
-        """Node condition summary and PVC phases — cheap context, best-effort."""
+        """Node conditions and mounted-PVC provisioning evidence."""
         lines: list[str] = []
         node_name = (pod.get("spec") or {}).get("nodeName")
         node_meta = self._meta_for_kind_name("Node")
@@ -873,7 +874,18 @@ class ToolExecutor:
                 try:
                     pvc = await self._kube.get_object(pvc_meta, namespace, claim)
                     phase = (pvc.get("status") or {}).get("phase") or "?"
-                    lines.append(f"pvc {claim}: {phase}")
+                    storage_class = (pvc.get("spec") or {}).get("storageClassName") or "(default)"
+                    lines.append(f"pvc {claim}: {phase} storageClass={storage_class}")
+                    raw_uid = (pvc.get("metadata") or {}).get("uid")
+                    events = await self._kube.list_events_for(
+                        namespace,
+                        claim,
+                        kind="PersistentVolumeClaim",
+                        uid=str(raw_uid) if raw_uid else None,
+                    )
+                    lines.extend(
+                        f"pvc {claim} warning: {event}" for event in warning_event_lines(events)
+                    )
                 except Exception as exc:
                     lines.append(f"pvc {claim}: unavailable ({exc})")
             omitted = claims[self._DIAGNOSE_MAX_PVCS :]
@@ -1014,6 +1026,7 @@ class ToolExecutor:
                 f"IDENTITY — pod {namespace}/{name}",
                 [*identity_lines(pod), await self._diagnose_owner_chain(namespace, pod)],
             ),
+            ("CURRENT HEALTH", [current_health_line(pod)]),
             ("RELATED", await self._diagnose_related(namespace, pod) or ["(none)"]),
             ("CONDITIONS (failing first)", condition_lines(pod) or ["(none reported)"]),
             ("CONTAINERS", container_state_lines(pod) or ["(no container statuses)"]),

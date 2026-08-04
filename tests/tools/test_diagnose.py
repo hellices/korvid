@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from korvid.tools import diagnose
 from korvid.tools.diagnose import (
     condition_lines,
     container_state_lines,
@@ -273,6 +274,33 @@ def test_condition_lines_put_failing_conditions_first() -> None:
 
 def test_condition_lines_empty_status_yields_no_lines() -> None:
     assert condition_lines({}) == []
+
+
+# --- current health ---------------------------------------------------------
+
+
+def test_current_health_line_marks_a_ready_running_pod_healthy_despite_restarts() -> None:
+    pod = _crashloop_pod()
+    pod["status"]["phase"] = "Running"
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": "app",
+            "ready": True,
+            "restartCount": 2,
+            "state": {"running": {"startedAt": "2026-07-27T06:01:00Z"}},
+            "lastState": {"terminated": {"exitCode": 255, "reason": "Error"}},
+        }
+    ]
+
+    assert diagnose.current_health_line(pod) == (
+        "HEALTHY NOW — phase=Running, Ready=True, all containers ready; "
+        "2 restart(s) are historical, not a current failure"
+    )
+
+
+def test_current_health_line_does_not_mark_a_not_ready_pod_healthy() -> None:
+    assert diagnose.current_health_line(_crashloop_pod()).startswith("UNHEALTHY NOW")
 
 
 # --- warning events ---------------------------------------------------------

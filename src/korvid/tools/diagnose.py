@@ -171,6 +171,30 @@ def condition_lines(pod: dict[str, Any]) -> list[str]:
     return failing + healthy
 
 
+def current_health_line(pod: dict[str, Any]) -> str:
+    """Current pod health, explicitly separated from restart history."""
+    status = _status(pod)
+    phase = str(status.get("phase") or "?")
+    conditions = status.get("conditions")
+    ready = next(
+        (
+            str(cond.get("status") or "?")
+            for cond in conditions or []
+            if isinstance(cond, dict) and cond.get("type") == "Ready"
+        ),
+        "?",
+    )
+    statuses = _container_statuses(pod)
+    all_ready = bool(statuses) and all(cs.get("ready") is True for _prefix, cs in statuses)
+    restarts = sum(int(cs.get("restartCount") or 0) for _prefix, cs in statuses)
+    if phase == "Running" and ready == "True" and all_ready:
+        suffix = ""
+        if restarts:
+            suffix = f"; {restarts} restart(s) are historical, not a current failure"
+        return f"HEALTHY NOW — phase=Running, Ready=True, all containers ready{suffix}"
+    return f"UNHEALTHY NOW — phase={phase}, Ready={ready}, all-containers-ready={all_ready}"
+
+
 def _event_count(ev: dict[str, Any]) -> int:
     """Recurrence count: `series.count` (events.k8s.io repeating events)
     first, then the core v1 `count`, defaulting to a single occurrence."""

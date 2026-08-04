@@ -1081,6 +1081,67 @@ async def test_diagnose_pod_healthy_pod_skips_log_fetches() -> None:
     assert "no troubled containers" in out
 
 
+async def test_diagnose_pod_puts_current_health_before_historical_restart_evidence() -> None:
+    kube = FakeDiagnoseKube()
+    pod = kube.objects[("pods", "api-1")]
+    pod["status"]["phase"] = "Running"
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": "app",
+            "ready": True,
+            "restartCount": 2,
+            "state": {"running": {"startedAt": "2026-07-27T06:01:00Z"}},
+            "lastState": {"terminated": {"exitCode": 255, "reason": "Error"}},
+        }
+    ]
+    kube.events = []
+    kube.log_lines = ["lost connection to peer, exiting for restart"]
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+
+    assert "CURRENT HEALTH\n  HEALTHY NOW" in out
+    assert out.index("HEALTHY NOW") < out.index("lost connection to peer")
+
+
+async def test_diagnose_pod_includes_pvc_storage_class_and_warning_events() -> None:
+    class PvcEventKube(FakeDiagnoseKube):
+        async def list_events_for(
+            self,
+            namespace: str,
+            name: str,
+            *,
+            kind: str | None = None,
+            uid: str | None = None,
+        ) -> list[dict[str, Any]]:
+            if kind == "PersistentVolumeClaim":
+                return [
+                    {
+                        "type": "Warning",
+                        "reason": "ProvisioningFailed",
+                        "message": 'storageclass.storage.k8s.io "fast-ssd" not found',
+                        "count": 9,
+                    }
+                ]
+            return await super().list_events_for(namespace, name, kind=kind, uid=uid)
+
+    kube = PvcEventKube()
+    pvc = kube.objects[("persistentvolumeclaims", "data-claim")]
+    pvc["metadata"]["uid"] = "pvc-uid"
+    pvc["spec"] = {"storageClassName": "fast-ssd"}
+    pvc["status"] = {"phase": "Pending"}
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+
+    assert "pvc data-claim: Pending storageClass=fast-ssd" in out
+    assert "ProvisioningFailed (9x)" in out
+    assert 'storageclass.storage.k8s.io "fast-ssd" not found' in out
+
+
 async def test_diagnose_pod_missing_pod_is_an_error() -> None:
     kube = FakeDiagnoseKube()
     del kube.objects[("pods", "api-1")]
