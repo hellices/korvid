@@ -3,7 +3,7 @@
   "purpose": "Corrected offline conversation matrix with turn-local evidence grading",
   "supersedes_for_offline_conversation": "results/2026-08-04/artifacts.tar.gz",
   "archive": "2026-08-04-r2-artifacts.tar.gz",
-  "source_revision": "1118935",
+  "source_revision": "5d37d96",
   "models": [
     "qwen3:1.7b",
     "qwen3:8b",
