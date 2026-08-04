@@ -299,9 +299,15 @@ def test_agent_options_rejects_unsupported_objects(tmp_path: Path) -> None:
         ("api-key", "api_key"),
         ("Authorization", "authorization"),
         ("credential", "credential"),
-        # Finding #3 round 2: compound keys containing multi-token reserved segments
+        # Compound underscore keys
         ("client_api_key", "api_key"),
         ("my_api_key_rotation", "api_key"),
+        # CamelCase JSON-style keys (finding round 5)
+        ("apiKey", "api_key"),
+        ("clientSecret", "secret"),
+        ("accessToken", "token"),
+        ("APIKey", "api_key"),
+        ("clientAPIKey", "api_key"),
     ],
 )
 def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, expected: str) -> None:
@@ -309,6 +315,24 @@ def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, exp
     assert cfg.agent_options == {}
     assert cfg.agent_options_error is not None
     assert expected in cfg.agent_options_error
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "clientKey",
+        "apiVersion",
+        "timeout",
+        "modelName",
+        "baseURL",
+        "maxRetries",
+    ],
+)
+def test_agent_options_accepts_non_secret_camel_case_keys(tmp_path: Path, key: str) -> None:
+    """Non-secret CamelCase keys must pass through without false positives."""
+    cfg = _load_agent_options_config(tmp_path, {key: "v"})
+    assert cfg.agent_options_error is None
+    assert key in cfg.agent_options
 
 
 def test_agent_options_accepts_non_secret_compound_keys(tmp_path: Path) -> None:

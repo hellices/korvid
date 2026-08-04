@@ -35,10 +35,9 @@ _MAX_NAME_LENGTH = 100
 _ENTRY_POINT_GROUP: str = "korvid.provider"
 _ALLOWED_AUTH_METHODS: frozenset[str] = frozenset({"none", "api_key", "entra"})
 
-# Centralized reserved names — these are built-in provider identifiers that must
-# never be claimed by third-party plugins.  Shared with korvid.providers.registry
-# to ensure plugin_registry and the built-in dispatch cannot drift.
-RESERVED_PROVIDER_NAMES: frozenset[str] = frozenset(
+# Single-source canonical built-in provider sets.  registry.py imports these
+# for dispatch routing so the two modules cannot drift independently.
+OPENAI_COMPAT_ALIASES: frozenset[str] = frozenset(
     {
         "openai-compat",
         "openai",
@@ -47,10 +46,17 @@ RESERVED_PROVIDER_NAMES: frozenset[str] = frozenset(
         "github",
         "anthropic",
         "claude",
-        "ollama",
-        "github-copilot",
     }
 )
+OLLAMA_PROVIDER: str = "ollama"
+GITHUB_COPILOT_PROVIDER: str = "github-copilot"
+
+# Centralized reserved names — union of all built-in identifiers that must
+# never be claimed by third-party plugins.
+RESERVED_PROVIDER_NAMES: frozenset[str] = OPENAI_COMPAT_ALIASES | {
+    OLLAMA_PROVIDER,
+    GITHUB_COPILOT_PROVIDER,
+}
 
 
 class ProviderPluginError(Exception):

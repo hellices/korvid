@@ -587,8 +587,18 @@ def _parse_agent_option_scalar(value: object, *, path: str) -> object:
     return _UNSUPPORTED_AGENT_OPTION
 
 
+_CAMEL_BOUNDARY_RE = re.compile(
+    r"(?<=[a-z0-9])(?=[A-Z])"  # lowerUpper: apiKey → api_Key
+    r"|(?<=[A-Z])(?=[A-Z][a-z])"  # ACRONYMWord: APIKey → API_Key
+)
+
+
 def _raise_if_secret_key_segment(key: str, *, path: str) -> None:
-    normalized = unicodedata.normalize("NFKD", key).casefold().strip()
+    # Split ASCII CamelCase/acronym transitions BEFORE casefold so that
+    # apiKey, clientSecret, accessToken, APIKey, clientAPIKey etc. are
+    # correctly tokenized and matched against reserved segments.
+    camel_split = _CAMEL_BOUNDARY_RE.sub("_", key)
+    normalized = unicodedata.normalize("NFKD", camel_split).casefold().strip()
     normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
     normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
     parts = [p for p in normalized.split("_") if p]

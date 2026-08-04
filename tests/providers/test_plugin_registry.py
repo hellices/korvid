@@ -1053,3 +1053,49 @@ class TestDiscoveryFailure:
             # No plugin found for "my-plugin", but discovery didn't crash
             with pytest.raises(ProviderPluginError, match="no provider plugin found"):
                 reg.load_selected("my-plugin")
+
+
+# ---------------------------------------------------------------------------
+# Finding #2 round 5: single-source provider names identity/parity
+# ---------------------------------------------------------------------------
+
+
+class TestSingleSourceProviderNames:
+    """RESERVED_PROVIDER_NAMES must derive from the same constants that
+    registry.py uses for dispatch, so the two cannot drift."""
+
+    def test_reserved_is_union_of_canonical_constants(self) -> None:
+        from korvid.providers.plugin_registry import (
+            GITHUB_COPILOT_PROVIDER,
+            OLLAMA_PROVIDER,
+            OPENAI_COMPAT_ALIASES,
+            RESERVED_PROVIDER_NAMES,
+        )
+
+        expected = OPENAI_COMPAT_ALIASES | {OLLAMA_PROVIDER, GITHUB_COPILOT_PROVIDER}
+        assert expected == RESERVED_PROVIDER_NAMES
+
+    def test_registry_dispatch_uses_same_constants(self) -> None:
+        """registry.py must import and use the canonical constants from
+        plugin_registry.py — not independently defined sets."""
+        import korvid.providers.registry as reg_mod
+        from korvid.providers.plugin_registry import (
+            GITHUB_COPILOT_PROVIDER,
+            OLLAMA_PROVIDER,
+            OPENAI_COMPAT_ALIASES,
+        )
+
+        # Verify the module references are the same objects.
+        assert reg_mod.OPENAI_COMPAT_ALIASES is OPENAI_COMPAT_ALIASES  # type: ignore[attr-defined]  # re-export identity check
+        assert reg_mod.OLLAMA_PROVIDER is OLLAMA_PROVIDER  # type: ignore[attr-defined]  # re-export identity check
+        assert reg_mod.GITHUB_COPILOT_PROVIDER is GITHUB_COPILOT_PROVIDER  # type: ignore[attr-defined]  # re-export identity check
+
+    def test_all_reserved_names_are_canonical_form(self) -> None:
+        """Every reserved name must already be in normalized form."""
+        from korvid.providers.plugin_registry import (
+            RESERVED_PROVIDER_NAMES,
+            normalize_provider_name,
+        )
+
+        for name in RESERVED_PROVIDER_NAMES:
+            assert normalize_provider_name(name) == name, f"{name!r} is not in canonical form"

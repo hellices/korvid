@@ -19,25 +19,18 @@ from korvid.providers.entra import EntraCredentialSource
 from korvid.providers.github_copilot import COPILOT_CHAT_BASE_URL, CopilotCredentialSource
 from korvid.providers.ollama import OllamaOptions, OllamaProvider
 from korvid.providers.openai_compat import OpenAICompatProvider
-from korvid.providers.plugin_registry import normalize_provider_name
+from korvid.providers.plugin_registry import (
+    GITHUB_COPILOT_PROVIDER,
+    OLLAMA_PROVIDER,
+    OPENAI_COMPAT_ALIASES,
+    normalize_provider_name,
+)
 from korvid.providers.static_creds import StaticHeaderSource
 
 if TYPE_CHECKING:
     from korvid.providers.plugin_registry import ProviderPluginRegistry
 
 logger = logging.getLogger(__name__)
-
-_OPENAI_COMPAT_ALIASES = frozenset(
-    {
-        "openai-compat",
-        "openai",
-        "azure",
-        "vllm",
-        "github",  # GitHub Models (models.github.ai) — OpenAI-compatible
-        "anthropic",  # Anthropic's OpenAI SDK compatibility endpoint
-        "claude",
-    }
-)
 
 
 def create_provider(
@@ -61,11 +54,11 @@ def create_provider(
     # Normalize once: lowercase, collapse [-_.] separators to hyphens, strip.
     # This ensures `openai_compat`, `OpenAI_Compat`, ` ollama` etc. route to built-ins.
     name = normalize_provider_name(provider) if isinstance(provider, str) else ""
-    if name == "github-copilot":
+    if name == GITHUB_COPILOT_PROVIDER:
         return _create_github_copilot(
             auth_method=auth_method, base_url=base_url, model=model, oauth_token=oauth_token
         )
-    if name not in _OPENAI_COMPAT_ALIASES and name != "ollama":
+    if name not in OPENAI_COMPAT_ALIASES and name != OLLAMA_PROVIDER:
         # Unknown to built-ins: try the plugin registry before giving up.
         return _create_via_plugin(
             name=name,
@@ -86,7 +79,7 @@ def create_provider(
     except _AuthMisconfigured as exc:
         logger.warning("%s — agent disabled", exc)
         return None
-    if name == "ollama":
+    if name == OLLAMA_PROVIDER:
         # Native /api/chat adapter (issue #72). The OpenAI-compat shim path
         # stays available via `provider: openai-compat` with an Ollama URL.
         return OllamaProvider(

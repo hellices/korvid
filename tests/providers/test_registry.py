@@ -731,3 +731,30 @@ def test_builtin_auth_misconfigured_still_returns_none() -> None:
         api_key_env="NONEXISTENT_KEY_abc",
     )
     assert p is None
+
+
+# ---------------------------------------------------------------------------
+# Finding #2 round 5: variant dispatch tests remain correct
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "provider",
+    ["openai", "azure", "vllm", "github", "anthropic", "claude", "openai-compat"],
+)
+def test_openai_compat_aliases_route_to_builtin(
+    provider: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every OpenAI-compat alias must route to the built-in path (not plugin)."""
+    monkeypatch.setenv("KORVID_TEST_REG_KEY", "k")
+    p = create_provider(
+        enabled=True,
+        provider=provider,
+        auth_method="api_key",
+        base_url="http://x/v1",
+        model="m",
+        api_key_env="KORVID_TEST_REG_KEY",
+    )
+    from korvid.providers.openai_compat import OpenAICompatProvider
+
+    assert isinstance(p, OpenAICompatProvider)
