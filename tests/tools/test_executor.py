@@ -1171,6 +1171,28 @@ async def test_diagnose_pod_includes_pvc_storage_class_and_warning_events() -> N
     assert 'storageclass.storage.k8s.io "fast-ssd" not found' in out
 
 
+async def test_diagnose_pod_distinguishes_pvc_event_failure_from_pvc_read() -> None:
+    class PvcEventsDeniedKube(FakeDiagnoseKube):
+        async def list_events_for(
+            self,
+            namespace: str,
+            name: str,
+            *,
+            kind: str | None = None,
+            uid: str | None = None,
+        ) -> list[dict[str, Any]]:
+            if kind == "PersistentVolumeClaim":
+                raise ApiStatusError(403, "PVC events forbidden")
+            return await super().list_events_for(namespace, name, kind=kind, uid=uid)
+
+    out = await _diagnose_executor(PvcEventsDeniedKube()).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "pvc data-claim: Bound storageClass=(default)" in out
+    assert "pvc data-claim warning events: unavailable" in out
+    assert "pvc data-claim: unavailable" not in out
+
+
 async def test_diagnose_pod_distinguishes_default_and_explicit_no_storage_class() -> None:
     kube = FakeDiagnoseKube()
     pod = kube.objects[("pods", "api-1")]

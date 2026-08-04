@@ -111,7 +111,7 @@ uv run python -m korvid.evals.journeys_cli \
 - result timeout: 300 seconds;
 - model quantization: Q4_K_M;
 - task source revision: `25649a3`;
-- offline journey source revision: `9585ee7`;
+- corrected offline journey source revision: `5d37d96`;
 - corrected live journey source revision: `8e15c52`;
 - live target: `aks-korvid-contract-test`;
 - live namespace: `korvid-agent-eval-20260804200747` (deleted after run).

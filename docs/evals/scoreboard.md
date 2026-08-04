@@ -109,8 +109,9 @@ returned to zero nodes.
 Generated files are kept off the source branch:
 
 - [2026-08-04 artifact directory](https://github.com/hellices/korvid/tree/eval-results/results/2026-08-04)
-- [turn-local conversation rerun](https://github.com/hellices/korvid/tree/eval-results/results/2026-08-04-r2)
-- [compressed raw artifacts](https://github.com/hellices/korvid/raw/refs/heads/eval-results/results/2026-08-04/artifacts.tar.gz)
+- [turn-local conversation rerun archive](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-04-r2-artifacts.tar.gz)
+- [turn-local rerun metadata](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-04-r2-metadata.json)
+- [initial compressed raw artifacts](https://github.com/hellices/korvid/raw/refs/heads/eval-results/results/2026-08-04/artifacts.tar.gz)
 - [metadata](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-04/metadata.json)
 - [SHA-256 checksums](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-04/SHA256SUMS)
 

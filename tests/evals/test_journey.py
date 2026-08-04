@@ -98,6 +98,39 @@ cluster: {objects: [], events: [], logs: {}}
         load_journey(path)
 
 
+def test_load_journey_rejects_zero_tool_call_budget(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "zero-budget.yaml",
+        """
+id: zero-budget
+root_cause: none
+turns:
+  - user: inspect
+    screen: pods
+    grading:
+      must_mention: [healthy]
+      must_not_mention: [broken]
+      max_tool_calls: 0
+      expected_evidence:
+        - tool: list_resources
+          args: {kind: pods}
+          contains: pod
+  - user: stop
+    screen: pods
+    grading:
+      must_mention: [stop]
+      must_not_mention: [broken]
+      expected_evidence:
+        - tool: list_resources
+          args: {kind: pods}
+          contains: pod
+cluster: {objects: [], events: [], logs: {}}
+""",
+    )
+    with pytest.raises(ValueError, match="positive integer"):
+        load_journey(path)
+
+
 def test_load_journeys_rejects_duplicate_ids(tmp_path: Path) -> None:
     text = """
 id: same

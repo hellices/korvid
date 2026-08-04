@@ -61,8 +61,8 @@ class ConversationJourney:
 def _positive_int_or_none(value: Any, label: str) -> int | None:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{label} must be a non-negative integer")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{label} must be a positive integer")
     return value
 
 

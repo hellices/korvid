@@ -876,33 +876,45 @@ class ToolExecutor:
         if pvc_meta is not None:
             claims = pvc_names(pod)
             for claim in claims[: self._DIAGNOSE_MAX_PVCS]:
-                try:
-                    pvc = await self._kube.get_object(pvc_meta, namespace, claim)
-                    phase = (pvc.get("status") or {}).get("phase") or "?"
-                    pvc_spec = pvc.get("spec") or {}
-                    raw_storage_class = pvc_spec.get("storageClassName")
-                    if "storageClassName" not in pvc_spec or raw_storage_class is None:
-                        storage_class = "(default)"
-                    elif raw_storage_class == "":
-                        storage_class = "(none)"
-                    else:
-                        storage_class = str(raw_storage_class)
-                    lines.append(f"pvc {claim}: {phase} storageClass={storage_class}")
-                    raw_uid = (pvc.get("metadata") or {}).get("uid")
-                    events = await self._kube.list_events_for(
-                        namespace,
-                        claim,
-                        kind="PersistentVolumeClaim",
-                        uid=str(raw_uid) if raw_uid else None,
-                    )
-                    lines.extend(
-                        f"pvc {claim} warning: {event}" for event in warning_event_lines(events)
-                    )
-                except Exception as exc:
-                    lines.append(f"pvc {claim}: unavailable ({exc})")
+                lines.extend(await self._diagnose_pvc(namespace, claim, pvc_meta))
             omitted = claims[self._DIAGNOSE_MAX_PVCS :]
             if omitted:
                 lines.append(f"({len(omitted)} more claims not fetched: {', '.join(omitted)})")
+        return lines
+
+    async def _diagnose_pvc(
+        self,
+        namespace: str,
+        claim: str,
+        pvc_meta: ResourceMeta,
+    ) -> list[str]:
+        """PVC state and its optional event evidence, independently."""
+        try:
+            pvc = await self._kube.get_object(pvc_meta, namespace, claim)
+        except Exception as exc:
+            return [f"pvc {claim}: unavailable ({exc})"]
+        phase = (pvc.get("status") or {}).get("phase") or "?"
+        pvc_spec = pvc.get("spec") or {}
+        raw_storage_class = pvc_spec.get("storageClassName")
+        if "storageClassName" not in pvc_spec or raw_storage_class is None:
+            storage_class = "(default)"
+        elif raw_storage_class == "":
+            storage_class = "(none)"
+        else:
+            storage_class = str(raw_storage_class)
+        lines = [f"pvc {claim}: {phase} storageClass={storage_class}"]
+        raw_uid = (pvc.get("metadata") or {}).get("uid")
+        try:
+            events = await self._kube.list_events_for(
+                namespace,
+                claim,
+                kind="PersistentVolumeClaim",
+                uid=str(raw_uid) if raw_uid else None,
+            )
+        except Exception as exc:
+            lines.append(f"pvc {claim} warning events: unavailable ({exc})")
+        else:
+            lines.extend(f"pvc {claim} warning: {event}" for event in warning_event_lines(events))
         return lines
 
     async def _diagnose_events(self, namespace: str, name: str, pod: dict[str, Any]) -> list[str]:
