@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 
+import pytest
+
 from korvid.core.secrets import (
     MASK_PLACEHOLDER,
     mask_secret_manifest,
@@ -106,6 +108,12 @@ class TestMaskSecretManifest:
         assert "hunter2" not in dumped
         assert _b64("hunter2") not in dumped
         assert "aHVudGVyMg" not in dumped
+
+    @pytest.mark.parametrize("section", ["data", "stringData"])
+    def test_rejects_malformed_sensitive_section(self, section: str) -> None:
+        manifest: dict[str, object] = {"kind": "Secret", section: "raw-sensitive-value"}
+        with pytest.raises(ValueError, match=section):
+            mask_secret_manifest(manifest)
 
 
 class TestSecretKeys:
