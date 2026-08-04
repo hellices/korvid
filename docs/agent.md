@@ -287,3 +287,24 @@ Custom scenario packs can be pointed at with `--scenarios DIR`, and
 descriptions, 6-iteration budget, small system prompt — see
 [Capability profiles](#capability-profiles)) so before/after numbers for a
 small model come from the same pack.
+
+### Conversational journeys
+
+`korvid.evals.journeys_cli` keeps one runtime alive across multiple user turns,
+measuring broad discovery, corrections, evidence pivots, stopping behavior, and
+UI intent:
+
+```sh
+export KORVID_EVAL_BASE_URL=http://localhost:11434/v1
+export KORVID_EVAL_MODEL=qwen3:8b
+export KORVID_EVAL_TIMEOUT_SECONDS=300
+
+uv run python -m korvid.evals.journeys_cli \
+  --profile small --reps 3 \
+  --out journeys.md --json journeys.json
+```
+
+The guarded `--live` mode reads real faults only from the dedicated
+`aks-korvid-contract-test` context and a namespace beginning with
+`korvid-agent-eval-`. See [evaluation methodology](evals/methodology.md),
+[scenario catalog](evals/scenarios.md), and the [model scoreboard](evals/scoreboard.md).
