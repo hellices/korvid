@@ -10,7 +10,7 @@ uv run pytest -q
 
 PRs that touch shared/runtime behavior must also keep the required
 `windows-test` CI job green. The proving run for issue #173 was
-`30930727214`: **3373 passed / 37 skipped / 0 failures**.
+`30936032385`: **3376 passed / 37 skipped / 0 failures**.
 
 ## Expected skips on Windows
 
@@ -27,7 +27,8 @@ PRs that touch shared/runtime behavior must also keep the required
 
 - Symlink tests depend on Windows **Developer Mode** (or an elevated shell):
   native `Path.symlink_to()` can fail before korvid logic runs if symlink
-  creation is not allowed.
+  creation is not allowed. The shared helper turns that into a capability skip
+  only when Windows symlink privilege is absent; the final hosted runner had privilege, so the count remained 37.
 - Interactive shell attach can hit Textual's `SuspendNotSupported` path on
   Windows/non-suspending drivers. That refusal is expected; render-only tests
   pin `legacy_windows=False` for deterministic Rich output.

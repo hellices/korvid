@@ -1,5 +1,6 @@
 """Shared test helpers for platform-specific expectations."""
 
+import errno
 import os
 import re
 from pathlib import Path
@@ -18,6 +19,22 @@ def posix_only(reason: str) -> pytest.MarkDecorator:
 def read_text_utf8(path: Path) -> str:
     """Read a repository text file with an explicit UTF-8 encoding."""
     return path.read_text(encoding="utf-8")
+
+
+def symlink_or_skip(link: Path, target: Path) -> None:
+    """Create a symlink, or skip only when Windows symlink privilege is absent."""
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        missing_privilege = WINDOWS and (
+            getattr(exc, "winerror", None) == 1314 or exc.errno == errno.EPERM
+        )
+        if missing_privilege:
+            pytest.skip(
+                "Windows symlink creation requires Developer Mode or an elevated"
+                " administrator shell"
+            )
+        raise
 
 
 def assert_pinned_action_ref(workflow_text: str, action: str) -> str:

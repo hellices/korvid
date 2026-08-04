@@ -1,11 +1,15 @@
 """Tests for shared platform helpers and CI workflow invariants."""
 
 import ast
+import errno
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
+import tests.platforms as platform_helpers
 from tests.platforms import (
     POSIX,
     WINDOWS,
@@ -69,6 +73,16 @@ def _ci_workflow() -> str:
     return read_text_utf8(Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml")
 
 
+def _workflow_job(workflow: str, name: str) -> dict[str, Any]:
+    parsed = yaml.safe_load(workflow)
+    assert isinstance(parsed, dict), "expected workflow YAML to parse to a mapping"
+    jobs = parsed.get("jobs")
+    assert isinstance(jobs, dict), "expected workflow to define a jobs mapping"
+    job = jobs.get(name)
+    assert isinstance(job, dict), f"expected workflow to define jobs[{name!r}]"
+    return job
+
+
 def _readme() -> str:
     return read_text_utf8(Path(__file__).parents[1] / "README.md")
 
@@ -113,18 +127,104 @@ def test_read_text_utf8_uses_utf8_encoding(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 def test_ci_workflow_defines_the_required_windows_test_job() -> None:
-    workflow = _ci_workflow()
-    test_job = workflow.index("\n  test:")
-    windows_job = workflow.index("\n  windows-test:")
-    pre_commit = workflow.index("\n  pre-commit:")
-    assert test_job < windows_job < pre_commit
-    segment = workflow[windows_job:pre_commit]
-    assert "runs-on: windows-latest" in segment
+    windows_job = _workflow_job(_ci_workflow(), "windows-test")
+    segment = yaml.safe_dump(windows_job, sort_keys=False)
+    steps = windows_job["steps"]
+    assert isinstance(steps, list)
+    runs = [step["run"] for step in steps if isinstance(step, dict) and "run" in step]
+    setup_uv = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("uses") == "astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9"
+    )
+    assert windows_job["runs-on"] == "windows-latest"
     assert_pinned_action_ref(segment, "actions/checkout")
     assert_pinned_action_ref(segment, "astral-sh/setup-uv")
-    assert 'python-version: "3.12"' in segment
-    assert "uv sync --locked --dev --all-extras" in segment
-    assert "uv run pytest -q" in segment
+    assert isinstance(setup_uv.get("with"), dict)
+    assert setup_uv["with"]["python-version"] == "3.12"
+    assert "uv sync --locked --dev --all-extras" in runs
+    assert "uv run pytest -q" in runs
+
+
+def test_workflow_job_lookup_is_order_independent() -> None:
+    workflow = """
+name: CI
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+  windows-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - run: uv sync --locked --dev --all-extras
+      - run: uv run pytest -q
+  test:
+    runs-on: ubuntu-latest
+"""
+
+    job = _workflow_job(workflow, "windows-test")
+
+    assert job["runs-on"] == "windows-latest"
+    assert "uv run pytest -q" in yaml.safe_dump(job, sort_keys=False)
+
+
+def test_symlink_or_skip_calls_path_symlink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "target.txt"
+    link = tmp_path / "link.txt"
+    called: dict[str, Path] = {}
+
+    def fake(self: Path, dest: Path, target_is_directory: bool = False) -> None:
+        assert target_is_directory is False
+        called["link"] = self
+        called["target"] = dest
+
+    monkeypatch.setattr(Path, "symlink_to", fake)
+
+    platform_helpers.symlink_or_skip(link, target)
+
+    assert called == {"link": link, "target": target}
+
+
+@pytest.mark.parametrize("winerror", [1314, None])
+def test_symlink_or_skip_skips_windows_privilege_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, winerror: int | None
+) -> None:
+    link = tmp_path / "link.txt"
+    target = tmp_path / "target.txt"
+
+    class FakePrivilegeError(PermissionError):
+        def __init__(self, value: int | None) -> None:
+            super().__init__(errno.EPERM, "privilege unavailable")
+            self.winerror = value
+
+    def fail(self: Path, dest: Path, target_is_directory: bool = False) -> None:
+        raise FakePrivilegeError(winerror)
+
+    monkeypatch.setattr(platform_helpers, "WINDOWS", True)
+    monkeypatch.setattr(Path, "symlink_to", fail)
+
+    with pytest.raises(pytest.skip.Exception, match=r"Developer Mode|administrator"):
+        platform_helpers.symlink_or_skip(link, target)
+
+
+def test_symlink_or_skip_propagates_unrelated_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    link = tmp_path / "link.txt"
+    target = tmp_path / "target.txt"
+
+    def fail(self: Path, dest: Path, target_is_directory: bool = False) -> None:
+        raise FileNotFoundError(errno.ENOENT, "missing target")
+
+    monkeypatch.setattr(platform_helpers, "WINDOWS", True)
+    monkeypatch.setattr(Path, "symlink_to", fail)
+
+    with pytest.raises(FileNotFoundError, match="missing target"):
+        platform_helpers.symlink_or_skip(link, target)
 
 
 def test_readme_links_windows_contributor_notes() -> None:
@@ -140,13 +240,16 @@ def test_windows_doc_records_verified_support_contract() -> None:
         "uv sync --dev --all-extras",
         "uv run pytest -q",
         "windows-test",
-        "30930727214",
-        "3373 passed / 37 skipped / 0 failures",
+        "30936032385",
+        "3376 passed / 37 skipped / 0 failures",
         "21 opt-in contract-suite skips",
         "16 capability skips",
         "`~user`",
         "Developer Mode",
         "symlink",
+        "capability skip",
+        "hosted runner had privilege",
+        "count remained 37",
         "SuspendNotSupported",
         "legacy_windows=False",
         'newline=""',

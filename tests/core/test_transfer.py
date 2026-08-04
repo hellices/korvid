@@ -19,7 +19,7 @@ from korvid.core.transfer import (
     upload_command,
     validate_spec,
 )
-from tests.platforms import posix_only
+from tests.platforms import posix_only, symlink_or_skip
 
 
 class TestTransferSpec:
@@ -188,7 +188,7 @@ class TestPackExtract:
         target = tmp_path / "real.txt"
         target.write_bytes(b"real bytes")
         link = tmp_path / "link.txt"
-        link.symlink_to(target)
+        symlink_or_skip(link, target)
         archive = tmp_path / "out.tar"
         size = pack_file(link, "f.txt", archive)
         assert size == len(b"real bytes")
