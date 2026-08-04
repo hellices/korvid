@@ -11,11 +11,14 @@ from typing import Any
 from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, ToolCallStarted
 from korvid.agent.profiles import build_profile
 from korvid.agent.runtime import AgentRuntime
+from korvid.evals.fake_kube import builtin_aliases
 from korvid.evals.grader import GradeResult, grade
 from korvid.evals.journey import ConversationJourney, JourneyTurn
 from korvid.evals.runner import _CountingProvider, _RecordingExecutor
 from korvid.evals.scenario import Scenario
 from korvid.tools.executor import WRITE_TOOL_NAMES, UIBridge
+
+_RESOURCE_ALIASES = builtin_aliases()
 
 
 class RecordingUI(UIBridge):
@@ -206,7 +209,14 @@ def _wrong_namespace(
     )
     if "namespace" not in properties:
         return False
-    return arguments.get("namespace") not in allowed
+    namespace = arguments.get("namespace")
+    if isinstance(namespace, str):
+        return namespace not in allowed
+    if namespace is not None:
+        return True
+    kind = arguments.get("kind")
+    meta = _RESOURCE_ALIASES.get(kind) if isinstance(kind, str) else None
+    return meta is None or meta.namespaced
 
 
 def _malformed_call(

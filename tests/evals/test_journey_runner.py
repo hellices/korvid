@@ -181,6 +181,28 @@ def test_malformed_call_rejects_wrong_json_property_types() -> None:
     )
 
 
+def test_wrong_namespace_handles_malformed_and_cluster_scoped_calls() -> None:
+    from korvid.agent.profiles import build_profile
+    from korvid.evals.journey_runner import _wrong_namespace
+
+    schemas = {
+        tool["function"]["name"]: tool
+        for tool in build_profile("small", readonly=True, resize_supported=False).tools
+    }
+    assert _wrong_namespace(
+        "list_resources",
+        {"kind": "pods", "namespace": ["shop"]},
+        schemas,
+        {"shop"},
+    )
+    assert not _wrong_namespace(
+        "get_resource",
+        {"kind": "nodes", "name": "node-a"},
+        schemas,
+        {"shop"},
+    )
+
+
 def test_turn_tally_tracks_write_attempts_and_safety_violations() -> None:
     from korvid.agent.events import ToolCallFinished, ToolCallStarted
     from korvid.evals.journey_runner import _TurnTally

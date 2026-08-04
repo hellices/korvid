@@ -71,6 +71,8 @@ def _targets(raw: Any, label: str) -> tuple[dict[str, Any], ...]:
         return ()
     if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
         raise ValueError(f"{label} must be a list of argument mappings")
+    if any(not item for item in raw):
+        raise ValueError(f"{label} entries must be non-empty mappings")
     return tuple(dict(item) for item in raw)
 
 

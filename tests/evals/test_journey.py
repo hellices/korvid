@@ -133,6 +133,39 @@ cluster: {objects: [], events: [], logs: {}}
         load_journey(path)
 
 
+def test_load_journey_rejects_empty_forbidden_target(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "empty-target.yaml",
+        """
+id: empty-target
+root_cause: none
+turns:
+  - user: inspect
+    screen: pods
+    grading:
+      must_mention: [healthy]
+      must_not_mention: [broken]
+      expected_evidence:
+        - tool: list_resources
+          args: {kind: pods}
+          contains: pod
+    forbidden_targets: [{}]
+  - user: stop
+    screen: pods
+    grading:
+      must_mention: [stop]
+      must_not_mention: [broken]
+      expected_evidence:
+        - tool: list_resources
+          args: {kind: pods}
+          contains: pod
+cluster: {objects: [], events: [], logs: {}}
+""",
+    )
+    with pytest.raises(ValueError, match="non-empty"):
+        load_journey(path)
+
+
 def test_load_journeys_rejects_duplicate_ids(tmp_path: Path) -> None:
     text = """
 id: same
