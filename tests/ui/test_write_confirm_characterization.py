@@ -10,10 +10,11 @@ Classification of the 12 callbacks:
 Group (a) — standard `_run_write` launch (9): delete, rollout restart,
 edit, scale, resize, cordon/uncordon, installplan approve, helm
 install/upgrade, helm rollback. Shape: `if confirmed:
-self.run_worker(self._run_write(...))`. The mutation coroutine is
-constructed *inside* the confirmed branch, so a declined dialog never
-creates it (no unawaited-coroutine leak — pinned here by the decline
-tests under warnings-as-errors).
+self.run_worker(self._run_write(...))`. The confirmed branch passes
+the operation factory to `_run_write`, which constructs the mutation
+coroutine only after the intent audit succeeds (no unawaited-coroutine
+leak on decline or audit failure — pinned here by the decline tests
+under warnings-as-errors).
 
 Group (b) — launch + UID recheck (1): operator install re-checks the
 catalog incarnation inside `_done` before launching, because create has

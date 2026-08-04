@@ -1469,15 +1469,14 @@ async def test_cancelled_before_factory_leaks_no_coroutine(tmp_path: Path) -> No
     app = make_app(rec, real_audit_path)
     app._audit = audit
 
-    async with app.run_test():
+    async with app.run_test() as pilot:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             task = asyncio.create_task(
                 app._run_write("delete", _PODS_META, "default", "web-1", factory)
             )
-            # Wait for audit to_thread to enter GatedAudit.append
-            while not entered.is_set():
-                await asyncio.sleep(0.01)
+            # Bounded wait for audit to_thread to enter GatedAudit.append
+            await until(pilot, entered.is_set, label="audit entered")
             task.cancel()
             # Release the gate so to_thread can return (avoiding a stuck thread)
             audit_gate.set()

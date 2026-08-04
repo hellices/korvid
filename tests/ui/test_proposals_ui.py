@@ -396,7 +396,6 @@ async def test_worker_cancellation_never_strands_a_claimed_proposal(tmp_path: Pa
 
         await until(pilot, lambda: state() == "approved")
         app.workers.cancel_group(app, "proposal-review")  # what shutdown does
-        rec.release.set()  # let the coroutine drain cleanly after cancellation
         await until(pilot, lambda: state() == "failed")
         found = store.get(pid)
         assert found is not None
@@ -452,7 +451,6 @@ async def test_cancelled_execution_still_audits_a_terminal_outcome(tmp_path: Pat
 
         await until(pilot, lambda: state() == "approved")
         app.workers.cancel_group(app, "proposal-review")
-        rec.release.set()  # let the coroutine drain cleanly after cancellation
         await until(pilot, lambda: state() == "failed")
 
         def audited() -> bool:
