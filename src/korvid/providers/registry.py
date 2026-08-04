@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from korvid.agent.credentials import CredentialSource
 from korvid.agent.provider import LLMProvider
@@ -17,6 +19,9 @@ from korvid.providers.github_copilot import COPILOT_CHAT_BASE_URL, CopilotCreden
 from korvid.providers.ollama import OllamaOptions, OllamaProvider
 from korvid.providers.openai_compat import OpenAICompatProvider
 from korvid.providers.static_creds import StaticHeaderSource
+
+if TYPE_CHECKING:
+    from korvid.providers.plugin_registry import ProviderPluginRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,8 @@ def create_provider(
     oauth_token: str | None = None,
     ollama: OllamaOptions | None = None,
     ca_bundle: str | None = None,
+    plugin_registry: ProviderPluginRegistry | None = None,
+    options: Mapping[str, object] | None = None,
 ) -> LLMProvider | None:
     """Build an LLM provider from neutral values, or None when unconfigured/misconfigured."""
     if not enabled:
@@ -56,8 +63,17 @@ def create_provider(
             auth_method=auth_method, base_url=base_url, model=model, oauth_token=oauth_token
         )
     if name not in _OPENAI_COMPAT_ALIASES and name != "ollama":
-        logger.warning("unknown agent provider %r — agent disabled", provider)
-        return None
+        # Unknown to built-ins: try the plugin registry before giving up.
+        return _create_via_plugin(
+            name=name,
+            provider_label=provider,
+            auth_method=auth_method,
+            base_url=base_url,
+            model=model,
+            api_key_env=api_key_env,
+            plugin_registry=plugin_registry,
+            options=options,
+        )
     if not base_url or not model:
         logger.warning("agent provider %r missing base_url/model — agent disabled", name)
         return None
@@ -110,6 +126,74 @@ def _create_github_copilot(
         model=model,
         credentials=CopilotCredentialSource(oauth_token),
     )
+
+
+def _create_via_plugin(
+    *,
+    name: str,
+    provider_label: str | None,
+    auth_method: str | None,
+    base_url: str | None,
+    model: str | None,
+    api_key_env: str | None,
+    plugin_registry: ProviderPluginRegistry | None,
+    options: Mapping[str, object] | None,
+) -> LLMProvider | None:
+    """Route an unknown provider name through the plugin registry.
+
+    Returns None (agent disabled) when there is no registry or the plugin
+    fails at any stage. Credentials are built first and closed on failure.
+    """
+    if plugin_registry is None:
+        logger.warning("unknown agent provider %r — agent disabled", provider_label)
+        return None
+
+    from korvid.agent.provider_plugin import ProviderPluginConfig
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    try:
+        plugin_registry.load_selected(name)
+    except ProviderPluginError as exc:
+        logger.warning("provider plugin %r failed: %s — agent disabled", name, exc)
+        return None
+
+    # Build credentials first (validates auth config) then close on failure.
+    credentials: CredentialSource | None = None
+    try:
+        credentials = build_credentials(name, auth_method, api_key_env)
+    except _AuthMisconfigured as exc:
+        logger.warning("%s — agent disabled", exc)
+        return None
+
+    config = ProviderPluginConfig(
+        base_url=base_url,
+        model=model,
+        auth_method=auth_method,
+        api_key_env=api_key_env,
+        options=options or {},
+    )
+
+    try:
+        return plugin_registry.create(name, config, credentials)
+    except ProviderPluginError as exc:
+        logger.warning("provider plugin %r creation failed: %s — agent disabled", name, exc)
+        _close_credentials(credentials)
+        return None
+
+
+def _close_credentials(credentials: CredentialSource | None) -> None:
+    """Best-effort async close for credentials when plugin construction fails."""
+    if credentials is None:
+        return
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    # Store a strong reference so the task isn't garbage-collected.
+    task = loop.create_task(credentials.aclose())
+    task.add_done_callback(lambda t: None)
 
 
 class _AuthMisconfigured(Exception):

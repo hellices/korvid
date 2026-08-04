@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -156,6 +156,227 @@ def test_none_when_provider_unknown() -> None:
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# Plugin integration — create_provider routes unknown names to the registry
+# ---------------------------------------------------------------------------
+
+
+def test_builtins_never_query_plugin_registry() -> None:
+    """Built-in providers (openai-compat, ollama, github-copilot) must never
+    touch the plugin_registry even when one is supplied."""
+    from unittest.mock import MagicMock
+
+    registry = MagicMock()
+    p = create_provider(
+        enabled=True,
+        provider="openai-compat",
+        auth_method=None,
+        base_url="http://x/v1",
+        model="m",
+        api_key_env=None,
+        plugin_registry=registry,
+    )
+    assert isinstance(p, OpenAICompatProvider)
+    registry.load_selected.assert_not_called()
+    registry.create.assert_not_called()
+
+
+def test_unknown_name_routes_through_plugin_registry() -> None:
+    """An unknown provider name with a registry invokes the plugin path."""
+    from collections.abc import AsyncIterator
+    from unittest.mock import MagicMock
+
+    from korvid.agent.provider import LLMProvider
+    from korvid.agent.provider_plugin import ProviderPluginMetadata
+
+    class _FakeProvider(LLMProvider):
+        @property
+        def name(self) -> str:
+            return "custom"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "done"}
+
+        async def aclose(self) -> None:
+            pass
+
+    meta = ProviderPluginMetadata(
+        api_version=1, name="custom-llm", display_name="Custom", auth_methods=("none",)
+    )
+    fake_plugin = MagicMock()
+    fake_plugin.metadata = meta
+    registry = MagicMock()
+    registry.load_selected.return_value = fake_plugin
+    registry.create.return_value = _FakeProvider()
+
+    p = create_provider(
+        enabled=True,
+        provider="custom-llm",
+        auth_method="none",
+        base_url="http://x/v1",
+        model="m",
+        api_key_env=None,
+        plugin_registry=registry,
+        options={"tenant": "test"},
+    )
+    assert p is not None
+    registry.load_selected.assert_called_once_with("custom-llm")
+    registry.create.assert_called_once()
+    # Verify config passed includes options
+    call_args = registry.create.call_args
+    config = call_args[0][1]  # positional: name, config, credentials
+    assert config.options == {"tenant": "test"}
+
+
+def test_plugin_receives_credentials_and_config_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plugin factory must receive only credentials/config/options — no kube/UI/executor/audit."""
+    from collections.abc import AsyncIterator
+    from unittest.mock import MagicMock
+
+    from korvid.agent.provider import LLMProvider
+    from korvid.agent.provider_plugin import ProviderPluginConfig, ProviderPluginMetadata
+
+    class _FakeProvider(LLMProvider):
+        @property
+        def name(self) -> str:
+            return "c"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "done"}
+
+        async def aclose(self) -> None:
+            pass
+
+    captured_config: list[ProviderPluginConfig] = []
+
+    def fake_create(name: str, config: ProviderPluginConfig, creds: Any) -> LLMProvider:
+        captured_config.append(config)
+        return _FakeProvider()
+
+    meta = ProviderPluginMetadata(
+        api_version=1, name="corp-llm", display_name="Corp", auth_methods=("api_key",)
+    )
+    registry = MagicMock()
+    registry.load_selected.return_value = MagicMock(metadata=meta)
+    registry.create = fake_create
+
+    monkeypatch.setenv("CORP_KEY", "sk-1")
+    p = create_provider(
+        enabled=True,
+        provider="corp-llm",
+        auth_method="api_key",
+        base_url="https://x/v1",
+        model="m",
+        api_key_env="CORP_KEY",
+        plugin_registry=registry,
+        options={"region": "us"},
+    )
+    assert p is not None
+    assert len(captured_config) == 1
+    cfg = captured_config[0]
+    assert cfg.base_url == "https://x/v1"
+    assert cfg.model == "m"
+    assert cfg.auth_method == "api_key"
+    assert cfg.options == {"region": "us"}
+
+
+async def test_plugin_credentials_closed_on_construction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If plugin construction fails, credentials built for it must be closed."""
+    from unittest.mock import MagicMock
+
+    from korvid.agent.provider_plugin import ProviderPluginMetadata
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    meta = ProviderPluginMetadata(
+        api_version=1, name="fail-llm", display_name="Fail", auth_methods=("api_key",)
+    )
+    registry = MagicMock()
+    registry.load_selected.return_value = MagicMock(metadata=meta)
+    registry.create.side_effect = ProviderPluginError("boom")
+
+    closed: list[bool] = []
+
+    class FakeCred:
+        async def headers(self) -> dict[str, str]:
+            return {"Authorization": "Bearer x"}
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    def patched_build(name: str, auth_method: str | None, api_key_env: str | None) -> FakeCred:
+        return FakeCred()
+
+    monkeypatch.setattr("korvid.providers.registry.build_credentials", patched_build)
+
+    import asyncio
+
+    p = create_provider(
+        enabled=True,
+        provider="fail-llm",
+        auth_method="api_key",
+        base_url="http://x/v1",
+        model="m",
+        api_key_env="K",
+        plugin_registry=registry,
+    )
+    assert p is None
+    # Credentials aclose is scheduled as a background task
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert closed == [True]
+
+
+def test_unknown_without_registry_returns_none() -> None:
+    """Without a plugin_registry, unknown names still return None (backward compat)."""
+    assert (
+        create_provider(
+            enabled=True,
+            provider="mystery",
+            auth_method=None,
+            base_url="http://x/v1",
+            model="m",
+            api_key_env=None,
+            plugin_registry=None,
+        )
+        is None
+    )
+
+
+def test_invalid_options_disable_only_the_plugin() -> None:
+    """A ProviderPluginError from the registry disables the provider (returns None)."""
+    from unittest.mock import MagicMock
+
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    registry = MagicMock()
+    registry.load_selected.side_effect = ProviderPluginError("bad plugin")
+
+    p = create_provider(
+        enabled=True,
+        provider="bad-plugin",
+        auth_method=None,
+        base_url="http://x/v1",
+        model="m",
+        api_key_env=None,
+        plugin_registry=registry,
+    )
+    assert p is None
 
 
 def test_none_when_provider_not_a_string() -> None:

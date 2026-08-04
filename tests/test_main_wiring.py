@@ -1259,6 +1259,167 @@ async def test_disconnect_agent_releases_the_provider(monkeypatch: object) -> No
     assert provider_box[0] is None
 
 
+def test_agent_wiring_creates_shared_plugin_registry(monkeypatch: object) -> None:
+    """_build_agent_wiring creates one ProviderPluginRegistry and passes it
+    to both the initial create_provider and the configurator, ensuring shared
+    cache lifetime."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.providers.plugin_registry import ProviderPluginRegistry
+
+    registries: list[ProviderPluginRegistry] = []
+    original_init = ProviderPluginRegistry.__init__
+
+    def capture_init(self: ProviderPluginRegistry) -> None:
+        original_init(self)
+        registries.append(self)
+
+    mp.setattr(ProviderPluginRegistry, "__init__", capture_init)
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+    )
+    kube_stub = cast("Any", object())
+    _build_agent_wiring(config, kube_stub, {})
+    assert len(registries) == 1  # one registry per build
+
+
+def test_agent_wiring_initial_plugin_error_becomes_warning(monkeypatch: object) -> None:
+    """A ProviderPluginError at initial creation must become a startup warning
+    — the app remains operational with provider=None."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    def boom_create(**kwargs: Any) -> None:
+        raise ProviderPluginError("bad plugin entrypoint")
+
+    mp.setattr("korvid.providers.registry.create_provider", boom_create)
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="corp-llm",
+        agent_auth_method="api_key",
+        agent_base_url="http://x/v1",
+        agent_model="m",
+    )
+    kube_stub = cast("Any", object())
+    runtime, configurator, _rebuild, _, _, provider_box, _ = _build_agent_wiring(
+        config, kube_stub, {}
+    )
+    assert runtime is None  # provider disabled, not a crash
+    assert provider_box[0] is None
+    assert configurator is not None  # wizard must remain usable
+
+
+async def test_agent_wiring_rebuild_passes_plugin_registry(monkeypatch: object) -> None:
+    """The rebuild closure must pass the same plugin_registry to create_provider
+    so plugin cache is shared across initial/rebuild."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import KorvidConfig
+
+    captured_kwargs: list[dict[str, Any]] = []
+    original_create = __import__(
+        "korvid.providers.registry", fromlist=["create_provider"]
+    ).create_provider
+
+    def capture_create(**kwargs: Any) -> Any:
+        captured_kwargs.append(kwargs)
+        return original_create(
+            **{k: v for k, v in kwargs.items() if k not in ("plugin_registry", "options")}
+        )
+
+    mp.setattr("korvid.providers.registry.create_provider", capture_create)
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+    )
+    kube_stub = cast("Any", object())
+    _, _, rebuild, _, _, _, _ = _build_agent_wiring(config, kube_stub, {})
+    assert rebuild is not None
+
+    # Initial create must have plugin_registry
+    assert captured_kwargs[0].get("plugin_registry") is not None
+    initial_registry = captured_kwargs[0]["plugin_registry"]
+
+    # Rebuild must share the same registry
+    settings = AgentSettings(
+        provider="openai",
+        auth_method="api_key",
+        base_url="http://localhost:9999/v1",
+        model="new-model",
+        api_key_env="KORVID_TEST_KEY",
+    )
+    rebuild(settings)
+    assert captured_kwargs[-1].get("plugin_registry") is initial_registry
+
+
+def test_agent_wiring_seeds_options_from_config(monkeypatch: object) -> None:
+    """Options from config reach both create_provider and the configurator."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    captured_kwargs: list[dict[str, Any]] = []
+    original_create = __import__(
+        "korvid.providers.registry", fromlist=["create_provider"]
+    ).create_provider
+
+    def capture_create(**kwargs: Any) -> Any:
+        captured_kwargs.append(kwargs)
+        return original_create(
+            **{k: v for k, v in kwargs.items() if k not in ("plugin_registry", "options")}
+        )
+
+    mp.setattr("korvid.providers.registry.create_provider", capture_create)
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+        agent_options={"tenant": "corp", "region": "us"},
+    )
+    kube_stub = cast("Any", object())
+    _build_agent_wiring(config, kube_stub, {})
+    assert captured_kwargs[0].get("options") == {"tenant": "corp", "region": "us"}
+
+
 def test_validate_ca_bundle_accepts_none_and_rejects_missing(tmp_path: Any) -> None:
     """network.ca_bundle (issue #168): unset is fine; a missing bundle fails
     startup actionably, naming the configured path — never a silent

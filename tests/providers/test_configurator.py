@@ -418,3 +418,56 @@ async def test_copilot_discovery_keeps_default_trust_with_a_private_bundle(
         assert not isinstance(public, _CANamedClient)  # default trust for GitHub
     finally:
         await public.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Plugin registry integration — configurator passes registry to create/test
+# ---------------------------------------------------------------------------
+
+
+async def test_configurator_test_passes_plugin_registry_to_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The test() method must forward plugin_registry to create_provider."""
+    from unittest.mock import MagicMock
+
+    captured_kwargs: list[dict[str, Any]] = []
+
+    provider = ScriptedProvider([{"type": "text_delta", "text": "ok"}, {"type": "done"}])
+
+    def capture_create(**kwargs: Any) -> ScriptedProvider:
+        captured_kwargs.append(kwargs)
+        return provider
+
+    monkeypatch.setattr("korvid.providers.configurator.create_provider", capture_create)
+
+    registry = MagicMock()
+    cfg = ProviderConfigurator(_store(tmp_path), persist=lambda s: None, plugin_registry=registry)
+    await cfg.test(_SETTINGS)
+    assert captured_kwargs[0].get("plugin_registry") is registry
+
+
+async def test_configurator_test_passes_options_to_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The test() method must forward settings.options to create_provider."""
+    captured_kwargs: list[dict[str, Any]] = []
+
+    provider = ScriptedProvider([{"type": "text_delta", "text": "ok"}, {"type": "done"}])
+
+    def capture_create(**kwargs: Any) -> ScriptedProvider:
+        captured_kwargs.append(kwargs)
+        return provider
+
+    monkeypatch.setattr("korvid.providers.configurator.create_provider", capture_create)
+
+    settings = AgentSettings(
+        provider="corp-llm",
+        auth_method="api_key",
+        base_url="http://x/v1",
+        model="m",
+        options={"tenant": "test"},
+    )
+    cfg = ProviderConfigurator(_store(tmp_path), persist=lambda s: None)
+    await cfg.test(settings)
+    assert captured_kwargs[0].get("options") == {"tenant": "test"}

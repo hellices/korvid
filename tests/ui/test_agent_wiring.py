@@ -522,6 +522,94 @@ async def test_apply_agent_settings_notifies_on_rebuild_failure() -> None:
         assert any("rebuild failed" in m.lower() for m in msgs)
 
 
+async def test_apply_agent_settings_notifies_on_plugin_error() -> None:
+    """ProviderPluginError raised by rebuild_agent must surface via the
+    existing error notification path (rebuild failure), not crash the app."""
+    from korvid.agent.setup import AgentSettings
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    settings = AgentSettings(
+        provider="corp-llm",
+        auth_method="api_key",
+        base_url="http://x/v1",
+        model="m",
+    )
+
+    def boom(s: Any) -> Any:
+        raise ProviderPluginError("plugin auth mismatch")
+
+    app = make_app(runtime=None, model=None, rebuild_agent=boom)
+    async with app.run_test() as pilot:
+        app._apply_agent_settings(settings)
+        await pilot.pause()
+        msgs = [n.message for n in app._notifications]
+        assert any("rebuild failed" in m.lower() or "plugin" in m.lower() for m in msgs)
+
+
+async def test_options_preserved_across_model_change() -> None:
+    """Options seeded from config must survive a :model switch."""
+    from korvid.agent.setup import AgentConfigurator, AgentSettings
+    from korvid.ui.messages import UnknownCommand
+
+    saved: list[AgentSettings] = []
+
+    class Cfg(AgentConfigurator):
+        async def begin_device_login(self) -> Any:
+            raise NotImplementedError
+
+        async def finish_device_login(self) -> None:
+            raise NotImplementedError
+
+        async def test(self, settings: Any) -> str:
+            return "ok"
+
+        async def list_models(self, settings: Any) -> list[str]:
+            return []
+
+        async def save(self, settings: AgentSettings) -> None:
+            saved.append(settings)
+
+    rebuilt: list[AgentSettings] = []
+    runtime = cast("Any", StubRuntime([]))
+
+    def rebuild(settings: AgentSettings) -> Any:
+        rebuilt.append(settings)
+        return runtime
+
+    store = ResourceStore()
+
+    async def source(kind: str, scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
+        yield ("ADDED", _pod("web-1"))
+        while True:
+            await asyncio.sleep(0.01)
+
+    app = KorvidApp(
+        config=KorvidConfig(
+            namespace="default",
+            agent_enabled=True,
+            agent_provider="corp-llm",
+            agent_base_url="http://x/v1",
+            agent_model="m",
+            agent_auth_method="api_key",
+            agent_options={"tenant": "platform", "features": {"region": "apac"}},
+        ),
+        store=store,
+        watch_manager=WatchManager(store, source),
+        agent_runtime=runtime,
+        agent_model_name="m",
+        agent_configurator=Cfg(),
+        rebuild_agent=rebuild,
+    )
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("model gpt-4o"))
+        for _ in range(4):
+            await pilot.pause()
+        assert rebuilt
+        assert dict(rebuilt[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
+        assert saved
+        assert dict(saved[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
+
+
 async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
     from korvid.ui.messages import UnknownCommand
 
