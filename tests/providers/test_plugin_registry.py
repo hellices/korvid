@@ -247,6 +247,39 @@ class TestMetadataValidation:
             with pytest.raises(ProviderPluginError, match="api_version"):
                 reg.load_selected("company-llm")
 
+    def test_huge_int_api_version_bounded_no_stringify(self, plugin_site: Any) -> None:
+        """A 5000-digit int api_version must raise ProviderPluginError with
+        bounded message, never stringify the value (would blow up or be huge)."""
+        huge_int = 10**5000  # Construct without parsing to avoid str-digit limit
+
+        class _HugeVersionPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=huge_int,
+                    name="company-llm",
+                    display_name="Huge",
+                    auth_methods=("api_key",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_HugeVersionPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="api_version") as exc_info:
+                reg.load_selected("company-llm")
+            msg = str(exc_info.value)
+            # Must not contain the raw huge int representation
+            assert len(msg) <= 200
+            # Must not have raised ValueError from int-to-str conversion
+            assert "999" not in msg  # no digits from the huge int
+
     def test_metadata_name_mismatch(self, plugin_site: Any) -> None:
         """Plugin whose metadata.name doesn't match the entry-point name is rejected."""
 

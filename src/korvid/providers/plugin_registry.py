@@ -144,9 +144,10 @@ def _validate_metadata_fields(
     if isinstance(meta.api_version, bool) or not isinstance(meta.api_version, int):
         raise _bounded_error(f"provider plugin {safe_name!r}: api_version must be int")
     if meta.api_version != PROVIDER_PLUGIN_API_VERSION:
+        # Never stringify the supplied value — a huge int (e.g. 10**5000)
+        # would blow up repr/format before truncation could bound it.
         raise _bounded_error(
-            f"provider plugin {safe_name!r} has api_version "
-            f"{meta.api_version}, expected {PROVIDER_PLUGIN_API_VERSION}"
+            f"provider plugin {safe_name!r}: api_version must be {PROVIDER_PLUGIN_API_VERSION}"
         )
 
     # name: non-empty string, bounded
