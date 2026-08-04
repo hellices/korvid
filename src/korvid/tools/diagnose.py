@@ -187,6 +187,12 @@ def current_health_line(pod: dict[str, Any]) -> str:
     statuses = _container_statuses(pod)
     all_ready = bool(statuses) and all(cs.get("ready") is True for _prefix, cs in statuses)
     restarts = sum(int(cs.get("restartCount") or 0) for _prefix, cs in statuses)
+    all_completed = bool(statuses) and all(
+        _dict(_dict(cs.get("state")).get("terminated")).get("exitCode") == 0
+        for _prefix, cs in statuses
+    )
+    if phase == "Succeeded" and all_completed:
+        return "COMPLETED SUCCESSFULLY — phase=Succeeded, all containers exited 0"
     if phase == "Running" and ready == "True" and all_ready:
         suffix = ""
         if restarts:

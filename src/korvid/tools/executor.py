@@ -882,7 +882,14 @@ class ToolExecutor:
                 try:
                     pvc = await self._kube.get_object(pvc_meta, namespace, claim)
                     phase = (pvc.get("status") or {}).get("phase") or "?"
-                    storage_class = (pvc.get("spec") or {}).get("storageClassName") or "(default)"
+                    pvc_spec = pvc.get("spec") or {}
+                    raw_storage_class = pvc_spec.get("storageClassName")
+                    if "storageClassName" not in pvc_spec or raw_storage_class is None:
+                        storage_class = "(default)"
+                    elif raw_storage_class == "":
+                        storage_class = "(none)"
+                    else:
+                        storage_class = str(raw_storage_class)
                     lines.append(f"pvc {claim}: {phase} storageClass={storage_class}")
                     raw_uid = (pvc.get("metadata") or {}).get("uid")
                     events = await self._kube.list_events_for(
@@ -1136,7 +1143,10 @@ class ToolExecutor:
             report.extend(["POD DIAGNOSES", "  (no non-ready owned pods found)"])
         for pod in non_ready[: self._DIAGNOSE_MAX_WORKLOAD_PODS]:
             report.append(f"POD DIAGNOSIS — {namespace}/{pod.name}")
-            diagnosis = await self._diagnose_pod({"pod": pod.name, "namespace": namespace})
+            try:
+                diagnosis = await self._diagnose_pod({"pod": pod.name, "namespace": namespace})
+            except ApiStatusError as exc:
+                diagnosis = f"unavailable ({exc})"
             report.extend(
                 f"  {line}"
                 for line in compact_result(

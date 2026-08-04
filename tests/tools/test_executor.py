@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -1163,6 +1164,32 @@ async def test_diagnose_pod_includes_pvc_storage_class_and_warning_events() -> N
     assert 'storageclass.storage.k8s.io "fast-ssd" not found' in out
 
 
+async def test_diagnose_pod_distinguishes_default_and_explicit_no_storage_class() -> None:
+    kube = FakeDiagnoseKube()
+    pod = kube.objects[("pods", "api-1")]
+    pod["spec"]["volumes"] = [
+        {"name": "defaulted", "persistentVolumeClaim": {"claimName": "defaulted"}},
+        {"name": "classless", "persistentVolumeClaim": {"claimName": "classless"}},
+    ]
+    kube.objects[("persistentvolumeclaims", "defaulted")] = {
+        "metadata": {"name": "defaulted"},
+        "spec": {},
+        "status": {"phase": "Pending"},
+    }
+    kube.objects[("persistentvolumeclaims", "classless")] = {
+        "metadata": {"name": "classless"},
+        "spec": {"storageClassName": ""},
+        "status": {"phase": "Pending"},
+    }
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+
+    assert "pvc defaulted: Pending storageClass=(default)" in out
+    assert "pvc classless: Pending storageClass=(none)" in out
+
+
 async def test_diagnose_pod_missing_pod_is_an_error() -> None:
     kube = FakeDiagnoseKube()
     del kube.objects[("pods", "api-1")]
@@ -1509,6 +1536,68 @@ async def test_diagnose_workload_rejects_unsupported_kinds_with_guidance() -> No
     )
     assert out.startswith("ERROR:")
     assert "supports deployments" in out
+
+
+async def test_diagnose_workload_keeps_parent_and_siblings_when_a_pod_disappears() -> None:
+    class DisappearingPodKube(FakeDiagnoseKube):
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            if meta.plural == "pods" and name == "api-1":
+                raise ApiStatusError(404, "pod disappeared during rollout")
+            return await super().get_object(meta, namespace, name)
+
+    kube = DisappearingPodKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "status": {
+            "conditions": [
+                {
+                    "type": "Progressing",
+                    "status": "False",
+                    "reason": "ProgressDeadlineExceeded",
+                }
+            ]
+        },
+    }
+    kube.objects[("replicasets", "api-6f")]["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [
+                {
+                    "kind": "Deployment",
+                    "name": "api",
+                    "uid": "deploy-uid",
+                    "controller": True,
+                }
+            ],
+        }
+    )
+    pod = kube.objects[("pods", "api-1")]
+    pod["metadata"]["ownerReferences"] = [
+        {
+            "kind": "ReplicaSet",
+            "name": "api-6f",
+            "uid": "rs-uid",
+            "controller": True,
+        }
+    ]
+    sibling = copy.deepcopy(pod)
+    sibling["metadata"]["name"] = "api-2"
+    sibling["metadata"]["uid"] = "pod-2"
+    kube.objects[("pods", "api-2")] = sibling
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+
+    assert not out.startswith("ERROR:")
+    assert "ProgressDeadlineExceeded" in out
+    assert "POD DIAGNOSIS — default/api-1" in out
+    assert "unavailable (API 404: pod disappeared during rollout)" in out
+    assert "POD DIAGNOSIS — default/api-2" in out
+    assert "CrashLoopBackOff" in out
 
 
 def test_compact_result_honors_tiny_limits() -> None:

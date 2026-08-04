@@ -303,6 +303,25 @@ def test_current_health_line_does_not_mark_a_not_ready_pod_healthy() -> None:
     assert diagnose.current_health_line(_crashloop_pod()).startswith("UNHEALTHY NOW")
 
 
+def test_current_health_line_marks_successful_completed_pod_as_completed() -> None:
+    pod = _crashloop_pod()
+    pod["status"] = {
+        "phase": "Succeeded",
+        "containerStatuses": [
+            {
+                "name": "worker",
+                "ready": False,
+                "restartCount": 0,
+                "state": {"terminated": {"exitCode": 0, "reason": "Completed"}},
+            }
+        ],
+    }
+
+    assert diagnose.current_health_line(pod) == (
+        "COMPLETED SUCCESSFULLY — phase=Succeeded, all containers exited 0"
+    )
+
+
 # --- warning events ---------------------------------------------------------
 
 
