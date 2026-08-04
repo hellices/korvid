@@ -171,6 +171,40 @@ def condition_lines(pod: dict[str, Any]) -> list[str]:
     return failing + healthy
 
 
+def current_health_line(pod: dict[str, Any]) -> str:
+    """Current pod health, explicitly separated from restart history."""
+    status = _status(pod)
+    deletion_timestamp = _dict(pod.get("metadata")).get("deletionTimestamp")
+    if deletion_timestamp:
+        return f"TERMINATING NOW — deletionTimestamp={deletion_timestamp}"
+    phase = str(status.get("phase") or "?")
+    conditions = status.get("conditions")
+    ready = next(
+        (
+            str(cond.get("status") or "?")
+            for cond in conditions or []
+            if isinstance(cond, dict) and cond.get("type") == "Ready"
+        ),
+        "?",
+    )
+    statuses = _container_statuses(pod)
+    regular_statuses = [cs for prefix, cs in statuses if prefix == ""]
+    all_ready = bool(regular_statuses) and all(cs.get("ready") is True for cs in regular_statuses)
+    restarts = sum(int(cs.get("restartCount") or 0) for _prefix, cs in statuses)
+    all_completed = bool(statuses) and all(
+        _dict(_dict(cs.get("state")).get("terminated")).get("exitCode") == 0
+        for _prefix, cs in statuses
+    )
+    if phase == "Succeeded" and all_completed:
+        return "COMPLETED SUCCESSFULLY — phase=Succeeded, all containers exited 0"
+    if phase == "Running" and ready == "True" and all_ready:
+        suffix = ""
+        if restarts:
+            suffix = f"; {restarts} restart(s) are historical, not a current failure"
+        return f"READY NOW — phase=Running, Ready=True, all containers ready{suffix}"
+    return f"UNHEALTHY NOW — phase={phase}, Ready={ready}, all-containers-ready={all_ready}"
+
+
 def _event_count(ev: dict[str, Any]) -> int:
     """Recurrence count: `series.count` (events.k8s.io repeating events)
     first, then the core v1 `count`, defaulting to a single occurrence."""

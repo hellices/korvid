@@ -233,6 +233,7 @@ _READ_ORDER = [
     "list_operators",
     "helm_list_releases",
     "diagnose_pod",
+    "diagnose_workload",
 ]
 _UI_ORDER = ["navigate", "set_filter", "open_logs", "open_describe", "drill_down"]
 _WRITE_ORDER = ["delete_resource", "scale_resource", "rollout_restart"]

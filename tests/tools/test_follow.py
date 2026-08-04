@@ -106,6 +106,11 @@ async def test_every_followable_tool_reaches_the_bridge(tool: str) -> None:
         "get_events": {"kind": "pods", "name": "x", "namespace": "d"},
         "get_logs": {"pod": "x", "namespace": "d"},
         "diagnose_pod": {"pod": "x", "namespace": "d"},
+        "diagnose_workload": {
+            "kind": "deployments",
+            "name": "x",
+            "namespace": "d",
+        },
         "list_operators": {},
         "helm_list_releases": {},
     }[tool]

@@ -392,6 +392,7 @@ class PodListSummary(GenericSummary):
     ready: str = ""
     restarts: int = 0
     node: str = ""
+    ready_condition: bool = False
 
     @classmethod
     def from_pod_manifest(cls, kind: str, manifest: dict[str, Any]) -> PodListSummary:
@@ -401,12 +402,17 @@ class PodListSummary(GenericSummary):
         status = _str_map(manifest.get("status"))
         statuses: list[dict[str, Any]] = status.get("containerStatuses") or []
         ready_count = sum(1 for s in statuses if s.get("ready"))
+        conditions: list[dict[str, Any]] = status.get("conditions") or []
         return cls(
             **vars(base),
             phase=_display_phase(meta, spec, status, statuses),
             ready=f"{ready_count}/{len(statuses)}",
             restarts=sum(int(s.get("restartCount", 0)) for s in statuses),
             node=str(spec.get("nodeName") or ""),
+            ready_condition=any(
+                condition.get("type") == "Ready" and condition.get("status") == "True"
+                for condition in conditions
+            ),
         )
 
 

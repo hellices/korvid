@@ -124,6 +124,65 @@ def test_small_profile_prompt_pins_tools_only_and_recovery_rules() -> None:
     assert "re-list instead of retrying" in prompt
 
 
+def test_small_profile_prompt_pins_measured_failure_mode_rules() -> None:
+    """Baseline eval failures on qwen3:4b (24-scenario pack, small profile)
+    exposed four prompt-fixable behaviors; each rule below is pinned by its
+    defining phrase so a reworded prompt cannot silently drop it.
+
+    1. exit-code over-anchoring: a liveness-probe kill (exit 137) was
+       misdiagnosed as OOM because the worked example taught 137=OOMKilled.
+    2. healthy resources: all three negative controls failed — old restart
+       history was reported as a live fault, and no plain healthy verdict
+       was given.
+    3. reason-string citation: a correct backoff-limit diagnosis failed the
+       grade because the decisive `BackoffLimitExceeded` reason was never
+       quoted.
+    4. one-hop-short exploration: unbound-PVC and service-endpoint answers
+       stopped at the pointer instead of fetching the object it named.
+    """
+    profile = build_profile("small", readonly=False, resize_supported=True)
+    prompt = profile.system_prompt.lower()
+    # 1. the reason string, not the exit code, names the cause — and a
+    #    liveness kill is attributed to the kubelet, not memory (the weak
+    #    first-round wording still produced an OOM misdiagnosis); round 2
+    #    measured contrastive rule-outs ("not OOM, but...") tripping the
+    #    misdiagnosis gate, so ruled-out faults must go unmentioned
+    assert "reason string" in prompt
+    assert "not the exit code" in prompt
+    assert "kubelet killed" in prompt
+    assert "never name faults you ruled out" in prompt
+    # round 3 measured the example's OOM answer parroted verbatim for a
+    # liveness kill, plans narrated instead of tool calls, and healthy
+    # verdicts too terse to name the passing checks
+    assert "shows the method only" in prompt
+    assert "call the tool instead" in prompt
+    assert "name the checks that pass" in prompt
+    # round 4 measured the OOM parrot surviving the method-only marker
+    # (liveness kills still answered with the example's OOM text), so the
+    # example itself now demonstrates the 137 discrimination: probe kill,
+    # quoted event reason, no OOM anywhere in the example
+    assert "liveness probe failed" in prompt
+    assert "oom" not in prompt.split("worked example")[1]
+    # round 5 fixed the liveness parrot but dropped the exit-code citation
+    # habit (oom-killed answers stopped naming 137) and healthy verdicts
+    # still hedged; the example now cites the exit code alongside the
+    # event reason, and a ready pod's answer must start with healthy
+    assert "last exit 137" in prompt
+    assert "/live" not in prompt.split("worked example")[1]
+    assert "start your answer with healthy" in prompt
+    # 2. healthy is a valid verdict; stopped restarts are history — made
+    #    mechanical only after current conditions/events also pass
+    assert "healthy" in prompt
+    assert "ready is not healthy" in prompt
+    assert "history, not a live fault" in prompt
+    # 3. copy decisive reasons word-for-word
+    assert "word-for-word" in prompt
+    # 4. fetch the object a result points at before answering — including
+    #    a PVC's storage class (round-1 answers stopped at the PVC)
+    assert "fetch it before answering" in prompt
+    assert "storage class" in prompt
+
+
 def test_full_profile_prompt_pins_tools_only_and_grounding_rules() -> None:
     """Same invariants for the frontier prompt: the agent explores only
     through session tools and never fabricates names or namespaces -

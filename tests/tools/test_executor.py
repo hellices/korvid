@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -10,7 +11,15 @@ from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
-from korvid.tools.executor import MAX_RESULT_CHARS, READ_TOOLS, UI_TOOLS, ToolExecutor, UIBridge
+from korvid.k8s.models import summary_for
+from korvid.tools.executor import (
+    MAX_RESULT_CHARS,
+    READ_TOOLS,
+    UI_TOOLS,
+    ToolExecutor,
+    UIBridge,
+    compact_result,
+)
 from korvid.tools.registry import TOOLS_BY_NAME, ToolDef
 
 
@@ -36,6 +45,7 @@ def test_read_tools_schema_names() -> None:
         "list_operators",
         "helm_list_releases",
         "diagnose_pod",
+        "diagnose_workload",
     ]
 
 
@@ -61,6 +71,10 @@ class _ExplodingKube:
         ("get_events", {"kind": "pods", "name": "default/web-1", "namespace": "app"}),
         ("get_logs", {"pod": "default/web-1", "namespace": "app"}),
         ("diagnose_pod", {"pod": "default/web-1", "namespace": "app"}),
+        (
+            "diagnose_workload",
+            {"kind": "deployments", "name": "default/web", "namespace": "app"},
+        ),
     ],
 )
 async def test_slash_in_name_is_rejected_with_guidance_before_any_api_call(
@@ -83,6 +97,10 @@ async def test_slash_in_name_is_rejected_with_guidance_before_any_api_call(
         ("get_events", {"kind": "pods", "name": "web-1", "namespace": "default/web-1"}),
         ("get_logs", {"pod": "web-1", "namespace": "default/web-1"}),
         ("diagnose_pod", {"pod": "web-1", "namespace": "default/web-1"}),
+        (
+            "diagnose_workload",
+            {"kind": "deployments", "name": "web", "namespace": "default/web"},
+        ),
     ],
 )
 async def test_slash_in_namespace_is_rejected_symmetrically(
@@ -998,6 +1016,17 @@ class FakeDiagnoseKube:
             raise ApiStatusError(404, "NotFound")
         return obj
 
+    async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+        summaries: list[Any] = []
+        for obj in self.objects.values():
+            if obj.get("kind") != meta.kind:
+                continue
+            metadata = obj.get("metadata") or {}
+            if meta.namespaced and namespace is not None and metadata.get("namespace") != namespace:
+                continue
+            summaries.append(summary_for(meta.kind, obj))
+        return summaries
+
     async def list_events_for(
         self, namespace: str, name: str, *, kind: str | None = None, uid: str | None = None
     ) -> list[dict[str, Any]]:
@@ -1079,6 +1108,115 @@ async def test_diagnose_pod_healthy_pod_skips_log_fetches() -> None:
     )
     assert kube.log_calls == []
     assert "no troubled containers" in out
+
+
+async def test_diagnose_pod_puts_current_health_before_historical_restart_evidence() -> None:
+    kube = FakeDiagnoseKube()
+    pod = kube.objects[("pods", "api-1")]
+    pod["status"]["phase"] = "Running"
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": "app",
+            "ready": True,
+            "restartCount": 2,
+            "state": {"running": {"startedAt": "2026-07-27T06:01:00Z"}},
+            "lastState": {"terminated": {"exitCode": 255, "reason": "Error"}},
+        }
+    ]
+    kube.events = []
+    kube.log_lines = ["lost connection to peer, exiting for restart"]
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+
+    assert "CURRENT HEALTH\n  READY NOW" in out
+    assert out.index("READY NOW") < out.index("lost connection to peer")
+
+
+async def test_diagnose_pod_includes_pvc_storage_class_and_warning_events() -> None:
+    class PvcEventKube(FakeDiagnoseKube):
+        async def list_events_for(
+            self,
+            namespace: str,
+            name: str,
+            *,
+            kind: str | None = None,
+            uid: str | None = None,
+        ) -> list[dict[str, Any]]:
+            if kind == "PersistentVolumeClaim":
+                return [
+                    {
+                        "type": "Warning",
+                        "reason": "ProvisioningFailed",
+                        "message": 'storageclass.storage.k8s.io "fast-ssd" not found',
+                        "count": 9,
+                    }
+                ]
+            return await super().list_events_for(namespace, name, kind=kind, uid=uid)
+
+    kube = PvcEventKube()
+    pvc = kube.objects[("persistentvolumeclaims", "data-claim")]
+    pvc["metadata"]["uid"] = "pvc-uid"
+    pvc["spec"] = {"storageClassName": "fast-ssd"}
+    pvc["status"] = {"phase": "Pending"}
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+
+    assert "pvc data-claim: Pending storageClass=fast-ssd" in out
+    assert "ProvisioningFailed (9x)" in out
+    assert 'storageclass.storage.k8s.io "fast-ssd" not found' in out
+
+
+async def test_diagnose_pod_distinguishes_pvc_event_failure_from_pvc_read() -> None:
+    class PvcEventsDeniedKube(FakeDiagnoseKube):
+        async def list_events_for(
+            self,
+            namespace: str,
+            name: str,
+            *,
+            kind: str | None = None,
+            uid: str | None = None,
+        ) -> list[dict[str, Any]]:
+            if kind == "PersistentVolumeClaim":
+                raise ApiStatusError(403, "PVC events forbidden")
+            return await super().list_events_for(namespace, name, kind=kind, uid=uid)
+
+    out = await _diagnose_executor(PvcEventsDeniedKube()).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+    assert "pvc data-claim: Bound storageClass=(default)" in out
+    assert "pvc data-claim warning events: unavailable" in out
+    assert "pvc data-claim: unavailable" not in out
+
+
+async def test_diagnose_pod_distinguishes_default_and_explicit_no_storage_class() -> None:
+    kube = FakeDiagnoseKube()
+    pod = kube.objects[("pods", "api-1")]
+    pod["spec"]["volumes"] = [
+        {"name": "defaulted", "persistentVolumeClaim": {"claimName": "defaulted"}},
+        {"name": "classless", "persistentVolumeClaim": {"claimName": "classless"}},
+    ]
+    kube.objects[("persistentvolumeclaims", "defaulted")] = {
+        "metadata": {"name": "defaulted"},
+        "spec": {},
+        "status": {"phase": "Pending"},
+    }
+    kube.objects[("persistentvolumeclaims", "classless")] = {
+        "metadata": {"name": "classless"},
+        "spec": {"storageClassName": ""},
+        "status": {"phase": "Pending"},
+    }
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_pod", {"pod": "api-1", "namespace": "default"}
+    )
+
+    assert "pvc defaulted: Pending storageClass=(default)" in out
+    assert "pvc classless: Pending storageClass=(none)" in out
 
 
 async def test_diagnose_pod_missing_pod_is_an_error() -> None:
@@ -1350,6 +1488,489 @@ async def test_diagnose_pod_clamps_the_skipped_container_summary() -> None:
     assert len(out) <= MAX_RESULT_CHARS
     assert "truncated" not in out  # never falls back to prefix truncation
     assert all(len(line) <= 250 for line in out.splitlines())
+
+
+# --- diagnose_workload ------------------------------------------------------
+
+
+def test_diagnose_workload_schema_prefers_one_call_for_rollout_failures() -> None:
+    schema = next(t for t in READ_TOOLS if t["function"]["name"] == "diagnose_workload")
+    description = schema["function"]["description"]
+    assert "Deployment" in description
+    assert "ReplicaSet" in description
+    assert "pod" in description
+
+
+async def test_diagnose_workload_follows_deployment_to_the_failing_pod() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 2},
+        "status": {
+            "replicas": 2,
+            "readyReplicas": 1,
+            "conditions": [
+                {
+                    "type": "Progressing",
+                    "status": "False",
+                    "reason": "ProgressDeadlineExceeded",
+                    "message": 'ReplicaSet "api-6f" timed out progressing',
+                }
+            ],
+        },
+    }
+    replicaset = kube.objects[("replicasets", "api-6f")]
+    replicaset["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [
+                {"kind": "Deployment", "name": "api", "uid": "deploy-uid", "controller": True}
+            ],
+        }
+    )
+    replicaset["spec"] = {"replicas": 1}
+    replicaset["status"] = {"replicas": 1, "readyReplicas": 0}
+    pod = kube.objects[("pods", "api-1")]
+    pod["metadata"]["ownerReferences"] = [
+        {"kind": "ReplicaSet", "name": "api-6f", "uid": "rs-uid", "controller": True}
+    ]
+    pod["status"]["phase"] = "Pending"
+    pod["status"]["containerStatuses"][0]["state"] = {
+        "waiting": {
+            "reason": "ImagePullBackOff",
+            "message": 'Back-off pulling image "api:v9-typo"',
+        }
+    }
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+
+    assert not out.startswith("ERROR:")
+    assert "WORKLOAD — Deployment default/api" in out
+    assert "ProgressDeadlineExceeded" in out
+    assert "ReplicaSet api-6f" in out
+    assert "POD DIAGNOSIS — default/api-1" in out
+    assert "ImagePullBackOff" in out
+    assert len(out) <= MAX_RESULT_CHARS
+
+
+async def test_diagnose_workload_projects_deployment_replica_status() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 3},
+        "status": {
+            "replicas": 3,
+            "updatedReplicas": 2,
+            "readyReplicas": 1,
+            "availableReplicas": 1,
+            "unavailableReplicas": 2,
+        },
+    }
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert "desired=3 current=3 updated=2 ready=1 available=1 unavailable=2" in out
+
+
+async def test_diagnose_workload_budget_keeps_every_selected_pod_header() -> None:
+    class PriorityEvidenceKube(FakeDiagnoseKube):
+        async def stream_logs(
+            self,
+            namespace: str,
+            pod: str,
+            container: str,
+            *,
+            previous: bool = False,
+            follow: bool = True,
+            tail_lines: int = 200,
+        ) -> Any:
+            for index in range(200):
+                yield LogLine(
+                    pod=pod,
+                    container=container,
+                    text=f"noise {index} " + "x" * 220,
+                )
+            yield LogLine(pod=pod, container=container, text=f"DECISIVE EVIDENCE {pod}")
+
+    kube = PriorityEvidenceKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 3},
+        "status": {"replicas": 3},
+    }
+    rs = kube.objects[("replicasets", "api-6f")]
+    rs["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "name": "api"}],
+        }
+    )
+    source = kube.objects[("pods", "api-1")]
+    source["metadata"]["ownerReferences"] = [
+        {"kind": "ReplicaSet", "uid": "rs-uid", "name": "api-6f"}
+    ]
+    for index in range(2, 4):
+        pod = copy.deepcopy(source)
+        pod["metadata"]["name"] = f"api-{index}"
+        pod["metadata"]["uid"] = f"pod-{index}"
+        if index == 2:
+            pod["status"]["containerStatuses"][0]["state"] = {
+                "waiting": {"reason": "ImagePullBackOff"}
+            }
+        else:
+            pod["status"]["phase"] = "Pending"
+            pod["status"]["containerStatuses"][0]["state"] = {
+                "waiting": {"reason": "ContainerCreating"}
+            }
+        kube.objects[("pods", f"api-{index}")] = pod
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert len(out) <= MAX_RESULT_CHARS
+    for name in ("api-1", "api-2", "api-3"):
+        assert f"POD DIAGNOSIS — default/{name}" in out
+        assert f"POD DIAGNOSIS — default/{name}" in compact_result(out, 3_000)
+    visible = compact_result(out, 3_000)
+    assert "POD DIAGNOSIS — default/api-2: phase=ImagePullBackOff" in visible
+    assert "POD DIAGNOSIS — default/api-3: phase=ContainerCreating" in visible
+    assert "DECISIVE EVIDENCE api-3" in visible
+
+
+async def test_diagnose_workload_prefers_newest_replicaset_pods() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 4},
+        "status": {"replicas": 4},
+    }
+    old_rs = kube.objects[("replicasets", "api-6f")]
+    old_rs["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "old-rs",
+            "creationTimestamp": "2026-01-01T00:00:00Z",
+            "annotations": {"deployment.kubernetes.io/revision": "1"},
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "name": "api"}],
+        }
+    )
+    new_rs = copy.deepcopy(old_rs)
+    new_rs["metadata"].update(
+        {
+            "name": "api-new",
+            "uid": "new-rs",
+            "creationTimestamp": "2026-02-01T00:00:00Z",
+            "annotations": {"deployment.kubernetes.io/revision": "2"},
+        }
+    )
+    kube.objects[("replicasets", "api-new")] = new_rs
+    source = kube.objects[("pods", "api-1")]
+    source["metadata"]["ownerReferences"] = [
+        {"kind": "ReplicaSet", "uid": "old-rs", "name": "api-6f"}
+    ]
+    for index in range(2, 5):
+        pod = copy.deepcopy(source)
+        pod["metadata"]["name"] = f"api-old-{index}"
+        pod["metadata"]["uid"] = f"old-pod-{index}"
+        kube.objects[("pods", f"api-old-{index}")] = pod
+    new_pod = copy.deepcopy(source)
+    new_pod["metadata"]["name"] = "api-new-1"
+    new_pod["metadata"]["uid"] = "new-pod"
+    new_pod["metadata"]["ownerReferences"] = [
+        {"kind": "ReplicaSet", "uid": "new-rs", "name": "api-new"}
+    ]
+    kube.objects[("pods", "api-new-1")] = new_pod
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert "POD DIAGNOSIS — default/api-new-1" in out
+
+
+async def test_diagnose_workload_bounds_omitted_pod_names() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 30},
+        "status": {"replicas": 30},
+    }
+    rs = kube.objects[("replicasets", "api-6f")]
+    rs["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "name": "api"}],
+        }
+    )
+    source = kube.objects[("pods", "api-1")]
+    source["metadata"]["ownerReferences"] = [
+        {"kind": "ReplicaSet", "uid": "rs-uid", "name": "api-6f"}
+    ]
+    for index in range(2, 31):
+        pod = copy.deepcopy(source)
+        pod["metadata"]["name"] = f"api-{index}-" + "x" * 200
+        pod["metadata"]["uid"] = f"pod-{index}"
+        kube.objects[("pods", pod["metadata"]["name"])] = pod
+    kube.log_lines = ["ERROR: useful evidence"]
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert len(out) <= MAX_RESULT_CHARS
+    assert "(27 more non-ready pod(s) not expanded:" in out
+    assert "useful evidence" in out
+    omitted_line = next(line for line in out.splitlines() if "more non-ready pod(s)" in line)
+    assert len(omitted_line) <= 1_300
+
+
+async def test_diagnose_workload_rejects_unsupported_kinds_with_guidance() -> None:
+    out = await _diagnose_executor(FakeDiagnoseKube()).execute(
+        "diagnose_workload",
+        {"kind": "nodes", "name": "node-a", "namespace": "default"},
+    )
+    assert out.startswith("ERROR:")
+    assert "supports deployments" in out
+
+
+async def test_diagnose_workload_uses_builtin_deployment_before_discovery() -> None:
+    kube: Any = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "status": {},
+    }
+    out = await ToolExecutor(kube, {"pods": PODS_META, "pod": PODS_META}).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert not out.startswith("ERROR: unknown kind")
+
+
+async def test_diagnose_workload_keeps_parent_and_siblings_when_a_pod_read_fails() -> None:
+    class FlakyPodKube(FakeDiagnoseKube):
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            if meta.plural == "pods" and name == "api-1":
+                raise RuntimeError("response decode failed")
+            return await super().get_object(meta, namespace, name)
+
+    kube = FlakyPodKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "status": {
+            "conditions": [
+                {
+                    "type": "Progressing",
+                    "status": "False",
+                    "reason": "ProgressDeadlineExceeded",
+                }
+            ]
+        },
+    }
+    kube.objects[("replicasets", "api-6f")]["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [
+                {
+                    "kind": "Deployment",
+                    "name": "api",
+                    "uid": "deploy-uid",
+                    "controller": True,
+                }
+            ],
+        }
+    )
+    pod = kube.objects[("pods", "api-1")]
+    pod["metadata"]["ownerReferences"] = [
+        {
+            "kind": "ReplicaSet",
+            "name": "api-6f",
+            "uid": "rs-uid",
+            "controller": True,
+        }
+    ]
+    sibling = copy.deepcopy(pod)
+    sibling["metadata"]["name"] = "api-2"
+    sibling["metadata"]["uid"] = "pod-2"
+    kube.objects[("pods", "api-2")] = sibling
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+
+    assert not out.startswith("ERROR:")
+    assert "ProgressDeadlineExceeded" in out
+    assert "POD DIAGNOSIS — default/api-1" in out
+    assert "unavailable (response decode failed)" in out
+    assert "POD DIAGNOSIS — default/api-2" in out
+    assert "CrashLoopBackOff" in out
+
+
+async def test_diagnose_workload_includes_running_pod_with_failed_ready_condition() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "status": {},
+    }
+    rs = kube.objects[("replicasets", "api-6f")]
+    rs["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "name": "api"}],
+        }
+    )
+    pod = kube.objects[("pods", "api-1")]
+    pod["metadata"]["ownerReferences"] = [{"kind": "ReplicaSet", "uid": "rs-uid", "name": "api-6f"}]
+    pod["status"]["phase"] = "Running"
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "False"}]
+    pod["status"]["containerStatuses"][0]["ready"] = True
+    pod["status"]["containerStatuses"][0]["state"] = {"running": {"startedAt": "x"}}
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert "POD DIAGNOSIS — default/api-1" in out
+
+
+async def test_diagnose_workload_rejects_same_name_replacement_uid() -> None:
+    class ReplacedPodKube(FakeDiagnoseKube):
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            obj = await super().get_object(meta, namespace, name)
+            if meta.plural == "pods" and name == "api-1":
+                obj = copy.deepcopy(obj)
+                obj["metadata"]["uid"] = "replacement-uid"
+            return obj
+
+    kube = ReplacedPodKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "status": {},
+    }
+    rs = kube.objects[("replicasets", "api-6f")]
+    rs["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "name": "api"}],
+        }
+    )
+    pod = kube.objects[("pods", "api-1")]
+    pod["metadata"]["uid"] = "original-uid"
+    pod["metadata"]["ownerReferences"] = [{"kind": "ReplicaSet", "uid": "rs-uid", "name": "api-6f"}]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert "UID changed from original-uid to replacement-uid" in out
+
+
+async def test_diagnose_workload_keeps_status_when_deployment_events_fail() -> None:
+    class EventsDeniedKube(FakeDiagnoseKube):
+        async def list_events_for(
+            self,
+            namespace: str,
+            name: str,
+            *,
+            kind: str | None = None,
+            uid: str | None = None,
+        ) -> list[dict[str, Any]]:
+            if kind == "Deployment":
+                raise ApiStatusError(403, "events forbidden")
+            return await super().list_events_for(namespace, name, kind=kind, uid=uid)
+
+    kube = EventsDeniedKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 2},
+        "status": {
+            "replicas": 2,
+            "readyReplicas": 1,
+            "conditions": [
+                {
+                    "type": "Progressing",
+                    "status": "False",
+                    "reason": "ProgressDeadlineExceeded",
+                }
+            ],
+        },
+    }
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert not out.startswith("ERROR:")
+    assert "ProgressDeadlineExceeded" in out
+    assert "unavailable (API 403: events forbidden)" in out
+
+
+@pytest.mark.parametrize(
+    ("failed_plural", "expected_section"),
+    [
+        ("replicasets", "OWNED REPLICASETS\n  unavailable"),
+        ("pods", "POD DIAGNOSES\n  unavailable"),
+    ],
+)
+async def test_diagnose_workload_keeps_parent_when_child_list_fails(
+    failed_plural: str,
+    expected_section: str,
+) -> None:
+    class ChildListDeniedKube(FakeDiagnoseKube):
+        async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+            if meta.plural == failed_plural:
+                raise ApiStatusError(403, f"{failed_plural} forbidden")
+            return await super().list_objects(meta, namespace)
+
+    kube = ChildListDeniedKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 2},
+        "status": {
+            "replicas": 2,
+            "readyReplicas": 1,
+            "conditions": [
+                {
+                    "type": "Progressing",
+                    "status": "False",
+                    "reason": "ProgressDeadlineExceeded",
+                }
+            ],
+        },
+    }
+    rs = kube.objects[("replicasets", "api-6f")]
+    rs["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "name": "api"}],
+        }
+    )
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert not out.startswith("ERROR:")
+    assert "ProgressDeadlineExceeded" in out
+    assert expected_section in out
 
 
 def test_compact_result_honors_tiny_limits() -> None:

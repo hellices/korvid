@@ -54,6 +54,29 @@ def test_provider_factory_builds_a_fresh_openai_compat_provider() -> None:
     assert first is not second  # fresh provider per run
 
 
+def test_provider_factory_applies_eval_timeout() -> None:
+    provider = provider_factory_from_env(
+        {
+            "KORVID_EVAL_BASE_URL": "http://localhost:1234/v1",
+            "KORVID_EVAL_MODEL": "large-local-model",
+            "KORVID_EVAL_TIMEOUT_SECONDS": "900",
+        }
+    )()
+    assert provider._get_client().timeout.read == 900.0
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nope", "nan", "inf"])
+def test_provider_factory_rejects_invalid_eval_timeout(value: str) -> None:
+    with pytest.raises(SystemExit, match="KORVID_EVAL_TIMEOUT_SECONDS"):
+        provider_factory_from_env(
+            {
+                "KORVID_EVAL_BASE_URL": "http://localhost:1234/v1",
+                "KORVID_EVAL_MODEL": "large-local-model",
+                "KORVID_EVAL_TIMEOUT_SECONDS": value,
+            }
+        )
+
+
 def _report(error: str | None = None) -> ScenarioReport:
     grade = GradeResult(
         diagnosis_success=True,

@@ -33,6 +33,7 @@ FOLLOWABLE_TOOLS: frozenset[str] = frozenset(
         "list_operators",
         "helm_list_releases",
         "diagnose_pod",
+        "diagnose_workload",
     }
 )
 
@@ -118,7 +119,7 @@ async def _mirror(ui: UIBridge, tool: str, args: Mapping[str, Any]) -> str | Non
             return None
         # An omitted namespace lists cluster-wide: mirror the same scope.
         return await ui.agent_navigate(kind, namespace or "all")
-    if tool in ("get_resource", "get_events"):
+    if tool in ("get_resource", "get_events", "diagnose_workload"):
         kind = _str_or_none(args.get("kind"))
         name = _str_or_none(args.get("name"))
         if kind is None or name is None:

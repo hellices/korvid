@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from korvid.tools import diagnose
 from korvid.tools.diagnose import (
     condition_lines,
     container_state_lines,
@@ -273,6 +274,110 @@ def test_condition_lines_put_failing_conditions_first() -> None:
 
 def test_condition_lines_empty_status_yields_no_lines() -> None:
     assert condition_lines({}) == []
+
+
+# --- current health ---------------------------------------------------------
+
+
+def test_current_health_line_marks_a_ready_running_pod_healthy_despite_restarts() -> None:
+    pod = _crashloop_pod()
+    pod["status"]["phase"] = "Running"
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": "app",
+            "ready": True,
+            "restartCount": 2,
+            "state": {"running": {"startedAt": "2026-07-27T06:01:00Z"}},
+            "lastState": {"terminated": {"exitCode": 255, "reason": "Error"}},
+        }
+    ]
+
+    assert diagnose.current_health_line(pod) == (
+        "READY NOW — phase=Running, Ready=True, all containers ready; "
+        "2 restart(s) are historical, not a current failure"
+    )
+
+
+def test_current_health_line_does_not_mark_a_not_ready_pod_healthy() -> None:
+    assert diagnose.current_health_line(_crashloop_pod()).startswith("UNHEALTHY NOW")
+
+
+def test_current_health_line_marks_successful_completed_pod_as_completed() -> None:
+    pod = _crashloop_pod()
+    pod["status"] = {
+        "phase": "Succeeded",
+        "containerStatuses": [
+            {
+                "name": "worker",
+                "ready": False,
+                "restartCount": 0,
+                "state": {"terminated": {"exitCode": 0, "reason": "Completed"}},
+            }
+        ],
+    }
+
+    assert diagnose.current_health_line(pod) == (
+        "COMPLETED SUCCESSFULLY — phase=Succeeded, all containers exited 0"
+    )
+
+
+def test_current_health_ignores_completed_init_ready_flag() -> None:
+    pod = _crashloop_pod()
+    pod["status"]["phase"] = "Running"
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    pod["status"]["initContainerStatuses"] = [
+        {
+            "name": "migrate",
+            "ready": False,
+            "restartCount": 0,
+            "state": {"terminated": {"exitCode": 0, "reason": "Completed"}},
+        }
+    ]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": "app",
+            "ready": True,
+            "restartCount": 0,
+            "state": {"running": {"startedAt": "x"}},
+        }
+    ]
+    assert diagnose.current_health_line(pod).startswith("READY NOW")
+
+
+def test_current_health_does_not_equate_ready_with_healthy() -> None:
+    pod = _crashloop_pod()
+    pod["status"]["phase"] = "Running"
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": "app",
+            "ready": True,
+            "restartCount": 0,
+            "state": {"running": {"startedAt": "x"}},
+        }
+    ]
+    verdict = diagnose.current_health_line(pod)
+    assert verdict.startswith("READY NOW")
+    assert "HEALTHY" not in verdict
+
+
+def test_current_health_reports_terminating_before_ready() -> None:
+    pod = _crashloop_pod()
+    pod["metadata"]["deletionTimestamp"] = "2026-07-27T07:59:00Z"
+    pod["status"]["phase"] = "Running"
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": "app",
+            "ready": True,
+            "restartCount": 0,
+            "state": {"running": {"startedAt": "x"}},
+        }
+    ]
+    assert diagnose.current_health_line(pod) == (
+        "TERMINATING NOW — deletionTimestamp=2026-07-27T07:59:00Z"
+    )
 
 
 # --- warning events ---------------------------------------------------------

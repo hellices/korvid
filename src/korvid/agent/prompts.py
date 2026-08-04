@@ -73,7 +73,12 @@ UI_DRIVE_PROMPT = (
 
 #: Short role statement, explicit grounding rules, and ONE worked example
 #: (question -> tool call -> result -> grounded answer) instead of the
-#: longer frontier instruction list (issue #71).
+#: longer frontier instruction list (issue #71). The diagnosis rules after
+#: the 404 clause each answer a failure measured on the #69 pack (issue
+#: #177): exit-code over-anchoring (a liveness kill misread as OOM because
+#: the example taught 137=OOMKilled), pointer-chasing stopped one hop
+#: short (unbound PVC, service endpoints), decisive reason strings never
+#: quoted, and healthy negative controls diagnosed as faults.
 SMALL_SYSTEM_PROMPT = (
     "You are korvid's Kubernetes exploration agent, embedded in a live TUI. "
     "You act only through the provided tools: no shell, no kubectl, no "
@@ -85,13 +90,31 @@ SMALL_SYSTEM_PROMPT = (
     "'namespace/name' — split that into the separate namespace and name "
     "fields; never paste the combined value into either field. "
     "A 404/NotFound means the name or namespace is wrong — "
-    "re-list instead of retrying. Cite evidence from tool results. "
-    "Worked example — user: why does pod checkout-1 in namespace shop keep "
-    'restarting? -> you call diagnose_pod with {"pod": "checkout-1", '
-    '"namespace": "shop"} -> the result shows lastState terminated '
-    "exit=137 (OOMKilled) -> you answer: checkout-1 is OOMKilled (exit "
-    "code 137); its container exceeds the memory limit, so raise the limit "
-    "or reduce usage."
+    "re-list instead of retrying. "
+    "Diagnose from the reason string in states and events, not the exit "
+    "code alone: when events show a failing liveness probe, the kubelet "
+    "killed the container, so the probe is the cause. "
+    "State exactly one root cause and never name faults you ruled out: "
+    "'not X but Y' still claims X, so mention only Y. "
+    "When a result points at another object (an unbound PVC then its "
+    "storage class, a service's endpoints, a job's pods), fetch it "
+    "before answering. "
+    "Copy decisive reason strings word-for-word and cite exit codes and "
+    "counts from the evidence (for example BackoffLimitExceeded, "
+    "FailedScheduling, exit 137). "
+    "Ready is not healthy when warnings show probe failures. Start your answer "
+    "with healthy only when status, conditions, and recent warnings show no "
+    "problem; name the checks that pass. Old restarts are history, not a live fault. "
+    "Never write a plan or a tool call as text — call the tool instead. "
+    "Worked example (shows the method only — always diagnose from your "
+    "own tool results, never reuse this answer): user: why does pod "
+    "checkout-1 in namespace shop keep restarting? -> you call "
+    'diagnose_pod with {"pod": "checkout-1", "namespace": "shop"} -> the '
+    "result shows last-exit=137 and the event 'Liveness probe failed: "
+    "context deadline exceeded (27x)' -> the event reason decides -> you "
+    "answer: checkout-1 is killed by its failing liveness probe — "
+    "'Liveness probe failed: context deadline exceeded' (27x), last exit "
+    "137; make the liveness probe complete in time or relax its timeout."
 )
 
 #: The full UI_DRIVE_PROMPT advertises all five UI tools; the small profile
@@ -113,6 +136,11 @@ SMALL_TOOL_DESCRIPTIONS: dict[str, str] = {
         "One-call diagnosis of a broken pod: container states, exit codes, "
         "restart counts, failing conditions, Warning events, node/PVC "
         "context, and log excerpts. Prefer this first when a pod is failing."
+    ),
+    "diagnose_workload": (
+        "One-call diagnosis of a stuck Deployment rollout: conditions and "
+        "Warning events, owned ReplicaSets, and compact diagnoses of its "
+        "non-ready pods. Prefer this when a Deployment is not progressing."
     ),
     "list_operators": (
         "List OLM operator packages and installed subscriptions with their status. Read-only."

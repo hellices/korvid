@@ -26,9 +26,11 @@ from korvid.k8s.models import (
 )
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
 from korvid.k8s.reads import ReadOps
+from korvid.k8s.relations import owned_by
 from korvid.tools.diagnose import (
     condition_lines,
     container_state_lines,
+    current_health_line,
     identity_lines,
     log_excerpt,
     node_condition_line,
@@ -809,6 +811,8 @@ class ToolExecutor:
     _DIAGNOSE_MAX_LOG_CONTAINERS = 3
     #: Mounted PVCs whose phase is fetched; more are named only.
     _DIAGNOSE_MAX_PVCS = 5
+    #: Non-ready pods expanded under a workload diagnosis.
+    _DIAGNOSE_MAX_WORKLOAD_PODS = 3
     #: Per-line clamp — event/condition messages and log lines are
     #: cluster-controlled and unbounded.
     _DIAGNOSE_LINE_CLAMP = 240
@@ -819,6 +823,8 @@ class ToolExecutor:
     #: the related evidence never depends on background API discovery
     #: having populated the alias table.
     _DIAGNOSE_BUILTIN_METAS: ClassVar[dict[str, ResourceMeta]] = {
+        "Deployment": ResourceMeta("Deployment", "deployments", "apps", "v1", True),
+        "Pod": ResourceMeta("Pod", "pods", "", "v1", True),
         "ReplicaSet": ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True),
         "Node": ResourceMeta("Node", "nodes", "", "v1", False),
         "PersistentVolumeClaim": ResourceMeta(
@@ -856,7 +862,7 @@ class ToolExecutor:
         return f"owner: {parent[0]} {parent[1]} (via {kind_name} {name})"
 
     async def _diagnose_related(self, namespace: str, pod: dict[str, Any]) -> list[str]:
-        """Node condition summary and PVC phases — cheap context, best-effort."""
+        """Node conditions and mounted-PVC provisioning evidence."""
         lines: list[str] = []
         node_name = (pod.get("spec") or {}).get("nodeName")
         node_meta = self._meta_for_kind_name("Node")
@@ -870,15 +876,45 @@ class ToolExecutor:
         if pvc_meta is not None:
             claims = pvc_names(pod)
             for claim in claims[: self._DIAGNOSE_MAX_PVCS]:
-                try:
-                    pvc = await self._kube.get_object(pvc_meta, namespace, claim)
-                    phase = (pvc.get("status") or {}).get("phase") or "?"
-                    lines.append(f"pvc {claim}: {phase}")
-                except Exception as exc:
-                    lines.append(f"pvc {claim}: unavailable ({exc})")
+                lines.extend(await self._diagnose_pvc(namespace, claim, pvc_meta))
             omitted = claims[self._DIAGNOSE_MAX_PVCS :]
             if omitted:
                 lines.append(f"({len(omitted)} more claims not fetched: {', '.join(omitted)})")
+        return lines
+
+    async def _diagnose_pvc(
+        self,
+        namespace: str,
+        claim: str,
+        pvc_meta: ResourceMeta,
+    ) -> list[str]:
+        """PVC state and its optional event evidence, independently."""
+        try:
+            pvc = await self._kube.get_object(pvc_meta, namespace, claim)
+        except Exception as exc:
+            return [f"pvc {claim}: unavailable ({exc})"]
+        phase = (pvc.get("status") or {}).get("phase") or "?"
+        pvc_spec = pvc.get("spec") or {}
+        raw_storage_class = pvc_spec.get("storageClassName")
+        if "storageClassName" not in pvc_spec or raw_storage_class is None:
+            storage_class = "(default)"
+        elif raw_storage_class == "":
+            storage_class = "(none)"
+        else:
+            storage_class = str(raw_storage_class)
+        lines = [f"pvc {claim}: {phase} storageClass={storage_class}"]
+        raw_uid = (pvc.get("metadata") or {}).get("uid")
+        try:
+            events = await self._kube.list_events_for(
+                namespace,
+                claim,
+                kind="PersistentVolumeClaim",
+                uid=str(raw_uid) if raw_uid else None,
+            )
+        except Exception as exc:
+            lines.append(f"pvc {claim} warning events: unavailable ({exc})")
+        else:
+            lines.extend(f"pvc {claim} warning: {event}" for event in warning_event_lines(events))
         return lines
 
     async def _diagnose_events(self, namespace: str, name: str, pod: dict[str, Any]) -> list[str]:
@@ -994,7 +1030,13 @@ class ToolExecutor:
             lines.extend(self._trim_front(body, share - len(header) - 1))
         return lines
 
-    async def _diagnose_pod(self, args: dict[str, Any]) -> str:
+    async def _diagnose_pod(
+        self,
+        args: dict[str, Any],
+        *,
+        expected_uid: str | None = None,
+        expected_owner_uids: set[str] | None = None,
+    ) -> str:
         """Compound read-only diagnosis (issue #70).
 
         Evidence gathering is deterministic code; the model only interprets.
@@ -1009,11 +1051,25 @@ class ToolExecutor:
         namespace = _reject_slash_name(str(args["namespace"]), "namespace")
         pods_meta = self._api_meta("pods")
         pod = await self._kube.get_object(pods_meta, namespace, name)
+        metadata = pod.get("metadata") or {}
+        actual_uid = str(metadata.get("uid") or "")
+        if expected_uid is not None and actual_uid != expected_uid:
+            raise ValueError(
+                f"pod {namespace}/{name} UID changed from {expected_uid} to {actual_uid}"
+            )
+        if expected_owner_uids is not None:
+            actual_owners = {
+                str(reference.get("uid") or "")
+                for reference in metadata.get("ownerReferences") or []
+            }
+            if not actual_owners & expected_owner_uids:
+                raise ValueError(f"pod {namespace}/{name} ownership changed during diagnosis")
         head_sections: list[tuple[str, list[str]]] = [
             (
                 f"IDENTITY — pod {namespace}/{name}",
                 [*identity_lines(pod), await self._diagnose_owner_chain(namespace, pod)],
             ),
+            ("CURRENT HEALTH", [current_health_line(pod)]),
             ("RELATED", await self._diagnose_related(namespace, pod) or ["(none)"]),
             ("CONDITIONS (failing first)", condition_lines(pod) or ["(none reported)"]),
             ("CONTAINERS", container_state_lines(pod) or ["(no container statuses)"]),
@@ -1031,6 +1087,230 @@ class ToolExecutor:
         blocks = await self._diagnose_log_blocks(namespace, name, pod)
         budget = MAX_RESULT_CHARS - sum(len(line) + 1 for line in report) - len(log_title) - 1
         return "\n".join([*report, log_title, *self._render_log_blocks(blocks, budget)])
+
+    async def _owned_summaries(
+        self, namespace: str, parent_uid: str, child_kind: str
+    ) -> list[GenericSummary]:
+        meta = self._meta_for_kind_name(child_kind)
+        if meta is None:
+            raise ValueError(f"{child_kind} API was not discovered")
+        return [
+            summary
+            for summary in await self._kube.list_objects(meta, namespace)
+            if owned_by(summary, parent_uid)
+        ]
+
+    async def _workload_event_lines(
+        self, namespace: str, name: str, workload: dict[str, Any]
+    ) -> list[str]:
+        metadata = workload.get("metadata") or {}
+        raw_uid = metadata.get("uid")
+        try:
+            events = await self._kube.list_events_for(
+                namespace,
+                name,
+                kind="Deployment",
+                uid=str(raw_uid) if raw_uid else None,
+            )
+        except Exception as exc:
+            return [f"unavailable ({exc})"]
+        return warning_event_lines(events) or ["(no warning events)"]
+
+    @staticmethod
+    def _pod_summary_is_ready(summary: GenericSummary) -> bool:
+        if not isinstance(summary, PodListSummary) or summary.phase != "Running":
+            return False
+        ready, separator, total = summary.ready.partition("/")
+        return summary.ready_condition and bool(separator) and ready == total and total != "0"
+
+    async def _deployment_children(
+        self,
+        namespace: str,
+        uid: str,
+    ) -> tuple[
+        list[GenericSummary],
+        list[str],
+        list[GenericSummary],
+        str,
+    ]:
+        """Best-effort owned ReplicaSet and Pod LISTs."""
+        pod_list_error = ""
+        try:
+            replicasets = await self._owned_summaries(namespace, uid, "ReplicaSet")
+        except Exception as exc:
+            replicasets = []
+            replicaset_lines = [f"unavailable ({exc})"]
+            pod_list_error = f"unavailable (ReplicaSet traversal failed: {exc})"
+        else:
+            replicaset_lines = [
+                f"ReplicaSet {summary.name}: {summary_facts(summary)}" for summary in replicasets
+            ] or ["(none found)"]
+        replica_uids = {summary.uid for summary in replicasets if summary.uid}
+        pods_meta = self._meta_for_kind_name("Pod")
+        if pods_meta is None:
+            raise ValueError("Pod API was not discovered")
+        pods: list[GenericSummary] = []
+        if not pod_list_error:
+            try:
+                listed_pods = await self._kube.list_objects(pods_meta, namespace)
+            except Exception as exc:
+                pod_list_error = f"unavailable ({exc})"
+            else:
+                pods = [
+                    summary
+                    for summary in listed_pods
+                    if any(owner_uid in replica_uids for owner_uid in summary.owner_uids)
+                ]
+        return replicasets, replicaset_lines, pods, pod_list_error
+
+    async def _diagnose_deployment(
+        self, namespace: str, name: str, workload: dict[str, Any]
+    ) -> str:
+        metadata = workload.get("metadata") or {}
+        uid = str(metadata.get("uid") or "")
+        if not uid:
+            raise ValueError(f"Deployment {namespace}/{name} has no metadata.uid")
+
+        (
+            replicasets,
+            replicaset_lines,
+            pods,
+            pod_list_error,
+        ) = await self._deployment_children(namespace, uid)
+        replica_uids = {summary.uid for summary in replicasets if summary.uid}
+        non_ready = [pod for pod in pods if not self._pod_summary_is_ready(pod)]
+        rs_by_uid = {summary.uid: summary for summary in replicasets}
+        non_ready.sort(
+            key=lambda pod: self._rollout_pod_sort_key(pod, rs_by_uid),
+            reverse=True,
+        )
+        selected = non_ready[: self._DIAGNOSE_MAX_WORKLOAD_PODS]
+        omitted = non_ready[self._DIAGNOSE_MAX_WORKLOAD_PODS :]
+
+        sections: list[tuple[str, list[str]]] = [
+            (
+                f"WORKLOAD — Deployment {namespace}/{name}",
+                [
+                    *identity_lines(workload),
+                    self._deployment_status_line(workload),
+                ],
+            ),
+            (
+                "SELECTED NON-READY PODS",
+                [
+                    f"POD DIAGNOSIS — {namespace}/{pod.name}: {summary_facts(pod)}"
+                    for pod in selected
+                ]
+                or ["(none found)"],
+            ),
+            (
+                "WORKLOAD CONDITIONS (failing first)",
+                condition_lines(workload) or ["(none reported)"],
+            ),
+            (
+                "WORKLOAD WARNING EVENTS (newest first)",
+                await self._workload_event_lines(namespace, name, workload),
+            ),
+            (
+                "OWNED REPLICASETS",
+                replicaset_lines,
+            ),
+        ]
+        report: list[str] = []
+        for title, lines in sections:
+            report.append(title)
+            report.extend(
+                f"  {line}"
+                for line in self._budget_section([self._clamp_line(line) for line in lines])
+            )
+        if pod_list_error:
+            report.extend(["POD DIAGNOSES", f"  {pod_list_error}"])
+
+        omitted_line = (
+            f"({len(omitted)} more non-ready pod(s) not expanded: "
+            + ", ".join(_clamp(pod.name) for pod in omitted[:5])
+            + (", …" if len(omitted) > 5 else "")
+            + ")"
+            if omitted
+            else ""
+        )
+        parent_size = len("\n".join(report))
+        separator_size = len(selected) + (1 if omitted_line else 0)
+        remaining = max(
+            0,
+            MAX_RESULT_CHARS
+            - parent_size
+            - separator_size
+            - (len(omitted_line) if omitted_line else 0),
+        )
+        share = remaining // max(1, len(selected))
+        # The runtime preserves the report tail when applying the smaller profile cap.
+        for pod in reversed(selected):
+            try:
+                diagnosis = await self._diagnose_pod(
+                    {"pod": pod.name, "namespace": namespace},
+                    expected_uid=pod.uid,
+                    expected_owner_uids=replica_uids,
+                )
+            except Exception as exc:
+                diagnosis = f"unavailable ({exc})"
+            block = "\n".join(
+                [
+                    f"POD DIAGNOSIS — {namespace}/{pod.name}",
+                    *(f"  {line}" for line in diagnosis.splitlines()),
+                ]
+            )
+            report.append(compact_result(block, share))
+        if omitted_line:
+            report.append(omitted_line)
+        return "\n".join(report)
+
+    @staticmethod
+    def _deployment_status_line(workload: dict[str, Any]) -> str:
+        spec = workload.get("spec") or {}
+        status = workload.get("status") or {}
+        return (
+            f"desired={spec.get('replicas', 0)} "
+            f"current={status.get('replicas', 0)} "
+            f"updated={status.get('updatedReplicas', 0)} "
+            f"ready={status.get('readyReplicas', 0)} "
+            f"available={status.get('availableReplicas', 0)} "
+            f"unavailable={status.get('unavailableReplicas', 0)}"
+        )
+
+    @staticmethod
+    def _rollout_pod_sort_key(
+        pod: GenericSummary,
+        replicasets: dict[str, GenericSummary],
+    ) -> tuple[int, str, str, str]:
+        owner = next(
+            (replicasets[uid] for uid in pod.owner_uids if uid in replicasets),
+            None,
+        )
+        revision_text = getattr(owner, "revision", "-")
+        try:
+            revision = int(revision_text)
+        except (TypeError, ValueError):
+            revision = -1
+        return (
+            revision,
+            owner.created if owner is not None else "",
+            pod.created,
+            pod.name,
+        )
+
+    async def _diagnose_workload(self, args: dict[str, Any]) -> str:
+        """One-call rollout diagnosis for supported workload kinds."""
+        kind = str(args["kind"]).strip().lower()
+        name = _reject_slash_name(str(args["name"]), "name")
+        namespace = _reject_slash_name(str(args["namespace"]), "namespace")
+        if kind not in {"deploy", "deployment", "deployments"}:
+            raise ValueError(f"diagnose_workload currently supports deployments, not {kind}")
+        meta = self._meta_for_kind_name("Deployment")
+        if meta is None:
+            raise ValueError("Deployment API was not discovered")
+        workload = await self._kube.get_object(meta, namespace, name)
+        return await self._diagnose_deployment(namespace, name, workload)
 
 
 def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:

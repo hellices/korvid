@@ -7,8 +7,8 @@ root_cause: stuck_rollout_bad_image
 grading:
   must_mention:
     - [progressdeadlineexceeded, progress deadline, rollout is stuck, rollout stuck,
-       stuck rollout, not progressing, timed out progressing, rollout never finished,
-       rollout has not finished]
+       stuck rollout, deployment is stuck, rollout is stalled, not progressing,
+       timed out progressing, rollout never finished, rollout has not finished]
     - [imagepullbackoff, errimagepull, image pull failure, image pull error,
        failed to pull, cannot pull, unable to pull, manifest unknown, manifest not found,
        v9-typo]
@@ -18,9 +18,13 @@ grading:
     - tool: get_resource
       args: {kind: deployments, name: api, namespace: shop}
       contains: ProgressDeadlineExceeded
-    - tool: diagnose_pod
-      args: {pod: api-8f6b-1, namespace: shop}
-      contains: ImagePullBackOff
+    -
+      - tool: diagnose_pod
+        args: {pod: api-8f6b-1, namespace: shop}
+        contains: ImagePullBackOff
+      - tool: diagnose_workload
+        args: {kind: deployments, name: api, namespace: shop}
+        contains: ImagePullBackOff
 cluster:
   objects:
     - kind: Deployment
@@ -55,7 +59,7 @@ cluster:
         namespace: shop
         uid: rs-api-new
         ownerReferences:
-          - {kind: Deployment, name: api, controller: true}
+          - {kind: Deployment, name: api, uid: deploy-api-1, controller: true}
       spec: {replicas: 1}
       status: {replicas: 1, readyReplicas: 0}
     - kind: ReplicaSet
@@ -65,7 +69,7 @@ cluster:
         namespace: shop
         uid: rs-api-old
         ownerReferences:
-          - {kind: Deployment, name: api, controller: true}
+          - {kind: Deployment, name: api, uid: deploy-api-1, controller: true}
       spec: {replicas: 1}
       status: {replicas: 1, readyReplicas: 1}
     - kind: Pod
@@ -77,7 +81,7 @@ cluster:
         creationTimestamp: "2026-07-27T06:30:00Z"
         labels: {app: api}
         ownerReferences:
-          - {kind: ReplicaSet, name: api-8f6b, controller: true}
+          - {kind: ReplicaSet, name: api-8f6b, uid: rs-api-new, controller: true}
       spec:
         nodeName: node-a
         containers:
@@ -104,7 +108,7 @@ cluster:
         creationTimestamp: "2026-07-27T05:00:00Z"
         labels: {app: api}
         ownerReferences:
-          - {kind: ReplicaSet, name: api-7c5a, controller: true}
+          - {kind: ReplicaSet, name: api-7c5a, uid: rs-api-old, controller: true}
       spec:
         nodeName: node-b
         containers:

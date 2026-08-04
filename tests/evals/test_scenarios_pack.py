@@ -34,6 +34,35 @@ def test_bundled_pack_loads_and_covers_the_planned_fault_matrix() -> None:
     assert 3 <= len(negative_controls) <= 5
 
 
+def test_stuck_rollout_accepts_the_compound_workload_evidence_path() -> None:
+    scenario = next(item for item in BUNDLED if item.id == "stuck-rollout")
+    assert any(
+        evidence.tool == "diagnose_workload"
+        and evidence.args == {"kind": "deployments", "name": "api", "namespace": "shop"}
+        and evidence.contains == "ImagePullBackOff"
+        for group in scenario.expected_evidence
+        for evidence in group
+    )
+
+
+def test_stuck_rollout_accepts_plain_deployment_stuck_wording() -> None:
+    scenario = next(item for item in BUNDLED if item.id == "stuck-rollout")
+    first_group = scenario.must_mention[0]
+    assert "deployment is stuck" in first_group
+    assert "rollout is stalled" in first_group
+
+
+def test_pvc_scenario_accepts_the_compound_pod_evidence_path() -> None:
+    scenario = next(item for item in BUNDLED if item.id == "pvc-pending-no-storageclass")
+    assert any(
+        evidence.tool == "diagnose_pod"
+        and evidence.args == {"pod": "db-0", "namespace": "data"}
+        and evidence.contains == 'storageclass.storage.k8s.io "fast-ssd" not found'
+        for group in scenario.expected_evidence
+        for evidence in group
+    )
+
+
 @pytest.mark.parametrize("scenario", BUNDLED, ids=lambda s: s.id)
 async def test_bundled_evidence_is_reachable_through_the_real_tools(
     scenario: Scenario,
@@ -76,3 +105,21 @@ def test_fixture_timestamps_never_exceed_scenario_now(scenario: Scenario) -> Non
     for raw in _timestamps([*scenario.objects, *scenario.events]):
         parsed = datetime.fromisoformat(raw)
         assert parsed <= SCENARIO_NOW, f"{scenario.id}: {raw} is after SCENARIO_NOW"
+
+
+@pytest.mark.parametrize("scenario", BUNDLED, ids=lambda s: s.id)
+def test_fixture_owner_references_use_uids(scenario: Scenario) -> None:
+    """Ownership-chain tools match Kubernetes objects by immutable UID.
+
+    The API always populates ownerReference.uid; name-only fixtures make
+    Deployment -> ReplicaSet -> Pod traversal impossible in the fake cluster
+    even though the same tool works against a real API server.
+    """
+    for obj in scenario.objects:
+        metadata = obj.get("metadata") or {}
+        for ref in metadata.get("ownerReferences") or []:
+            uid = str(ref.get("uid") or "")
+            assert uid, (
+                f"{scenario.id}: {obj.get('kind')} {metadata.get('name')} "
+                f"owner {ref.get('kind')} {ref.get('name')} has no uid"
+            )

@@ -15,9 +15,9 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
-from korvid.evals.scenario import SCENARIO_NOW, TIMESTAMP_PATTERN, Scenario
+from korvid.evals.scenario import SCENARIO_NOW, TIMESTAMP_PATTERN, ContainerLogs
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HELM_SECRET_TYPE, HelmReleaseSummary, release_from_secret
@@ -26,6 +26,17 @@ from korvid.k8s.models import GenericSummary, summary_for
 from korvid.k8s.reads import ReadOps
 
 __all__ = ["SCENARIO_NOW", "FakeKubeClient", "builtin_aliases"]
+
+
+class _ClusterFixture(Protocol):
+    @property
+    def objects(self) -> tuple[dict[str, Any], ...]: ...
+
+    @property
+    def events(self) -> tuple[dict[str, Any], ...]: ...
+
+    @property
+    def logs(self) -> dict[str, ContainerLogs]: ...
 
 
 def _rebase(value: Any, delta: timedelta) -> Any:
@@ -87,7 +98,7 @@ class FakeKubeClient(ReadOps):
     client under strict typing — read-surface drift becomes a type error.
     """
 
-    def __init__(self, scenario: Scenario) -> None:
+    def __init__(self, scenario: _ClusterFixture) -> None:
         self._scenario = scenario
         delta = datetime.now(UTC) - SCENARIO_NOW
         self._objects: list[dict[str, Any]] = [_rebase(obj, delta) for obj in scenario.objects]

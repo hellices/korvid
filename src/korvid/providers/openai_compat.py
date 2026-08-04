@@ -32,6 +32,7 @@ class OpenAICompatProvider(LLMProvider):
         client: httpx.AsyncClient | None = None,
         *,
         ca_bundle: str | None = None,
+        timeout_seconds: float = 60.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
@@ -39,6 +40,7 @@ class OpenAICompatProvider(LLMProvider):
         self._client = client  # injected or lazily created on first call
         self._owns_client = client is None
         self._ca_bundle = ca_bundle
+        self._timeout_seconds = timeout_seconds
 
     @property
     def name(self) -> str:
@@ -49,7 +51,10 @@ class OpenAICompatProvider(LLMProvider):
             # Corporate CA trust (issue #168): built from the same helper
             # as the :ai wizard's test client; verification failures name
             # the configured bundle path.
-            self._client = make_client(self._ca_bundle, timeout=httpx.Timeout(60.0, connect=10.0))
+            self._client = make_client(
+                self._ca_bundle,
+                timeout=httpx.Timeout(self._timeout_seconds, connect=10.0),
+            )
         return self._client
 
     async def aclose(self) -> None:

@@ -14,9 +14,13 @@ grading:
     - tool: diagnose_pod
       args: {pod: db-0, namespace: data}
       contains: "pvc data-db-0: Pending"
-    - tool: get_events
-      args: {kind: persistentvolumeclaims, namespace: data, name: data-db-0}
-      contains: storageclass.storage.k8s.io "fast-ssd" not found
+    -
+      - tool: get_events
+        args: {kind: persistentvolumeclaims, namespace: data, name: data-db-0}
+        contains: storageclass.storage.k8s.io "fast-ssd" not found
+      - tool: diagnose_pod
+        args: {pod: db-0, namespace: data}
+        contains: storageclass.storage.k8s.io "fast-ssd" not found
 cluster:
   objects:
     - kind: Pod
