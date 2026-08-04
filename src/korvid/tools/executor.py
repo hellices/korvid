@@ -1244,7 +1244,8 @@ class ToolExecutor:
             - (len(omitted_line) if omitted_line else 0),
         )
         share = remaining // max(1, len(selected))
-        for pod in selected:
+        # The runtime preserves the report tail when applying the smaller profile cap.
+        for pod in reversed(selected):
             try:
                 diagnosis = await self._diagnose_pod(
                     {"pod": pod.name, "namespace": namespace},

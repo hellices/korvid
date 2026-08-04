@@ -8,6 +8,7 @@ from typing import Any
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.journey import load_journeys
 from korvid.evals.journey_runner import RecordingUI, run_journey
+from korvid.evals.live_journey import NamespaceBoundReadOps
 from korvid.evals.scripted import ScriptedProvider
 from korvid.tools.executor import ToolExecutor
 
@@ -91,6 +92,64 @@ async def test_run_journey_persists_history_and_honors_user_correction() -> None
     # One provider instance serves every user turn; six completions proves the
     # runtime was not recreated between turns.
     assert provider._cursor == 6
+
+
+async def test_live_boundary_rejection_fails_an_otherwise_successful_turn() -> None:
+    journey = next(
+        item
+        for item in load_journeys(
+            __import__(
+                "korvid.evals.journey", fromlist=["bundled_journeys_dir"]
+            ).bundled_journeys_dir()
+        )
+        if item.id == "triage-and-correct"
+    )
+    script: list[list[dict[str, Any]]] = [
+        [
+            _call("list_resources", {"kind": "nodes"}, "c0"),
+            {"type": "done"},
+        ],
+        [
+            _call("list_resources", {"kind": "pods", "namespace": "shop"}, "c1"),
+            {"type": "done"},
+        ],
+        _text("checkout and payments need attention; inspect checkout first."),
+        [
+            _call(
+                "diagnose_pod",
+                {"pod": "payments-1", "namespace": "shop"},
+                "c2",
+            ),
+            {"type": "done"},
+        ],
+        _text("payments has an unauthorized registry authentication failure."),
+        [
+            _call(
+                "open_describe",
+                {"kind": "pods", "name": "payments-1", "namespace": "shop"},
+                "c3",
+            ),
+            {"type": "done"},
+        ],
+        _text("payments needs registry credentials or an image pull secret."),
+    ]
+
+    report = await run_journey(
+        journey,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda fixture: ToolExecutor(
+            NamespaceBoundReadOps(FakeKubeClient(fixture), "shop"),
+            builtin_aliases(),
+            ui=RecordingUI(),
+        ),
+        repetitions=1,
+        profile="small",
+    )
+
+    first = report.runs[0].turns[0]
+    assert first.grade.evidence_fetched is True
+    assert first.wrong_namespace_calls == 1
+    assert first.success is False
 
 
 async def test_run_journey_fails_redundant_turn_budget() -> None:

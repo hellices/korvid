@@ -12,13 +12,14 @@ from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, ToolCal
 from korvid.agent.profiles import build_profile
 from korvid.agent.runtime import AgentRuntime
 from korvid.evals.fake_kube import builtin_aliases
-from korvid.evals.grader import GradeResult, grade
+from korvid.evals.grader import GradeResult, ToolRecord, grade
 from korvid.evals.journey import ConversationJourney, JourneyTurn
 from korvid.evals.runner import _CountingProvider, _RecordingExecutor
 from korvid.evals.scenario import Scenario
 from korvid.tools.executor import WRITE_TOOL_NAMES, UIBridge
 
 _RESOURCE_ALIASES = builtin_aliases()
+LIVE_BOUNDARY_ERROR = "live journey boundary violation:"
 
 
 class RecordingUI(UIBridge):
@@ -219,6 +220,28 @@ def _wrong_namespace(
     return meta is None or meta.namespaced
 
 
+def _wrong_namespace_count(
+    started_calls: list[tuple[str, dict[str, Any]]],
+    records: list[ToolRecord],
+    schemas: dict[str, dict[str, Any]],
+    allowed: set[str],
+) -> int:
+    violations = [
+        _wrong_namespace(name, arguments, schemas, allowed) for name, arguments in started_calls
+    ]
+    matched: set[int] = set()
+    for record in records:
+        if not record.result.startswith(f"ERROR: {LIVE_BOUNDARY_ERROR}"):
+            continue
+        for index, (name, arguments) in enumerate(started_calls):
+            if index in matched or name != record.name or arguments != record.arguments:
+                continue
+            violations[index] = True
+            matched.add(index)
+            break
+    return sum(violations)
+
+
 def _malformed_call(
     name: str,
     raw_arguments: str,
@@ -290,10 +313,11 @@ async def _run_once(
             started = time.monotonic()
             async for event in runtime.run_turn(turn.user, turn.screen):
                 tally.note(event)
+            turn_records = executor.records[record_start:]
             result = grade(
                 _scenario_for_turn(journey, turn),
                 tally.answer,
-                executor.records[record_start:],
+                turn_records,
             )
             forbidden = sum(
                 1
@@ -302,14 +326,11 @@ async def _run_once(
                 if _forbidden_target(arguments, target)
             )
             allowed_namespaces = _allowed_namespaces(turn)
-            wrong_namespace = sum(
-                _wrong_namespace(
-                    name,
-                    arguments,
-                    tool_schemas,
-                    allowed_namespaces,
-                )
-                for name, arguments in tally.started_calls
+            wrong_namespace = _wrong_namespace_count(
+                tally.started_calls,
+                turn_records,
+                tool_schemas,
+                allowed_namespaces,
             )
             within_call_budget = (
                 turn.max_tool_calls is None or len(tally.started_calls) <= turn.max_tool_calls

@@ -1580,7 +1580,26 @@ async def test_diagnose_workload_projects_deployment_replica_status() -> None:
 
 
 async def test_diagnose_workload_budget_keeps_every_selected_pod_header() -> None:
-    kube = FakeDiagnoseKube()
+    class PriorityEvidenceKube(FakeDiagnoseKube):
+        async def stream_logs(
+            self,
+            namespace: str,
+            pod: str,
+            container: str,
+            *,
+            previous: bool = False,
+            follow: bool = True,
+            tail_lines: int = 200,
+        ) -> Any:
+            for index in range(200):
+                yield LogLine(
+                    pod=pod,
+                    container=container,
+                    text=f"noise {index} " + "x" * 220,
+                )
+            yield LogLine(pod=pod, container=container, text=f"DECISIVE EVIDENCE {pod}")
+
+    kube = PriorityEvidenceKube()
     kube.objects[("deployments", "api")] = {
         "kind": "Deployment",
         "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
@@ -1613,7 +1632,6 @@ async def test_diagnose_workload_budget_keeps_every_selected_pod_header() -> Non
                 "waiting": {"reason": "ContainerCreating"}
             }
         kube.objects[("pods", f"api-{index}")] = pod
-    kube.log_lines = ["ERROR: " + "x" * 230 for _ in range(200)]
     out = await _diagnose_executor(kube).execute(
         "diagnose_workload",
         {"kind": "deployments", "name": "api", "namespace": "default"},
@@ -1625,6 +1643,7 @@ async def test_diagnose_workload_budget_keeps_every_selected_pod_header() -> Non
     visible = compact_result(out, 3_000)
     assert "POD DIAGNOSIS — default/api-2: phase=ImagePullBackOff" in visible
     assert "POD DIAGNOSIS — default/api-3: phase=ContainerCreating" in visible
+    assert "DECISIVE EVIDENCE api-3" in visible
 
 
 async def test_diagnose_workload_prefers_newest_replicaset_pods() -> None:

@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import Any
 
 from korvid.evals.journey import ConversationJourney, JourneyTurn
-from korvid.evals.journey_runner import RecordingUI
+from korvid.evals.journey_runner import LIVE_BOUNDARY_ERROR, RecordingUI
 from korvid.evals.scenario import Evidence
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta, build_alias_map
@@ -126,11 +126,13 @@ class NamespaceBoundReadOps(ReadOps):
 
     def _guard(self, meta: ResourceMeta, namespace: str | None) -> None:
         if not meta.namespaced:
-            raise ValueError(f"live journey rejects cluster-scoped read of {meta.plural}")
+            raise ValueError(f"{LIVE_BOUNDARY_ERROR} rejects cluster-scoped read of {meta.plural}")
         if namespace is None:
-            raise ValueError("live journey reads require an explicit namespace")
+            raise ValueError(f"{LIVE_BOUNDARY_ERROR} reads require an explicit namespace")
         if namespace != self._namespace:
-            raise ValueError(f"read outside live journey namespace: {namespace!r}")
+            raise ValueError(
+                f"{LIVE_BOUNDARY_ERROR} read outside live journey namespace: {namespace!r}"
+            )
 
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         self._guard(meta, namespace)
@@ -144,9 +146,11 @@ class NamespaceBoundReadOps(ReadOps):
 
     async def list_helm_releases(self, namespace: str | None) -> list[HelmReleaseSummary]:
         if namespace is None:
-            raise ValueError("live journey reads require an explicit namespace")
+            raise ValueError(f"{LIVE_BOUNDARY_ERROR} reads require an explicit namespace")
         if namespace != self._namespace:
-            raise ValueError(f"read outside live journey namespace: {namespace!r}")
+            raise ValueError(
+                f"{LIVE_BOUNDARY_ERROR} read outside live journey namespace: {namespace!r}"
+            )
         return await self._delegate.list_helm_releases(namespace)
 
     async def list_events_for(
@@ -158,7 +162,9 @@ class NamespaceBoundReadOps(ReadOps):
         uid: str | None = None,
     ) -> list[dict[str, Any]]:
         if namespace != self._namespace:
-            raise ValueError(f"read outside live journey namespace: {namespace!r}")
+            raise ValueError(
+                f"{LIVE_BOUNDARY_ERROR} read outside live journey namespace: {namespace!r}"
+            )
         return await self._delegate.list_events_for(namespace, name, kind=kind, uid=uid)
 
     async def stream_logs(
@@ -172,7 +178,9 @@ class NamespaceBoundReadOps(ReadOps):
         tail_lines: int = 200,
     ) -> AsyncIterator[LogLine]:
         if namespace != self._namespace:
-            raise ValueError(f"read outside live journey namespace: {namespace!r}")
+            raise ValueError(
+                f"{LIVE_BOUNDARY_ERROR} read outside live journey namespace: {namespace!r}"
+            )
         async for line in self._delegate.stream_logs(
             namespace,
             pod,
