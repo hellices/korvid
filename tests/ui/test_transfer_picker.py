@@ -523,7 +523,7 @@ class TestWhitespaceVerbatim:
             app.screen.query_one(DirectoryTree).focus()
             await pilot.press("s")
             await until(pilot, lambda: app.screen is dialog, label="picker closed")
-            assert local.value == str(tmp_path) + "/report "
+            assert local.value == str(tmp_path / "report ")
 
     async def test_remote_dir_pick_appends_local_basename_verbatim(self, tmp_path: Path) -> None:
         opener = FakeExecOpener(_listing("config/"))

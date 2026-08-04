@@ -8008,7 +8008,8 @@ class KorvidApp(App[None]):
         return f"{len(pending)} proposals (next from {source}: {target}) — :proposals"
 
     def on_external_proposals_changed(self, message: ExternalProposalsChanged) -> None:
-        self._refresh_status()
+        with contextlib.suppress(NoMatches):  # teardown: StatusBar already unmounted
+            self._refresh_status()
 
     async def on_external_proposal_expired(self, message: ExternalProposalExpired) -> None:
         """Audit a proposal the lazy TTL sweep expired: it reached a terminal

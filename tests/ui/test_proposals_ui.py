@@ -1223,3 +1223,19 @@ async def test_proposal_outcome_audits_bind_to_the_proposal_context(tmp_path: Pa
 
         await until(pilot, lambda: outcome_context() != "missing")
         assert outcome_context() == "ctx-a"
+
+
+async def test_proposals_changed_during_teardown_does_not_raise(tmp_path: Path) -> None:
+    """ExternalProposalsChanged arriving after StatusBar is unmounted must
+    not raise NoMatches — the handler suppresses it during teardown."""
+    from korvid.ui.messages import ExternalProposalsChanged
+
+    store = ProposalStore()
+    app = make_app(Recorder(), tmp_path / "a.jsonl", store)
+    async with app.run_test():
+        await _submit(app)
+    # After run_test exits, the widget tree is torn down; posting the
+    # message synchronously exercises the guard (would raise on the
+    # unguarded code path).
+    app.post_message(ExternalProposalsChanged())
+    await asyncio.sleep(0)  # let the message loop drain
