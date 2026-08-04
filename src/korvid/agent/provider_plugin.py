@@ -12,9 +12,9 @@ from korvid.agent.credentials import CredentialSource
 from korvid.agent.provider import LLMProvider
 
 PROVIDER_PLUGIN_API_VERSION: Final[int] = 1
-_MAX_TEXT_DELTA_LENGTH: Final[int] = 65_536
+_MAX_TEXT_DELTA_BYTES: Final[int] = 65_536
 _MAX_TOOL_CALL_FIELD_LENGTH: Final[int] = 256
-_MAX_TOOL_ARGUMENTS_LENGTH: Final[int] = 65_536
+_MAX_TOOL_ARGUMENTS_BYTES: Final[int] = 65_536
 _MAX_USAGE_TOKENS: Final[int] = 1_000_000_000
 
 
@@ -79,9 +79,15 @@ class ValidatedPluginProvider(LLMProvider):
         *,
         stream: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
+        done_seen = False
         try:
             async for event in self._provider.complete(messages, tools, stream=stream):
-                yield _normalize_event(event)
+                normalized = _normalize_event(event)
+                if done_seen:
+                    raise ProviderPluginContractError("provider emitted event after terminal done")
+                if normalized.get("type") == "done":
+                    done_seen = True
+                yield normalized
         except ProviderPluginContractError:
             raise
         except Exception as exc:
@@ -89,6 +95,8 @@ class ValidatedPluginProvider(LLMProvider):
             raise ProviderPluginContractError(
                 f"provider stream failed: {_bounded_exception(exc_type)}"
             ) from None
+        if not done_seen:
+            raise ProviderPluginContractError("provider stream ended without terminal done event")
 
     async def aclose(self) -> None:
         if self._closed:
@@ -116,11 +124,11 @@ def _normalize_event(event: object) -> dict[str, Any]:
     if event_type == "text_delta":
         return {
             "type": "text_delta",
-            "text": _require_bounded_str(
+            "text": _require_byte_bounded_str(
                 event,
                 "text_delta.text",
                 "text",
-                max_length=_MAX_TEXT_DELTA_LENGTH,
+                max_bytes=_MAX_TEXT_DELTA_BYTES,
             ),
         }
     if event_type == "tool_call":
@@ -138,11 +146,11 @@ def _normalize_event(event: object) -> dict[str, Any]:
                 "name",
                 max_length=_MAX_TOOL_CALL_FIELD_LENGTH,
             ),
-            "arguments": _require_bounded_str(
+            "arguments": _require_byte_bounded_str(
                 event,
                 "tool_call.arguments",
                 "arguments",
-                max_length=_MAX_TOOL_ARGUMENTS_LENGTH,
+                max_bytes=_MAX_TOOL_ARGUMENTS_BYTES,
             ),
         }
     if event_type == "usage":
@@ -183,6 +191,20 @@ def _require_bounded_str(
     value = _require_str(event, label, key)
     if len(value) > max_length:
         raise ProviderPluginContractError(f"{label} exceeds max length {max_length}")
+    return value
+
+
+def _require_byte_bounded_str(
+    event: Mapping[object, object],
+    label: str,
+    key: str,
+    *,
+    max_bytes: int,
+) -> str:
+    """Validate a string field against a UTF-8 byte limit."""
+    value = _require_str(event, label, key)
+    if len(value.encode("utf-8")) > max_bytes:
+        raise ProviderPluginContractError(f"{label} exceeds max {max_bytes} UTF-8 bytes")
     return value
 
 

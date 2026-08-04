@@ -103,13 +103,14 @@ class LLMProvider(ABC):
     @property
     def name(self) -> str: ...
 
-    def complete(
+    async def complete(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         *,
         stream: bool = True,
-    ) -> AsyncIterator[dict[str, Any]]: ...
+    ) -> AsyncIterator[dict[str, Any]]:
+        yield ...  # async generator (async def + yield)
 
     async def aclose(self) -> None: ...
 
@@ -289,10 +290,10 @@ shapes:
 
 | Event | Required keys | Exact bounds |
 |---|---|---|
-| `text_delta` | `{"type": "text_delta", "text": str}` | `text` max **65,536** chars |
-| `tool_call` | `{"type": "tool_call", "id": str, "name": str, "arguments": str}` | `id` non-empty, max **256** chars; `name` non-empty, max **256** chars; `arguments` max **65,536** chars |
+| `text_delta` | `{"type": "text_delta", "text": str}` | `text` max **65,536 UTF-8 bytes** |
+| `tool_call` | `{"type": "tool_call", "id": str, "name": str, "arguments": str}` | `id` non-empty, max **256** chars; `name` non-empty, max **256** chars; `arguments` max **65,536 UTF-8 bytes** |
 | `usage` | `{"type": "usage", "input_tokens": int, "output_tokens": int}` | each token count is a non-bool int in **0..1,000,000,000** |
-| `done` | `{"type": "done"}` | no payload |
+| `done` | `{"type": "done"}` | no payload; exactly one terminal done required |
 
 Extra keys are discarded. Unknown event types, non-mapping payloads, missing
 fields, overlong strings, or out-of-range token counts raise

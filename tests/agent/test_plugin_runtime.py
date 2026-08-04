@@ -163,3 +163,42 @@ async def test_packaged_plugin_runtime_rejects_invalid_events_before_history_or_
         message.get("role") == "assistant" and message.get("tool_calls")
         for message in second_call_messages
     )
+
+
+async def test_tool_call_then_no_done_becomes_agent_error_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A tool_call followed by stream exhaustion (no done) must produce an
+    AgentError without dispatching the tool or corrupting history."""
+    provider = _create_runtime_provider(
+        monkeypatch,
+        tmp_path,
+        scripted_turns=[
+            [
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "{}"},
+                # No done event — stream ends here
+            ],
+            [{"type": "text_delta", "text": "recovered"}, {"type": "done"}],
+        ],
+    )
+
+    runtime = AgentRuntime(cast("Any", provider), EchoExecutor())
+    failed = await collect(runtime, "first question")
+
+    error = next(event for event in failed if isinstance(event, AgentError))
+    assert "done" in error.message.lower()
+    # Tool must NOT have been dispatched
+    assert not any(isinstance(event, ToolCallStarted | ToolCallFinished) for event in failed)
+
+    # Recovery: next turn must not see the corrupt tool_call in history
+    recovered = await collect(runtime, "second question")
+    assert recovered[0] == TextDelta(text="recovered")
+    assert isinstance(recovered[-1], TurnComplete)
+
+    inner = cast("Any", provider)._provider
+    second_call_messages = inner.calls[1]
+    assert not any(msg.get("role") == "tool" for msg in second_call_messages)
+    assert not any(
+        msg.get("role") == "assistant" and msg.get("tool_calls") for msg in second_call_messages
+    )

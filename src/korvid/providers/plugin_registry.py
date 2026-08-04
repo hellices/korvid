@@ -122,10 +122,11 @@ def _validate_auth_methods(
             )
     invalid = set(auth_methods) - _ALLOWED_AUTH_METHODS
     if invalid:
+        # Never sort/join/include plugin-controlled values in error messages —
+        # they may contain secrets or unbounded text.
         raise _bounded_error(
             f"provider plugin {_bounded(normalized)!r}: "
-            f"auth_methods contains disallowed values: "
-            f"{', '.join(sorted(invalid))}"
+            f"auth_methods contains {len(invalid)} disallowed value(s)"
         )
     if len(auth_methods) != len(set(auth_methods)):
         raise _bounded_error(

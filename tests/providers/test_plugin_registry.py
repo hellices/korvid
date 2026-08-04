@@ -300,6 +300,37 @@ class TestMetadataValidation:
             with pytest.raises(ProviderPluginError, match="auth_methods"):
                 reg.load_selected("company-llm")
 
+    def test_auth_methods_secret_huge_values_not_in_error(self, plugin_site: Any) -> None:
+        """Disallowed auth_methods with secret/huge values must NOT appear in
+        the error message and must not cause a pre-truncation blowup."""
+        secret_method = "SECRET_BEARER_TOKEN_" + "x" * 5000
+
+        class _SecretAuthPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="SecretAuth",
+                    auth_methods=("api_key", secret_method),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_SecretAuthPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="disallowed") as exc_info:
+                reg.load_selected("company-llm")
+            msg = str(exc_info.value)
+            assert "SECRET_BEARER_TOKEN" not in msg
+            assert len(msg) <= 200
+
     def test_auth_methods_duplicate_rejected(self, plugin_site: Any) -> None:
         """Duplicate entries in auth_methods are rejected."""
 

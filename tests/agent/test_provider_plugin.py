@@ -363,3 +363,114 @@ async def test_validated_aclose_preserves_exactly_once_guard() -> None:
     # Second close must be a no-op (exactly-once guard)
     await wrapped.aclose()
     assert inner.close_calls == 1
+
+
+# --- Finding #2 (round 3): exactly one terminal done ---
+
+
+async def test_validated_stream_zero_done_raises_contract_error() -> None:
+    """Stream exhaustion without a done event must raise ProviderPluginContractError."""
+    provider = _ScriptedProvider([{"type": "text_delta", "text": "hi"}])
+    wrapped = ValidatedPluginProvider(provider)
+
+    with pytest.raises(ProviderPluginContractError, match="without terminal done"):
+        await _collect_events(wrapped)
+
+
+async def test_validated_stream_event_after_done_raises_contract_error() -> None:
+    """Any event after done (including a second done) must raise before yielding."""
+    provider = _ScriptedProvider(
+        [
+            {"type": "text_delta", "text": "hi"},
+            {"type": "done"},
+            {"type": "text_delta", "text": "ghost"},
+        ]
+    )
+    wrapped = ValidatedPluginProvider(provider)
+
+    with pytest.raises(ProviderPluginContractError, match="after terminal done"):
+        await _collect_events(wrapped)
+
+
+async def test_validated_stream_double_done_raises() -> None:
+    """A second done must raise."""
+    provider = _ScriptedProvider([{"type": "done"}, {"type": "done"}])
+    wrapped = ValidatedPluginProvider(provider)
+
+    with pytest.raises(ProviderPluginContractError, match="after terminal done"):
+        await _collect_events(wrapped)
+
+
+async def test_validated_stream_normal_done_passes() -> None:
+    """Normal stream with exactly one terminal done must pass."""
+    provider = _ScriptedProvider(
+        [
+            {"type": "text_delta", "text": "hello"},
+            {"type": "usage", "input_tokens": 5, "output_tokens": 2},
+            {"type": "done"},
+        ]
+    )
+    wrapped = ValidatedPluginProvider(provider)
+    events = await _collect_events(wrapped)
+    assert events == [
+        {"type": "text_delta", "text": "hello"},
+        {"type": "usage", "input_tokens": 5, "output_tokens": 2},
+        {"type": "done"},
+    ]
+
+
+# --- Finding #4 (round 3): UTF-8 byte limits for text and arguments ---
+
+
+async def test_text_delta_accepts_exact_utf8_byte_boundary() -> None:
+    """A text_delta with exactly 65,536 UTF-8 bytes must pass."""
+    # Each CJK char is 3 UTF-8 bytes; 65_536 / 3 = 21845.33 → use 21845 CJK chars (65535 bytes)
+    # then one ASCII byte = 65536 total
+    text = "\u4e00" * 21845 + "x"  # 21845*3 + 1 = 65536 bytes
+    assert len(text.encode("utf-8")) == 65_536
+    provider = _ScriptedProvider([{"type": "text_delta", "text": text}, {"type": "done"}])
+    wrapped = ValidatedPluginProvider(provider)
+    events = await _collect_events(wrapped)
+    assert events[0] == {"type": "text_delta", "text": text}
+
+
+async def test_text_delta_rejects_one_byte_over_utf8_boundary() -> None:
+    """A text_delta with 65,537 UTF-8 bytes must be rejected."""
+    text = "\u4e00" * 21845 + "xy"  # 65537 bytes
+    assert len(text.encode("utf-8")) == 65_537
+    provider = _ScriptedProvider([{"type": "text_delta", "text": text}, {"type": "done"}])
+    wrapped = ValidatedPluginProvider(provider)
+
+    with pytest.raises(ProviderPluginContractError, match=r"text_delta\.text"):
+        await _collect_events(wrapped)
+
+
+async def test_tool_arguments_accepts_exact_utf8_byte_boundary() -> None:
+    """tool_call.arguments with exactly 65,536 UTF-8 bytes must pass."""
+    args = "\u4e00" * 21845 + "x"  # 65536 bytes
+    assert len(args.encode("utf-8")) == 65_536
+    provider = _ScriptedProvider(
+        [
+            {"type": "tool_call", "id": "c1", "name": "run", "arguments": args},
+            {"type": "done"},
+        ]
+    )
+    wrapped = ValidatedPluginProvider(provider)
+    events = await _collect_events(wrapped)
+    assert events[0]["arguments"] == args
+
+
+async def test_tool_arguments_rejects_one_byte_over_utf8_boundary() -> None:
+    """tool_call.arguments with 65,537 UTF-8 bytes must be rejected."""
+    args = "\u4e00" * 21845 + "xy"  # 65537 bytes
+    assert len(args.encode("utf-8")) == 65_537
+    provider = _ScriptedProvider(
+        [
+            {"type": "tool_call", "id": "c1", "name": "run", "arguments": args},
+            {"type": "done"},
+        ]
+    )
+    wrapped = ValidatedPluginProvider(provider)
+
+    with pytest.raises(ProviderPluginContractError, match=r"tool_call\.arguments"):
+        await _collect_events(wrapped)
