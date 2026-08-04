@@ -2,8 +2,9 @@
 
 ## Goal
 
-Evaluate models that users can install on Apple-silicon MacBooks or on-prem
-servers under one standardized AKS serving protocol. Publish task-diagnostic
+Evaluate models that individuals can install and use routinely on
+Apple-silicon MacBooks or consumer Windows PCs under one standardized AKS
+serving protocol. Publish task-diagnostic
 and conversational-exploration scores separately, assign practical grades, and
 recommend models by MacBook unified-memory tier.
 
@@ -13,26 +14,28 @@ The model is the comparison unit. Developer laptop versus AKS is not a
 leaderboard dimension. Laptop runs may guide iteration, but a model receives a
 published score only after it runs on the shared AKS evaluation environment.
 
-The first matrix covers:
+The primary matrix covers practical personal-device tiers:
 
-| Practical MacBook tier | Candidate | Ollama model layer |
-|---|---|---:|
-| 16GB | Phi-4 Mini 3.8B | 2.49GB |
-| 16GB | Qwen3 4B | 2.50GB |
-| 16GB | Llama 3.1 8B | 4.92GB |
-| 16GB | Qwen3 8B | 5.23GB |
-| 16GB | GLM4 9B | 5.46GB |
-| 24GB | Qwen3 14B | 9.28GB |
-| 32GB | Mistral Small 3.1 24B | 15.49GB |
-| 32GB | Devstral 24B | 14.33GB |
-| 32GB | Qwen3 30B-A3B | 18.56GB |
-| 32GB | Qwen3-Coder 30B-A3B | 18.56GB |
-| 32GB | Qwen3 32B | 20.20GB |
-| 64GB | Llama 3.3 70B | 42.52GB |
+| Mac unified memory | Windows baseline | Candidate class |
+|---:|---|---|
+| 8GB | CPU/iGPU, 8GB system RAM | 0.6B–3B; 4B only with short context |
+| 16GB | 8GB VRAM and 16GB+ system RAM | 4B–8B |
+| 24GB | 12GB VRAM and 24GB+ system RAM | 8B–14B |
+| 32GB | 16GB VRAM and 32GB+ system RAM | 14B–24B |
+| 64GB | 24GB VRAM and 48GB+ system RAM | 30B MoE or 32B dense |
 
 The tiers are practical minimum recommendations, not claims that the model
 weights are the only memory consumer. Ollama, KV cache, context length, and the
 operating system need headroom.
+
+Primary candidates are Qwen3 0.6B/1.7B/4B/8B/14B/30B-A3B, Llama 3.2
+1B/3B, Granite 3.2 2B, Phi-4 Mini, Llama 3.1 8B, Mistral Small 3.1,
+Devstral, and Qwen3-Coder 30B-A3B. The 8GB smoke result promotes Qwen3
+1.7B (4/6 with all evidence fetched) and conditionally Qwen3 4B when context
+is kept short. Qwen3 0.6B, Llama 3.2 1B/3B, Granite 3.2 2B, and Phi-4 Mini
+do not reliably complete evidence-driven tool tasks in the current profile.
+Qwen3 32B is an enthusiast reference. Llama 3.3 70B is excluded from
+personal-device recommendations and retained only as a server-class comparison.
 
 ## Evaluation Strategy
 
@@ -160,7 +163,8 @@ dimension.
 
 - All listed candidates receive a smoke result on AKS.
 - Every promoted model receives three task-pack and three journey-pack runs.
-- Results include practical 16GB, 24GB, 32GB, and 64GB MacBook recommendations.
+- Results include practical 8GB, 16GB, 24GB, 32GB, and 64GB MacBook tiers and
+  corresponding consumer Windows VRAM/system-memory guidance.
 - The node pool remains available and can scale to zero after evaluation.
 - The scoreboard is generated from raw results and issue #176 is its single
   tracking location.
