@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
@@ -449,6 +450,9 @@ class _AgentOptionsError(ValueError):
     """Raised when `agent.options` violates the published v1 bounds."""
 
 
+_UNSUPPORTED_AGENT_OPTION = object()
+
+
 def _parse_agent_options(value: Any) -> tuple[dict[str, object], str | None]:
     if not isinstance(value, Mapping):
         return {}, "agent.options must be a mapping with string keys"
@@ -537,9 +541,6 @@ def _parse_agent_option_value(
     )
 
 
-_UNSUPPORTED_AGENT_OPTION = object()
-
-
 def _parse_agent_option_scalar(value: object, *, path: str) -> object:
     if value is None or isinstance(value, bool):
         return value
@@ -560,7 +561,9 @@ def _parse_agent_option_scalar(value: object, *, path: str) -> object:
 
 
 def _raise_if_secret_key_segment(key: str, *, path: str) -> None:
-    normalized = re.sub(r"[^a-z0-9]+", "_", key.strip().lower()).strip("_")
+    normalized = unicodedata.normalize("NFKD", key).casefold().strip()
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
     tokens = {normalized, *(token for token in normalized.split("_") if token)}
     for segment in _SECRET_OPTION_KEY_SEGMENTS:
         if segment in tokens:

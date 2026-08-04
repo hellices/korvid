@@ -11,18 +11,19 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
+from typing import cast
 
 
-def _copy_option_value(value: object) -> object:
+def _freeze_option_value(value: object) -> object:
     if isinstance(value, Mapping):
-        return {key: _copy_option_value(item) for key, item in value.items()}
+        return MappingProxyType({key: _freeze_option_value(item) for key, item in value.items()})
     if isinstance(value, list):
-        return [_copy_option_value(item) for item in value]
+        return tuple(_freeze_option_value(item) for item in value)
     return value
 
 
 def _freeze_options(options: Mapping[str, object]) -> Mapping[str, object]:
-    return MappingProxyType({key: _copy_option_value(value) for key, value in options.items()})
+    return cast("Mapping[str, object]", _freeze_option_value(options))
 
 
 @dataclass(frozen=True)

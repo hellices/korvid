@@ -191,6 +191,23 @@ def test_agent_options_depth_limit_is_exact(tmp_path: Path) -> None:
     assert "max depth 4" in invalid.agent_options_error
 
 
+def test_agent_options_mixed_container_depth_limit_is_exact(tmp_path: Path) -> None:
+    valid = _load_agent_options_config(
+        tmp_path,
+        {"l1": [{"l3": ["ok"]}]},
+    )
+    assert valid.agent_options_error is None
+    assert valid.agent_options["l1"] == [{"l3": ["ok"]}]
+
+    invalid = _load_agent_options_config(
+        tmp_path,
+        {"l1": [{"l3": [{"l5": "boom"}]}]},
+    )
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "max depth 4" in invalid.agent_options_error
+
+
 def test_agent_options_mapping_key_limit_is_exact(tmp_path: Path) -> None:
     valid = _load_agent_options_config(tmp_path, {f"k{i}": i for i in range(64)})
     assert valid.agent_options_error is None
@@ -282,6 +299,7 @@ def test_agent_options_rejects_unsupported_objects(tmp_path: Path) -> None:
         ("api-key", "api_key"),
         ("Authorization", "authorization"),
         ("credential", "credential"),
+        ("pāssword", "password"),
     ],
 )
 def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, expected: str) -> None:

@@ -6,6 +6,7 @@ fetch models -> filterable model list (typed fallback) -> test -> save.
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -586,10 +587,14 @@ def test_agent_settings_options_are_copy_safe_and_immutable() -> None:
     assert dict(settings.options) == {
         "tenant": "platform",
         "nested": {"region": "apac"},
-        "models": ["llama3"],
+        "models": ("llama3",),
     }
+    assert isinstance(settings.options, MappingProxyType)
+    assert isinstance(settings.options["nested"], MappingProxyType)
     with pytest.raises(TypeError, match="mappingproxy"):
         settings.options["new"] = "value"  # type: ignore[index]  # immutability is the test
+    with pytest.raises(TypeError, match="mappingproxy"):
+        settings.options["nested"]["region"] = "emea"  # type: ignore[index]  # immutability is the test
 
 
 async def test_reconnect_preserves_current_options_in_drafted_settings() -> None:
@@ -618,5 +623,5 @@ async def test_reconnect_preserves_current_options_in_drafted_settings() -> None
         assert dict(drafted.options) == {
             "tenant": "platform",
             "features": {"region": "apac"},
-            "fallbacks": ["gpt-4o-mini"],
+            "fallbacks": ("gpt-4o-mini",),
         }
