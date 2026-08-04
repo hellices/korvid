@@ -502,7 +502,7 @@ class AgentRuntime:
                 self._total_out += turn_out + state.out_tok
                 if usage_missing or not state.has_usage:
                     self._estimated = True
-                yield AgentError(message=str(exc))
+                yield AgentError(message=str(exc) or type(exc).__name__)
                 return
 
             _estimate_missing_usage(state, prompt_estimate)

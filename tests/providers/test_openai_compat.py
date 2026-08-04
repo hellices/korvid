@@ -127,6 +127,15 @@ async def test_aclose_closes_owned_client_only() -> None:
     await injected_client.aclose()
 
 
+def test_owned_client_uses_configured_read_timeout() -> None:
+    provider = OpenAICompatProvider(
+        base_url="http://x/v1",
+        model="m1",
+        timeout_seconds=900.0,
+    )
+    assert provider._get_client().timeout.read == 900.0
+
+
 async def test_no_auth_header_without_credentials() -> None:
     cap: dict[str, Any] = {}
 

@@ -10,6 +10,7 @@ Configuration comes from the environment:
 - `KORVID_EVAL_BASE_URL` — OpenAI-compatible endpoint base URL (required)
 - `KORVID_EVAL_MODEL` — model name (required)
 - `KORVID_EVAL_API_KEY` — bearer token, if the endpoint needs one
+- `KORVID_EVAL_TIMEOUT_SECONDS` — read timeout for slow local models (default 60)
 """
 
 from __future__ import annotations
@@ -47,10 +48,22 @@ def provider_factory_from_env(env: Mapping[str, str]) -> Callable[[], Any]:
             " and KORVID_EVAL_MODEL (and KORVID_EVAL_API_KEY if required)."
         )
     api_key = env.get("KORVID_EVAL_API_KEY", "").strip()
+    raw_timeout = env.get("KORVID_EVAL_TIMEOUT_SECONDS", "60").strip()
+    try:
+        timeout_seconds = float(raw_timeout)
+    except ValueError:
+        timeout_seconds = 0
+    if timeout_seconds <= 0:
+        raise SystemExit("KORVID_EVAL_TIMEOUT_SECONDS must be a positive number.")
 
     def factory() -> OpenAICompatProvider:
         credentials = StaticHeaderSource(api_key) if api_key else None
-        return OpenAICompatProvider(base_url, model, credentials=credentials)
+        return OpenAICompatProvider(
+            base_url,
+            model,
+            credentials=credentials,
+            timeout_seconds=timeout_seconds,
+        )
 
     return factory
 

@@ -107,6 +107,26 @@ async def test_provider_error_surfaces() -> None:
     assert isinstance(events[0], AgentError)
 
 
+async def test_provider_error_with_empty_message_names_its_type() -> None:
+    class EmptyMessageProvider(ScriptedProvider):
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            raise TimeoutError()
+            yield  # pragma: no cover
+
+    events = await collect(
+        AgentRuntime(EmptyMessageProvider([]), EchoExecutor()),
+        "x",
+    )
+    error = next(event for event in events if isinstance(event, AgentError))
+    assert error.message == "TimeoutError"
+
+
 async def test_history_persists_across_turns() -> None:
     p = ScriptedProvider(
         [
