@@ -1251,7 +1251,7 @@ class ToolExecutor:
                     expected_uid=pod.uid,
                     expected_owner_uids=replica_uids,
                 )
-            except (ApiStatusError, ValueError) as exc:
+            except Exception as exc:
                 diagnosis = f"unavailable ({exc})"
             block = "\n".join(
                 [

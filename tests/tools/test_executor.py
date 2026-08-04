@@ -1740,14 +1740,14 @@ async def test_diagnose_workload_uses_builtin_deployment_before_discovery() -> N
     assert not out.startswith("ERROR: unknown kind")
 
 
-async def test_diagnose_workload_keeps_parent_and_siblings_when_a_pod_disappears() -> None:
-    class DisappearingPodKube(FakeDiagnoseKube):
+async def test_diagnose_workload_keeps_parent_and_siblings_when_a_pod_read_fails() -> None:
+    class FlakyPodKube(FakeDiagnoseKube):
         async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
             if meta.plural == "pods" and name == "api-1":
-                raise ApiStatusError(404, "pod disappeared during rollout")
+                raise RuntimeError("response decode failed")
             return await super().get_object(meta, namespace, name)
 
-    kube = DisappearingPodKube()
+    kube = FlakyPodKube()
     kube.objects[("deployments", "api")] = {
         "kind": "Deployment",
         "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
@@ -1797,7 +1797,7 @@ async def test_diagnose_workload_keeps_parent_and_siblings_when_a_pod_disappears
     assert not out.startswith("ERROR:")
     assert "ProgressDeadlineExceeded" in out
     assert "POD DIAGNOSIS — default/api-1" in out
-    assert "unavailable (API 404: pod disappeared during rollout)" in out
+    assert "unavailable (response decode failed)" in out
     assert "POD DIAGNOSIS — default/api-2" in out
     assert "CrashLoopBackOff" in out
 
