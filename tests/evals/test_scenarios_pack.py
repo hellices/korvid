@@ -45,6 +45,24 @@ def test_stuck_rollout_accepts_the_compound_workload_evidence_path() -> None:
     )
 
 
+def test_stuck_rollout_accepts_plain_deployment_stuck_wording() -> None:
+    scenario = next(item for item in BUNDLED if item.id == "stuck-rollout")
+    first_group = scenario.must_mention[0]
+    assert "deployment is stuck" in first_group
+    assert "rollout is stalled" in first_group
+
+
+def test_pvc_scenario_accepts_the_compound_pod_evidence_path() -> None:
+    scenario = next(item for item in BUNDLED if item.id == "pvc-pending-no-storageclass")
+    assert any(
+        evidence.tool == "diagnose_pod"
+        and evidence.args == {"pod": "db-0", "namespace": "data"}
+        and evidence.contains == 'storageclass.storage.k8s.io "fast-ssd" not found'
+        for group in scenario.expected_evidence
+        for evidence in group
+    )
+
+
 @pytest.mark.parametrize("scenario", BUNDLED, ids=lambda s: s.id)
 async def test_bundled_evidence_is_reachable_through_the_real_tools(
     scenario: Scenario,
