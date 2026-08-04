@@ -595,10 +595,6 @@ def _build_agent_wiring(
     close_tasks: set[asyncio.Task[None]] = set()
 
     def rebuild_agent(settings: AgentSettings) -> AgentRuntime | None:
-        old = provider_box[0]
-        if old is not None:
-            # Close in the background; the new provider takes over immediately.
-            _close_provider_in_background(old, close_tasks)
         new_provider = create_provider(
             enabled=True,
             provider=settings.provider,
@@ -615,9 +611,15 @@ def _build_agent_wiring(
             plugin_registry=plugin_registry,
             options=settings.options,
         )
-        provider_box[0] = new_provider
         if new_provider is None:
             return None
+        old = provider_box[0]
+        provider_box[0] = new_provider
+        if old is not None:
+            # Transactional swap (issue #171 task 5): keep the previous
+            # provider alive until a replacement exists, so a failed rebuild
+            # does not silently disconnect the still-active runtime.
+            _close_provider_in_background(old, close_tasks)
         # The wizard's rebuild carries its own profile choice (e.g. small
         # when the provider is ollama), composed against the *current*
         # cluster's capabilities and prompt note — a rebuild after a `:ctx`

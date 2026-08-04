@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from korvid.__main__ import _close_provider_in_background
+from korvid.agent.setup import AgentSettings
 from korvid.tools.executor import UIBridge
+from tests.fixtures.provider_plugin.site_helpers import (
+    FIXTURES_DIR,
+    build_dist_info,
+    discover_provider_entry_points,
+)
 
 
 class _BoomProvider:
@@ -1257,6 +1264,173 @@ async def test_disconnect_agent_releases_the_provider(monkeypatch: object) -> No
     assert closed == [True]  # released in the background, not leaked
     disconnect()  # idempotent when already off
     assert provider_box[0] is None
+
+
+def _install_company_plugin_site(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    build_dist_info(
+        tmp_path,
+        dist_name="company_provider",
+        version="1.0",
+        entry_point_name="company-llm",
+        entry_point_value="company_provider:CompanyProviderPlugin",
+    )
+    build_dist_info(
+        tmp_path,
+        dist_name="unselected_provider",
+        version="1.0",
+        entry_point_name="unselected-thing",
+        entry_point_value="unselected_provider:UnselectedPlugin",
+    )
+    monkeypatch.syspath_prepend(str(FIXTURES_DIR))
+    monkeypatch.setattr(
+        "korvid.providers.plugin_registry._discover_entry_points",
+        lambda: discover_provider_entry_points(tmp_path),
+    )
+
+
+def _company_plugin_config() -> Any:
+    from korvid.core.config import KorvidConfig
+
+    return KorvidConfig(
+        agent_enabled=True,
+        agent_provider="company-llm",
+        agent_auth_method="api_key",
+        agent_base_url="https://fixtures.example.test/v1",
+        agent_model="fixture-model",
+        agent_api_key_env="KORVID_TEST_KEY",
+    )
+
+
+def _company_plugin_settings(*, options: dict[str, object] | None = None) -> AgentSettings:
+    return AgentSettings(
+        provider="company-llm",
+        auth_method="api_key",
+        base_url="https://fixtures.example.test/v1",
+        model="fixture-model",
+        api_key_env="KORVID_TEST_KEY",
+        options=options or {},
+    )
+
+
+class _FakeKubeCloseOnly:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def _wait_for_close_count(provider: object, expected: int) -> None:
+    inner = cast("Any", provider)._provider
+    for _ in range(20):
+        if inner.close_calls == expected:
+            return
+        await asyncio.sleep(0.01)
+    assert inner.close_calls == expected
+
+
+async def test_plugin_rebuild_failure_keeps_the_previous_provider_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
+    _install_company_plugin_site(monkeypatch, tmp_path)
+    runtime, _, rebuild, _, _, provider_box, _ = _build_agent_wiring(
+        _company_plugin_config(),
+        cast("Any", object()),
+        {},
+    )
+    assert runtime is not None
+    assert rebuild is not None
+    old_provider = provider_box[0]
+    assert old_provider is not None
+
+    with pytest.raises(ProviderPluginError, match="factory failed"):
+        rebuild(_company_plugin_settings(options={"raise_in_create": True}))
+
+    assert provider_box[0] is old_provider
+    await asyncio.sleep(0.05)
+    assert cast("Any", old_provider)._provider.close_calls == 0
+
+
+async def test_plugin_rebuild_closes_the_replaced_provider_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from korvid.__main__ import _build_agent_wiring
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
+    _install_company_plugin_site(monkeypatch, tmp_path)
+    runtime, _, rebuild, _, _, provider_box, _ = _build_agent_wiring(
+        _company_plugin_config(),
+        cast("Any", object()),
+        {},
+    )
+    assert runtime is not None
+    assert rebuild is not None
+    old_provider = provider_box[0]
+    assert old_provider is not None
+
+    new_runtime = rebuild(_company_plugin_settings())
+
+    assert new_runtime is not None
+    assert provider_box[0] is not None
+    assert provider_box[0] is not old_provider
+    await _wait_for_close_count(old_provider, 1)
+    assert cast("Any", provider_box[0])._provider.close_calls == 0
+
+
+async def test_plugin_disconnect_then_shutdown_does_not_double_close(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from korvid.__main__ import _build_agent_wiring, _shutdown
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
+    _install_company_plugin_site(monkeypatch, tmp_path)
+    runtime, _, _, _, disconnect, provider_box, _ = _build_agent_wiring(
+        _company_plugin_config(),
+        cast("Any", object()),
+        {},
+    )
+    assert runtime is not None
+    provider = provider_box[0]
+    assert provider is not None
+
+    disconnect()
+    await _wait_for_close_count(provider, 1)
+    kube = _FakeKubeCloseOnly()
+    await _shutdown(None, provider_box[0], cast("Any", kube))
+
+    assert cast("Any", provider)._provider.close_calls == 1
+    assert kube.closed is True
+
+
+async def test_plugin_shutdown_closes_the_current_provider_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from korvid.__main__ import _build_agent_wiring, _shutdown
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
+    _install_company_plugin_site(monkeypatch, tmp_path)
+    runtime, _, _, _, _, provider_box, _ = _build_agent_wiring(
+        _company_plugin_config(),
+        cast("Any", object()),
+        {},
+    )
+    assert runtime is not None
+    provider = provider_box[0]
+    assert provider is not None
+
+    kube = _FakeKubeCloseOnly()
+    await _shutdown(None, provider, cast("Any", kube))
+
+    assert cast("Any", provider)._provider.close_calls == 1
+    assert kube.closed is True
 
 
 def test_agent_wiring_creates_shared_plugin_registry(monkeypatch: object) -> None:
