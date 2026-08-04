@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import dataclasses
 import json
+import math
 import os
 import sys
 from collections.abc import Callable, Mapping
@@ -53,7 +54,7 @@ def provider_factory_from_env(env: Mapping[str, str]) -> Callable[[], Any]:
         timeout_seconds = float(raw_timeout)
     except ValueError:
         timeout_seconds = 0
-    if timeout_seconds <= 0:
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise SystemExit("KORVID_EVAL_TIMEOUT_SECONDS must be a positive number.")
 
     def factory() -> OpenAICompatProvider:

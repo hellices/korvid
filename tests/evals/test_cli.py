@@ -65,7 +65,7 @@ def test_provider_factory_applies_eval_timeout() -> None:
     assert provider._get_client().timeout.read == 900.0
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "nope"])
+@pytest.mark.parametrize("value", ["0", "-1", "nope", "nan", "inf"])
 def test_provider_factory_rejects_invalid_eval_timeout(value: str) -> None:
     with pytest.raises(SystemExit, match="KORVID_EVAL_TIMEOUT_SECONDS"):
         provider_factory_from_env(

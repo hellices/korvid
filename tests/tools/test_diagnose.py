@@ -322,6 +322,29 @@ def test_current_health_line_marks_successful_completed_pod_as_completed() -> No
     )
 
 
+def test_current_health_ignores_completed_init_ready_flag() -> None:
+    pod = _crashloop_pod()
+    pod["status"]["phase"] = "Running"
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    pod["status"]["initContainerStatuses"] = [
+        {
+            "name": "migrate",
+            "ready": False,
+            "restartCount": 0,
+            "state": {"terminated": {"exitCode": 0, "reason": "Completed"}},
+        }
+    ]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": "app",
+            "ready": True,
+            "restartCount": 0,
+            "state": {"running": {"startedAt": "x"}},
+        }
+    ]
+    assert diagnose.current_health_line(pod).startswith("HEALTHY NOW")
+
+
 # --- warning events ---------------------------------------------------------
 
 

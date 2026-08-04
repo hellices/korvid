@@ -813,9 +813,6 @@ class ToolExecutor:
     _DIAGNOSE_MAX_PVCS = 5
     #: Non-ready pods expanded under a workload diagnosis.
     _DIAGNOSE_MAX_WORKLOAD_PODS = 3
-    #: Each embedded pod diagnosis gets a fixed share so parent evidence and
-    #: sibling attribution remain visible under the shared ingest cap.
-    _DIAGNOSE_WORKLOAD_POD_BUDGET = 2200
     #: Per-line clamp — event/condition messages and log lines are
     #: cluster-controlled and unbounded.
     _DIAGNOSE_LINE_CLAMP = 240
@@ -1134,7 +1131,10 @@ class ToolExecutor:
         sections: list[tuple[str, list[str]]] = [
             (
                 f"WORKLOAD — Deployment {namespace}/{name}",
-                identity_lines(workload),
+                [
+                    *identity_lines(workload),
+                    self._deployment_status_line(workload),
+                ],
             ),
             (
                 "WORKLOAD CONDITIONS (failing first)",
@@ -1160,8 +1160,26 @@ class ToolExecutor:
 
         if not non_ready:
             report.extend(["POD DIAGNOSES", "  (no non-ready owned pods found)"])
-        for pod in non_ready[: self._DIAGNOSE_MAX_WORKLOAD_PODS]:
-            report.append(f"POD DIAGNOSIS — {namespace}/{pod.name}")
+        selected = non_ready[: self._DIAGNOSE_MAX_WORKLOAD_PODS]
+        omitted = non_ready[self._DIAGNOSE_MAX_WORKLOAD_PODS :]
+        omitted_line = (
+            f"({len(omitted)} more non-ready pod(s) not expanded: "
+            + ", ".join(pod.name for pod in omitted)
+            + ")"
+            if omitted
+            else ""
+        )
+        parent_size = len("\n".join(report))
+        separator_size = len(selected) + (1 if omitted_line else 0)
+        remaining = max(
+            0,
+            MAX_RESULT_CHARS
+            - parent_size
+            - separator_size
+            - (len(omitted_line) if omitted_line else 0),
+        )
+        share = remaining // max(1, len(selected))
+        for pod in selected:
             try:
                 diagnosis = await self._diagnose_pod(
                     {"pod": pod.name, "namespace": namespace},
@@ -1170,20 +1188,29 @@ class ToolExecutor:
                 )
             except (ApiStatusError, ValueError) as exc:
                 diagnosis = f"unavailable ({exc})"
-            report.extend(
-                f"  {line}"
-                for line in compact_result(
-                    diagnosis, self._DIAGNOSE_WORKLOAD_POD_BUDGET
-                ).splitlines()
+            block = "\n".join(
+                [
+                    f"POD DIAGNOSIS — {namespace}/{pod.name}",
+                    *(f"  {line}" for line in diagnosis.splitlines()),
+                ]
             )
-        omitted = non_ready[self._DIAGNOSE_MAX_WORKLOAD_PODS :]
-        if omitted:
-            report.append(
-                f"({len(omitted)} more non-ready pod(s) not expanded: "
-                + ", ".join(pod.name for pod in omitted)
-                + ")"
-            )
-        return compact_result("\n".join(report), MAX_RESULT_CHARS)
+            report.append(compact_result(block, share))
+        if omitted_line:
+            report.append(omitted_line)
+        return "\n".join(report)
+
+    @staticmethod
+    def _deployment_status_line(workload: dict[str, Any]) -> str:
+        spec = workload.get("spec") or {}
+        status = workload.get("status") or {}
+        return (
+            f"desired={spec.get('replicas', 0)} "
+            f"current={status.get('replicas', 0)} "
+            f"updated={status.get('updatedReplicas', 0)} "
+            f"ready={status.get('readyReplicas', 0)} "
+            f"available={status.get('availableReplicas', 0)} "
+            f"unavailable={status.get('unavailableReplicas', 0)}"
+        )
 
     async def _diagnose_workload(self, args: dict[str, Any]) -> str:
         """One-call rollout diagnosis for supported workload kinds."""

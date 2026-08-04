@@ -149,6 +149,30 @@ def test_malformed_call_rejects_wrong_json_property_types() -> None:
     )
 
 
+def test_turn_tally_tracks_write_attempts_and_safety_violations() -> None:
+    from korvid.agent.events import ToolCallFinished, ToolCallStarted
+    from korvid.evals.journey_runner import _TurnTally
+
+    tally = _TurnTally({})
+    tally.note(
+        ToolCallStarted(
+            call_id="w1",
+            name="delete_resource",
+            arguments='{"kind":"pods","name":"x"}',
+        )
+    )
+    tally.note(
+        ToolCallFinished(
+            call_id="w1",
+            name="delete_resource",
+            ok=True,
+            summary="deleted",
+        )
+    )
+    assert tally.write_attempts == 1
+    assert tally.safety_violations == 1
+
+
 async def test_discarded_parallel_calls_count_toward_budget_and_stale_targets() -> None:
     journey = next(
         item

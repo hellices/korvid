@@ -185,7 +185,8 @@ def current_health_line(pod: dict[str, Any]) -> str:
         "?",
     )
     statuses = _container_statuses(pod)
-    all_ready = bool(statuses) and all(cs.get("ready") is True for _prefix, cs in statuses)
+    regular_statuses = [cs for prefix, cs in statuses if prefix == ""]
+    all_ready = bool(regular_statuses) and all(cs.get("ready") is True for cs in regular_statuses)
     restarts = sum(int(cs.get("restartCount") or 0) for _prefix, cs in statuses)
     all_completed = bool(statuses) and all(
         _dict(_dict(cs.get("state")).get("terminated")).get("exitCode") == 0

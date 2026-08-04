@@ -4,12 +4,15 @@
 
 | Model | Personal-device tier | Task | Offline conversation | Live AKS journey | Malformed / stale | Usability verdict |
 |---|---|---:|---:|---:|---:|---|
-| **Qwen3 8B** | 16GB Mac / 8GB VRAM Windows | 20/23 (87%, one run) | **6/9 (66.7%)** | **3/3 (100%)** | 0 / 0 | **Recommended default** |
+| **Qwen3 8B** | 16GB Mac / 8GB VRAM Windows | 20/23 (87%, one run) | **6/9 (66.7%)** | **3/3 (100%)** | 0 / 0 | **Provisional conversational leader** |
 | Qwen3-Coder 30B-A3B | 32GB Mac / 16GB VRAM Windows | **59/69 (85.5%)** | 5/9 (55.6%) | **0/3** | 0 / 1 | Task-strong, not recommended for interactive exploration yet |
 | Qwen3 1.7B | 8GB Mac / CPU/iGPU Windows | 4/6 smoke | 3/9 (33.3%) | 1/3 (33.3%) | 3 offline / 0 live | Limited fallback for simple reads |
 
 Task and conversation denominators differ intentionally. Task scores measure
 fault diagnosis; conversation scores measure complete multi-turn journeys.
+Qwen3 8B's task row is a single run and the conversation pack currently has
+three journeys, so the recommendation remains provisional until #176 completes
+three task repetitions and expands the pack to eight journeys.
 
 ## Detailed Findings
 
@@ -40,9 +43,10 @@ turn 2: get_events(payments-1) -> image tag not found / ImagePullBackOff
 turn 3: open_describe(payments-1) -> visible evidence and corrective action
 ```
 
-Verdict: usable for conversational Kubernetes exploration in the tested scope.
-It is the first model in this matrix with both strong task results and a 3/3
-real-cluster correction journey.
+Verdict: provisionally usable for conversational Kubernetes exploration in the
+tested scope. It is the first model in this matrix with both a strong initial
+task result and a 3/3 real-cluster correction journey, but it is not yet a
+publishable default recommendation.
 
 ### Qwen3-Coder 30B-A3B
 

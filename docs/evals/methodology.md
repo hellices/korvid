@@ -39,6 +39,9 @@ Each turn grades:
 - UI intent such as `open_describe`;
 - malformed calls and runtime errors.
 
+The current pack has three journeys. It is an initial benchmark, not the final
+eight-journey coverage target tracked in #176.
+
 ### 3. Live AKS journeys
 
 The live journey targets actual Kubernetes resources in the dedicated

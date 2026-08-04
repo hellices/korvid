@@ -1529,6 +1529,62 @@ async def test_diagnose_workload_follows_deployment_to_the_failing_pod() -> None
     assert len(out) <= MAX_RESULT_CHARS
 
 
+async def test_diagnose_workload_projects_deployment_replica_status() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 3},
+        "status": {
+            "replicas": 3,
+            "updatedReplicas": 2,
+            "readyReplicas": 1,
+            "availableReplicas": 1,
+            "unavailableReplicas": 2,
+        },
+    }
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert "desired=3 current=3 updated=2 ready=1 available=1 unavailable=2" in out
+
+
+async def test_diagnose_workload_budget_keeps_every_selected_pod_header() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 3},
+        "status": {"replicas": 3},
+    }
+    rs = kube.objects[("replicasets", "api-6f")]
+    rs["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "name": "api"}],
+        }
+    )
+    source = kube.objects[("pods", "api-1")]
+    source["metadata"]["ownerReferences"] = [
+        {"kind": "ReplicaSet", "uid": "rs-uid", "name": "api-6f"}
+    ]
+    for index in range(2, 4):
+        pod = copy.deepcopy(source)
+        pod["metadata"]["name"] = f"api-{index}"
+        pod["metadata"]["uid"] = f"pod-{index}"
+        kube.objects[("pods", f"api-{index}")] = pod
+    kube.log_lines = ["ERROR: " + "x" * 230 for _ in range(200)]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert len(out) <= MAX_RESULT_CHARS
+    for name in ("api-1", "api-2", "api-3"):
+        assert f"POD DIAGNOSIS — default/{name}" in out
+
+
 async def test_diagnose_workload_rejects_unsupported_kinds_with_guidance() -> None:
     out = await _diagnose_executor(FakeDiagnoseKube()).execute(
         "diagnose_workload",

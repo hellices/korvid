@@ -64,12 +64,18 @@ A candidate advances when it achieves all of:
 Promoted candidates run:
 
 - all 23 task scenarios, three repetitions;
-- all eight conversational journeys, three repetitions;
+- the initial three conversational journeys, three repetitions;
 - the same profile, prompt SHA, scenario SHA, serving engine, quantization,
   context length, and warm-up procedure.
 
 Raw JSON records every run. Generated documentation contains means and
 variance; it does not copy ad hoc numbers from issue comments.
+
+The initial three-journey pack validates broad triage/correction, evidence
+pivoting, and healthy stopping. Expanding it to eight journeys (including
+ownership traversal, cross-namespace comparison, and RBAC-limited exploration)
+remains follow-up work tracked by #176; scores in this PR are an initial,
+explicitly partial conversation benchmark.
 
 ## Conversational Journey Evaluation
 
@@ -162,7 +168,9 @@ dimension.
 ## Acceptance Criteria
 
 - All listed candidates receive a smoke result on AKS.
-- Every promoted model receives three task-pack and three journey-pack runs.
+- Every published task grade uses three task-pack runs.
+- Initial conversation results use three journeys × three repetitions and stay
+  labelled partial until #176 expands the pack to eight journeys.
 - Results include practical 8GB, 16GB, 24GB, 32GB, and 64GB MacBook tiers and
   corresponding consumer Windows VRAM/system-memory guidance.
 - The node pool remains available and can scale to zero after evaluation.
