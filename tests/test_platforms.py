@@ -244,6 +244,8 @@ def test_windows_doc_records_verified_support_contract() -> None:
         "3376 passed / 37 skipped / 0 failures",
         "21 opt-in contract-suite skips",
         "16 capability skips",
+        "3 newly classified capability skips",
+        "13 pre-existing platform skips",
         "`~user`",
         "Developer Mode",
         "symlink",

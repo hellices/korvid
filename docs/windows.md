@@ -16,12 +16,13 @@ PRs that touch shared/runtime behavior must also keep the required
 
 - **21 opt-in contract-suite skips** when `KORVID_CONTRACT_RUN_ID` is unset.
 - **16 capability skips**:
-  - **2 `~user`** POSIX account-lookup cases (`tests/core/test_transfer.py`,
-    `tests/ui/test_transfer_picker.py`).
-  - **14 pre-existing platform skips** for POSIX-only permission semantics:
-    7 local transfer permission-bit cases, 4 audit-log mode/directory-fsync
-    cases, 2 transfer-stream late-permission-loss cases, and 1 unreadable CA
-    bundle permission case.
+  - **3 newly classified capability skips**: 2 `~user` POSIX account-lookup
+    cases (`tests/core/test_transfer.py`, `tests/ui/test_transfer_picker.py`)
+    and 1 POSIX directory-fsync failure case.
+  - **13 pre-existing platform skips** for POSIX-only permission semantics:
+    7 local transfer permission-bit cases, 3 audit-log mode cases,
+    2 transfer-stream late-permission-loss cases, and 1 unreadable CA bundle
+    permission case.
 
 ## Current Windows limits
 
