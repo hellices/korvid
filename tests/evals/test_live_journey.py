@@ -109,6 +109,12 @@ def test_live_corrective_turn_requires_an_invalid_image_claim() -> None:
         [],
     )
     assert result.diagnosis_success is False
+    adjective_only = grade(
+        scenario,
+        "Payments: the invalid image is the correct diagnosis.",
+        [],
+    )
+    assert adjective_only.diagnosis_success is False
 
 
 class _ReadSpy(ReadOps):

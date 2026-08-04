@@ -41,7 +41,8 @@ turns:
     grading:
       must_mention:
         - [payments]
-        - [correct, replace, update, fix]
+        - [correct the image, correct the tag, replace the image,
+           update the image, fix the image, fix the tag]
         - [korvid-does-not-exist, nonexistent image, invalid image, invalid tag,
            wrong tag, bad tag]
       must_not_mention:

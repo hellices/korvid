@@ -32,7 +32,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--journeys",
         type=Path,
-        default=bundled_journeys_dir(),
+        default=None,
     )
     parser.add_argument("--reps", type=_positive_int, default=3)
     parser.add_argument("--profile", choices=("full", "small"), default="small")
@@ -51,7 +51,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--namespace",
         default=os.environ.get("KORVID_LIVE_EVAL_NAMESPACE", ""),
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.journeys is None:
+        args.journeys = (
+            Path(__file__).parent / "live_journeys" if args.live else bundled_journeys_dir()
+        )
+    return args
 
 
 def _fake_executor(fixture: Any) -> ToolExecutor:

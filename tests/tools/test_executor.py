@@ -1667,6 +1667,44 @@ async def test_diagnose_workload_prefers_newest_replicaset_pods() -> None:
     assert "POD DIAGNOSIS — default/api-new-1" in out
 
 
+async def test_diagnose_workload_bounds_omitted_pod_names() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 30},
+        "status": {"replicas": 30},
+    }
+    rs = kube.objects[("replicasets", "api-6f")]
+    rs["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "name": "api"}],
+        }
+    )
+    source = kube.objects[("pods", "api-1")]
+    source["metadata"]["ownerReferences"] = [
+        {"kind": "ReplicaSet", "uid": "rs-uid", "name": "api-6f"}
+    ]
+    for index in range(2, 31):
+        pod = copy.deepcopy(source)
+        pod["metadata"]["name"] = f"api-{index}-" + "x" * 200
+        pod["metadata"]["uid"] = f"pod-{index}"
+        kube.objects[("pods", pod["metadata"]["name"])] = pod
+    kube.log_lines = ["ERROR: useful evidence"]
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert len(out) <= MAX_RESULT_CHARS
+    assert "(27 more non-ready pod(s) not expanded:" in out
+    assert "useful evidence" in out
+    omitted_line = next(line for line in out.splitlines() if "more non-ready pod(s)" in line)
+    assert len(omitted_line) <= 1_300
+
+
 async def test_diagnose_workload_rejects_unsupported_kinds_with_guidance() -> None:
     out = await _diagnose_executor(FakeDiagnoseKube()).execute(
         "diagnose_workload",

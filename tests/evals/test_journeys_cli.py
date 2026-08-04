@@ -38,6 +38,7 @@ def test_journey_cli_accepts_live_mode_and_outputs() -> None:
     assert args.live is True
     assert args.out.name == "report.md"
     assert args.json.name == "report.json"
+    assert args.journeys.name == "live_journeys"
 
 
 async def test_journey_cli_rejects_empty_pack(

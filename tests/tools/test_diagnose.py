@@ -362,6 +362,24 @@ def test_current_health_does_not_equate_ready_with_healthy() -> None:
     assert "HEALTHY" not in verdict
 
 
+def test_current_health_reports_terminating_before_ready() -> None:
+    pod = _crashloop_pod()
+    pod["metadata"]["deletionTimestamp"] = "2026-07-27T07:59:00Z"
+    pod["status"]["phase"] = "Running"
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": "app",
+            "ready": True,
+            "restartCount": 0,
+            "state": {"running": {"startedAt": "x"}},
+        }
+    ]
+    assert diagnose.current_health_line(pod) == (
+        "TERMINATING NOW — deletionTimestamp=2026-07-27T07:59:00Z"
+    )
+
+
 # --- warning events ---------------------------------------------------------
 
 

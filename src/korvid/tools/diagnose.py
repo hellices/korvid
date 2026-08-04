@@ -174,6 +174,9 @@ def condition_lines(pod: dict[str, Any]) -> list[str]:
 def current_health_line(pod: dict[str, Any]) -> str:
     """Current pod health, explicitly separated from restart history."""
     status = _status(pod)
+    deletion_timestamp = _dict(pod.get("metadata")).get("deletionTimestamp")
+    if deletion_timestamp:
+        return f"TERMINATING NOW — deletionTimestamp={deletion_timestamp}"
     phase = str(status.get("phase") or "?")
     conditions = status.get("conditions")
     ready = next(

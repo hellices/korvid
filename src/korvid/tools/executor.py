@@ -1224,7 +1224,8 @@ class ToolExecutor:
 
         omitted_line = (
             f"({len(omitted)} more non-ready pod(s) not expanded: "
-            + ", ".join(pod.name for pod in omitted)
+            + ", ".join(_clamp(pod.name) for pod in omitted[:5])
+            + (", …" if len(omitted) > 5 else "")
             + ")"
             if omitted
             else ""
