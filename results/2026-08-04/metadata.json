@@ -1,0 +1,27 @@
+{
+  "date": "2026-08-04",
+  "archive": "artifacts.tar.gz",
+  "serving": {
+    "engine": "Ollama",
+    "version": "0.32.5",
+    "node": "Standard_D32s_v5 Spot",
+    "zone": "koreacentral-2",
+    "profile": "small",
+    "timeout_seconds": 300
+  },
+  "source_revisions": {
+    "task": "25649a3",
+    "offline_conversation": "9585ee7",
+    "live_conversation_corrected": "8e15c52"
+  },
+  "live_target": {
+    "cluster": "aks-korvid-contract-test",
+    "namespace_deleted": true,
+    "cluster_stopped_after_run": true
+  },
+  "publishable_live_results_in_archive": [
+    "2026-08-04/live-journeys/qwen3-1.7b.json",
+    "2026-08-04/live-journeys/qwen3-8b-r2.json",
+    "2026-08-04/live-journeys/qwen3-coder-30b.json"
+  ]
+}
