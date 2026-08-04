@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from korvid.evals.grader import grade
 from korvid.evals.journey import bundled_journeys_dir, load_journey, load_journeys
+from korvid.evals.scenario import Scenario
 
 
 def _write(path: Path, text: str) -> Path:
@@ -170,3 +172,25 @@ def test_bundled_journey_pack_has_three_conversational_behaviors() -> None:
         "triage-and-correct",
     }
     assert all(len(journey.turns) >= 2 for journey in journeys)
+
+
+def test_triage_requires_an_explicit_priority_not_just_both_names() -> None:
+    journey = next(
+        item for item in load_journeys(bundled_journeys_dir()) if item.id == "triage-and-correct"
+    )
+    turn = journey.turns[0]
+    scenario = Scenario(
+        id="priority",
+        question=turn.user,
+        screen=turn.screen,
+        root_cause=journey.root_cause,
+        must_mention=turn.must_mention,
+        must_not_mention=turn.must_not_mention,
+        expected_evidence=turn.expected_evidence,
+    )
+    result = grade(
+        scenario,
+        "Checkout and payments both need attention.",
+        [],
+    )
+    assert result.diagnosis_success is False

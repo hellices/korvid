@@ -44,7 +44,7 @@ async def test_run_journey_persists_history_and_honors_user_correction() -> None
             ),
             {"type": "done"},
         ],
-        _text("checkout and payments need attention; inspect payments first."),
+        _text("checkout and payments need attention; inspect checkout first."),
         [
             _call(
                 "diagnose_pod",

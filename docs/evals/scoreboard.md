@@ -4,14 +4,18 @@
 
 | Model | Personal-device tier | Task | Offline conversation | Live AKS journey | Malformed / stale | Usability verdict |
 |---|---|---:|---:|---:|---:|---|
-| **Qwen3 8B** | 16GB Mac / 8GB VRAM Windows | 20/23 (87%, one run) | **3/9 (33.3%)** | **3/3 (100%)** | 0 / 0 | **Provisional conversational leader** |
-| Qwen3-Coder 30B-A3B | 32GB Mac / 16GB VRAM Windows | **59/69 (85.5%)** | 2/9 (22.2%) | **0/3** | 0 / 1 | Task-strong, not recommended for interactive exploration yet |
-| Qwen3 1.7B | 8GB Mac / CPU/iGPU Windows | 4/6 smoke | 1/9 (11.1%) | 1/3 (33.3%) | 1 offline / 0 live | Limited fallback for simple reads |
+| Qwen3 8B | 16GB Mac / 8GB VRAM Windows | 20/23 (87%, one run) | rerun required | rerun required | — | candidate |
+| Qwen3-Coder 30B-A3B | 32GB Mac / 16GB VRAM Windows | **59/69 (85.5%)** | rerun required | rerun required | — | Task A; conversation pending |
+| Qwen3 1.7B | 8GB Mac / CPU/iGPU Windows | 4/6 smoke | rerun required | rerun required | — | limited candidate |
 
 Task and conversation denominators differ intentionally. Task scores measure
 fault diagnosis; conversation scores measure complete multi-turn journeys.
 Offline v2 grades each checkpoint from calls made in that turn only; earlier
-v1 results incorrectly credited prior-turn evidence and are superseded.
+v1 results incorrectly credited prior-turn evidence and are superseded. Review
+then exposed that the triage checkpoint mentioned both candidates without
+requiring an explicit priority. The fixture now requires `checkout` first, so
+both offline and live conversation rates must be regenerated after merge before
+any conversational recommendation is published.
 Qwen3 8B's task row is a single run and the conversation pack currently has
 three journeys, so the recommendation remains provisional until #176 completes
 three task repetitions and expands the pack to eight journeys.
@@ -23,7 +27,7 @@ therefore has the required three-run dispersion evidence.
 
 ## Detailed Findings
 
-### Qwen3 8B
+### Qwen3 8B (superseded exploratory conversation runs)
 
 Strengths:
 
@@ -50,12 +54,9 @@ turn 2: get_events(payments-1) -> image tag not found / ImagePullBackOff
 turn 3: open_describe(payments-1) -> visible evidence and corrective action
 ```
 
-Verdict: provisionally usable for conversational Kubernetes exploration in the
-tested scope. It is the first model in this matrix with both a strong initial
-task result and a 3/3 real-cluster correction journey, but it is not yet a
-publishable default recommendation.
+Verdict: candidate for post-merge rerun; no current conversational grade.
 
-### Qwen3-Coder 30B-A3B
+### Qwen3-Coder 30B-A3B (superseded exploratory conversation runs)
 
 Strengths:
 
@@ -78,7 +79,7 @@ Conversation weaknesses:
 Verdict: useful as a task-oriented diagnostic model, but currently less usable
 than Qwen3 8B for interactive correction and concise exploration.
 
-### Qwen3 1.7B
+### Qwen3 1.7B (superseded exploratory conversation runs)
 
 Strengths:
 

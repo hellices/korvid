@@ -9,6 +9,8 @@ turns:
       must_mention:
         - [checkout]
         - [payments]
+        - [checkout first, prioritize checkout, inspect checkout first,
+           checkout should be inspected first]
       must_not_mention:
         - [healthy namespace, no issues]
       expected_evidence:
