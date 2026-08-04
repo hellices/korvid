@@ -599,9 +599,9 @@ def test_save_agent_config_preserves_restrictive_file_mode(tmp_path: Path) -> No
         chmod_calls: list[tuple[object, int]] = []
         real_chmod = os.chmod
 
-        def spy_chmod(path: object, mode: int, *args: object, **kw: object) -> None:
+        def spy_chmod(path: Path, mode: int) -> None:
             chmod_calls.append((path, mode))
-            real_chmod(path, mode, *args, **kw)  # type: ignore[arg-type]
+            real_chmod(path, mode)
 
         from unittest.mock import patch
 
