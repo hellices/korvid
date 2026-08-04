@@ -4,12 +4,14 @@
 
 | Model | Personal-device tier | Task | Offline conversation | Live AKS journey | Malformed / stale | Usability verdict |
 |---|---|---:|---:|---:|---:|---|
-| **Qwen3 8B** | 16GB Mac / 8GB VRAM Windows | 20/23 (87%, one run) | **6/9 (66.7%)** | **3/3 (100%)** | 0 / 0 | **Provisional conversational leader** |
-| Qwen3-Coder 30B-A3B | 32GB Mac / 16GB VRAM Windows | **59/69 (85.5%)** | 5/9 (55.6%) | **0/3** | 0 / 1 | Task-strong, not recommended for interactive exploration yet |
-| Qwen3 1.7B | 8GB Mac / CPU/iGPU Windows | 4/6 smoke | 3/9 (33.3%) | 1/3 (33.3%) | 3 offline / 0 live | Limited fallback for simple reads |
+| **Qwen3 8B** | 16GB Mac / 8GB VRAM Windows | 20/23 (87%, one run) | **3/9 (33.3%)** | **3/3 (100%)** | 0 / 0 | **Provisional conversational leader** |
+| Qwen3-Coder 30B-A3B | 32GB Mac / 16GB VRAM Windows | **59/69 (85.5%)** | 2/9 (22.2%) | **0/3** | 0 / 1 | Task-strong, not recommended for interactive exploration yet |
+| Qwen3 1.7B | 8GB Mac / CPU/iGPU Windows | 4/6 smoke | 1/9 (11.1%) | 1/3 (33.3%) | 1 offline / 0 live | Limited fallback for simple reads |
 
 Task and conversation denominators differ intentionally. Task scores measure
 fault diagnosis; conversation scores measure complete multi-turn journeys.
+Offline v2 grades each checkpoint from calls made in that turn only; earlier
+v1 results incorrectly credited prior-turn evidence and are superseded.
 Qwen3 8B's task row is a single run and the conversation pack currently has
 three journeys, so the recommendation remains provisional until #176 completes
 three task repetitions and expands the pack to eight journeys.
@@ -29,11 +31,11 @@ Strengths:
 
 Weaknesses:
 
-- offline `logs-to-events` passed only 1/3: it sometimes reused existing
-  diagnosis rather than explicitly fetching events, or omitted the kubelet
-  explanation;
-- offline `triage-and-correct` passed 2/3 because one run fetched a manifest
-  instead of the declared diagnostic evidence.
+- offline `healthy-stop` passed 0/3 because the final checkpoint did not perform
+  its declared verification read (one run also hedged the initial health claim);
+- offline `logs-to-events` passed 0/3: it reused prior evidence or fetched a
+  manifest instead of making the requested events pivot;
+- offline `triage-and-correct` passed 3/3 with turn-local evidence.
 
 Live representative sequence:
 
@@ -58,7 +60,11 @@ Strengths:
 
 Conversation weaknesses:
 
-- over-explored simple turns and exceeded call budgets;
+- `healthy-stop` passed 0/3 due unnecessary follow-up diagnosis or no final
+  verification read;
+- `logs-to-events` passed 2/3;
+- `triage-and-correct` passed 0/3 due over-exploration and missed checkpoint
+  evidence;
 - after “payments, not checkout,” one live run called checkout again;
 - one live run described both faults but failed to state the requested payments
   ImagePullBackOff cause;
@@ -77,11 +83,11 @@ Strengths:
 
 Weaknesses:
 
-- offline malformed calls appeared in 3 of 9 journeys;
+- one malformed call appeared in the nine offline journey runs;
 - often skipped the required evidence tool on follow-up turns;
 - sometimes lost the requested payments focus even without making a stale tool
   call;
-- only 1/3 real-cluster journeys completed.
+- only 1/3 offline triage journeys and 1/3 real-cluster journeys completed.
 
 Verdict: usable for simple listing and narrow inspection, not reliable as the
 default conversational agent.
@@ -103,6 +109,7 @@ returned to zero nodes.
 Generated files are kept off the source branch:
 
 - [2026-08-04 artifact directory](https://github.com/hellices/korvid/tree/eval-results/results/2026-08-04)
+- [turn-local conversation rerun](https://github.com/hellices/korvid/tree/eval-results/results/2026-08-04-r2)
 - [compressed raw artifacts](https://github.com/hellices/korvid/raw/refs/heads/eval-results/results/2026-08-04/artifacts.tar.gz)
 - [metadata](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-04/metadata.json)
 - [SHA-256 checksums](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-04/SHA256SUMS)

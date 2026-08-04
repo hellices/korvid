@@ -242,6 +242,7 @@ async def _run_once(
     results: list[JourneyTurnResult] = []
     try:
         for turn in journey.turns:
+            record_start = len(executor.records)
             tally = _TurnTally(tool_schemas)
             started = time.monotonic()
             async for event in runtime.run_turn(turn.user, turn.screen):
@@ -249,7 +250,7 @@ async def _run_once(
             result = grade(
                 _scenario_for_turn(journey, turn),
                 tally.answer,
-                executor.records,
+                executor.records[record_start:],
             )
             forbidden = sum(
                 1

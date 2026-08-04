@@ -32,7 +32,8 @@ real.
 
 Each turn grades:
 
-- answer claims and cumulative evidence;
+- answer claims and evidence fetched during that turn (prior-turn evidence
+  cannot satisfy a later checkpoint);
 - calls made during that turn;
 - forbidden stale targets after a user correction;
 - maximum useful-call budget;

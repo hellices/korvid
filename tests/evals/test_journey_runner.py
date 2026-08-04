@@ -134,6 +134,38 @@ async def test_run_journey_fails_redundant_turn_budget() -> None:
     assert report.runs[0].turns[1].success is False
 
 
+async def test_each_turn_must_fetch_its_own_required_evidence() -> None:
+    journey = next(
+        item
+        for item in load_journeys(
+            __import__(
+                "korvid.evals.journey", fromlist=["bundled_journeys_dir"]
+            ).bundled_journeys_dir()
+        )
+        if item.id == "healthy-stop"
+    )
+    script: list[list[dict[str, Any]]] = [
+        [
+            _call("list_resources", {"kind": "pods", "namespace": "catalog"}, "c1"),
+            {"type": "done"},
+        ],
+        _text("The namespace is healthy."),
+        _text("No further investigation is needed; stop here."),
+    ]
+    report = await run_journey(
+        journey,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda fixture: ToolExecutor(
+            FakeKubeClient(fixture), builtin_aliases(), ui=RecordingUI()
+        ),
+        repetitions=1,
+        profile="small",
+    )
+    second = report.runs[0].turns[1]
+    assert second.grade.evidence_fetched is False
+    assert second.success is False
+
+
 def test_malformed_call_rejects_wrong_json_property_types() -> None:
     from korvid.agent.profiles import build_profile
     from korvid.evals.journey_runner import _malformed_call
