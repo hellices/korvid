@@ -1093,12 +1093,15 @@ class ToolExecutor:
     ) -> list[str]:
         metadata = workload.get("metadata") or {}
         raw_uid = metadata.get("uid")
-        events = await self._kube.list_events_for(
-            namespace,
-            name,
-            kind="Deployment",
-            uid=str(raw_uid) if raw_uid else None,
-        )
+        try:
+            events = await self._kube.list_events_for(
+                namespace,
+                name,
+                kind="Deployment",
+                uid=str(raw_uid) if raw_uid else None,
+            )
+        except Exception as exc:
+            return [f"unavailable ({exc})"]
         return warning_event_lines(events) or ["(no warning events)"]
 
     @staticmethod

@@ -1791,6 +1791,46 @@ async def test_diagnose_workload_rejects_same_name_replacement_uid() -> None:
     assert "UID changed from original-uid to replacement-uid" in out
 
 
+async def test_diagnose_workload_keeps_status_when_deployment_events_fail() -> None:
+    class EventsDeniedKube(FakeDiagnoseKube):
+        async def list_events_for(
+            self,
+            namespace: str,
+            name: str,
+            *,
+            kind: str | None = None,
+            uid: str | None = None,
+        ) -> list[dict[str, Any]]:
+            if kind == "Deployment":
+                raise ApiStatusError(403, "events forbidden")
+            return await super().list_events_for(namespace, name, kind=kind, uid=uid)
+
+    kube = EventsDeniedKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 2},
+        "status": {
+            "replicas": 2,
+            "readyReplicas": 1,
+            "conditions": [
+                {
+                    "type": "Progressing",
+                    "status": "False",
+                    "reason": "ProgressDeadlineExceeded",
+                }
+            ],
+        },
+    }
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert not out.startswith("ERROR:")
+    assert "ProgressDeadlineExceeded" in out
+    assert "unavailable (API 403: events forbidden)" in out
+
+
 def test_compact_result_honors_tiny_limits() -> None:
     """The output-never-exceeds-limit contract must hold for any input: a
     limit shorter than the truncation marker cannot fit the marker, so it

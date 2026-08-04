@@ -78,7 +78,11 @@ async def _run(args: argparse.Namespace) -> list[JourneyReport]:
             args.context,
             args.namespace,
         )
-        journeys = [retarget_journey_namespace(journey, args.namespace) for journey in journeys]
+        try:
+            journeys = [retarget_journey_namespace(journey, args.namespace) for journey in journeys]
+        except Exception:
+            await live_environment.close()
+            raise
         executor_factory: Callable[[Any], ToolExecutor] = live_environment.executor_factory
     else:
         executor_factory = _fake_executor

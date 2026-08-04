@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -47,6 +48,70 @@ async def test_journey_cli_rejects_empty_pack(
     args = _parse_args(["--journeys", str(tmp_path)])
     with pytest.raises(SystemExit, match="no journey YAML files"):
         await _run(args)
+
+
+async def test_live_cli_closes_environment_when_retargeting_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "cluster-wide.yaml").write_text(
+        """
+id: cluster-wide
+root_cause: none
+turns:
+  - user: inspect
+    screen: nodes
+    grading:
+      must_mention: [healthy]
+      must_not_mention: [broken]
+      expected_evidence:
+        - tool: list_resources
+          args: {kind: nodes}
+          contains: node
+  - user: stop
+    screen: nodes
+    grading:
+      must_mention: [stop]
+      must_not_mention: [broken]
+      expected_evidence:
+        - tool: list_resources
+          args: {kind: nodes}
+          contains: node
+cluster: {objects: [], events: [], logs: {}}
+"""
+    )
+    monkeypatch.setenv("KORVID_EVAL_BASE_URL", "http://localhost:1/v1")
+    monkeypatch.setenv("KORVID_EVAL_MODEL", "model")
+
+    class FakeLiveEnvironment:
+        closed = False
+        last: ClassVar[FakeLiveEnvironment | None] = None
+
+        @classmethod
+        async def connect(cls, context: str, namespace: str) -> FakeLiveEnvironment:
+            cls.last = cls()
+            return cls.last
+
+        async def close(self) -> None:
+            self.closed = True
+
+    import korvid.evals.live_journey as live_module
+
+    monkeypatch.setattr(live_module, "LiveJourneyEnvironment", FakeLiveEnvironment)
+    args = _parse_args(
+        [
+            "--live",
+            "--context",
+            "aks-korvid-contract-test",
+            "--namespace",
+            "korvid-agent-eval-run",
+            "--journeys",
+            str(tmp_path),
+        ]
+    )
+    with pytest.raises(ValueError, match="no namespaced evidence"):
+        await _run(args)
+    assert FakeLiveEnvironment.last is not None
+    assert FakeLiveEnvironment.last.closed is True
 
 
 def test_journey_exit_code_prints_turn_errors(
