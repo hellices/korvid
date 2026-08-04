@@ -7,6 +7,7 @@ application configuration (AGENTS.md layer rules).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import Mapping
@@ -141,21 +142,18 @@ def _create_via_plugin(
 ) -> LLMProvider | None:
     """Route an unknown provider name through the plugin registry.
 
-    Returns None (agent disabled) when there is no registry or the plugin
-    fails at any stage. Credentials are built first and closed on failure.
+    Returns None when there is no registry. Raises ``ProviderPluginError``
+    on any plugin failure — the caller decides whether to convert the error
+    to a warning (initial startup) or let it propagate (rebuild).
     """
     if plugin_registry is None:
         logger.warning("unknown agent provider %r — agent disabled", provider_label)
         return None
 
     from korvid.agent.provider_plugin import ProviderPluginConfig
-    from korvid.providers.plugin_registry import ProviderPluginError
 
-    try:
-        plugin_registry.load_selected(name)
-    except ProviderPluginError as exc:
-        logger.warning("provider plugin %r failed: %s — agent disabled", name, exc)
-        return None
+    # load_selected may raise ProviderPluginError — let it propagate.
+    plugin_registry.load_selected(name)
 
     # Build credentials first (validates auth config) then close on failure.
     credentials: CredentialSource | None = None
@@ -175,25 +173,40 @@ def _create_via_plugin(
 
     try:
         return plugin_registry.create(name, config, credentials)
-    except ProviderPluginError as exc:
-        logger.warning("provider plugin %r creation failed: %s — agent disabled", name, exc)
+    except Exception:
         _close_credentials(credentials)
-        return None
+        raise
+
+
+# Strong references for credential-close tasks — mirrors _close_provider_in_background
+# in __main__.py so fire-and-forget aclose() tasks aren't garbage-collected.
+_cred_close_tasks: set[asyncio.Task[None]] = set()
 
 
 def _close_credentials(credentials: CredentialSource | None) -> None:
-    """Best-effort async close for credentials when plugin construction fails."""
+    """Best-effort async close for credentials when plugin construction fails.
+
+    Uses a strong-reference set with a done-callback that discards the task
+    and consumes any exception at debug level, matching the
+    ``_close_provider_in_background`` pattern in ``__main__``.
+    """
     if credentials is None:
         return
-    import asyncio
 
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    # Store a strong reference so the task isn't garbage-collected.
+
     task = loop.create_task(credentials.aclose())
-    task.add_done_callback(lambda t: None)
+    _cred_close_tasks.add(task)
+
+    def _reap(t: asyncio.Task[None]) -> None:
+        _cred_close_tasks.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            logger.debug("credential close failed", exc_info=t.exception())
+
+    task.add_done_callback(_reap)
 
 
 class _AuthMisconfigured(Exception):

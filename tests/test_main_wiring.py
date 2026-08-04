@@ -1297,7 +1297,13 @@ def test_agent_wiring_creates_shared_plugin_registry(monkeypatch: object) -> Non
 
 def test_agent_wiring_initial_plugin_error_becomes_warning(monkeypatch: object) -> None:
     """A ProviderPluginError at initial creation must become a startup warning
-    — the app remains operational with provider=None."""
+    — the app remains operational with provider=None.
+
+    Uses a production-real path: a fake ProviderPluginRegistry whose
+    load_selected raises ProviderPluginError is injected via the
+    ProviderPluginRegistry constructor in __main__, flowing through
+    _create_initial_provider → create_provider → _create_via_plugin.
+    """
     import pytest
 
     mp = monkeypatch
@@ -1307,10 +1313,17 @@ def test_agent_wiring_initial_plugin_error_becomes_warning(monkeypatch: object) 
     from korvid.core.config import KorvidConfig
     from korvid.providers.plugin_registry import ProviderPluginError
 
-    def boom_create(**kwargs: Any) -> None:
-        raise ProviderPluginError("bad plugin entrypoint")
+    class _BoomRegistry:
+        """Fake registry whose load_selected always raises."""
 
-    mp.setattr("korvid.providers.registry.create_provider", boom_create)
+        def load_selected(self, name: str) -> None:
+            raise ProviderPluginError("bad plugin entrypoint")
+
+    # Replace ProviderPluginRegistry() in __main__ with our fake
+    mp.setattr(
+        "korvid.providers.plugin_registry.ProviderPluginRegistry",
+        lambda: _BoomRegistry(),
+    )
 
     config = KorvidConfig(
         agent_enabled=True,
@@ -1319,13 +1332,20 @@ def test_agent_wiring_initial_plugin_error_becomes_warning(monkeypatch: object) 
         agent_base_url="http://x/v1",
         agent_model="m",
     )
+    warnings: list[str] = []
     kube_stub = cast("Any", object())
     runtime, configurator, _rebuild, _, _, provider_box, _ = _build_agent_wiring(
-        config, kube_stub, {}
+        config,
+        kube_stub,
+        {},
+        startup_warnings=warnings,
     )
     assert runtime is None  # provider disabled, not a crash
     assert provider_box[0] is None
     assert configurator is not None  # wizard must remain usable
+    assert len(warnings) == 1
+    assert "Provider plugin failed" in warnings[0]
+    assert "bad plugin entrypoint" in warnings[0]
 
 
 async def test_agent_wiring_rebuild_passes_plugin_registry(monkeypatch: object) -> None:

@@ -297,7 +297,8 @@ def test_plugin_receives_credentials_and_config_only(monkeypatch: pytest.MonkeyP
 async def test_plugin_credentials_closed_on_construction_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If plugin construction fails, credentials built for it must be closed."""
+    """If plugin construction fails, credentials built for it must be closed
+    via a strong-referenced task that consumes close errors."""
     from unittest.mock import MagicMock
 
     from korvid.agent.provider_plugin import ProviderPluginMetadata
@@ -326,20 +327,71 @@ async def test_plugin_credentials_closed_on_construction_failure(
 
     import asyncio
 
-    p = create_provider(
-        enabled=True,
-        provider="fail-llm",
-        auth_method="api_key",
-        base_url="http://x/v1",
-        model="m",
-        api_key_env="K",
-        plugin_registry=registry,
-    )
-    assert p is None
-    # Credentials aclose is scheduled as a background task
+    with pytest.raises(ProviderPluginError, match="boom"):
+        create_provider(
+            enabled=True,
+            provider="fail-llm",
+            auth_method="api_key",
+            base_url="http://x/v1",
+            model="m",
+            api_key_env="K",
+            plugin_registry=registry,
+        )
+    # Credentials aclose is scheduled as a background task with strong ref
     for _ in range(5):
         await asyncio.sleep(0)
     assert closed == [True]
+
+
+async def test_credential_close_consumes_exceptions_without_secret_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If credential.aclose() raises, the error is consumed/logged
+    without leaking secret payload."""
+    from unittest.mock import MagicMock
+
+    from korvid.agent.provider_plugin import ProviderPluginMetadata
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    meta = ProviderPluginMetadata(
+        api_version=1, name="leak-llm", display_name="Leak", auth_methods=("api_key",)
+    )
+    registry = MagicMock()
+    registry.load_selected.return_value = MagicMock(metadata=meta)
+    registry.create.side_effect = ProviderPluginError("factory error")
+
+    close_called: list[bool] = []
+
+    class ExplodingCred:
+        async def headers(self) -> dict[str, str]:
+            return {"Authorization": "Bearer x"}
+
+        async def aclose(self) -> None:
+            close_called.append(True)
+            raise RuntimeError("SUPER_SECRET_TOKEN_xyz123 leaked in close")
+
+    def patched_build(name: str, auth_method: str | None, api_key_env: str | None) -> ExplodingCred:
+        return ExplodingCred()
+
+    monkeypatch.setattr("korvid.providers.registry.build_credentials", patched_build)
+
+    import asyncio
+
+    with pytest.raises(ProviderPluginError, match="factory error"):
+        create_provider(
+            enabled=True,
+            provider="leak-llm",
+            auth_method="api_key",
+            base_url="http://x/v1",
+            model="m",
+            api_key_env="K",
+            plugin_registry=registry,
+        )
+    # Let the close task run and fail
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert close_called == [True]
+    # No unhandled-task-exception: the done callback consumed it
 
 
 def test_unknown_without_registry_returns_none() -> None:
@@ -359,7 +411,7 @@ def test_unknown_without_registry_returns_none() -> None:
 
 
 def test_invalid_options_disable_only_the_plugin() -> None:
-    """A ProviderPluginError from the registry disables the provider (returns None)."""
+    """A ProviderPluginError from the registry propagates — callers decide policy."""
     from unittest.mock import MagicMock
 
     from korvid.providers.plugin_registry import ProviderPluginError
@@ -367,16 +419,42 @@ def test_invalid_options_disable_only_the_plugin() -> None:
     registry = MagicMock()
     registry.load_selected.side_effect = ProviderPluginError("bad plugin")
 
-    p = create_provider(
-        enabled=True,
-        provider="bad-plugin",
-        auth_method=None,
-        base_url="http://x/v1",
-        model="m",
-        api_key_env=None,
-        plugin_registry=registry,
+    with pytest.raises(ProviderPluginError, match="bad plugin"):
+        create_provider(
+            enabled=True,
+            provider="bad-plugin",
+            auth_method=None,
+            base_url="http://x/v1",
+            model="m",
+            api_key_env=None,
+            plugin_registry=registry,
+        )
+
+
+def test_plugin_create_failure_propagates() -> None:
+    """ProviderPluginError from registry.create() must propagate, not be swallowed."""
+    from unittest.mock import MagicMock
+
+    from korvid.agent.provider_plugin import ProviderPluginMetadata
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    meta = ProviderPluginMetadata(
+        api_version=1, name="fail-llm", display_name="Fail", auth_methods=("none",)
     )
-    assert p is None
+    registry = MagicMock()
+    registry.load_selected.return_value = MagicMock(metadata=meta)
+    registry.create.side_effect = ProviderPluginError("factory boom")
+
+    with pytest.raises(ProviderPluginError, match="factory boom"):
+        create_provider(
+            enabled=True,
+            provider="fail-llm",
+            auth_method="none",
+            base_url="http://x/v1",
+            model="m",
+            api_key_env=None,
+            plugin_registry=registry,
+        )
 
 
 def test_none_when_provider_not_a_string() -> None:
