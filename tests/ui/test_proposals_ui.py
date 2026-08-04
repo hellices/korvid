@@ -1227,15 +1227,34 @@ async def test_proposal_outcome_audits_bind_to_the_proposal_context(tmp_path: Pa
 
 async def test_proposals_changed_during_teardown_does_not_raise(tmp_path: Path) -> None:
     """ExternalProposalsChanged arriving after StatusBar is unmounted must
-    not raise NoMatches — the handler suppresses it during teardown."""
+    not raise NoMatches — the handler suppresses it during teardown.
+
+    Removes the StatusBar while the app message pump is active, then calls
+    the handler directly; a spy on _refresh_status proves the code path
+    executed (not silently discarded) and that the suppress caught NoMatches.
+    """
+    from unittest.mock import patch
+
     from korvid.ui.messages import ExternalProposalsChanged
+    from korvid.ui.widgets.status_bar import StatusBar
 
     store = ProposalStore()
     app = make_app(Recorder(), tmp_path / "a.jsonl", store)
     async with app.run_test():
         await _submit(app)
-    # After run_test exits, the widget tree is torn down; posting the
-    # message synchronously exercises the guard (would raise on the
-    # unguarded code path).
-    app.post_message(ExternalProposalsChanged())
-    await asyncio.sleep(0)  # let the message loop drain
+        # Remove the StatusBar to reproduce teardown widget state while
+        # the app message pump is still active.
+        bar = app.query_one(StatusBar)
+        await bar.remove()
+        # Spy on _refresh_status to prove the handler entered it (the
+        # suppress catches the NoMatches raised by query_one inside).
+        refresh_calls: list[bool] = []
+        real_refresh = app._refresh_status
+
+        def spy_refresh() -> None:
+            refresh_calls.append(True)
+            real_refresh()
+
+        with patch.object(app, "_refresh_status", spy_refresh):
+            app.on_external_proposals_changed(ExternalProposalsChanged())
+        assert refresh_calls, "_refresh_status must be called (NoMatches suppressed, not skipped)"
