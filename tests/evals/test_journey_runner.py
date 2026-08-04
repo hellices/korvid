@@ -1,0 +1,134 @@
+"""Persistent multi-turn journey runner tests."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
+from korvid.evals.journey import load_journeys
+from korvid.evals.journey_runner import RecordingUI, run_journey
+from korvid.evals.scripted import ScriptedProvider
+from korvid.tools.executor import ToolExecutor
+
+
+def _call(name: str, args: dict[str, object], call_id: str) -> dict[str, Any]:
+    return {
+        "type": "tool_call",
+        "id": call_id,
+        "name": name,
+        "arguments": json.dumps(args),
+    }
+
+
+def _text(text: str) -> list[dict[str, Any]]:
+    return [{"type": "text_delta", "text": text}, {"type": "done"}]
+
+
+async def test_run_journey_persists_history_and_honors_user_correction() -> None:
+    journey = next(
+        item
+        for item in load_journeys(
+            __import__(
+                "korvid.evals.journey", fromlist=["bundled_journeys_dir"]
+            ).bundled_journeys_dir()
+        )
+        if item.id == "triage-and-correct"
+    )
+    script: list[list[dict[str, Any]]] = [
+        [
+            _call(
+                "list_resources",
+                {"kind": "pods", "namespace": "shop"},
+                "c1",
+            ),
+            {"type": "done"},
+        ],
+        _text("checkout and payments need attention; inspect payments first."),
+        [
+            _call(
+                "diagnose_pod",
+                {"pod": "payments-1", "namespace": "shop"},
+                "c2",
+            ),
+            {"type": "done"},
+        ],
+        _text("payments has an unauthorized registry authentication failure."),
+        [
+            _call(
+                "open_describe",
+                {"kind": "pods", "name": "payments-1", "namespace": "shop"},
+                "c3",
+            ),
+            {"type": "done"},
+        ],
+        _text("payments needs registry credentials or an image pull secret."),
+    ]
+    provider = ScriptedProvider(script)
+    ui = RecordingUI()
+
+    report = await run_journey(
+        journey,
+        provider_factory=lambda: provider,
+        executor_factory=lambda fixture: ToolExecutor(
+            FakeKubeClient(fixture),
+            builtin_aliases(),
+            ui=ui,
+        ),
+        repetitions=1,
+        profile="small",
+    )
+
+    run = report.runs[0]
+    assert run.success is True
+    assert [turn.success for turn in run.turns] == [True, True, True]
+    assert run.turns[1].forbidden_target_calls == 0
+    assert run.turns[2].tool_names == ("open_describe",)
+    assert ui.calls[-1] == (
+        "open_describe",
+        {"kind": "pods", "name": "payments-1", "namespace": "shop"},
+    )
+    # One provider instance serves every user turn; six completions proves the
+    # runtime was not recreated between turns.
+    assert provider._cursor == 6
+
+
+async def test_run_journey_fails_redundant_turn_budget() -> None:
+    journey = next(
+        item
+        for item in load_journeys(
+            __import__(
+                "korvid.evals.journey", fromlist=["bundled_journeys_dir"]
+            ).bundled_journeys_dir()
+        )
+        if item.id == "healthy-stop"
+    )
+    script: list[list[dict[str, Any]]] = [
+        [
+            _call("list_resources", {"kind": "pods", "namespace": "catalog"}, "c1"),
+            {"type": "done"},
+        ],
+        _text("The namespace is healthy."),
+        [
+            _call("list_resources", {"kind": "pods", "namespace": "catalog"}, "c2"),
+            {"type": "done"},
+        ],
+        [
+            _call("list_resources", {"kind": "pods", "namespace": "catalog"}, "c3"),
+            {"type": "done"},
+        ],
+        _text("No further investigation is needed; stop here."),
+    ]
+
+    report = await run_journey(
+        journey,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda fixture: ToolExecutor(
+            FakeKubeClient(fixture), builtin_aliases(), ui=RecordingUI()
+        ),
+        repetitions=1,
+        profile="small",
+    )
+
+    assert report.runs[0].turns[1].tool_calls == 2
+    assert report.runs[0].turns[1].success is False

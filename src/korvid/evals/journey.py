@@ -1,0 +1,145 @@
+"""Strict schema for multi-turn conversational agent evaluations."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from korvid.evals.scenario import (
+    ContainerLogs,
+    Evidence,
+    _alt_groups,
+    _evidence,
+    _logs,
+    _manifests,
+    _reject_future_timestamps,
+    _reject_unknown_keys,
+    _require_str,
+)
+
+_TOP_LEVEL_KEYS = frozenset({"id", "root_cause", "turns", "cluster"})
+_TURN_KEYS = frozenset({"user", "screen", "grading", "forbidden_targets"})
+_GRADING_KEYS = frozenset(
+    {
+        "must_mention",
+        "must_not_mention",
+        "expected_evidence",
+        "max_tool_calls",
+    }
+)
+_CLUSTER_KEYS = frozenset({"objects", "events", "logs"})
+
+
+@dataclass(frozen=True)
+class JourneyTurn:
+    """One scripted user turn and its deterministic acceptance assertions."""
+
+    user: str
+    screen: str
+    must_mention: tuple[tuple[str, ...], ...]
+    must_not_mention: tuple[tuple[str, ...], ...]
+    expected_evidence: tuple[tuple[Evidence, ...], ...]
+    forbidden_targets: tuple[dict[str, Any], ...] = ()
+    max_tool_calls: int | None = None
+
+
+@dataclass(frozen=True)
+class ConversationJourney:
+    """A shared cluster state plus ordered turns on one persistent runtime."""
+
+    id: str
+    root_cause: str
+    turns: tuple[JourneyTurn, ...]
+    objects: tuple[dict[str, Any], ...]
+    events: tuple[dict[str, Any], ...]
+    logs: dict[str, ContainerLogs]
+
+
+def _positive_int_or_none(value: Any, label: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+    return value
+
+
+def _targets(raw: Any, label: str) -> tuple[dict[str, Any], ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise ValueError(f"{label} must be a list of argument mappings")
+    return tuple(dict(item) for item in raw)
+
+
+def _turn(raw: Any, path: Path, index: int) -> JourneyTurn:
+    label = f"{path.name}: turn {index}"
+    if not isinstance(raw, dict):
+        raise ValueError(f"{label} must be a mapping")
+    _reject_unknown_keys(raw, _TURN_KEYS, label)
+    grading = raw.get("grading")
+    if not isinstance(grading, dict):
+        raise ValueError(f"{label} needs a 'grading' mapping")
+    _reject_unknown_keys(grading, _GRADING_KEYS, f"{label} grading")
+    must_mention = _alt_groups(grading.get("must_mention"), "must_mention")
+    expected_evidence = _evidence(grading.get("expected_evidence"))
+    if not must_mention:
+        raise ValueError(f"{label} needs at least one must_mention entry")
+    if not expected_evidence:
+        raise ValueError(f"{label} needs at least one expected_evidence entry")
+    return JourneyTurn(
+        user=_require_str(raw, "user"),
+        screen=_require_str(raw, "screen"),
+        must_mention=must_mention,
+        must_not_mention=_alt_groups(grading.get("must_not_mention"), "must_not_mention"),
+        expected_evidence=expected_evidence,
+        forbidden_targets=_targets(raw.get("forbidden_targets"), f"{label} forbidden_targets"),
+        max_tool_calls=_positive_int_or_none(
+            grading.get("max_tool_calls"), f"{label} max_tool_calls"
+        ),
+    )
+
+
+def load_journey(path: Path) -> ConversationJourney:
+    """Load and strictly validate one journey YAML file."""
+    data = yaml.safe_load(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"{path.name}: journey must be a mapping")
+    _reject_unknown_keys(data, _TOP_LEVEL_KEYS, f"{path.name}: journey")
+    raw_turns = data.get("turns")
+    if not isinstance(raw_turns, list) or len(raw_turns) < 2:
+        raise ValueError(f"{path.name}: journey needs at least two turns")
+    cluster = data.get("cluster")
+    if not isinstance(cluster, dict):
+        raise ValueError(f"{path.name}: journey needs a 'cluster' mapping")
+    _reject_unknown_keys(cluster, _CLUSTER_KEYS, f"{path.name}: cluster")
+    objects = _manifests(cluster.get("objects"), "objects")
+    events = _manifests(cluster.get("events"), "events")
+    _reject_future_timestamps(objects, f"{path.name}: objects")
+    _reject_future_timestamps(events, f"{path.name}: events")
+    return ConversationJourney(
+        id=_require_str(data, "id"),
+        root_cause=_require_str(data, "root_cause"),
+        turns=tuple(_turn(raw, path, index) for index, raw in enumerate(raw_turns, 1)),
+        objects=objects,
+        events=events,
+        logs=_logs(cluster.get("logs")),
+    )
+
+
+def bundled_journeys_dir() -> Path:
+    """Directory containing the conversational journey pack."""
+    return Path(__file__).parent / "journeys"
+
+
+def load_journeys(directory: Path) -> list[ConversationJourney]:
+    """Load every journey in stable id order and reject duplicate ids."""
+    journeys = [load_journey(path) for path in sorted(directory.glob("*.yaml"))]
+    seen: set[str] = set()
+    for journey in journeys:
+        if journey.id in seen:
+            raise ValueError(f"duplicate journey id {journey.id!r}")
+        seen.add(journey.id)
+    return sorted(journeys, key=lambda journey: journey.id)
