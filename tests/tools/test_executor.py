@@ -1853,6 +1853,57 @@ async def test_diagnose_workload_keeps_status_when_deployment_events_fail() -> N
     assert "unavailable (API 403: events forbidden)" in out
 
 
+@pytest.mark.parametrize(
+    ("failed_plural", "expected_section"),
+    [
+        ("replicasets", "OWNED REPLICASETS\n  unavailable"),
+        ("pods", "POD DIAGNOSES\n  unavailable"),
+    ],
+)
+async def test_diagnose_workload_keeps_parent_when_child_list_fails(
+    failed_plural: str,
+    expected_section: str,
+) -> None:
+    class ChildListDeniedKube(FakeDiagnoseKube):
+        async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+            if meta.plural == failed_plural:
+                raise ApiStatusError(403, f"{failed_plural} forbidden")
+            return await super().list_objects(meta, namespace)
+
+    kube = ChildListDeniedKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 2},
+        "status": {
+            "replicas": 2,
+            "readyReplicas": 1,
+            "conditions": [
+                {
+                    "type": "Progressing",
+                    "status": "False",
+                    "reason": "ProgressDeadlineExceeded",
+                }
+            ],
+        },
+    }
+    rs = kube.objects[("replicasets", "api-6f")]
+    rs["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "name": "api"}],
+        }
+    )
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert not out.startswith("ERROR:")
+    assert "ProgressDeadlineExceeded" in out
+    assert expected_section in out
+
+
 def test_compact_result_honors_tiny_limits() -> None:
     """The output-never-exceeds-limit contract must hold for any input: a
     limit shorter than the truncation marker cannot fit the marker, so it

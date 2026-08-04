@@ -1123,6 +1123,46 @@ class ToolExecutor:
         ready, separator, total = summary.ready.partition("/")
         return summary.ready_condition and bool(separator) and ready == total and total != "0"
 
+    async def _deployment_children(
+        self,
+        namespace: str,
+        uid: str,
+    ) -> tuple[
+        list[GenericSummary],
+        list[str],
+        list[GenericSummary],
+        str,
+    ]:
+        """Best-effort owned ReplicaSet and Pod LISTs."""
+        pod_list_error = ""
+        try:
+            replicasets = await self._owned_summaries(namespace, uid, "ReplicaSet")
+        except Exception as exc:
+            replicasets = []
+            replicaset_lines = [f"unavailable ({exc})"]
+            pod_list_error = f"unavailable (ReplicaSet traversal failed: {exc})"
+        else:
+            replicaset_lines = [
+                f"ReplicaSet {summary.name}: {summary_facts(summary)}" for summary in replicasets
+            ] or ["(none found)"]
+        replica_uids = {summary.uid for summary in replicasets if summary.uid}
+        pods_meta = self._meta_for_kind_name("Pod")
+        if pods_meta is None:
+            raise ValueError("Pod API was not discovered")
+        pods: list[GenericSummary] = []
+        if not pod_list_error:
+            try:
+                listed_pods = await self._kube.list_objects(pods_meta, namespace)
+            except Exception as exc:
+                pod_list_error = f"unavailable ({exc})"
+            else:
+                pods = [
+                    summary
+                    for summary in listed_pods
+                    if any(owner_uid in replica_uids for owner_uid in summary.owner_uids)
+                ]
+        return replicasets, replicaset_lines, pods, pod_list_error
+
     async def _diagnose_deployment(
         self, namespace: str, name: str, workload: dict[str, Any]
     ) -> str:
@@ -1131,16 +1171,13 @@ class ToolExecutor:
         if not uid:
             raise ValueError(f"Deployment {namespace}/{name} has no metadata.uid")
 
-        replicasets = await self._owned_summaries(namespace, uid, "ReplicaSet")
+        (
+            replicasets,
+            replicaset_lines,
+            pods,
+            pod_list_error,
+        ) = await self._deployment_children(namespace, uid)
         replica_uids = {summary.uid for summary in replicasets if summary.uid}
-        pods_meta = self._meta_for_kind_name("Pod")
-        if pods_meta is None:
-            raise ValueError("Pod API was not discovered")
-        pods = [
-            summary
-            for summary in await self._kube.list_objects(pods_meta, namespace)
-            if any(owner_uid in replica_uids for owner_uid in summary.owner_uids)
-        ]
         non_ready = [pod for pod in pods if not self._pod_summary_is_ready(pod)]
         rs_by_uid = {summary.uid: summary for summary in replicasets}
         non_ready.sort(
@@ -1172,8 +1209,7 @@ class ToolExecutor:
             ),
             (
                 "OWNED REPLICASETS",
-                [f"ReplicaSet {summary.name}: {summary_facts(summary)}" for summary in replicasets]
-                or ["(none found)"],
+                replicaset_lines,
             ),
         ]
         report: list[str] = []
@@ -1183,6 +1219,8 @@ class ToolExecutor:
                 f"  {line}"
                 for line in self._budget_section([self._clamp_line(line) for line in lines])
             )
+        if pod_list_error:
+            report.extend(["POD DIAGNOSES", f"  {pod_list_error}"])
 
         omitted_line = (
             f"({len(omitted)} more non-ready pod(s) not expanded: "
