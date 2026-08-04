@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from korvid.tools import registry as registry_mod
 from korvid.tools.executor import ToolExecutor, UIBridge
 from korvid.tools.registry import (
     TOOL_DEFS,
@@ -75,6 +76,19 @@ def test_resize_is_capability_gated() -> None:
     assert all(d.capability == "none" for d in others)
 
 
+def test_every_tool_declares_an_outbound_result_format() -> None:
+    assert {d.result_format for d in TOOL_DEFS} <= {
+        "structured_yaml",
+        "untrusted_text",
+    }
+    assert registry_mod.tool_result_format("get_resource") == "structured_yaml"
+    assert all(
+        registry_mod.tool_result_format(d.name) == "untrusted_text"
+        for d in TOOL_DEFS
+        if d.name != "get_resource"
+    )
+
+
 # --- derived surfaces ---------------------------------------------------
 
 
@@ -126,6 +140,7 @@ def _tool(name: str, **overrides: Any) -> ToolDef:
         "effect": "cluster_read",
         "dispatch": "_handler",
         "surfaces": frozenset({"full_agent"}),
+        "result_format": "untrusted_text",
     }
     fields.update(overrides)
     return ToolDef(**fields)
@@ -145,6 +160,12 @@ def test_validate_rejects_schema_name_mismatch() -> None:
 def test_validate_rejects_missing_dispatch() -> None:
     with pytest.raises(ValueError, match="dispatch"):
         validate_tool_defs([_tool("a", dispatch="")])
+
+
+def test_validate_rejects_unknown_result_format() -> None:
+    bad = _tool("a", result_format="opaque")
+    with pytest.raises(ValueError, match="result format"):
+        validate_tool_defs([bad])
 
 
 def test_validate_rejects_write_without_action() -> None:

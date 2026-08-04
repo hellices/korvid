@@ -1993,6 +1993,7 @@ def _ui_def(name: str, dispatch: str) -> ToolDef:
         effect="ui_only",
         dispatch=dispatch,
         surfaces=frozenset({"full_agent"}),
+        result_format="untrusted_text",
     )
 
 
@@ -2033,6 +2034,7 @@ async def test_write_resize_path_routes_by_write_action_not_tool_name(
         effect="cluster_write",
         dispatch="agent_request_write",
         surfaces=frozenset({"full_agent"}),
+        result_format="untrusted_text",
         approval="user_confirmation",
         write_action="resize",
     )
@@ -2057,6 +2059,7 @@ async def test_write_resize_path_still_validates_resources_under_any_name(
         effect="cluster_write",
         dispatch="agent_request_write",
         surfaces=frozenset({"full_agent"}),
+        result_format="untrusted_text",
         approval="user_confirmation",
         write_action="resize",
     )
