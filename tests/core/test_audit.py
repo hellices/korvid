@@ -8,6 +8,7 @@ import pytest
 
 import korvid.core.audit as audit_module
 from korvid.core.audit import AuditLog
+from tests.platforms import POSIX, posix_only
 
 
 def test_append_writes_jsonl_entry(tmp_path: Path) -> None:
@@ -138,8 +139,10 @@ def test_constructor_does_not_touch_filesystem(tmp_path: Path) -> None:
     bad = tmp_path / "not-a-dir"
     bad.write_text("file, not a directory")
     log = AuditLog(bad / "audit.jsonl")  # must not raise
-    # macOS raises FileExistsError, Linux NotADirectoryError for the mkdir
-    with pytest.raises((FileExistsError, NotADirectoryError)):
+    # macOS raises FileExistsError, Linux NotADirectoryError, Windows
+    # FileNotFoundError — all are OSError subtypes. The constructor is lazy;
+    # only append() touches the filesystem and propagates the failure.
+    with pytest.raises(OSError, match=r"(exist|directory|not found|denied)"):
         log.append(action="delete", kind="pods", namespace="default", name="w")
 
 
@@ -220,8 +223,13 @@ def test_append_fsyncs_before_returning(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(os, "fsync", recording_fsync)
     log = AuditLog(tmp_path / "audit.jsonl")
     log.append(action="delete", kind="pods", namespace="default", name="web-1")
-    # at least the log file and its parent directory were synced
-    assert len(synced) >= 2
+    # POSIX: file fsync + parent directory fsync (at least 2 calls).
+    # Windows: file fsync only — NTFS metadata ops are journal-durable, so
+    # directory fsync is skipped (os.open(dir, O_RDONLY) is unsupported).
+    if POSIX:
+        assert len(synced) >= 2
+    else:
+        assert len(synced) >= 1
 
 
 def test_append_fails_closed_when_fsync_fails(
@@ -236,6 +244,7 @@ def test_append_fails_closed_when_fsync_fails(
         log.append(action="delete", kind="pods", namespace="default", name="web-1")
 
 
+@posix_only("directory fsync requires POSIX os.open(dir, O_RDONLY)")
 def test_append_fails_closed_when_dir_sync_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -251,6 +260,22 @@ def test_append_fails_closed_when_dir_sync_fails(
     monkeypatch.setattr(os, "open", failing_open)
     log = AuditLog(tmp_path / "audit.jsonl")
     with pytest.raises(OSError, match="cannot open directory"):
+        log.append(action="delete", kind="pods", namespace="default", name="web-1")
+
+
+def test_append_fails_closed_when_file_fsync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """File fsync failure must propagate on every platform (including
+    Windows where directory fsync is not applicable): a buffered-only
+    record does not satisfy the fail-closed durability invariant."""
+
+    def failing_fsync(fd: int) -> None:
+        raise OSError("disk I/O error")
+
+    monkeypatch.setattr(os, "fsync", failing_fsync)
+    log = AuditLog(tmp_path / "audit.jsonl")
+    with pytest.raises(OSError, match="disk I/O error"):
         log.append(action="delete", kind="pods", namespace="default", name="web-1")
 
 
