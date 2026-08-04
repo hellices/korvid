@@ -8,7 +8,21 @@ composition root (tach layer rules: ui must not import providers).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
+
+
+def _copy_option_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _copy_option_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_option_value(item) for item in value]
+    return value
+
+
+def _freeze_options(options: Mapping[str, object]) -> Mapping[str, object]:
+    return MappingProxyType({key: _copy_option_value(value) for key, value in options.items()})
 
 
 @dataclass(frozen=True)
@@ -20,6 +34,10 @@ class AgentSettings:
     api_key_env: str | None = None
     #: Model-capability profile (issue #71): `full` or `small`.
     profile: str = "full"
+    options: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "options", _freeze_options(self.options))
 
 
 @dataclass(frozen=True)

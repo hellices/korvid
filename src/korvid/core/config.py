@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from math import isfinite
@@ -20,6 +23,20 @@ from korvid.k8s.columns import SOURCES, CustomColumn, parse_jsonpath
 from korvid.k8s.helm import SYNTHETIC_VIEW_KINDS
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "korvid" / "config.yaml"
+_MAX_AGENT_OPTIONS_DEPTH = 4
+_MAX_AGENT_OPTIONS_KEYS = 64
+_MAX_AGENT_OPTIONS_LIST_ITEMS = 64
+_MAX_AGENT_OPTIONS_STRING_BYTES = 2048
+_MAX_AGENT_OPTIONS_SERIALIZED_BYTES = 16 * 1024
+_MAX_AGENT_OPTIONS_PATH_CHARS = 120
+_SECRET_OPTION_KEY_SEGMENTS = (
+    "secret",
+    "password",
+    "token",
+    "api_key",
+    "authorization",
+    "credential",
+)
 
 
 @dataclass(frozen=True)
@@ -45,6 +62,8 @@ class KorvidConfig:
     agent_model: str | None = None
     agent_api_key_env: str | None = None
     agent_auth_method: str | None = None
+    agent_options: dict[str, object] = field(default_factory=dict)
+    agent_options_error: str | None = None
     #: Model-capability profile (issue #71): `agent.profile` — `full` keeps
     #: the frontier surface; `small` reduces tools, budgets and prompt for
     #: 3B-14B local models. None means unset: the runtime treats it as
@@ -134,6 +153,9 @@ def load_config(path: Path | None = None) -> KorvidConfig:
     api_key_env = _opt_str(agent_raw.get("api_key_env"))
     auth_value = agent_raw.get("auth")
     auth_raw: dict[str, Any] = auth_value if isinstance(auth_value, dict) else {}
+    agent_options, agent_options_error = (
+        _parse_agent_options(agent_raw["options"]) if "options" in agent_raw else ({}, None)
+    )
     auth_method = _opt_str(auth_raw.get("method"))
     if auth_method is None and provider:
         # Back-compat: configs written before agent.auth existed.
@@ -176,6 +198,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         debug_images = {}
     views, view_warnings = _parse_views(raw.get("views"))
     warnings = list(view_warnings)
+    if agent_options_error is not None:
+        warnings.append(agent_options_error)
     if "namespaces" in raw:
         warnings.append(
             "namespaces: no longer controls the namespace picker or watches"
@@ -195,6 +219,8 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         agent_model=_opt_str(agent_raw.get("model")),
         agent_api_key_env=api_key_env,
         agent_auth_method=auth_method,
+        agent_options=agent_options,
+        agent_options_error=agent_options_error,
         agent_profile=(
             # Key presence checked here: `profile: null` is a present-but-
             # invalid value (falls back to `full` like any other), not the
@@ -411,6 +437,143 @@ def _parse_keep_alive(value: Any) -> str | int | None:
 def _opt_str(value: Any) -> str | None:
     """Coerce value to string or None if empty."""
     return value if isinstance(value, str) and value else None
+
+
+@dataclass
+class _AgentOptionCounters:
+    mapping_keys: int = 0
+    list_items: int = 0
+
+
+class _AgentOptionsError(ValueError):
+    """Raised when `agent.options` violates the published v1 bounds."""
+
+
+def _parse_agent_options(value: Any) -> tuple[dict[str, object], str | None]:
+    if not isinstance(value, Mapping):
+        return {}, "agent.options must be a mapping with string keys"
+    counters = _AgentOptionCounters()
+    try:
+        parsed = _parse_agent_option_mapping(
+            value, path="agent.options", depth=1, counters=counters
+        )
+        serialized = json.dumps(
+            parsed,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    except _AgentOptionsError as exc:
+        return {}, str(exc)
+    except (TypeError, ValueError) as exc:
+        return {}, f"agent.options could not be serialized safely: {type(exc).__name__}"
+    if len(serialized) > _MAX_AGENT_OPTIONS_SERIALIZED_BYTES:
+        return (
+            {},
+            f"agent.options exceeds max serialized budget {_MAX_AGENT_OPTIONS_SERIALIZED_BYTES} bytes",
+        )
+    return parsed, None
+
+
+def _parse_agent_option_mapping(
+    value: Mapping[object, object],
+    *,
+    path: str,
+    depth: int,
+    counters: _AgentOptionCounters,
+) -> dict[str, object]:
+    if depth > _MAX_AGENT_OPTIONS_DEPTH:
+        raise _AgentOptionsError(
+            f"{_agent_options_path(path)} exceeds max depth {_MAX_AGENT_OPTIONS_DEPTH}"
+        )
+    parsed: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise _AgentOptionsError("agent.options must use string keys")
+        _raise_if_secret_key_segment(key, path=path)
+        counters.mapping_keys += 1
+        if counters.mapping_keys > _MAX_AGENT_OPTIONS_KEYS:
+            raise _AgentOptionsError(
+                f"agent.options exceeds max {_MAX_AGENT_OPTIONS_KEYS} mapping keys"
+            )
+        child_path = f"{path}.{key}"
+        parsed[key] = _parse_agent_option_value(
+            item, path=child_path, depth=depth, counters=counters
+        )
+    return parsed
+
+
+def _parse_agent_option_value(
+    value: object,
+    *,
+    path: str,
+    depth: int,
+    counters: _AgentOptionCounters,
+) -> object:
+    scalar = _parse_agent_option_scalar(value, path=path)
+    if scalar is not _UNSUPPORTED_AGENT_OPTION:
+        return scalar
+    if isinstance(value, Mapping):
+        return _parse_agent_option_mapping(value, path=path, depth=depth + 1, counters=counters)
+    if isinstance(value, list):
+        counters.list_items += len(value)
+        if counters.list_items > _MAX_AGENT_OPTIONS_LIST_ITEMS:
+            raise _AgentOptionsError(
+                f"agent.options exceeds max {_MAX_AGENT_OPTIONS_LIST_ITEMS} list items"
+            )
+        if depth + 1 > _MAX_AGENT_OPTIONS_DEPTH:
+            raise _AgentOptionsError(
+                f"{_agent_options_path(path)} exceeds max depth {_MAX_AGENT_OPTIONS_DEPTH}"
+            )
+        return [
+            _parse_agent_option_value(
+                item, path=f"{path}[{index}]", depth=depth + 1, counters=counters
+            )
+            for index, item in enumerate(value)
+        ]
+    raise _AgentOptionsError(
+        f"{_agent_options_path(path)} must be null/bool/int/finite float/string/list/mapping, "
+        f"got {type(value).__name__}"
+    )
+
+
+_UNSUPPORTED_AGENT_OPTION = object()
+
+
+def _parse_agent_option_scalar(value: object, *, path: str) -> object:
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise _AgentOptionsError(f"{_agent_options_path(path)} must be a finite float")
+        return value
+    if isinstance(value, str):
+        if len(value.encode("utf-8")) > _MAX_AGENT_OPTIONS_STRING_BYTES:
+            raise _AgentOptionsError(
+                f"{_agent_options_path(path)} exceeds max string length "
+                f"{_MAX_AGENT_OPTIONS_STRING_BYTES} bytes"
+            )
+        return value
+    return _UNSUPPORTED_AGENT_OPTION
+
+
+def _raise_if_secret_key_segment(key: str, *, path: str) -> None:
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.strip().lower()).strip("_")
+    tokens = {normalized, *(token for token in normalized.split("_") if token)}
+    for segment in _SECRET_OPTION_KEY_SEGMENTS:
+        if segment in tokens:
+            raise _AgentOptionsError(
+                f"{_agent_options_path(f'{path}.{key}')} uses reserved secret-bearing key segment "
+                f"{segment!r}; keep secrets in env vars such as agent.api_key_env"
+            )
+
+
+def _agent_options_path(path: str) -> str:
+    if len(path) <= _MAX_AGENT_OPTIONS_PATH_CHARS:
+        return path
+    return path[: _MAX_AGENT_OPTIONS_PATH_CHARS - 3] + "..."
 
 
 def _parse_favorite_namespaces(value: Any) -> tuple[tuple[str, ...], list[str]]:

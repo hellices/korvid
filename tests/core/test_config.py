@@ -1,9 +1,17 @@
+import json
 import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 from korvid.core.config import KorvidConfig, load_config, save_agent_config
+
+
+def _load_agent_options_config(tmp_path: Path, options: object) -> KorvidConfig:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"agent": {"options": options}}, sort_keys=False))
+    return load_config(path)
 
 
 def test_defaults_when_no_file(tmp_path: Path) -> None:
@@ -143,6 +151,146 @@ def test_save_agent_config_preserves_other_keys(tmp_path: Path) -> None:
     assert cfg.agent_auth_method == "device-login"
 
 
+def test_agent_options_parses_valid_nested_data(tmp_path: Path) -> None:
+    cfg = _load_agent_options_config(
+        tmp_path,
+        {
+            "tenant": "platform",
+            "enabled": True,
+            "retries": 3,
+            "temperature": 0.5,
+            "headers": {"x_scope": "cluster-readonly", "mode": None},
+            "fallbacks": ["gpt-4o-mini", {"label": "backup", "weight": 1}],
+        },
+    )
+    assert cfg.agent_options == {
+        "tenant": "platform",
+        "enabled": True,
+        "retries": 3,
+        "temperature": 0.5,
+        "headers": {"x_scope": "cluster-readonly", "mode": None},
+        "fallbacks": ["gpt-4o-mini", {"label": "backup", "weight": 1}],
+    }
+    assert cfg.agent_options_error is None
+
+
+def test_agent_options_depth_limit_is_exact(tmp_path: Path) -> None:
+    valid = _load_agent_options_config(
+        tmp_path,
+        {"l1": {"l2": {"l3": {"l4": "ok"}}}},
+    )
+    assert valid.agent_options_error is None
+    assert valid.agent_options["l1"] == {"l2": {"l3": {"l4": "ok"}}}
+
+    invalid = _load_agent_options_config(
+        tmp_path,
+        {"l1": {"l2": {"l3": {"l4": {"l5": "boom"}}}}},
+    )
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "max depth 4" in invalid.agent_options_error
+
+
+def test_agent_options_mapping_key_limit_is_exact(tmp_path: Path) -> None:
+    valid = _load_agent_options_config(tmp_path, {f"k{i}": i for i in range(64)})
+    assert valid.agent_options_error is None
+    assert len(valid.agent_options) == 64
+
+    invalid = _load_agent_options_config(tmp_path, {f"k{i}": i for i in range(65)})
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "64 mapping keys" in invalid.agent_options_error
+
+
+def test_agent_options_list_item_limit_is_exact(tmp_path: Path) -> None:
+    valid = _load_agent_options_config(tmp_path, {"models": list(range(64))})
+    assert valid.agent_options_error is None
+    assert valid.agent_options["models"] == list(range(64))
+
+    invalid = _load_agent_options_config(tmp_path, {"models": list(range(65))})
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "64 list items" in invalid.agent_options_error
+
+
+def test_agent_options_string_limit_is_exact(tmp_path: Path) -> None:
+    valid = _load_agent_options_config(tmp_path, {"prompt": "x" * 2048})
+    assert valid.agent_options_error is None
+    assert valid.agent_options["prompt"] == "x" * 2048
+
+    invalid = _load_agent_options_config(tmp_path, {"prompt": "x" * 2049})
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "2048 bytes" in invalid.agent_options_error
+
+
+def test_agent_options_serialized_budget_limit_is_exact(tmp_path: Path) -> None:
+    valid_options = {f"k{i}": "x" * 2048 for i in range(7)} | {"k7": "x" * 1983}
+    assert (
+        len(
+            json.dumps(
+                valid_options,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        == 16 * 1024
+    )
+    valid = _load_agent_options_config(tmp_path, valid_options)
+    assert valid.agent_options_error is None
+
+    invalid = _load_agent_options_config(tmp_path, valid_options | {"k7": "x" * 1984})
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "16384 bytes" in invalid.agent_options_error
+
+
+def test_agent_options_rejects_nonfinite_float(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("agent:\n  options:\n    temperature: .nan\n")
+    cfg = load_config(path)
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert "finite float" in cfg.agent_options_error
+
+
+def test_agent_options_rejects_non_string_keys(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("agent:\n  options:\n    1: one\n")
+    cfg = load_config(path)
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert "string keys" in cfg.agent_options_error
+
+
+def test_agent_options_rejects_unsupported_objects(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("agent:\n  options:\n    launched: 2026-08-04\n")
+    cfg = load_config(path)
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert "date" in cfg.agent_options_error
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("secret", "secret"),
+        ("db_password", "password"),
+        ("access_token", "token"),
+        ("api-key", "api_key"),
+        ("Authorization", "authorization"),
+        ("credential", "credential"),
+    ],
+)
+def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, expected: str) -> None:
+    cfg = _load_agent_options_config(tmp_path, {key: "plain-text-secret"})
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert expected in cfg.agent_options_error
+
+
 def test_save_agent_config_creates_file(tmp_path: Path) -> None:
     p = tmp_path / "sub" / "c.yaml"
     save_agent_config(
@@ -171,6 +319,43 @@ def test_save_agent_config_preserves_agent_extension_keys(tmp_path: Path) -> Non
 
     raw = yaml.safe_load(p.read_text())
     assert raw["agent"]["custom_note"] == "keepme"  # unrelated agent key kept
+
+
+def test_save_agent_config_preserves_agent_options(tmp_path: Path) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "agent": {
+                    "provider": "custom-provider",
+                    "model": "cluster-brain",
+                    "options": {
+                        "tenant": "platform",
+                        "scopes": ["read", "write"],
+                        "nested": {"region": "apac"},
+                    },
+                }
+            },
+            sort_keys=False,
+        )
+    )
+    save_agent_config(
+        p,
+        provider="custom-provider",
+        auth_method="none",
+        base_url="https://llm.internal/v1",
+        model="cluster-brain-v2",
+        api_key_env=None,
+    )
+    raw = yaml.safe_load(p.read_text())
+    assert raw["agent"]["options"] == {
+        "tenant": "platform",
+        "scopes": ["read", "write"],
+        "nested": {"region": "apac"},
+    }
+    cfg = load_config(p)
+    assert cfg.agent_options == raw["agent"]["options"]
+    assert cfg.agent_options_error is None
 
 
 def test_save_agent_config_drops_stale_optional_fields(tmp_path: Path) -> None:

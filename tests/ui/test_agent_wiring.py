@@ -312,6 +312,7 @@ async def test_model_command_swaps_model_and_saves() -> None:
         auth_method="none",
         base_url="http://localhost:11434/v1",
         model="llama3",
+        options={"tenant": "platform", "features": {"region": "apac"}},
     )
     async with app.run_test() as pilot:
         app._apply_agent_settings(settings)
@@ -321,7 +322,9 @@ async def test_model_command_swaps_model_and_saves() -> None:
         assert app._agent_model_name == "gpt-4o"
         assert saved
         assert saved[-1].model == "gpt-4o"
+        assert dict(saved[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
         assert rebuilt[-1].model == "gpt-4o"
+        assert dict(rebuilt[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
 
 
 async def test_model_command_without_config_does_not_crash() -> None:
@@ -481,6 +484,7 @@ async def test_model_command_works_after_configured_startup() -> None:
             agent_base_url="http://localhost:11434/v1",
             agent_model="llama3",
             agent_auth_method="none",
+            agent_options={"tenant": "platform", "features": {"region": "apac"}},
         ),
         store=store,
         watch_manager=WatchManager(store, source),
@@ -497,6 +501,7 @@ async def test_model_command_works_after_configured_startup() -> None:
         assert saved
         assert saved[-1].provider == "ollama"
         assert saved[-1].model == "gpt-4o"
+        assert dict(saved[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
 
 
 async def test_apply_agent_settings_notifies_on_rebuild_failure() -> None:
