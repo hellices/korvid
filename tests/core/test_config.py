@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from korvid.core.config import KorvidConfig, load_config, save_agent_config
+from tests.platforms import POSIX
 
 
 def _load_agent_options_config(tmp_path: Path, options: object) -> KorvidConfig:
@@ -582,7 +583,7 @@ def test_save_agent_config_preserves_restrictive_file_mode(tmp_path: Path) -> No
     p.write_text("agent:\n  provider: ollama\n  model: llama3\n")
     os.chmod(p, 0o600)
 
-    if os.name != "nt":
+    if POSIX:
         save_agent_config(
             p,
             provider="ollama",
@@ -653,7 +654,7 @@ def test_save_agent_config_fsyncs_before_replace(
         # Windows' fsync (_commit) requires a writable handle: syncing an
         # O_RDONLY fd raises there, so the implementation must sync the fd
         # it wrote through. fcntl itself is POSIX-only, so guard the check.
-        if os.name != "nt":
+        if POSIX:
             import fcntl
 
             assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY

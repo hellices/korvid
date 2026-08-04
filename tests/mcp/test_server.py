@@ -20,6 +20,7 @@ from korvid.mcp.server import (
     default_endpoint_path,
 )
 from korvid.tools.executor import PROPOSAL_TOOLS, READ_TOOLS, UI_TOOLS, ToolExecutor
+from tests.platforms import POSIX
 from tests.tools.test_executor import FakeBridge
 
 
@@ -824,7 +825,7 @@ async def test_endpoint_file_publishes_capability_with_owner_only_mode(tmp_path:
         await asyncio.wait_for(server.wait_started(), timeout=10)
         entry = json.loads(endpoint_file.read_text())["servers"][str(os.getpid())]
         assert entry["capability"] == "cap-tok"
-        if os.name != "nt":
+        if POSIX:
             assert (endpoint_file.stat().st_mode & 0o777) == 0o600
         else:
             # Windows: POSIX mode bits are not meaningful on NTFS; assert the
@@ -856,10 +857,13 @@ def test_endpoint_file_is_created_owner_only_not_merely_chmodded(
     from a chmod racing the umask-default file.
 
     On POSIX we disable chmod and prove os.open(O_CREAT|O_EXCL, 0o600)
-    alone achieves the correct mode. On Windows/NTFS, stat mode is not
-    meaningful; we verify the file was created and contains valid JSON.
+    alone achieves the correct mode. On Windows/NTFS, Python's stat does
+    not reflect POSIX permission bits (NTFS uses ACLs, not mode bits);
+    we can only verify the atomic-creation path produces valid content.
+    The code passes 0o600 to os.open which is the strongest portable
+    guarantee — no ACL confidentiality claim is made here.
     """
-    if os.name != "nt":
+    if POSIX:
         monkeypatch.setattr(Path, "chmod", lambda self, mode: None)
         target = tmp_path / "mcp-endpoint.json"
         _replace_atomically(target, {"servers": {}})

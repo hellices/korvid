@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from korvid.providers.token_store import TokenStore
+from tests.platforms import POSIX
 
 
 def _no_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,7 +34,7 @@ def test_file_mode_0600(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     _no_keyring(monkeypatch)
     p = tmp_path / "creds.json"
     TokenStore(fallback_path=p).save("k", "v")
-    if os.name != "nt":
+    if POSIX:
         assert stat.S_IMODE(p.stat().st_mode) == 0o600
     else:
         # Windows: POSIX mode bits are not meaningful on NTFS. Verify the
@@ -184,7 +185,7 @@ def test_write_fsyncs_before_replace(tmp_path: Path, monkeypatch: pytest.MonkeyP
         # Windows' fsync (_commit) requires a writable handle: syncing an
         # O_RDONLY fd raises there, so the implementation must sync the fd
         # it wrote through. fcntl itself is POSIX-only, so guard the check.
-        if os.name != "nt":
+        if POSIX:
             import fcntl
 
             assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY

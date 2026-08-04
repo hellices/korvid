@@ -235,6 +235,14 @@ def test_append_fsyncs_before_returning(tmp_path: Path, monkeypatch: pytest.Monk
 def test_append_fails_closed_when_fsync_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """File-level fsync failure propagates on every platform (the cross-
+    platform counterpart to the POSIX-only directory-sync test below).
+
+    On Windows, where directory fsync is inapplicable (NTFS metadata is
+    journaled), this is the sole durability-failure assertion: a buffered-
+    only record does not satisfy the fail-closed invariant.
+    """
+
     def failing_fsync(fd: int) -> None:
         raise OSError("disk gone")
 
@@ -260,22 +268,6 @@ def test_append_fails_closed_when_dir_sync_fails(
     monkeypatch.setattr(os, "open", failing_open)
     log = AuditLog(tmp_path / "audit.jsonl")
     with pytest.raises(OSError, match="cannot open directory"):
-        log.append(action="delete", kind="pods", namespace="default", name="web-1")
-
-
-def test_append_fails_closed_when_file_fsync_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """File fsync failure must propagate on every platform (including
-    Windows where directory fsync is not applicable): a buffered-only
-    record does not satisfy the fail-closed durability invariant."""
-
-    def failing_fsync(fd: int) -> None:
-        raise OSError("disk I/O error")
-
-    monkeypatch.setattr(os, "fsync", failing_fsync)
-    log = AuditLog(tmp_path / "audit.jsonl")
-    with pytest.raises(OSError, match="disk I/O error"):
         log.append(action="delete", kind="pods", namespace="default", name="web-1")
 
 
