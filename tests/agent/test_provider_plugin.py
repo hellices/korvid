@@ -530,3 +530,196 @@ async def test_our_done_check_errors_are_preserved() -> None:
 
     with pytest.raises(ProviderPluginContractError, match="after terminal done"):
         await _collect_events(wrapped)
+
+
+# --- Round 7 follow-up: iterator cleanup on all exit paths ---
+
+
+class _TrackingCloseProvider(LLMProvider):
+    """Provider whose async generator tracks close calls."""
+
+    def __init__(self, events: list[object]) -> None:
+        self._events = events
+        self.close_calls = 0
+        self.close_exception: Exception | None = None
+
+    @property
+    def name(self) -> str:
+        return "tracking-close"
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> AsyncIterator[dict[str, Any]]:
+        try:
+            for event in self._events:
+                yield event  # type: ignore[misc]
+        finally:
+            self.close_calls += 1
+            if self.close_exception is not None:
+                raise self.close_exception
+
+    async def aclose(self) -> None:
+        pass
+
+
+async def test_iterator_closed_on_malformed_event_rejection() -> None:
+    """When wrapper rejects a malformed event, the underlying iterator's
+    finally/aclose must still fire."""
+    inner = _TrackingCloseProvider(
+        [
+            {"type": "text_delta", "text": "hi"},
+            {"type": "bogus"},  # triggers normalization error
+        ]
+    )
+    wrapped = ValidatedPluginProvider(inner)
+
+    with pytest.raises(ProviderPluginContractError, match="unknown provider event type"):
+        await _collect_events(wrapped)
+    assert inner.close_calls == 1
+
+
+async def test_iterator_closed_on_after_done_rejection() -> None:
+    """When wrapper rejects an event after done, the underlying iterator
+    must be closed."""
+    inner = _TrackingCloseProvider(
+        [
+            {"type": "done"},
+            {"type": "text_delta", "text": "ghost"},
+        ]
+    )
+    wrapped = ValidatedPluginProvider(inner)
+
+    with pytest.raises(ProviderPluginContractError, match="after terminal done"):
+        await _collect_events(wrapped)
+    assert inner.close_calls == 1
+
+
+async def test_iterator_closed_on_consumer_cancellation() -> None:
+    """When the driving task is cancelled, the underlying iterator must
+    still be closed (exactly once)."""
+    import asyncio
+
+    event_reached = asyncio.Event()
+
+    class _BlockingProvider(LLMProvider):
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        @property
+        def name(self) -> str:
+            return "blocking"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            try:
+                yield {"type": "text_delta", "text": "hi"}
+                event_reached.set()
+                await asyncio.sleep(999)  # block until cancelled
+                yield {"type": "done"}
+            finally:
+                self.close_calls += 1
+
+    inner = _BlockingProvider()
+    wrapped = ValidatedPluginProvider(inner)
+
+    async def _drive() -> list[dict[str, Any]]:
+        return await _collect_events(wrapped)
+
+    task = asyncio.create_task(_drive())
+    await event_reached.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Give the event loop a tick for cleanup
+    await asyncio.sleep(0)
+    assert inner.close_calls == 1
+
+
+async def test_close_raises_secret_primary_error_preserved() -> None:
+    """If iterator close raises with secret payload while a primary wrapper
+    error is active, the primary error is preserved and no secret leaks."""
+
+    class _AfterDoneCloseRaises(LLMProvider):
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        @property
+        def name(self) -> str:
+            return "after-done-close-raises"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            try:
+                yield {"type": "done"}
+                yield {"type": "text_delta", "text": "after-done"}
+            finally:
+                self.close_calls += 1
+                raise RuntimeError("SECRET_CLOSE_PAYLOAD_xyz" * 10)
+
+    inner = _AfterDoneCloseRaises()
+    wrapped = ValidatedPluginProvider(inner)
+
+    with pytest.raises(ProviderPluginContractError, match="after terminal done") as exc_info:
+        await _collect_events(wrapped)
+    msg = str(exc_info.value)
+    assert "SECRET_CLOSE_PAYLOAD" not in msg
+    assert inner.close_calls == 1
+
+
+async def test_normal_close_failure_becomes_contract_error() -> None:
+    """On normal exhaustion, if iterator aclose() raises, it must become a
+    fixed ProviderPluginContractError without raw payload."""
+
+    class _CloseFailsOnExhaust(LLMProvider):
+        """Provider whose iterator aclose raises after normal exhaustion."""
+
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        @property
+        def name(self) -> str:
+            return "close-fails-exhaust"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            # This async generator yields events, and its finally (aclose) will
+            # be called by our wrapper. We raise only in the aclose path.
+            try:
+                yield {"type": "text_delta", "text": "hi"}
+                yield {"type": "done"}
+            finally:
+                self.close_calls += 1
+                raise RuntimeError("SECRET_CLEANUP_FAIL_abc" * 10)
+
+    inner = _CloseFailsOnExhaust()
+    wrapped = ValidatedPluginProvider(inner)
+
+    # The generator exhausts normally (StopAsyncIteration after done), then
+    # the else-branch calls _close_iterator_or_raise which triggers finally.
+    # But: Python's async generator finalization means the finally fires during
+    # the StopAsyncIteration __anext__ call. So the exception comes from the
+    # iterator advancement path. Either way, no secret should leak.
+    with pytest.raises(ProviderPluginContractError) as exc_info:
+        await _collect_events(wrapped)
+    msg = str(exc_info.value)
+    assert "SECRET_CLEANUP_FAIL" not in msg
+    assert inner.close_calls == 1
