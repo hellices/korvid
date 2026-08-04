@@ -1,9 +1,9 @@
 """LLMProvider ABC — the pluggable boundary (design doc §6.3, standards §3).
 
 Concrete adapters live in korvid/providers/ and are selected by the
-config-driven factory in korvid.providers.registry. Entry-point based
-discovery ("korvid.provider" group) is planned for third-party adapters
-but not implemented yet.
+config-driven factory in korvid.providers.registry. Third-party adapters
+target the public contract in korvid.agent.provider_plugin; their
+discovery/loading stays outside this ABC boundary.
 """
 
 from __future__ import annotations
