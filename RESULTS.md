@@ -14,6 +14,11 @@ separately from the application source tree.
 - [`2026-08-04`](results/2026-08-04/) — local-model AKS task smoke, 8GB tier,
   Qwen3-Coder task pack, offline conversation journeys, and live contract-cluster
   journey runs.
+- `2026-08-04-r2` — corrected offline conversation matrix using evidence
+  fetched during each checkpoint turn only:
+  [`archive`](results/2026-08-04-r2-artifacts.tar.gz),
+  [`metadata`](results/2026-08-04-r2-metadata.json), and
+  [`checksums`](results/2026-08-04-r2-SHA256SUMS).
 
 ## Important Validity Note
 
