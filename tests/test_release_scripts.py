@@ -22,6 +22,7 @@ import check_artifacts  # type: ignore[import-not-found]  # noqa: E402  # script
 import check_sbom  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import check_source  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import check_version  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
+import compare_assets  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import metadata  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import offline_verify  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import release_manifest  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
@@ -515,6 +516,38 @@ def test_release_manifest_rejects_colliding_asset_names(tmp_path: Path) -> None:
         )
 
 
+def test_release_asset_comparison_accepts_identical_sets(tmp_path: Path) -> None:
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    remote.mkdir()
+    for root in (local, remote):
+        (root / "korvid.whl").write_bytes(b"same wheel")
+        (root / "SHA256SUMS").write_bytes(b"same sums")
+    assert compare_assets.main([str(local), str(remote)]) == 0
+
+
+def test_release_asset_comparison_rejects_different_bytes(tmp_path: Path) -> None:
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    remote.mkdir()
+    (local / "korvid.whl").write_bytes(b"reviewed")
+    (remote / "korvid.whl").write_bytes(b"rebuilt")
+    with pytest.raises(ValueError, match=r"korvid\.whl"):
+        compare_assets.main([str(local), str(remote)])
+
+
+def test_release_asset_comparison_rejects_missing_assets(tmp_path: Path) -> None:
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    remote.mkdir()
+    (local / "offline.zip").write_bytes(b"bundle")
+    with pytest.raises(ValueError, match=r"offline\.zip"):
+        compare_assets.main([str(local), str(remote)])
+
+
 # --- archive verification ---------------------------------------------------
 
 
@@ -592,6 +625,27 @@ def test_release_audit_covers_every_shipped_extra() -> None:
     assert (
         "uv export --frozen --all-extras --no-emit-project --no-dev -o requirements.txt"
     ) in workflow
+
+
+def test_draft_release_is_staged_before_irreversible_pypi_publication() -> None:
+    workflow = _release_workflow()
+    stage = workflow.index("\n  stage-github-release:")
+    publish = workflow.index("\n  publish-pypi:")
+    finalize = workflow.index("\n  finalize-github-release:")
+    assert stage < publish < finalize
+    assert "gh release create" in workflow[stage:publish]
+    assert "--draft" in workflow[stage:publish]
+    assert "scripts/release/compare_assets.py" in workflow[stage:publish]
+    assert "skip-existing: true" in workflow[publish:finalize]
+    assert "--draft=false" in workflow[finalize:]
+
+
+def test_release_docs_require_immutable_protected_tags() -> None:
+    readme = (Path(__file__).parents[1] / "README.md").read_text()
+    assert "immutable `v*` tag ruleset" in readme
+    assert "restrict tag creation" in readme
+    assert "update and deletion" in readme
+    assert "protected tags only" in readme
 
 
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:

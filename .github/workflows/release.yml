@@ -294,8 +294,69 @@ jobs:
         with:
           subject-path: release-files/*
 
-  publish-pypi:
+  stage-github-release:
     needs: [verify, smoke, attest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: release-files
+          path: release-files
+      - name: Revalidate the remote tag before staging the release
+        env:
+          TAG: ${{ github.ref_name }}
+          EXPECTED_COMMIT: ${{ needs.verify.outputs.source_commit }}
+        run: |
+          git fetch --force origin \
+            "+refs/tags/$TAG:refs/tags/$TAG" \
+            "refs/heads/main:refs/remotes/origin/main"
+          python scripts/release/check_source.py "$TAG" origin/main \
+            --expected-commit "$EXPECTED_COMMIT"
+      - name: Stage an idempotent draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            draft=$(gh release view "$TAG" --repo "$REPO" \
+              --json isDraft --jq .isDraft)
+            if [ "$draft" != true ]; then
+              echo "a non-draft release already exists for $TAG"
+              exit 1
+            fi
+            mkdir existing-release
+            gh release download "$TAG" --repo "$REPO" --dir existing-release
+            python scripts/release/compare_assets.py \
+              release-files existing-release
+          else
+            status=$(curl --silent --show-error --output /dev/null \
+              --write-out '%{http_code}' \
+              "https://pypi.org/pypi/korvid/$VERSION/json")
+            if [ "$status" = 200 ]; then
+              echo "PyPI version exists but no matching draft release; refusing recovery"
+              exit 1
+            elif [ "$status" != 404 ]; then
+              echo "could not establish PyPI version state (HTTP $status)"
+              exit 1
+            fi
+            gh release create "$TAG" release-files/* \
+              --repo "$REPO" \
+              --title "korvid $TAG" \
+              --verify-tag \
+              --generate-notes \
+              --draft
+          fi
+
+  publish-pypi:
+    needs: [verify, stage-github-release]
     runs-on: ubuntu-latest
     # Protected environment: PyPI Trusted Publishing binds to this exact
     # workflow + environment; there is no API token anywhere.
@@ -328,8 +389,11 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           packages-dir: dist/
+          # Safe on rerun because stage-github-release first proves the
+          # persisted draft assets are byte-identical to this run.
+          skip-existing: true
 
-  github-release:
+  finalize-github-release:
     needs: [verify, publish-pypi]
     runs-on: ubuntu-latest
     permissions:
@@ -339,11 +403,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: release-files
-          path: release-files
-      - name: Revalidate the remote tag immediately before release creation
+      - name: Revalidate the remote tag immediately before release publication
         env:
           TAG: ${{ github.ref_name }}
           EXPECTED_COMMIT: ${{ needs.verify.outputs.source_commit }}
@@ -353,14 +413,16 @@ jobs:
             "refs/heads/main:refs/remotes/origin/main"
           python scripts/release/check_source.py "$TAG" origin/main \
             --expected-commit "$EXPECTED_COMMIT"
-      - name: Create the GitHub Release with the exact same artifacts
+      - name: Publish the already-staged GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
-          gh release create "$TAG" release-files/* \
-            --repo "$REPO" \
-            --title "korvid $TAG" \
-            --verify-tag \
-            --generate-notes
+          draft=$(gh release view "$TAG" --repo "$REPO" \
+            --json isDraft --jq .isDraft)
+          if [ "$draft" != true ]; then
+            echo "staged release is missing or no longer a draft"
+            exit 1
+          fi
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest

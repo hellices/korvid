@@ -150,6 +150,15 @@ dependency graph, build-provenance attestations, and offline wheelhouse
 bundles for Linux/Windows x86-64 on Python 3.11–3.13. Once the first
 release lands, install with:
 
+Before enabling the workflow, repository administrators **must** create an
+immutable `v*` tag ruleset: restrict tag creation to trusted release
+maintainers and prohibit tag update and deletion. The protected `release`
+environment must allow protected tags only and require approval; PyPI's
+Trusted Publisher must bind exactly to `hellices/korvid`,
+`.github/workflows/release.yml`, and that environment. The in-workflow
+source check is defense in depth, not a replacement for this external
+trust boundary.
+
 ```sh
 uv tool install 'korvid[all]==X.Y.Z'   # or: pip install 'korvid[all]==X.Y.Z'
 ```
