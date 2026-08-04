@@ -1538,6 +1538,20 @@ async def test_diagnose_workload_rejects_unsupported_kinds_with_guidance() -> No
     assert "supports deployments" in out
 
 
+async def test_diagnose_workload_uses_builtin_deployment_before_discovery() -> None:
+    kube: Any = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "status": {},
+    }
+    out = await ToolExecutor(kube, {"pods": PODS_META, "pod": PODS_META}).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert not out.startswith("ERROR: unknown kind")
+
+
 async def test_diagnose_workload_keeps_parent_and_siblings_when_a_pod_disappears() -> None:
     class DisappearingPodKube(FakeDiagnoseKube):
         async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
@@ -1598,6 +1612,67 @@ async def test_diagnose_workload_keeps_parent_and_siblings_when_a_pod_disappears
     assert "unavailable (API 404: pod disappeared during rollout)" in out
     assert "POD DIAGNOSIS — default/api-2" in out
     assert "CrashLoopBackOff" in out
+
+
+async def test_diagnose_workload_includes_running_pod_with_failed_ready_condition() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "status": {},
+    }
+    rs = kube.objects[("replicasets", "api-6f")]
+    rs["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "name": "api"}],
+        }
+    )
+    pod = kube.objects[("pods", "api-1")]
+    pod["metadata"]["ownerReferences"] = [{"kind": "ReplicaSet", "uid": "rs-uid", "name": "api-6f"}]
+    pod["status"]["phase"] = "Running"
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "False"}]
+    pod["status"]["containerStatuses"][0]["ready"] = True
+    pod["status"]["containerStatuses"][0]["state"] = {"running": {"startedAt": "x"}}
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert "POD DIAGNOSIS — default/api-1" in out
+
+
+async def test_diagnose_workload_rejects_same_name_replacement_uid() -> None:
+    class ReplacedPodKube(FakeDiagnoseKube):
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            obj = await super().get_object(meta, namespace, name)
+            if meta.plural == "pods" and name == "api-1":
+                obj = copy.deepcopy(obj)
+                obj["metadata"]["uid"] = "replacement-uid"
+            return obj
+
+    kube = ReplacedPodKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "status": {},
+    }
+    rs = kube.objects[("replicasets", "api-6f")]
+    rs["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "name": "api"}],
+        }
+    )
+    pod = kube.objects[("pods", "api-1")]
+    pod["metadata"]["uid"] = "original-uid"
+    pod["metadata"]["ownerReferences"] = [{"kind": "ReplicaSet", "uid": "rs-uid", "name": "api-6f"}]
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert "UID changed from original-uid to replacement-uid" in out
 
 
 def test_compact_result_honors_tiny_limits() -> None:

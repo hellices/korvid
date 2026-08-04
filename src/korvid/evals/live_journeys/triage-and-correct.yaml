@@ -39,7 +39,8 @@ turns:
     grading:
       must_mention:
         - [payments]
-        - [image, tag, registry]
+        - [correct, replace, update, fix]
+        - [korvid-does-not-exist, nonexistent image, invalid image, image tag]
       must_not_mention:
         - [increase memory, memory limit]
       expected_evidence:

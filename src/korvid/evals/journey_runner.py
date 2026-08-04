@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, ToolCallStarted
@@ -128,11 +128,19 @@ class _TurnTally:
     answer: str = ""
     malformed: int = 0
     error: str | None = None
+    started_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
     def note(self, event: Any) -> None:
         if isinstance(event, TextDelta):
             self.answer += event.text
         elif isinstance(event, ToolCallStarted):
+            try:
+                arguments = json.loads(event.arguments or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            self.started_calls.append((event.name, arguments))
             if _malformed_call(event.name, event.arguments, self.tool_schemas):
                 self.malformed += 1
         elif isinstance(event, ToolCallFinished):
@@ -176,7 +184,25 @@ def _malformed_call(
         return True
     parameters = schema.get("function", {}).get("parameters", {})
     required = parameters.get("required", ())
-    return not set(required) <= arguments.keys()
+    if not set(required) <= arguments.keys():
+        return True
+    json_types: dict[str, type | tuple[type, ...]] = {
+        "string": str,
+        "integer": int,
+        "boolean": bool,
+        "object": dict,
+        "array": list,
+    }
+    for key, value in arguments.items():
+        property_schema = parameters.get("properties", {}).get(key, {})
+        expected = json_types.get(property_schema.get("type"))
+        if expected is None:
+            continue
+        if expected is int and isinstance(value, bool):
+            return True
+        if not isinstance(value, expected):
+            return True
+    return False
 
 
 async def _run_once(
@@ -208,12 +234,10 @@ async def _run_once(
     results: list[JourneyTurnResult] = []
     try:
         for turn in journey.turns:
-            record_start = len(executor.records)
             tally = _TurnTally(tool_schemas)
             started = time.monotonic()
             async for event in runtime.run_turn(turn.user, turn.screen):
                 tally.note(event)
-            turn_records = executor.records[record_start:]
             result = grade(
                 _scenario_for_turn(journey, turn),
                 tally.answer,
@@ -221,12 +245,12 @@ async def _run_once(
             )
             forbidden = sum(
                 1
-                for record in turn_records
+                for _name, arguments in tally.started_calls
                 for target in turn.forbidden_targets
-                if _targets(record.arguments, target)
+                if _targets(arguments, target)
             )
             within_call_budget = (
-                turn.max_tool_calls is None or len(turn_records) <= turn.max_tool_calls
+                turn.max_tool_calls is None or len(tally.started_calls) <= turn.max_tool_calls
             )
             success = (
                 result.diagnosis_success
@@ -241,8 +265,8 @@ async def _run_once(
                     answer=tally.answer,
                     grade=result,
                     success=success,
-                    tool_calls=len(turn_records),
-                    tool_names=tuple(record.name for record in turn_records),
+                    tool_calls=len(tally.started_calls),
+                    tool_names=tuple(name for name, _args in tally.started_calls),
                     malformed_tool_calls=tally.malformed,
                     forbidden_target_calls=forbidden,
                     error=tally.error,

@@ -1021,7 +1021,13 @@ class ToolExecutor:
             lines.extend(self._trim_front(body, share - len(header) - 1))
         return lines
 
-    async def _diagnose_pod(self, args: dict[str, Any]) -> str:
+    async def _diagnose_pod(
+        self,
+        args: dict[str, Any],
+        *,
+        expected_uid: str | None = None,
+        expected_owner_uids: set[str] | None = None,
+    ) -> str:
         """Compound read-only diagnosis (issue #70).
 
         Evidence gathering is deterministic code; the model only interprets.
@@ -1036,6 +1042,19 @@ class ToolExecutor:
         namespace = _reject_slash_name(str(args["namespace"]), "namespace")
         pods_meta = self._api_meta("pods")
         pod = await self._kube.get_object(pods_meta, namespace, name)
+        metadata = pod.get("metadata") or {}
+        actual_uid = str(metadata.get("uid") or "")
+        if expected_uid is not None and actual_uid != expected_uid:
+            raise ValueError(
+                f"pod {namespace}/{name} UID changed from {expected_uid} to {actual_uid}"
+            )
+        if expected_owner_uids is not None:
+            actual_owners = {
+                str(reference.get("uid") or "")
+                for reference in metadata.get("ownerReferences") or []
+            }
+            if not actual_owners & expected_owner_uids:
+                raise ValueError(f"pod {namespace}/{name} ownership changed during diagnosis")
         head_sections: list[tuple[str, list[str]]] = [
             (
                 f"IDENTITY — pod {namespace}/{name}",
@@ -1090,7 +1109,7 @@ class ToolExecutor:
         if not isinstance(summary, PodListSummary) or summary.phase != "Running":
             return False
         ready, separator, total = summary.ready.partition("/")
-        return bool(separator) and ready == total and total != "0"
+        return summary.ready_condition and bool(separator) and ready == total and total != "0"
 
     async def _diagnose_deployment(
         self, namespace: str, name: str, workload: dict[str, Any]
@@ -1144,8 +1163,12 @@ class ToolExecutor:
         for pod in non_ready[: self._DIAGNOSE_MAX_WORKLOAD_PODS]:
             report.append(f"POD DIAGNOSIS — {namespace}/{pod.name}")
             try:
-                diagnosis = await self._diagnose_pod({"pod": pod.name, "namespace": namespace})
-            except ApiStatusError as exc:
+                diagnosis = await self._diagnose_pod(
+                    {"pod": pod.name, "namespace": namespace},
+                    expected_uid=pod.uid,
+                    expected_owner_uids=replica_uids,
+                )
+            except (ApiStatusError, ValueError) as exc:
                 diagnosis = f"unavailable ({exc})"
             report.extend(
                 f"  {line}"
@@ -1167,9 +1190,11 @@ class ToolExecutor:
         kind = str(args["kind"]).strip().lower()
         name = _reject_slash_name(str(args["name"]), "name")
         namespace = _reject_slash_name(str(args["namespace"]), "namespace")
-        meta = self._api_meta(kind)
-        if meta.plural != "deployments":
-            raise ValueError(f"diagnose_workload currently supports deployments, not {meta.plural}")
+        if kind not in {"deploy", "deployment", "deployments"}:
+            raise ValueError(f"diagnose_workload currently supports deployments, not {kind}")
+        meta = self._meta_for_kind_name("Deployment")
+        if meta is None:
+            raise ValueError("Deployment API was not discovered")
         workload = await self._kube.get_object(meta, namespace, name)
         return await self._diagnose_deployment(namespace, name, workload)
 

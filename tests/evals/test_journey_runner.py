@@ -132,3 +132,73 @@ async def test_run_journey_fails_redundant_turn_budget() -> None:
 
     assert report.runs[0].turns[1].tool_calls == 2
     assert report.runs[0].turns[1].success is False
+
+
+def test_malformed_call_rejects_wrong_json_property_types() -> None:
+    from korvid.agent.profiles import build_profile
+    from korvid.evals.journey_runner import _malformed_call
+
+    schemas = {
+        tool["function"]["name"]: tool
+        for tool in build_profile("small", readonly=True, resize_supported=False).tools
+    }
+    assert _malformed_call(
+        "list_resources",
+        '{"kind": 7, "namespace": ["catalog"]}',
+        schemas,
+    )
+
+
+async def test_discarded_parallel_calls_count_toward_budget_and_stale_targets() -> None:
+    journey = next(
+        item
+        for item in load_journeys(
+            __import__(
+                "korvid.evals.journey", fromlist=["bundled_journeys_dir"]
+            ).bundled_journeys_dir()
+        )
+        if item.id == "triage-and-correct"
+    )
+    script: list[list[dict[str, Any]]] = [
+        [
+            _call("list_resources", {"kind": "pods", "namespace": "shop"}, "c1"),
+            {"type": "done"},
+        ],
+        _text("checkout and payments need attention."),
+        [
+            _call(
+                "diagnose_pod",
+                {"pod": "payments-1", "namespace": "shop"},
+                "c2",
+            ),
+            _call(
+                "diagnose_pod",
+                {"pod": "checkout-1", "namespace": "shop"},
+                "c3",
+            ),
+            {"type": "done"},
+        ],
+        _text("payments has unauthorized registry authentication."),
+        [
+            _call(
+                "open_describe",
+                {"kind": "pods", "name": "payments-1", "namespace": "shop"},
+                "c4",
+            ),
+            {"type": "done"},
+        ],
+        _text("payments needs registry credentials."),
+    ]
+    report = await run_journey(
+        journey,
+        provider_factory=lambda: ScriptedProvider(script),
+        executor_factory=lambda fixture: ToolExecutor(
+            FakeKubeClient(fixture), builtin_aliases(), ui=RecordingUI()
+        ),
+        repetitions=1,
+        profile="small",
+    )
+    turn = report.runs[0].turns[1]
+    assert turn.tool_calls == 2
+    assert turn.forbidden_target_calls == 1
+    assert turn.success is False

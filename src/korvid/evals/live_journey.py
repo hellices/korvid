@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
 
@@ -10,6 +11,10 @@ from korvid.evals.journey_runner import RecordingUI
 from korvid.evals.scenario import Evidence
 from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta, build_alias_map
+from korvid.k8s.helm import HelmReleaseSummary
+from korvid.k8s.logs import LogLine
+from korvid.k8s.models import GenericSummary
+from korvid.k8s.reads import ReadOps
 from korvid.tools.executor import ToolExecutor
 
 EXPECTED_CONTEXT = "aks-korvid-contract-test"
@@ -89,12 +94,85 @@ def build_live_aliases(resources: list[ResourceMeta]) -> dict[str, ResourceMeta]
     return build_alias_map(resources)
 
 
+class NamespaceBoundReadOps(ReadOps):
+    """Fail-closed view of a client confined to one namespaced fixture."""
+
+    def __init__(self, delegate: ReadOps, namespace: str) -> None:
+        self._delegate = delegate
+        self._namespace = namespace
+
+    def _guard(self, meta: ResourceMeta, namespace: str | None) -> None:
+        if not meta.namespaced:
+            raise ValueError(f"live journey rejects cluster-scoped read of {meta.plural}")
+        if namespace is None:
+            raise ValueError("live journey reads require an explicit namespace")
+        if namespace != self._namespace:
+            raise ValueError(f"read outside live journey namespace: {namespace!r}")
+
+    async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
+        self._guard(meta, namespace)
+        return await self._delegate.list_objects(meta, namespace)
+
+    async def get_object(
+        self, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> dict[str, Any]:
+        self._guard(meta, namespace)
+        return await self._delegate.get_object(meta, namespace, name)
+
+    async def list_helm_releases(self, namespace: str | None) -> list[HelmReleaseSummary]:
+        if namespace is None:
+            raise ValueError("live journey reads require an explicit namespace")
+        if namespace != self._namespace:
+            raise ValueError(f"read outside live journey namespace: {namespace!r}")
+        return await self._delegate.list_helm_releases(namespace)
+
+    async def list_events_for(
+        self,
+        namespace: str,
+        name: str,
+        *,
+        kind: str | None = None,
+        uid: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if namespace != self._namespace:
+            raise ValueError(f"read outside live journey namespace: {namespace!r}")
+        return await self._delegate.list_events_for(namespace, name, kind=kind, uid=uid)
+
+    async def stream_logs(
+        self,
+        namespace: str,
+        pod: str,
+        container: str,
+        *,
+        previous: bool = False,
+        follow: bool = True,
+        tail_lines: int = 200,
+    ) -> AsyncIterator[LogLine]:
+        if namespace != self._namespace:
+            raise ValueError(f"read outside live journey namespace: {namespace!r}")
+        async for line in self._delegate.stream_logs(
+            namespace,
+            pod,
+            container,
+            previous=previous,
+            follow=follow,
+            tail_lines=tail_lines,
+        ):
+            yield line
+
+
 class LiveJourneyEnvironment:
     """Connected read executor for the guarded contract-test context."""
 
-    def __init__(self, client: KubeClient, aliases: dict[str, ResourceMeta]) -> None:
+    def __init__(
+        self,
+        client: KubeClient,
+        aliases: dict[str, ResourceMeta],
+        namespace: str,
+    ) -> None:
         self._client = client
         self._aliases = aliases
+        self._reads = NamespaceBoundReadOps(client, namespace)
 
     @classmethod
     async def connect(
@@ -110,12 +188,12 @@ class LiveJourneyEnvironment:
         except Exception:
             await client.close()
             raise
-        return cls(client, build_live_aliases(resources))
+        return cls(client, build_live_aliases(resources), namespace)
 
     def executor_factory(self, _fixture: Any) -> ToolExecutor:
         """Read-only tool executor; profile construction omits every write."""
         return ToolExecutor(
-            self._client,
+            self._reads,
             self._aliases,
             ui=RecordingUI(),
         )
