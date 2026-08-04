@@ -1132,7 +1132,7 @@ def _run_with_recovery(
             if len(crash_times) >= RESTART_CAP:
                 print(
                     f"korvid crashed {len(crash_times)} times within"
-                    f" {RESTART_WINDOW_SECONDS:.0f}s — not restarting.",
+                    f" {RESTART_WINDOW_SECONDS:.0f}s -- not restarting.",
                     file=sys.stderr,
                 )
                 raise

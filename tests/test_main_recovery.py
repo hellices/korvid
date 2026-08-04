@@ -77,6 +77,20 @@ def test_crash_cap_stops_a_deterministic_crash_loop(
     assert "not restarting" in capsys.readouterr().err
 
 
+def test_crash_cap_message_is_ascii_encodable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """All stderr output from the crash-cap path must be encodable in ASCII
+    (and therefore cp1252/any single-byte codepage) — em dashes or other
+    non-ASCII would raise UnicodeEncodeError on Windows terminals."""
+    runner = FlakyRunner(failures=100)
+    with pytest.raises(RuntimeError, match="boom"):
+        _run_with_recovery(runner, allow_restart=True, prompt=lambda: "y", clock=lambda: 0.0)
+    captured = capsys.readouterr().err
+    # This encodes the entire cap diagnostic; would raise on non-ASCII.
+    captured.encode("ascii")
+
+
 def test_old_crashes_age_out_of_the_window() -> None:
     runner = FlakyRunner(failures=RESTART_CAP + 1)
     times = iter(
