@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import FrozenInstanceError
 from typing import Any
 
@@ -722,4 +722,147 @@ async def test_normal_close_failure_becomes_contract_error() -> None:
         await _collect_events(wrapped)
     msg = str(exc_info.value)
     assert "SECRET_CLEANUP_FAIL" not in msg
+    assert inner.close_calls == 1
+
+
+# --- Round 8: iterator creation and hostile mapping ---
+
+
+class _CreationFailsProvider(LLMProvider):
+    """Provider whose complete() raises synchronously (non-generator)."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    @property
+    def name(self) -> str:
+        return "creation-fails"
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> AsyncIterator[dict[str, Any]]:
+        raise self._exc
+
+    async def aclose(self) -> None:
+        pass
+
+
+async def test_iterator_creation_secret_exception_translated() -> None:
+    """Synchronous exception from complete() call itself must be translated."""
+    secret_exc = ProviderPluginContractError("SECRET_INIT_PAYLOAD" * 20)
+    wrapped = ValidatedPluginProvider(_CreationFailsProvider(secret_exc))
+
+    with pytest.raises(ProviderPluginContractError, match="stream creation failed") as exc_info:
+        await _collect_events(wrapped)
+    msg = str(exc_info.value)
+    assert "SECRET_INIT_PAYLOAD" not in msg
+    assert len(msg) <= 300
+
+
+async def test_iterator_creation_huge_exception_bounded() -> None:
+    """Huge exception type name from complete() must be bounded."""
+    huge_exc = type("A" * 5000, (Exception,), {})("payload")
+    wrapped = ValidatedPluginProvider(_CreationFailsProvider(huge_exc))
+
+    with pytest.raises(ProviderPluginContractError, match="stream creation failed") as exc_info:
+        await _collect_events(wrapped)
+    assert len(str(exc_info.value)) <= 2200
+
+
+class _HostileMapping(Mapping[object, object]):
+    """Mapping whose get() raises with secret payload."""
+
+    def __init__(self, secret: str) -> None:
+        self._secret = secret
+
+    def __getitem__(self, key: object) -> object:
+        raise RuntimeError(self._secret)
+
+    def __iter__(self) -> Iterator[object]:
+        raise RuntimeError(self._secret)
+
+    def __len__(self) -> int:
+        raise RuntimeError(self._secret)
+
+    def get(self, key: object, default: object = None) -> object:
+        raise RuntimeError(self._secret)
+
+
+async def test_hostile_mapping_get_raises_translated() -> None:
+    """A Mapping whose get() raises must produce fixed contract error."""
+    hostile = _HostileMapping("SECRET_MAP_PAYLOAD_xyz789" * 10)
+    provider = _ScriptedProvider([hostile, {"type": "done"}])
+    wrapped = ValidatedPluginProvider(provider)
+
+    with pytest.raises(ProviderPluginContractError, match="field access") as exc_info:
+        await _collect_events(wrapped)
+    msg = str(exc_info.value)
+    assert "SECRET_MAP_PAYLOAD" not in msg
+
+
+async def test_hostile_mapping_in_text_delta_field() -> None:
+    """A text_delta event whose Mapping raises on field get() must be caught."""
+
+    class _HostileTextMapping(Mapping[object, object]):
+        def __getitem__(self, key: object) -> object:
+            if key == "type":
+                return "text_delta"
+            raise RuntimeError("SECRET_FIELD_READ" * 20)
+
+        def __iter__(self) -> Iterator[object]:
+            return iter(["type", "text"])
+
+        def __len__(self) -> int:
+            return 2
+
+        def get(self, key: object, default: object = None) -> object:
+            if key == "type":
+                return "text_delta"
+            raise RuntimeError("SECRET_FIELD_READ" * 20)
+
+    provider = _ScriptedProvider([_HostileTextMapping(), {"type": "done"}])
+    wrapped = ValidatedPluginProvider(provider)
+
+    with pytest.raises(ProviderPluginContractError, match="field access") as exc_info:
+        await _collect_events(wrapped)
+    assert "SECRET_FIELD_READ" not in str(exc_info.value)
+
+
+async def test_hostile_mapping_iterator_still_closed() -> None:
+    """When normalization fails on hostile mapping, the underlying iterator
+    must still be closed (deterministic cleanup)."""
+    hostile = _HostileMapping("SECRET" * 100)
+
+    class _TrackClose(LLMProvider):
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        @property
+        def name(self) -> str:
+            return "track-close"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            try:
+                yield hostile  # type: ignore[misc]
+            finally:
+                self.close_calls += 1
+
+        async def aclose(self) -> None:
+            pass
+
+    inner = _TrackClose()
+    wrapped = ValidatedPluginProvider(inner)
+
+    with pytest.raises(ProviderPluginContractError, match="field access"):
+        await _collect_events(wrapped)
     assert inner.close_calls == 1

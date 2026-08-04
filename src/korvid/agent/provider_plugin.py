@@ -80,8 +80,16 @@ class ValidatedPluginProvider(LLMProvider):
         *,
         stream: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
+        # Iterator creation itself may raise (synchronous Exception from
+        # plugin code or wrong return type causing protocol error later).
+        try:
+            iterator = self._provider.complete(messages, tools, stream=stream)
+        except Exception as exc:
+            exc_type = type(exc).__name__
+            raise ProviderPluginContractError(
+                f"provider stream creation failed: {_bounded_exception(exc_type)}"
+            ) from None
         done_seen = False
-        iterator = self._provider.complete(messages, tools, stream=stream)
         try:
             while True:
                 # Advance the underlying plugin iterator — translate ALL
@@ -161,11 +169,26 @@ def _bounded_exception(label: str) -> str:
     return encoded[:_MAX_EXCEPTION_BYTES].decode("utf-8", errors="ignore") + "..."
 
 
+def _safe_mapping_get(event: Mapping[object, object], key: str) -> object:
+    """Read a key from a plugin-controlled Mapping, translating any exception.
+
+    Plugin Mappings may override __getitem__/get/keys to raise arbitrary
+    exceptions with secret payloads.  This isolates every read so only our
+    own validation code produces diagnostic messages.
+    """
+    try:
+        return event.get(key)
+    except Exception:
+        raise ProviderPluginContractError(
+            "provider event mapping raised during field access"
+        ) from None
+
+
 def _normalize_event(event: object) -> dict[str, Any]:
     if not isinstance(event, Mapping):
         raise ProviderPluginContractError("provider events must be mapping objects")
 
-    event_type = event.get("type")
+    event_type = _safe_mapping_get(event, "type")
     if event_type == "text_delta":
         return {
             "type": "text_delta",
@@ -220,7 +243,7 @@ def _normalize_event(event: object) -> dict[str, Any]:
 
 
 def _require_str(event: Mapping[object, object], label: str, key: str) -> str:
-    value = event.get(key)
+    value = _safe_mapping_get(event, key)
     if not isinstance(value, str):
         raise ProviderPluginContractError(f"{label} must be str")
     return value
@@ -273,7 +296,7 @@ def _require_non_negative_int(
     *,
     max_value: int,
 ) -> int:
-    value = event.get(key)
+    value = _safe_mapping_get(event, key)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > max_value:
         raise ProviderPluginContractError(f"{label} must be a non-negative int <= {max_value}")
     return value
