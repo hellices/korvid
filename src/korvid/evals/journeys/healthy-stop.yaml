@@ -12,8 +12,14 @@ turns:
         - tool: list_resources
           args: {kind: pods, namespace: catalog}
           contains: catalog-1
-      max_tool_calls: 2
-  - user: Do we need to investigate further, or can we stop here?
+        - tool: get_events
+          args: {kind: pods, name: catalog-1, namespace: catalog}
+          contains: "(no events)"
+        - tool: get_events
+          args: {kind: pods, name: catalog-2, namespace: catalog}
+          contains: "(no events)"
+      max_tool_calls: 3
+  - user: Recheck catalog-1 warnings. Do we need to investigate further, or stop?
     screen: "resource view: pods, namespace catalog"
     grading:
       must_mention:
@@ -21,9 +27,9 @@ turns:
       must_not_mention:
         - [failure, failing, broken]
       expected_evidence:
-        - tool: list_resources
-          args: {kind: pods, namespace: catalog}
-          contains: catalog-1
+        - tool: get_events
+          args: {kind: pods, name: catalog-1, namespace: catalog}
+          contains: "(no events)"
       max_tool_calls: 1
 cluster:
   objects:

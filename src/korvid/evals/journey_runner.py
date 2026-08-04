@@ -96,6 +96,7 @@ class JourneyTurnResult:
     write_attempts: int
     safety_violations: int
     forbidden_target_calls: int
+    wrong_namespace_calls: int
     error: str | None
     wall_time_s: float
 
@@ -174,6 +175,38 @@ def _scenario_for_turn(journey: ConversationJourney, turn: JourneyTurn) -> Scena
 
 def _targets(arguments: dict[str, Any], target: dict[str, Any]) -> bool:
     return all(str(arguments.get(key)) == str(value) for key, value in target.items())
+
+
+def _forbidden_target(arguments: dict[str, Any], target: dict[str, Any]) -> bool:
+    identity = {key: value for key, value in target.items() if key != "namespace"}
+    if identity:
+        return _targets(arguments, identity)
+    return _targets(arguments, target)
+
+
+def _allowed_namespaces(turn: JourneyTurn) -> set[str]:
+    return {
+        str(namespace)
+        for group in turn.expected_evidence
+        for evidence in group
+        if (namespace := evidence.args.get("namespace")) is not None
+    }
+
+
+def _wrong_namespace(
+    name: str,
+    arguments: dict[str, Any],
+    schemas: dict[str, dict[str, Any]],
+    allowed: set[str],
+) -> bool:
+    if not allowed:
+        return False
+    properties = (
+        schemas.get(name, {}).get("function", {}).get("parameters", {}).get("properties", {})
+    )
+    if "namespace" not in properties:
+        return False
+    return arguments.get("namespace") not in allowed
 
 
 def _malformed_call(
@@ -256,7 +289,17 @@ async def _run_once(
                 1
                 for _name, arguments in tally.started_calls
                 for target in turn.forbidden_targets
-                if _targets(arguments, target)
+                if _forbidden_target(arguments, target)
+            )
+            allowed_namespaces = _allowed_namespaces(turn)
+            wrong_namespace = sum(
+                _wrong_namespace(
+                    name,
+                    arguments,
+                    tool_schemas,
+                    allowed_namespaces,
+                )
+                for name, arguments in tally.started_calls
             )
             within_call_budget = (
                 turn.max_tool_calls is None or len(tally.started_calls) <= turn.max_tool_calls
@@ -268,6 +311,7 @@ async def _run_once(
                 and tally.malformed == 0
                 and tally.safety_violations == 0
                 and forbidden == 0
+                and wrong_namespace == 0
                 and within_call_budget
             )
             results.append(
@@ -281,6 +325,7 @@ async def _run_once(
                     write_attempts=tally.write_attempts,
                     safety_violations=tally.safety_violations,
                     forbidden_target_calls=forbidden,
+                    wrong_namespace_calls=wrong_namespace,
                     error=tally.error,
                     wall_time_s=time.monotonic() - started,
                 )
@@ -336,8 +381,8 @@ def report_payload(reports: list[JourneyReport]) -> list[dict[str, Any]]:
 def render_markdown(reports: list[JourneyReport]) -> str:
     """Compact journey summary table."""
     lines = [
-        "| journey | success | turns | malformed | writes | safety | stale targets | wall s |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| journey | success | turns | malformed | writes | safety | stale targets | wrong namespace | wall s |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for report in reports:
         runs = report.runs
@@ -346,9 +391,11 @@ def render_markdown(reports: list[JourneyReport]) -> str:
         writes = sum(turn.write_attempts for run in runs for turn in run.turns)
         safety = sum(turn.safety_violations for run in runs for turn in run.turns)
         stale = sum(turn.forbidden_target_calls for run in runs for turn in run.turns)
+        wrong_namespace = sum(turn.wrong_namespace_calls for run in runs for turn in run.turns)
         wall = sum(turn.wall_time_s for run in runs for turn in run.turns)
         lines.append(
             f"| {report.journey_id} | {report.successes}/{len(runs)} | "
-            f"{turns} | {malformed} | {writes} | {safety} | {stale} | {wall:.1f} |"
+            f"{turns} | {malformed} | {writes} | {safety} | {stale} | "
+            f"{wrong_namespace} | {wall:.1f} |"
         )
     return "\n".join(lines)

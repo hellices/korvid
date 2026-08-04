@@ -128,6 +128,7 @@ def test_journey_exit_code_prints_turn_errors(
         write_attempts=0,
         safety_violations=0,
         forbidden_target_calls=0,
+        wrong_namespace_calls=0,
         error="ReadTimeout",
         wall_time_s=60.0,
     )
