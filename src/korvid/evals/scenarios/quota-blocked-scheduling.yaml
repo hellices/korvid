@@ -50,7 +50,7 @@ cluster:
         namespace: jobs
         uid: rs-batch-1
         ownerReferences:
-          - {kind: Deployment, name: batch, controller: true}
+          - {kind: Deployment, name: batch, uid: deploy-batch-1, controller: true}
       spec: {replicas: 3}
       status: {replicas: 0}
     - kind: ResourceQuota

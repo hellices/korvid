@@ -43,7 +43,7 @@ cluster:
         namespace: shop
         uid: rs-checkout-1
         ownerReferences:
-          - {kind: Deployment, name: checkout, controller: true}
+          - {kind: Deployment, name: checkout, uid: deploy-checkout-1, controller: true}
       spec: {replicas: 2}
       status: {replicas: 2, readyReplicas: 2}
     - kind: Pod
@@ -55,7 +55,7 @@ cluster:
         creationTimestamp: "2026-07-27T04:00:00Z"
         labels: {app: checkout}
         ownerReferences:
-          - {kind: ReplicaSet, name: checkout-5b7d, controller: true}
+          - {kind: ReplicaSet, name: checkout-5b7d, uid: rs-checkout-1, controller: true}
       spec:
         nodeName: node-a
         containers:
@@ -80,7 +80,7 @@ cluster:
         creationTimestamp: "2026-07-27T04:00:00Z"
         labels: {app: checkout}
         ownerReferences:
-          - {kind: ReplicaSet, name: checkout-5b7d, controller: true}
+          - {kind: ReplicaSet, name: checkout-5b7d, uid: rs-checkout-1, controller: true}
       spec:
         nodeName: node-b
         containers:

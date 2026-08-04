@@ -76,3 +76,21 @@ def test_fixture_timestamps_never_exceed_scenario_now(scenario: Scenario) -> Non
     for raw in _timestamps([*scenario.objects, *scenario.events]):
         parsed = datetime.fromisoformat(raw)
         assert parsed <= SCENARIO_NOW, f"{scenario.id}: {raw} is after SCENARIO_NOW"
+
+
+@pytest.mark.parametrize("scenario", BUNDLED, ids=lambda s: s.id)
+def test_fixture_owner_references_use_uids(scenario: Scenario) -> None:
+    """Ownership-chain tools match Kubernetes objects by immutable UID.
+
+    The API always populates ownerReference.uid; name-only fixtures make
+    Deployment -> ReplicaSet -> Pod traversal impossible in the fake cluster
+    even though the same tool works against a real API server.
+    """
+    for obj in scenario.objects:
+        metadata = obj.get("metadata") or {}
+        for ref in metadata.get("ownerReferences") or []:
+            uid = str(ref.get("uid") or "")
+            assert uid, (
+                f"{scenario.id}: {obj.get('kind')} {metadata.get('name')} "
+                f"owner {ref.get('kind')} {ref.get('name')} has no uid"
+            )

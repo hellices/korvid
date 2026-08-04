@@ -10,6 +10,7 @@ from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
+from korvid.k8s.models import summary_for
 from korvid.tools.executor import MAX_RESULT_CHARS, READ_TOOLS, UI_TOOLS, ToolExecutor, UIBridge
 from korvid.tools.registry import TOOLS_BY_NAME, ToolDef
 
@@ -36,6 +37,7 @@ def test_read_tools_schema_names() -> None:
         "list_operators",
         "helm_list_releases",
         "diagnose_pod",
+        "diagnose_workload",
     ]
 
 
@@ -61,6 +63,10 @@ class _ExplodingKube:
         ("get_events", {"kind": "pods", "name": "default/web-1", "namespace": "app"}),
         ("get_logs", {"pod": "default/web-1", "namespace": "app"}),
         ("diagnose_pod", {"pod": "default/web-1", "namespace": "app"}),
+        (
+            "diagnose_workload",
+            {"kind": "deployments", "name": "default/web", "namespace": "app"},
+        ),
     ],
 )
 async def test_slash_in_name_is_rejected_with_guidance_before_any_api_call(
@@ -83,6 +89,10 @@ async def test_slash_in_name_is_rejected_with_guidance_before_any_api_call(
         ("get_events", {"kind": "pods", "name": "web-1", "namespace": "default/web-1"}),
         ("get_logs", {"pod": "web-1", "namespace": "default/web-1"}),
         ("diagnose_pod", {"pod": "web-1", "namespace": "default/web-1"}),
+        (
+            "diagnose_workload",
+            {"kind": "deployments", "name": "web", "namespace": "default/web"},
+        ),
     ],
 )
 async def test_slash_in_namespace_is_rejected_symmetrically(
@@ -998,6 +1008,17 @@ class FakeDiagnoseKube:
             raise ApiStatusError(404, "NotFound")
         return obj
 
+    async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+        summaries: list[Any] = []
+        for obj in self.objects.values():
+            if obj.get("kind") != meta.kind:
+                continue
+            metadata = obj.get("metadata") or {}
+            if meta.namespaced and namespace is not None and metadata.get("namespace") != namespace:
+                continue
+            summaries.append(summary_for(meta.kind, obj))
+        return summaries
+
     async def list_events_for(
         self, namespace: str, name: str, *, kind: str | None = None, uid: str | None = None
     ) -> list[dict[str, Any]]:
@@ -1411,6 +1432,83 @@ async def test_diagnose_pod_clamps_the_skipped_container_summary() -> None:
     assert len(out) <= MAX_RESULT_CHARS
     assert "truncated" not in out  # never falls back to prefix truncation
     assert all(len(line) <= 250 for line in out.splitlines())
+
+
+# --- diagnose_workload ------------------------------------------------------
+
+
+def test_diagnose_workload_schema_prefers_one_call_for_rollout_failures() -> None:
+    schema = next(t for t in READ_TOOLS if t["function"]["name"] == "diagnose_workload")
+    description = schema["function"]["description"]
+    assert "Deployment" in description
+    assert "ReplicaSet" in description
+    assert "pod" in description
+
+
+async def test_diagnose_workload_follows_deployment_to_the_failing_pod() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 2},
+        "status": {
+            "replicas": 2,
+            "readyReplicas": 1,
+            "conditions": [
+                {
+                    "type": "Progressing",
+                    "status": "False",
+                    "reason": "ProgressDeadlineExceeded",
+                    "message": 'ReplicaSet "api-6f" timed out progressing',
+                }
+            ],
+        },
+    }
+    replicaset = kube.objects[("replicasets", "api-6f")]
+    replicaset["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [
+                {"kind": "Deployment", "name": "api", "uid": "deploy-uid", "controller": True}
+            ],
+        }
+    )
+    replicaset["spec"] = {"replicas": 1}
+    replicaset["status"] = {"replicas": 1, "readyReplicas": 0}
+    pod = kube.objects[("pods", "api-1")]
+    pod["metadata"]["ownerReferences"] = [
+        {"kind": "ReplicaSet", "name": "api-6f", "uid": "rs-uid", "controller": True}
+    ]
+    pod["status"]["phase"] = "Pending"
+    pod["status"]["containerStatuses"][0]["state"] = {
+        "waiting": {
+            "reason": "ImagePullBackOff",
+            "message": 'Back-off pulling image "api:v9-typo"',
+        }
+    }
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+
+    assert not out.startswith("ERROR:")
+    assert "WORKLOAD — Deployment default/api" in out
+    assert "ProgressDeadlineExceeded" in out
+    assert "ReplicaSet api-6f" in out
+    assert "POD DIAGNOSIS — default/api-1" in out
+    assert "ImagePullBackOff" in out
+    assert len(out) <= MAX_RESULT_CHARS
+
+
+async def test_diagnose_workload_rejects_unsupported_kinds_with_guidance() -> None:
+    out = await _diagnose_executor(FakeDiagnoseKube()).execute(
+        "diagnose_workload",
+        {"kind": "nodes", "name": "node-a", "namespace": "default"},
+    )
+    assert out.startswith("ERROR:")
+    assert "supports deployments" in out
 
 
 def test_compact_result_honors_tiny_limits() -> None:

@@ -41,7 +41,7 @@ cluster:
         creationTimestamp: "2026-07-27T02:00:00Z"
         labels: {job-name: nightly-report}
         ownerReferences:
-          - {kind: Job, name: nightly-report, controller: true}
+          - {kind: Job, name: nightly-report, uid: job-report-1, controller: true}
       spec:
         nodeName: node-a
         containers:

@@ -26,7 +26,7 @@ cluster:
         creationTimestamp: "2026-07-27T06:00:00Z"
         labels: {app: checkout}
         ownerReferences:
-          - {kind: ReplicaSet, name: checkout-5f9d, controller: true}
+          - {kind: ReplicaSet, name: checkout-5f9d, uid: rs-checkout-1, controller: true}
       spec:
         nodeName: node-a
         containers:
@@ -54,7 +54,7 @@ cluster:
         namespace: shop
         uid: rs-checkout-1
         ownerReferences:
-          - {kind: Deployment, name: checkout, controller: true}
+          - {kind: Deployment, name: checkout, uid: deploy-checkout-1, controller: true}
       spec: {replicas: 1}
     - kind: Node
       apiVersion: v1

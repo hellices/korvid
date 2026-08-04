@@ -467,6 +467,45 @@ TOOL_DEFS: list[ToolDef] = [
         },
     ),
     ToolDef(
+        name="diagnose_workload",
+        effect="cluster_read",
+        dispatch="_diagnose_workload",
+        surfaces=_ALL_SURFACES,
+        schema={
+            "type": "function",
+            "function": {
+                "name": "diagnose_workload",
+                "description": (
+                    "Compound rollout diagnostic for a Deployment. One call"
+                    " gathers workload conditions and Warning events, follows"
+                    " ownership through ReplicaSets to non-ready pods, and"
+                    " embeds compact pod diagnoses with container states,"
+                    " events, and logs. Prefer this over manually chaining"
+                    " get_resource, list_resources, and diagnose_pod when a"
+                    " Deployment rollout is stuck."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "description": "Workload kind. Currently: deployments.",
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Workload name.",
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Kubernetes namespace containing the workload.",
+                        },
+                    },
+                    "required": ["kind", "name", "namespace"],
+                },
+            },
+        },
+    ),
+    ToolDef(
         name="navigate",
         effect="ui_only",
         dispatch="agent_navigate",

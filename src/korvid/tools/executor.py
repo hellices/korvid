@@ -26,6 +26,7 @@ from korvid.k8s.models import (
 )
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
 from korvid.k8s.reads import ReadOps
+from korvid.k8s.relations import owned_by
 from korvid.tools.diagnose import (
     condition_lines,
     container_state_lines,
@@ -810,6 +811,11 @@ class ToolExecutor:
     _DIAGNOSE_MAX_LOG_CONTAINERS = 3
     #: Mounted PVCs whose phase is fetched; more are named only.
     _DIAGNOSE_MAX_PVCS = 5
+    #: Non-ready pods expanded under a workload diagnosis.
+    _DIAGNOSE_MAX_WORKLOAD_PODS = 3
+    #: Each embedded pod diagnosis gets a fixed share so parent evidence and
+    #: sibling attribution remain visible under the shared ingest cap.
+    _DIAGNOSE_WORKLOAD_POD_BUDGET = 2200
     #: Per-line clamp — event/condition messages and log lines are
     #: cluster-controlled and unbounded.
     _DIAGNOSE_LINE_CLAMP = 240
@@ -820,6 +826,8 @@ class ToolExecutor:
     #: the related evidence never depends on background API discovery
     #: having populated the alias table.
     _DIAGNOSE_BUILTIN_METAS: ClassVar[dict[str, ResourceMeta]] = {
+        "Deployment": ResourceMeta("Deployment", "deployments", "apps", "v1", True),
+        "Pod": ResourceMeta("Pod", "pods", "", "v1", True),
         "ReplicaSet": ResourceMeta("ReplicaSet", "replicasets", "apps", "v1", True),
         "Node": ResourceMeta("Node", "nodes", "", "v1", False),
         "PersistentVolumeClaim": ResourceMeta(
@@ -1044,6 +1052,116 @@ class ToolExecutor:
         blocks = await self._diagnose_log_blocks(namespace, name, pod)
         budget = MAX_RESULT_CHARS - sum(len(line) + 1 for line in report) - len(log_title) - 1
         return "\n".join([*report, log_title, *self._render_log_blocks(blocks, budget)])
+
+    async def _owned_summaries(
+        self, namespace: str, parent_uid: str, child_kind: str
+    ) -> list[GenericSummary]:
+        meta = self._meta_for_kind_name(child_kind)
+        if meta is None:
+            raise ValueError(f"{child_kind} API was not discovered")
+        return [
+            summary
+            for summary in await self._kube.list_objects(meta, namespace)
+            if owned_by(summary, parent_uid)
+        ]
+
+    async def _workload_event_lines(
+        self, namespace: str, name: str, workload: dict[str, Any]
+    ) -> list[str]:
+        metadata = workload.get("metadata") or {}
+        raw_uid = metadata.get("uid")
+        events = await self._kube.list_events_for(
+            namespace,
+            name,
+            kind="Deployment",
+            uid=str(raw_uid) if raw_uid else None,
+        )
+        return warning_event_lines(events) or ["(no warning events)"]
+
+    @staticmethod
+    def _pod_summary_is_ready(summary: GenericSummary) -> bool:
+        if not isinstance(summary, PodListSummary) or summary.phase != "Running":
+            return False
+        ready, separator, total = summary.ready.partition("/")
+        return bool(separator) and ready == total and total != "0"
+
+    async def _diagnose_deployment(
+        self, namespace: str, name: str, workload: dict[str, Any]
+    ) -> str:
+        metadata = workload.get("metadata") or {}
+        uid = str(metadata.get("uid") or "")
+        if not uid:
+            raise ValueError(f"Deployment {namespace}/{name} has no metadata.uid")
+
+        replicasets = await self._owned_summaries(namespace, uid, "ReplicaSet")
+        replica_uids = {summary.uid for summary in replicasets if summary.uid}
+        pods_meta = self._meta_for_kind_name("Pod")
+        if pods_meta is None:
+            raise ValueError("Pod API was not discovered")
+        pods = [
+            summary
+            for summary in await self._kube.list_objects(pods_meta, namespace)
+            if any(owner_uid in replica_uids for owner_uid in summary.owner_uids)
+        ]
+        non_ready = [pod for pod in pods if not self._pod_summary_is_ready(pod)]
+
+        sections: list[tuple[str, list[str]]] = [
+            (
+                f"WORKLOAD — Deployment {namespace}/{name}",
+                identity_lines(workload),
+            ),
+            (
+                "WORKLOAD CONDITIONS (failing first)",
+                condition_lines(workload) or ["(none reported)"],
+            ),
+            (
+                "WORKLOAD WARNING EVENTS (newest first)",
+                await self._workload_event_lines(namespace, name, workload),
+            ),
+            (
+                "OWNED REPLICASETS",
+                [f"ReplicaSet {summary.name}: {summary_facts(summary)}" for summary in replicasets]
+                or ["(none found)"],
+            ),
+        ]
+        report: list[str] = []
+        for title, lines in sections:
+            report.append(title)
+            report.extend(
+                f"  {line}"
+                for line in self._budget_section([self._clamp_line(line) for line in lines])
+            )
+
+        if not non_ready:
+            report.extend(["POD DIAGNOSES", "  (no non-ready owned pods found)"])
+        for pod in non_ready[: self._DIAGNOSE_MAX_WORKLOAD_PODS]:
+            report.append(f"POD DIAGNOSIS — {namespace}/{pod.name}")
+            diagnosis = await self._diagnose_pod({"pod": pod.name, "namespace": namespace})
+            report.extend(
+                f"  {line}"
+                for line in compact_result(
+                    diagnosis, self._DIAGNOSE_WORKLOAD_POD_BUDGET
+                ).splitlines()
+            )
+        omitted = non_ready[self._DIAGNOSE_MAX_WORKLOAD_PODS :]
+        if omitted:
+            report.append(
+                f"({len(omitted)} more non-ready pod(s) not expanded: "
+                + ", ".join(pod.name for pod in omitted)
+                + ")"
+            )
+        return compact_result("\n".join(report), MAX_RESULT_CHARS)
+
+    async def _diagnose_workload(self, args: dict[str, Any]) -> str:
+        """One-call rollout diagnosis for supported workload kinds."""
+        kind = str(args["kind"]).strip().lower()
+        name = _reject_slash_name(str(args["name"]), "name")
+        namespace = _reject_slash_name(str(args["namespace"]), "namespace")
+        meta = self._api_meta(kind)
+        if meta.plural != "deployments":
+            raise ValueError(f"diagnose_workload currently supports deployments, not {meta.plural}")
+        workload = await self._kube.get_object(meta, namespace, name)
+        return await self._diagnose_deployment(namespace, name, workload)
 
 
 def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:

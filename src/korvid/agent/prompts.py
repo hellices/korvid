@@ -138,6 +138,11 @@ SMALL_TOOL_DESCRIPTIONS: dict[str, str] = {
         "restart counts, failing conditions, Warning events, node/PVC "
         "context, and log excerpts. Prefer this first when a pod is failing."
     ),
+    "diagnose_workload": (
+        "One-call diagnosis of a stuck Deployment rollout: conditions and "
+        "Warning events, owned ReplicaSets, and compact diagnoses of its "
+        "non-ready pods. Prefer this when a Deployment is not progressing."
+    ),
     "list_operators": (
         "List OLM operator packages and installed subscriptions with their status. Read-only."
     ),
