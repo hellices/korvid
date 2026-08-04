@@ -587,6 +587,13 @@ def test_release_build_toolchain_is_fully_pinned() -> None:
     assert "--hash=sha256:" in constraints
 
 
+def test_release_audit_covers_every_shipped_extra() -> None:
+    workflow = _release_workflow()
+    assert (
+        "uv export --frozen --all-extras --no-emit-project --no-dev -o requirements.txt"
+    ) in workflow
+
+
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:
     workflow = _release_workflow()
     assert 'source_commit=$(git rev-list -n 1 "refs/tags/$TAG")' in workflow

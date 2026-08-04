@@ -55,7 +55,7 @@ jobs:
       - run: uvx deptry src/
       - run: uv run pytest --cov --cov-fail-under=80
       # Vulnerability audit against the locked resolution (fail-closed).
-      - run: uv export --frozen --no-emit-project --no-dev -o requirements.txt
+      - run: uv export --frozen --all-extras --no-emit-project --no-dev -o requirements.txt
       - run: uvx pip-audit -r requirements.txt --disable-pip
 
   build:
