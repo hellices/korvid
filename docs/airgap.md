@@ -57,6 +57,54 @@ file field. When set, korvid validates the path and runs
 wrapper (never a shell). Helm remains the owner of persisted repository
 configuration and credentials — korvid stores nothing.
 
+## Offline installation bundles
+
+Every tagged release attaches versioned offline archives built from the
+committed lockfile with **all extras** (`korvid[all,entra]`):
+
+| Archive | Platform | Python |
+| --- | --- | --- |
+| `korvid-X.Y.Z-offline-linux-manylinux_2_28-x86_64-py3.11.tar.gz` … `py3.13` | Linux x86-64, glibc 2.28+ | 3.11–3.13 |
+| `korvid-X.Y.Z-offline-windows-x86_64-py3.11.zip` … `py3.13` | Windows x86-64 | 3.11–3.13 |
+
+Pick the archive matching the target's OS and Python minor version. Each
+contains `wheels/` (korvid plus every locked dependency, built on a
+native runner of that platform), `install.sh`/`install.ps1`,
+`SHA256SUMS`, `sbom.cdx.json`, and `README.txt`.
+Linux wheel selection and offline verification run inside the pinned
+`manylinux_2_28_x86_64` image, making **glibc 2.28** the explicit
+compatibility floor rather than inheriting whichever newer glibc happens
+to be installed on `ubuntu-latest`.
+
+On the connected side, verify before carrying it across the boundary:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing          # release-level checksums
+gh attestation verify korvid-X.Y.Z-offline-linux-manylinux_2_28-x86_64-py3.12.tar.gz \
+  --repo hellices/korvid                          # build provenance
+```
+
+On the air-gapped side:
+
+```sh
+tar xzf korvid-X.Y.Z-offline-linux-manylinux_2_28-x86_64-py3.12.tar.gz
+cd korvid-X.Y.Z-offline-linux-manylinux_2_28-x86_64-py3.12
+sha256sum -c SHA256SUMS      # bundle-internal integrity
+./install.sh                 # or: python -m pip install --no-index \
+                             #       --find-links ./wheels "korvid[all,entra]==X.Y.Z"
+```
+
+Upgrading is the same procedure with the newer archive — pip replaces the
+installed version in place (`--no-index` still applies). Every archive is
+verified in CI in a clean environment with package indexes unreachable,
+including a negative check proving the install fails when a dependency
+wheel is missing (i.e. nothing is silently fetched).
+
+**Boundary:** the Python bundle contains korvid and its locked Python
+dependencies only. Helm, Telepresence, debug images, model artifacts, and
+Kubernetes credentials are separate operator-supplied dependencies — see
+the sections above.
+
 ## Internalizing the remaining dependencies
 
 - **LLM**: run Ollama/vLLM inside the network; see above.
