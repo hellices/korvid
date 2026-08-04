@@ -1,0 +1,50 @@
+id: live-triage-and-correct
+root_cause: image_pull_failure
+turns:
+  - user: >-
+      Explore namespace eval-template broadly. Which pods need attention, and
+      which one should we inspect first?
+    screen: "resource view: pods, namespace eval-template"
+    grading:
+      must_mention:
+        - [checkout]
+        - [payments]
+      must_not_mention:
+        - [healthy namespace, no issues]
+      expected_evidence:
+        - tool: list_resources
+          args: {kind: pods, namespace: eval-template}
+          contains: payments-1
+      max_tool_calls: 3
+  - user: >-
+      Focus on payments, not checkout. Find the exact cause and keep the
+      namespace straight.
+    screen: "resource view: pods, namespace eval-template, selected: payments-1"
+    grading:
+      must_mention:
+        - [payments]
+        - [imagepullbackoff, errimagepull, image pull, failed to pull]
+      must_not_mention:
+        - [oomkilled, out of memory]
+      expected_evidence:
+        - tool: diagnose_pod
+          args: {pod: payments-1, namespace: eval-template}
+          contains: ImagePullBackOff
+      max_tool_calls: 2
+    forbidden_targets:
+      - {pod: checkout-1, namespace: eval-template}
+      - {name: checkout-1, namespace: eval-template}
+  - user: Show the payments evidence on screen and summarize the next action.
+    screen: "resource view: pods, namespace eval-template, selected: payments-1"
+    grading:
+      must_mention:
+        - [payments]
+        - [image, tag, registry]
+      must_not_mention:
+        - [increase memory, memory limit]
+      expected_evidence:
+        - tool: open_describe
+          args: {kind: pods, name: payments-1, namespace: eval-template}
+          contains: opened describe
+      max_tool_calls: 2
+cluster: {objects: [], events: [], logs: {}}

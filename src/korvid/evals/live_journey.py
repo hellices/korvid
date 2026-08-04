@@ -9,7 +9,7 @@ from korvid.evals.journey import ConversationJourney, JourneyTurn
 from korvid.evals.journey_runner import RecordingUI
 from korvid.evals.scenario import Evidence
 from korvid.k8s.client import KubeClient
-from korvid.k8s.discovery import ResourceMeta
+from korvid.k8s.discovery import ResourceMeta, build_alias_map
 from korvid.tools.executor import ToolExecutor
 
 EXPECTED_CONTEXT = "aks-korvid-contract-test"
@@ -84,14 +84,9 @@ def retarget_journey_namespace(
     return replace(journey, turns=tuple(turns))
 
 
-def _aliases(resources: list[ResourceMeta]) -> dict[str, ResourceMeta]:
-    aliases: dict[str, ResourceMeta] = {}
-    for meta in resources:
-        aliases[meta.plural] = meta
-        aliases[meta.kind.lower()] = meta
-        for shortname in meta.shortnames:
-            aliases[shortname] = meta
-    return aliases
+def build_live_aliases(resources: list[ResourceMeta]) -> dict[str, ResourceMeta]:
+    """Match application discovery semantics: first collision wins."""
+    return build_alias_map(resources)
 
 
 class LiveJourneyEnvironment:
@@ -115,7 +110,7 @@ class LiveJourneyEnvironment:
         except Exception:
             await client.close()
             raise
-        return cls(client, _aliases(resources))
+        return cls(client, build_live_aliases(resources))
 
     def executor_factory(self, _fixture: Any) -> ToolExecutor:
         """Read-only tool executor; profile construction omits every write."""
