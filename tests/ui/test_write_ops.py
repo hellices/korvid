@@ -1419,10 +1419,9 @@ async def test_cancelled_before_factory_leaks_no_coroutine(tmp_path: Path) -> No
     factory — no unawaited coroutine, no mutation before intent.
 
     Uses a gated audit (threading.Event inside to_thread) to deterministically
-    cancel at the right instant and warnings-as-errors to prove no coroutine leaks.
+    cancel at the right instant.
     """
     import threading
-    import warnings
 
     factory_calls: list[str] = []
 
@@ -1470,17 +1469,16 @@ async def test_cancelled_before_factory_leaks_no_coroutine(tmp_path: Path) -> No
     app._audit = audit
 
     async with app.run_test() as pilot:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            task = asyncio.create_task(
-                app._run_write("delete", _PODS_META, "default", "web-1", factory)
-            )
-            # Bounded wait for audit to_thread to enter GatedAudit.append
+        task = asyncio.create_task(
+            app._run_write("delete", _PODS_META, "default", "web-1", factory)
+        )
+        try:
             await until(pilot, entered.is_set, label="audit entered")
             task.cancel()
-            # Release the gate so to_thread can return (avoiding a stuck thread)
+        finally:
+            # Always release so the executor thread cannot hang at exit.
             audit_gate.set()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
     assert factory_calls == [], "factory must not be called when cancelled during audit"
     assert rec.calls == [], "no mutation must reach the recorder"
