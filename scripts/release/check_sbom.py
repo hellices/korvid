@@ -14,13 +14,16 @@ def _normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def _requirements(path: Path) -> set[str]:
-    names: set[str] = set()
+def _requirements(path: Path) -> set[tuple[str, str]]:
+    pinned: set[tuple[str, str]] = set()
     for line in path.read_text().splitlines():
-        match = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==", line)
+        match = re.match(
+            r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9.+!_-]*)",
+            line,
+        )
         if match:
-            names.add(_normalize(match.group(1)))
-    return names
+            pinned.add((_normalize(match.group(1)), match.group(2)))
+    return pinned
 
 
 def main(argv: list[str]) -> int:
@@ -34,13 +37,17 @@ def main(argv: list[str]) -> int:
     if _normalize(str(root.get("name", ""))) != "korvid":
         raise ValueError("SBOM root component is not korvid")
     components = {
-        _normalize(str(component.get("name", "")))
+        (
+            _normalize(str(component.get("name", ""))),
+            str(component.get("version", "")),
+        )
         for component in payload.get("components", [])
         if isinstance(component, dict)
     }
     missing = _requirements(Path(args.requirements)) - components
     if missing:
-        raise ValueError(f"SBOM is missing locked dependencies: {sorted(missing)}")
+        formatted = [f"{name}=={version}" for name, version in sorted(missing)]
+        raise ValueError(f"SBOM is missing locked dependencies: {formatted}")
     print(f"SBOM verified: korvid + {len(components)} dependency components")
     return 0
 

@@ -47,14 +47,14 @@ def main(argv: list[str]) -> int:
     commit = tagged_commit.stdout.strip()
     if args.expected_commit is not None and commit != args.expected_commit:
         print(
-            f"release tag {tag!r} changed from verified commit {args.expected_commit} to {commit}",
+            f"release tag {tag!r} changed from verified commit; refusing publication",
             file=sys.stderr,
         )
         return 1
     reachable = _git(repo, "merge-base", "--is-ancestor", commit, trusted_ref)
     if reachable.returncode != 0:
         print(
-            f"tagged commit {commit} is not reachable from trusted ref {trusted_ref!r}",
+            f"release tag {tag!r} is not reachable from trusted ref {trusted_ref!r}",
             file=sys.stderr,
         )
         return 1

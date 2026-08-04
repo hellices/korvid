@@ -146,6 +146,19 @@ def test_release_tag_must_still_match_the_originally_verified_commit(
     assert "changed from verified commit" in capsys.readouterr().err
 
 
+def test_source_policy_errors_do_not_log_commit_hashes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _release_repo(tmp_path)
+    _git(repo, "checkout", "-b", "unreviewed")
+    (repo / "tracked.txt").write_text("unreviewed\n")
+    _git(repo, "commit", "-am", "unreviewed")
+    _git(repo, "tag", "-a", "v1.2.3", "-m", "release 1.2.3")
+    commit = _git(repo, "rev-parse", "v1.2.3^{}")
+    assert check_source.main(["v1.2.3", "main", str(repo)]) == 1
+    assert commit not in capsys.readouterr().err
+
+
 # --- checksums --------------------------------------------------------------
 
 
@@ -367,7 +380,10 @@ def test_artifact_metadata_version_mismatch_fails(tmp_path: Path) -> None:
 def _sbom(path: Path, *, include_korvid: bool = True) -> Path:
     payload = {
         "metadata": {"component": {"name": "korvid" if include_korvid else "dependencies"}},
-        "components": [{"name": "httpx"}, {"name": "textual"}],
+        "components": [
+            {"name": "httpx", "version": "0.28.0"},
+            {"name": "textual", "version": "8.1.1"},
+        ],
     }
     path.write_text(json.dumps(payload))
     return path
@@ -402,6 +418,15 @@ def test_sbom_missing_a_locked_dependency_fails(tmp_path: Path) -> None:
     requirements = tmp_path / "requirements.txt"
     requirements.write_text("httpx==0.28.0\nanyio==4.0.0\n")
     with pytest.raises(ValueError, match="anyio"):
+        check_sbom.main(
+            ["--sbom", str(_sbom(tmp_path / "sbom.json")), "--requirements", str(requirements)]
+        )
+
+
+def test_sbom_dependency_version_must_match_the_lock(tmp_path: Path) -> None:
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("httpx==0.27.0\n")
+    with pytest.raises(ValueError, match=r"httpx==0\.27\.0"):
         check_sbom.main(
             ["--sbom", str(_sbom(tmp_path / "sbom.json")), "--requirements", str(requirements)]
         )
@@ -467,6 +492,29 @@ def test_offline_verifier_extracts_the_published_archive(tmp_path: Path) -> None
     assert extracted.name == "korvid-1.2.3-offline-linux-x86_64-py3.12"
     assert (extracted / "SHA256SUMS").is_file()
     assert (extracted / "wheels" / "korvid-1.2.3-py3-none-any.whl").is_file()
+
+
+# --- workflow invariants ----------------------------------------------------
+
+
+def _release_workflow() -> str:
+    return (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text()
+
+
+def test_linux_bundle_pins_and_names_the_manylinux_2_28_baseline() -> None:
+    workflow = _release_workflow()
+    assert "manylinux_2_28_x86_64@sha256:" in workflow
+    assert 'platform_tag="linux-manylinux_2_28-x86_64"' in workflow
+
+
+def test_release_metadata_is_generated_in_the_build_job() -> None:
+    workflow = _release_workflow()
+    build = workflow.index("\n  build:")
+    smoke = workflow.index("\n  smoke:")
+    sbom = workflow.index("\n  sbom:")
+    offline = workflow.index("\n  offline:")
+    assert "scripts/release/metadata.py" in workflow[build:smoke]
+    assert "scripts/release/metadata.py" not in workflow[sbom:offline]
 
 
 # --- metadata ---------------------------------------------------------------
