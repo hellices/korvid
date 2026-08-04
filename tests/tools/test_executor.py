@@ -1603,6 +1603,15 @@ async def test_diagnose_workload_budget_keeps_every_selected_pod_header() -> Non
         pod = copy.deepcopy(source)
         pod["metadata"]["name"] = f"api-{index}"
         pod["metadata"]["uid"] = f"pod-{index}"
+        if index == 2:
+            pod["status"]["containerStatuses"][0]["state"] = {
+                "waiting": {"reason": "ImagePullBackOff"}
+            }
+        else:
+            pod["status"]["phase"] = "Pending"
+            pod["status"]["containerStatuses"][0]["state"] = {
+                "waiting": {"reason": "ContainerCreating"}
+            }
         kube.objects[("pods", f"api-{index}")] = pod
     kube.log_lines = ["ERROR: " + "x" * 230 for _ in range(200)]
     out = await _diagnose_executor(kube).execute(
@@ -1613,6 +1622,9 @@ async def test_diagnose_workload_budget_keeps_every_selected_pod_header() -> Non
     for name in ("api-1", "api-2", "api-3"):
         assert f"POD DIAGNOSIS — default/{name}" in out
         assert f"POD DIAGNOSIS — default/{name}" in compact_result(out, 3_000)
+    visible = compact_result(out, 3_000)
+    assert "POD DIAGNOSIS — default/api-2: phase=ImagePullBackOff" in visible
+    assert "POD DIAGNOSIS — default/api-3: phase=ContainerCreating" in visible
 
 
 async def test_diagnose_workload_prefers_newest_replicaset_pods() -> None:

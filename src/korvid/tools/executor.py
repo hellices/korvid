@@ -1197,7 +1197,11 @@ class ToolExecutor:
             ),
             (
                 "SELECTED NON-READY PODS",
-                [f"POD DIAGNOSIS — {namespace}/{pod.name}" for pod in selected] or ["(none found)"],
+                [
+                    f"POD DIAGNOSIS — {namespace}/{pod.name}: {summary_facts(pod)}"
+                    for pod in selected
+                ]
+                or ["(none found)"],
             ),
             (
                 "WORKLOAD CONDITIONS (failing first)",
