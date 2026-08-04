@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from korvid.evals.grader import grade
 from korvid.evals.journey import bundled_journeys_dir, load_journeys
 from korvid.evals.live_journey import (
     NamespaceBoundReadOps,
@@ -14,6 +16,7 @@ from korvid.evals.live_journey import (
     guard_live_target,
     retarget_journey_namespace,
 )
+from korvid.evals.scenario import Scenario
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.helm import HelmReleaseSummary
 from korvid.k8s.logs import LogLine
@@ -56,6 +59,26 @@ def test_live_aliases_keep_core_pods_ahead_of_pod_metrics_collision() -> None:
     )
     aliases = build_live_aliases([PODS_META, metrics_pods])
     assert aliases["pods"] == PODS_META
+
+
+def test_live_corrective_turn_requires_an_invalid_image_claim() -> None:
+    journey = load_journeys(Path("src/korvid/evals/live_journeys"))[0]
+    turn = journey.turns[2]
+    scenario = Scenario(
+        id="corrective",
+        question=turn.user,
+        screen=turn.screen,
+        root_cause=journey.root_cause,
+        must_mention=turn.must_mention,
+        must_not_mention=turn.must_not_mention,
+        expected_evidence=turn.expected_evidence,
+    )
+    result = grade(
+        scenario,
+        "Payments: fix the registry credentials; the image tag is valid.",
+        [],
+    )
+    assert result.diagnosis_success is False
 
 
 class _ReadSpy(ReadOps):

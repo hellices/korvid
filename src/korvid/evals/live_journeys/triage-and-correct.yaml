@@ -40,7 +40,8 @@ turns:
       must_mention:
         - [payments]
         - [correct, replace, update, fix]
-        - [korvid-does-not-exist, nonexistent image, invalid image, image tag]
+        - [korvid-does-not-exist, nonexistent image, invalid image, invalid tag,
+           wrong tag, bad tag]
       must_not_mention:
         - [increase memory, memory limit]
       expected_evidence:
