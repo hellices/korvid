@@ -333,12 +333,18 @@ def test_offline_verifier_uses_windows_console_launcher(tmp_path: Path) -> None:
 # --- artifact metadata ------------------------------------------------------
 
 
-def _metadata_text(*, version: str = "1.2.3", include_entra: bool = True) -> str:
+def _metadata_text(
+    *,
+    version: str = "1.2.3",
+    include_entra: bool = True,
+    include_keyring: bool = True,
+) -> str:
     entra = (
         'Provides-Extra: entra\nRequires-Dist: azure-identity>=1.19; extra == "entra"\n'
         if include_entra
         else ""
     )
+    keyring = 'Requires-Dist: keyring>=25.7.0; extra == "agent"\n' if include_keyring else ""
     return (
         "Metadata-Version: 2.4\n"
         "Name: korvid\n"
@@ -348,8 +354,17 @@ def _metadata_text(*, version: str = "1.2.3", include_entra: bool = True) -> str
         f"{entra}"
         "Provides-Extra: all\n"
         'Requires-Dist: httpx>=0.27; extra == "agent"\n'
+        f"{keyring}"
         'Requires-Dist: mcp<2,>=1.10; extra == "mcp"\n'
-        'Requires-Dist: korvid[agent,mcp]; extra == "all"\n'
+        'Requires-Dist: anyio>=4.5; extra == "mcp"\n'
+        'Requires-Dist: starlette>=0.36; extra == "mcp"\n'
+        'Requires-Dist: uvicorn>=0.30; extra == "mcp"\n'
+        'Requires-Dist: httpx>=0.27; extra == "all"\n'
+        'Requires-Dist: keyring>=25.7.0; extra == "all"\n'
+        'Requires-Dist: mcp<2,>=1.10; extra == "all"\n'
+        'Requires-Dist: anyio>=4.5; extra == "all"\n'
+        'Requires-Dist: starlette>=0.36; extra == "all"\n'
+        'Requires-Dist: uvicorn>=0.30; extra == "all"\n'
         "\n"
     )
 
@@ -380,6 +395,14 @@ def test_artifact_metadata_missing_an_extra_fails(tmp_path: Path) -> None:
 def test_artifact_metadata_version_mismatch_fails(tmp_path: Path) -> None:
     dist = _fake_dist(tmp_path, _metadata_text(version="1.2.4"))
     with pytest.raises(ValueError, match=r"1\.2\.4"):
+        check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
+
+
+def test_artifact_metadata_rejects_a_partial_extra_dependency_set(
+    tmp_path: Path,
+) -> None:
+    dist = _fake_dist(tmp_path, _metadata_text(include_keyring=False))
+    with pytest.raises(ValueError, match="keyring"):
         check_artifacts.main(["--dist", str(dist), "--version", "1.2.3"])
 
 
@@ -524,6 +547,25 @@ def test_release_metadata_is_generated_in_the_build_job() -> None:
     offline = workflow.index("\n  offline:")
     assert "scripts/release/metadata.py" in workflow[build:smoke]
     assert "scripts/release/metadata.py" not in workflow[sbom:offline]
+
+
+def test_release_build_toolchain_is_fully_pinned() -> None:
+    workflow = _release_workflow()
+    setup_uv_count = workflow.count(
+        "uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9"
+    )
+    assert setup_uv_count > 0
+    assert workflow.count('version: "0.10.9"') == setup_uv_count
+    assert (
+        "uv build --build-constraints scripts/release/build-constraints.txt --require-hashes"
+    ) in workflow
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text()
+    assert '"hatchling==1.27.0"' in pyproject
+    constraints = (
+        Path(__file__).parents[1] / "scripts" / "release" / "build-constraints.txt"
+    ).read_text()
+    assert "hatchling==1.27.0" in constraints
+    assert "--hash=sha256:" in constraints
 
 
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:

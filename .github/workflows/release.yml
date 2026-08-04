@@ -28,6 +28,7 @@ jobs:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
         with:
+          version: "0.10.9"
           # Publishing workflow: caching is a poisoning vector (zizmor).
           enable-cache: false
       - id: version
@@ -66,11 +67,12 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
         with:
+          version: "0.10.9"
           # Publishing workflow: caching is a poisoning vector (zizmor).
           enable-cache: false
       # Built exactly once; these files are promoted to PyPI and the
       # GitHub Release without rebuilding.
-      - run: uv build
+      - run: uv build --build-constraints scripts/release/build-constraints.txt --require-hashes
       - name: Verify wheel and sdist metadata before promotion
         env:
           VERSION: ${{ needs.verify.outputs.version }}
@@ -126,6 +128,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
         with:
+          version: "0.10.9"
           # Publishing workflow: caching is a poisoning vector (zizmor).
           enable-cache: false
       # CycloneDX SBOM over korvid plus the full locked runtime graph
@@ -163,6 +166,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
         with:
+          version: "0.10.9"
           python-version: ${{ matrix.python-version }}
           # Publishing workflow: caching is a poisoning vector (zizmor).
           enable-cache: false
