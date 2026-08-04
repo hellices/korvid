@@ -35,6 +35,7 @@ _SECRET_OPTION_KEY_SEGMENTS = (
     "password",
     "token",
     "api_key",
+    "apikey",  # compact form of api_key (common in JSON configs)
     "authorization",
     "credential",
 )

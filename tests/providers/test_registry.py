@@ -758,3 +758,113 @@ def test_openai_compat_aliases_route_to_builtin(
     from korvid.providers.openai_compat import OpenAICompatProvider
 
     assert isinstance(p, OpenAICompatProvider)
+
+
+# ---------------------------------------------------------------------------
+# Finding #1 round 6: effective auth resolution in plugin path
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_auth_none_with_api_key_env_resolves_to_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """auth_method=None + api_key_env present must resolve to 'api_key'
+    and build credentials; plugin metadata must see 'api_key'."""
+    from unittest.mock import MagicMock
+
+    from korvid.agent.provider_plugin import ProviderPluginMetadata
+
+    meta = ProviderPluginMetadata(
+        api_version=1, name="my-llm", display_name="My", auth_methods=("api_key",)
+    )
+    plugin = MagicMock(metadata=meta)
+    registry = MagicMock()
+    registry.load_selected.return_value = plugin
+    # Track what config.auth_method the registry.create receives
+    configs_seen: list[object] = []
+
+    def _capture_create(name: str, config: object, creds: object) -> MagicMock:
+        configs_seen.append(config)
+        return MagicMock(name="fake-provider", aclose=MagicMock())
+
+    registry.create.side_effect = _capture_create
+
+    monkeypatch.setenv("KORVID_TEST_PLUGIN_KEY", "test-token")
+    create_provider(
+        enabled=True,
+        provider="my-llm",
+        auth_method=None,  # unset
+        base_url="http://x/v1",
+        model="m",
+        api_key_env="KORVID_TEST_PLUGIN_KEY",
+        plugin_registry=registry,
+    )
+    assert configs_seen
+    from korvid.agent.provider_plugin import ProviderPluginConfig
+
+    cfg = configs_seen[0]
+    assert isinstance(cfg, ProviderPluginConfig)
+    assert cfg.auth_method == "api_key"
+
+
+def test_plugin_none_only_with_api_key_env_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A none-only plugin receiving api_key_env must reject (effective method
+    is api_key which is not in the plugin's auth_methods)."""
+    from unittest.mock import MagicMock
+
+    from korvid.agent.provider_plugin import ProviderPluginMetadata
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    meta = ProviderPluginMetadata(
+        api_version=1, name="my-llm", display_name="My", auth_methods=("none",)
+    )
+    registry = MagicMock()
+    registry.load_selected.return_value = MagicMock(metadata=meta)
+    registry.create.side_effect = ProviderPluginError(
+        "provider plugin 'my-llm' does not support auth method 'api_key'"
+    )
+
+    monkeypatch.setenv("KORVID_TEST_PLUGIN_KEY2", "test-token")
+    with pytest.raises(ProviderPluginError, match="auth"):
+        create_provider(
+            enabled=True,
+            provider="my-llm",
+            auth_method=None,
+            base_url="http://x/v1",
+            model="m",
+            api_key_env="KORVID_TEST_PLUGIN_KEY2",
+            plugin_registry=registry,
+        )
+
+
+def test_plugin_api_key_only_without_env_defaults_none_and_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An api_key-only plugin with no api_key_env must resolve method=none
+    and the create call should reject (none not in api_key-only methods)."""
+    from unittest.mock import MagicMock
+
+    from korvid.agent.provider_plugin import ProviderPluginMetadata
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    meta = ProviderPluginMetadata(
+        api_version=1, name="my-llm", display_name="My", auth_methods=("api_key",)
+    )
+    registry = MagicMock()
+    registry.load_selected.return_value = MagicMock(metadata=meta)
+    registry.create.side_effect = ProviderPluginError(
+        "provider plugin 'my-llm' does not support auth method 'none'"
+    )
+
+    with pytest.raises(ProviderPluginError, match="auth"):
+        create_provider(
+            enabled=True,
+            provider="my-llm",
+            auth_method=None,
+            base_url="http://x/v1",
+            model="m",
+            api_key_env=None,
+            plugin_registry=registry,
+        )

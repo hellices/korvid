@@ -159,10 +159,14 @@ def _create_via_plugin(
     # load_selected may raise ProviderPluginError — let it propagate.
     plugin_registry.load_selected(name)
 
+    # Resolve effective auth method ONCE so build_credentials and
+    # ProviderPluginConfig always agree and metadata validation runs.
+    effective_auth = auth_method or ("api_key" if api_key_env else "none")
+
     # Build credentials first (validates auth config) then close on failure.
     credentials: CredentialSource | None = None
     try:
-        credentials = build_credentials(name, auth_method, api_key_env)
+        credentials = build_credentials(name, effective_auth, api_key_env)
     except _AuthMisconfigured:
         from korvid.providers.plugin_registry import ProviderPluginError as _PPE
 
@@ -171,7 +175,7 @@ def _create_via_plugin(
     config = ProviderPluginConfig(
         base_url=base_url,
         model=model,
-        auth_method=auth_method,
+        auth_method=effective_auth,
         api_key_env=api_key_env,
         options=options or {},
     )

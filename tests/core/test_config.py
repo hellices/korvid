@@ -308,6 +308,9 @@ def test_agent_options_rejects_unsupported_objects(tmp_path: Path) -> None:
         ("accessToken", "token"),
         ("APIKey", "api_key"),
         ("clientAPIKey", "api_key"),
+        # Compact lowercase form (finding round 6)
+        ("apikey", "apikey"),
+        ("my_apikey", "apikey"),
     ],
 )
 def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, expected: str) -> None:

@@ -334,9 +334,12 @@ segments are exactly:
 - `secret`
 - `password`
 - `token`
-- `api_key`
+- `api_key` (and compact form `apikey`)
 - `authorization`
 - `credential`
+
+CamelCase keys are split at word boundaries before matching, so `apiKey`,
+`clientSecret`, `accessToken`, `APIKey`, and `clientAPIKey` are all rejected.
 
 Store secrets in environment variables and pass only the variable name via
 `agent.api_key_env`.
