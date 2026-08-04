@@ -12,6 +12,10 @@ from korvid.agent.credentials import CredentialSource
 from korvid.agent.provider import LLMProvider
 
 PROVIDER_PLUGIN_API_VERSION: Final[int] = 1
+_MAX_TEXT_DELTA_LENGTH: Final[int] = 65_536
+_MAX_TOOL_CALL_FIELD_LENGTH: Final[int] = 256
+_MAX_TOOL_ARGUMENTS_LENGTH: Final[int] = 65_536
+_MAX_USAGE_TOKENS: Final[int] = 1_000_000_000
 
 
 @dataclass(frozen=True)
@@ -88,20 +92,51 @@ def _normalize_event(event: object) -> dict[str, Any]:
 
     event_type = event.get("type")
     if event_type == "text_delta":
-        return {"type": "text_delta", "text": _require_str(event, "text_delta.text", "text")}
+        return {
+            "type": "text_delta",
+            "text": _require_bounded_str(
+                event,
+                "text_delta.text",
+                "text",
+                max_length=_MAX_TEXT_DELTA_LENGTH,
+            ),
+        }
     if event_type == "tool_call":
         return {
             "type": "tool_call",
-            "id": _require_non_empty_str(event, "tool_call.id", "id"),
-            "name": _require_non_empty_str(event, "tool_call.name", "name"),
-            "arguments": _require_str(event, "tool_call.arguments", "arguments"),
+            "id": _require_non_empty_str(
+                event,
+                "tool_call.id",
+                "id",
+                max_length=_MAX_TOOL_CALL_FIELD_LENGTH,
+            ),
+            "name": _require_non_empty_str(
+                event,
+                "tool_call.name",
+                "name",
+                max_length=_MAX_TOOL_CALL_FIELD_LENGTH,
+            ),
+            "arguments": _require_bounded_str(
+                event,
+                "tool_call.arguments",
+                "arguments",
+                max_length=_MAX_TOOL_ARGUMENTS_LENGTH,
+            ),
         }
     if event_type == "usage":
         return {
             "type": "usage",
-            "input_tokens": _require_non_negative_int(event, "usage.input_tokens", "input_tokens"),
+            "input_tokens": _require_non_negative_int(
+                event,
+                "usage.input_tokens",
+                "input_tokens",
+                max_value=_MAX_USAGE_TOKENS,
+            ),
             "output_tokens": _require_non_negative_int(
-                event, "usage.output_tokens", "output_tokens"
+                event,
+                "usage.output_tokens",
+                "output_tokens",
+                max_value=_MAX_USAGE_TOKENS,
             ),
         }
     if event_type == "done":
@@ -116,15 +151,40 @@ def _require_str(event: Mapping[object, object], label: str, key: str) -> str:
     return value
 
 
-def _require_non_empty_str(event: Mapping[object, object], label: str, key: str) -> str:
+def _require_bounded_str(
+    event: Mapping[object, object],
+    label: str,
+    key: str,
+    *,
+    max_length: int,
+) -> str:
     value = _require_str(event, label, key)
+    if len(value) > max_length:
+        raise ProviderPluginContractError(f"{label} exceeds max length {max_length}")
+    return value
+
+
+def _require_non_empty_str(
+    event: Mapping[object, object],
+    label: str,
+    key: str,
+    *,
+    max_length: int,
+) -> str:
+    value = _require_bounded_str(event, label, key, max_length=max_length)
     if not value:
         raise ProviderPluginContractError(f"{label} must be non-empty")
     return value
 
 
-def _require_non_negative_int(event: Mapping[object, object], label: str, key: str) -> int:
+def _require_non_negative_int(
+    event: Mapping[object, object],
+    label: str,
+    key: str,
+    *,
+    max_value: int,
+) -> int:
     value = event.get(key)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ProviderPluginContractError(f"{label} must be a non-negative int")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > max_value:
+        raise ProviderPluginContractError(f"{label} must be a non-negative int <= {max_value}")
     return value

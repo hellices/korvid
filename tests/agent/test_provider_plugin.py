@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from korvid.agent.credentials import CredentialSource
 from korvid.agent.provider import LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
@@ -53,7 +54,7 @@ class _ConcretePlugin(ProviderPlugin):
     def create(
         self,
         config: ProviderPluginConfig,
-        credentials: object | None,
+        credentials: CredentialSource | None,
     ) -> LLMProvider:
         del config, credentials
         return _ScriptedProvider([{"type": "done"}])
@@ -94,6 +95,10 @@ def test_metadata_and_config_are_frozen() -> None:
 def test_provider_plugin_is_abstract() -> None:
     with pytest.raises(TypeError, match="abstract"):
         ProviderPlugin()  # type: ignore[abstract]  # instantiating the ABC is the test
+
+
+def test_provider_plugin_api_version_is_v1() -> None:
+    assert PROVIDER_PLUGIN_API_VERSION == 1
 
 
 def test_validated_plugin_provider_requires_llm_provider_instance() -> None:
@@ -152,6 +157,7 @@ async def test_validated_plugin_provider_normalizes_all_event_shapes() -> None:
         ({"type": "unknown"}, "unknown provider event type"),
         ({"type": "text_delta", "text": 3}, "text_delta.text"),
         ({"type": "tool_call", "id": "", "name": "get_logs", "arguments": "{}"}, "tool_call.id"),
+        ({"type": "tool_call", "id": "c1", "name": "", "arguments": "{}"}, "tool_call.name"),
         (
             {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": {}},
             "tool_call.arguments",
@@ -161,6 +167,57 @@ async def test_validated_plugin_provider_normalizes_all_event_shapes() -> None:
     ],
 )
 async def test_validated_plugin_provider_rejects_malformed_events(
+    event: object,
+    message: str,
+) -> None:
+    wrapped = ValidatedPluginProvider(_ScriptedProvider([event]))
+
+    with pytest.raises(ProviderPluginContractError, match=message):
+        await _collect_events(wrapped)
+
+
+@pytest.mark.parametrize(
+    ("event", "message"),
+    [
+        ({"type": "text_delta", "text": "x" * 65_537}, "text_delta.text"),
+        (
+            {
+                "type": "tool_call",
+                "id": "c1",
+                "name": "get_logs",
+                "arguments": "x" * 65_537,
+            },
+            "tool_call.arguments",
+        ),
+        (
+            {
+                "type": "tool_call",
+                "id": "x" * 257,
+                "name": "get_logs",
+                "arguments": "{}",
+            },
+            "tool_call.id",
+        ),
+        (
+            {
+                "type": "tool_call",
+                "id": "c1",
+                "name": "x" * 257,
+                "arguments": "{}",
+            },
+            "tool_call.name",
+        ),
+        (
+            {"type": "usage", "input_tokens": 1_000_000_001, "output_tokens": 0},
+            "usage.input_tokens",
+        ),
+        (
+            {"type": "usage", "input_tokens": 0, "output_tokens": 1_000_000_001},
+            "usage.output_tokens",
+        ),
+    ],
+)
+async def test_validated_plugin_provider_rejects_out_of_bounds_events(
     event: object,
     message: str,
 ) -> None:
