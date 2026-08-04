@@ -106,6 +106,46 @@ def test_lightweight_release_tag_fails(tmp_path: Path, capsys: pytest.CaptureFix
     assert "annotated tag" in capsys.readouterr().err
 
 
+def test_release_tag_must_still_match_the_originally_verified_commit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _release_repo(tmp_path)
+    _git(repo, "tag", "-a", "v1.2.3", "-m", "release 1.2.3")
+    verified_commit = _git(repo, "rev-parse", "v1.2.3^{}")
+    assert (
+        check_source.main(
+            [
+                "v1.2.3",
+                "main",
+                str(repo),
+                "--expected-commit",
+                verified_commit,
+            ]
+        )
+        == 0
+    )
+
+    # Simulate a force-moved release tag after protected-environment
+    # approval began: the remote re-fetch now resolves a different commit.
+    (repo / "tracked.txt").write_text("moved\n")
+    _git(repo, "commit", "-am", "move tag")
+    _git(repo, "tag", "-d", "v1.2.3")
+    _git(repo, "tag", "-a", "v1.2.3", "-m", "moved release")
+    assert (
+        check_source.main(
+            [
+                "v1.2.3",
+                "main",
+                str(repo),
+                "--expected-commit",
+                verified_commit,
+            ]
+        )
+        == 1
+    )
+    assert "changed from verified commit" in capsys.readouterr().err
+
+
 # --- checksums --------------------------------------------------------------
 
 

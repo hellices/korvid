@@ -18,6 +18,7 @@ jobs:
     runs-on: korvid-runners
     outputs:
       version: ${{ steps.version.outputs.version }}
+      source_commit: ${{ steps.source.outputs.source_commit }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
@@ -35,12 +36,14 @@ jobs:
         run: |
           version=$(uv run --no-project python scripts/release/check_version.py "$TAG")
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Require an annotated tag from the trusted release branch
+      - id: source
+        name: Require an annotated tag from the trusted release branch
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          uv run --no-project python scripts/release/check_source.py \
-            "$TAG" origin/main
+          source_commit=$(uv run --no-project python \
+            scripts/release/check_source.py "$TAG" origin/main)
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
       - run: uv sync --locked --dev --all-extras
       - run: uv run ruff check src/ tests/
       - run: uv run mypy
@@ -261,10 +264,27 @@ jobs:
       id-token: write
       contents: read
     steps:
+      # The protected environment can pause this job. Re-fetch the remote tag
+      # after approval and bind publication to the commit verified above:
+      # `--verify-tag` alone only proves that a tag currently exists.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: dist
           path: dist
+      - name: Revalidate the remote tag immediately before PyPI publication
+        env:
+          TAG: ${{ github.ref_name }}
+          EXPECTED_COMMIT: ${{ needs.verify.outputs.source_commit }}
+        run: |
+          git fetch --force origin \
+            "+refs/tags/$TAG:refs/tags/$TAG" \
+            "refs/heads/main:refs/remotes/origin/main"
+          python scripts/release/check_source.py "$TAG" origin/main \
+            --expected-commit "$EXPECTED_COMMIT"
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           packages-dir: dist/
@@ -275,10 +295,24 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: release-files
           path: release-files
+      - name: Revalidate the remote tag immediately before release creation
+        env:
+          TAG: ${{ github.ref_name }}
+          EXPECTED_COMMIT: ${{ needs.verify.outputs.source_commit }}
+        run: |
+          git fetch --force origin \
+            "+refs/tags/$TAG:refs/tags/$TAG" \
+            "refs/heads/main:refs/remotes/origin/main"
+          python scripts/release/check_source.py "$TAG" origin/main \
+            --expected-commit "$EXPECTED_COMMIT"
       - name: Create the GitHub Release with the exact same artifacts
         env:
           GH_TOKEN: ${{ github.token }}

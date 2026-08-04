@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -17,14 +18,18 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) not in (2, 3):
-        print(
-            "usage: check_source.py TAG TRUSTED_REF [repository]",
-            file=sys.stderr,
-        )
-        return 2
-    tag, trusted_ref = argv[:2]
-    repo = Path(argv[2]) if len(argv) == 3 else Path.cwd()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("tag")
+    parser.add_argument("trusted_ref")
+    parser.add_argument("repository", nargs="?", default=".")
+    parser.add_argument(
+        "--expected-commit",
+        help="fail if the dereferenced tag moved since initial verification",
+    )
+    args = parser.parse_args(argv)
+    tag = args.tag
+    trusted_ref = args.trusted_ref
+    repo = Path(args.repository)
     tag_ref = f"refs/tags/{tag}"
 
     tag_type = _git(repo, "cat-file", "-t", tag_ref)
@@ -40,6 +45,12 @@ def main(argv: list[str]) -> int:
         print(f"could not resolve release tag {tag!r}", file=sys.stderr)
         return 1
     commit = tagged_commit.stdout.strip()
+    if args.expected_commit is not None and commit != args.expected_commit:
+        print(
+            f"release tag {tag!r} changed from verified commit {args.expected_commit} to {commit}",
+            file=sys.stderr,
+        )
+        return 1
     reachable = _git(repo, "merge-base", "--is-ancestor", commit, trusted_ref)
     if reachable.returncode != 0:
         print(
