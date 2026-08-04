@@ -34,6 +34,8 @@ def test_guard_live_target_accepts_only_dedicated_cluster_and_owned_namespace() 
         guard_live_target("aks-shared-runners", "korvid-agent-eval-run-123")
     with pytest.raises(ValueError, match="namespace prefix"):
         guard_live_target("aks-korvid-contract-test", "default")
+    with pytest.raises(ValueError, match="non-empty run suffix"):
+        guard_live_target("aks-korvid-contract-test", "korvid-agent-eval-")
 
 
 def test_namespace_ownership_requires_managed_and_matching_run_labels() -> None:

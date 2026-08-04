@@ -41,6 +41,8 @@ def guard_live_target(context: str, namespace: str) -> None:
         raise ValueError(
             f"live journey namespace prefix must be {NAMESPACE_PREFIX!r}, got {namespace!r}"
         )
+    if not namespace.removeprefix(NAMESPACE_PREFIX):
+        raise ValueError("live journey namespace requires a non-empty run suffix")
 
 
 def guard_namespace_ownership(
