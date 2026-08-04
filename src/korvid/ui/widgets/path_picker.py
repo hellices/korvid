@@ -10,6 +10,7 @@ manual path entry the dialog already has.
 
 from __future__ import annotations
 
+import os
 import posixpath
 import unicodedata
 from collections.abc import Awaitable, Callable
@@ -121,7 +122,9 @@ class LocalPathPickerScreen(ModalScreen[str | None]):
         path = self._start if node is None or node.data is None else Path(node.data.path)
         if not path.is_dir():
             path = path.parent
-        self.dismiss(str(path).rstrip("/") + "/")
+        # rstrip(os.sep) avoids "//"; add trailing sep so the caller knows
+        # this is a directory (on root "/" or "C:\", rstrip + sep round-trips).
+        self.dismiss(str(path).rstrip(os.sep) + os.sep)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

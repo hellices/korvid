@@ -562,6 +562,7 @@ async def test_download_default_local_path_from_remote_basename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     (tmp_path / "Downloads").mkdir()
     payload = b"data"
     opener = FakeExecOpener([b"\x01" + tar_bytes("app.log", payload), b"\x03" + SUCCESS])

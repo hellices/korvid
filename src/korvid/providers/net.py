@@ -56,7 +56,7 @@ class _CANamedClient(httpx.AsyncClient):
             if "CERTIFICATE_VERIFY_FAILED" in str(exc):
                 raise httpx.ConnectError(
                     f"TLS verification failed against network.ca_bundle"
-                    f" {self._ca_bundle_path!r}: {exc}",
+                    f" '{self._ca_bundle_path}': {exc}",
                     request=request,
                 ) from exc
             raise

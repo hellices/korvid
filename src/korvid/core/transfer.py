@@ -311,9 +311,10 @@ def default_local_path(remote_path: str) -> str:
     ``validate_spec``'s parent checks.
     """
     base = posixpath.basename(remote_path.rstrip("/")) or "download"
-    downloads = Path("~/Downloads").expanduser()
+    home = Path.home()
+    downloads = home / "Downloads"
     usable = downloads.is_dir() and os.access(downloads, os.W_OK | os.X_OK)
-    directory = downloads if usable else Path("~").expanduser()
+    directory = downloads if usable else home
     return str(directory / base)
 
 

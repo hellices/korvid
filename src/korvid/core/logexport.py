@@ -83,7 +83,7 @@ def export_log_lines(
             # (cluster logs may be sensitive), and explicit UTF-8 so a
             # non-UTF-8 locale can't fail on non-ASCII log text.
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with open(fd, "w", encoding="utf-8") as fh:
+            with open(fd, "w", encoding="utf-8", newline="") as fh:
                 fh.write(content)
         except FileExistsError:
             continue

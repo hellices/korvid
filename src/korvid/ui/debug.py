@@ -106,7 +106,7 @@ class DebugController:
         with self._suspend():
             exit_code, pull_failure = self.run_process(
                 argv,
-                f"korvid debug → {target} (exit to return)",
+                f"korvid debug -> {target} (exit to return)",
                 namespace,
                 name,
                 image,

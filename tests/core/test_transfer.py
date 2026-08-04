@@ -36,8 +36,8 @@ class TestTransferSpec:
 
 
 class TestValidateSpec:
-    def test_valid_download(self) -> None:
-        spec = TransferSpec("download", "/var/log/app.log", "/tmp/app.log")
+    def test_valid_download(self, tmp_path: Path) -> None:
+        spec = TransferSpec("download", "/var/log/app.log", str(tmp_path / "app.log"))
         assert validate_spec(spec) is None
 
     def test_valid_upload(self, tmp_path: Path) -> None:
@@ -64,10 +64,10 @@ class TestValidateSpec:
         assert error is not None
         assert "file" in error
 
-    def test_remote_path_with_trailing_space_is_validated_verbatim(self) -> None:
+    def test_remote_path_with_trailing_space_is_validated_verbatim(self, tmp_path: Path) -> None:
         # "/srv/ " names the file " " in /srv — valid; stripping before
         # validation turned it into the directory "/srv/" and rejected it.
-        spec = TransferSpec("download", "/srv/ ", "/tmp/x")
+        spec = TransferSpec("download", "/srv/ ", str(tmp_path / "x"))
         assert validate_spec(spec) is None
 
     def test_remote_path_with_leading_space_rejected_as_relative(self) -> None:
@@ -127,6 +127,7 @@ class TestValidateSpec:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         spec = TransferSpec("download", "/tmp/x", "~/x.log")
         assert validate_spec(spec) is None
 
@@ -165,6 +166,7 @@ class TestCommands:
 class TestDefaultLocalPath:
     def test_uses_downloads_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         (tmp_path / "Downloads").mkdir()
         assert default_local_path("/var/log/app.log") == str(tmp_path / "Downloads" / "app.log")
 
@@ -174,6 +176,7 @@ class TestDefaultLocalPath:
         # Not every home has ~/Downloads; the default must still pass
         # validate_spec (parent exists), so fall back to the home directory.
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         assert default_local_path("/var/log/app.log") == str(tmp_path / "app.log")
 
 
@@ -347,6 +350,7 @@ class TestDefaultLocalPathPermissions:
         # The default must always survive validate_spec's new writability
         # check, so a read-only ~/Downloads falls back to the home directory.
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         downloads = tmp_path / "Downloads"
         downloads.mkdir(mode=0o500)
         assert default_local_path("/var/log/app.log") == str(tmp_path / "app.log")
@@ -355,6 +359,7 @@ class TestDefaultLocalPathPermissions:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         downloads = tmp_path / "Downloads"
         downloads.mkdir(mode=0o600)
         try:
