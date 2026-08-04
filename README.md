@@ -95,6 +95,10 @@ Full key reference: [docs/keybindings.md](docs/keybindings.md).
   tools, `diagnose_pod`, cloud-provider awareness (AKS / EKS / GKE),
   provider setup (`:ai` wizard), capability profiles for small local
   models, and an eval harness that grades diagnosis quality.
+- **[Provider plugins](docs/provider-plugins.md)** — the API-v1 contract for
+  third-party LLM adapters, selected-only loading, exact event and option
+  limits, and guidance on when a plugin is warranted instead of an
+  OpenAI-compatible endpoint.
 - **[MCP server](docs/mcp.md)** — expose korvid's read and UI-drive tools
   to VS Code, Claude Code, Cursor, or Zed; write tools are never exposed.
   An opt-in proposal flow lets external agents queue writes that execute

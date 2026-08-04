@@ -157,6 +157,20 @@ the OS keyring (falling back to a `0600` file at
 `~/.config/korvid/credentials.json`).  Claude Code is a CLI product, not an
 API — use the Anthropic API entry above for Claude models.
 
+### Provider plugins
+
+If your backend already speaks an OpenAI-compatible API, prefer
+`provider: openai-compat` (or one of its built-in aliases) over a plugin.
+Third-party provider plugins are for backends whose protocol or auth flow
+truly differs from korvid's built-ins.
+
+Plugins are configured manually in `config.yaml` today — the `:ai` wizard only
+offers the built-ins above.  Plugins also run as trusted Python code inside
+the korvid process, so install only packages you trust.  See
+[Provider plugins](provider-plugins.md) for the exact API-v1 contract,
+entry-point registration, event limits, option limits, and selected-only
+loading behavior.
+
 For endpoints signed by a corporate/private CA (internal Ollama, vLLM, or
 an OpenAI-compatible gateway), set `network.ca_bundle` in `config.yaml` —
 the same trust covers the live agent and the wizard's connection test, and
