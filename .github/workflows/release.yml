@@ -41,8 +41,11 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          source_commit=$(uv run --no-project python \
-            scripts/release/check_source.py "$TAG" origin/main)
+          uv run --no-project python scripts/release/check_source.py \
+            "$TAG" origin/main
+          # check_source deliberately logs no hashes (CodeQL). Export the
+          # verified commit directly through GitHub's output channel.
+          source_commit=$(git rev-list -n 1 "refs/tags/$TAG")
           echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
       - run: uv sync --locked --dev --all-extras
       - run: uv run ruff check src/ tests/

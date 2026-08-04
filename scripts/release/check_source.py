@@ -34,31 +34,28 @@ def main(argv: list[str]) -> int:
 
     tag_type = _git(repo, "cat-file", "-t", tag_ref)
     if tag_type.returncode != 0:
-        print(f"release tag {tag!r} does not exist", file=sys.stderr)
+        print("release tag does not exist", file=sys.stderr)
         return 1
     if tag_type.stdout.strip() != "tag":
-        print(f"release tag {tag!r} must be an annotated tag", file=sys.stderr)
+        print("release tag must be an annotated tag", file=sys.stderr)
         return 1
 
     tagged_commit = _git(repo, "rev-list", "-n", "1", tag_ref)
     if tagged_commit.returncode != 0:
-        print(f"could not resolve release tag {tag!r}", file=sys.stderr)
+        print("could not resolve release tag", file=sys.stderr)
         return 1
     commit = tagged_commit.stdout.strip()
     if args.expected_commit is not None and commit != args.expected_commit:
         print(
-            f"release tag {tag!r} changed from verified commit; refusing publication",
+            "release tag changed from verified commit; refusing publication",
             file=sys.stderr,
         )
         return 1
     reachable = _git(repo, "merge-base", "--is-ancestor", commit, trusted_ref)
     if reachable.returncode != 0:
-        print(
-            f"release tag {tag!r} is not reachable from trusted ref {trusted_ref!r}",
-            file=sys.stderr,
-        )
+        print("release tag is not reachable from trusted ref", file=sys.stderr)
         return 1
-    print(commit)
+    print("release source verified")
     return 0
 
 

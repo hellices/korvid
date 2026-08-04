@@ -81,10 +81,16 @@ def _release_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def test_annotated_tag_reachable_from_trusted_branch_passes(tmp_path: Path) -> None:
+def test_annotated_tag_reachable_from_trusted_branch_passes_without_logging_hash(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     repo = _release_repo(tmp_path)
     _git(repo, "tag", "-a", "v1.2.3", "-m", "release 1.2.3")
+    commit = _git(repo, "rev-parse", "v1.2.3^{}")
     assert check_source.main(["v1.2.3", "main", str(repo)]) == 0
+    output = capsys.readouterr().out
+    assert "release source verified" in output
+    assert commit not in output
 
 
 def test_tagged_commit_not_reachable_from_trusted_branch_fails(
@@ -156,7 +162,10 @@ def test_source_policy_errors_do_not_log_commit_hashes(
     _git(repo, "tag", "-a", "v1.2.3", "-m", "release 1.2.3")
     commit = _git(repo, "rev-parse", "v1.2.3^{}")
     assert check_source.main(["v1.2.3", "main", str(repo)]) == 1
-    assert commit not in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert commit not in error
+    assert "v1.2.3" not in error
+    assert "main" not in error
 
 
 # --- checksums --------------------------------------------------------------
@@ -515,6 +524,12 @@ def test_release_metadata_is_generated_in_the_build_job() -> None:
     offline = workflow.index("\n  offline:")
     assert "scripts/release/metadata.py" in workflow[build:smoke]
     assert "scripts/release/metadata.py" not in workflow[sbom:offline]
+
+
+def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:
+    workflow = _release_workflow()
+    assert 'source_commit=$(git rev-list -n 1 "refs/tags/$TAG")' in workflow
+    assert "source_commit=$(uv run" not in workflow
 
 
 # --- metadata ---------------------------------------------------------------
