@@ -80,21 +80,28 @@ class ValidatedPluginProvider(LLMProvider):
         stream: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
         done_seen = False
-        try:
-            async for event in self._provider.complete(messages, tools, stream=stream):
-                normalized = _normalize_event(event)
-                if done_seen:
-                    raise ProviderPluginContractError("provider emitted event after terminal done")
-                if normalized.get("type") == "done":
-                    done_seen = True
-                yield normalized
-        except ProviderPluginContractError:
-            raise
-        except Exception as exc:
-            exc_type = type(exc).__name__
-            raise ProviderPluginContractError(
-                f"provider stream failed: {_bounded_exception(exc_type)}"
-            ) from None
+        iterator = self._provider.complete(messages, tools, stream=stream)
+        while True:
+            # Advance the underlying plugin iterator — translate ALL exceptions
+            # (including ProviderPluginContractError with secret payload) to a
+            # fixed bounded message.  Only errors from our own normalization/
+            # done checks below are preserved verbatim.
+            try:
+                event = await iterator.__anext__()
+            except StopAsyncIteration:
+                break
+            except Exception as exc:
+                exc_type = type(exc).__name__
+                raise ProviderPluginContractError(
+                    f"provider stream failed: {_bounded_exception(exc_type)}"
+                ) from None
+            # Our own validation — errors here are safe (fixed messages).
+            normalized = _normalize_event(event)
+            if done_seen:
+                raise ProviderPluginContractError("provider emitted event after terminal done")
+            if normalized.get("type") == "done":
+                done_seen = True
+            yield normalized
         if not done_seen:
             raise ProviderPluginContractError("provider stream ended without terminal done event")
 

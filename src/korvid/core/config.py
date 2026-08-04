@@ -40,6 +40,12 @@ _SECRET_OPTION_KEY_SEGMENTS = (
     "credential",
 )
 
+# Precompute token sequences for sliding-window matching.
+# Each entry is a tuple of underscore-split tokens for the reserved segment.
+_SECRET_SEGMENT_TOKEN_SEQS: tuple[tuple[str, ...], ...] = tuple(
+    tuple(seg.split("_")) for seg in _SECRET_OPTION_KEY_SEGMENTS
+)
+
 _PROVIDER_SEPARATOR_RE = re.compile(r"[-_.]+")
 
 
@@ -603,19 +609,31 @@ def _raise_if_secret_key_segment(key: str, *, path: str) -> None:
     normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
     normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
     parts = [p for p in normalized.split("_") if p]
-    # Build all single tokens plus consecutive multi-token subsequences
-    # so multi-token reserved segments like "api_key" match compound keys
-    # like "client_api_key".
-    tokens: set[str] = {normalized}
-    for i in range(len(parts)):
-        for j in range(i + 1, len(parts) + 1):
-            tokens.add("_".join(parts[i:j]))
-    for segment in _SECRET_OPTION_KEY_SEGMENTS:
-        if segment in tokens:
-            raise _AgentOptionsError(
-                f"{_agent_options_path(f'{path}.{key}')} uses reserved secret-bearing key segment "
-                f"{segment!r}; keep secrets in env vars such as agent.api_key_env"
-            )
+    # Bounded sliding-window comparison: for each reserved segment's token
+    # sequence (max 2 tokens), slide over parts looking for a contiguous
+    # match.  O(len(parts) * number_of_reserved_patterns) — no set
+    # materialization of all O(n²) subsequences.
+    for seg_tokens, segment in zip(
+        _SECRET_SEGMENT_TOKEN_SEQS, _SECRET_OPTION_KEY_SEGMENTS, strict=True
+    ):
+        seg_len = len(seg_tokens)
+        if seg_len == 1:
+            # Single-token segment: check exact match in parts or full normalized
+            if seg_tokens[0] in parts or seg_tokens[0] == normalized:
+                raise _AgentOptionsError(
+                    f"{_agent_options_path(f'{path}.{key}')} uses reserved "
+                    f"secret-bearing key segment {segment!r}; keep secrets in "
+                    f"env vars such as agent.api_key_env"
+                )
+        else:
+            # Multi-token segment: slide a window of seg_len over parts
+            for i in range(len(parts) - seg_len + 1):
+                if parts[i : i + seg_len] == list(seg_tokens):
+                    raise _AgentOptionsError(
+                        f"{_agent_options_path(f'{path}.{key}')} uses reserved "
+                        f"secret-bearing key segment {segment!r}; keep secrets in "
+                        f"env vars such as agent.api_key_env"
+                    )
 
 
 def _agent_options_path(path: str) -> str:

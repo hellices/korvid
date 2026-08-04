@@ -371,6 +371,19 @@ def test_agent_options_key_byte_limit_exact(tmp_path: Path) -> None:
     assert "2048 bytes" in invalid.agent_options_error
 
 
+def test_pathological_separator_heavy_key_accepted(tmp_path: Path) -> None:
+    """A 2KiB key with many separators (producing many parts) must be
+    accepted without quadratic blowup. This tests the bounded sliding-window
+    algorithm does not materialize O(n^2) subsequences."""
+    # 2048 bytes, alternating single-char tokens with separators: a_b_c_d_...
+    # produces ~1024 parts — pathological for O(n^2) but O(n) for sliding window.
+    key = "_".join("x" for _ in range(1024))  # "x_x_x_..." = 2047 chars
+    assert len(key.encode("utf-8")) <= 2048
+    cfg = _load_agent_options_config(tmp_path, {key: "v"})
+    assert cfg.agent_options_error is None
+    assert key in cfg.agent_options
+
+
 def test_agent_options_rejects_non_ascii_keys(tmp_path: Path) -> None:
     """Finding #9: non-ASCII option keys are rejected before normalization."""
     # Cyrillic confusable: U+043E instead of Latin 'o'

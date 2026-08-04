@@ -474,3 +474,59 @@ async def test_tool_arguments_rejects_one_byte_over_utf8_boundary() -> None:
 
     with pytest.raises(ProviderPluginContractError, match=r"tool_call\.arguments"):
         await _collect_events(wrapped)
+
+
+# --- Finding #1 round 7: underlying ProviderPluginContractError with secret ---
+
+
+class _SecretContractErrorProvider(LLMProvider):
+    """Provider that raises ProviderPluginContractError with secret payload."""
+
+    @property
+    def name(self) -> str:
+        return "secret-error-provider"
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> AsyncIterator[dict[str, Any]]:
+        yield {"type": "text_delta", "text": "hi"}
+        raise ProviderPluginContractError("SECRET_INTERNAL_TOKEN_xyz789_LEAKED" * 10)
+
+    async def aclose(self) -> None:
+        pass
+
+
+async def test_underlying_contract_error_with_secret_is_translated() -> None:
+    """ProviderPluginContractError raised by the plugin iterator (not our
+    normalization) must be translated to a fixed bounded message without
+    exposing the raw secret payload."""
+    wrapped = ValidatedPluginProvider(_SecretContractErrorProvider())
+
+    with pytest.raises(ProviderPluginContractError, match="provider stream failed") as exc_info:
+        await _collect_events(wrapped)
+    msg = str(exc_info.value)
+    assert "SECRET_INTERNAL_TOKEN" not in msg
+    assert len(msg) <= 300
+
+
+async def test_our_normalize_event_errors_are_still_preserved() -> None:
+    """Errors from _normalize_event (our own validation) must still produce
+    specific error messages (e.g. 'unknown provider event type')."""
+    provider = _ScriptedProvider([{"type": "bogus_event"}, {"type": "done"}])
+    wrapped = ValidatedPluginProvider(provider)
+
+    with pytest.raises(ProviderPluginContractError, match="unknown provider event type"):
+        await _collect_events(wrapped)
+
+
+async def test_our_done_check_errors_are_preserved() -> None:
+    """Errors from our done-state checks must have specific messages."""
+    provider = _ScriptedProvider([{"type": "done"}, {"type": "done"}])
+    wrapped = ValidatedPluginProvider(provider)
+
+    with pytest.raises(ProviderPluginContractError, match="after terminal done"):
+        await _collect_events(wrapped)

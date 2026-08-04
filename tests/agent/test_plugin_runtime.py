@@ -202,3 +202,36 @@ async def test_tool_call_then_no_done_becomes_agent_error_before_dispatch(
     assert not any(
         msg.get("role") == "assistant" and msg.get("tool_calls") for msg in second_call_messages
     )
+
+
+async def test_underlying_contract_error_with_secret_becomes_agent_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A ProviderPluginContractError raised by the plugin iterator with
+    secret payload must become a bounded AgentError with no secret leakage
+    into history."""
+    provider = _create_runtime_provider(
+        monkeypatch,
+        tmp_path,
+        scripted_turns=[
+            [
+                {"type": "text_delta", "text": "hi"},
+                # The fixture provider raises when it sees this sentinel
+                {"type": "__raise_contract_error__"},
+            ],
+            [{"type": "text_delta", "text": "recovered"}, {"type": "done"}],
+        ],
+    )
+
+    runtime = AgentRuntime(cast("Any", provider), EchoExecutor())
+    failed = await collect(runtime, "first question")
+
+    error = next(event for event in failed if isinstance(event, AgentError))
+    assert "SECRET" not in error.message
+    assert "stream failed" in error.message.lower() or "contract" in error.message.lower()
+
+    # Recovery must work cleanly
+    recovered = await collect(runtime, "second question")
+    assert recovered[0] == TextDelta(text="recovered")
+    assert isinstance(recovered[-1], TurnComplete)

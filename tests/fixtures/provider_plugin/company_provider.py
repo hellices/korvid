@@ -11,6 +11,7 @@ from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
     ProviderPlugin,
     ProviderPluginConfig,
+    ProviderPluginContractError,
     ProviderPluginMetadata,
 )
 
@@ -46,6 +47,8 @@ class _CompanyLLMProvider(LLMProvider):
         self.tools_seen.append([dict(tool) for tool in tools])
         turn = self._turns.pop(0) if self._turns else [{"type": "done"}]
         for event in turn:
+            if isinstance(event, dict) and event.get("type") == "__raise_contract_error__":
+                raise ProviderPluginContractError("SECRET_INTERNAL_TOKEN_xyz789" * 10)
             yield event  # type: ignore[misc]  # tests inject malformed payloads on purpose
 
     async def aclose(self) -> None:
