@@ -461,6 +461,7 @@ def _create_initial_provider(
             ca_bundle=config.network_ca_bundle,
             plugin_registry=plugin_registry,
             options=config.agent_options,
+            options_error=config.agent_options_error,
         )
     except ProviderPluginError as exc:
         # Plugin failure at startup degrades to warning — the TUI remains
@@ -613,36 +614,40 @@ def _build_agent_wiring(
         )
         if new_provider is None:
             return None
+        # Fully transactional: build profile, executor, and runtime BEFORE
+        # swapping provider_box or scheduling old provider close. If anything
+        # raises, close the new provider exactly once and leave old state live.
+        try:
+            new_profile = build_profile(
+                settings.profile,
+                readonly=config.readonly,
+                resize_supported=resize_box[0],
+            )
+            new_runtime = AgentRuntime(
+                new_provider,
+                ToolExecutor(
+                    kube, aliases, ui=ui_proxy, custom_columns=_custom_column_names(config)
+                ),
+                tools=new_profile.tools,
+                max_iterations=new_profile.max_iterations,
+                max_history_chars=new_profile.max_history_chars,
+                max_result_chars=new_profile.max_result_chars,
+                max_tool_calls_per_iteration=new_profile.max_tool_calls_per_iteration,
+                strict_history_budget=new_profile.strict_history_budget,
+                system_prompt=new_profile.system_prompt,
+                ui_prompt=new_profile.ui_prompt,
+                cluster_context=note_box[0],
+            )
+        except Exception:
+            _close_provider_in_background(new_provider, close_tasks)
+            raise
+        # Success — now atomically swap state.
         old = provider_box[0]
         provider_box[0] = new_provider
         if old is not None:
-            # Transactional swap (issue #171 task 5): keep the previous
-            # provider alive until a replacement exists, so a failed rebuild
-            # does not silently disconnect the still-active runtime.
             _close_provider_in_background(old, close_tasks)
-        # The wizard's rebuild carries its own profile choice (e.g. small
-        # when the provider is ollama), composed against the *current*
-        # cluster's capabilities and prompt note — a rebuild after a `:ctx`
-        # switch must not resurrect the old cluster's tool set.
-        new_profile = build_profile(
-            settings.profile,
-            readonly=config.readonly,
-            resize_supported=resize_box[0],
-        )
         profile_box[0] = new_profile.name
-        return AgentRuntime(
-            new_provider,
-            ToolExecutor(kube, aliases, ui=ui_proxy, custom_columns=_custom_column_names(config)),
-            tools=new_profile.tools,
-            max_iterations=new_profile.max_iterations,
-            max_history_chars=new_profile.max_history_chars,
-            max_result_chars=new_profile.max_result_chars,
-            max_tool_calls_per_iteration=new_profile.max_tool_calls_per_iteration,
-            strict_history_budget=new_profile.strict_history_budget,
-            system_prompt=new_profile.system_prompt,
-            ui_prompt=new_profile.ui_prompt,
-            cluster_context=note_box[0],
-        )
+        return new_runtime
 
     def retarget_agent(
         runtime: AgentRuntime | None,

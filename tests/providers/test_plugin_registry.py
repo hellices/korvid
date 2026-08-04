@@ -935,3 +935,57 @@ class TestReservedNames:
         """Reserved built-in names are rejected without any entry-point discovery."""
         with pytest.raises(ProviderPluginError, match="reserved"):
             registry.load_selected(name)
+
+
+# ---------------------------------------------------------------------------
+# Finding #7: importlib.metadata discovery/enumeration failures
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoveryFailure:
+    def test_distributions_raises_translates_to_bounded_plugin_error(self) -> None:
+        """If importlib.metadata.distributions() explodes, the error must be
+        translated to a bounded ProviderPluginError without raw payload."""
+
+        def boom() -> list[object]:
+            raise RuntimeError("SECRET_INTERNAL_PATH=/opt/venv/lib/python" * 10)
+
+        with patch(
+            "korvid.providers.plugin_registry.importlib.metadata.distributions",
+            side_effect=boom,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="discovery failed") as exc_info:
+                reg.load_selected("my-plugin")
+            msg = str(exc_info.value)
+            assert "SECRET_INTERNAL_PATH" not in msg
+            assert len(msg) <= 200
+
+    def test_single_dist_enumeration_failure_degrades_gracefully(self) -> None:
+        """A single broken distribution during enumeration must be skipped,
+        not crash the whole discovery."""
+
+        class _BrokenDist:
+            @property
+            def name(self) -> str:
+                raise RuntimeError("SECRET_CORRUPTED_METADATA")
+
+            @property
+            def entry_points(self) -> list[object]:
+                raise RuntimeError("SECRET_CORRUPTED_METADATA")
+
+        class _GoodDist:
+            name = "good-dist"
+
+            @property
+            def entry_points(self) -> list[object]:
+                return []
+
+        with patch(
+            "korvid.providers.plugin_registry.importlib.metadata.distributions",
+            return_value=[_BrokenDist(), _GoodDist()],
+        ):
+            reg = ProviderPluginRegistry()
+            # No plugin found for "my-plugin", but discovery didn't crash
+            with pytest.raises(ProviderPluginError, match="no provider plugin found"):
+                reg.load_selected("my-plugin")

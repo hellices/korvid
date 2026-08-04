@@ -299,7 +299,6 @@ def test_agent_options_rejects_unsupported_objects(tmp_path: Path) -> None:
         ("api-key", "api_key"),
         ("Authorization", "authorization"),
         ("credential", "credential"),
-        ("pāssword", "password"),
     ],
 )
 def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, expected: str) -> None:
@@ -307,6 +306,61 @@ def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, exp
     assert cfg.agent_options == {}
     assert cfg.agent_options_error is not None
     assert expected in cfg.agent_options_error
+
+
+def test_agent_options_non_ascii_macron_password_rejected_as_non_ascii(tmp_path: Path) -> None:
+    """Non-ASCII 'pāssword' (macron a) is now rejected at the ASCII gate
+    before secret detection — this is the intended v1 policy (finding #9)."""
+    cfg = _load_agent_options_config(tmp_path, {"pāssword": "plain-text-secret"})
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert "ASCII" in cfg.agent_options_error
+
+
+def test_agent_options_key_byte_limit_exact(tmp_path: Path) -> None:
+    """Finding #3: mapping keys must respect the 2048 UTF-8 byte limit."""
+    key_at_limit = "k" * 2048
+    valid = _load_agent_options_config(tmp_path, {key_at_limit: "v"})
+    assert valid.agent_options_error is None
+    assert key_at_limit in valid.agent_options
+
+    key_over_limit = "k" * 2049
+    invalid = _load_agent_options_config(tmp_path, {key_over_limit: "v"})
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "2048 bytes" in invalid.agent_options_error
+
+
+def test_agent_options_rejects_non_ascii_keys(tmp_path: Path) -> None:
+    """Finding #9: non-ASCII option keys are rejected before normalization."""
+    # Cyrillic confusable: U+043E instead of Latin 'o'
+    cfg = _load_agent_options_config(tmp_path, {"t\u043eken": "val"})
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert "ASCII" in cfg.agent_options_error
+
+
+def test_agent_options_rejects_greek_lookalike_key(tmp_path: Path) -> None:
+    """Finding #9: Greek lookalike option key is rejected."""
+    # Greek U+03B1 in key
+    cfg = _load_agent_options_config(tmp_path, {"\u03b1pi_key": "val"})
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert "ASCII" in cfg.agent_options_error
+
+
+def test_agent_options_accepts_ascii_keys(tmp_path: Path) -> None:
+    """Finding #9: pure ASCII keys are still accepted."""
+    cfg = _load_agent_options_config(tmp_path, {"tenant": "platform", "region_code": "apac"})
+    assert cfg.agent_options_error is None
+    assert cfg.agent_options == {"tenant": "platform", "region_code": "apac"}
+
+
+def test_agent_options_non_ascii_values_accepted(tmp_path: Path) -> None:
+    """Finding #9: non-ASCII restriction must NOT affect values."""
+    cfg = _load_agent_options_config(tmp_path, {"greeting": "こんにちは"})
+    assert cfg.agent_options_error is None
+    assert cfg.agent_options == {"greeting": "こんにちは"}
 
 
 def test_save_agent_config_creates_file(tmp_path: Path) -> None:

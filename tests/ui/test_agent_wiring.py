@@ -106,13 +106,14 @@ async def test_prompt_drives_runtime_and_renders_reply() -> None:
         inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
         inp.value = "how are my pods?"
         await pilot.press("enter")
-        await pilot.pause()
-        await pilot.pause()
-        assert runtime.calls
+        await until(pilot, lambda: runtime.calls, label="agent turn started")
         assert runtime.calls[0][0] == "how are my pods?"
-        text = _panel_text(app)
-        assert "how are my pods?" in text
-        assert "All pods healthy." in text
+        await until(
+            pilot,
+            lambda: "All pods healthy." in _panel_text(app),
+            label="reply rendered",
+        )
+        assert "how are my pods?" in _panel_text(app)
         assert inp.disabled is False
 
 
@@ -124,9 +125,7 @@ async def test_screen_context_includes_current_view() -> None:
         inp = app.query_one(AgentPanel).query_one("#agent-input", Input)
         inp.value = "q"
         await pilot.press("enter")
-        await pilot.pause()
-        await pilot.pause()
-        assert runtime.calls
+        await until(pilot, lambda: runtime.calls, label="agent turn started")
         ctx = runtime.calls[0][1]
         assert "view=pods" in ctx
         assert "scope=default" in ctx
@@ -317,9 +316,11 @@ async def test_model_command_swaps_model_and_saves() -> None:
     async with app.run_test() as pilot:
         app._apply_agent_settings(settings)
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
-        for _ in range(4):
-            await pilot.pause()
-        assert app._agent_model_name == "gpt-4o"
+        await until(
+            pilot,
+            lambda: app._agent_model_name == "gpt-4o",
+            label="model swap applied",
+        )
         assert saved
         assert saved[-1].model == "gpt-4o"
         assert dict(saved[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
@@ -381,8 +382,11 @@ async def test_model_command_does_not_persist_when_apply_fails() -> None:
     async with app.run_test() as pilot:
         app._apply_agent_settings(settings)
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
-        for _ in range(4):
-            await pilot.pause()
+        await until(
+            pilot,
+            lambda: len(rebuilds) >= 2,
+            label="rebuild attempted",
+        )
         assert app._agent_model_name == "llama3"  # old runtime kept
         assert not saved  # and nothing was persisted
 
@@ -422,8 +426,11 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
     async with app.run_test() as pilot:
         app._apply_agent_settings(settings)
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
-        for _ in range(4):
-            await pilot.pause()
+        await until(
+            pilot,
+            lambda: app._agent_model_name == "gpt-4o",
+            label="first model swap",
+        )
         assert app._agent_model_name == "gpt-4o"  # swap took effect
         notes = " ".join(str(n.message) for n in app._notifications)
         assert "disk full" in notes
@@ -433,8 +440,11 @@ async def test_model_command_save_failure_warns_about_restart_revert() -> None:
         # live-but-unsaved model: the in-memory snapshot is not what is on
         # disk, so the warning must not name a specific model at all.
         app.on_unknown_command(UnknownCommand("model claude-3"))
-        for _ in range(4):
-            await pilot.pause()
+        await until(
+            pilot,
+            lambda: app._agent_model_name == "claude-3",
+            label="second model swap",
+        )
         assert app._agent_model_name == "claude-3"
         second = " ".join(
             str(n.message)
@@ -495,9 +505,11 @@ async def test_model_command_works_after_configured_startup() -> None:
     )
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
-        for _ in range(4):
-            await pilot.pause()
-        assert app._agent_model_name == "gpt-4o"
+        await until(
+            pilot,
+            lambda: app._agent_model_name == "gpt-4o",
+            label="model swap from startup config",
+        )
         assert saved
         assert saved[-1].provider == "ollama"
         assert saved[-1].model == "gpt-4o"
@@ -602,9 +614,11 @@ async def test_options_preserved_across_model_change() -> None:
     )
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
-        for _ in range(4):
-            await pilot.pause()
-        assert rebuilt
+        await until(
+            pilot,
+            lambda: rebuilt,
+            label="rebuild triggered",
+        )
         assert dict(rebuilt[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
         assert saved
         assert dict(saved[-1].options) == {"tenant": "platform", "features": {"region": "apac"}}
@@ -656,8 +670,11 @@ async def test_rebuild_failure_keeps_previous_runtime_and_settings() -> None:
     )
     async with app.run_test() as pilot:
         app.on_unknown_command(UnknownCommand("model gpt-4o"))
-        for _ in range(4):
-            await pilot.pause()
+        await until(
+            pilot,
+            lambda: any("rebuild failed" in str(n.message).lower() for n in app._notifications),
+            label="rebuild failure notification",
+        )
         # Transactional swap: the working runtime and settings must survive.
         assert app._agent_runtime is old_runtime
         assert app._agent_model_name == "llama3"
@@ -766,14 +783,18 @@ async def test_mcp_command_toggles_server_and_status_bar() -> None:
     async with app.run_test() as pilot:
         assert "MCP off" in str(app.query_one(StatusBar).render())
         app.on_unknown_command(UnknownCommand("mcp on"))
-        for _ in range(4):
-            await pilot.pause()
-        assert mcp.calls == ["start"]
+        await until(
+            pilot,
+            lambda: mcp.calls == ["start"],
+            label="MCP started",
+        )
         assert "MCP on :7878" in str(app.query_one(StatusBar).render())
         app.on_unknown_command(UnknownCommand("mcp off"))
-        for _ in range(4):
-            await pilot.pause()
-        assert mcp.calls == ["start", "stop"]
+        await until(
+            pilot,
+            lambda: mcp.calls == ["start", "stop"],
+            label="MCP stopped",
+        )
         assert "MCP off" in str(app.query_one(StatusBar).render())
 
 

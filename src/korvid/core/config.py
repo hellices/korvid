@@ -494,6 +494,15 @@ def _parse_agent_option_mapping(
     for key, item in value.items():
         if not isinstance(key, str):
             raise _AgentOptionsError("agent.options must use string keys")
+        if len(key.encode("utf-8")) > _MAX_AGENT_OPTIONS_STRING_BYTES:
+            raise _AgentOptionsError(
+                f"{_agent_options_path(f'{path}.{key[:60]}...')} key exceeds max length "
+                f"{_MAX_AGENT_OPTIONS_STRING_BYTES} bytes"
+            )
+        if not key.isascii():
+            raise _AgentOptionsError(
+                f"{_agent_options_path(f'{path}.{key[:60]}')} option keys must be ASCII-only"
+            )
         _raise_if_secret_key_segment(key, path=path)
         counters.mapping_keys += 1
         if counters.mapping_keys > _MAX_AGENT_OPTIONS_KEYS:

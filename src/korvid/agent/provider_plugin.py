@@ -56,6 +56,9 @@ class ProviderPluginContractError(Exception):
     """Raised when a provider plugin violates the published contract."""
 
 
+_MAX_EXCEPTION_BYTES: Final[int] = 2048
+
+
 class ValidatedPluginProvider(LLMProvider):
     """LLMProvider wrapper that enforces the provider plugin event contract."""
 
@@ -76,14 +79,30 @@ class ValidatedPluginProvider(LLMProvider):
         *,
         stream: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
-        async for event in self._provider.complete(messages, tools, stream=stream):
-            yield _normalize_event(event)
+        try:
+            async for event in self._provider.complete(messages, tools, stream=stream):
+                yield _normalize_event(event)
+        except ProviderPluginContractError:
+            raise
+        except Exception as exc:
+            exc_type = type(exc).__name__
+            raise ProviderPluginContractError(
+                f"provider stream failed: {_bounded_exception(exc_type)}"
+            ) from None
 
     async def aclose(self) -> None:
         if self._closed:
             return
         self._closed = True
         await self._provider.aclose()
+
+
+def _bounded_exception(label: str) -> str:
+    """Truncate an exception type name to _MAX_EXCEPTION_BYTES UTF-8 bytes."""
+    encoded = label.encode("utf-8")
+    if len(encoded) <= _MAX_EXCEPTION_BYTES:
+        return label
+    return encoded[:_MAX_EXCEPTION_BYTES].decode("utf-8", errors="ignore") + "..."
 
 
 def _normalize_event(event: object) -> dict[str, Any]:

@@ -239,7 +239,11 @@ class CompanyProvider(LLMProvider):
         yield {"type": "done"}
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        try:
+            await self._client.aclose()
+        finally:
+            if self._credentials is not None:
+                await self._credentials.aclose()
 
 
 class CompanyProviderPlugin(ProviderPlugin):
@@ -318,8 +322,10 @@ Exact parser limits:
 - max depth: **4**
 - max mapping keys across the whole structure: **64**
 - max list items across the whole structure: **64**
-- max string length: **2048 bytes**
+- max string length (values and keys): **2048 UTF-8 bytes**
 - max serialized JSON budget: **16384 bytes**
+- option keys must be **ASCII-only** (non-ASCII keys are rejected before any
+  normalization or secret detection)
 
 Secret-looking keys are rejected before the plugin sees them. The reserved key
 segments are exactly:
@@ -359,6 +365,10 @@ Plugin lifecycle in current korvid builds:
    `CredentialSource | None` into `create()`. Plugins do **not** receive kube
    clients, UI handles, audit handles, or write executors.
 5. Your `LLMProvider` instance is wrapped in `ValidatedPluginProvider`.
+6. korvid calls `LLMProvider.aclose()` when the provider is replaced or at
+   shutdown. **Your adapter owns the injected `CredentialSource`**: close it
+   in `aclose()` (in a `finally` block) alongside any HTTP clients or other
+   resources. Failure to close credentials leaks token-refresh HTTP sessions.
 
 Compatibility rules:
 

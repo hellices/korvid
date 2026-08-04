@@ -597,6 +597,27 @@ def test_agent_settings_options_are_copy_safe_and_immutable() -> None:
         settings.options["nested"]["region"] = "emea"  # type: ignore[index]  # immutability is the test
 
 
+def test_agent_settings_deep_freezes_tuple_elements() -> None:
+    """Finding #4: tuple elements containing mutable dicts must become
+    mapping proxies; nested mutation must be rejected."""
+    settings = AgentSettings(
+        provider="ollama",
+        auth_method="none",
+        base_url="http://localhost:11434",
+        model="llama3",
+        options={"items": ({"key": "val"}, {"nested": {"deep": True}})},
+    )
+    items = settings.options["items"]
+    assert isinstance(items, tuple)
+    assert isinstance(items[0], MappingProxyType)
+    assert isinstance(items[1], MappingProxyType)
+    assert isinstance(items[1]["nested"], MappingProxyType)
+    with pytest.raises(TypeError, match="mappingproxy"):
+        items[0]["key"] = "mutated"  # type: ignore[index]  # immutability is the test
+    with pytest.raises(TypeError, match="mappingproxy"):
+        items[1]["nested"]["deep"] = False  # type: ignore[index]  # immutability is the test
+
+
 async def test_reconnect_preserves_current_options_in_drafted_settings() -> None:
     settings = AgentSettings(
         provider="openai",

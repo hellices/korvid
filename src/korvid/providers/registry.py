@@ -53,6 +53,7 @@ def create_provider(
     ca_bundle: str | None = None,
     plugin_registry: ProviderPluginRegistry | None = None,
     options: Mapping[str, object] | None = None,
+    options_error: str | None = None,
 ) -> LLMProvider | None:
     """Build an LLM provider from neutral values, or None when unconfigured/misconfigured."""
     if not enabled:
@@ -75,6 +76,7 @@ def create_provider(
             api_key_env=api_key_env,
             plugin_registry=plugin_registry,
             options=options,
+            options_error=options_error,
         )
     if not base_url or not model:
         logger.warning("agent provider %r missing base_url/model — agent disabled", name)
@@ -140,6 +142,7 @@ def _create_via_plugin(
     api_key_env: str | None,
     plugin_registry: ProviderPluginRegistry | None,
     options: Mapping[str, object] | None,
+    options_error: str | None = None,
 ) -> LLMProvider | None:
     """Route an unknown provider name through the plugin registry.
 
@@ -150,6 +153,13 @@ def _create_via_plugin(
     if plugin_registry is None:
         logger.warning("unknown agent provider %r — agent disabled", provider_label)
         return None
+
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    # Gate third-party plugin creation when options are invalid: the plugin
+    # must not receive broken configuration silently.
+    if options_error is not None:
+        raise ProviderPluginError(f"agent.options validation failed: {options_error}")
 
     from korvid.agent.provider_plugin import ProviderPluginConfig
 

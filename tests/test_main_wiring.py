@@ -1636,3 +1636,167 @@ def test_validate_ca_bundle_rejects_malformed(tmp_path: Any) -> None:
     bad.write_text("this is not a certificate")
     with pytest.raises(SystemExit, match=r"garbage\.pem"):
         _validate_ca_bundle(str(bad))
+
+
+# ---------------------------------------------------------------------------
+# Finding #8: Rebuild transactional — profile/runtime failures
+# ---------------------------------------------------------------------------
+
+
+async def test_rebuild_profile_failure_closes_new_provider_keeps_old(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """If build_profile raises during rebuild, the new provider must be closed
+    and the old provider_box/runtime state must remain untouched."""
+    from korvid.__main__ import _build_agent_wiring
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
+    _install_company_plugin_site(monkeypatch, tmp_path)
+    runtime, _, rebuild, _, _, provider_box, _ = _build_agent_wiring(
+        _company_plugin_config(),
+        cast("Any", object()),
+        {},
+    )
+    assert runtime is not None
+    assert rebuild is not None
+    old_provider = provider_box[0]
+    assert old_provider is not None
+
+    # Use a settings with a profile that causes ToolExecutor to fail
+    # Patch ToolExecutor so that it raises on the next construction
+    from korvid.tools import executor as executor_mod
+
+    def _boom_te_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("tool executor construction failed")
+
+    monkeypatch.setattr(executor_mod.ToolExecutor, "__init__", _boom_te_init)
+
+    with pytest.raises(RuntimeError, match="tool executor construction failed"):
+        rebuild(_company_plugin_settings())
+
+    # Old provider must be alive and still in the box
+    assert provider_box[0] is old_provider
+    assert cast("Any", old_provider)._provider.close_calls == 0
+
+
+async def test_rebuild_runtime_failure_closes_new_provider_keeps_old(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """If AgentRuntime construction raises, the new provider must be closed
+    and old state must remain live."""
+    from korvid.__main__ import _build_agent_wiring
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
+    _install_company_plugin_site(monkeypatch, tmp_path)
+    runtime, _, rebuild, _, _, provider_box, _ = _build_agent_wiring(
+        _company_plugin_config(),
+        cast("Any", object()),
+        {},
+    )
+    assert runtime is not None
+    assert rebuild is not None
+    old_provider = provider_box[0]
+    assert old_provider is not None
+
+    # Patch AgentRuntime to raise on next instantiation
+    from korvid.agent import runtime as runtime_mod
+
+    def _boom_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("runtime construction failed")
+
+    monkeypatch.setattr(runtime_mod.AgentRuntime, "__init__", _boom_init)
+
+    with pytest.raises(RuntimeError, match="runtime construction failed"):
+        rebuild(_company_plugin_settings())
+
+    assert provider_box[0] is old_provider
+    assert cast("Any", old_provider)._provider.close_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Finding #1: options_error gates third-party plugin creation
+# ---------------------------------------------------------------------------
+
+
+def test_options_error_gates_plugin_creation_at_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """At initial startup, options_error on a plugin provider must surface
+    as a warning and disable the agent (not silently start with options={})."""
+    from korvid.__main__ import _build_agent_wiring
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
+    _install_company_plugin_site(monkeypatch, tmp_path)
+    config = dataclasses.replace(
+        _company_plugin_config(),
+        agent_options={},
+        agent_options_error="agent.options must be a mapping with string keys",
+    )
+    warnings: list[str] = []
+    runtime, _, _, _, _, provider_box, _ = _build_agent_wiring(
+        config,
+        cast("Any", object()),
+        {},
+        startup_warnings=warnings,
+    )
+    # The agent must be disabled (None runtime) and the warning must be surfaced.
+    assert runtime is None
+    assert provider_box[0] is None
+    assert any("agent.options" in w for w in warnings)
+
+
+def test_options_error_does_not_gate_builtin_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Built-in providers must remain usable even when options_error exists."""
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+        agent_options={},
+        agent_options_error="agent.options exceeded max depth",
+    )
+    runtime, _, _, _, _, _, _ = _build_agent_wiring(
+        config,
+        cast("Any", object()),
+        {},
+    )
+    # Built-in provider starts fine despite options_error
+    assert runtime is not None
+
+
+def test_options_error_fails_rebuild_for_plugin_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """At rebuild time, options_error on a plugin must raise ProviderPluginError
+    (the wizard sees it as an actionable failure)."""
+    from korvid.providers.plugin_registry import ProviderPluginError, ProviderPluginRegistry
+    from korvid.providers.registry import create_provider
+
+    monkeypatch.setenv("KORVID_TEST_KEY", "fixture-token")
+    _install_company_plugin_site(monkeypatch, tmp_path)
+    registry = ProviderPluginRegistry()
+
+    with pytest.raises(ProviderPluginError, match=r"agent\.options"):
+        create_provider(
+            enabled=True,
+            provider="company-llm",
+            auth_method="api_key",
+            base_url="https://fixtures.example.test/v1",
+            model="fixture-model",
+            api_key_env="KORVID_TEST_KEY",
+            plugin_registry=registry,
+            options={},
+            options_error="agent.options must be ASCII keys only",
+        )

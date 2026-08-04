@@ -235,3 +235,66 @@ async def test_validated_plugin_provider_closes_underlying_provider_once() -> No
     await wrapped.aclose()
 
     assert inner.close_calls == 1
+
+
+# --- Finding #2: stream exception containment ---
+
+
+class _ExplodingProvider(LLMProvider):
+    """Provider whose complete() raises an exception with secret payload."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    @property
+    def name(self) -> str:
+        return "exploding-provider"
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> AsyncIterator[dict[str, Any]]:
+        yield {"type": "text_delta", "text": "hello"}
+        raise self._exc
+
+    async def aclose(self) -> None:
+        pass
+
+
+async def test_validated_stream_translates_secret_exception_to_bounded_contract_error() -> None:
+    """Exceptions from the underlying provider stream must be translated to
+    bounded ProviderPluginContractError without raw payload."""
+    secret_exc = RuntimeError("SUPER_SECRET_API_KEY_abc123xyz789" * 10)
+    wrapped = ValidatedPluginProvider(_ExplodingProvider(secret_exc))
+
+    with pytest.raises(ProviderPluginContractError, match="provider stream failed") as exc_info:
+        async for _ in wrapped.complete([], []):
+            pass
+    msg = str(exc_info.value)
+    assert "SUPER_SECRET" not in msg
+    assert len(msg.encode("utf-8")) <= 2200  # bounded
+
+
+async def test_validated_stream_preserves_contract_error() -> None:
+    """ProviderPluginContractError from normalization must pass through."""
+    bad_event_provider = _ScriptedProvider([{"type": "unknown_garbage"}])
+    wrapped = ValidatedPluginProvider(bad_event_provider)
+
+    with pytest.raises(ProviderPluginContractError, match="unknown provider event type"):
+        async for _ in wrapped.complete([], []):
+            pass
+
+
+async def test_validated_stream_huge_exception_is_bounded() -> None:
+    """Even a huge exception type name is bounded."""
+    huge_exc = type("A" * 5000, (Exception,), {})("payload")
+    wrapped = ValidatedPluginProvider(_ExplodingProvider(huge_exc))
+
+    with pytest.raises(ProviderPluginContractError, match="provider stream failed") as exc_info:
+        async for _ in wrapped.complete([], []):
+            pass
+    msg = str(exc_info.value)
+    assert len(msg.encode("utf-8")) <= 2200

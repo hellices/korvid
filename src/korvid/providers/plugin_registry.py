@@ -81,13 +81,27 @@ def _discover_entry_points() -> list[tuple[importlib.metadata.EntryPoint, str]]:
 
     Returns a list of (entry_point, distribution_name) tuples.
     Isolated for test patching.
+    Translates importlib.metadata failures to ProviderPluginError with bounded,
+    no-payload messages so secrets from broken distributions never leak.
     """
     results: list[tuple[importlib.metadata.EntryPoint, str]] = []
-    for dist in importlib.metadata.distributions():
-        dist_name = dist.name or "<unknown>"
-        for ep in dist.entry_points:
-            if ep.group == _ENTRY_POINT_GROUP:
-                results.append((ep, dist_name))
+    try:
+        dists = list(importlib.metadata.distributions())
+    except Exception:
+        raise _bounded_error(
+            "provider plugin discovery failed: could not enumerate installed distributions"
+        ) from None
+    for dist in dists:
+        try:
+            dist_name = dist.name or "<unknown>"
+            for ep in dist.entry_points:
+                if ep.group == _ENTRY_POINT_GROUP:
+                    results.append((ep, dist_name))
+        except Exception:
+            logger.warning(
+                "skipping distribution during provider plugin discovery (metadata unreadable)"
+            )
+            continue
     return results
 
 
