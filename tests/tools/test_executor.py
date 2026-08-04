@@ -1124,8 +1124,8 @@ async def test_diagnose_pod_puts_current_health_before_historical_restart_eviden
         "diagnose_pod", {"pod": "api-1", "namespace": "default"}
     )
 
-    assert "CURRENT HEALTH\n  HEALTHY NOW" in out
-    assert out.index("HEALTHY NOW") < out.index("lost connection to peer")
+    assert "CURRENT HEALTH\n  READY NOW" in out
+    assert out.index("READY NOW") < out.index("lost connection to peer")
 
 
 async def test_diagnose_pod_includes_pvc_storage_class_and_warning_events() -> None:
@@ -1583,6 +1583,58 @@ async def test_diagnose_workload_budget_keeps_every_selected_pod_header() -> Non
     assert len(out) <= MAX_RESULT_CHARS
     for name in ("api-1", "api-2", "api-3"):
         assert f"POD DIAGNOSIS — default/{name}" in out
+
+
+async def test_diagnose_workload_prefers_newest_replicaset_pods() -> None:
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 4},
+        "status": {"replicas": 4},
+    }
+    old_rs = kube.objects[("replicasets", "api-6f")]
+    old_rs["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "old-rs",
+            "creationTimestamp": "2026-01-01T00:00:00Z",
+            "annotations": {"deployment.kubernetes.io/revision": "1"},
+            "ownerReferences": [{"kind": "Deployment", "uid": "deploy-uid", "name": "api"}],
+        }
+    )
+    new_rs = copy.deepcopy(old_rs)
+    new_rs["metadata"].update(
+        {
+            "name": "api-new",
+            "uid": "new-rs",
+            "creationTimestamp": "2026-02-01T00:00:00Z",
+            "annotations": {"deployment.kubernetes.io/revision": "2"},
+        }
+    )
+    kube.objects[("replicasets", "api-new")] = new_rs
+    source = kube.objects[("pods", "api-1")]
+    source["metadata"]["ownerReferences"] = [
+        {"kind": "ReplicaSet", "uid": "old-rs", "name": "api-6f"}
+    ]
+    for index in range(2, 5):
+        pod = copy.deepcopy(source)
+        pod["metadata"]["name"] = f"api-old-{index}"
+        pod["metadata"]["uid"] = f"old-pod-{index}"
+        kube.objects[("pods", f"api-old-{index}")] = pod
+    new_pod = copy.deepcopy(source)
+    new_pod["metadata"]["name"] = "api-new-1"
+    new_pod["metadata"]["uid"] = "new-pod"
+    new_pod["metadata"]["ownerReferences"] = [
+        {"kind": "ReplicaSet", "uid": "new-rs", "name": "api-new"}
+    ]
+    kube.objects[("pods", "api-new-1")] = new_pod
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+    assert "POD DIAGNOSIS — default/api-new-1" in out
 
 
 async def test_diagnose_workload_rejects_unsupported_kinds_with_guidance() -> None:

@@ -198,7 +198,7 @@ def current_health_line(pod: dict[str, Any]) -> str:
         suffix = ""
         if restarts:
             suffix = f"; {restarts} restart(s) are historical, not a current failure"
-        return f"HEALTHY NOW — phase=Running, Ready=True, all containers ready{suffix}"
+        return f"READY NOW — phase=Running, Ready=True, all containers ready{suffix}"
     return f"UNHEALTHY NOW — phase={phase}, Ready={ready}, all-containers-ready={all_ready}"
 
 

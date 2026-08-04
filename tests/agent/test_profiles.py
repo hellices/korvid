@@ -170,8 +170,9 @@ def test_small_profile_prompt_pins_measured_failure_mode_rules() -> None:
     assert "last exit 137" in prompt
     assert "start your answer with healthy" in prompt
     # 2. healthy is a valid verdict; stopped restarts are history — made
-    #    mechanical in round 5: ready now means healthy now
+    #    mechanical only after current conditions/events also pass
     assert "healthy" in prompt
+    assert "ready is not healthy" in prompt
     assert "history, not a live fault" in prompt
     # 3. copy decisive reasons word-for-word
     assert "word-for-word" in prompt

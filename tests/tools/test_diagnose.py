@@ -294,7 +294,7 @@ def test_current_health_line_marks_a_ready_running_pod_healthy_despite_restarts(
     ]
 
     assert diagnose.current_health_line(pod) == (
-        "HEALTHY NOW — phase=Running, Ready=True, all containers ready; "
+        "READY NOW — phase=Running, Ready=True, all containers ready; "
         "2 restart(s) are historical, not a current failure"
     )
 
@@ -342,7 +342,24 @@ def test_current_health_ignores_completed_init_ready_flag() -> None:
             "state": {"running": {"startedAt": "x"}},
         }
     ]
-    assert diagnose.current_health_line(pod).startswith("HEALTHY NOW")
+    assert diagnose.current_health_line(pod).startswith("READY NOW")
+
+
+def test_current_health_does_not_equate_ready_with_healthy() -> None:
+    pod = _crashloop_pod()
+    pod["status"]["phase"] = "Running"
+    pod["status"]["conditions"] = [{"type": "Ready", "status": "True"}]
+    pod["status"]["containerStatuses"] = [
+        {
+            "name": "app",
+            "ready": True,
+            "restartCount": 0,
+            "state": {"running": {"startedAt": "x"}},
+        }
+    ]
+    verdict = diagnose.current_health_line(pod)
+    assert verdict.startswith("READY NOW")
+    assert "HEALTHY" not in verdict
 
 
 # --- warning events ---------------------------------------------------------

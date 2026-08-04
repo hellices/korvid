@@ -64,6 +64,8 @@ def _fake_executor(fixture: Any) -> ToolExecutor:
 
 async def _run(args: argparse.Namespace) -> list[JourneyReport]:
     journeys = load_journeys(args.journeys)
+    if not journeys:
+        raise SystemExit(f"no journey YAML files found in {args.journeys}")
     provider_factory = provider_factory_from_env(os.environ)
     live_environment: Any | None = None
     if args.live:
@@ -108,10 +110,23 @@ def main(argv: list[str] | None = None) -> int:
         args.out.write_text(markdown + "\n")
     if args.json:
         args.json.write_text(json.dumps(report_payload(reports), indent=2) + "\n")
-    errored = any(
-        turn.error is not None for report in reports for run in report.runs for turn in run.turns
-    )
-    return 1 if errored else 0
+    return exit_code(reports)
+
+
+def exit_code(reports: list[JourneyReport]) -> int:
+    """Nonzero for runtime/provider failures, with actionable stderr."""
+    errors = 0
+    for report in reports:
+        for run_index, run in enumerate(report.runs, 1):
+            for turn_index, turn in enumerate(run.turns, 1):
+                if turn.error is None:
+                    continue
+                errors += 1
+                print(
+                    f"error: {report.journey_id} run {run_index} turn {turn_index}: {turn.error}",
+                    file=sys.stderr,
+                )
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

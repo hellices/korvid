@@ -1127,6 +1127,11 @@ class ToolExecutor:
             if any(owner_uid in replica_uids for owner_uid in summary.owner_uids)
         ]
         non_ready = [pod for pod in pods if not self._pod_summary_is_ready(pod)]
+        rs_by_uid = {summary.uid: summary for summary in replicasets}
+        non_ready.sort(
+            key=lambda pod: self._rollout_pod_sort_key(pod, rs_by_uid),
+            reverse=True,
+        )
 
         sections: list[tuple[str, list[str]]] = [
             (
@@ -1210,6 +1215,27 @@ class ToolExecutor:
             f"ready={status.get('readyReplicas', 0)} "
             f"available={status.get('availableReplicas', 0)} "
             f"unavailable={status.get('unavailableReplicas', 0)}"
+        )
+
+    @staticmethod
+    def _rollout_pod_sort_key(
+        pod: GenericSummary,
+        replicasets: dict[str, GenericSummary],
+    ) -> tuple[int, str, str, str]:
+        owner = next(
+            (replicasets[uid] for uid in pod.owner_uids if uid in replicasets),
+            None,
+        )
+        revision_text = getattr(owner, "revision", "-")
+        try:
+            revision = int(revision_text)
+        except (TypeError, ValueError):
+            revision = -1
+        return (
+            revision,
+            owner.created if owner is not None else "",
+            pod.created,
+            pod.name,
         )
 
     async def _diagnose_workload(self, args: dict[str, Any]) -> str:
