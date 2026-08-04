@@ -19,6 +19,7 @@ from korvid.providers.entra import EntraCredentialSource
 from korvid.providers.github_copilot import COPILOT_CHAT_BASE_URL, CopilotCredentialSource
 from korvid.providers.ollama import OllamaOptions, OllamaProvider
 from korvid.providers.openai_compat import OpenAICompatProvider
+from korvid.providers.plugin_registry import normalize_provider_name
 from korvid.providers.static_creds import StaticHeaderSource
 
 if TYPE_CHECKING:
@@ -56,9 +57,9 @@ def create_provider(
     """Build an LLM provider from neutral values, or None when unconfigured/misconfigured."""
     if not enabled:
         return None
-    # YAML can hand us non-string scalars (e.g. `provider: true`); only
-    # strings are meaningful — anything else falls to the unknown branch.
-    name = provider.lower() if isinstance(provider, str) else ""
+    # Normalize once: lowercase, collapse [-_.] separators to hyphens, strip.
+    # This ensures `openai_compat`, `OpenAI_Compat`, ` ollama` etc. route to built-ins.
+    name = normalize_provider_name(provider) if isinstance(provider, str) else ""
     if name == "github-copilot":
         return _create_github_copilot(
             auth_method=auth_method, base_url=base_url, model=model, oauth_token=oauth_token

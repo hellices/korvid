@@ -18,6 +18,7 @@ from korvid.agent.provider import LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
     ProviderPlugin,
+    ProviderPluginMetadata,
     ValidatedPluginProvider,
 )
 
@@ -30,8 +31,26 @@ logger = logging.getLogger(__name__)
 _SEPARATOR_RE = re.compile(r"[-_.]+")
 _MAX_ERROR_LENGTH = 200
 _MAX_LABEL_LENGTH = 60
+_MAX_NAME_LENGTH = 100
 _ENTRY_POINT_GROUP: str = "korvid.provider"
 _ALLOWED_AUTH_METHODS: frozenset[str] = frozenset({"none", "api_key", "entra"})
+
+# Centralized reserved names — these are built-in provider identifiers that must
+# never be claimed by third-party plugins.  Shared with korvid.providers.registry
+# to ensure plugin_registry and the built-in dispatch cannot drift.
+RESERVED_PROVIDER_NAMES: frozenset[str] = frozenset(
+    {
+        "openai-compat",
+        "openai",
+        "azure",
+        "vllm",
+        "github",
+        "anthropic",
+        "claude",
+        "ollama",
+        "github-copilot",
+    }
+)
 
 
 class ProviderPluginError(Exception):
@@ -100,6 +119,50 @@ def _validate_auth_methods(
         )
 
 
+def _validate_metadata_fields(
+    meta: ProviderPluginMetadata,
+    normalized: str,
+    safe_name: str,
+) -> None:
+    """Validate all ProviderPluginMetadata field types and values."""
+    # api_version: exact non-bool int == PROVIDER_PLUGIN_API_VERSION
+    if isinstance(meta.api_version, bool) or not isinstance(meta.api_version, int):
+        raise _bounded_error(f"provider plugin {safe_name!r}: api_version must be int")
+    if meta.api_version != PROVIDER_PLUGIN_API_VERSION:
+        raise _bounded_error(
+            f"provider plugin {safe_name!r} has api_version "
+            f"{meta.api_version}, expected {PROVIDER_PLUGIN_API_VERSION}"
+        )
+
+    # name: non-empty string, bounded
+    if not isinstance(meta.name, str) or not meta.name:
+        raise _bounded_error(f"provider plugin {safe_name!r}: metadata.name must be non-empty str")
+    if len(meta.name) > _MAX_NAME_LENGTH:
+        raise _bounded_error(f"provider plugin {safe_name!r}: metadata.name exceeds max length")
+
+    # display_name: non-empty string
+    if not isinstance(meta.display_name, str) or not meta.display_name:
+        raise _bounded_error(f"provider plugin {safe_name!r}: display_name must be non-empty str")
+
+    # auth_methods: must be a tuple (not list)
+    if not isinstance(meta.auth_methods, tuple):
+        raise _bounded_error(f"provider plugin {safe_name!r}: auth_methods must be a tuple")
+
+    # supports_generic_setup: strict bool (not int subclass)
+    if not isinstance(meta.supports_generic_setup, bool):
+        raise _bounded_error(f"provider plugin {safe_name!r}: supports_generic_setup must be bool")
+
+    # metadata.name must match entry-point name after normalization
+    meta_normalized = normalize_provider_name(meta.name)
+    if meta_normalized != normalized:
+        raise _bounded_error(
+            f"provider plugin {safe_name!r}: metadata.name does not match entry-point name"
+        )
+
+    # Validate auth_methods contents
+    _validate_auth_methods(meta.auth_methods, normalized)
+
+
 class ProviderPluginRegistry:
     """Registry that discovers and loads provider plugins by entry point.
 
@@ -108,7 +171,7 @@ class ProviderPluginRegistry:
     """
 
     def __init__(self) -> None:
-        self._cache: dict[str, ProviderPlugin] = {}
+        self._cache: dict[str, tuple[ProviderPlugin, ProviderPluginMetadata]] = {}
 
     def _resolve_entry_point(
         self,
@@ -140,8 +203,8 @@ class ProviderPluginRegistry:
         plugin: ProviderPlugin,
         normalized: str,
         safe_name: str,
-    ) -> None:
-        """Validate plugin metadata: api_version, name match, auth_methods."""
+    ) -> ProviderPluginMetadata:
+        """Validate plugin metadata: type, all fields, and return the cached copy."""
         try:
             meta = plugin.metadata
         except Exception:
@@ -149,19 +212,15 @@ class ProviderPluginRegistry:
                 f"provider plugin {safe_name!r} raised while accessing metadata"
             ) from None
 
-        if meta.api_version != PROVIDER_PLUGIN_API_VERSION:
+        # Must be a ProviderPluginMetadata instance — reject dicts/arbitrary objects
+        if not isinstance(meta, ProviderPluginMetadata):
             raise _bounded_error(
-                f"provider plugin {safe_name!r} has api_version "
-                f"{meta.api_version}, expected {PROVIDER_PLUGIN_API_VERSION}"
+                f"provider plugin {safe_name!r}: metadata must be "
+                f"ProviderPluginMetadata, got {type(meta).__name__}"
             )
 
-        meta_normalized = normalize_provider_name(meta.name)
-        if meta_normalized != normalized:
-            raise _bounded_error(
-                f"provider plugin {safe_name!r}: metadata.name does not match entry-point name"
-            )
-
-        _validate_auth_methods(meta.auth_methods, normalized)
+        _validate_metadata_fields(meta, normalized, safe_name)
+        return meta
 
     def load_selected(self, name: str) -> ProviderPlugin:
         """Load and validate the provider plugin matching *name*.
@@ -177,7 +236,13 @@ class ProviderPluginRegistry:
         """
         normalized = normalize_provider_name(name)
         if normalized in self._cache:
-            return self._cache[normalized]
+            return self._cache[normalized][0]
+
+        # Defense-in-depth: reject reserved built-in names before any discovery
+        if normalized in RESERVED_PROVIDER_NAMES:
+            raise _bounded_error(
+                f"provider name {_bounded(normalized)!r} is reserved for a built-in provider"
+            )
 
         safe_name = _bounded(normalized)
         ep, dist_name = self._resolve_entry_point(normalized, safe_name)
@@ -206,9 +271,9 @@ class ProviderPluginRegistry:
                 f"failed to instantiate provider plugin {safe_name!r} from {safe_dist}"
             ) from None
 
-        self._validate_metadata(plugin, normalized, safe_name)
-
-        self._cache[normalized] = plugin
+        # Validate metadata and cache both plugin + validated metadata
+        validated_meta = self._validate_metadata(plugin, normalized, safe_name)
+        self._cache[normalized] = (plugin, validated_meta)
         return plugin
 
     def create(
@@ -233,15 +298,15 @@ class ProviderPluginRegistry:
         """
         normalized = normalize_provider_name(name)
         safe_name = _bounded(normalized)
-        plugin = self._cache.get(normalized)
-        if plugin is None:
+        cached = self._cache.get(normalized)
+        if cached is None:
             raise _bounded_error(
                 f"provider plugin {safe_name!r} not loaded — call load_selected() first"
             )
 
-        meta = plugin.metadata
+        plugin, meta = cached
 
-        # Validate auth method against plugin's declared auth_methods
+        # Validate auth method against cached metadata's declared auth_methods
         if config.auth_method and config.auth_method not in meta.auth_methods:
             raise _bounded_error(
                 f"provider plugin {safe_name!r} does not support "

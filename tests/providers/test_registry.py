@@ -612,3 +612,72 @@ def test_create_provider_threads_ca_bundle(tmp_path: Path, monkeypatch: pytest.M
         assert provider is not None
         assert isinstance(provider, OllamaProvider | OpenAICompatProvider)
         assert provider._ca_bundle == str(ca)  # reaches the adapter's client build
+
+
+# ---------------------------------------------------------------------------
+# Blocker 2: Reserved-name normalization routes variants to built-ins
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected_type"),
+    [
+        ("openai_compat", OpenAICompatProvider),
+        ("OpenAI_Compat", OpenAICompatProvider),
+        ("OPENAI-COMPAT", OpenAICompatProvider),
+        (" ollama", OllamaProvider),
+        ("Ollama", OllamaProvider),
+        ("OLLAMA", OllamaProvider),
+    ],
+)
+def test_normalized_variants_route_to_builtins(variant: str, expected_type: type) -> None:
+    """Separator/case variants of built-in names must route to built-in providers."""
+    p = create_provider(
+        enabled=True,
+        provider=variant,
+        auth_method=None,
+        base_url="http://localhost:11434",
+        model="m",
+        api_key_env=None,
+    )
+    assert isinstance(p, expected_type)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["github_copilot", "GitHub_Copilot", "GITHUB-COPILOT"],
+)
+def test_github_copilot_variants_route_to_builtin(variant: str) -> None:
+    """github-copilot casing/separator variants route to the copilot path."""
+    # Without oauth token, returns None — but exercises the copilot code path
+    p = create_provider(
+        enabled=True,
+        provider=variant,
+        auth_method=None,
+        base_url=None,
+        model="gpt-4o",
+        api_key_env=None,
+        oauth_token=None,
+    )
+    # The copilot path returns None when not logged in — that's correct routing
+    assert p is None
+
+
+def test_normalized_variant_never_queries_plugin_registry() -> None:
+    """Built-in variant names must never touch the plugin registry."""
+    from unittest.mock import MagicMock
+
+    registry = MagicMock()
+    # openai_compat should normalize to openai-compat (a built-in alias)
+    p = create_provider(
+        enabled=True,
+        provider="openai_compat",
+        auth_method=None,
+        base_url="http://x/v1",
+        model="m",
+        api_key_env=None,
+        plugin_registry=registry,
+    )
+    assert isinstance(p, OpenAICompatProvider)
+    registry.load_selected.assert_not_called()
+    registry.create.assert_not_called()

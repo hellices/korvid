@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.metadata
 import sys
 import textwrap
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -651,3 +652,286 @@ class TestCreate:
         )
         with pytest.raises(ProviderPluginError, match="not loaded"):
             registry.create("nonexistent", config, None)
+
+
+# ---------------------------------------------------------------------------
+# Blocker 1: Full metadata boundary validation
+# ---------------------------------------------------------------------------
+
+
+class TestMetadataBoundary:
+    """Validate that metadata must be ProviderPluginMetadata and all fields type-checked."""
+
+    def test_dict_metadata_rejected(self, plugin_site: Any) -> None:
+        """A plugin returning a dict instead of ProviderPluginMetadata is rejected."""
+
+        class _DictMetaPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return {"api_version": 1, "name": "company-llm"}  # type: ignore[return-value]
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_DictMetaPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="ProviderPluginMetadata"):
+                reg.load_selected("company-llm")
+
+    def test_api_version_bool_rejected(self, plugin_site: Any) -> None:
+        """api_version=True (bool is subclass of int) must be rejected."""
+
+        class _BoolVersionPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=True,  # bool subclass of int — valid to mypy, rejected at runtime
+                    name="company-llm",
+                    display_name="Bool",
+                    auth_methods=("api_key",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_BoolVersionPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="api_version"):
+                reg.load_selected("company-llm")
+
+    def test_name_empty_rejected(self, plugin_site: Any) -> None:
+        """metadata.name that is empty string is rejected."""
+
+        class _EmptyNamePlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="",
+                    display_name="Empty",
+                    auth_methods=("api_key",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_EmptyNamePlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="name"):
+                reg.load_selected("company-llm")
+
+    def test_display_name_non_string_rejected(self, plugin_site: Any) -> None:
+        """metadata.display_name that is not a string is rejected."""
+
+        class _BadDisplayPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name=42,  # type: ignore[arg-type]
+                    auth_methods=("api_key",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_BadDisplayPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="display_name"):
+                reg.load_selected("company-llm")
+
+    def test_auth_methods_list_rejected(self, plugin_site: Any) -> None:
+        """metadata.auth_methods as list (not tuple) is rejected."""
+
+        class _ListAuthPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="List",
+                    auth_methods=["api_key"],  # type: ignore[arg-type]
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_ListAuthPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match=r"auth_methods.*tuple"):
+                reg.load_selected("company-llm")
+
+    def test_supports_generic_setup_non_bool_rejected(self, plugin_site: Any) -> None:
+        """metadata.supports_generic_setup that is not bool is rejected."""
+
+        class _BadSetupPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="BadSetup",
+                    auth_methods=("api_key",),
+                    supports_generic_setup=1,  # type: ignore[arg-type]
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_BadSetupPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="supports_generic_setup"):
+                reg.load_selected("company-llm")
+
+    def test_create_never_rereads_metadata(self, plugin_site: Any) -> None:
+        """create() must use cached metadata from load_selected — not re-read the property.
+
+        A plugin whose metadata raises on second read must still have create() succeed.
+        """
+        call_count = 0
+
+        class _InlineProvider(LLMProvider):
+            @property
+            def name(self) -> str:
+                return "inline"
+
+            async def complete(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]],
+                *,
+                stream: bool = True,
+            ) -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "done"}
+
+            async def aclose(self) -> None:
+                pass
+
+        class _StatefulMetaPlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                nonlocal call_count
+                call_count += 1
+                if call_count > 1:
+                    raise RuntimeError("SECRET_KEY_LEAKED_ON_SECOND_READ")
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="company-llm",
+                    display_name="Stateful",
+                    auth_methods=("api_key",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                return _InlineProvider()
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_StatefulMetaPlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            reg.load_selected("company-llm")
+            config = ProviderPluginConfig(
+                base_url=None,
+                model=None,
+                auth_method="api_key",
+                api_key_env=None,
+                options={},
+            )
+            # This MUST NOT re-read metadata — if it does, RuntimeError would leak
+            provider = reg.create("company-llm", config, None)
+            assert provider is not None
+
+    def test_name_too_long_rejected(self, plugin_site: Any) -> None:
+        """metadata.name exceeding bounds is rejected."""
+
+        class _LongNamePlugin(ProviderPlugin):
+            @property
+            def metadata(self) -> ProviderPluginMetadata:
+                return ProviderPluginMetadata(
+                    api_version=PROVIDER_PLUGIN_API_VERSION,
+                    name="x" * 200,
+                    display_name="Long",
+                    auth_methods=("api_key",),
+                )
+
+            def create(
+                self, config: ProviderPluginConfig, credentials: CredentialSource | None
+            ) -> LLMProvider:
+                raise NotImplementedError
+
+        with patch(
+            "korvid.providers.plugin_registry._load_entry_point",
+            return_value=_LongNamePlugin,
+        ):
+            reg = ProviderPluginRegistry()
+            with pytest.raises(ProviderPluginError, match="name") as exc_info:
+                reg.load_selected("company-llm")
+            assert len(str(exc_info.value)) <= 200
+
+
+# ---------------------------------------------------------------------------
+# Blocker 2: Reserved name rejection
+# ---------------------------------------------------------------------------
+
+
+class TestReservedNames:
+    """ProviderPluginRegistry.load_selected must reject reserved built-in names."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "openai-compat",
+            "openai",
+            "azure",
+            "vllm",
+            "github",
+            "anthropic",
+            "claude",
+            "ollama",
+            "github-copilot",
+            # Variant casings / separators that normalize to reserved names
+            "OpenAI_Compat",
+            "GitHub_Copilot",
+            "OLLAMA",
+            "Azure",
+        ],
+    )
+    def test_reserved_name_rejected_before_discovery(
+        self, name: str, registry: ProviderPluginRegistry
+    ) -> None:
+        """Reserved built-in names are rejected without any entry-point discovery."""
+        with pytest.raises(ProviderPluginError, match="reserved"):
+            registry.load_selected(name)
