@@ -923,6 +923,7 @@ class KorvidApp(App[None]):
                 model=config.agent_model,
                 api_key_env=config.agent_api_key_env,
                 profile=config.agent_profile or "full",
+                options=config.agent_options,
             )
         self._agent_task: asyncio.Task[None] | None = None
         #: True after :ai off (issue #167): the agent was configured and

@@ -303,6 +303,7 @@ class AgentSetupScreen(ModalScreen["AgentSettings | None"]):
             # Ollama endpoints usually serve 3B-14B models, so suggest the
             # reduced capability profile (issue #71).
             profile=self._current_profile or ("small" if self._provider == "ollama" else "full"),
+            options=self._current_settings.options if self._current_settings is not None else {},
         )
 
     def _show_model_step(self, models: list[str]) -> None:

@@ -7,8 +7,11 @@ application configuration (AGENTS.md layer rules).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from korvid.agent.credentials import CredentialSource
 from korvid.agent.provider import LLMProvider
@@ -16,21 +19,18 @@ from korvid.providers.entra import EntraCredentialSource
 from korvid.providers.github_copilot import COPILOT_CHAT_BASE_URL, CopilotCredentialSource
 from korvid.providers.ollama import OllamaOptions, OllamaProvider
 from korvid.providers.openai_compat import OpenAICompatProvider
+from korvid.providers.plugin_registry import (
+    GITHUB_COPILOT_PROVIDER,
+    OLLAMA_PROVIDER,
+    OPENAI_COMPAT_ALIASES,
+    normalize_provider_name,
+)
 from korvid.providers.static_creds import StaticHeaderSource
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from korvid.providers.plugin_registry import ProviderPluginRegistry
 
-_OPENAI_COMPAT_ALIASES = frozenset(
-    {
-        "openai-compat",
-        "openai",
-        "azure",
-        "vllm",
-        "github",  # GitHub Models (models.github.ai) — OpenAI-compatible
-        "anthropic",  # Anthropic's OpenAI SDK compatibility endpoint
-        "claude",
-    }
-)
+logger = logging.getLogger(__name__)
 
 
 def create_provider(
@@ -44,20 +44,33 @@ def create_provider(
     oauth_token: str | None = None,
     ollama: OllamaOptions | None = None,
     ca_bundle: str | None = None,
+    plugin_registry: ProviderPluginRegistry | None = None,
+    options: Mapping[str, object] | None = None,
+    options_error: str | None = None,
 ) -> LLMProvider | None:
     """Build an LLM provider from neutral values, or None when unconfigured/misconfigured."""
     if not enabled:
         return None
-    # YAML can hand us non-string scalars (e.g. `provider: true`); only
-    # strings are meaningful — anything else falls to the unknown branch.
-    name = provider.lower() if isinstance(provider, str) else ""
-    if name == "github-copilot":
+    # Normalize once: lowercase, collapse [-_.] separators to hyphens, strip.
+    # This ensures `openai_compat`, `OpenAI_Compat`, ` ollama` etc. route to built-ins.
+    name = normalize_provider_name(provider) if isinstance(provider, str) else ""
+    if name == GITHUB_COPILOT_PROVIDER:
         return _create_github_copilot(
             auth_method=auth_method, base_url=base_url, model=model, oauth_token=oauth_token
         )
-    if name not in _OPENAI_COMPAT_ALIASES and name != "ollama":
-        logger.warning("unknown agent provider %r — agent disabled", provider)
-        return None
+    if name not in OPENAI_COMPAT_ALIASES and name != OLLAMA_PROVIDER:
+        # Unknown to built-ins: try the plugin registry before giving up.
+        return _create_via_plugin(
+            name=name,
+            provider_label=provider,
+            auth_method=auth_method,
+            base_url=base_url,
+            model=model,
+            api_key_env=api_key_env,
+            plugin_registry=plugin_registry,
+            options=options,
+            options_error=options_error,
+        )
     if not base_url or not model:
         logger.warning("agent provider %r missing base_url/model — agent disabled", name)
         return None
@@ -66,7 +79,7 @@ def create_provider(
     except _AuthMisconfigured as exc:
         logger.warning("%s — agent disabled", exc)
         return None
-    if name == "ollama":
+    if name == OLLAMA_PROVIDER:
         # Native /api/chat adapter (issue #72). The OpenAI-compat shim path
         # stays available via `provider: openai-compat` with an Ollama URL.
         return OllamaProvider(
@@ -110,6 +123,102 @@ def _create_github_copilot(
         model=model,
         credentials=CopilotCredentialSource(oauth_token),
     )
+
+
+def _create_via_plugin(
+    *,
+    name: str,
+    provider_label: str | None,
+    auth_method: str | None,
+    base_url: str | None,
+    model: str | None,
+    api_key_env: str | None,
+    plugin_registry: ProviderPluginRegistry | None,
+    options: Mapping[str, object] | None,
+    options_error: str | None = None,
+) -> LLMProvider | None:
+    """Route an unknown provider name through the plugin registry.
+
+    Returns None when there is no registry. Raises ``ProviderPluginError``
+    on any plugin failure — the caller decides whether to convert the error
+    to a warning (initial startup) or let it propagate (rebuild).
+    """
+    if plugin_registry is None:
+        logger.warning("unknown agent provider %r — agent disabled", provider_label)
+        return None
+
+    from korvid.providers.plugin_registry import ProviderPluginError
+
+    # Gate third-party plugin creation when options are invalid: the plugin
+    # must not receive broken configuration silently.
+    if options_error is not None:
+        raise ProviderPluginError(f"agent.options validation failed: {options_error}")
+
+    from korvid.agent.provider_plugin import ProviderPluginConfig
+
+    # load_selected may raise ProviderPluginError — let it propagate.
+    plugin_registry.load_selected(name)
+
+    # Resolve effective auth method ONCE so build_credentials and
+    # ProviderPluginConfig always agree and metadata validation runs.
+    effective_auth = auth_method or ("api_key" if api_key_env else "none")
+
+    # Build credentials first (validates auth config) then close on failure.
+    credentials: CredentialSource | None = None
+    try:
+        credentials = build_credentials(name, effective_auth, api_key_env)
+    except _AuthMisconfigured:
+        from korvid.providers.plugin_registry import ProviderPluginError as _PPE
+
+        raise _PPE(f"provider plugin {name!r}: auth misconfigured") from None
+
+    config = ProviderPluginConfig(
+        base_url=base_url,
+        model=model,
+        auth_method=effective_auth,
+        api_key_env=api_key_env,
+        options=options or {},
+    )
+
+    try:
+        return plugin_registry.create(name, config, credentials)
+    except Exception:
+        _close_credentials(credentials)
+        raise
+
+
+# Strong references for credential-close tasks — mirrors _close_provider_in_background
+# in __main__.py so fire-and-forget aclose() tasks aren't garbage-collected.
+_cred_close_tasks: set[asyncio.Task[None]] = set()
+
+
+def _close_credentials(credentials: CredentialSource | None) -> None:
+    """Best-effort async close for credentials when plugin construction fails.
+
+    Uses a strong-reference set with a done-callback that discards the task
+    and consumes any exception at debug level, matching the
+    ``_close_provider_in_background`` pattern in ``__main__``.
+    """
+    if credentials is None:
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    task = loop.create_task(credentials.aclose())
+    _cred_close_tasks.add(task)
+
+    def _reap(t: asyncio.Task[None]) -> None:
+        _cred_close_tasks.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            # Consume the exception with a fixed message only — never log
+            # exc_info or the exception message (may contain secrets/tokens
+            # from a third-party credential source).
+            logger.debug("credential close failed")
+
+    task.add_done_callback(_reap)
 
 
 class _AuthMisconfigured(Exception):

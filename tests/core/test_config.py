@@ -1,9 +1,17 @@
+import json
 import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 from korvid.core.config import KorvidConfig, load_config, save_agent_config
+
+
+def _load_agent_options_config(tmp_path: Path, options: object) -> KorvidConfig:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"agent": {"options": options}}, sort_keys=False))
+    return load_config(path)
 
 
 def test_defaults_when_no_file(tmp_path: Path) -> None:
@@ -143,6 +151,271 @@ def test_save_agent_config_preserves_other_keys(tmp_path: Path) -> None:
     assert cfg.agent_auth_method == "device-login"
 
 
+def test_agent_options_parses_valid_nested_data(tmp_path: Path) -> None:
+    cfg = _load_agent_options_config(
+        tmp_path,
+        {
+            "tenant": "platform",
+            "enabled": True,
+            "retries": 3,
+            "temperature": 0.5,
+            "headers": {"x_scope": "cluster-readonly", "mode": None},
+            "fallbacks": ["gpt-4o-mini", {"label": "backup", "weight": 1}],
+        },
+    )
+    assert cfg.agent_options == {
+        "tenant": "platform",
+        "enabled": True,
+        "retries": 3,
+        "temperature": 0.5,
+        "headers": {"x_scope": "cluster-readonly", "mode": None},
+        "fallbacks": ["gpt-4o-mini", {"label": "backup", "weight": 1}],
+    }
+    assert cfg.agent_options_error is None
+
+
+def test_agent_options_depth_limit_is_exact(tmp_path: Path) -> None:
+    valid = _load_agent_options_config(
+        tmp_path,
+        {"l1": {"l2": {"l3": {"l4": "ok"}}}},
+    )
+    assert valid.agent_options_error is None
+    assert valid.agent_options["l1"] == {"l2": {"l3": {"l4": "ok"}}}
+
+    invalid = _load_agent_options_config(
+        tmp_path,
+        {"l1": {"l2": {"l3": {"l4": {"l5": "boom"}}}}},
+    )
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "max depth 4" in invalid.agent_options_error
+
+
+def test_agent_options_mixed_container_depth_limit_is_exact(tmp_path: Path) -> None:
+    valid = _load_agent_options_config(
+        tmp_path,
+        {"l1": [{"l3": ["ok"]}]},
+    )
+    assert valid.agent_options_error is None
+    assert valid.agent_options["l1"] == [{"l3": ["ok"]}]
+
+    invalid = _load_agent_options_config(
+        tmp_path,
+        {"l1": [{"l3": [{"l5": "boom"}]}]},
+    )
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "max depth 4" in invalid.agent_options_error
+
+
+def test_agent_options_mapping_key_limit_is_exact(tmp_path: Path) -> None:
+    valid = _load_agent_options_config(tmp_path, {f"k{i}": i for i in range(64)})
+    assert valid.agent_options_error is None
+    assert len(valid.agent_options) == 64
+
+    invalid = _load_agent_options_config(tmp_path, {f"k{i}": i for i in range(65)})
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "64 mapping keys" in invalid.agent_options_error
+
+
+def test_agent_options_list_item_limit_is_exact(tmp_path: Path) -> None:
+    valid = _load_agent_options_config(tmp_path, {"models": list(range(64))})
+    assert valid.agent_options_error is None
+    assert valid.agent_options["models"] == list(range(64))
+
+    invalid = _load_agent_options_config(tmp_path, {"models": list(range(65))})
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "64 list items" in invalid.agent_options_error
+
+
+def test_agent_options_string_limit_is_exact(tmp_path: Path) -> None:
+    valid = _load_agent_options_config(tmp_path, {"prompt": "x" * 2048})
+    assert valid.agent_options_error is None
+    assert valid.agent_options["prompt"] == "x" * 2048
+
+    invalid = _load_agent_options_config(tmp_path, {"prompt": "x" * 2049})
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "2048 bytes" in invalid.agent_options_error
+
+
+def test_agent_options_serialized_budget_limit_is_exact(tmp_path: Path) -> None:
+    valid_options = {f"k{i}": "x" * 2048 for i in range(7)} | {"k7": "x" * 1983}
+    assert (
+        len(
+            json.dumps(
+                valid_options,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        == 16 * 1024
+    )
+    valid = _load_agent_options_config(tmp_path, valid_options)
+    assert valid.agent_options_error is None
+
+    invalid = _load_agent_options_config(tmp_path, valid_options | {"k7": "x" * 1984})
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "16384 bytes" in invalid.agent_options_error
+
+
+def test_agent_options_rejects_nonfinite_float(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("agent:\n  options:\n    temperature: .nan\n")
+    cfg = load_config(path)
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert "finite float" in cfg.agent_options_error
+
+
+def test_agent_options_rejects_non_string_keys(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("agent:\n  options:\n    1: one\n")
+    cfg = load_config(path)
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert "string keys" in cfg.agent_options_error
+
+
+def test_agent_options_rejects_unsupported_objects(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("agent:\n  options:\n    launched: 2026-08-04\n")
+    cfg = load_config(path)
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert "date" in cfg.agent_options_error
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("secret", "secret"),
+        ("db_password", "password"),
+        ("access_token", "token"),
+        ("api-key", "api_key"),
+        ("Authorization", "authorization"),
+        ("credential", "credential"),
+        # Compound underscore keys
+        ("client_api_key", "api_key"),
+        ("my_api_key_rotation", "api_key"),
+        # CamelCase JSON-style keys (finding round 5)
+        ("apiKey", "api_key"),
+        ("clientSecret", "secret"),
+        ("accessToken", "token"),
+        ("APIKey", "api_key"),
+        ("clientAPIKey", "api_key"),
+        # Compact lowercase form (finding round 6)
+        ("apikey", "apikey"),
+        ("my_apikey", "apikey"),
+    ],
+)
+def test_agent_options_rejects_secret_key_segments(tmp_path: Path, key: str, expected: str) -> None:
+    cfg = _load_agent_options_config(tmp_path, {key: "plain-text-secret"})
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert expected in cfg.agent_options_error
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "clientKey",
+        "apiVersion",
+        "timeout",
+        "modelName",
+        "baseURL",
+        "maxRetries",
+    ],
+)
+def test_agent_options_accepts_non_secret_camel_case_keys(tmp_path: Path, key: str) -> None:
+    """Non-secret CamelCase keys must pass through without false positives."""
+    cfg = _load_agent_options_config(tmp_path, {key: "v"})
+    assert cfg.agent_options_error is None
+    assert key in cfg.agent_options
+
+
+def test_agent_options_accepts_non_secret_compound_keys(tmp_path: Path) -> None:
+    """Compound keys that do NOT contain a reserved segment must pass."""
+    cfg = _load_agent_options_config(
+        tmp_path, {"client_key": "v", "api_version": "v2", "timeout": "30"}
+    )
+    assert cfg.agent_options_error is None
+    assert "client_key" in cfg.agent_options
+    assert "api_version" in cfg.agent_options
+
+
+def test_agent_options_non_ascii_macron_password_rejected_as_non_ascii(tmp_path: Path) -> None:
+    """Non-ASCII 'pāssword' (macron a) is now rejected at the ASCII gate
+    before secret detection — this is the intended v1 policy (finding #9)."""
+    cfg = _load_agent_options_config(tmp_path, {"pāssword": "plain-text-secret"})
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert "ASCII" in cfg.agent_options_error
+
+
+def test_agent_options_key_byte_limit_exact(tmp_path: Path) -> None:
+    """Finding #3: mapping keys must respect the 2048 UTF-8 byte limit."""
+    key_at_limit = "k" * 2048
+    valid = _load_agent_options_config(tmp_path, {key_at_limit: "v"})
+    assert valid.agent_options_error is None
+    assert key_at_limit in valid.agent_options
+
+    key_over_limit = "k" * 2049
+    invalid = _load_agent_options_config(tmp_path, {key_over_limit: "v"})
+    assert invalid.agent_options == {}
+    assert invalid.agent_options_error is not None
+    assert "2048 bytes" in invalid.agent_options_error
+
+
+def test_pathological_separator_heavy_key_accepted(tmp_path: Path) -> None:
+    """A 2KiB key with many separators (producing many parts) must be
+    accepted without quadratic blowup. This tests the bounded sliding-window
+    algorithm does not materialize O(n^2) subsequences."""
+    # 2048 bytes, alternating single-char tokens with separators: a_b_c_d_...
+    # produces ~1024 parts — pathological for O(n^2) but O(n) for sliding window.
+    key = "_".join("x" for _ in range(1024))  # "x_x_x_..." = 2047 chars
+    assert len(key.encode("utf-8")) <= 2048
+    cfg = _load_agent_options_config(tmp_path, {key: "v"})
+    assert cfg.agent_options_error is None
+    assert key in cfg.agent_options
+
+
+def test_agent_options_rejects_non_ascii_keys(tmp_path: Path) -> None:
+    """Finding #9: non-ASCII option keys are rejected before normalization."""
+    # Cyrillic confusable: U+043E instead of Latin 'o'
+    cfg = _load_agent_options_config(tmp_path, {"t\u043eken": "val"})
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert "ASCII" in cfg.agent_options_error
+
+
+def test_agent_options_rejects_greek_lookalike_key(tmp_path: Path) -> None:
+    """Finding #9: Greek lookalike option key is rejected."""
+    # Greek U+03B1 in key
+    cfg = _load_agent_options_config(tmp_path, {"\u03b1pi_key": "val"})
+    assert cfg.agent_options == {}
+    assert cfg.agent_options_error is not None
+    assert "ASCII" in cfg.agent_options_error
+
+
+def test_agent_options_accepts_ascii_keys(tmp_path: Path) -> None:
+    """Finding #9: pure ASCII keys are still accepted."""
+    cfg = _load_agent_options_config(tmp_path, {"tenant": "platform", "region_code": "apac"})
+    assert cfg.agent_options_error is None
+    assert cfg.agent_options == {"tenant": "platform", "region_code": "apac"}
+
+
+def test_agent_options_non_ascii_values_accepted(tmp_path: Path) -> None:
+    """Finding #9: non-ASCII restriction must NOT affect values."""
+    cfg = _load_agent_options_config(tmp_path, {"greeting": "こんにちは"})
+    assert cfg.agent_options_error is None
+    assert cfg.agent_options == {"greeting": "こんにちは"}
+
+
 def test_save_agent_config_creates_file(tmp_path: Path) -> None:
     p = tmp_path / "sub" / "c.yaml"
     save_agent_config(
@@ -171,6 +444,43 @@ def test_save_agent_config_preserves_agent_extension_keys(tmp_path: Path) -> Non
 
     raw = yaml.safe_load(p.read_text())
     assert raw["agent"]["custom_note"] == "keepme"  # unrelated agent key kept
+
+
+def test_save_agent_config_preserves_agent_options(tmp_path: Path) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "agent": {
+                    "provider": "custom-provider",
+                    "model": "cluster-brain",
+                    "options": {
+                        "tenant": "platform",
+                        "scopes": ["read", "write"],
+                        "nested": {"region": "apac"},
+                    },
+                }
+            },
+            sort_keys=False,
+        )
+    )
+    save_agent_config(
+        p,
+        provider="custom-provider",
+        auth_method="none",
+        base_url="https://llm.internal/v1",
+        model="cluster-brain-v2",
+        api_key_env=None,
+    )
+    raw = yaml.safe_load(p.read_text())
+    assert raw["agent"]["options"] == {
+        "tenant": "platform",
+        "scopes": ["read", "write"],
+        "nested": {"region": "apac"},
+    }
+    cfg = load_config(p)
+    assert cfg.agent_options == raw["agent"]["options"]
+    assert cfg.agent_options_error is None
 
 
 def test_save_agent_config_drops_stale_optional_fields(tmp_path: Path) -> None:
@@ -1121,3 +1431,50 @@ def test_network_section_tolerates_non_mapping(tmp_path: Path) -> None:
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text("network: nonsense\n")
     assert load_config(cfg_path).network_ca_bundle is None
+
+
+# ---------------------------------------------------------------------------
+# Finding #5: Provider name canonicalization at config load
+# ---------------------------------------------------------------------------
+
+
+def test_provider_name_canonicalized_at_load(tmp_path: Path) -> None:
+    """Config load must canonicalize provider names so github_copilot
+    receives device-login default and compositions root loads OAuth."""
+    f = tmp_path / "config.yaml"
+    f.write_text("agent:\n  provider: github_copilot\n  model: gpt-4o\n")
+    cfg = load_config(f)
+    assert cfg.agent_provider == "github-copilot"
+    assert cfg.agent_auth_method == "device-login"
+
+
+def test_provider_name_case_variant_canonicalized(tmp_path: Path) -> None:
+    """Mixed case and dot separators are canonicalized."""
+    f = tmp_path / "config.yaml"
+    f.write_text("agent:\n  provider: GitHub.Copilot\n  model: m\n")
+    cfg = load_config(f)
+    assert cfg.agent_provider == "github-copilot"
+    assert cfg.agent_auth_method == "device-login"
+
+
+def test_canonicalize_provider_name_parity() -> None:
+    """The core _canonicalize_provider_name must produce the same output
+    as providers.plugin_registry.normalize_provider_name for
+    representative built-in and plugin names."""
+    from korvid.core.config import _canonicalize_provider_name
+    from korvid.providers.plugin_registry import normalize_provider_name
+
+    names = [
+        "github-copilot",
+        "GitHub_Copilot",
+        "openai_compat",
+        "OpenAI.Compat",
+        "OLLAMA",
+        "Company_LLM",
+        "  azure  ",
+        "my--custom..provider",
+    ]
+    for name in names:
+        assert _canonicalize_provider_name(name) == normalize_provider_name(name), (
+            f"parity failed for {name!r}"
+        )

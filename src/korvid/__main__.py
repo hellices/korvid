@@ -261,7 +261,10 @@ def _close_provider_in_background(provider: LLMProvider, tasks: set[asyncio.Task
     def _reap(t: asyncio.Task[None]) -> None:
         tasks.discard(t)
         if not t.cancelled() and t.exception() is not None:
-            logger.debug("old provider close failed", exc_info=t.exception())
+            # Consume the exception with a fixed message only — never log
+            # exc_info or the exception message (plugin payloads may contain
+            # secrets or unbounded text).
+            logger.debug("old provider close failed")
 
     task.add_done_callback(_reap)
 
@@ -437,6 +440,41 @@ def _agent_unavailable_wiring(
     return None, None, None, _retarget_noop, lambda: None, provider_box, ui_proxy
 
 
+def _create_initial_provider(
+    config: KorvidConfig,
+    oauth: str | None,
+    ollama_options: Any,
+    plugin_registry: Any,
+    startup_warnings: list[str] | None,
+) -> LLMProvider | None:
+    """Build the initial LLM provider, converting plugin errors to warnings."""
+    from korvid.providers.plugin_registry import ProviderPluginError
+    from korvid.providers.registry import create_provider
+
+    try:
+        return create_provider(
+            enabled=config.agent_enabled,
+            provider=config.agent_provider,
+            auth_method=config.agent_auth_method,
+            base_url=config.agent_base_url,
+            model=config.agent_model,
+            api_key_env=config.agent_api_key_env,
+            oauth_token=oauth,
+            ollama=ollama_options,
+            ca_bundle=config.network_ca_bundle,
+            plugin_registry=plugin_registry,
+            options=config.agent_options,
+            options_error=config.agent_options_error,
+        )
+    except ProviderPluginError as exc:
+        # Plugin failure at startup degrades to warning — the TUI remains
+        # operational with provider=None; the :ai wizard can still reconfigure.
+        if startup_warnings is not None:
+            startup_warnings.append(f"Provider plugin failed: {exc}")
+        logger.warning("provider plugin failed at startup: %s — agent disabled", exc)
+        return None
+
+
 def _build_agent_wiring(
     config: KorvidConfig,
     kube: KubeClient,
@@ -445,6 +483,7 @@ def _build_agent_wiring(
     pod_resize_supported: bool = False,
     cluster_context: str | None = None,
     provider_box: list[LLMProvider | None] | None = None,
+    startup_warnings: list[str] | None = None,
 ) -> tuple[
     AgentRuntime | None,
     AgentConfigurator | None,
@@ -478,9 +517,11 @@ def _build_agent_wiring(
     from korvid.agent.runtime import AgentRuntime
     from korvid.providers.configurator import ProviderConfigurator
     from korvid.providers.ollama import OllamaOptions
+    from korvid.providers.plugin_registry import ProviderPluginRegistry
     from korvid.providers.registry import create_provider
     from korvid.providers.token_store import TokenStore
 
+    plugin_registry = ProviderPluginRegistry()
     token_store = TokenStore()
     # Model-capability profile (issue #71): tool surface, budgets, and
     # prompts come from one place so the initial build and every wizard
@@ -500,16 +541,8 @@ def _build_agent_wiring(
         think=config.agent_ollama_think,
         keep_alive=config.agent_ollama_keep_alive,
     )
-    provider = create_provider(
-        enabled=config.agent_enabled,
-        provider=config.agent_provider,
-        auth_method=config.agent_auth_method,
-        base_url=config.agent_base_url,
-        model=config.agent_model,
-        api_key_env=config.agent_api_key_env,
-        oauth_token=oauth,
-        ollama=ollama_options,
-        ca_bundle=config.network_ca_bundle,
+    provider = _create_initial_provider(
+        config, oauth, ollama_options, plugin_registry, startup_warnings
     )
     # Ownership transfers immediately: if anything below raises (executor,
     # runtime, configurator), the teardown guard still closes the provider
@@ -561,14 +594,11 @@ def _build_agent_wiring(
         # listing) share the live providers' trust; GitHub Copilot
         # discovery keeps default trust like the live copilot provider.
         ca_bundle=config.network_ca_bundle,
+        plugin_registry=plugin_registry,
     )
     close_tasks: set[asyncio.Task[None]] = set()
 
     def rebuild_agent(settings: AgentSettings) -> AgentRuntime | None:
-        old = provider_box[0]
-        if old is not None:
-            # Close in the background; the new provider takes over immediately.
-            _close_provider_in_background(old, close_tasks)
         new_provider = create_provider(
             enabled=True,
             provider=settings.provider,
@@ -582,33 +612,45 @@ def _build_agent_wiring(
             # config reload is ever added, re-derive the options here.
             ollama=ollama_options,
             ca_bundle=config.network_ca_bundle,
+            plugin_registry=plugin_registry,
+            options=settings.options,
         )
-        provider_box[0] = new_provider
         if new_provider is None:
             return None
-        # The wizard's rebuild carries its own profile choice (e.g. small
-        # when the provider is ollama), composed against the *current*
-        # cluster's capabilities and prompt note — a rebuild after a `:ctx`
-        # switch must not resurrect the old cluster's tool set.
-        new_profile = build_profile(
-            settings.profile,
-            readonly=config.readonly,
-            resize_supported=resize_box[0],
-        )
+        # Fully transactional: build profile, executor, and runtime BEFORE
+        # swapping provider_box or scheduling old provider close. If anything
+        # raises, close the new provider exactly once and leave old state live.
+        try:
+            new_profile = build_profile(
+                settings.profile,
+                readonly=config.readonly,
+                resize_supported=resize_box[0],
+            )
+            new_runtime = AgentRuntime(
+                new_provider,
+                ToolExecutor(
+                    kube, aliases, ui=ui_proxy, custom_columns=_custom_column_names(config)
+                ),
+                tools=new_profile.tools,
+                max_iterations=new_profile.max_iterations,
+                max_history_chars=new_profile.max_history_chars,
+                max_result_chars=new_profile.max_result_chars,
+                max_tool_calls_per_iteration=new_profile.max_tool_calls_per_iteration,
+                strict_history_budget=new_profile.strict_history_budget,
+                system_prompt=new_profile.system_prompt,
+                ui_prompt=new_profile.ui_prompt,
+                cluster_context=note_box[0],
+            )
+        except Exception:
+            _close_provider_in_background(new_provider, close_tasks)
+            raise
+        # Success — now atomically swap state.
+        old = provider_box[0]
+        provider_box[0] = new_provider
+        if old is not None:
+            _close_provider_in_background(old, close_tasks)
         profile_box[0] = new_profile.name
-        return AgentRuntime(
-            new_provider,
-            ToolExecutor(kube, aliases, ui=ui_proxy, custom_columns=_custom_column_names(config)),
-            tools=new_profile.tools,
-            max_iterations=new_profile.max_iterations,
-            max_history_chars=new_profile.max_history_chars,
-            max_result_chars=new_profile.max_result_chars,
-            max_tool_calls_per_iteration=new_profile.max_tool_calls_per_iteration,
-            strict_history_budget=new_profile.strict_history_budget,
-            system_prompt=new_profile.system_prompt,
-            ui_prompt=new_profile.ui_prompt,
-            cluster_context=note_box[0],
-        )
+        return new_runtime
 
     def retarget_agent(
         runtime: AgentRuntime | None,
@@ -964,6 +1006,7 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
     # the agent system prompt and the Service/Ingress describe footer.
     provider_info = await _probe_cloud_provider(kube)
 
+    agent_warnings: list[str] = []
     agent_runtime, configurator, rebuild_agent, retarget_agent, disconnect_agent, _, ui_proxy = (
         _build_agent_wiring(
             config,
@@ -974,8 +1017,11 @@ async def _wire_and_run(config: KorvidConfig, kube: KubeClient, state: _RunState
             # Ownership lands in the teardown guard's box the moment the
             # provider exists, so partial agent wiring is also cleaned up.
             provider_box=state.provider_box,
+            startup_warnings=agent_warnings,
         )
     )
+    if agent_warnings:
+        config = dataclasses.replace(config, warnings=(*config.warnings, *agent_warnings))
 
     mcp_hooks = _MCPAppHooks()
     mcp_controller = _build_mcp_controller(config, kube, aliases, ui_proxy, mcp_hooks=mcp_hooks)

@@ -6,8 +6,10 @@ fetch models -> filterable model list (typed fallback) -> test -> save.
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Any
 
+import pytest
 from textual.app import App
 from textual.widgets import Input, OptionList, Static
 
@@ -560,3 +562,87 @@ async def test_reconnect_preserves_a_no_auth_method() -> None:
         assert screen._auth_method == "none"
         env_input = screen.query_one("#setup-api-key-env", Input)
         assert env_input.display is False  # never asked for a key env
+
+
+def test_agent_settings_options_are_copy_safe_and_immutable() -> None:
+    nested = {"region": "apac"}
+    models = ["llama3"]
+    source: dict[str, object] = {
+        "tenant": "platform",
+        "nested": nested,
+        "models": models,
+    }
+    settings = AgentSettings(
+        provider="ollama",
+        auth_method="none",
+        base_url="http://localhost:11434",
+        model="llama3",
+        options=source,
+    )
+
+    source["tenant"] = "mutated"
+    nested["region"] = "emea"
+    models.append("qwen3")
+
+    assert dict(settings.options) == {
+        "tenant": "platform",
+        "nested": {"region": "apac"},
+        "models": ("llama3",),
+    }
+    assert isinstance(settings.options, MappingProxyType)
+    assert isinstance(settings.options["nested"], MappingProxyType)
+    with pytest.raises(TypeError, match="mappingproxy"):
+        settings.options["new"] = "value"  # type: ignore[index]  # immutability is the test
+    with pytest.raises(TypeError, match="mappingproxy"):
+        settings.options["nested"]["region"] = "emea"  # type: ignore[index]  # immutability is the test
+
+
+def test_agent_settings_deep_freezes_tuple_elements() -> None:
+    """Finding #4: tuple elements containing mutable dicts must become
+    mapping proxies; nested mutation must be rejected."""
+    settings = AgentSettings(
+        provider="ollama",
+        auth_method="none",
+        base_url="http://localhost:11434",
+        model="llama3",
+        options={"items": ({"key": "val"}, {"nested": {"deep": True}})},
+    )
+    items = settings.options["items"]
+    assert isinstance(items, tuple)
+    assert isinstance(items[0], MappingProxyType)
+    assert isinstance(items[1], MappingProxyType)
+    assert isinstance(items[1]["nested"], MappingProxyType)
+    with pytest.raises(TypeError, match="mappingproxy"):
+        items[0]["key"] = "mutated"  # type: ignore[index]  # immutability is the test
+    with pytest.raises(TypeError, match="mappingproxy"):
+        items[1]["nested"]["deep"] = False  # type: ignore[index]  # immutability is the test
+
+
+async def test_reconnect_preserves_current_options_in_drafted_settings() -> None:
+    settings = AgentSettings(
+        provider="openai",
+        auth_method="api_key",
+        base_url="https://api.my-proxy.example/v1",
+        model="gpt-4o-mini",
+        api_key_env="MY_KEY",
+        options={
+            "tenant": "platform",
+            "features": {"region": "apac"},
+            "fallbacks": ["gpt-4o-mini"],
+        },
+    )
+    app = _HostWithSettings(FakeConfigurator(), settings)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, AgentSetupScreen)
+        screen._provider = "openai-compat"
+        screen._auth_method = "api_key"
+        screen._base_url = "https://api.my-proxy.example/v1"
+        screen._api_key_env = "MY_KEY"
+        drafted = screen._draft_settings("gpt-4o")
+        assert dict(drafted.options) == {
+            "tenant": "platform",
+            "features": {"region": "apac"},
+            "fallbacks": ("gpt-4o-mini",),
+        }

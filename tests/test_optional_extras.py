@@ -8,10 +8,13 @@ already cached in this test process's `sys.modules` can mask a regression.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
 import pytest
+
+from tests.fixtures.provider_plugin.site_helpers import FIXTURES_DIR
 
 #: Top-level third-party modules that only the optional extras may pull in.
 _MCP_MODULES = ("mcp", "anyio", "starlette", "uvicorn")
@@ -35,6 +38,21 @@ def _assert_import_is_extra_free(module: str) -> None:
         capture_output=True,
         text=True,
         timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _run_subprocess_probe(probe: str) -> None:
+    pythonpath = os.pathsep.join(
+        entry for entry in [str(FIXTURES_DIR), os.environ.get("PYTHONPATH")] if entry
+    )
+    env = {**os.environ, "PYTHONPATH": pythonpath}
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
     )
     assert result.returncode == 0, result.stderr
 
@@ -63,6 +81,52 @@ def test_mcp_adapter_is_the_only_mcp_stack_consumer() -> None:
         [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("module", ["korvid.__main__", "korvid.ui.app"])
+def test_base_import_does_not_scan_provider_plugins(module: str) -> None:
+    probe = (
+        "import importlib.metadata as metadata\n"
+        "import sys\n"
+        "def boom(*args, **kwargs):\n"
+        "    raise SystemExit('provider entry-point discovery must stay lazy')\n"
+        "metadata.entry_points = boom\n"
+        "metadata.distributions = boom\n"
+        f"import {module}  # noqa: F401\n"
+        "assert 'company_provider' not in sys.modules\n"
+        "assert 'unselected_provider' not in sys.modules\n"
+    )
+    _run_subprocess_probe(probe)
+
+
+def test_agentless_wiring_does_not_scan_provider_plugins() -> None:
+    probe = (
+        "import importlib.metadata as metadata\n"
+        "import importlib.util\n"
+        "import sys\n"
+        "def boom(*args, **kwargs):\n"
+        "    raise SystemExit('provider entry-point discovery must stay lazy')\n"
+        "metadata.entry_points = boom\n"
+        "metadata.distributions = boom\n"
+        "real_find_spec = importlib.util.find_spec\n"
+        "def fake_find_spec(name, *args, **kwargs):\n"
+        "    if name in {'httpx', 'keyring'}:\n"
+        "        return None\n"
+        "    return real_find_spec(name, *args, **kwargs)\n"
+        "importlib.util.find_spec = fake_find_spec\n"
+        "from korvid.__main__ import _build_agent_wiring\n"
+        "from korvid.core.config import KorvidConfig\n"
+        "runtime, configurator, rebuild, retarget, _disconnect, provider_box, _proxy = "
+        "_build_agent_wiring(KorvidConfig(), object(), {})\n"
+        "assert runtime is None\n"
+        "assert configurator is None\n"
+        "assert rebuild is None\n"
+        "assert provider_box == [None]\n"
+        "retarget(None, True, 'ctx')\n"
+        "assert 'company_provider' not in sys.modules\n"
+        "assert 'unselected_provider' not in sys.modules\n"
+    )
+    _run_subprocess_probe(probe)
 
 
 @pytest.mark.parametrize("module", ["korvid.__main__", "korvid.ui.app"])

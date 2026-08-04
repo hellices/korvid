@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -18,6 +19,9 @@ from korvid.providers.net import make_client
 from korvid.providers.ollama import normalize_base_url
 from korvid.providers.registry import build_credentials, create_provider
 from korvid.providers.token_store import TokenStore
+
+if TYPE_CHECKING:
+    from korvid.providers.plugin_registry import ProviderPluginRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,7 @@ class ProviderConfigurator(AgentConfigurator):
         flow_factory: Callable[[], GitHubDeviceFlow] = GitHubDeviceFlow,
         http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
         ca_bundle: str | None = None,
+        plugin_registry: ProviderPluginRegistry | None = None,
     ) -> None:
         self._store = token_store
         self._persist = persist
@@ -50,6 +55,7 @@ class ProviderConfigurator(AgentConfigurator):
         # with the same trust as the live agent — the wizard's test and the
         # runtime can never disagree about the CA.
         self._ca_bundle = ca_bundle
+        self._plugin_registry = plugin_registry
         self._flow: GitHubDeviceFlow | None = None
         self._prompt: DeviceCodePrompt | None = None
 
@@ -176,6 +182,8 @@ class ProviderConfigurator(AgentConfigurator):
             api_key_env=settings.api_key_env,
             oauth_token=oauth,
             ca_bundle=self._ca_bundle,
+            plugin_registry=self._plugin_registry,
+            options=settings.options,
         )
         if provider is None:
             raise RuntimeError("configuration incomplete — provider could not be created")
