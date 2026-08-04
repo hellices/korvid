@@ -31,14 +31,15 @@ _SENSITIVE_NAMES = frozenset(
 )
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _AUTHORIZATION_RE = re.compile(
-    r"(?im)(?P<prefix>(?<![A-Za-z0-9])authorization\s*[:=]\s*)"
-    r"(?P<value>(?:(?:bearer|basic)\s+)?[^\s,;}\]]+)"
+    r"(?im)(?P<prefix>(?<![A-Za-z0-9])"
+    r"(?P<auth_key_quote>[\"']?)authorization(?P=auth_key_quote)\s*[:=]\s*)"
+    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|(?:(?:bearer|basic)\s+)?[^\s,;}\]]+)"
 )
 _CREDENTIAL_RE = re.compile(
-    r"(?im)(?P<prefix>(?<![A-Za-z0-9])(?:"
+    r"(?im)(?P<prefix>(?<![A-Za-z0-9])(?P<credential_key_quote>[\"']?)(?:"
     r"password|api[\s_-]?key|client[\s_-]?secret|access[\s_-]?token|"
     r"refresh[\s_-]?token|credentials|token"
-    r")\s*[:=]\s*)"
+    r")(?P=credential_key_quote)\s*[:=]\s*)"
     r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;}\]]+)"
 )
 
@@ -128,7 +129,12 @@ def _replace_match(
     reason: str,
 ) -> str:
     _record(records, path, reason)
-    return f"{match.group('prefix')}{MASK_PLACEHOLDER}"
+    value = match.group("value")
+    if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+        replacement = f"{value[0]}{MASK_PLACEHOLDER}{value[-1]}"
+    else:
+        replacement = MASK_PLACEHOLDER
+    return f"{match.group('prefix')}{replacement}"
 
 
 def _sanitize_text(text: str, path: str, records: list[RedactionRecord]) -> str:
@@ -572,6 +578,19 @@ class OutboundPolicy:
         iteration: int,
     ) -> PreparedOutbound:
         """Validate, redact, bound, and snapshot one provider request."""
+        try:
+            return self._prepare(provider, messages, tools, iteration=iteration)
+        except RecursionError as exc:
+            raise _blocked("outbound data is too deeply nested") from exc
+
+    def _prepare(
+        self,
+        provider: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        iteration: int,
+    ) -> PreparedOutbound:
         if not isinstance(provider, str) or not provider:
             raise _blocked("provider name must be non-empty text")
         if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:

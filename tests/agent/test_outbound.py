@@ -18,6 +18,8 @@ from korvid.agent.outbound import (
 )
 from korvid.core.secrets import MASK_PLACEHOLDER
 
+_DEEP_NESTING = 2_000
+
 
 def _tool_exchange(result: str, *, name: str = "get_resource") -> list[dict[str, Any]]:
     return [
@@ -35,6 +37,13 @@ def _tool_exchange(result: str, *, name: str = "get_resource") -> list[dict[str,
         },
         {"role": "tool", "tool_call_id": "call-1", "content": result},
     ]
+
+
+def _deeply_nested(value: Any) -> Any:
+    result = value
+    for _ in range(_DEEP_NESTING):
+        result = [result]
+    return result
 
 
 @pytest.mark.parametrize("section", ["data", "stringData"])
@@ -136,6 +145,28 @@ def test_untrusted_event_and_log_text_redacts_credentials_but_keeps_evidence() -
     assert "hunter2" not in sanitized
     assert "raw-client-secret" not in sanitized
     assert sanitized.count(MASK_PLACEHOLDER) == 3
+
+
+def test_untrusted_json_text_redacts_credentials_and_keeps_diagnostics() -> None:
+    text = json.dumps(
+        {
+            "level": "warning",
+            "password": "hunter2",
+            "token": "raw-token",
+            "message": "pod api is crashlooping",
+        },
+        separators=(",", ":"),
+    )
+    sanitized = sanitize_tool_result("get_events", text)
+    loaded = json.loads(sanitized)
+    assert loaded == {
+        "level": "warning",
+        "password": MASK_PLACEHOLDER,
+        "token": MASK_PLACEHOLDER,
+        "message": "pod api is crashlooping",
+    }
+    assert "hunter2" not in sanitized
+    assert "raw-token" not in sanitized
 
 
 def test_screen_context_replaces_controls_and_preserves_prompt_injection_evidence() -> None:
@@ -281,6 +312,63 @@ def test_tool_messages_must_correlate_to_assistant_tool_calls() -> None:
             [],
             iteration=0,
         )
+
+
+def test_deep_message_content_is_normalized_to_policy_error() -> None:
+    with pytest.raises(OutboundPolicyError, match="too deeply nested") as raised:
+        OutboundPolicy(max_request_chars=20_000).prepare(
+            "ollama",
+            [{"role": "user", "content": _deeply_nested("message-source-value")}],
+            [],
+            iteration=0,
+        )
+    assert "message-source-value" not in str(raised.value)
+
+
+def test_deep_assistant_tool_arguments_are_normalized_to_policy_error() -> None:
+    arguments = "[" * _DEEP_NESTING + json.dumps("argument-source-value") + "]" * _DEEP_NESTING
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "deep-call",
+                    "type": "function",
+                    "function": {"name": "get_logs", "arguments": arguments},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "deep-call", "content": "status=ok"},
+    ]
+    with pytest.raises(OutboundPolicyError, match="too deeply nested") as raised:
+        OutboundPolicy(max_request_chars=20_000).prepare(
+            "ollama",
+            messages,
+            [],
+            iteration=0,
+        )
+    assert "argument-source-value" not in str(raised.value)
+
+
+def test_deep_tool_schema_is_normalized_to_policy_error() -> None:
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "deep_tool",
+                "parameters": _deeply_nested("schema-source-value"),
+            },
+        }
+    ]
+    with pytest.raises(OutboundPolicyError, match="too deeply nested") as raised:
+        OutboundPolicy(max_request_chars=20_000).prepare(
+            "ollama",
+            [{"role": "user", "content": "status"}],
+            tools,
+            iteration=0,
+        )
+    assert "schema-source-value" not in str(raised.value)
 
 
 def test_request_over_hard_character_cap_is_blocked() -> None:
