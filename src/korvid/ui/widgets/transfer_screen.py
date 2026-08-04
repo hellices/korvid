@@ -162,7 +162,8 @@ class TransferScreen(ModalScreen[TransferSpec | None]):
                 # Basename taken verbatim — it may end in whitespace.
                 remote = self.query_one("#transfer-remote", Input).value
                 base = posixpath.basename(remote.rstrip("/")) if remote.strip() else ""
-                result += base
+                if base:
+                    result = str(Path(result) / base)
             field.value = result
         field.focus()
 

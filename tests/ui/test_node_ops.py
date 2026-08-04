@@ -183,6 +183,14 @@ async def test_c_cordons_node_after_approval(tmp_path: Path) -> None:
         await pilot.press("y")
         await until(pilot, lambda: rec.calls, label="cordon executed")
         assert rec.calls == [("cordon", "worker-1", True, "node-uid-1")]
+
+        def _success_audited() -> bool:
+            if not audit_path.exists():
+                return False
+            lines = audit_path.read_text().splitlines()
+            return any('"success"' in ln for ln in lines)
+
+        await until(pilot, _success_audited, label="success audit record")
         entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
         assert entries[0]["action"] == "cordon"
         assert entries[0]["outcome"] == "intent"

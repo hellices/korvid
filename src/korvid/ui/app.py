@@ -4243,7 +4243,7 @@ class KorvidApp(App[None]):
         argv = build_exec_argv(namespace, name, container, context=self.config.kube_context)
         target = f"{name}/{container}" if container else name
         with self.suspend():
-            exit_code = self._run_interactive(argv, f"korvid shell → {target} (exit to return)")
+            exit_code = self._run_interactive(argv, f"korvid shell -> {target} (exit to return)")
         self.refresh()
         if exit_code == 0:
             return
@@ -5182,7 +5182,7 @@ class KorvidApp(App[None]):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op: Awaitable[None],
+        op_factory: Callable[[], Awaitable[None]],
         detail: str = "",
     ) -> str:
         """Execute an approved write with fail-closed auditing (AGENTS.md):
@@ -5190,12 +5190,18 @@ class KorvidApp(App[None]):
         the write is blocked. Returns a short outcome string ('done' /
         'blocked: ...' / 'failed: ...') for callers that report back.
 
+        Takes an operation *factory* so the mutation coroutine is never
+        created until intent is audited — a declined or blocked write
+        produces no unawaited coroutine to leak.
+
         The whole span publishes an in-flight progress label (issue #143):
         between approval and the outcome toast there was previously no
         visible state at all."""
         kind = meta.plural
         with self._progress(f"{action} {kind}/{name}"):
-            return await self._run_write_inner(action, meta, namespace, name, op, detail, kind)
+            return await self._run_write_inner(
+                action, meta, namespace, name, op_factory, detail, kind
+            )
 
     async def _run_write_inner(
         self,
@@ -5203,19 +5209,14 @@ class KorvidApp(App[None]):
         meta: ResourceMeta,
         namespace: str | None,
         name: str,
-        op: Awaitable[None],
+        op_factory: Callable[[], Awaitable[None]],
         detail: str,
         kind: str,
     ) -> str:
         try:
             await self._audit_write(action, meta, namespace, name, detail, "intent")
         except Exception as exc:
-            close = getattr(op, "close", None)
-            if callable(close):
-                close()  # avoid "coroutine was never awaited" for the blocked op
-            # The exception can embed the local audit path (home directory):
-            # log it here, but keep the notification and the tool result -
-            # which is sent to the LLM provider - free of filesystem details.
+            # Factory was never called — no coroutine to leak.
             logger.exception("audit intent record failed; write blocked: %s", exc)
             self.notify(
                 f"{action} {kind}/{name} blocked: audit log unavailable",
@@ -5223,7 +5224,7 @@ class KorvidApp(App[None]):
             )
             return "blocked: audit log unavailable"
         try:
-            await op
+            await op_factory()
         except ApiStatusError as exc:
             with contextlib.suppress(Exception):
                 await self._audit_write(action, meta, namespace, name, detail, f"error: {exc}")
@@ -5294,7 +5295,7 @@ class KorvidApp(App[None]):
         def _done(confirmed: bool | None) -> None:
             if confirmed:
                 self.run_worker(
-                    self._run_write(action, meta, namespace, name, op_factory(), detail=detail)
+                    self._run_write(action, meta, namespace, name, op_factory, detail=detail)
                 )
 
         await self.push_screen(
@@ -6255,7 +6256,7 @@ class KorvidApp(App[None]):
         try:
             with self.suspend():
                 exit_code = self._run_interactive(
-                    attach_argv, f"korvid node shell → {node} (exit to return)"
+                    attach_argv, f"korvid node shell -> {node} (exit to return)"
                 )
         except SuspendNotSupported:
             # Non-suspending drivers (e.g. Windows, web): refuse gracefully —
@@ -6666,7 +6667,7 @@ class KorvidApp(App[None]):
                     sub_meta,
                     namespace,
                     facts.package,
-                    ops.create_object(sub_meta, namespace, manifest),
+                    lambda: ops.create_object(sub_meta, namespace, manifest),
                     detail=f"channel={channel} approval={approval} source={facts.catalog_source}",
                 )
             )
@@ -6942,7 +6943,7 @@ class KorvidApp(App[None]):
             sub_meta,
             ns,
             name,
-            ops.delete_object(sub_meta, ns, name, uid=uid),
+            lambda: ops.delete_object(sub_meta, ns, name, uid=uid),
             detail=f"csv={csv_name or '-'}",
         )
         if outcome != "done" or csv_meta is None or not csv_name:
@@ -6952,7 +6953,7 @@ class KorvidApp(App[None]):
             csv_meta,
             ns,
             csv_name,
-            ops.delete_object(csv_meta, ns, csv_name, uid=csv_uid),
+            lambda: ops.delete_object(csv_meta, ns, csv_name, uid=csv_uid),
             detail=f"subscription={name}",
         )
 
@@ -7978,17 +7979,22 @@ class KorvidApp(App[None]):
         mcp_label = self._mcp.status() if self._mcp is not None else ""
         if mcp_label and self._mcp is not None and self._mcp.running and self._mcp_follow:
             mcp_label += " ·follow"
-        self._status_bar.update_status(
-            self.config.kube_context,
-            self.current_scope,
-            label,
-            breadcrumb=self._drill.breadcrumb(),
-            mcp_label=mcp_label,
-            filter_label=self._resource_filter.describe(),
-            progress_label=" · ".join(label for label in self._progress_labels.values() if label),
-            proposals_label=self._proposals_label(),
-            protected=self._protected_context is not None,
-        )
+        try:
+            self._status_bar.update_status(
+                self.config.kube_context,
+                self.current_scope,
+                label,
+                breadcrumb=self._drill.breadcrumb(),
+                mcp_label=mcp_label,
+                filter_label=self._resource_filter.describe(),
+                progress_label=" · ".join(
+                    label for label in self._progress_labels.values() if label
+                ),
+                proposals_label=self._proposals_label(),
+                protected=self._protected_context is not None,
+            )
+        except NoMatches:
+            return  # StatusBar unmounted during teardown
 
     def _proposals_label(self) -> str:
         """Status-bar text for pending external write proposals (issue #110):
@@ -8998,7 +9004,9 @@ class KorvidApp(App[None]):
             return (
                 f"denied: the user declined the {action} request for {self._gvr_label(meta)}/{name}"
             )
-        outcome = await self._run_write_shielded(action, meta, ns, name, op(uid), detail=detail)
+        outcome = await self._run_write_shielded(
+            action, meta, ns, name, lambda: op(uid), detail=detail
+        )
         if outcome != "done":
             return f"ERROR: {action} {self._gvr_label(meta)}/{name} {outcome}"
         self._mark_agent_action(f"{action} → {self._gvr_label(meta)}/{name}")
@@ -9010,7 +9018,7 @@ class KorvidApp(App[None]):
         meta: ResourceMeta,
         ns: str | None,
         name: str,
-        op: Awaitable[None],
+        op_factory: Callable[[], Awaitable[None]],
         *,
         detail: str,
     ) -> str:
@@ -9019,7 +9027,9 @@ class KorvidApp(App[None]):
         mutation is worse than finishing what the user explicitly approved.
         Every wait stays shielded — repeated cancellations are absorbed until
         the write reaches a terminal state, then cancellation is re-raised."""
-        write = asyncio.ensure_future(self._run_write(action, meta, ns, name, op, detail=detail))
+        write = asyncio.ensure_future(
+            self._run_write(action, meta, ns, name, op_factory, detail=detail)
+        )
         interrupted = False
         while not write.done():
             try:
@@ -9587,7 +9597,12 @@ class KorvidApp(App[None]):
             detail = self._proposal_provenance(proposal)
             write = asyncio.ensure_future(
                 self._run_write(
-                    proposal.action, meta, ns, proposal.name, op(proposal.uid), detail=detail
+                    proposal.action,
+                    meta,
+                    ns,
+                    proposal.name,
+                    lambda: op(proposal.uid),
+                    detail=detail,
                 )
             )
             try:

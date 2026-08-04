@@ -222,6 +222,11 @@ async def test_download_writes_file_and_audits(tmp_path: Path) -> None:
             lambda: any("downloaded" in str(n.message).lower() for n in app._notifications),
             label="success toast",
         )
+        await until(
+            pilot,
+            lambda: any(e.get("outcome") == "success" for e in audit_entries(audit_path)),
+            label="success audit",
+        )
     assert dest.read_bytes() == payload
     assert opener.calls == [
         {
@@ -366,6 +371,13 @@ async def test_download_failure_notifies_and_audits_error(tmp_path: Path) -> Non
             lambda: any("not found" in str(n.message) for n in app._notifications),
             label="error toast",
         )
+        await until(
+            pilot,
+            lambda: any(
+                e.get("outcome", "").startswith("error") for e in audit_entries(audit_path)
+            ),
+            label="error audit",
+        )
     entries = audit_entries(audit_path)
     assert [e["outcome"] for e in entries[:1]] == ["intent"]
     assert entries[-1]["outcome"].startswith("error")
@@ -396,6 +408,11 @@ async def test_upload_requires_approval_then_transfers(tmp_path: Path) -> None:
             pilot,
             lambda: any("uploaded" in str(n.message).lower() for n in app._notifications),
             label="success toast",
+        )
+        await until(
+            pilot,
+            lambda: any(e.get("outcome") == "success" for e in audit_entries(audit_path)),
+            label="success audit",
         )
     assert opener.calls[0]["command"] == ["tar", "xf", "-", "-C", "/opt"]
     assert opener.calls[0]["stdin"] is True
@@ -562,6 +579,7 @@ async def test_download_default_local_path_from_remote_basename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     (tmp_path / "Downloads").mkdir()
     payload = b"data"
     opener = FakeExecOpener([b"\x01" + tar_bytes("app.log", payload), b"\x03" + SUCCESS])
@@ -610,6 +628,11 @@ async def test_progress_screen_escape_cancels_transfer(tmp_path: Path) -> None:
             pilot,
             lambda: not isinstance(app.screen, TransferProgressScreen),
             label="progress closed",
+        )
+        await until(
+            pilot,
+            lambda: any(e.get("outcome") == "cancelled" for e in audit_entries(audit_path)),
+            label="cancelled audit",
         )
     entries = audit_entries(audit_path)
     assert [e["outcome"] for e in entries] == ["intent", "cancelled"]

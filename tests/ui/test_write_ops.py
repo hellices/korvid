@@ -6,6 +6,7 @@ audit log.
 """
 
 import asyncio
+import contextlib
 import copy
 import json
 import logging
@@ -1384,3 +1385,100 @@ async def test_walk_ignores_string_controller_flags(tmp_path: Path) -> None:
         }
     }
     assert await app._managed_note_from(pod, "default") is None
+
+
+# -- _run_write factory-based design regression tests -------------------------
+
+
+async def test_blocked_audit_never_invokes_op_factory(tmp_path: Path) -> None:
+    """When the intent audit fails, the operation factory must never be called.
+
+    The factory design guarantees no mutation coroutine is created before
+    intent is persisted — a blocked write cannot leak an unawaited coroutine.
+    """
+    factory_calls: list[str] = []
+
+    async def spy_op() -> None:
+        factory_calls.append("invoked")
+
+    def factory() -> Awaitable[None]:
+        factory_calls.append("created")
+        return spy_op()
+
+    audit_path = tmp_path / "audit.jsonl"
+    audit_path.mkdir()  # directory makes appends fail → intent blocked
+    app = make_app(Recorder(), audit_path)
+    async with app.run_test():
+        result = await app._run_write("delete", _PODS_META, "default", "web-1", factory)
+    assert "blocked" in result
+    assert factory_calls == [], "factory must not be called when audit intent fails"
+
+
+async def test_cancelled_before_factory_leaks_no_coroutine(tmp_path: Path) -> None:
+    """Cancellation while the audit intent is in-flight must never invoke the
+    factory — no unawaited coroutine, no mutation before intent.
+
+    Uses a gated audit (threading.Event inside to_thread) to deterministically
+    cancel at the right instant.
+    """
+    import threading
+
+    factory_calls: list[str] = []
+
+    async def spy_op() -> None:
+        factory_calls.append("invoked")
+
+    def factory() -> Awaitable[None]:
+        factory_calls.append("created")
+        return spy_op()
+
+    audit_gate = threading.Event()
+    real_audit_path = tmp_path / "audit.jsonl"
+    entered = threading.Event()
+
+    class GatedAudit(AuditLog):
+        def append(
+            self,
+            *,
+            action: str,
+            kind: str,
+            namespace: str | None,
+            name: str,
+            group: str = "",
+            version: str = "",
+            detail: str = "",
+            outcome: str = "success",
+            context: object = None,
+        ) -> None:
+            entered.set()
+            audit_gate.wait()
+            super().append(
+                action=action,
+                kind=kind,
+                namespace=namespace,
+                name=name,
+                group=group,
+                version=version,
+                detail=detail,
+                outcome=outcome,
+            )
+
+    audit = GatedAudit(real_audit_path, context="test")
+    rec = Recorder()
+    app = make_app(rec, real_audit_path)
+    app._audit = audit
+
+    async with app.run_test() as pilot:
+        task = asyncio.create_task(
+            app._run_write("delete", _PODS_META, "default", "web-1", factory)
+        )
+        try:
+            await until(pilot, entered.is_set, label="audit entered")
+            task.cancel()
+        finally:
+            # Always release so the executor thread cannot hang at exit.
+            audit_gate.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert factory_calls == [], "factory must not be called when cancelled during audit"
+    assert rec.calls == [], "no mutation must reach the recorder"

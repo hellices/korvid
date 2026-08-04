@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import unicodedata
 from collections.abc import Mapping
@@ -348,10 +349,14 @@ def _atomic_write_text(path: Path, text: str) -> None:
     unrelated keys), a power loss cannot leave an empty file, and concurrent
     writers cannot race on a shared temp name."""
     try:
-        # Preserve an existing restrictive mode; default new files to 0600.
-        mode = S_IMODE(path.stat().st_mode)
+        existing_mode = S_IMODE(path.stat().st_mode)
     except OSError:
-        mode = 0o600
+        existing_mode = None
+    # On Windows, POSIX stat mode emulation returns 0o666 for readable+writable
+    # files regardless of actual ACLs; we cannot trust it as a "preserve" signal
+    # and always request the restrictive 0o600.  On POSIX the real mode is
+    # meaningful, so we honour it when present.
+    mode = existing_mode if os.name != "nt" and existing_mode is not None else 0o600
     fd, tmp_name = mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     tmp = Path(tmp_name)
     try:

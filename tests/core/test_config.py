@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from korvid.core.config import KorvidConfig, load_config, save_agent_config
+from tests.platforms import POSIX
 
 
 def _load_agent_options_config(tmp_path: Path, options: object) -> KorvidConfig:
@@ -567,22 +568,53 @@ def test_save_agent_config_interrupted_write_preserves_existing_config(
 
 def test_save_agent_config_preserves_restrictive_file_mode(tmp_path: Path) -> None:
     """Atomic replacement must not widen an existing 0600 config to the
-    umask-derived default, exposing preserved values."""
-    import os
+    umask-derived default, exposing preserved values.
+
+    On POSIX we verify the effective stat mode. On Windows/NTFS, Python's
+    POSIX-mode emulation does not enforce real file permissions; the code
+    calls os.chmod(tmp, mode) before os.replace — we verify via spy that
+    the code *requests* the restrictive mode.
+    """
     import stat
+
+    import korvid.core.config as cfg_mod
 
     p = tmp_path / "c.yaml"
     p.write_text("agent:\n  provider: ollama\n  model: llama3\n")
     os.chmod(p, 0o600)
-    save_agent_config(
-        p,
-        provider="ollama",
-        auth_method="none",
-        base_url=None,
-        model="llama3",
-        api_key_env=None,
-    )
-    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+
+    if POSIX:
+        save_agent_config(
+            p,
+            provider="ollama",
+            auth_method="none",
+            base_url=None,
+            model="llama3",
+            api_key_env=None,
+        )
+        assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    else:
+        # Windows: stat mode doesn't reflect POSIX bits; spy on os.chmod
+        # to prove the code requests 0o600.
+        chmod_calls: list[tuple[object, int]] = []
+        real_chmod = os.chmod
+
+        def spy_chmod(path: Path, mode: int) -> None:
+            chmod_calls.append((path, mode))
+            real_chmod(path, mode)
+
+        from unittest.mock import patch
+
+        with patch.object(cfg_mod, "os_chmod", spy_chmod):
+            save_agent_config(
+                p,
+                provider="ollama",
+                auth_method="none",
+                base_url=None,
+                model="llama3",
+                api_key_env=None,
+            )
+        assert any(mode == 0o600 for _, mode in chmod_calls)
 
 
 def test_save_agent_config_preserves_auth_extension_keys(tmp_path: Path) -> None:
@@ -622,7 +654,7 @@ def test_save_agent_config_fsyncs_before_replace(
         # Windows' fsync (_commit) requires a writable handle: syncing an
         # O_RDONLY fd raises there, so the implementation must sync the fd
         # it wrote through. fcntl itself is POSIX-only, so guard the check.
-        if os.name != "nt":
+        if POSIX:
             import fcntl
 
             assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY

@@ -1132,7 +1132,7 @@ def _run_with_recovery(
             if len(crash_times) >= RESTART_CAP:
                 print(
                     f"korvid crashed {len(crash_times)} times within"
-                    f" {RESTART_WINDOW_SECONDS:.0f}s — not restarting.",
+                    f" {RESTART_WINDOW_SECONDS:.0f}s -- not restarting.",
                     file=sys.stderr,
                 )
                 raise
@@ -1145,7 +1145,7 @@ def _run_with_recovery(
 def _restart_prompt() -> str:
     # Interactivity keys off stdin/stderr; a redirected stdout must neither
     # swallow the question nor be contaminated by it.
-    print("korvid crashed — restart? [Y/n] ", end="", file=sys.stderr, flush=True)
+    print("korvid crashed -- restart? [Y/n] ", end="", file=sys.stderr, flush=True)
     return input()
 
 

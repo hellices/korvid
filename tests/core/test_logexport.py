@@ -9,6 +9,7 @@ import pytest
 
 from korvid.core.logexport import default_log_export_dir, export_log_lines
 from korvid.k8s.logs import LogLine
+from tests.platforms import POSIX
 
 
 def _line(
@@ -57,10 +58,21 @@ def test_export_includes_timestamp_when_present(tmp_path: Path) -> None:
 
 
 def test_export_file_is_private(tmp_path: Path) -> None:
-    """Exported cluster logs must not be readable by group/other users."""
+    """Exported cluster logs must not be readable by group/other users.
+
+    On POSIX we can verify the effective mode bits. On Windows/NTFS, Python's
+    POSIX-mode emulation (stat.st_mode) does not reflect true ACLs; the code
+    passes 0o600 to os.open(O_CREAT|O_EXCL) which is the strongest portable
+    guarantee available. We verify the file was created and exists.
+    """
     path = export_log_lines([_line("secretish")], tmp_path)
 
-    assert path.stat().st_mode & 0o077 == 0
+    if POSIX:
+        assert path.stat().st_mode & 0o077 == 0
+    else:
+        # Windows: file exists and was created atomically (O_EXCL); POSIX
+        # mode bits are not enforced by NTFS — assert creation succeeded.
+        assert path.is_file()
 
 
 def test_export_writes_utf8(tmp_path: Path) -> None:

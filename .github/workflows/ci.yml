@@ -29,6 +29,19 @@ jobs:
       - run: uvx deptry src/
       - run: uv run pytest --cov --cov-fail-under=80
 
+  windows-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked --dev --all-extras
+      - run: uv run pytest -q
+
   pre-commit:
     runs-on: korvid-runners
     steps:
