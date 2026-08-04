@@ -168,6 +168,7 @@ def test_small_profile_prompt_pins_measured_failure_mode_rules() -> None:
     # still hedged; the example now cites the exit code alongside the
     # event reason, and a ready pod's answer must start with healthy
     assert "last exit 137" in prompt
+    assert "/live" not in prompt.split("worked example")[1]
     assert "start your answer with healthy" in prompt
     # 2. healthy is a valid verdict; stopped restarts are history — made
     #    mechanical only after current conditions/events also pass

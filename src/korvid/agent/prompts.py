@@ -114,7 +114,7 @@ SMALL_SYSTEM_PROMPT = (
     "context deadline exceeded (27x)' -> the event reason decides -> you "
     "answer: checkout-1 is killed by its failing liveness probe — "
     "'Liveness probe failed: context deadline exceeded' (27x), last exit "
-    "137; fix the /live endpoint or relax the probe timeout."
+    "137; make the liveness probe complete in time or relax its timeout."
 )
 
 #: The full UI_DRIVE_PROMPT advertises all five UI tools; the small profile
