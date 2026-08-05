@@ -59,11 +59,17 @@ def _run_subprocess_probe(probe: str) -> None:
 
 @pytest.mark.parametrize(
     "module",
-    ["korvid.__main__", "korvid.ui.app", "korvid.tools.executor", "korvid.agent.runtime"],
+    [
+        "korvid.__main__",
+        "korvid.ui.app",
+        "korvid.tools.executor",
+        "korvid.agent.runtime",
+        "korvid.agent.outbound",
+    ],
 )
 def test_base_import_does_not_require_optional_extras(module: str) -> None:
-    """The composition root, the UI, the tool layer, and the agent runtime
-    itself are all importable without the [mcp]/[agent] extras installed."""
+    """The composition root, UI, tool layer, agent runtime, and outbound policy
+    are all importable without the [mcp]/[agent] extras installed."""
     _assert_import_is_extra_free(module)
 
 
