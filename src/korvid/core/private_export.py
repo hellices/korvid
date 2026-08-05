@@ -11,6 +11,13 @@ _SAFE_SUFFIX = re.compile(r"\.[A-Za-z0-9][A-Za-z0-9_-]*")
 _MAX_COLLISION_SUFFIX = 1000
 
 
+def default_payload_export_dir() -> Path:
+    """Directory for explicit provider-payload exports."""
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / "korvid" / "agent-payloads"
+
+
 def write_private_text(directory: Path, stem: str, suffix: str, content: str) -> Path:
     """Exclusively create a private UTF-8 text file and return its path.
 
