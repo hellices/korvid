@@ -16,16 +16,29 @@ An opt-in *proposal* flow lets external agents queue writes for your review
 proposal never executes without a fresh keystroke in the TUI.
 
 **MCP tool calls never go through korvid's embedded-provider boundary.**
-Results returned by `list_resources`, `get_logs`, `diagnose_pod`, and the
-rest go straight from the Kubernetes API to the external MCP client with
-none of the `OutboundPolicy` redaction the embedded agent applies (see
-[`docs/threat-model.md`](threat-model.md)) — because no korvid-managed model
-call is involved at all. The external MCP client (and whatever model or
-data policy it applies to what it receives) owns its own AI data boundary;
-korvid's guarantee at this surface is limited to what tools are exposed
-(read-only plus opt-in write proposals) and that writes still require your
-keystroke, not what the connected client does with the data those tools
-return.
+No korvid-managed model call is involved, so `OutboundPolicy` — the
+snapshot, the request caps, the text credential-pattern masking — does not
+run on this surface at all. What a result carries therefore depends on its
+format:
+
+- **Structured manifests** (`get_resource`) are recursively redacted where
+  they are produced, by the same `korvid.core.redaction` primitive the
+  embedded agent's boundary uses: `Secret` `data`/`stringData`, the
+  `kubectl.kubernetes.io/last-applied-configuration` annotation,
+  credential-named keys, and credential-named env values are masked at any
+  nesting depth before the document is bounded and returned. An MCP client
+  sees the same redacted manifest the model would.
+- **Logs, events, lists, diagnoses, and helm status** get only their own
+  tool-specific shaping (scoping, formatting, size caps). They are
+  **not** credential-pattern masked: a token printed into a pod's log
+  reaches the client verbatim.
+
+The external MCP client (and whatever model or data policy it applies to
+what it receives) owns its own AI data boundary; korvid's guarantee at this
+surface is limited to the producer-side redaction above, what tools are
+exposed (read-only plus opt-in write proposals), and that writes still
+require your keystroke — not what the connected client does with the data
+those tools return.
 
 The live endpoint is also published to
 `$XDG_STATE_HOME/korvid/mcp-endpoint.json` (defaulting to

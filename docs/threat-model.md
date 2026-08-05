@@ -126,21 +126,32 @@ flowchart LR
   hold an entire prior manifest, including secret material a client-side
   `kubectl apply` embedded) is stripped from every object, not only
   `Secret`s.
-- **Credential-key redaction** — mapping keys that normalize to
+- **Credential-key redaction** — the *key* stays; its **value** is replaced
+  with `MASK_PLACEHOLDER`. Keeping the key is deliberate: the model can
+  still see that the field exists and reason about the shape of the object,
+  while the material it held never leaves. A key that normalizes exactly to
   `password`, `token`, `apikey`, `authorization`, `clientsecret`,
-  `accesstoken`, `refreshtoken`, or `credentials` are replaced with the
-  mask placeholder; free-form text matching `authorization: ...` or a
-  `password=`/`token=`/etc. assignment pattern is masked the same way.
+  `accesstoken`, `refreshtoken`, or `credentials` loses its value whatever
+  type that value has. A *compound* key whose words spell one of those
+  names (`dbPassword`, `admin-api-key`, `github-access-token`) loses its
+  value the same way — mapping, list, string, or number alike, because only
+  the key names the credential and a nested value would otherwise be
+  shipped under inner keys that name nothing. The one exception is a
+  boolean, which is kept: one bit cannot carry a credential, and
+  `automountServiceAccountToken: true` is real diagnostic information. In
+  free-form text, an `authorization: …` header and a
+  `<credential-word>: …` or `<credential-word>=…` assignment likewise keep
+  their key and have their value replaced.
 - **Credential-named env values** — a container env entry whose `name`
   denotes a credential (`DB_PASSWORD`, `API_KEY`, `OAUTH_CLIENT_SECRET`,
   `GITHUB_ACCESS_TOKEN`, `REFRESH_TOKEN`, `REGISTRY_CREDENTIALS`,
-  `dbPassword`, …) has its sibling `value` masked, because the secret is
-  in the value while only the name says what it is. The whole `value` is
-  masked whatever type it has: the API types it as a string, so a mapping
-  or list there is malformed or hostile and is not descended into.
-  Non-credential env values (`LOG_LEVEL`, `TOKENIZER_PATH`) and
-  `valueFrom` references are preserved so the model can still reason
-  about configuration.
+  `dbPassword`, …) keeps its `name` and its `value` key, and the value
+  itself is replaced with `MASK_PLACEHOLDER` — the secret is in the value
+  while only the name says what it is. The whole value is replaced whatever
+  type it has: the API types it as a string, so a mapping or list there is
+  malformed or hostile and is not descended into. Non-credential env values
+  (`LOG_LEVEL`, `TOKENIZER_PATH`) and `valueFrom` references are preserved
+  so the model can still reason about configuration.
 - **Untrusted-text treatment** — all tool results and screen context are
   sanitized as data (control-character stripping, credential-pattern
   masking) rather than parsed as trusted instructions.
@@ -204,7 +215,10 @@ These are explicit, current limitations — not aspirational future work:
   external MCP clients; it does not route those calls through
   `OutboundPolicy` or any embedded provider, and it has no way to know or
   constrain what model or data policy the external client applies to the
-  tool results it receives.
+  tool results it receives. Structured manifests are still redacted
+  producer-side by the shared primitive (see
+  [`docs/mcp.md`](mcp.md#mcp-server)), but text results — logs, events,
+  diagnoses — carry only their tool-specific shaping.
 - **Raw logs and the audit trail are sensitive on their own terms.** Log
   captures, describe/log exports, and `audit.jsonl` are not sanitized the
   way embedded-provider payloads are — they are not provider payloads at
