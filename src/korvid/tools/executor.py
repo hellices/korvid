@@ -99,10 +99,17 @@ class ToolOutcome:
 
     Returned by value rather than kept on the executor: concurrent tool
     calls must not share a "records from the last call" slot.
+
+    `error` says which branch produced the text, and only the producer
+    can say it. The boundary used to infer it from an `ERROR:` prefix,
+    which is content: a valid document whose first line said `ERROR:`
+    skipped the structural redaction pass — the only one that can see a
+    nested `kind: Secret` or a credential env sibling (PR #197 review).
     """
 
     text: str
     redactions: tuple[RedactionRecord, ...] = field(default=())
+    error: bool = False
 
 
 class RecordedExecution(ABC):
@@ -651,10 +658,14 @@ class ToolExecutor(RecordedExecution):
             raise ToolResultBlocked(f"could not redact the result: {exc}") from exc
         except Exception as exc:
             # Errors flow through the same cap below: a client error with a
-            # long reason must not bypass the ingest limit.
-            return ToolOutcome(text=cap_result(f"{ERROR_PREFIX} {exc}"))
+            # long reason must not bypass the ingest limit. Marked as an
+            # error here, where it is known, so the boundary never has to
+            # guess from the text.
+            return ToolOutcome(text=cap_result(f"{ERROR_PREFIX} {exc}"), error=True)
         if isinstance(result, ToolOutcome):
-            return ToolOutcome(text=cap_result(result.text), redactions=result.redactions)
+            return ToolOutcome(
+                text=cap_result(result.text), redactions=result.redactions, error=result.error
+            )
         return ToolOutcome(text=cap_result(result))
 
     async def _dispatch(self, name: str, arguments: dict[str, Any]) -> str | ToolOutcome:

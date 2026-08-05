@@ -92,10 +92,14 @@ class _RecordingExecutor(RecordedExecution):
         # producer's trail re-rooted onto this result, so a mask both
         # passes saw is reported once (PR #197 review).
         result, redactions = sanitize_recorded_tool_result(
-            name, outcome.text, outcome.redactions, max_chars=self._max_result_chars
+            name,
+            outcome.text,
+            outcome.redactions,
+            max_chars=self._max_result_chars,
+            error=outcome.error,
         )
         self.records.append(ToolRecord(name=name, arguments=dict(arguments), result=result))
-        return ToolOutcome(text=result, redactions=redactions)
+        return ToolOutcome(text=result, redactions=redactions, error=outcome.error)
 
 
 class _CountingProvider:

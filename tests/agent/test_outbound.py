@@ -803,9 +803,11 @@ def test_a_manifest_cannot_impersonate_the_executor_error_marker() -> None:
 
 
 def test_executor_error_text_is_still_treated_as_text() -> None:
-    """The marker keeps working for what it is for: an executor failure is
-    not a document and must not be blocked as invalid YAML."""
-    sanitized = sanitize_tool_result("get_resource", "ERROR: [Errno 111] Connection refused")
+    """An executor failure is not a document and must not be blocked as
+    invalid YAML — but the executor says so, the text no longer does."""
+    sanitized = sanitize_tool_result(
+        "get_resource", "ERROR: [Errno 111] Connection refused", error=True
+    )
 
     assert sanitized == "ERROR: [Errno 111] Connection refused"
 
@@ -1301,3 +1303,76 @@ def test_the_caller_history_is_never_touched_by_a_hook() -> None:
         provider_prepared_messages(_Vandal(), history)
 
     assert history == before
+
+
+# --- A structured result cannot excuse itself from redaction (round 8) -----
+
+_ERROR_SHAPED_SECRET = (
+    "ERROR: could not read the object\n"
+    "kind: Secret\n"
+    "metadata:\n"
+    "  name: db\n"
+    "data:\n"
+    "  config.json: cmF3LXNlY3JldA==\n"
+)
+
+_ERROR_KEYED_CRD = (
+    "ERROR: operator reported a failure\n"
+    "apiVersion: apps.example.com/v1\n"
+    "kind: CompositeApp\n"
+    "spec:\n"
+    "  embedded:\n"
+    "    kind: Secret\n"
+    "    data:\n"
+    "      tlsBundle: cmF3LXNlY3JldA==\n"
+)
+
+_ERROR_SHAPED_ENV = (
+    "ERROR: partial read\n"
+    "kind: Pod\n"
+    "spec:\n"
+    "  containers:\n"
+    "    - name: app\n"
+    "      env:\n"
+    "        - name: DB_PASSWORD\n"
+    "          value: cmF3LXNlY3JldA==\n"
+)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [_ERROR_SHAPED_SECRET, _ERROR_KEYED_CRD, _ERROR_SHAPED_ENV],
+    ids=["top-level-secret", "nested-crd-secret", "env-sibling"],
+)
+def test_a_structured_result_is_redacted_whatever_its_first_line_says(document: str) -> None:
+    """`ERROR:` is text the producer of the result chose. Treating it as
+    proof that the text is an error let a valid document skip the only
+    pass that can see `kind: Secret` (PR #197 review)."""
+    records: list[RedactionRecord] = []
+
+    sanitized = sanitize_tool_result("get_resource", document, records=records)
+
+    assert "cmF3LXNlY3JldA==" not in sanitized
+    assert records
+
+
+def test_a_result_the_executor_reports_as_an_error_stays_model_visible() -> None:
+    """The executor knows which branch produced the text; that is the
+    signal, and an ordinary failure must still reach the model."""
+    records: list[RedactionRecord] = []
+
+    sanitized = sanitize_tool_result(
+        "get_resource", "ERROR: pods 'web' not found", records=records, error=True
+    )
+
+    assert sanitized == "ERROR: pods 'web' not found"
+
+
+def test_an_error_the_executor_reports_is_still_scrubbed_as_text() -> None:
+    records: list[RedactionRecord] = []
+
+    sanitized = sanitize_tool_result(
+        "get_resource", 'ERROR: refused api_key: "raw-secret"', records=records, error=True
+    )
+
+    assert "raw-secret" not in sanitized

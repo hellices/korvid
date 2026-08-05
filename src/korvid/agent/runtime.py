@@ -282,7 +282,7 @@ class AgentRuntime:
 
     async def _execute_tool(
         self, name: str, arguments: dict[str, Any]
-    ) -> tuple[str, tuple[RedactionRecord, ...]]:
+    ) -> tuple[str, tuple[RedactionRecord, ...], bool]:
         """Run one tool, taking the producer redaction trail it reports.
 
         Producer-side redaction happens before the size bound, so it is
@@ -301,7 +301,7 @@ class AgentRuntime:
             # block means one rollback path — history truncated to the turn
             # base, records purged, the last successful snapshot standing.
             raise ToolResultBlockedError(str(exc)) from exc
-        return outcome.text, outcome.redactions
+        return outcome.text, outcome.redactions, outcome.error
 
     def _truncate_history(self, start: int) -> None:
         """Drop history from `start` on, and the records that described it.
@@ -416,6 +416,12 @@ class AgentRuntime:
             arguments = str(tc["arguments"])
             yield ToolCallStarted(call_id=call_id, name=name, arguments=arguments)
             produced: tuple[RedactionRecord, ...] = ()
+            # Whether this text is a failure is the producer's to state,
+            # never the boundary's to read off the text: a structured
+            # result that opened with `ERROR:` used to skip the pass that
+            # sees nested secrets (PR #197 review). The runtime's own
+            # failures below are errors by construction.
+            errored = True
             try:
                 parsed = json.loads(arguments or "{}")
             except json.JSONDecodeError:
@@ -427,7 +433,7 @@ class AgentRuntime:
                     result = "ERROR: bad arguments"
                 else:
                     try:
-                        result, produced = await self._execute_tool(name, parsed)
+                        result, produced, errored = await self._execute_tool(name, parsed)
                     except OutboundPolicyError:
                         # A blocked result is not reportable to the model:
                         # let it reach run_turn's rollback.
@@ -447,7 +453,7 @@ class AgentRuntime:
             # two views of one document, merged onto the same origin so a
             # redaction both of them saw is not counted twice.
             result, ingress_records = sanitize_recorded_tool_result(
-                name, result, produced, max_chars=self._max_result_chars
+                name, result, produced, max_chars=self._max_result_chars, error=errored
             )
             if excess and index == len(kept) - 1:
                 # Appended after compaction, without re-compacting: the

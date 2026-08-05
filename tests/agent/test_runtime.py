@@ -12,7 +12,11 @@ from korvid.agent.prompts import NO_WRITE_PROMPT
 from korvid.agent.runtime import MAX_HISTORY_TURNS, AgentRuntime
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
-from korvid.tools.executor import MAX_RESULT_CHARS, RecordedExecution, ToolExecutor
+from korvid.tools.executor import (
+    MAX_RESULT_CHARS,
+    RecordedExecution,
+    ToolExecutor,
+)
 from tests.tools.test_executor import (
     LONG_NAME_ENV_SENTINEL,
     NESTED_SECRET_SENTINEL,
@@ -2372,3 +2376,57 @@ async def test_the_first_request_of_a_turn_is_iteration_one() -> None:
     assert snapshot is not None
     assert snapshot.iteration == 1
     assert json.loads(snapshot.export_json())["iteration"] == 1
+
+
+# --- No structured document excuses itself from redaction (round 8) --------
+
+_ERROR_SHAPED_SECRET = (
+    "ERROR: could not fully read the object\n"
+    "kind: Secret\n"
+    "metadata:\n"
+    "  name: db\n"
+    "data:\n"
+    "  config.json: cmF3LXNlY3JldA==\n"
+)
+
+
+async def test_an_error_shaped_document_from_a_custom_executor_never_reaches_the_wire() -> None:
+    """A string-only executor is not trusted to classify its own output:
+    the text is a valid document and is redacted as one (PR #197 review)."""
+
+    class Duck:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return _ERROR_SHAPED_SECRET
+
+    provider = ScriptedProvider(_get_resource_turn())
+    runtime = AgentRuntime(provider, Duck())
+
+    await collect(runtime, "why?")
+
+    wire = json.dumps(provider.calls)
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "cmF3LXNlY3JldA==" not in wire
+    assert "cmF3LXNlY3JldA==" not in snapshot.payload_json
+    assert not any("cmF3LXNlY3JldA==" in str(m.get("content")) for m in runtime._messages)
+
+
+async def test_a_real_executor_error_still_reaches_the_model() -> None:
+    """The executor says which branch produced the text, so an ordinary
+    cluster failure is still reported rather than parsed as a document."""
+
+    class _AngryKube:
+        async def get_object(self, meta: Any, namespace: str, name: str) -> dict[str, Any]:
+            raise RuntimeError("pods 'web' not found")
+
+    runtime = AgentRuntime(
+        ScriptedProvider(_get_resource_turn()),
+        ToolExecutor(_AngryKube(), {"pods": PODS_META}),  # type: ignore[arg-type]  # test double for ReadOps
+    )
+
+    events = await collect(runtime, "why?")
+
+    assert any(
+        isinstance(e, ToolCallFinished) and not e.ok and "not found" in e.summary for e in events
+    )
+    assert any("not found" in str(m.get("content")) for m in runtime._messages)

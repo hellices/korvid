@@ -35,7 +35,7 @@ from korvid.core.redaction import (
 )
 from korvid.tools.executor import MAX_RESULT_CHARS, compact_result
 from korvid.tools.registry import tool_result_format
-from korvid.tools.structured import ERROR_PREFIX, dump_bounded_yaml, dump_yaml
+from korvid.tools.structured import dump_bounded_yaml, dump_yaml
 
 _ALLOWED_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
@@ -281,10 +281,12 @@ def _sanitize_tool_result(
     path: str,
     records: list[RedactionRecord],
     max_chars: int | None = None,
+    *,
+    error: bool = False,
 ) -> str:
     if not isinstance(name, str) or not isinstance(result, str):
         raise _blocked("tool name and result must be text")
-    if tool_result_format(name) == "structured_yaml" and not result.startswith(ERROR_PREFIX):
+    if tool_result_format(name) == "structured_yaml" and not error:
         # A structured result is always bounded: the ingest cap applies
         # even when no tighter profile budget was given, because the
         # bound must be enforced on the *redacted* document.
@@ -306,6 +308,7 @@ def sanitize_tool_result(
     *,
     max_chars: int | None = None,
     records: list[RedactionRecord] | None = None,
+    error: bool = False,
 ) -> str:
     """Sanitize one tool result and bound it in its own format.
 
@@ -322,10 +325,24 @@ def sanitize_tool_result(
             appended to it, rooted at `tool_result`. The caller keeps
             them so the outbound inventory can report redactions whose
             evidence this pass removed rather than masked.
+        error: Whether the producer reports this as a failure rather than
+            a result. Only a producer can say so: an error is scrubbed as
+            text and stays readable to the model, while everything else
+            claiming a structured format is parsed and recursively
+            redacted as a document. Inferring this from the text let a
+            valid document opt out by starting with `ERROR:` — content
+            the producer of that document chose (PR #197 review). The
+            default is the safe one, so a caller that cannot tell gets
+            the structural pass.
     """
     with _fail_closed():
         return _sanitize_tool_result(
-            name, result, "tool_result", records if records is not None else [], max_chars
+            name,
+            result,
+            "tool_result",
+            records if records is not None else [],
+            max_chars,
+            error=error,
         )
 
 
@@ -335,6 +352,7 @@ def sanitize_recorded_tool_result(
     produced: Sequence[RedactionRecord],
     *,
     max_chars: int | None = None,
+    error: bool = False,
 ) -> tuple[str, tuple[RedactionRecord, ...]]:
     """Sanitize one tool result and return it with its complete record trail.
 
@@ -351,7 +369,7 @@ def sanitize_recorded_tool_result(
     production (PR #197 review).
     """
     ingress: list[RedactionRecord] = []
-    text = sanitize_tool_result(name, result, max_chars=max_chars, records=ingress)
+    text = sanitize_tool_result(name, result, max_chars=max_chars, records=ingress, error=error)
     return text, tuple(merge_records(ingress, [rebase(item, "tool_result") for item in produced]))
 
 
