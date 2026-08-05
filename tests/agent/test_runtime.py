@@ -1661,6 +1661,19 @@ def _one_tool_turn(tool: str) -> list[list[dict[str, Any]]]:
     ]
 
 
+def _dump_ingress_store(runtime: AgentRuntime) -> str:
+    """Everything the store holds — records and the messages they point at."""
+    return json.dumps(
+        [
+            {
+                "message": entry.message,
+                "records": [(r.path, r.reason) for r in entry.records],
+            }
+            for entry in runtime._ingress_records.values()
+        ]
+    )
+
+
 def _reasons(runtime: AgentRuntime) -> list[str]:
     snapshot = runtime.latest_outbound_payload
     assert snapshot is not None
@@ -1863,9 +1876,7 @@ async def test_the_ingress_record_map_never_retains_raw_content() -> None:
 
     await collect(runtime, "why?", "DB_PASSWORD=screen-raw")
 
-    stored = json.dumps(
-        {k: [(r.path, r.reason) for r in v] for k, v in runtime._ingress_records.items()}
-    )
+    stored = _dump_ingress_store(runtime)
     assert "hunter2-raw" not in stored
     assert "screen-raw" not in stored
 
@@ -2034,9 +2045,7 @@ async def test_the_producer_record_map_never_retains_raw_content() -> None:
 
     await collect(runtime, "why?")
 
-    stored = json.dumps(
-        {k: [(r.path, r.reason) for r in v] for k, v in runtime._ingress_records.items()}
-    )
+    stored = _dump_ingress_store(runtime)
     assert "cmF3LXNlY3JldA==" not in stored
 
 
@@ -2082,3 +2091,127 @@ async def test_every_inventory_path_leaf_appears_in_the_exported_payload() -> No
     for item in snapshot.redactions:
         leaf = item.path.rsplit(".", 1)[-1].rsplit("[", 1)[-1].strip('"]')
         assert leaf in snapshot.payload_json, item.path
+
+
+# --- Ingress records must belong to one message, not to a string (round 5) --
+#
+# The map was keyed by sanitized content, so two messages that sanitize
+# to the same text shared one entry: a later, genuinely clean message
+# inherited an earlier message's redaction, and a trim that removed the
+# original left the record attached to the survivor.
+
+
+def _text_turn(count: int = 1) -> list[list[dict[str, Any]]]:
+    return [[{"type": "text_delta", "text": "ok"}, {"type": "done"}] for _ in range(count)]
+
+
+async def test_a_clean_message_does_not_inherit_an_earlier_messages_redaction() -> None:
+    runtime = AgentRuntime(ScriptedProvider(_text_turn(2)), EchoExecutor())
+
+    await collect(runtime, "why?", "bad\x07")
+    await collect(runtime, "why?", "bad\ufffd")
+
+    assert _records_at(runtime, "messages[3].content") == []
+
+
+async def test_a_trim_does_not_move_a_redaction_onto_a_lookalike_message() -> None:
+    """The first message carried the control character; the second never did."""
+    runtime = AgentRuntime(ScriptedProvider(_text_turn(9)), EchoExecutor())
+
+    await collect(runtime, "why?", "bad\x07")
+    await collect(runtime, "why?", "bad\ufffd")
+    for index in range(7):
+        await collect(runtime, f"filler {index}", "view=pods")
+
+    survivor = next(m for m in runtime._messages if m.get("role") == "user")["content"]
+    assert "bad\ufffd" in survivor, "the trim must leave the lookalike behind to be meaningful"
+    assert "control-character" not in _reasons(runtime)
+
+
+async def test_removing_a_recorded_message_leaves_no_record_on_a_lookalike() -> None:
+    """`_truncate_history` is the removal primitive that policy rollback,
+    interruption and the strict-preflight rejection all share, so this
+    covers every one of those paths at the point they converge."""
+    runtime = AgentRuntime(ScriptedProvider(_text_turn(3)), EchoExecutor())
+
+    await collect(runtime, "why?", "bad\ufffd")
+    base = len(runtime._messages)
+    await collect(runtime, "why?", "bad\x07")
+    runtime._truncate_history(base)
+    await collect(runtime, "why?", "bad\ufffd")
+
+    assert "control-character" not in _reasons(runtime)
+
+
+async def test_two_identical_messages_each_keep_their_own_redaction() -> None:
+    runtime = AgentRuntime(ScriptedProvider(_text_turn(2)), EchoExecutor())
+
+    await collect(runtime, "why?", "bad\x07")
+    await collect(runtime, "why?", "bad\x07")
+
+    assert _records_at(runtime, "messages[1].content") == ["control-character"]
+    assert _records_at(runtime, "messages[3].content") == ["control-character"]
+
+
+async def test_identical_messages_keep_separate_records_of_the_same_multiplicity() -> None:
+    """Two credentials each, twice — two records per message, not shared."""
+    runtime = AgentRuntime(ScriptedProvider(_text_turn(2)), EchoExecutor())
+
+    await collect(runtime, "a", "api_key=one\npassword=two")
+    await collect(runtime, "a", "api_key=one\npassword=two")
+
+    assert len(_records_at(runtime, "messages[1].content")) == 2
+    assert len(_records_at(runtime, "messages[3].content")) == 2
+
+
+async def test_the_dialect_hook_does_not_shift_records_onto_other_messages() -> None:
+    class _Dialect(ScriptedProvider):
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            for message in messages:
+                if message.get("role") == "assistant":
+                    message["thinking"] = "internal"
+            return messages
+
+    runtime = AgentRuntime(_Dialect(_text_turn(2)), EchoExecutor())
+
+    await collect(runtime, "why?", "bad\x07")
+    await collect(runtime, "why?", "bad\ufffd")
+
+    assert _records_at(runtime, "messages[1].content") == ["control-character"]
+    assert _records_at(runtime, "messages[3].content") == []
+
+
+async def test_a_dialect_hook_that_changes_the_message_count_is_rejected() -> None:
+    class _Dropping(ScriptedProvider):
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return messages[1:]
+
+    runtime = AgentRuntime(_Dropping(_text_turn(1)), EchoExecutor())
+
+    events = await collect(runtime, "hi", "view=pods")
+
+    assert any(isinstance(event, AgentError) for event in events)
+
+
+async def test_the_record_store_holds_no_content_of_its_own() -> None:
+    runtime = AgentRuntime(ScriptedProvider(_text_turn(1)), EchoExecutor())
+
+    await collect(runtime, "why?", "DB_PASSWORD=hunter2-raw")
+
+    assert "hunter2-raw" not in _dump_ingress_store(runtime)
+
+
+async def test_a_freed_message_cannot_hand_its_records_to_a_new_one() -> None:
+    """The store pins the message it describes, so its id cannot be reused."""
+    runtime = AgentRuntime(ScriptedProvider(_text_turn(30)), EchoExecutor())
+
+    await collect(runtime, "why?", "bad\x07")
+    recorded = [entry.message for entry in runtime._ingress_records.values()]
+    assert recorded, "the first turn must have produced a record to pin"
+    runtime._truncate_history(1)
+    for index in range(20):
+        await collect(runtime, f"filler {index}", "view=pods")
+
+    assert all(entry.message in runtime._messages for entry in runtime._ingress_records.values())
+    for item in _reasons(runtime):
+        assert item != "control-character"

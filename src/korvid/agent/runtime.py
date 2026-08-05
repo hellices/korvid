@@ -69,6 +69,14 @@ class _Executor(Protocol):
     async def execute(self, name: str, arguments: dict[str, Any]) -> str: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _IngressRecords:
+    """Redactions applied to one message, tied to that message."""
+
+    message: dict[str, Any]
+    records: tuple[RedactionRecord, ...]
+
+
 @runtime_checkable
 class _RecordingExecutor(Protocol):
     """An executor that also reports what it redacted while producing a result.
@@ -180,10 +188,11 @@ class AgentRuntime:
         # applied to. The outbound policy re-derives what it can still
         # see, but a redaction that removed its evidence rather than
         # masking it leaves nothing to re-derive, so the inspector would
-        # show a payload that looks untouched. Keying by content instead
-        # of position keeps this correct across trimming, rollback and
-        # recovery reordering without any index bookkeeping.
-        self._ingress_records: dict[str, tuple[RedactionRecord, ...]] = {}
+        # show a payload that looks untouched. Keyed by the identity of
+        # the message it describes: content is not an identifier, and two
+        # messages that sanitize to the same text are still two messages
+        # — one of which may never have been redacted at all.
+        self._ingress_records: dict[int, _IngressRecords] = {}
         self._total_in = 0
         self._total_out = 0
         self._estimated = False
@@ -255,10 +264,31 @@ class AgentRuntime:
         """
         return self._latest_outbound_payload
 
-    def _remember_ingress(self, content: str, records: list[RedactionRecord]) -> None:
-        """Keep the redactions applied to one message's content on the way in."""
+    def _remember_ingress(self, message: dict[str, Any], records: list[RedactionRecord]) -> None:
+        """Keep the redactions applied to one message's content on the way in.
+
+        The entry holds the message itself, which both identifies it and
+        keeps it alive: an id whose object had been freed could be handed
+        to a later allocation and silently adopt someone else's records.
+        It retains nothing history does not already hold — the content is
+        the sanitized text that is in the payload.
+        """
         if records:
-            self._ingress_records[content] = tuple(records)
+            self._ingress_records[id(message)] = _IngressRecords(message, tuple(records))
+
+    def _ingress_by_index(self) -> dict[int, tuple[RedactionRecord, ...]]:
+        """Project the store onto the positions the policy will see.
+
+        The policy works on a list, so identity has to become position
+        exactly once, here, against the same history the request is built
+        from.
+        """
+        projected: dict[int, tuple[RedactionRecord, ...]] = {}
+        for index, message in enumerate(self._messages):
+            entry = self._ingress_records.get(id(message))
+            if entry is not None and entry.message is message:
+                projected[index] = entry.records
+        return projected
 
     async def _execute_tool(
         self, name: str, arguments: dict[str, Any]
@@ -294,15 +324,9 @@ class AgentRuntime:
         """
         if not self._ingress_records:
             return
-        live = {
-            message["content"]
-            for message in self._messages
-            if isinstance(message.get("content"), str)
-        }
+        live = {id(message) for message in self._messages}
         self._ingress_records = {
-            content: records
-            for content, records in self._ingress_records.items()
-            if content in live
+            identity: entry for identity, entry in self._ingress_records.items() if identity in live
         }
 
     def _trim_history(self) -> None:
@@ -440,12 +464,13 @@ class AgentRuntime:
                 ok=not result.startswith("ERROR:"),
                 summary=result[:120],
             )
-            self._messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+            tool_message = {"role": "tool", "tool_call_id": call_id, "content": result}
+            self._messages.append(tool_message)
             # The producer's trail and this pass's are two views of one
             # document, re-rooted onto the same origin so a redaction both
             # of them saw is not counted twice.
             self._remember_ingress(
-                result,
+                tool_message,
                 merge_records(ingress, [rebase(item, "tool_result") for item in produced]),
             )
         for tc in excess:
@@ -543,7 +568,7 @@ class AgentRuntime:
                     provider_prepared_messages(self._provider, self._messages),
                     self._tools,
                     iteration=iteration,
-                    ingress=self._ingress_records,
+                    ingress=self._ingress_by_index(),
                 )
             except OutboundRequestTooLarge:
                 removed = self._drop_oldest_retained_turn()
@@ -675,8 +700,9 @@ class AgentRuntime:
                 "[end screen context]\n\n"
                 f"{user_text}"
             )
-            self._messages.append({"role": "user", "content": content})
-            self._remember_ingress(content, ingress)
+            user_message = {"role": "user", "content": content}
+            self._messages.append(user_message)
+            self._remember_ingress(user_message, ingress)
             if self._strict_preflight_over_budget():
                 # Drop the unfittable prompt so it cannot poison later turns.
                 self._truncate_history(self._turn_base)

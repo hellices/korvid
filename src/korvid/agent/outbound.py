@@ -346,6 +346,12 @@ def provider_prepared_messages(
         raise _blocked("provider message preparation failed") from exc
     if not isinstance(prepared, list):
         raise _blocked("provider message preparation returned an invalid shape")
+    if len(prepared) != len(private):
+        # Ingress redaction records are carried by position in this list.
+        # A hook that added or dropped a message would slide every record
+        # after it onto the wrong message, so the request is blocked
+        # rather than reported inaccurately.
+        raise _blocked("provider message preparation changed the message count")
     return prepared
 
 
@@ -561,24 +567,21 @@ def _sanitize_tool_message(
 
 
 def _carried_records(
-    raw_message: Any,
     index: int,
-    ingress: Mapping[str, Sequence[RedactionRecord]] | None,
+    ingress: Mapping[int, Sequence[RedactionRecord]] | None,
 ) -> list[RedactionRecord]:
     """Records from this message's ingress redaction, on payload paths.
 
-    Keyed by the sanitized content itself rather than by position, so
-    trimming, rollback and recovery need no bookkeeping: a message that
-    is no longer in history simply has no content to look up, and one
-    that moved is found wherever it moved to.
+    Keyed by position in the very list being prepared. The caller owns
+    the projection from its own message identities onto these positions,
+    because content is not an identifier: two messages that sanitize to
+    the same text are still two messages, and one of them may never have
+    been redacted at all.
     """
-    if not ingress or not isinstance(raw_message, Mapping):
-        return []
-    content = raw_message.get("content")
-    if not isinstance(content, str):
+    if not ingress:
         return []
     root = key_path(f"messages[{index}]", "content")
-    return [rebase(item, root) for item in ingress.get(content, ())]
+    return [rebase(item, root) for item in ingress.get(index, ())]
 
 
 def _sanitize_message(
@@ -630,7 +633,7 @@ class OutboundPolicy:
         tools: list[dict[str, Any]],
         *,
         iteration: int,
-        ingress: Mapping[str, Sequence[RedactionRecord]] | None = None,
+        ingress: Mapping[int, Sequence[RedactionRecord]] | None = None,
     ) -> PreparedOutbound:
         """Validate, redact, bound, and snapshot one provider request.
 
@@ -641,12 +644,12 @@ class OutboundPolicy:
             tools: Tool schemas as the provider will receive them.
             iteration: Zero-based tool-loop iteration of this request.
             ingress: Redactions already applied to a message's content
-                before it entered history, keyed by that exact sanitized
-                content. This pass re-derives what it can see, but a
-                redaction that *removed* its evidence (a stripped control
-                character, a deleted last-applied annotation) leaves
-                nothing to find, so those records are carried in here and
-                re-rooted onto the payload path they occupy.
+                before it entered history, keyed by that message's index
+                in `messages`. This pass re-derives what it can see, but
+                a redaction that *removed* its evidence (a stripped
+                control character, a deleted last-applied annotation)
+                leaves nothing to find, so those records are carried in
+                here and re-rooted onto the payload path they occupy.
         """
         with _fail_closed():
             try:
@@ -661,7 +664,7 @@ class OutboundPolicy:
         tools: list[dict[str, Any]],
         *,
         iteration: int,
-        ingress: Mapping[str, Sequence[RedactionRecord]] | None = None,
+        ingress: Mapping[int, Sequence[RedactionRecord]] | None = None,
     ) -> PreparedOutbound:
         if not isinstance(model, str) or not model:
             raise _blocked("model name must be non-empty text")
@@ -676,7 +679,7 @@ class OutboundPolicy:
         for index, message in enumerate(messages):
             own_start = len(records)
             prepared_messages.append(_sanitize_message(message, index, records, pending))
-            carried = _carried_records(message, index, ingress)
+            carried = _carried_records(index, ingress)
             if carried:
                 own = records[own_start:]
                 del records[own_start:]

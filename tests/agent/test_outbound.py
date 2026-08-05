@@ -14,6 +14,7 @@ from korvid.agent.outbound import (
     OutboundPolicy,
     OutboundPolicyError,
     OutboundRequestTooLarge,
+    provider_prepared_messages,
     request_char_budget,
     sanitize_screen_context,
     sanitize_tool_result,
@@ -825,7 +826,7 @@ def test_carried_records_are_reported_on_their_payload_path() -> None:
         _basic(safe),
         [],
         iteration=0,
-        ingress={safe: tuple(records)},
+        ingress={1: tuple(records)},
     )
 
     assert [(r.path, r.reason) for r in prepared.snapshot.redactions] == [
@@ -843,7 +844,7 @@ def test_a_carried_record_the_policy_re_derives_is_reported_once() -> None:
         _basic(safe),
         [],
         iteration=0,
-        ingress={safe: tuple(records)},
+        ingress={1: tuple(records)},
     )
 
     assert [(r.path, r.reason) for r in prepared.snapshot.redactions] == [
@@ -851,7 +852,8 @@ def test_a_carried_record_the_policy_re_derives_is_reported_once() -> None:
     ]
 
 
-def test_carried_records_for_absent_content_are_not_reported() -> None:
+def test_carried_records_for_an_absent_message_are_not_reported() -> None:
+    """A stale index names a message that is not in this request."""
     stale = RedactionRecord(path="screen_context", reason="control-character")
 
     prepared = OutboundPolicy(max_request_chars=20_000).prepare(
@@ -859,10 +861,30 @@ def test_carried_records_for_absent_content_are_not_reported() -> None:
         _basic("clean"),
         [],
         iteration=0,
-        ingress={"content that was trimmed away": (stale,)},
+        ingress={7: (stale,)},
     )
 
     assert prepared.snapshot.redactions == ()
+
+
+def test_carried_records_land_on_the_message_they_were_keyed_to() -> None:
+    """Identical content at two positions must not share one entry."""
+    records: list[RedactionRecord] = []
+    safe = sanitize_screen_context("view=pods\x07ns=default", records)
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": safe},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": safe},
+    ]
+
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m", messages, [], iteration=0, ingress={3: tuple(records)}
+    )
+
+    assert [(r.path, r.reason) for r in prepared.snapshot.redactions] == [
+        ("messages[3].content", "control-character")
+    ]
 
 
 def test_preparing_without_an_ingress_map_is_unchanged() -> None:
@@ -1087,3 +1109,34 @@ def test_ordinary_tool_schema_keys_are_preserved() -> None:
 
     assert "namespace" in prepared.snapshot.payload_json
     assert prepared.snapshot.redactions == ()
+
+
+def test_a_hook_that_changes_the_message_count_is_blocked() -> None:
+    """Carried records travel by position, so the list must keep its shape."""
+
+    class _Dropping:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return messages[1:]
+
+    with pytest.raises(OutboundPolicyError, match="message count"):
+        provider_prepared_messages(_Dropping(), _basic("hi"))
+
+
+def test_a_hook_that_adds_a_message_is_blocked() -> None:
+    class _Adding:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [*messages, {"role": "user", "content": "extra"}]
+
+    with pytest.raises(OutboundPolicyError, match="message count"):
+        provider_prepared_messages(_Adding(), _basic("hi"))
+
+
+def test_a_hook_that_keeps_the_message_count_is_allowed() -> None:
+    class _Annotating:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [{**message, "thinking": "t"} for message in messages]
+
+    prepared = provider_prepared_messages(_Annotating(), _basic("hi"))
+
+    assert len(prepared) == 2
+    assert all("thinking" in message for message in prepared)

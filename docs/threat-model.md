@@ -256,10 +256,13 @@ that *removed* their evidence at an earlier pass (a stripped control
 character, a deleted last-applied annotation, a mapping elided to fit the
 size bound) leave nothing for a later pass to rediscover, so those records
 are carried forward and reported on the payload path they occupy. A
-redaction more than one pass can see is listed once. Records are dropped
-when the message they describe leaves history — through a trim, a
-rollback, or an interruption — so no path in the list names a message the
-payload does not contain.
+redaction more than one pass can see is listed once. A carried record
+belongs to the message it was taken from, not to that message's text:
+two messages that end up reading the same never share an entry, so a
+later message that was never redacted cannot inherit an earlier one's
+record. Records are dropped when the message they describe leaves
+history — through a trim, a rollback, or an interruption — so no path in
+the list names a message the payload does not contain.
 This is the real payload — not a re-derived approximation — so what you
 read is what was sent. A turn that was blocked or rolled back sent
 nothing, so it leaves the previous handoff on display rather than
