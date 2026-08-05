@@ -12,6 +12,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from version_format import UNSUPPORTED_VERSION, is_supported_release_version
+
 
 def main(argv: list[str]) -> int:
     if not argv:
@@ -21,6 +23,11 @@ def main(argv: list[str]) -> int:
     pyproject = Path(argv[1]) if len(argv) > 1 else Path("pyproject.toml")
     data = tomllib.loads(pyproject.read_text())
     version = str(data["project"]["version"])
+    # Validate the shape before the value reaches the shell, $GITHUB_OUTPUT,
+    # or artifact file names. Never echo the rejected value.
+    if not is_supported_release_version(version):
+        print(UNSUPPORTED_VERSION, file=sys.stderr)
+        return 1
     if not tag.startswith("v"):
         print(f"release tag {tag!r} must look like v{version}", file=sys.stderr)
         return 1

@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-korvid = "korvid.__main__:main"
+korvid = "korvid.cli:main"
 
 [project.optional-dependencies]
 # Embedded AI agent: provider HTTP adapters + OS-keychain credential storage.

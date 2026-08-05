@@ -21,6 +21,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from korvid import __version__
 from korvid.agent.context import cluster_context_note
 from korvid.agent.setup import AgentConfigurator, AgentSettings
 from korvid.core.audit import AuditLog, default_audit_path
@@ -1151,6 +1152,7 @@ def _restart_prompt() -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="korvid", description="Kubernetes TUI with an agent.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--readonly",
         action="store_true",

@@ -9,16 +9,19 @@ import json
 import subprocess
 import sys
 import tarfile
+import tomllib
 import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 SCRIPTS = Path(__file__).parents[1] / "scripts" / "release"
 sys.path.insert(0, str(SCRIPTS))
 
 import bundle  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import check_artifacts  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
+import check_dry_run  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import check_sbom  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import check_source  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import check_version  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
@@ -26,6 +29,8 @@ import compare_assets  # type: ignore[import-not-found]  # noqa: E402  # scripts
 import metadata  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import offline_verify  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import release_manifest  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
+import smoke_install  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
+import version_format  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 
 
 def _pyproject(tmp_path: Path, version: str) -> Path:
@@ -55,6 +60,25 @@ def test_mismatched_tag_fails_naming_both_versions(
 
 def test_tag_without_v_prefix_fails(tmp_path: Path) -> None:
     assert check_version.main(["1.2.3", str(_pyproject(tmp_path, "1.2.3"))]) == 1
+
+
+@pytest.mark.parametrize("version", ["0.1.0.dev1", "1.0", "0.1.0rc1", "1.2.3-x", "$(id)"])
+def test_release_tag_outside_the_supported_version_format_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], version: str
+) -> None:
+    """The same X.Y.Z guard the dry run applies, on the publication path."""
+    assert check_version.main([f"v{version}", str(_pyproject(tmp_path, version))]) == 1
+    captured = capsys.readouterr()
+    assert "supported release version" in captured.err
+    assert captured.out.strip() == ""
+
+
+def test_release_version_format_helper_is_shared_by_both_gates() -> None:
+    assert version_format.is_supported_release_version("0.1.0")
+    assert version_format.is_supported_release_version("10.20.30")
+    assert not version_format.is_supported_release_version("0.1.0.dev1")
+    assert not version_format.is_supported_release_version("1.0")
+    assert not version_format.is_supported_release_version("\u0660.\u0661.\u0660")
 
 
 # --- check_source -----------------------------------------------------------
@@ -167,6 +191,109 @@ def test_source_policy_errors_do_not_log_commit_hashes(
     assert commit not in error
     assert "v1.2.3" not in error
     assert "main" not in error
+
+
+# --- check_dry_run ----------------------------------------------------------
+
+
+def test_dry_run_at_trusted_head_prints_version(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _release_repo(tmp_path)
+    assert check_dry_run.main(["main", str(repo), str(_pyproject(repo, "0.1.0"))]) == 0
+    assert capsys.readouterr().out.strip() == "0.1.0"
+
+
+def test_dry_run_refuses_a_commit_behind_trusted_head(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _release_repo(tmp_path)
+    reviewed_commit = _git(repo, "rev-parse", "HEAD")
+    (repo / "tracked.txt").write_text("trusted update\n")
+    _git(repo, "commit", "-am", "trusted update")
+    trusted_head = _git(repo, "rev-parse", "main")
+    _git(repo, "checkout", "--detach", reviewed_commit)
+    assert check_dry_run.main(["main", str(repo), str(_pyproject(repo, "0.1.0"))]) == 1
+    error = capsys.readouterr().err
+    assert "trusted branch head" in error
+    assert reviewed_commit not in error
+    assert trusted_head not in error
+
+
+def test_dry_run_refuses_an_unreviewed_commit_ahead_of_trusted_head(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _release_repo(tmp_path)
+    trusted_head = _git(repo, "rev-parse", "main")
+    _git(repo, "checkout", "--detach")
+    (repo / "tracked.txt").write_text("unreviewed ahead\n")
+    _git(repo, "commit", "-am", "unreviewed ahead")
+    ahead_commit = _git(repo, "rev-parse", "HEAD")
+    assert check_dry_run.main(["main", str(repo), str(_pyproject(repo, "0.1.0"))]) == 1
+    error = capsys.readouterr().err
+    assert "trusted branch head" in error
+    assert ahead_commit not in error
+    assert trusted_head not in error
+
+
+def test_dry_run_refuses_invalid_project_metadata(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _release_repo(tmp_path)
+    pyproject = repo / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "korvid"\n')
+    assert check_dry_run.main(["main", str(repo), str(pyproject)]) == 1
+    assert "project metadata is invalid" in capsys.readouterr().err
+
+
+def test_dry_run_refuses_a_stale_dispatch_sha_against_the_live_remote_ref(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A dispatch can check out an older SHA while `origin/main` has moved on;
+    comparing against the live remote-tracking ref must reject it."""
+    repo = _release_repo(tmp_path)
+    stale_commit = _git(repo, "rev-parse", "HEAD")
+    (repo / "tracked.txt").write_text("live main\n")
+    _git(repo, "commit", "-am", "live main")
+    live_commit = _git(repo, "rev-parse", "main")
+    _git(repo, "update-ref", "refs/remotes/origin/main", live_commit)
+    _git(repo, "checkout", "--detach", stale_commit)
+
+    assert check_dry_run.main(["origin/main", str(repo), str(_pyproject(repo, "0.1.0"))]) == 1
+    error = capsys.readouterr().err
+    assert "trusted branch head" in error
+    assert stale_commit not in error
+    assert live_commit not in error
+
+
+def test_dry_run_accepts_the_live_remote_tracking_head(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _release_repo(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/origin/main", _git(repo, "rev-parse", "main"))
+    assert check_dry_run.main(["origin/main", str(repo), str(_pyproject(repo, "0.1.0"))]) == 0
+    assert capsys.readouterr().out.strip() == "0.1.0"
+
+
+@pytest.mark.parametrize("version", ["0.1.0.dev1", "1.0", "0.1.0rc1", "1.2.3-x", "$(id)", ""])
+def test_dry_run_rejects_versions_outside_the_supported_release_format(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], version: str
+) -> None:
+    """The version reaches shell interpolation, `$GITHUB_OUTPUT`, and artifact
+    file names, so validate its shape before printing it."""
+    repo = _release_repo(tmp_path)
+    assert check_dry_run.main(["main", str(repo), str(_pyproject(repo, version))]) == 1
+    captured = capsys.readouterr()
+    assert "supported release version" in captured.err
+    assert captured.out.strip() == ""
+
+
+def test_dry_run_accepts_the_supported_x_y_z_release_format(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _release_repo(tmp_path)
+    assert check_dry_run.main(["main", str(repo), str(_pyproject(repo, "10.20.30"))]) == 0
+    assert capsys.readouterr().out.strip() == "10.20.30"
 
 
 # --- checksums --------------------------------------------------------------
@@ -322,6 +449,231 @@ def test_bundle_checksums_cover_every_wheel(tmp_path: Path) -> None:
 
 
 # --- offline verification helpers -------------------------------------------
+
+
+def test_smoke_install_requirement_for_base_uses_the_local_wheel_url(tmp_path: Path) -> None:
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    assert smoke_install.requirement_for(wheel, "base") == wheel.resolve().as_uri()
+
+
+def test_smoke_install_requirement_for_agent_uses_a_pep_508_direct_reference(
+    tmp_path: Path,
+) -> None:
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    assert smoke_install.requirement_for(wheel, "agent") == (
+        f"korvid[agent] @ {wheel.resolve().as_uri()}"
+    )
+
+
+def test_smoke_install_required_modules_follow_the_selected_variant() -> None:
+    assert smoke_install.required_modules("base") == set()
+    assert smoke_install.required_modules("agent") == {"httpx", "keyring"}
+    assert smoke_install.required_modules("mcp") == {"mcp"}
+    assert smoke_install.required_modules("all") == {"httpx", "keyring", "mcp"}
+
+
+def test_smoke_install_required_korvid_modules_follow_the_selected_variant() -> None:
+    base = {"korvid.__main__", "korvid.ui.app"}
+    agent = {"korvid.providers.registry", "korvid.providers.token_store"}
+    mcp = {"korvid.mcp.server"}
+    assert smoke_install.required_korvid_modules("base") == base
+    assert smoke_install.required_korvid_modules("agent") == base | agent
+    assert smoke_install.required_korvid_modules("mcp") == base | mcp
+    assert smoke_install.required_korvid_modules("all") == base | agent | mcp
+
+
+def test_smoke_install_forbids_optional_feature_packages_outside_their_variant() -> None:
+    """`mcp` pulls httpx transitively, so httpx is only forbidden where no
+    selected extra provides it."""
+    assert smoke_install.forbidden_modules("base") == {"httpx", "keyring", "mcp"}
+    assert smoke_install.forbidden_modules("agent") == {"mcp"}
+    assert smoke_install.forbidden_modules("mcp") == {"keyring"}
+    assert smoke_install.forbidden_modules("all") == set()
+
+
+def test_smoke_install_variant_matrix_excludes_entra() -> None:
+    """`entra` is deliberately outside the agreed base/agent/mcp/all matrix."""
+    assert set(smoke_install.variants()) == {"base", "agent", "mcp", "all"}
+
+
+def test_smoke_install_plan_installs_the_variant_directly_in_a_fresh_environment(
+    tmp_path: Path,
+) -> None:
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    for variant in smoke_install.variants():
+        plan = smoke_install.install_plan(wheel, variant)
+        fresh = plan[0]
+        assert fresh.name == "fresh"
+        assert fresh.requirements == (smoke_install.requirement_for(wheel, variant),)
+
+
+def test_smoke_install_plan_keeps_a_separate_base_to_extra_expansion_check(
+    tmp_path: Path,
+) -> None:
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    base_requirement = smoke_install.requirement_for(wheel, "base")
+    for variant in ("agent", "mcp", "all"):
+        plan = smoke_install.install_plan(wheel, variant)
+        assert len(plan) == 2
+        expansion = plan[1]
+        assert expansion.name == "expansion"
+        assert expansion.requirements == (
+            base_requirement,
+            smoke_install.requirement_for(wheel, variant),
+        )
+        assert expansion.env_dir_name != plan[0].env_dir_name
+
+
+def test_smoke_install_plan_for_base_is_a_single_fresh_environment(tmp_path: Path) -> None:
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    plan = smoke_install.install_plan(wheel, "base")
+    assert len(plan) == 1
+    assert plan[0].requirements == (wheel.resolve().as_uri(),)
+
+
+def test_smoke_install_rejects_unknown_variants(tmp_path: Path) -> None:
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    with pytest.raises(ValueError, match="unknown variant"):
+        smoke_install.requirement_for(wheel, "nope")
+    with pytest.raises(ValueError, match="unknown variant"):
+        smoke_install.required_modules("nope")
+    with pytest.raises(ValueError, match="unknown variant"):
+        smoke_install.required_korvid_modules("nope")
+    with pytest.raises(ValueError, match="unknown variant"):
+        smoke_install.forbidden_modules("nope")
+    with pytest.raises(ValueError, match="unknown variant"):
+        smoke_install.install_plan(wheel, "nope")
+
+
+def test_smoke_install_runs_a_fresh_install_then_a_separate_expansion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drive the real phase runner offline: the fresh environment installs the
+    variant directly, and the expansion environment is a *different* venv that
+    starts from base."""
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    created: list[Path] = []
+    commands: list[list[str]] = []
+
+    def _fake_venv(env_dir: Path, *, with_pip: bool = False) -> None:
+        created.append(env_dir)
+        launcher_dir = env_dir / ("Scripts" if smoke_install.os.name == "nt" else "bin")
+        launcher_dir.mkdir(parents=True)
+        for name in ("python", "korvid"):
+            binary = launcher_dir / (f"{name}.exe" if smoke_install.os.name == "nt" else name)
+            binary.write_text("#!/bin/sh\n")
+            binary.chmod(0o755)
+
+    def _fake_run(
+        args: list[str], *, env: dict[str, str], cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(args)
+        if "uninstall" in args:
+            launcher = smoke_install._resolve_launcher(Path(args[0]).parent.parent)
+            if launcher is not None:
+                launcher.unlink()
+        stdout = "usage: korvid" if args[1:] == ["--help"] else "korvid 1.2.3"
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(smoke_install.venv, "create", _fake_venv)
+    monkeypatch.setattr(smoke_install, "_run", _fake_run)
+
+    smoke_install._smoke_install(wheel, "1.2.3", "agent", workspace)
+
+    assert created == [workspace / "venv-fresh", workspace / "venv-expansion"]
+    installs = [args for args in commands if "install" in args]
+    agent_requirement = smoke_install.requirement_for(wheel, "agent")
+    base_requirement = smoke_install.requirement_for(wheel, "base")
+    assert installs[0][-1] == agent_requirement
+    assert "--upgrade" not in installs[0]
+    assert installs[1][-1] == base_requirement
+    assert installs[2][-1] == agent_requirement
+    assert "--upgrade" in installs[2]
+    # The fresh install must never be reached through a base install first.
+    assert base_requirement not in installs[0]
+    assert any("keyring" in " ".join(args) for args in commands)
+    assert any("korvid.providers.registry" in " ".join(args) for args in commands)
+    assert any("korvid.__main__" in " ".join(args) for args in commands)
+    assert any("find_spec('mcp')" in " ".join(args) for args in commands)
+
+
+def test_smoke_install_resolves_a_relative_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every command runs with `cwd=workspace`, so a relative workspace would
+    make the venv interpreter path unresolvable."""
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    seen: list[Path] = []
+    monkeypatch.setattr(
+        smoke_install,
+        "_smoke_install",
+        lambda _wheel, _version, _variant, workspace: seen.append(workspace),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert (
+        smoke_install.main(
+            [
+                "--wheel",
+                str(wheel),
+                "--version",
+                "1.2.3",
+                "--variant",
+                "base",
+                "--workspace",
+                "relative-workspace",
+            ]
+        )
+        == 0
+    )
+    assert seen == [tmp_path.resolve() / "relative-workspace"]
+    assert seen[0].is_absolute()
+
+
+def test_smoke_install_reports_workspace_cleanup_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Cleanup stays fail-closed: an unremovable workspace fails the job."""
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    monkeypatch.setattr(smoke_install, "_smoke_install", lambda *args, **kwargs: None)
+
+    def _boom(path: object) -> None:
+        raise OSError("device busy")
+
+    monkeypatch.setattr(smoke_install.shutil, "rmtree", _boom)
+    exit_code = smoke_install.main(
+        [
+            "--wheel",
+            str(wheel),
+            "--version",
+            "1.2.3",
+            "--variant",
+            "base",
+            "--workspace",
+            str(tmp_path / "workspace"),
+        ]
+    )
+    assert exit_code == 1
+    assert "failed to clean workspace" in capsys.readouterr().err
+
+
+def test_smoke_install_rejects_a_wheel_with_the_wrong_version(tmp_path: Path) -> None:
+    wheel = tmp_path / "korvid-1.2.4-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    with pytest.raises(ValueError, match=r"1\.2\.3"):
+        smoke_install.validate_wheel_version(wheel, "1.2.3")
 
 
 def test_pick_removable_wheel_never_picks_korvid(tmp_path: Path) -> None:
@@ -585,6 +937,16 @@ def _release_workflow() -> str:
     return (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text()
 
 
+def _readme() -> str:
+    return (Path(__file__).parents[1] / "README.md").read_text()
+
+
+def _release_runbook() -> str:
+    path = Path(__file__).parents[1] / "docs" / "release.md"
+    assert path.is_file(), "docs/release.md is missing"
+    return path.read_text()
+
+
 def test_linux_bundle_pins_and_names_the_manylinux_2_28_baseline() -> None:
     workflow = _release_workflow()
     assert "manylinux_2_28_x86_64@sha256:" in workflow
@@ -641,17 +1003,297 @@ def test_draft_release_is_staged_before_irreversible_pypi_publication() -> None:
 
 
 def test_release_docs_require_immutable_protected_tags() -> None:
-    readme = (Path(__file__).parents[1] / "README.md").read_text()
+    readme = _readme()
     assert "immutable `v*` tag ruleset" in readme
     assert "restrict tag creation" in readme
     assert "update and deletion" in readme
     assert "protected tags only" in readme
 
 
+def test_release_docs_readme_pins_first_release_install_and_links_the_runbook() -> None:
+    readme = _readme()
+    assert "python -m pip install 'korvid[all]==0.1.0'" in readme
+    assert "docs/release.md" in readme
+
+
+def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -> None:
+    runbook = _release_runbook()
+    assert "refs/tags/v*" in runbook
+    assert "`release`" in runbook
+    assert "`.github/workflows/release.yml`" in runbook
+    assert "`hellices/korvid`" in runbook
+    assert "gh workflow run Release --ref main" in runbook
+    assert 'gh run watch "$RUN_ID" --exit-status' in runbook
+    assert 'git tag -a v0.1.0 COMMIT -m "korvid v0.1.0"' in runbook
+    assert "git push origin refs/tags/v0.1.0" in runbook
+    assert "gh release download v0.1.0 --dir dist/v0.1.0" in runbook
+    assert (
+        "gh attestation verify dist/v0.1.0/korvid-0.1.0-py3-none-any.whl --repo hellices/korvid"
+    ) in runbook
+    assert ("gh attestation verify dist/v0.1.0/SHA256SUMS --repo hellices/korvid") in runbook
+    assert ("cd dist/v0.1.0 && shasum --algorithm 256 --check SHA256SUMS") in runbook
+    assert "PyPI publication is irreversible" in runbook
+    assert "annotated tag publication is irreversible" in runbook
+
+
+def test_release_docs_runbook_requires_protected_tags_and_maintainer_approval() -> None:
+    runbook = " ".join(_release_runbook().split())
+    assert "allow protected tags only" in runbook
+    assert "require approval from a designated release maintainer" in runbook
+
+
+def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> None:
+    runbook = _release_runbook()
+    stop_processes = runbook.index("Stop all korvid processes")
+    remove_files = runbook.index("Then remove the retained files")
+    assert "~/.config/korvid/config.yaml" in runbook
+    assert "~/.config/korvid/credentials.json" in runbook
+    assert "~/.local/state/korvid/audit.jsonl" in runbook
+    assert "~/.local/state/korvid/audit.jsonl.lock" in runbook
+    assert "~/.local/share/korvid/logs" in runbook
+    assert "~/.local/share/korvid/agent-payloads" in runbook
+    assert "python -m pip install 'korvid[all]==0.1.0'" in runbook
+    assert "python -m pip uninstall -y korvid" in runbook
+    assert "opt-in cleanup" in runbook
+    assert "rerun your package manager with the full desired extra set" in runbook
+    assert 'state_root="${XDG_STATE_HOME:-$HOME/.local/state}/korvid"' in runbook
+    assert 'data_root="${XDG_DATA_HOME:-$HOME/.local/share}/korvid"' in runbook
+    assert 'rm -f "$state_root/audit.jsonl"' in runbook
+    assert 'rm -rf "$data_root/logs" "$data_root/agent-payloads"' in runbook
+    assert stop_processes < remove_files
+
+
+def test_release_docs_runbook_lists_and_cleans_the_os_keyring_credential() -> None:
+    runbook = " ".join(_release_runbook().split())
+    assert "OS keyring" in runbook
+    assert "service `korvid`, account `github-oauth`" in runbook
+    assert 'keyring.get_password("korvid", "github-oauth")' in runbook
+    assert 'keyring.delete_password("korvid", "github-oauth")' in runbook
+    assert "except PasswordDeleteError" not in runbook
+    assert "before uninstalling korvid" in runbook
+
+
+def test_release_readme_discloses_the_retained_os_keyring_credential() -> None:
+    readme = " ".join(_readme().split())
+    assert "OS keyring credential (`korvid` / `github-oauth`)" in readme
+    assert "cleanup is explicit and opt-in in the [release runbook](docs/release.md)" in readme
+
+
+def test_release_docs_runbook_marks_recovery_boundaries_and_first_release_upgrade_limit() -> None:
+    runbook = _release_runbook()
+    assert "Deleting or moving a published tag/version is not rollback" in runbook
+    assert "resume the idempotent workflow only when the staged assets match" in runbook
+    assert "stop and diagnose" in runbook
+    assert "v0.1.0 cannot prove a cross-version PyPI upgrade" in runbook
+
+
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:
     workflow = _release_workflow()
     assert 'source_commit=$(git rev-list -n 1 "refs/tags/$TAG")' in workflow
     assert "source_commit=$(uv run" not in workflow
+
+
+def test_release_workflow_has_a_main_only_non_publishing_manual_dry_run() -> None:
+    workflow = _release_workflow()
+    verify = workflow.index("\n  verify:")
+    build = workflow.index("\n  build:")
+    stage = workflow.index("\n  stage-github-release:")
+    publish = workflow.index("\n  publish-pypi:")
+    finalize = workflow.index("\n  finalize-github-release:")
+    assert "workflow_dispatch:" in workflow
+    assert "scripts/release/check_dry_run.py" in workflow
+    assert "refs/heads/main" in workflow[verify:build]
+    assert "check_dry_run.py origin/main" in workflow[verify:build]
+    assert "check_source.py" in workflow[verify:build]
+    manual_start = workflow.index('elif [ "$EVENT_NAME" = "workflow_dispatch" ]', verify, build)
+    manual_end = workflow.index("\n          else", manual_start, build)
+    assert "check_source.py" not in workflow[manual_start:manual_end]
+    assert "github.event_name == 'push'" in workflow[stage:publish]
+    assert "github.event_name == 'push'" in workflow[publish:finalize]
+    assert "github.event_name == 'push'" in workflow[finalize:]
+
+
+def test_release_workflow_smoke_matrix_covers_every_supported_runner_and_variant() -> None:
+    workflow = _release_workflow()
+    smoke = workflow.index("\n  smoke:")
+    sbom = workflow.index("\n  sbom:")
+    smoke_job = workflow[smoke:sbom]
+    assert "fail-fast: false" in smoke_job
+    assert "os: [ubuntu-latest, macos-latest, windows-latest]" in smoke_job
+    assert 'python-version: ["3.11", "3.12", "3.13"]' in smoke_job
+    assert "variant: [base, agent, mcp, all]" in smoke_job
+    assert "runs-on: ${{ matrix.os }}" in smoke_job
+
+
+def test_release_workflow_smokes_the_downloaded_wheel_once_without_rebuilding() -> None:
+    workflow = _release_workflow()
+    smoke = workflow.index("\n  smoke:")
+    sbom = workflow.index("\n  sbom:")
+    smoke_job = workflow[smoke:sbom]
+    assert smoke_job.count("scripts/release/smoke_install.py") == 1
+    assert "name: dist" in smoke_job
+    assert "path: dist" in smoke_job
+    assert "python-version: ${{ matrix.python-version }}" in smoke_job
+    assert "${{ runner.temp }}" in smoke_job
+    assert "uv build" not in smoke_job
+
+
+# --- the dry-run source policy compares against the live remote -------------
+
+
+def test_release_workflow_fetches_the_live_trusted_branch_before_the_source_policy() -> None:
+    """`actions/checkout` can leave `origin/main` at the dispatched SHA, which
+    would make the dry-run HEAD comparison vacuous."""
+    workflow = _release_workflow()
+    verify = workflow.index("\n  verify:")
+    build = workflow.index("\n  build:")
+    verify_job = workflow[verify:build]
+    fetch = verify_job.index(
+        'git fetch --force --no-tags origin "refs/heads/main:refs/remotes/origin/main"'
+    )
+    assert fetch < verify_job.index("check_dry_run.py origin/main")
+    assert fetch < verify_job.index("check_source.py")
+    assert "fetch-depth: 0" in verify_job
+
+
+# --- provenance attestation is irreversible, so tag pushes only -------------
+
+
+def test_attestation_is_gated_to_tag_pushes_and_never_runs_on_a_dry_run() -> None:
+    workflow = _release_workflow()
+    document = yaml.safe_load(workflow)
+    collect = workflow.index("\n  collect:")
+    attest = workflow.index("\n  attest:")
+    stage = workflow.index("\n  stage-github-release:")
+    assert collect < attest < stage
+    assert "github.event_name == 'push'" not in workflow[collect:attest]
+    assert document["jobs"]["attest"]["needs"] == ["verify", "collect", "smoke"]
+    assert "if: github.event_name == 'push'" in workflow[attest:stage]
+    assert "actions/attest-build-provenance" in workflow[attest:stage]
+
+
+def test_attestation_revalidates_live_tag_and_main_immediately_before_signing() -> None:
+    workflow = _release_workflow()
+    attest = workflow.index("\n  attest:")
+    stage = workflow.index("\n  stage-github-release:")
+    attest_job = workflow[attest:stage]
+    fetch = attest_job.index(
+        "git fetch --force origin \\\n"
+        '            "+refs/tags/$TAG:refs/tags/$TAG" \\\n'
+        '            "refs/heads/main:refs/remotes/origin/main"'
+    )
+    check = attest_job.index(
+        'python scripts/release/check_source.py "$TAG" origin/main \\\n'
+        '            --expected-commit "$EXPECTED_COMMIT"'
+    )
+    sign = attest_job.index("actions/attest-build-provenance")
+    assert fetch < check < sign
+    assert "fetch-depth: 0" in attest_job
+    assert "TAG: ${{ github.ref_name }}" in attest_job
+    assert "EXPECTED_COMMIT: ${{ needs.verify.outputs.source_commit }}" in attest_job
+
+
+# --- no GitHub expressions inside shell bodies ------------------------------
+
+
+def _workflow_run_bodies() -> list[tuple[str, str]]:
+    document = yaml.safe_load(_release_workflow())
+    bodies: list[tuple[str, str]] = []
+    for job_name, job in document["jobs"].items():
+        for step in job.get("steps", []):
+            if "run" in step:
+                bodies.append((job_name, step["run"]))
+    return bodies
+
+
+def test_release_workflow_keeps_github_expressions_out_of_shell_bodies() -> None:
+    offenders = [job for job, body in _workflow_run_bodies() if "${{" in body]
+    assert offenders == []
+
+
+def test_release_workflow_smoke_step_passes_matrix_values_through_env() -> None:
+    workflow = _release_workflow()
+    smoke = workflow.index("\n  smoke:")
+    sbom = workflow.index("\n  sbom:")
+    smoke_job = workflow[smoke:sbom]
+    assert "VERSION: ${{ needs.verify.outputs.version }}" in smoke_job
+    assert "VARIANT: ${{ matrix.variant }}" in smoke_job
+    assert "shell: bash" in smoke_job
+
+
+# --- the 36-cell smoke matrix must not hang a release -----------------------
+
+
+def test_release_workflow_smoke_job_declares_a_timeout() -> None:
+    document = yaml.safe_load(_release_workflow())
+    timeout = document["jobs"]["smoke"]["timeout-minutes"]
+    assert isinstance(timeout, int)
+    assert 0 < timeout <= 60
+
+
+# --- the packaged version is the version the package reports ----------------
+
+
+def test_pyproject_version_matches_the_package_version() -> None:
+    import korvid
+
+    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    assert pyproject["project"]["version"] == korvid.__version__
+
+
+# --- release documentation invariants ---------------------------------------
+
+
+def test_release_docs_call_provenance_attestation_irreversible() -> None:
+    runbook = _release_runbook()
+    assert "Sigstore" in runbook
+    assert "Rekor" in runbook
+    assert "attestation is irreversible" in runbook
+
+
+def test_release_docs_state_the_dry_run_skips_attestation_and_publication() -> None:
+    runbook = _release_runbook()
+    assert "does not exercise attestation" in runbook
+    assert "stage-github-release" in runbook
+    assert "compare-assets recovery" in runbook
+    assert "tag revalidation" in runbook
+    assert "reduces but does not eliminate" in runbook
+
+
+def test_release_docs_show_how_to_find_the_run_id_and_the_dispatch_precondition() -> None:
+    runbook = _release_runbook()
+    assert "gh run list --workflow Release --limit 1" in runbook
+    assert "default branch" in runbook
+
+
+def test_release_docs_correct_the_xdg_config_claim() -> None:
+    runbook = _release_runbook()
+    assert "`XDG_CONFIG_HOME` is not honored" in runbook
+    assert "always under `~/.config/korvid`" in runbook
+
+
+def test_release_docs_list_and_clean_the_mcp_endpoint_state() -> None:
+    runbook = _release_runbook()
+    assert "~/.local/state/korvid/mcp-endpoint.json" in runbook
+    assert "~/.local/state/korvid/mcp-endpoint.json.lock" in runbook
+    cleanup = runbook.index("## opt-in cleanup")
+    assert "mcp-endpoint.json" in runbook[cleanup:]
+    assert "~/.config/korvid/credentials.json" in runbook[cleanup:]
+
+
+def test_release_docs_keep_a_source_install_fallback_before_publication() -> None:
+    runbook = _release_runbook()
+    readme = _readme()
+    source_install = "pip install 'korvid[all] @ git+https://github.com/hellices/korvid'"
+    assert source_install in runbook
+    assert source_install in readme
+    assert "PyPI is the release path" in readme
+
+
+def test_release_docs_describe_fresh_installs_and_extra_expansion_separately() -> None:
+    runbook = _release_runbook()
+    assert "fresh install of each variant" in runbook
+    assert "separate base-to-extra expansion check" in runbook
 
 
 # --- metadata ---------------------------------------------------------------
