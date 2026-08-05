@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
 import pytest
 
+from korvid.k8s.errors import ApiStatusError
 from tests.performance import cli
 from tests.performance.metrics import (
     ApiSummary,
@@ -154,6 +156,30 @@ async def fake_failed_report(
     )
 
 
+async def fake_dropped_report(
+    profile: WorkloadProfile,
+    options: ReplayOptions,
+) -> ReplayReport:
+    """Failed replay — matching digests with one unrendered update."""
+    return replace(await fake_run_replay(profile, options), dropped_updates=1)
+
+
+async def fake_api_failure(
+    profile: WorkloadProfile,
+    options: ReplayOptions,
+) -> ReplayReport:
+    """Expected replay failure surfaced by the Kubernetes boundary."""
+    raise ApiStatusError(503, "unavailable")
+
+
+async def fake_programmer_error(
+    profile: WorkloadProfile,
+    options: ReplayOptions,
+) -> ReplayReport:
+    """Unexpected implementation error that must retain its traceback."""
+    raise TypeError("unexpected replay defect")
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -178,12 +204,58 @@ def test_cli_writes_json_and_markdown(tmp_path: Path, monkeypatch: pytest.Monkey
     )
     assert result == 0
     assert json.loads(json_path.read_text())["schema_version"] == 1
+    assert json_path.read_text().index('"api"') < json_path.read_text().index('"schema_version"')
     assert "# Large-cluster benchmark" in markdown_path.read_text()
 
 
+@pytest.mark.parametrize("failed_replay", [fake_failed_report, fake_dropped_report])
 def test_cli_returns_nonzero_for_digest_or_drop_failure(
     monkeypatch: pytest.MonkeyPatch,
+    failed_replay: object,
 ) -> None:
     monkeypatch.setattr(cli, "load_profile", lambda _path: _make_minimal_profile())
-    monkeypatch.setattr(cli, "run_replay", fake_failed_report)
+    monkeypatch.setattr(cli, "run_replay", failed_replay)
     assert cli.main(["replay", "--profile", "profile.json"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("--time-scale", "-1", "--time-scale must be non-negative"),
+        ("--sample-interval", "0", "--sample-interval must be positive"),
+    ],
+)
+def test_cli_rejects_invalid_timing_options(
+    option: str,
+    value: str,
+    message: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main(["replay", "--profile", "profile.json", option, value]) == 1
+    assert message in capsys.readouterr().err
+
+
+def test_cli_reports_expected_replay_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "load_profile", lambda _path: _make_minimal_profile())
+    monkeypatch.setattr(cli, "run_replay", fake_api_failure)
+    assert cli.main(["replay", "--profile", "profile.json"]) == 1
+    assert "error during replay: API 503: unavailable" in capsys.readouterr().err
+
+
+def test_cli_does_not_hide_unexpected_profile_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_profile(_path: Path) -> WorkloadProfile:
+        raise TypeError("unexpected profile defect")
+
+    monkeypatch.setattr(cli, "load_profile", fail_profile)
+    with pytest.raises(TypeError, match="unexpected profile defect"):
+        cli.main(["replay", "--profile", "profile.json"])
+
+
+def test_cli_does_not_hide_unexpected_replay_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "load_profile", lambda _path: _make_minimal_profile())
+    monkeypatch.setattr(cli, "run_replay", fake_programmer_error)
+    with pytest.raises(TypeError, match="unexpected replay defect"):
+        cli.main(["replay", "--profile", "profile.json"])

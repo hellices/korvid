@@ -17,6 +17,7 @@ import tracemalloc
 from pathlib import Path
 from typing import Any
 
+from korvid.k8s.errors import ApiStatusError
 from tests.performance.metrics import BenchmarkReport, render_markdown, report_payload
 from tests.performance.profile import WorkloadProfile, load_profile
 from tests.performance.replay import ReplayOptions, ReplayReport, run_replay
@@ -123,7 +124,7 @@ def _write_outputs(args: argparse.Namespace, replay: ReplayReport) -> None:
         Path(args.out_path).write_text(markdown)
     if args.json_path:
         payload: dict[str, Any] = {"schema_version": 1, **report_payload(benchmark)}
-        Path(args.json_path).write_text(json.dumps(payload, indent=2))
+        Path(args.json_path).write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def _cmd_replay(args: argparse.Namespace) -> int:
@@ -136,7 +137,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 
     try:
         profile = load_profile(Path(args.profile))
-    except Exception as exc:
+    except (OSError, UnicodeError, ValueError) as exc:
         print(f"error loading profile: {exc}", file=sys.stderr)
         return 1
 
@@ -150,7 +151,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             replay = _run_with_cpu_profile(profile, options, args.cpu_profile)
         else:
             replay = asyncio.run(run_replay(profile, options))
-    except Exception as exc:
+    except (ApiStatusError, AssertionError, OSError) as exc:
         print(f"error during replay: {exc}", file=sys.stderr)
         return 1
     finally:
