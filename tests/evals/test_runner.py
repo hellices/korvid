@@ -746,6 +746,7 @@ async def test_the_eval_recorder_forwards_the_producer_redaction_trail() -> None
     from korvid.tools.executor import RecordedExecution, ToolOutcome
 
     trail = (RedactionRecord(path="manifest.data", reason="secret-data"),)
+    rebased = (RedactionRecord(path="tool_result.data", reason="secret-data"),)
 
     class Recording(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
@@ -757,7 +758,7 @@ async def test_the_eval_recorder_forwards_the_producer_redaction_trail() -> None
     recording = _RecordingExecutor(Recording(), max_result_chars=3_000)
     outcome = await recording.execute_recorded("get_resource", {"kind": "pods"})
 
-    assert outcome.redactions == trail
+    assert outcome.redactions == rebased
 
 
 async def test_the_eval_recorder_propagates_a_blocked_result() -> None:
@@ -778,3 +779,74 @@ async def test_the_eval_recorder_propagates_a_blocked_result() -> None:
     with pytest.raises(ToolResultBlocked, match="could not redact the result"):
         await recording.execute_recorded("get_resource", {"kind": "pods"})
     assert recording.records == []
+
+
+async def test_the_eval_recorder_keeps_the_records_of_its_own_sanitize_pass() -> None:
+    """The recorder sanitizes before the runtime does, and that pass is
+    idempotent — so whatever it redacted without recording, the runtime's
+    re-run can no longer find. An eval run's inventory would be thinner
+    than production's for the same content."""
+    from korvid.evals.runner import _RecordingExecutor
+
+    class Noisy:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "line one\x07line two"
+
+    recording = _RecordingExecutor(Noisy(), max_result_chars=3_000)
+    outcome = await recording.execute_recorded("get_events", {"namespace": "shop"})
+
+    assert "control-character" in [item.reason for item in outcome.redactions]
+    assert "\x07" not in outcome.text
+
+
+async def test_the_eval_recorder_merges_producer_and_ingress_records() -> None:
+    """Two views of one document, not two redactions: a mask both passes
+    see is reported once, and genuine multiplicity survives."""
+    from korvid.core.redaction import RedactionRecord
+    from korvid.evals.runner import _RecordingExecutor
+    from korvid.tools.executor import RecordedExecution, ToolOutcome
+
+    shared = RedactionRecord(path="tool_result", reason="control-character")
+    producer = (shared, RedactionRecord(path="manifest.data", reason="secret-data"))
+
+    class Producing(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "line one\x07line two"
+
+        async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            return ToolOutcome(text="line one\x07line two", redactions=producer)
+
+    recording = _RecordingExecutor(Producing(), max_result_chars=3_000)
+    outcome = await recording.execute_recorded("get_events", {"namespace": "shop"})
+
+    reasons = [item.reason for item in outcome.redactions]
+    assert reasons.count("control-character") == 1
+    assert ("tool_result.data", "secret-data") in [
+        (item.path, item.reason) for item in outcome.redactions
+    ]
+
+
+async def test_an_eval_runtime_snapshot_inventories_the_recorder_redaction() -> None:
+    """Production parity end to end: the inspector inventory an eval run
+    would export must name the same redaction a real session's does."""
+    from korvid.agent.runtime import AgentRuntime
+    from korvid.evals.runner import _RecordingExecutor
+
+    class Noisy:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "restarts\x07=7"
+
+    provider = ScriptedProvider(
+        [
+            [_tool_call("get_events", {"namespace": "shop"}), {"type": "done"}],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, _RecordingExecutor(Noisy(), max_result_chars=3_000))
+
+    async for _ in runtime.run_turn("why?", ""):
+        pass
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "control-character" in [item.reason for item in snapshot.redactions]

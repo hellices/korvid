@@ -21,7 +21,7 @@ from korvid.agent.events import (
     ToolCallFinished,
     ToolCallStarted,
 )
-from korvid.agent.outbound import sanitize_tool_result
+from korvid.agent.outbound import sanitize_recorded_tool_result
 from korvid.agent.profiles import AgentProfile, build_profile
 from korvid.agent.runtime import AgentRuntime
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
@@ -67,8 +67,9 @@ class _RecordingExecutor(RecordedExecution):
 
     It sits between the real executor and the runtime, so it is on the
     path that carries producer redaction records — and the path a blocked
-    result has to travel to stop the turn. Both pass through unchanged:
-    an eval run's boundary behaviour is the behaviour under test.
+    result has to travel to stop the turn. Both pass through: an eval
+    run's boundary behaviour is the behaviour under test, down to the
+    inventory the payload inspector would export.
     """
 
     def __init__(
@@ -83,9 +84,18 @@ class _RecordingExecutor(RecordedExecution):
 
     async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
         outcome = await self._executor.execute_recorded(name, arguments)
-        result = sanitize_tool_result(name, outcome.text, max_chars=self._max_result_chars)
+        # This pass's own redactions are kept, not dropped. It runs before
+        # the runtime's and is idempotent, so a redaction made here is one
+        # the runtime's re-run can no longer find — discarding the records
+        # left an eval run's inventory thinner than production's for the
+        # same content. Merged the way the runtime merges them: the
+        # producer's trail re-rooted onto this result, so a mask both
+        # passes saw is reported once (PR #197 review).
+        result, redactions = sanitize_recorded_tool_result(
+            name, outcome.text, outcome.redactions, max_chars=self._max_result_chars
+        )
         self.records.append(ToolRecord(name=name, arguments=dict(arguments), result=result))
-        return ToolOutcome(text=result, redactions=outcome.redactions)
+        return ToolOutcome(text=result, redactions=redactions)
 
 
 class _CountingProvider:
