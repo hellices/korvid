@@ -14,7 +14,7 @@ import copy
 import dataclasses
 import json
 import math
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -630,6 +630,8 @@ def _sanitize_tool_message(
     path: str,
     records: list[RedactionRecord],
     pending: dict[str, str],
+    *,
+    error: bool = False,
 ) -> dict[str, Any]:
     if set(raw_message) - {"role", "content", "name", "tool_call_id", "tool_name"}:
         raise _blocked("tool message has an invalid shape")
@@ -651,6 +653,7 @@ def _sanitize_tool_message(
             content,
             key_path(path, "content"),
             records,
+            error=error,
         ),
     }
     if "tool_name" in raw_message:
@@ -687,6 +690,8 @@ def _sanitize_message(
     index: int,
     records: list[RedactionRecord],
     pending: dict[str, str],
+    *,
+    error: bool = False,
 ) -> dict[str, Any]:
     path = f"messages[{index}]"
     if not isinstance(raw_message, Mapping):
@@ -702,7 +707,7 @@ def _sanitize_message(
     elif role == "assistant":
         result = _sanitize_assistant_message(raw_message, path, records, pending)
     else:
-        result = _sanitize_tool_message(raw_message, path, records, pending)
+        result = _sanitize_tool_message(raw_message, path, records, pending, error=error)
 
     if "name" in raw_message:
         name_value = raw_message["name"]
@@ -732,6 +737,7 @@ class OutboundPolicy:
         *,
         iteration: int,
         ingress: Mapping[int, Sequence[RedactionRecord]] | None = None,
+        tool_errors: Collection[int] | None = None,
     ) -> PreparedOutbound:
         """Validate, redact, bound, and snapshot one provider request.
 
@@ -752,10 +758,26 @@ class OutboundPolicy:
                 control character, a deleted last-applied annotation)
                 leaves nothing to find, so those records are carried in
                 here and re-rooted onto the payload path they occupy.
+            tool_errors: Indices of tool messages whose content the
+                *producer* declared a failure rather than a result. Only a
+                producer can say so, and a stored result is re-sanitized
+                from scratch on every request, so the verdict has to
+                travel here rather than be re-derived from the text — an
+                `ERROR: API 403: ...` string re-read as a document blocked
+                ordinary cluster failures (PR #197 review). An index that
+                is absent gets the structural pass, so this can only ever
+                relax a result the producer vouched for.
         """
         with _fail_closed():
             try:
-                return self._prepare(model, messages, tools, iteration=iteration, ingress=ingress)
+                return self._prepare(
+                    model,
+                    messages,
+                    tools,
+                    iteration=iteration,
+                    ingress=ingress,
+                    tool_errors=tool_errors,
+                )
             except RecursionError as exc:
                 raise _blocked("outbound data is too deeply nested") from exc
 
@@ -767,6 +789,7 @@ class OutboundPolicy:
         *,
         iteration: int,
         ingress: Mapping[int, Sequence[RedactionRecord]] | None = None,
+        tool_errors: Collection[int] | None = None,
     ) -> PreparedOutbound:
         if not isinstance(model, str) or not model:
             raise _blocked("model name must be non-empty text")
@@ -780,7 +803,15 @@ class OutboundPolicy:
         prepared_messages = []
         for index, message in enumerate(messages):
             own_start = len(records)
-            prepared_messages.append(_sanitize_message(message, index, records, pending))
+            prepared_messages.append(
+                _sanitize_message(
+                    message,
+                    index,
+                    records,
+                    pending,
+                    error=tool_errors is not None and index in tool_errors,
+                )
+            )
             carried = _carried_records(index, ingress)
             if carried:
                 own = records[own_start:]

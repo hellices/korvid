@@ -70,11 +70,21 @@ class _Provider(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class _IngressRecords:
-    """Redactions applied to one message, tied to that message."""
+class _MessageProvenance:
+    """What the boundary must know about a message that its text cannot say.
+
+    Two such facts, and both are tied to the message object rather than
+    to its content: the redactions already applied to it on the way in,
+    and — for a tool result — whether the producer declared it a failure
+    rather than a result. Neither is recoverable from the text. A
+    redaction that *removed* its evidence leaves nothing to rediscover,
+    and an `ERROR: ...` string is indistinguishable from a document that
+    says the same thing, which is the whole point of asking the producer.
+    """
 
     message: dict[str, Any]
-    records: tuple[RedactionRecord, ...]
+    records: tuple[RedactionRecord, ...] = ()
+    error: bool = False
 
 
 def _message_chars(message: dict[str, Any]) -> int:
@@ -193,7 +203,7 @@ class AgentRuntime:
         # the message it describes: content is not an identifier, and two
         # messages that sanitize to the same text are still two messages
         # — one of which may never have been redacted at all.
-        self._ingress_records: dict[int, _IngressRecords] = {}
+        self._provenance: dict[int, _MessageProvenance] = {}
         self._total_in = 0
         self._total_out = 0
         self._estimated = False
@@ -266,32 +276,42 @@ class AgentRuntime:
         return self._latest_outbound_payload
 
     def _remember_ingress(
-        self, message: dict[str, Any], records: Sequence[RedactionRecord]
+        self,
+        message: dict[str, Any],
+        records: Sequence[RedactionRecord],
+        *,
+        error: bool = False,
     ) -> None:
-        """Keep the redactions applied to one message's content on the way in.
+        """Keep what the boundary cannot re-derive about one message.
 
         The entry holds the message itself, which both identifies it and
         keeps it alive: an id whose object had been freed could be handed
         to a later allocation and silently adopt someone else's records.
         It retains nothing history does not already hold — the content is
-        the sanitized text that is in the payload.
+        the sanitized text that is in the payload, and the verdict is one
+        bit about it.
         """
-        if records:
-            self._ingress_records[id(message)] = _IngressRecords(message, tuple(records))
+        if records or error:
+            self._provenance[id(message)] = _MessageProvenance(message, tuple(records), error)
 
-    def _ingress_by_index(self) -> dict[int, tuple[RedactionRecord, ...]]:
+    def _provenance_by_index(self) -> tuple[dict[int, tuple[RedactionRecord, ...]], set[int]]:
         """Project the store onto the positions the policy will see.
 
         The policy works on a list, so identity has to become position
         exactly once, here, against the same history the request is built
         from.
         """
-        projected: dict[int, tuple[RedactionRecord, ...]] = {}
+        records: dict[int, tuple[RedactionRecord, ...]] = {}
+        errors: set[int] = set()
         for index, message in enumerate(self._messages):
-            entry = self._ingress_records.get(id(message))
-            if entry is not None and entry.message is message:
-                projected[index] = entry.records
-        return projected
+            entry = self._provenance.get(id(message))
+            if entry is None or entry.message is not message:
+                continue
+            if entry.records:
+                records[index] = entry.records
+            if entry.error:
+                errors.add(index)
+        return records, errors
 
     async def _execute_tool(
         self, name: str, arguments: dict[str, Any]
@@ -318,14 +338,17 @@ class AgentRuntime:
 
     async def _tool_result(
         self, name: str, arguments: str
-    ) -> tuple[str, tuple[RedactionRecord, ...]]:
+    ) -> tuple[str, tuple[RedactionRecord, ...], bool]:
         """Run one tool call and return what history may keep of it.
 
         Whether the text is a failure is the producer's to state, never
         the boundary's to read off the text: a structured result that
         opened with `ERROR:` used to skip the pass that sees nested
         secrets (PR #197 review). The failures raised here are errors by
-        construction, so they say so.
+        construction, so they say so. The verdict is returned with the
+        text because it has to be stored with the message: every later
+        request re-sanitizes history from scratch, and by then the text
+        is all there is.
 
         Head+tail compaction, not a prefix cut: reports place their
         evidence (events, log excerpts) last by design. Structured
@@ -353,9 +376,10 @@ class AgentRuntime:
                 # Same ingest cap as ToolExecutor — a huge exception
                 # message must not bypass the limit into history.
                 result = cap_result(f"ERROR: {exc}")
-        return sanitize_recorded_tool_result(
+        text, records = sanitize_recorded_tool_result(
             name, result, produced, max_chars=self._max_result_chars, error=errored
         )
+        return text, records, errored
 
     def _truncate_history(self, start: int) -> None:
         """Drop history from `start` on, and the records that described it.
@@ -365,19 +389,20 @@ class AgentRuntime:
         nothing.
         """
         del self._messages[start:]
-        self._forget_dropped_ingress_records()
+        self._forget_dropped_provenance()
 
-    def _forget_dropped_ingress_records(self) -> None:
-        """Drop records for content no longer in history.
+    def _forget_dropped_provenance(self) -> None:
+        """Drop what is known about content no longer in history.
 
-        Their message is gone from the payload, so reporting them would
-        name a path nobody can find.
+        Their message is gone from the payload, so reporting a record
+        would name a path nobody can find, and holding a verdict for a
+        message that is not there could only ever be adopted by mistake.
         """
-        if not self._ingress_records:
+        if not self._provenance:
             return
         live = {id(message) for message in self._messages}
-        self._ingress_records = {
-            identity: entry for identity, entry in self._ingress_records.items() if identity in live
+        self._provenance = {
+            identity: entry for identity, entry in self._provenance.items() if identity in live
         }
 
     def _trim_history(self) -> None:
@@ -399,7 +424,7 @@ class AgentRuntime:
         if len(self._messages) < before:
             removed = before - len(self._messages)
             self._shift_turn_bases(removed)
-            self._forget_dropped_ingress_records()
+            self._forget_dropped_provenance()
             # Dropped context makes the agent "forget" earlier exchanges;
             # leave a trace so such reports are debuggable.
             logger.info(
@@ -470,7 +495,7 @@ class AgentRuntime:
             arguments = str(tc["arguments"])
             yield ToolCallStarted(call_id=call_id, name=name, arguments=arguments)
             try:
-                result, ingress_records = await self._tool_result(name, arguments)
+                result, ingress_records, errored = await self._tool_result(name, arguments)
             except OutboundPolicyError:
                 # A blocked result is not reportable to the model: close
                 # the call the UI is showing, then let it reach run_turn's
@@ -498,7 +523,7 @@ class AgentRuntime:
             )
             tool_message = {"role": "tool", "tool_call_id": call_id, "content": result}
             self._messages.append(tool_message)
-            self._remember_ingress(tool_message, ingress_records)
+            self._remember_ingress(tool_message, ingress_records, error=errored)
         for tc in excess:
             summary = "discarded: too many tool calls in one response"
             yield ToolCallStarted(
@@ -587,14 +612,16 @@ class AgentRuntime:
         the turn is rejected with a message the user can act on.
         """
         while True:
-            self._forget_dropped_ingress_records()
+            self._forget_dropped_provenance()
+            ingress, tool_errors = self._provenance_by_index()
             try:
                 return self._outbound.prepare(
                     self._provider.name,
                     provider_prepared_messages(self._provider, self._messages),
                     self._tools,
                     iteration=iteration,
-                    ingress=self._ingress_by_index(),
+                    ingress=ingress,
+                    tool_errors=tool_errors,
                 )
             except OutboundRequestTooLarge:
                 removed = self._drop_oldest_retained_turn()

@@ -12,6 +12,7 @@ from korvid.agent.prompts import NO_WRITE_PROMPT
 from korvid.agent.runtime import MAX_HISTORY_TURNS, AgentRuntime
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
+from korvid.k8s.errors import ApiStatusError
 from korvid.tools.executor import (
     MAX_RESULT_CHARS,
     RecordedExecution,
@@ -1665,7 +1666,7 @@ def _one_tool_turn(tool: str) -> list[list[dict[str, Any]]]:
     ]
 
 
-def _dump_ingress_store(runtime: AgentRuntime) -> str:
+def _dump_provenance_store(runtime: AgentRuntime) -> str:
     """Everything the store holds — records and the messages they point at."""
     return json.dumps(
         [
@@ -1673,7 +1674,7 @@ def _dump_ingress_store(runtime: AgentRuntime) -> str:
                 "message": entry.message,
                 "records": [(r.path, r.reason) for r in entry.records],
             }
-            for entry in runtime._ingress_records.values()
+            for entry in runtime._provenance.values()
         ]
     )
 
@@ -1831,7 +1832,7 @@ async def test_trimming_history_leaves_no_stale_redaction_records() -> None:
     snapshot = runtime.latest_outbound_payload
     assert snapshot is not None
     assert "control-character" not in _reasons(runtime)
-    assert not runtime._ingress_records
+    assert not runtime._provenance
 
 
 async def test_a_blocked_turn_leaves_no_stale_records_for_the_next_one() -> None:
@@ -1880,7 +1881,7 @@ async def test_the_ingress_record_map_never_retains_raw_content() -> None:
 
     await collect(runtime, "why?", "DB_PASSWORD=screen-raw")
 
-    stored = _dump_ingress_store(runtime)
+    stored = _dump_provenance_store(runtime)
     assert "hunter2-raw" not in stored
     assert "screen-raw" not in stored
 
@@ -2012,7 +2013,7 @@ async def test_producer_records_are_dropped_when_their_turn_is_trimmed() -> None
         await collect(runtime, f"question {index}")
 
     assert "control-character" not in _reasons(runtime)
-    assert not runtime._ingress_records
+    assert not runtime._provenance
 
 
 async def test_producer_records_do_not_survive_a_rolled_back_turn() -> None:
@@ -2035,7 +2036,7 @@ async def test_producer_records_do_not_survive_a_rolled_back_turn() -> None:
     snapshot = runtime.latest_outbound_payload
     assert snapshot is not None
     assert "control-character" not in _reasons(runtime)
-    assert not runtime._ingress_records
+    assert not runtime._provenance
 
 
 async def test_the_producer_record_map_never_retains_raw_content() -> None:
@@ -2049,7 +2050,7 @@ async def test_the_producer_record_map_never_retains_raw_content() -> None:
 
     await collect(runtime, "why?")
 
-    stored = _dump_ingress_store(runtime)
+    stored = _dump_provenance_store(runtime)
     assert "cmF3LXNlY3JldA==" not in stored
 
 
@@ -2202,7 +2203,7 @@ async def test_the_record_store_holds_no_content_of_its_own() -> None:
 
     await collect(runtime, "why?", "DB_PASSWORD=hunter2-raw")
 
-    assert "hunter2-raw" not in _dump_ingress_store(runtime)
+    assert "hunter2-raw" not in _dump_provenance_store(runtime)
 
 
 async def test_a_freed_message_cannot_hand_its_records_to_a_new_one() -> None:
@@ -2210,13 +2211,13 @@ async def test_a_freed_message_cannot_hand_its_records_to_a_new_one() -> None:
     runtime = AgentRuntime(ScriptedProvider(_text_turn(30)), EchoExecutor())
 
     await collect(runtime, "why?", "bad\x07")
-    recorded = [entry.message for entry in runtime._ingress_records.values()]
+    recorded = [entry.message for entry in runtime._provenance.values()]
     assert recorded, "the first turn must have produced a record to pin"
     runtime._truncate_history(1)
     for index in range(20):
         await collect(runtime, f"filler {index}", "view=pods")
 
-    assert all(entry.message in runtime._messages for entry in runtime._ingress_records.values())
+    assert all(entry.message in runtime._messages for entry in runtime._provenance.values())
     for item in _reasons(runtime):
         assert item != "control-character"
 
@@ -2263,7 +2264,7 @@ async def test_an_unredactable_tool_result_leaves_no_history_behind() -> None:
     await collect(runtime, "why?")
 
     assert [m.get("role") for m in runtime._messages] == ["system"]
-    assert not runtime._ingress_records
+    assert not runtime._provenance
 
 
 async def test_an_unredactable_tool_result_reports_nothing_raw() -> None:
@@ -2464,5 +2465,127 @@ async def test_a_turn_blocked_at_ingress_leaves_no_history_behind() -> None:
     await collect(runtime, "why?")
 
     assert not [m for m in runtime._messages if m.get("role") in {"tool", "assistant"}]
-    assert not runtime._ingress_records
+    assert not runtime._provenance
     assert len(ScriptedProvider(_get_resource_turn()).turns) == 2
+
+
+# --- An ordinary cluster failure is not a document (round 9) ---------------
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ApiStatusError(401, "Unauthorized"),
+        ApiStatusError(403, "pods 'web' is forbidden: User cannot get resource"),
+        ApiStatusError(404, 'pods "web" not found'),
+        ApiStatusError(500, "Internal Server Error"),
+        ConnectionError("[Errno 111] Connection refused"),
+    ],
+    ids=["401", "403", "404", "500", "network"],
+)
+async def test_a_cluster_failure_reaches_the_model_and_the_turn_continues(
+    failure: Exception,
+) -> None:
+    """The producer's verdict has to survive into history: the boundary
+    pass re-reads a stored result, and re-parsing an error string as YAML
+    blocked ordinary failures (PR #197 review)."""
+
+    class _AngryKube:
+        async def get_object(self, meta: Any, namespace: str, name: str) -> dict[str, Any]:
+            raise failure
+
+    provider = ScriptedProvider(_get_resource_turn())
+    runtime = AgentRuntime(
+        provider,
+        ToolExecutor(_AngryKube(), {"pods": PODS_META}),  # type: ignore[arg-type]  # test double for ReadOps
+    )
+
+    events = await collect(runtime, "why?")
+
+    assert not [e for e in events if isinstance(e, AgentError)]
+    assert len(provider.calls) == 2
+    tool_messages = [m for m in runtime._messages if m.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    assert str(tool_messages[0]["content"]).startswith("ERROR:")
+    sent = json.dumps(provider.calls[1])
+    assert "ERROR:" in sent
+
+
+async def test_a_stored_error_is_not_reparsed_as_a_document() -> None:
+    """The second request re-sanitizes history from scratch; the verdict
+    must travel with the message, not be re-derived from its text."""
+
+    class _AngryKube:
+        async def get_object(self, meta: Any, namespace: str, name: str) -> dict[str, Any]:
+            raise ApiStatusError(403, "pods 'web' is forbidden: User cannot get resource")
+
+    provider = ScriptedProvider(_get_resource_turn())
+    runtime = AgentRuntime(
+        provider,
+        ToolExecutor(_AngryKube(), {"pods": PODS_META}),  # type: ignore[arg-type]  # test double for ReadOps
+    )
+
+    await collect(runtime, "why?")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    tool_entry = next(
+        m for m in json.loads(snapshot.payload_json)["messages"] if m["role"] == "tool"
+    )
+    assert tool_entry["content"].startswith("ERROR:")
+    assert "forbidden" in tool_entry["content"]
+
+
+async def test_the_producer_verdict_never_reaches_the_provider() -> None:
+    """It is boundary bookkeeping, not payload: the wire and the hook see
+    a tool message with exactly the canonical fields."""
+
+    class _AngryKube:
+        async def get_object(self, meta: Any, namespace: str, name: str) -> dict[str, Any]:
+            raise ApiStatusError(404, "not found")
+
+    provider = ScriptedProvider(_get_resource_turn())
+    runtime = AgentRuntime(
+        provider,
+        ToolExecutor(_AngryKube(), {"pods": PODS_META}),  # type: ignore[arg-type]  # test double for ReadOps
+    )
+
+    await collect(runtime, "why?")
+
+    tool_sent = [m for m in provider.calls[1] if m.get("role") == "tool"]
+    assert tool_sent
+    assert all(set(m) == {"role", "tool_call_id", "content"} for m in tool_sent)
+
+
+async def test_an_error_shaped_document_is_still_a_document_at_the_boundary() -> None:
+    """The verdict is only ever the producer's; a string-only executor
+    still gets the structural pass on both passes."""
+
+    class Duck:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return _ERROR_SHAPED_SECRET
+
+    provider = ScriptedProvider(_get_resource_turn())
+    runtime = AgentRuntime(provider, Duck())
+
+    await collect(runtime, "why?")
+
+    assert len(provider.calls) == 2
+    assert "cmF3LXNlY3JldA==" not in json.dumps(provider.calls)
+
+
+async def test_a_producer_verdict_is_dropped_with_the_message_it_belongs_to() -> None:
+    class _AngryKube:
+        async def get_object(self, meta: Any, namespace: str, name: str) -> dict[str, Any]:
+            raise ApiStatusError(404, "not found")
+
+    runtime = AgentRuntime(
+        ScriptedProvider(_get_resource_turn()),
+        ToolExecutor(_AngryKube(), {"pods": PODS_META}),  # type: ignore[arg-type]  # test double for ReadOps
+    )
+
+    await collect(runtime, "why?")
+    runtime._messages = [m for m in runtime._messages if m.get("role") != "tool"]
+    runtime._forget_dropped_provenance()
+
+    assert not [entry for entry in runtime._provenance.values() if entry.error]
