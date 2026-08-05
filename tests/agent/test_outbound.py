@@ -1005,3 +1005,85 @@ def test_an_ordinary_tool_call_id_is_untouched() -> None:
 
     assert prepared.messages[2]["tool_calls"][0]["id"] == "call_abc123"
     assert prepared.messages[3]["tool_call_id"] == "call_abc123"
+
+
+# --- Credential text inside a mapping key at the boundary (round 5) ---------
+
+
+def _schema_with_key(key: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_resource",
+                "parameters": {"type": "object", "properties": {key: {"type": "string"}}},
+            },
+        }
+    ]
+
+
+def test_a_credential_assignment_in_a_tool_schema_key_never_reaches_the_wire() -> None:
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m",
+        [{"role": "user", "content": "hi"}],
+        _schema_with_key("api_key=raw-secret"),
+        iteration=0,
+    )
+
+    assert "raw-secret" not in prepared.snapshot.payload_json
+    assert "raw-secret" not in prepared.snapshot.export_json()
+
+
+def test_an_authorization_assignment_in_a_tool_schema_key_never_reaches_the_wire() -> None:
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m",
+        [{"role": "user", "content": "hi"}],
+        _schema_with_key("Authorization: Bearer raw-token"),
+        iteration=0,
+    )
+
+    assert "raw-token" not in prepared.snapshot.payload_json
+    assert "raw-token" not in prepared.snapshot.export_json()
+
+
+def test_a_credential_key_record_path_resolves_against_the_payload() -> None:
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m",
+        [{"role": "user", "content": "hi"}],
+        _schema_with_key("api_key=raw-secret"),
+        iteration=0,
+    )
+
+    payload = prepared.snapshot.payload_json
+    for item in prepared.snapshot.redactions:
+        leaf = item.path.rsplit(".", 1)[-1].rsplit("[", 1)[-1].strip('"]')
+        assert leaf in payload, item.path
+
+
+def test_tool_schema_keys_that_collide_after_masking_are_rejected() -> None:
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "t",
+                "parameters": {
+                    "api_key=one": {"type": "string"},
+                    "api_key=two": {"type": "string"},
+                },
+            },
+        }
+    ]
+
+    with pytest.raises(OutboundPolicyError, match="unique"):
+        OutboundPolicy(max_request_chars=20_000).prepare(
+            "m", [{"role": "user", "content": "hi"}], tools, iteration=0
+        )
+
+
+def test_ordinary_tool_schema_keys_are_preserved() -> None:
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m", [{"role": "user", "content": "hi"}], _schema_with_key("namespace"), iteration=0
+    )
+
+    assert "namespace" in prepared.snapshot.payload_json
+    assert prepared.snapshot.redactions == ()

@@ -2038,3 +2038,47 @@ async def test_the_producer_record_map_never_retains_raw_content() -> None:
         {k: [(r.path, r.reason) for r in v] for k, v in runtime._ingress_records.items()}
     )
     assert "cmF3LXNlY3JldA==" not in stored
+
+
+# --- A credential-bearing manifest key, end to end (round 5) ----------------
+
+
+async def test_a_credential_key_in_a_real_manifest_never_reaches_the_snapshot() -> None:
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "web",
+            "annotations": {"api_key=raw-secret": "x", "Authorization: Bearer raw-token": "y"},
+        },
+    }
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), _manifest_executor(manifest))
+
+    await collect(runtime, "why?")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "raw-secret" not in snapshot.export_json()
+    assert "raw-token" not in snapshot.export_json()
+
+
+async def test_every_inventory_path_leaf_appears_in_the_exported_payload() -> None:
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "web",
+            "annotations": {"api_key=raw-secret": "x"},
+            "labels": {"app": "we\x07ird"},
+        },
+    }
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), _manifest_executor(manifest))
+
+    await collect(runtime, "why?")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert snapshot.redactions
+    for item in snapshot.redactions:
+        leaf = item.path.rsplit(".", 1)[-1].rsplit("[", 1)[-1].strip('"]')
+        assert leaf in snapshot.payload_json, item.path

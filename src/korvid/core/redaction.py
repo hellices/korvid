@@ -55,17 +55,45 @@ _MAX_NAME_WINDOW = 3
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _DOUBLE_QUOTED_VALUE = r'"(?:\\.|[^"\\\r\n])*"'
 _SINGLE_QUOTED_VALUE = r"'(?:\\.|[^'\\\r\n])*'"
+#: Control characters are normalized to U+FFFD *before* these patterns
+#: run, so a control character planted inside a keyword would otherwise
+#: leave debris that hides the keyword: `api\x07_key=raw` becomes
+#: `api\ufffd_key=raw`, which `api[\s_-]?key` no longer matches, and the
+#: credential ships. Every keyword therefore tolerates that debris
+#: between its letters. On text that never held a control character this
+#: is exactly the old pattern, because U+FFFD is not there to match.
+_DEBRIS = "\ufffd*"
+_SEPARATOR = r"[\s_\-\ufffd]*"
+
+
+def _keyword(word: str) -> str:
+    """A keyword that still matches after control-character normalization."""
+    return _DEBRIS.join(re.escape(character) for character in word)
+
+
+def _any_keyword(*words: str) -> str:
+    return "|".join(_SEPARATOR.join(_keyword(part) for part in word.split()) for word in words)
+
+
 _AUTHORIZATION_RE = re.compile(
     r"(?im)(?P<prefix>(?<![A-Za-z0-9])"
-    r"(?P<auth_key_quote>[\"']?)authorization(?P=auth_key_quote)\s*[:=]\s*)"
+    rf"(?P<auth_key_quote>[\"']?)(?:{_keyword('authorization')})(?P=auth_key_quote)\s*[:=]\s*)"
     rf"(?P<value>{_DOUBLE_QUOTED_VALUE}|{_SINGLE_QUOTED_VALUE}|"
     r"(?:(?:bearer|basic)\s+)?[^\s,;}\]]+)"
 )
 _CREDENTIAL_RE = re.compile(
     r"(?im)(?P<prefix>(?<![A-Za-z0-9])(?P<credential_key_quote>[\"']?)(?:"
-    r"password|api[\s_-]?key|client[\s_-]?secret|access[\s_-]?token|"
-    r"refresh[\s_-]?token|secret[\s_-]?access[\s_-]?key|credentials|token"
-    r")(?P=credential_key_quote)\s*[:=]\s*)"
+    + _any_keyword(
+        "password",
+        "api key",
+        "client secret",
+        "access token",
+        "refresh token",
+        "secret access key",
+        "credentials",
+        "token",
+    )
+    + r")(?P=credential_key_quote)\s*[:=]\s*)"
     rf"(?P<value>{_DOUBLE_QUOTED_VALUE}|{_SINGLE_QUOTED_VALUE}|[^\s,;}}\]]+)"
 )
 
@@ -174,22 +202,35 @@ def strip_control_characters(text: str, path: str, records: list[RedactionRecord
 
 
 def sanitize_mapping_key(key: str, parent_path: str, records: list[RedactionRecord]) -> str:
-    """Normalize a mapping key so it cannot smuggle control characters.
+    """Clean a mapping key that may itself carry credential text.
+
+    A key is model- or cluster-authored data like any other string, and
+    nothing stops it from *being* the secret: `Authorization: Bearer …`
+    and `api_key=…` are keys as readily as they are values. It gets the
+    same treatment free-form text gets — control characters normalized,
+    credential assignments masked.
+
+    A key that merely *names* a credential (`password`, `dbPassword`) is
+    not an assignment and keeps its spelling: the name is a stable field
+    identifier the reader needs, and it is the value that gets masked.
 
     Args:
         key: The raw key as it arrived.
-        parent_path: Path of the mapping that holds it — the record is
+        parent_path: Path of the mapping that holds it — records are
             built from the *sanitized* key, because the raw spelling is
             not in the payload. Naming it would point a reader at
             something they cannot find, and would carry raw key material
             into a report whose whole purpose is to show that nothing raw
             left.
-        records: Accumulator for the change, if there was one.
+        records: Accumulator for the changes, if there were any.
     """
-    if not _CONTROL_RE.search(key):
+    own: list[RedactionRecord] = []
+    output = redact_text(key, "", own)
+    if not own:
         return key
-    output = _CONTROL_RE.sub("\N{REPLACEMENT CHARACTER}", key)
-    record(records, key_path(parent_path, output), "control-character")
+    item_path = key_path(parent_path, output)
+    for item in own:
+        record(records, item_path, item.reason)
     return output
 
 

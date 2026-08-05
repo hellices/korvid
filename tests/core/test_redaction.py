@@ -521,3 +521,113 @@ def test_every_record_path_names_a_key_present_in_the_redacted_document() -> Non
         assert match is not None, item.path
         key = json.loads(f'"{match.group(1)}"') if match.group(1) is not None else match.group(2)
         assert key in rendered, f"{item.path} names a key absent from the payload"
+
+
+# --- Credential text inside a mapping key (round 5) -------------------------
+#
+# A key was only normalized for control characters, so a key that *is* a
+# credential assignment — `Authorization: Bearer raw`, `api_key=raw` —
+# rode into the payload and into its own record path verbatim.
+
+
+def test_an_authorization_assignment_in_a_key_is_masked() -> None:
+    redacted, records = redact_document({"Authorization: Bearer raw-token": "v"}, path="doc")
+
+    blob = json.dumps(
+        {"doc": redacted, "records": [(r.path, r.reason) for r in records]}, ensure_ascii=False
+    )
+    assert "raw-token" not in blob
+    assert list(redacted) == [f"Authorization: {MASK_PLACEHOLDER}"]
+
+
+def test_a_credential_assignment_in_a_key_is_masked() -> None:
+    redacted, records = redact_document({"api_key=raw-secret": "v"}, path="doc")
+
+    blob = json.dumps(
+        {"doc": redacted, "records": [(r.path, r.reason) for r in records]}, ensure_ascii=False
+    )
+    assert "raw-secret" not in blob
+    assert list(redacted) == [f"api_key={MASK_PLACEHOLDER}"]
+
+
+def test_a_credential_assignment_in_a_nested_key_is_masked() -> None:
+    redacted, records = redact_document(
+        {"spec": {"annotations": {"note api_key=raw-secret": "x"}}}, path="doc"
+    )
+
+    blob = json.dumps(
+        {"doc": redacted, "records": [(r.path, r.reason) for r in records]}, ensure_ascii=False
+    )
+    assert "raw-secret" not in blob
+
+
+def test_a_credential_key_record_path_uses_the_masked_spelling() -> None:
+    _, records = redact_document({"api_key=raw-secret": "v"}, path="doc")
+
+    paths = {item.path for item in records}
+    assert f'doc["api_key={MASK_PLACEHOLDER}"]' in paths
+    assert all("raw-secret" not in path for path in paths)
+
+
+def test_a_credential_key_records_the_reason_it_was_rewritten() -> None:
+    _, records = redact_document({"api_key=raw-secret": "v"}, path="doc")
+
+    assert "credential-assignment" in {item.reason for item in records}
+
+
+def test_keys_that_collide_after_masking_are_rejected() -> None:
+    with pytest.raises(RedactionError, match="keys must remain unique"):
+        redact_document({"api_key=one": 1, "api_key=two": 2}, path="doc")
+
+
+def test_an_exact_sensitive_key_keeps_its_name_and_masks_its_value() -> None:
+    """`password` is a stable field name, not an assignment — it stays."""
+    redacted, _ = redact_document({"password": "hunter2"}, path="doc")
+
+    assert redacted == {"password": MASK_PLACEHOLDER}
+
+
+def test_a_compound_credential_key_keeps_its_name_and_masks_its_value() -> None:
+    redacted, _ = redact_document({"dbPassword": "hunter2", "adminApiKey": 5}, path="doc")
+
+    assert redacted == {"dbPassword": MASK_PLACEHOLDER, "adminApiKey": MASK_PLACEHOLDER}
+
+
+def test_ordinary_keys_are_left_alone() -> None:
+    document = {"metadata": {"name": "web", "labels": {"app": "api", "tier": "backend"}}}
+
+    redacted, records = redact_document(document, path="doc")
+
+    assert redacted == document
+    assert records == []
+
+
+def test_a_key_carrying_both_a_control_character_and_a_credential_is_fully_cleaned() -> None:
+    redacted, records = redact_document({"api\x07_key=raw-secret": "v"}, path="doc")
+
+    blob = json.dumps(
+        {"doc": redacted, "records": [(r.path, r.reason) for r in records]}, ensure_ascii=False
+    )
+    assert "raw-secret" not in blob
+    assert "\x07" not in blob
+    assert {item.reason for item in records} >= {"control-character", "credential-assignment"}
+
+
+def test_a_control_character_inside_a_keyword_no_longer_hides_it() -> None:
+    """Normalization runs first, so debris must not break keyword matching."""
+    for probe in ("api\x07_key=raw-secret", "a\x07pi_key=raw-secret", "pass\x01word: raw-secret"):
+        records: list[RedactionRecord] = []
+
+        cleaned = redact_text(probe, "p", records)
+
+        assert "raw-secret" not in cleaned, probe
+        assert "credential-assignment" in {item.reason for item in records}, probe
+
+
+def test_debris_tolerance_does_not_fire_on_text_that_held_no_control_character() -> None:
+    records: list[RedactionRecord] = []
+
+    cleaned = redact_text("apikeyword and tokenizer and passwordless", "p", records)
+
+    assert cleaned == "apikeyword and tokenizer and passwordless"
+    assert records == []
