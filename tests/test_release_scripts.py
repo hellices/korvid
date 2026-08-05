@@ -1020,6 +1020,12 @@ def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -
     assert "annotated tag publication is irreversible" in runbook
 
 
+def test_release_docs_runbook_requires_protected_tags_and_maintainer_approval() -> None:
+    runbook = " ".join(_release_runbook().split())
+    assert "allow protected tags only" in runbook
+    assert "require approval from a designated release maintainer" in runbook
+
+
 def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> None:
     runbook = _release_runbook()
     assert "~/.config/korvid/config.yaml" in runbook
@@ -1031,6 +1037,20 @@ def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> N
     assert "python -m pip uninstall -y korvid" in runbook
     assert "opt-in cleanup" in runbook
     assert "rerun your package manager with the full desired extra set" in runbook
+
+
+def test_release_docs_runbook_lists_and_cleans_the_os_keyring_credential() -> None:
+    runbook = " ".join(_release_runbook().split())
+    assert "OS keyring" in runbook
+    assert "service `korvid`, account `github-oauth`" in runbook
+    assert 'keyring.delete_password("korvid", "github-oauth")' in runbook
+    assert "before uninstalling korvid" in runbook
+
+
+def test_release_readme_discloses_the_retained_os_keyring_credential() -> None:
+    readme = " ".join(_readme().split())
+    assert "OS keyring credential (`korvid` / `github-oauth`)" in readme
+    assert "cleanup is explicit and opt-in in the [release runbook](docs/release.md)" in readme
 
 
 def test_release_docs_runbook_marks_recovery_boundaries_and_first_release_upgrade_limit() -> None:

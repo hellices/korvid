@@ -11,7 +11,9 @@ Before anyone publishes `v0.1.0`, confirm these external trust boundaries:
 - GitHub tag protection covers `refs/tags/v*` with an immutable rule: only
   trusted release maintainers may create tags, and tag update/deletion is
   prohibited.
-- The protected GitHub Actions environment is named `release`.
+- The protected GitHub Actions environment is named `release`. Its deployment
+  policy must allow protected tags only, and its protection rules must require
+  approval from a designated release maintainer.
 - PyPI Trusted Publishing is bound exactly to:
   - repository: `hellices/korvid`
   - workflow file: `.github/workflows/release.yml`
@@ -171,6 +173,8 @@ retains these paths:
 - `~/.config/korvid/config.yaml`
 - `~/.config/korvid/credentials.json` (fallback only when the OS keyring was
   unavailable or broken)
+- The OS keyring credential stored under service `korvid`, account
+  `github-oauth` (when the keyring was available during GitHub Copilot login)
 - `~/.local/state/korvid/audit.jsonl` (plus rotated `audit.jsonl.1`-`.3`
   backups when rotation has occurred)
 - `~/.local/state/korvid/mcp-endpoint.json` (MCP discovery registry) and its
@@ -192,6 +196,25 @@ Environment overrides are **not** uniform:
 ## opt-in cleanup
 
 This opt-in cleanup is explicit. Only remove the retained paths if you deliberately want to discard local state:
+
+Remove the OS-keyring credential before uninstalling korvid and before deleting
+the fallback file. Run this while the `keyring` dependency from `korvid[agent]`
+is still installed. A missing entry is harmless; any other backend error remains
+visible and must be resolved before continuing.
+
+```sh
+python - <<'PY'
+import keyring
+from keyring.errors import PasswordDeleteError
+
+try:
+    keyring.delete_password("korvid", "github-oauth")
+except PasswordDeleteError:
+    pass
+PY
+```
+
+Then remove the retained files:
 
 ```sh
 # config and credentials are always under ~/.config/korvid

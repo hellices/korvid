@@ -169,7 +169,8 @@ message. `[entra]` adds Entra ID auth for Azure OpenAI.
 
 `python -m pip uninstall -y korvid` removes the package only. It does **not**
 remove `~/.config/korvid/config.yaml`, the fallback
-`~/.config/korvid/credentials.json`, `~/.local/state/korvid/audit.jsonl`,
+`~/.config/korvid/credentials.json`, the OS keyring credential
+(`korvid` / `github-oauth`), `~/.local/state/korvid/audit.jsonl`,
 `~/.local/state/korvid/mcp-endpoint.json` (and its `.lock` sibling),
 `~/.local/share/korvid/logs`, or `~/.local/share/korvid/agent-payloads`;
 cleanup is explicit and opt-in in the [release runbook](docs/release.md).
