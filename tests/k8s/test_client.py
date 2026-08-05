@@ -417,6 +417,30 @@ async def test_watch_objects_emits_list_open_and_event_telemetry() -> None:
     assert seen[2].decoded_bytes > 0
 
 
+async def test_watch_objects_initial_snapshot_reuses_computed_summaries() -> None:
+    client = KubeClient()
+    meta = _deploy_meta()
+    list_resp = {
+        "metadata": {"resourceVersion": "200"},
+        "items": [_generic("dep-a")],
+    }
+    fake_watch = _FakeWatch([])
+    original_summary = client._object_summary
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        patch.object(client, "_object_summary", side_effect=original_summary) as summary_mock,
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        collected = [
+            (ev, summary.name) async for ev, summary in client.watch_objects(meta, "default")
+        ]
+
+    assert collected == [("ADDED", "dep-a")]
+    assert summary_mock.call_count == 1
+
+
 async def test_watch_objects_replicaset_yields_rich_summary() -> None:
     """ReplicaSet kinds get ReplicaSetSummary (revision/desired/ready) via summary_for."""
     client = KubeClient()

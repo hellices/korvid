@@ -320,7 +320,7 @@ class KubeClient(ReadOps, WriteOps):
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
         items = data.get("items", [])
         self._observe_read("list", path, payload=data, object_count=len(items))
-        return [item["metadata"]["name"] for item in data.get("items", [])]
+        return [item["metadata"]["name"] for item in items]
 
     async def detect_cloud_provider(self) -> ProviderInfo:
         """Detect the cluster's cloud provider from a few nodes (issue #30).
@@ -522,7 +522,7 @@ class KubeClient(ReadOps, WriteOps):
 
     async def _initial_object_snapshot(
         self, meta: ResourceMeta, namespace: str | None
-    ) -> tuple[str, dict[str, Any], dict[str, GenericSummary]]:
+    ) -> tuple[str, str | None, list[GenericSummary], dict[str, GenericSummary]]:
         list_path = self._list_path(meta, namespace)
         try:
             data = await self._request_json(list_path)
@@ -532,11 +532,14 @@ class KubeClient(ReadOps, WriteOps):
 
         items = data.get("items", [])
         self._observe_read("list", list_path, payload=data, object_count=len(items))
+        resource_version = (data.get("metadata") or {}).get("resourceVersion")
+        summaries: list[GenericSummary] = []
         known: dict[str, GenericSummary] = {}
         for item in items:
             summary = self._object_summary(meta, item)
+            summaries.append(summary)
             known[f"{summary.namespace}/{summary.name}"] = summary
-        return list_path, data, known
+        return list_path, resource_version, summaries, known
 
     def _watch_objects_requires_poll_fallback(
         self,
@@ -572,10 +575,10 @@ class KubeClient(ReadOps, WriteOps):
             raise RuntimeError("connect() first")
 
         # LIST phase --------------------------------------------------------
-        list_path, data, known = await self._initial_object_snapshot(meta, namespace)
-        resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
-        for item in data.get("items", []):
-            summary = self._object_summary(meta, item)
+        list_path, resource_version, initial_summaries, known = await self._initial_object_snapshot(
+            meta, namespace
+        )
+        for summary in initial_summaries:
             yield ("ADDED", summary)
 
         if not meta.watchable:
@@ -659,7 +662,7 @@ class KubeClient(ReadOps, WriteOps):
             raise
         items = data.get("items", [])
         self._observe_read("list", path, payload=data, object_count=len(items))
-        return [self._object_summary(meta, item) for item in data.get("items", [])]
+        return [self._object_summary(meta, item) for item in items]
 
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
