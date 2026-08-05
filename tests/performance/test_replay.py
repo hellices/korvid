@@ -40,11 +40,16 @@ async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:
 
 
 async def test_replay_time_scale_1_uses_relative_inter_event_delays() -> None:
-    """time_scale=1 must replay within approximately profile.duration_seconds.
+    """time_scale=1 must use inter-event delays, not absolute offsets.
 
     If the delay computation uses each event's absolute offset_seconds instead
-    of the elapsed time since churn started, total sleep = sum(all offsets) ≈
-    many multiples of the profile duration, causing the until() guard to fire.
+    of the elapsed time since churn started, total sleep = sum(all offsets) for
+    60 events at 20 eps over 3 s ≈ 91.5 s > the 30 s until() guard, causing an
+    AssertionError before any assert below is reached.
+
+    The sleep_callback assertion is a scale-independent deterministic check:
+    with the fix, total_sleep ≈ profile.duration_seconds (inter-event delays);
+    with the bug, total_sleep ≈ 91.5 s (sum of absolute offsets).
     """
     profile = WorkloadProfile(
         schema_version=1,
@@ -52,14 +57,20 @@ async def test_replay_time_scale_1_uses_relative_inter_event_delays() -> None:
         seed=186,
         object_count=20,
         namespace_count=4,
-        steady_events_per_second=3,
+        steady_events_per_second=20,
         duration_seconds=3,
         bursts=(),
         failures=(),
     )
-    # With the bug the sum of absolute offsets is ~90 s > the 30 s until()
-    # timeout, causing an AssertionError before any assert below is reached.
-    report = await run_replay(profile, ReplayOptions(time_scale=1))
+    total_sleep: list[float] = [0.0]
+
+    def record_sleep(delay: float) -> None:
+        total_sleep[0] += delay
+
+    report = await run_replay(profile, ReplayOptions(time_scale=1, sleep_callback=record_sleep))
+    # Scale-independent check: inter-event delays sum to ≈ duration_seconds, not sum_of_offsets.
+    # Bug: total_sleep ≈ 91.5 s; fix: total_sleep ≈ 3 s.
+    assert total_sleep[0] < profile.duration_seconds * 3
     assert report.dropped_updates == 0
     assert report.object_count == 20
     assert report.expected_digest == report.final_digest
@@ -96,6 +107,18 @@ async def test_replay_gone_reconnects_and_digest_matches() -> None:
 
 
 async def test_replay_gone_reconnects_with_time_scale_1() -> None:
+    """HTTP 410 reconnect with time_scale=1 must use elapsed-based delay, not absolute offsets.
+
+    With the absolute-offset reconnect bug, gen=1 events (post-reconnect) sleep
+    their full absolute offset_seconds values.  For 95 events at 20 eps over
+    5 s (offsets 0.30-5.00 s), the total gen=1 sleep ~251.75 s >> the 30 s
+    until() guard, causing a deterministic failure even when run in isolation
+    (margin 221.75 s, eliminating the pilot-overhead timing race in duration_seconds=2).
+
+    The sleep_callback assertion provides a scale-independent deterministic check:
+    with the fix, total_sleep ≈ profile.duration_seconds; with the bug, gen=1 alone
+    contributes ≈ 251.75 s.
+    """
     profile = WorkloadProfile(
         schema_version=1,
         id="test-gone-ts1",
@@ -103,13 +126,20 @@ async def test_replay_gone_reconnects_with_time_scale_1() -> None:
         object_count=20,
         namespace_count=4,
         steady_events_per_second=20,
-        duration_seconds=2,
+        duration_seconds=5,
         bursts=(),
         failures=(FailureInjection(kind="gone", at_event=5),),
     )
+    total_sleep: list[float] = [0.0]
 
-    report = await run_replay(profile, ReplayOptions(time_scale=1))
+    def record_sleep(delay: float) -> None:
+        total_sleep[0] += delay
 
+    report = await run_replay(profile, ReplayOptions(time_scale=1, sleep_callback=record_sleep))
+
+    # Scale-independent check: total inter-event delays ≈ profile.duration_seconds.
+    # With the absolute-offset bug: gen=1 alone contributes ≈ 251.75 s.
+    assert total_sleep[0] < profile.duration_seconds * 3
     assert report.expected_digest == report.final_digest
     assert report.dropped_updates == 0
     assert report.api.operations["list"] == 2

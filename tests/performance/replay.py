@@ -13,8 +13,8 @@ import json
 import os
 import platform
 import sys
-from collections.abc import AsyncIterator, Iterable
-from dataclasses import asdict, dataclass
+from collections.abc import AsyncIterator, Callable, Iterable
+from dataclasses import asdict, dataclass, field
 from time import monotonic
 from typing import Any, cast
 
@@ -56,10 +56,14 @@ class ReplayOptions:
         time_scale: Multiplier applied to every scheduled-event sleep.
             0 skips all sleeps (fastest); 1.0 replays at real time.
         sample_interval: Seconds between process-memory samples.
+        sleep_callback: Optional callable invoked with each scheduled sleep
+            duration (seconds) before the sleep occurs.  Used by tests to
+            accumulate total sleep without modifying the production path.
     """
 
     time_scale: float = 1.0
     sample_interval: float = 1.0
+    sleep_callback: Callable[[float], None] | None = field(default=None, hash=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -204,6 +208,8 @@ class _ReplaySource:
             elapsed = monotonic() - self._replay_start
             delay = event.offset_seconds * self._options.time_scale - elapsed
             if delay > 0:
+                if self._options.sleep_callback is not None:
+                    self._options.sleep_callback(delay)
                 await asyncio.sleep(delay)
 
             await self._handle_failure_if_any(event, i)
