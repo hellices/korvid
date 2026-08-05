@@ -2586,3 +2586,113 @@ def test_as_recorded_does_not_wrap_what_already_satisfies_the_contract() -> None
     executor = make_executor(FakeKube())
 
     assert as_recorded(executor) is executor
+
+
+# --- Shaped text is redacted before it is cut (round 9) --------------------
+
+_LOG_SECRET = "9f3c1a7e42b85d06c7e1f0a2b3d4e5f60718293a4b5c6d7e8f90"
+
+
+def _credential_log_kube(assignment: str) -> FakeDiagnoseKube:
+    """A rollout failure whose log excerpts carry a credential assignment."""
+    kube = FakeDiagnoseKube()
+    kube.objects[("deployments", "api")] = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+        "spec": {"replicas": 2},
+        "status": {"replicas": 2, "readyReplicas": 1, "conditions": []},
+    }
+    replicaset = kube.objects[("replicasets", "api-6f")]
+    replicaset["metadata"].update(
+        {
+            "namespace": "default",
+            "uid": "rs-uid",
+            "ownerReferences": [
+                {"kind": "Deployment", "name": "api", "uid": "deploy-uid", "controller": True}
+            ],
+        }
+    )
+    replicaset["spec"] = {"replicas": 1}
+    replicaset["status"] = {"replicas": 1, "readyReplicas": 0}
+    base = kube.objects[("pods", "api-1")]
+    for index in range(2, 4):
+        clone = copy.deepcopy(base)
+        clone["metadata"]["name"] = f"api-{index}"
+        kube.objects[("pods", f"api-{index}")] = clone
+    for key, obj in list(kube.objects.items()):
+        if key[0] != "pods":
+            continue
+        obj["metadata"]["ownerReferences"] = [
+            {"kind": "ReplicaSet", "name": "api-6f", "uid": "rs-uid", "controller": True}
+        ]
+        obj["metadata"].setdefault("namespace", "default")
+        obj["status"]["phase"] = "Pending"
+    # Long enough that each pod block still exceeds its share after
+    # masking, so the head+tail cut genuinely fires on this fixture.
+    kube.log_lines = [
+        "." * (index % 11) + f"level=error {assignment} retry " + "z" * 520 for index in range(200)
+    ]
+    return kube
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        f"api_key={_LOG_SECRET}",
+        f"password={_LOG_SECRET}",
+        f"AWS_SECRET_ACCESS_KEY={_LOG_SECRET}",
+    ],
+    ids=["api_key", "password", "aws"],
+)
+async def test_a_shaped_report_is_redacted_before_it_is_compacted(assignment: str) -> None:
+    """Head+tail compaction cuts at a byte offset, so an assignment that
+    straddles the cut loses the keyword that classifies it and strands the
+    value in the tail. Redaction has to run first (PR #197 review)."""
+    outcome = await _diagnose_executor(_credential_log_kube(assignment)).execute_recorded(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+
+    assert _LOG_SECRET not in outcome.text
+    assert MASK_PLACEHOLDER in outcome.text
+    assert outcome.redactions
+    assert not outcome.error
+
+
+async def test_a_compacted_report_keeps_its_evidence_and_its_bound() -> None:
+    kube = _credential_log_kube(f"api_key={_LOG_SECRET}")
+
+    out = await _diagnose_executor(kube).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+
+    assert "WORKLOAD — Deployment default/api" in out
+    assert "POD DIAGNOSIS — default/api-1" in out
+    assert "middle truncated" in out
+    assert len(out) <= MAX_RESULT_CHARS
+
+
+async def test_a_report_without_credentials_is_left_alone() -> None:
+    kube = _credential_log_kube("level=error image pull failed")
+
+    outcome = await _diagnose_executor(kube).execute_recorded(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+
+    assert MASK_PLACEHOLDER not in outcome.text
+    assert not outcome.redactions
+    assert "image pull failed" in outcome.text
+
+
+async def test_the_string_api_reports_the_same_redacted_report() -> None:
+    """`execute()` is what the MCP host and the eval grader take; the
+    producer's redaction is on that path too, not only the recorded one."""
+    out = await _diagnose_executor(_credential_log_kube(f"api_key={_LOG_SECRET}")).execute(
+        "diagnose_workload",
+        {"kind": "deployments", "name": "api", "namespace": "default"},
+    )
+
+    assert _LOG_SECRET not in out
+    assert MASK_PLACEHOLDER in out

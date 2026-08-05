@@ -10,7 +10,13 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
 from korvid.core.portforward import controller_owner
-from korvid.core.redaction import RedactionError, RedactionRecord, record, redact_document
+from korvid.core.redaction import (
+    RedactionError,
+    RedactionRecord,
+    record,
+    redact_document,
+    redact_text,
+)
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HelmReleaseSummary, HelmRevisionSummary
@@ -314,6 +320,32 @@ def compact_result(result: str, limit: int) -> str:
     head = content * 2 // 5
     tail = content - head
     return result[:head] + _MIDDLE_TRUNCATION_MARKER + result[len(result) - tail :]
+
+
+def redacted_and_compacted(text: str, limit: int, path: str, records: list[RedactionRecord]) -> str:
+    """Redact shaped text, then compact it — in that order, always.
+
+    `compact_result` cuts at a byte offset, so an assignment straddling
+    the cut is split: the head keeps `api_key=` with the value's first
+    characters, and the tail keeps the rest as a bare token with nothing
+    left to classify it. Redaction afterwards sees neither as a
+    credential and the value survives (PR #197 review).
+
+    Redacting first removes the value before there is anything to split,
+    and the records go to the caller because this pass is the only one
+    that sees the text at full length: what it masks, a later pass over
+    the compacted text may no longer be able to find.
+
+    Args:
+        text: The shaped report, at full length.
+        limit: Character budget for the result.
+        path: Record path root for anything redacted here.
+        records: Accumulator for those redactions.
+
+    Returns:
+        The redacted report, compacted to `limit`.
+    """
+    return compact_result(redact_text(text, path, records), limit)
 
 
 #: Derived surfaces (issue #91): the registry in `korvid.tools.registry`
@@ -1311,7 +1343,7 @@ class ToolExecutor(RecordedExecution):
 
     async def _diagnose_deployment(
         self, namespace: str, name: str, workload: dict[str, Any]
-    ) -> str:
+    ) -> ToolOutcome:
         metadata = workload.get("metadata") or {}
         uid = str(metadata.get("uid") or "")
         if not uid:
@@ -1391,6 +1423,7 @@ class ToolExecutor(RecordedExecution):
         )
         share = remaining // max(1, len(selected))
         # The runtime preserves the report tail when applying the smaller profile cap.
+        records: list[RedactionRecord] = []
         for pod in reversed(selected):
             try:
                 diagnosis = await self._diagnose_pod(
@@ -1406,10 +1439,13 @@ class ToolExecutor(RecordedExecution):
                     *(f"  {line}" for line in diagnosis.splitlines()),
                 ]
             )
-            report.append(compact_result(block, share))
+            # Redacted before it is cut, not after: the cut lands on a
+            # byte offset and would split a credential assignment into a
+            # masked head and an unclassifiable tail (PR #197 review).
+            report.append(redacted_and_compacted(block, share, "report", records))
         if omitted_line:
             report.append(omitted_line)
-        return "\n".join(report)
+        return ToolOutcome(text="\n".join(report), redactions=tuple(records))
 
     @staticmethod
     def _deployment_status_line(workload: dict[str, Any]) -> str:
@@ -1445,7 +1481,7 @@ class ToolExecutor(RecordedExecution):
             pod.name,
         )
 
-    async def _diagnose_workload(self, args: dict[str, Any]) -> str:
+    async def _diagnose_workload(self, args: dict[str, Any]) -> ToolOutcome:
         """One-call rollout diagnosis for supported workload kinds."""
         kind = str(args["kind"]).strip().lower()
         name = _reject_slash_name(str(args["name"]), "name")

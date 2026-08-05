@@ -19,6 +19,7 @@ from korvid.tools.executor import (
     ToolExecutor,
 )
 from tests.tools.test_executor import (
+    _LOG_SECRET,
     LONG_NAME_ENV_SENTINEL,
     NESTED_SECRET_SENTINEL,
     oversized_crd_with_nested_credentials,
@@ -2589,3 +2590,39 @@ async def test_a_producer_verdict_is_dropped_with_the_message_it_belongs_to() ->
     runtime._forget_dropped_provenance()
 
     assert not [entry for entry in runtime._provenance.values() if entry.error]
+
+
+def _credential_report_executor() -> Any:
+    """A real ToolExecutor whose rollout logs carry a credential."""
+    from tests.tools.test_executor import _credential_log_kube, _diagnose_executor
+
+    return _diagnose_executor(_credential_log_kube(f"api_key={_LOG_SECRET}"))
+
+
+async def test_a_shaped_report_reaches_the_provider_already_redacted() -> None:
+    """The producer's pass is the only one that sees the report at full
+    length; its records have to reach the inventory with it."""
+
+    provider = ScriptedProvider(
+        [
+            [
+                {
+                    "type": "tool_call",
+                    "id": "c1",
+                    "name": "diagnose_workload",
+                    "arguments": '{"kind": "deployments", "name": "api", "namespace": "default"}',
+                },
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, _credential_report_executor())
+
+    await collect(runtime, "why?")
+
+    assert _LOG_SECRET not in json.dumps(provider.calls)
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert _LOG_SECRET not in snapshot.payload_json
+    assert any(r.reason == "credential-assignment" for r in snapshot.redactions)

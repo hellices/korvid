@@ -28,9 +28,15 @@ format:
   credential-named keys, and credential-named env values are masked at any
   nesting depth before the document is bounded and returned. An MCP client
   sees the same redacted manifest the model would.
-- **Logs, events, lists, diagnoses, and helm status** get only their own
-  tool-specific shaping (scoping, formatting, size caps). They are
-  **not** credential-pattern masked: a token printed into a pod's log
+- **Compound diagnoses** (`diagnose_workload`) are credential-pattern
+  masked where they are shaped, before the per-pod report is compacted to
+  fit. That reduction cuts at a byte offset, so redacting afterwards
+  would let an assignment split across the cut escape both halves;
+  redacting first means the value is gone before there is anything to
+  split. An MCP client sees the same masked report the model would.
+- **Logs, events, lists, single-pod diagnoses, and helm status** get only
+  their own tool-specific shaping (scoping, formatting, size caps). They
+  are **not** credential-pattern masked: a token printed into a pod's log
   reaches the client verbatim.
 
 The external MCP client (and whatever model or data policy it applies to
