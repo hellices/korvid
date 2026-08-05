@@ -73,9 +73,11 @@ def test_a_mutating_hook_cannot_reach_the_runtime_history() -> None:
 
     history = [{"role": "user", "content": "hi"}]
 
-    prepared = provider_prepared_messages(_Mutating(), history)
+    # Rewriting in place is still a rewrite: it is caught against a
+    # baseline the hook never sees, and the caller's list is untouched.
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_Mutating(), history)
 
-    assert prepared[0]["content"] == "rewritten"
     assert history[0]["content"] == "hi"
 
 

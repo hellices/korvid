@@ -380,6 +380,12 @@ def provider_prepared_messages(
     stays allowed: Ollama's `tool_name`, `thinking`, `function.index` and
     object-valued arguments all leave role and content untouched.
 
+    That comparison is made against a baseline taken *before* the hook
+    runs and never handed to it. Comparing with the copy the hook was
+    given would check a mutated list against itself: adapters are free to
+    work in place, and an in-place reorder or rewrite would then agree
+    with its own result (PR #197 review).
+
     Args:
         provider: The provider adapter; a missing hook means the identity.
         messages: Conversation history to adapt.
@@ -392,34 +398,41 @@ def provider_prepared_messages(
     hook = getattr(provider, "prepare_messages", None)
     if not callable(hook):
         return private
+    baseline = [(message.get("role"), message.get("content")) for message in private]
     try:
         prepared = hook(private)
     except Exception as exc:
         raise _blocked("provider message preparation failed") from exc
     if not isinstance(prepared, list):
         raise _blocked("provider message preparation returned an invalid shape")
-    if len(prepared) != len(private):
+    if len(prepared) != len(baseline):
         # Ingress redaction records are carried by position in this list.
         # A hook that added or dropped a message would slide every record
         # after it onto the wrong message, so the request is blocked
         # rather than reported inaccurately.
         raise _blocked("provider message preparation changed the message count")
-    for adapted, original in zip(prepared, private, strict=True):
-        if not isinstance(adapted, dict) or not _same_position(adapted, original):
+    for adapted, (role, content) in zip(prepared, baseline, strict=True):
+        if not isinstance(adapted, dict) or not _same_position(adapted, role, content):
             raise _blocked("provider message preparation reordered or rewrote a message")
     return prepared
 
 
-def _same_position(adapted: Mapping[str, Any], original: Mapping[str, Any]) -> bool:
+def _same_position(adapted: Mapping[str, Any], role: Any, content: Any) -> bool:
     """True when an adapted message still says what its position said.
 
     Identity for this purpose is `role` plus `content`: everything else a
     dialect hook touches is representation, and these two are what a
     carried record's path resolves against.
+
+    Args:
+        adapted: The message the hook produced for this position.
+        role: The role this position carried before the hook ran.
+        content: The content this position carried before the hook ran.
+
+    Returns:
+        True when the adapted message still carries both.
     """
-    return adapted.get("role") == original.get("role") and adapted.get("content") == original.get(
-        "content"
-    )
+    return bool(adapted.get("role") == role and adapted.get("content") == content)
 
 
 def _sanitize_arguments(

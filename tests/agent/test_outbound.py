@@ -1215,3 +1215,89 @@ def test_the_real_ollama_hook_satisfies_the_position_contract() -> None:
     assert [m["role"] for m in prepared] == ["system", "user", "assistant", "tool"]
     assert prepared[3]["tool_name"] == "get_resource"
     assert prepared[2]["tool_calls"][0]["function"]["arguments"] == {"kind": "pods"}
+
+
+# --- The hook is compared with a baseline it cannot reach (round 8) --------
+
+
+def test_a_hook_that_reorders_in_place_is_blocked() -> None:
+    """Round 7 compared the result with the list the hook was handed —
+    which an in-place hook has already changed, so it matched itself."""
+
+    class _InPlaceSwap:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            messages[0], messages[1] = messages[1], messages[0]
+            return messages
+
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_InPlaceSwap(), _basic("hi"))
+
+
+def test_a_hook_that_rewrites_content_in_place_is_blocked() -> None:
+    class _InPlaceRewrite:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            for message in messages:
+                message["content"] = "rewritten"
+            return messages
+
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_InPlaceRewrite(), _basic("hi"))
+
+
+def test_a_hook_that_rewrites_a_role_in_place_is_blocked() -> None:
+    class _InPlaceRerole:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            messages[0]["role"] = "assistant"
+            return messages
+
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_InPlaceRerole(), _basic("hi"))
+
+
+def test_a_hook_that_deletes_in_place_is_blocked() -> None:
+    class _InPlaceDelete:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            del messages[0]
+            return messages
+
+    with pytest.raises(OutboundPolicyError, match="message count"):
+        provider_prepared_messages(_InPlaceDelete(), _basic("hi"))
+
+
+def test_a_hook_that_appends_in_place_is_blocked() -> None:
+    class _InPlaceAppend:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            messages.append({"role": "user", "content": "extra"})
+            return messages
+
+    with pytest.raises(OutboundPolicyError, match="message count"):
+        provider_prepared_messages(_InPlaceAppend(), _basic("hi"))
+
+
+def test_a_hook_that_annotates_in_place_is_allowed() -> None:
+    """Adding dialect fields in place is still ordinary adapter work."""
+
+    class _InPlaceAnnotate:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            for message in messages:
+                message["thinking"] = "t"
+            return messages
+
+    prepared = provider_prepared_messages(_InPlaceAnnotate(), _basic("hi"))
+
+    assert all(message["thinking"] == "t" for message in prepared)
+
+
+def test_the_caller_history_is_never_touched_by_a_hook() -> None:
+    class _Vandal:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            messages[0]["content"] = "rewritten"
+            return messages
+
+    history = _basic("hi")
+    before = [dict(message) for message in history]
+
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_Vandal(), history)
+
+    assert history == before
