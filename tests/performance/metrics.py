@@ -4,10 +4,11 @@ import asyncio
 import math
 import tracemalloc
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from time import monotonic
+from types import MappingProxyType
 
 import psutil  # type: ignore[import-untyped]  # dependency ships without inline stubs
 
@@ -118,8 +119,8 @@ class ProcessSummary:
 
 @dataclass(frozen=True)
 class ApiSummary:
-    operations: dict[str, int]
-    paths: dict[str, dict[str, int]]
+    operations: Mapping[str, int]
+    paths: Mapping[str, Mapping[str, int]]
     decoded_bytes: int
     object_count: int
     watch_events: int
@@ -137,6 +138,8 @@ class ApiSummary:
         watch_events = 0
         throttles = 0
         authorization_failures = 0
+        relists = 0
+        relist_candidates: set[str] = set()
         for event in events:
             operations[event.operation] += 1
             paths.setdefault(event.path, Counter())[event.operation] += 1
@@ -148,14 +151,20 @@ class ApiSummary:
                 throttles += 1
             if event.status in {401, 403}:
                 authorization_failures += 1
+            if event.operation == "list" and event.path in relist_candidates:
+                relists += 1
+                relist_candidates.remove(event.path)
+            if event.status == 410:
+                relist_candidates.add(event.path)
         reconnects = sum(max(counts.get("watch_open", 0) - 1, 0) for counts in paths.values())
-        relists = sum(max(counts.get("list", 0) - 1, 0) for counts in paths.values())
         return cls(
-            operations=dict(sorted(operations.items())),
-            paths={
-                path: dict(sorted(counts.items()))
-                for path, counts in sorted(paths.items(), key=lambda item: item[0])
-            },
+            operations=MappingProxyType(dict(sorted(operations.items()))),
+            paths=MappingProxyType(
+                {
+                    path: MappingProxyType(dict(sorted(counts.items())))
+                    for path, counts in sorted(paths.items(), key=lambda item: item[0])
+                }
+            ),
             decoded_bytes=decoded_bytes,
             object_count=object_count,
             watch_events=watch_events,
@@ -188,10 +197,18 @@ class ProcessSampler:
         self._start_time: float | None = None
         self._samples: list[ProcessSample] = []
         self._task: asyncio.Task[None] | None = None
+        self._owns_tracemalloc = False
 
     def start(self) -> None:
+        if self._task is not None:
+            raise RuntimeError(
+                "ProcessSampler.start() cannot run while sampling is already running"
+            )
         self._samples.clear()
         self._start_time = self._clock()
+        self._owns_tracemalloc = not tracemalloc.is_tracing()
+        if self._owns_tracemalloc:
+            tracemalloc.start()
         self._process.cpu_percent()
         self._task = asyncio.create_task(self._run())
 
@@ -203,6 +220,9 @@ class ProcessSampler:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+        if self._owns_tracemalloc and tracemalloc.is_tracing():
+            tracemalloc.stop()
+        self._owns_tracemalloc = False
         return tuple(self._samples)
 
     async def _run(self) -> None:
@@ -271,6 +291,8 @@ class BenchmarkRecorder:
 
 
 def report_payload(report: BenchmarkReport) -> dict[str, object]:
+    api_operations = dict(report.api.operations)
+    api_paths = {path: dict(counts) for path, counts in report.api.paths.items()}
     return {
         "manifest": {
             "profile_id": report.manifest.profile_id,
@@ -306,8 +328,8 @@ def report_payload(report: BenchmarkReport) -> dict[str, object]:
             "rss_slope_mib_per_minute": report.process.rss_slope_mib_per_minute,
         },
         "api": {
-            "operations": report.api.operations,
-            "paths": report.api.paths,
+            "operations": api_operations,
+            "paths": api_paths,
             "decoded_bytes": report.api.decoded_bytes,
             "object_count": report.api.object_count,
             "watch_events": report.api.watch_events,

@@ -19,6 +19,68 @@ from tests.performance.metrics import (
 )
 
 
+class _MemoryInfo:
+    def __init__(self, rss: int) -> None:
+        self.rss = rss
+
+
+class _FakeProcess:
+    def __init__(self, cpu_values: tuple[float, ...], rss_values: tuple[int, ...]) -> None:
+        self.cpu_values = iter(cpu_values)
+        self.rss_values = iter(rss_values)
+
+    def cpu_percent(self, interval: float | None = None) -> float:
+        return next(self.cpu_values)
+
+    def memory_info(self) -> _MemoryInfo:
+        return _MemoryInfo(next(self.rss_values))
+
+
+def _metrics_module() -> Any:
+    return cast(Any, importlib.import_module("tests.performance.metrics"))
+
+
+def _patch_sampler_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cpu_values: tuple[float, ...],
+    rss_values: tuple[int, ...],
+    tracing: bool,
+    python_bytes: tuple[int, ...],
+    strict_tracing: bool = False,
+) -> tuple[dict[str, bool], list[str], Any]:
+    metrics = _metrics_module()
+    state = {"tracing": tracing}
+    lifecycle: list[str] = []
+    blocker = asyncio.Event()
+    original_sleep = asyncio.sleep
+    traced_sizes = iter(python_bytes)
+
+    async def _fake_sleep(_: float) -> None:
+        await blocker.wait()
+
+    def _start() -> None:
+        lifecycle.append("start")
+        state["tracing"] = True
+
+    def _stop() -> None:
+        lifecycle.append("stop")
+        state["tracing"] = False
+
+    def _get_traced_memory() -> tuple[int, int]:
+        if strict_tracing and not state["tracing"]:
+            raise RuntimeError("tracemalloc not tracing")
+        return (next(traced_sizes), 0)
+
+    monkeypatch.setattr(metrics.psutil, "Process", lambda: _FakeProcess(cpu_values, rss_values))
+    monkeypatch.setattr(metrics.tracemalloc, "is_tracing", lambda: state["tracing"])
+    monkeypatch.setattr(metrics.tracemalloc, "start", _start)
+    monkeypatch.setattr(metrics.tracemalloc, "stop", _stop)
+    monkeypatch.setattr(metrics.tracemalloc, "get_traced_memory", _get_traced_memory)
+    monkeypatch.setattr(metrics.asyncio, "sleep", _fake_sleep)
+    return state, lifecycle, original_sleep
+
+
 def run_manifest() -> RunManifest:
     return RunManifest(
         profile_id="smoke-1k",
@@ -118,6 +180,65 @@ def test_report_counts_api_operations_without_path_loss() -> None:
     assert api["object_count"] == 1000
 
 
+def test_api_summary_does_not_treat_repeated_lists_as_relists() -> None:
+    recorder = BenchmarkRecorder()
+    recorder.record_api(ReadTelemetryEvent("list", "/api/v1/pods"))
+    recorder.record_api(ReadTelemetryEvent("list", "/api/v1/pods"))
+
+    report = recorder.report(run_manifest(), (), final_digest="abc")
+
+    assert report.api.relists == 0
+    assert report.api.operations == {"list": 2}
+    assert report.api.paths == {"/api/v1/pods": {"list": 2}}
+
+
+def test_api_summary_counts_relist_only_after_410_then_list() -> None:
+    recorder = BenchmarkRecorder()
+    recorder.record_api(ReadTelemetryEvent("list", "/api/v1/pods"))
+    recorder.record_api(ReadTelemetryEvent("error", "/api/v1/pods", status=410))
+    recorder.record_api(ReadTelemetryEvent("list", "/api/v1/pods"))
+
+    report = recorder.report(run_manifest(), (), final_digest="abc")
+
+    assert report.api.relists == 1
+    assert report.api.operations == {"error": 1, "list": 2}
+    assert report.api.paths == {"/api/v1/pods": {"error": 1, "list": 2}}
+
+
+def test_api_summary_mappings_are_immutable_and_payloads_are_copied() -> None:
+    recorder = BenchmarkRecorder()
+    recorder.record_api(ReadTelemetryEvent("list", "/api/v1/pods"))
+    recorder.record_api(ReadTelemetryEvent("watch_open", "/api/v1/pods"))
+
+    report = recorder.report(run_manifest(), (), final_digest="abc")
+    operations = cast(Any, report.api.operations)
+    paths = cast(Any, report.api.paths)
+
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        operations["list"] = 99
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        paths["/api/v1/pods"]["watch_open"] = 99
+
+    first_payload = report_payload(report)
+    first_api = cast(dict[str, object], first_payload["api"])
+    first_operations = cast(dict[str, int], first_api["operations"])
+    first_paths = cast(dict[str, object], first_api["paths"])
+    first_pod_path = cast(dict[str, int], first_paths["/api/v1/pods"])
+    first_operations["list"] = 41
+    first_pod_path["watch_open"] = 42
+
+    second_payload = report_payload(report)
+    second_api = cast(dict[str, object], second_payload["api"])
+    second_operations = cast(dict[str, int], second_api["operations"])
+    second_paths = cast(dict[str, object], second_api["paths"])
+    second_pod_path = cast(dict[str, int], second_paths["/api/v1/pods"])
+
+    assert report.api.operations == {"list": 1, "watch_open": 1}
+    assert report.api.paths == {"/api/v1/pods": {"list": 1, "watch_open": 1}}
+    assert second_operations == {"list": 1, "watch_open": 1}
+    assert second_pod_path == {"list": 1, "watch_open": 1}
+
+
 def test_report_payload_is_json_serializable_and_stable() -> None:
     recorder = BenchmarkRecorder()
     recorder.record_event(1, 1.0)
@@ -206,37 +327,98 @@ def test_render_markdown_uses_stable_labels() -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_sampler_rejects_double_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, original_sleep = _patch_sampler_runtime(
+        monkeypatch,
+        cpu_values=(0.0, 0.0),
+        rss_values=(100,),
+        tracing=True,
+        python_bytes=(1000,),
+    )
+
+    sampler = ProcessSampler(interval_seconds=0.01, clock=lambda: 10.0)
+    sampler.start()
+    await original_sleep(0)
+    try:
+        with pytest.raises(RuntimeError, match="already running"):
+            sampler.start()
+    finally:
+        await sampler.stop()
+
+
+@pytest.mark.asyncio
+async def test_process_sampler_starts_and_stops_owned_tracemalloc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, lifecycle, original_sleep = _patch_sampler_runtime(
+        monkeypatch,
+        cpu_values=(0.0, 12.5),
+        rss_values=(100,),
+        tracing=False,
+        python_bytes=(1000,),
+        strict_tracing=True,
+    )
+
+    sampler = ProcessSampler(interval_seconds=0.01, clock=lambda: 11.0)
+    sampler.start()
+    await original_sleep(0)
+    samples = await sampler.stop()
+
+    assert samples == (
+        ProcessSample(
+            elapsed_seconds=0.0,
+            cpu_percent=12.5,
+            rss_bytes=100,
+            python_bytes=1000,
+        ),
+    )
+    assert lifecycle == ["start", "stop"]
+    assert state["tracing"] is False
+
+
+@pytest.mark.asyncio
+async def test_process_sampler_preserves_preexisting_tracemalloc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, lifecycle, original_sleep = _patch_sampler_runtime(
+        monkeypatch,
+        cpu_values=(0.0, 8.0),
+        rss_values=(120,),
+        tracing=True,
+        python_bytes=(2000,),
+    )
+
+    sampler = ProcessSampler(interval_seconds=0.01, clock=lambda: 5.0)
+    sampler.start()
+    await original_sleep(0)
+    samples = await sampler.stop()
+
+    assert samples == (
+        ProcessSample(
+            elapsed_seconds=0.0,
+            cpu_percent=8.0,
+            rss_bytes=120,
+            python_bytes=2000,
+        ),
+    )
+    assert lifecycle == []
+    assert state["tracing"] is True
+
+
+@pytest.mark.asyncio
 async def test_process_sampler_skips_warmup_sample(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    metrics = cast(Any, importlib.import_module("tests.performance.metrics"))
-
-    class _MemoryInfo:
-        def __init__(self, rss: int) -> None:
-            self.rss = rss
-
-    class _FakeProcess:
-        def __init__(self) -> None:
-            self.cpu_values = iter((0.0, 12.5, 15.0))
-            self.rss_values = iter((100, 110))
-
-        def cpu_percent(self, interval: float | None = None) -> float:
-            return next(self.cpu_values)
-
-        def memory_info(self) -> _MemoryInfo:
-            return _MemoryInfo(next(self.rss_values))
-
     times = iter((10.0, 11.0))
-    python_bytes = iter((1000, 1200))
-    blocker = asyncio.Event()
-    original_sleep = asyncio.sleep
-
-    async def _fake_sleep(_: float) -> None:
-        await blocker.wait()
-
-    monkeypatch.setattr(metrics.psutil, "Process", _FakeProcess)
-    monkeypatch.setattr(metrics.tracemalloc, "get_traced_memory", lambda: (next(python_bytes), 0))
-    monkeypatch.setattr(metrics.asyncio, "sleep", _fake_sleep)
+    _, _, original_sleep = _patch_sampler_runtime(
+        monkeypatch,
+        cpu_values=(0.0, 12.5, 15.0),
+        rss_values=(100, 110),
+        tracing=True,
+        python_bytes=(1000, 1200),
+    )
 
     sampler = ProcessSampler(interval_seconds=0.01, clock=lambda: next(times))
     sampler.start()
