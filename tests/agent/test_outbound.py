@@ -13,9 +13,12 @@ import yaml
 from korvid.agent.outbound import (
     OutboundPolicy,
     OutboundPolicyError,
+    OutboundRequestTooLarge,
+    request_char_budget,
     sanitize_screen_context,
     sanitize_tool_result,
 )
+from korvid.agent.profiles import build_profile
 from korvid.core.secrets import MASK_PLACEHOLDER
 
 _DEEP_NESTING = 2_000
@@ -520,3 +523,57 @@ def test_structured_string_values_under_compound_credential_keys_are_masked() ->
     assert spec["secretName"] == "db-credentials"
     assert "raw-sensitive-value" not in sanitized
     assert "raw-api-key" not in sanitized
+
+
+@pytest.mark.parametrize("profile_name", ["full", "small"])
+def test_derived_ceiling_admits_a_history_budget_worth_of_escaped_content(
+    profile_name: str,
+) -> None:
+    """The ceiling must clear the conversations the history budget keeps.
+
+    A full retained history of quote- and newline-heavy text serializes to
+    roughly twice its character count and carries the tool schemas on top;
+    when the ceiling equalled the history budget, that ordinary case was
+    blocked (issue #189)."""
+    profile = build_profile(profile_name, readonly=True, resize_supported=False)
+    tools_chars = len(json.dumps(profile.tools))
+    policy = OutboundPolicy(
+        max_request_chars=request_char_budget(
+            max_history_chars=profile.max_history_chars,
+            tools_chars=tools_chars,
+        )
+    )
+    unit = 'line "quoted"\n'
+    content = unit * (profile.max_history_chars // len(unit))
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": content},
+    ]
+
+    prepared = policy.prepare("openai", messages, profile.tools, iteration=1)
+
+    assert len(prepared.snapshot.payload_json) > profile.max_history_chars
+    assert content in json.loads(prepared.snapshot.payload_json)["messages"][1]["content"]
+
+
+def test_derived_ceiling_still_rejects_a_runaway_payload() -> None:
+    policy = OutboundPolicy(
+        max_request_chars=request_char_budget(max_history_chars=10_000, tools_chars=0)
+    )
+    messages = [{"role": "user", "content": "x" * 200_000}]
+
+    with pytest.raises(OutboundRequestTooLarge, match="character limit"):
+        policy.prepare("openai", messages, [], iteration=1)
+
+
+def test_request_char_budget_rejects_impossible_inputs() -> None:
+    with pytest.raises(ValueError, match="max_history_chars must be a positive integer"):
+        request_char_budget(max_history_chars=0, tools_chars=10)
+    with pytest.raises(ValueError, match="tools_chars must not be negative"):
+        request_char_budget(max_history_chars=10, tools_chars=-1)
+
+
+def test_an_over_ceiling_request_is_a_recoverable_policy_error() -> None:
+    """Callers distinguish "too big" from fail-closed content blocks: the
+    first is fixed by dropping history, the second never is."""
+    assert issubclass(OutboundRequestTooLarge, OutboundPolicyError)

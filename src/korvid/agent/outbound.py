@@ -57,6 +57,47 @@ class OutboundPolicyError(ValueError):
     """The provider request was blocked before network I/O."""
 
 
+class OutboundRequestTooLarge(OutboundPolicyError):
+    """The prepared request exceeded the hard character ceiling.
+
+    Distinguished from the fail-closed content/shape blocks because it is
+    recoverable: the same conversation fits again once older turns are
+    dropped, so the caller can retry with less history instead of losing
+    the session.
+    """
+
+
+#: JSON serialization is bigger than the character budget the runtime
+#: accounts for, and by a variable amount: escaping doubles quotes and
+#: newlines (control characters are normalized away before this point),
+#: and the tool schemas ride along on every single request.
+_PAYLOAD_ESCAPE_FACTOR = 2
+#: Room for what message-character accounting never counts: role keys,
+#: per-message envelopes, tool-call ids, and the canonical separators.
+_PAYLOAD_STRUCTURE_SLACK = 8_192
+
+
+def request_char_budget(*, max_history_chars: int, tools_chars: int) -> int:
+    """Hard ceiling for one serialized request.
+
+    Derived from the budgets the runtime actually enforces so the ceiling
+    stays a safety net for anomalous payloads instead of a second,
+    stricter budget that blocks conversations the history budget accepted.
+
+    Args:
+        max_history_chars: Retained-history budget in message characters.
+        tools_chars: Serialized size of the tool schemas sent every call.
+
+    Raises:
+        ValueError: for a non-positive history budget or negative tools size.
+    """
+    if max_history_chars <= 0:
+        raise ValueError("max_history_chars must be a positive integer")
+    if tools_chars < 0:
+        raise ValueError("tools_chars must not be negative")
+    return max_history_chars * _PAYLOAD_ESCAPE_FACTOR + tools_chars + _PAYLOAD_STRUCTURE_SLACK
+
+
 @dataclass(frozen=True)
 class RedactionRecord:
     """One deterministic change made while preparing a provider request."""
@@ -709,7 +750,7 @@ class OutboundPolicy:
             allow_nan=False,
         )
         if len(payload_json) > self._max_request_chars:
-            raise OutboundPolicyError(
+            raise OutboundRequestTooLarge(
                 f"outbound request exceeds {self._max_request_chars} character limit"
             )
         snapshot = OutboundSnapshot(

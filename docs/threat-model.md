@@ -118,11 +118,16 @@ flowchart LR
 - **Untrusted-text treatment** — all tool results and screen context are
   sanitized as data (control-character stripping, credential-pattern
   masking) rather than parsed as trusted instructions.
-- **Request caps** — tool results are capped (`cap_result`/`compact_result`
-  in `tools/executor.py`), retained history is bounded
-  (`MAX_HISTORY_CHARS`), and `OutboundPolicy` enforces a hard
-  `max_request_chars` ceiling that blocks the request instead of sending an
-  unbounded payload.
+- **Request caps** — structured tool results are bounded while staying
+  parsable (`dump_bounded_yaml` in `tools/structured.py`), text results are
+  capped (`cap_result`/`compact_result` in `tools/executor.py`), retained
+  history is bounded (`MAX_HISTORY_CHARS`), and `OutboundPolicy` enforces a
+  hard `max_request_chars` ceiling that blocks the request instead of
+  sending an unbounded payload. The ceiling is derived from the history
+  budget plus serialization overhead (`request_char_budget`), so it stays a
+  safety net for anomalous payloads; a request over it first retries with
+  the oldest retained turn dropped, and is only reported to the user when
+  nothing older is left to drop.
 - **Protected contexts** — `protected_contexts` plus
   `agent.disable_in_protected` can refuse agent prompts entirely on
   production-labeled kube contexts (see

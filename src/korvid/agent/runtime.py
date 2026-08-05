@@ -20,7 +20,10 @@ from korvid.agent.events import (
 from korvid.agent.outbound import (
     OutboundPolicy,
     OutboundPolicyError,
+    OutboundRequestTooLarge,
     OutboundSnapshot,
+    PreparedOutbound,
+    request_char_budget,
     sanitize_screen_context,
     sanitize_tool_result,
 )
@@ -111,6 +114,7 @@ class AgentRuntime:
         max_result_chars: int | None = None,
         max_tool_calls_per_iteration: int | None = None,
         strict_history_budget: bool = False,
+        max_request_chars: int | None = None,
         cluster_context: str | None = None,
         system_prompt: str | None = None,
         ui_prompt: str | None = None,
@@ -118,11 +122,17 @@ class AgentRuntime:
         self._provider = provider
         self._executor = executor
         self._tools = tools if tools is not None else READ_TOOLS
-        self._outbound = OutboundPolicy(max_request_chars=max_history_chars)
         self._latest_outbound_payload: OutboundSnapshot | None = None
         # The serialized tool schemas ride along on every request; they are
         # part of the prompt cost when a provider omits usage.
         self._tools_chars = len(json.dumps(self._tools))
+        # The outbound ceiling is a safety net above the history budget,
+        # not a second copy of it: the same conversation serializes larger
+        # than its message characters (envelopes, escaping, tool schemas),
+        # so equating the two blocks conversations the history budget
+        # already accepted. Overridable for tests and future tuning.
+        self._max_request_chars = max_request_chars
+        self._outbound = self._build_policy(max_history_chars)
         # Remembered for retarget(): a `:ctx` switch recomposes the system
         # prompt and must keep the active profile's role statement and
         # UI-drive instruction (issue #71), not reset them to the defaults.
@@ -163,6 +173,19 @@ class AgentRuntime:
         self._turn_in = 0
         self._turn_out = 0
         self._turn_usage_missing = False
+        # Index of the first message of the turn in flight; kept current
+        # so a rollback deletes exactly that turn even after recovery
+        # trimming shifted everything down.
+        self._turn_base = len(self._messages)
+
+    def _build_policy(self, max_history_chars: int) -> OutboundPolicy:
+        limit = self._max_request_chars
+        if limit is None:
+            limit = request_char_budget(
+                max_history_chars=max_history_chars,
+                tools_chars=self._tools_chars,
+            )
+        return OutboundPolicy(max_request_chars=limit)
 
     def retarget(self, *, tools: list[dict[str, Any]], cluster_context: str | None) -> None:
         """Re-arm the runtime for a new cluster (issue #36, `:ctx`).
@@ -175,6 +198,8 @@ class AgentRuntime:
         self._tools = tools
         # Keep the omitted-usage estimate honest for the new tool set.
         self._tools_chars = len(json.dumps(self._tools))
+        # A different tool surface is a different per-request overhead.
+        self._outbound = self._build_policy(self._max_history_chars)
         self._messages[0] = {
             "role": "system",
             "content": compose_system_prompt(
@@ -217,14 +242,26 @@ class AgentRuntime:
                 break
             self._messages = [self._messages[0], *self._messages[user_indices[1] :]]
         if len(self._messages) < before:
+            removed = before - len(self._messages)
+            self._shift_turn_bases(removed)
             # Dropped context makes the agent "forget" earlier exchanges;
             # leave a trace so such reports are debuggable.
             logger.info(
                 "trimmed agent history: dropped %d message(s), %d retained (budget %d chars)",
-                before - len(self._messages),
+                removed,
                 len(self._messages),
                 self._max_history_chars,
             )
+
+    def _shift_turn_bases(self, removed: int) -> None:
+        """Keep the in-flight turn's indices on the same messages.
+
+        Trimming and recovery both drop history from *in front of* the
+        current turn; without this the rollback slice would point past the
+        turn it must delete and leave a rejected prompt in history.
+        """
+        self._turn_base = max(1, self._turn_base - removed)
+        self._iteration_base = max(1, self._iteration_base - removed)
 
     async def _consume_stream(
         self,
@@ -382,9 +419,52 @@ class AgentRuntime:
         self._trim_history()
         return sum(_message_chars(m) for m in self._messages) > self._max_history_chars
 
+    def _drop_oldest_retained_turn(self) -> int:
+        """Drop the oldest retained turn; return how many messages went.
+
+        Recovery only: used when a prepared request is over the outbound
+        ceiling. The turn in flight is never a candidate — the current
+        prompt is what the request is *for*, so it is reported as too
+        large, never silently removed from the payload the model sees.
+        """
+        user_indices = [i for i, m in enumerate(self._messages) if m.get("role") == "user"]
+        if len(user_indices) <= 1:
+            return 0
+        start, cut = user_indices[0], user_indices[1]
+        del self._messages[start:cut]
+        return cut - start
+
+    def _prepare_request(self, iteration: int) -> PreparedOutbound:
+        """Prepare one request, recovering from an over-ceiling payload.
+
+        An oversized request is recoverable: dropping the oldest retained
+        turn shrinks the same conversation until it fits, so a long
+        session keeps working instead of blocking every prompt from here
+        on. When nothing older is left to drop, the error propagates and
+        the turn is rejected with a message the user can act on.
+        """
+        while True:
+            try:
+                return self._outbound.prepare(
+                    self._provider.name,
+                    self._messages,
+                    self._tools,
+                    iteration=iteration,
+                )
+            except OutboundRequestTooLarge:
+                removed = self._drop_oldest_retained_turn()
+                if not removed:
+                    raise
+                self._shift_turn_bases(removed)
+                logger.info(
+                    "outbound request over the ceiling: dropped the oldest retained turn "
+                    "(%d message(s), %d retained)",
+                    removed,
+                    len(self._messages),
+                )
+
     def _rollback_policy_block(
         self,
-        turn_base: int,
         turn_in: int,
         turn_out: int,
         usage_missing: bool,
@@ -394,7 +474,7 @@ class AgentRuntime:
         self._turn_active = False
         self._live_state = None
         self._latest_outbound_payload = None
-        del self._messages[turn_base:]
+        del self._messages[self._turn_base :]
         self._total_in += turn_in
         self._total_out += turn_out
         self._estimated = self._estimated or usage_missing
@@ -488,7 +568,7 @@ class AgentRuntime:
         """Async generator: run one conversation turn, yielding events until done."""
         self._latest_outbound_payload = None
         self._trim_history()
-        turn_base = len(self._messages)
+        self._turn_base = len(self._messages)
         turn_in = 0
         turn_out = 0
         # Token counts are exact only when EVERY iteration reported usage;
@@ -509,7 +589,7 @@ class AgentRuntime:
             )
             if self._strict_preflight_over_budget():
                 # Drop the unfittable prompt so it cannot poison later turns.
-                del self._messages[turn_base:]
+                del self._messages[self._turn_base :]
                 logger.warning(
                     "strict history budget: rejected a prompt that cannot fit by itself "
                     "(budget %d chars)",
@@ -564,12 +644,7 @@ class AgentRuntime:
                 ) // 4
                 self._live_prompt_estimate = prompt_estimate
                 self._latest_outbound_payload = None
-                prepared = self._outbound.prepare(
-                    self._provider.name,
-                    self._messages,
-                    self._tools,
-                    iteration=iteration + 1,
-                )
+                prepared = self._prepare_request(iteration + 1)
                 self._latest_outbound_payload = prepared.snapshot
                 try:
                     stream = self._provider.complete(prepared.messages, prepared.tools)
@@ -635,7 +710,6 @@ class AgentRuntime:
             )
         except OutboundPolicyError as exc:
             error, complete = self._rollback_policy_block(
-                turn_base,
                 turn_in,
                 turn_out,
                 usage_missing,

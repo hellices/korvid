@@ -969,7 +969,12 @@ async def test_latest_snapshot_is_set_before_each_call_and_tracks_last_iteration
 
 async def test_latest_snapshot_is_cleared_when_the_next_turn_is_blocked() -> None:
     provider = ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
-    runtime = AgentRuntime(provider, EchoExecutor(), max_history_chars=20_000)
+    runtime = AgentRuntime(
+        provider,
+        EchoExecutor(),
+        max_history_chars=20_000,
+        max_request_chars=20_000,
+    )
     await collect(runtime, "first")
     assert getattr(runtime, "latest_outbound_payload", None) is not None
 
@@ -1047,15 +1052,22 @@ async def test_provider_and_executor_mutation_cannot_change_history_or_snapshot(
 
 
 @pytest.mark.parametrize("profile_name", ["full", "small"])
-async def test_profiles_reject_an_over_cap_final_provider_request(profile_name: str) -> None:
+async def test_profiles_keep_a_hard_cap_on_the_final_provider_request(profile_name: str) -> None:
+    """The reconciled ceiling is still a real cap, not an open door.
+
+    A prompt several times the profile's own history budget cannot be made
+    to fit by dropping older turns, so it must be rejected before the
+    provider is called — and the session must still accept the next,
+    reasonable prompt (issue #189).
+    """
     profile = build_profile(profile_name, readonly=False, resize_supported=True)
-    provider = ScriptedProvider([[{"type": "text_delta", "text": "unexpected"}, {"type": "done"}]])
+    provider = ScriptedProvider([[{"type": "text_delta", "text": "recovered"}, {"type": "done"}]])
     runtime = AgentRuntime(
         provider,
         EchoExecutor(),
         tools=profile.tools,
         max_iterations=profile.max_iterations,
-        max_history_chars=8_000,
+        max_history_chars=profile.max_history_chars,
         max_result_chars=profile.max_result_chars,
         max_tool_calls_per_iteration=profile.max_tool_calls_per_iteration,
         strict_history_budget=profile.strict_history_budget,
@@ -1063,14 +1075,17 @@ async def test_profiles_reject_an_over_cap_final_provider_request(profile_name: 
         ui_prompt=profile.ui_prompt,
     )
 
-    events = await collect(runtime, "inspect")
+    events = await collect(runtime, "x" * (profile.max_history_chars * 4))
 
     assert len(provider.calls) == 0
-    assert any(
-        isinstance(event, AgentError) and "outbound policy blocked" in event.message
-        for event in events
-    )
+    assert any(isinstance(event, AgentError) for event in events)
     assert getattr(runtime, "latest_outbound_payload", None) is None
+
+    recovered = await collect(runtime, "inspect")
+
+    assert not [event for event in recovered if isinstance(event, AgentError)]
+    assert recovered[0] == TextDelta(text="recovered")
+    assert len(provider.calls) == 1
 
 
 def _bulk_pod_manifest(*, labels: int) -> dict[str, Any]:
@@ -1211,3 +1226,222 @@ async def test_small_profile_bounds_oversized_manifest_without_blocking() -> Non
     payload = json.dumps(provider.calls)
     assert "last-applied-hunter2" not in payload
     assert "env-hunter2" not in payload
+
+
+def _bulk_text_executor(chars: int) -> Any:
+    class BulkExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "log line evidence. " * (chars // 19)
+
+    return BulkExecutor()
+
+
+def _tool_then_text_script(tool_iterations: int, answer: str) -> list[list[dict[str, Any]]]:
+    script: list[list[dict[str, Any]]] = [
+        [
+            {
+                "type": "tool_call",
+                "id": f"c{index}",
+                "name": "get_logs",
+                "arguments": '{"pod":"api-0","namespace":"prod"}',
+            },
+            {"type": "done"},
+        ]
+        for index in range(tool_iterations)
+    ]
+    script.append([{"type": "text_delta", "text": answer}, {"type": "done"}])
+    return script
+
+
+def _profile_runtime(profile_name: str, provider: Any, executor: Any) -> AgentRuntime:
+    profile = build_profile(profile_name, readonly=True, resize_supported=False)
+    return AgentRuntime(
+        provider,
+        executor,
+        tools=profile.tools,
+        max_iterations=profile.max_iterations,
+        max_history_chars=profile.max_history_chars,
+        max_result_chars=profile.max_result_chars,
+        max_tool_calls_per_iteration=profile.max_tool_calls_per_iteration,
+        strict_history_budget=profile.strict_history_budget,
+        system_prompt=profile.system_prompt,
+        ui_prompt=profile.ui_prompt,
+    )
+
+
+async def test_full_profile_session_survives_a_near_budget_previous_turn() -> None:
+    """A turn that fills the retained-history budget must not brick the
+    session. The policy ceiling was the *same number* as the message-only
+    history budget, so the serialized payload (tool schemas, JSON
+    envelopes, escaping) always overshot it: every later prompt was
+    blocked and erased, with no way back except `:ai off` (issue #189)."""
+    script = _tool_then_text_script(14, "here is the summary")
+    script.append([{"type": "text_delta", "text": "second answer"}, {"type": "done"}])
+    script.append([{"type": "text_delta", "text": "third answer"}, {"type": "done"}])
+    provider = ScriptedProvider(script)
+    runtime = _profile_runtime("full", provider, _bulk_text_executor(8_000))
+
+    first = await collect(runtime, "investigate the outage")
+    assert not [event for event in first if isinstance(event, AgentError)]
+    assert len(provider.calls) == 15
+
+    second = await collect(runtime, "and now?")
+    third = await collect(runtime, "anything else?")
+
+    assert not [event for event in second if isinstance(event, AgentError)]
+    assert not [event for event in third if isinstance(event, AgentError)]
+    assert second[0] == TextDelta(text="second answer")
+    assert third[0] == TextDelta(text="third answer")
+    assert len(provider.calls) == 17
+    assert runtime.latest_outbound_payload is not None
+
+
+async def test_small_profile_session_survives_a_near_budget_previous_turn() -> None:
+    """Same reconciliation for the small profile's tighter budgets: its
+    retained turn plus a long follow-up question fits the history budget
+    but not the identically-sized policy ceiling."""
+    script = _tool_then_text_script(5, "here is the summary")
+    script.append([{"type": "text_delta", "text": "second answer"}, {"type": "done"}])
+    provider = ScriptedProvider(script)
+    runtime = _profile_runtime("small", provider, _bulk_text_executor(3_000))
+
+    first = await collect(runtime, "investigate the outage")
+    assert not [event for event in first if isinstance(event, AgentError)]
+
+    second = await collect(runtime, "and now? explain each failing container. " * 75)
+
+    assert not [event for event in second if isinstance(event, AgentError)]
+    assert second[0] == TextDelta(text="second answer")
+    assert runtime.latest_outbound_payload is not None
+
+
+async def test_over_ceiling_request_drops_the_oldest_turn_and_still_reaches_the_model() -> None:
+    """An oversized payload is recoverable, not terminal.
+
+    Trimming the oldest retained turn shrinks the same conversation until
+    it fits, so a long session keeps working. The current prompt is never
+    the thing that gets dropped (issue #189)."""
+    provider = ScriptedProvider(
+        [
+            [{"type": "text_delta", "text": "first answer"}, {"type": "done"}],
+            [{"type": "text_delta", "text": "second answer"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(
+        provider,
+        EchoExecutor(),
+        max_history_chars=40_000,
+        max_request_chars=12_000,
+    )
+
+    first = await collect(runtime, "a" * 6_000)
+    second = await collect(runtime, "b" * 6_000)
+
+    assert not [event for event in first if isinstance(event, AgentError)]
+    assert not [event for event in second if isinstance(event, AgentError)]
+    assert second[0] == TextDelta(text="second answer")
+    sent = json.dumps(provider.calls[1])
+    assert "b" * 6_000 in sent
+    assert "a" * 6_000 not in sent
+    assert runtime.latest_outbound_payload is not None
+
+
+async def test_a_blocked_oversized_prompt_leaves_the_session_usable() -> None:
+    """The sole current prompt is reported, never silently dropped from
+    the request — and the *next* prompt must still go through, so the
+    session never needs `:ai off` to recover (issue #189)."""
+    provider = ScriptedProvider([[{"type": "text_delta", "text": "recovered"}, {"type": "done"}]])
+    runtime = AgentRuntime(
+        provider,
+        EchoExecutor(),
+        max_history_chars=60_000,
+        max_request_chars=12_000,
+    )
+
+    blocked = await collect(runtime, "z" * 30_000)
+    recovered = await collect(runtime, "short question")
+
+    assert [event for event in blocked if isinstance(event, AgentError)]
+    assert len(provider.calls) == 1
+    assert not [event for event in recovered if isinstance(event, AgentError)]
+    assert recovered[0] == TextDelta(text="recovered")
+    assert "z" * 30_000 not in json.dumps(provider.calls[0])
+
+
+async def test_strict_rejection_after_trimming_does_not_poison_later_turns() -> None:
+    """Rejecting an unfittable prompt must delete *that* prompt.
+
+    The pre-flight trims history first, which shifts every index down; a
+    rollback computed before the trim then pointed past the end and left
+    the rejected prompt in history, blocking every later turn (issue
+    #189)."""
+    script = _tool_then_text_script(5, "here is the summary")
+    script.append([{"type": "text_delta", "text": "recovered"}, {"type": "done"}])
+    provider = ScriptedProvider(script)
+    runtime = _profile_runtime("small", provider, _bulk_text_executor(3_000))
+
+    await collect(runtime, "investigate the outage")
+    blocked = await collect(runtime, "y" * 30_000)
+    recovered = await collect(runtime, "short follow-up")
+
+    assert any(
+        isinstance(event, AgentError) and "too large for the history budget" in event.message
+        for event in blocked
+    )
+    assert not [event for event in recovered if isinstance(event, AgentError)]
+    assert recovered[0] == TextDelta(text="recovered")
+    assert "y" * 1_000 not in json.dumps(runtime._messages)
+    assert "y" * 1_000 not in json.dumps(provider.calls[-1])
+
+
+async def test_rollback_after_recovery_trimming_removes_the_whole_blocked_turn() -> None:
+    """A rollback must delete the turn it belongs to, not a stale slice.
+
+    Recovery trimming shifts every index down mid-turn; a rollback that
+    still used the pre-trim offset left a half-turn (here: an assistant
+    message with duplicate tool-call IDs) in history, which the policy
+    rejects on every later turn — a permanently bricked session (issue
+    #189)."""
+    provider = ScriptedProvider(
+        [
+            [{"type": "text_delta", "text": "first answer"}, {"type": "done"}],
+            [
+                {
+                    "type": "tool_call",
+                    "id": "c1",
+                    "name": "get_logs",
+                    "arguments": '{"pod":"api-0","namespace":"prod"}',
+                },
+                {"type": "done"},
+            ],
+            [
+                {"type": "tool_call", "id": "dup", "name": "get_logs", "arguments": "{}"},
+                {"type": "tool_call", "id": "dup", "name": "get_logs", "arguments": "{}"},
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "third answer"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(
+        provider,
+        _bulk_text_executor(2_500),
+        max_history_chars=40_000,
+        max_request_chars=12_000,
+    )
+
+    await collect(runtime, "a" * 3_000)
+    blocked = await collect(runtime, "b" * 1_000)
+    recovered = await collect(runtime, "third question")
+
+    assert any(
+        isinstance(event, AgentError) and "outbound policy blocked" in event.message
+        for event in blocked
+    )
+    assert "b" * 1_000 not in json.dumps(runtime._messages)
+    assert not [event for event in recovered if isinstance(event, AgentError)]
+    assert recovered[-1] == TurnComplete(
+        input_tokens=recovered[-1].input_tokens,
+        output_tokens=recovered[-1].output_tokens,
+        estimated=recovered[-1].estimated,
+    )
+    assert TextDelta(text="third answer") in recovered
