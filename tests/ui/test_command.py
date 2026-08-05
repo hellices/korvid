@@ -124,7 +124,7 @@ def test_builtin_names_reserved_over_resource_aliases() -> None:
     def crd_known(head: str) -> str | None:
         return {"model": "models", "agent": "agents", "ai": "ais", "mcp": "mcps"}.get(head)
 
-    for text in ("ai", "agent", "model gpt-4o", "mcp", "mcp on"):
+    for text in ("ai", "ai payload", "agent", "model gpt-4o", "mcp", "mcp on"):
         msg = parse_command(text, crd_known)
         assert isinstance(msg, UnknownCommand)
         assert msg.text == text
@@ -148,6 +148,13 @@ def test_command_help_lists_proposals() -> None:
 
     commands = [cmd for cmd, _ in command_help()]
     assert ":proposals" in commands
+
+
+def test_command_help_pins_ai_payload_usage() -> None:
+    from korvid.ui.command import command_help
+
+    ai_rows = [command for command, _ in command_help() if command.startswith(":ai")]
+    assert ai_rows == [":ai [off|follow|payload]"]
 
 
 # ---------------------------------------------------------------------------

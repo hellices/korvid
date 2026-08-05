@@ -9,6 +9,7 @@ from typing import Any, cast
 from textual.widgets import Input
 
 from korvid.agent.events import AgentEvent, TextDelta, TurnComplete
+from korvid.agent.outbound import OutboundSnapshot
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ResourceStore
 from korvid.core.watch import WatchManager
@@ -35,12 +36,18 @@ def _pod(name: str) -> PodSummary:
 class StubRuntime:
     """Scripted stand-in for AgentRuntime."""
 
-    def __init__(self, events: list[AgentEvent], block: bool = False) -> None:
+    def __init__(
+        self,
+        events: list[AgentEvent],
+        block: bool = False,
+        snapshot: OutboundSnapshot | None = None,
+    ) -> None:
         self._events = events
         self._block = block
         self.calls: list[tuple[str, str]] = []
         self.total_tokens = (0, 0)
         self.usage_estimated = False
+        self.latest_outbound_payload = snapshot
 
     async def run_turn(self, user_text: str, screen_context: str) -> AsyncIterator[AgentEvent]:
         self.calls.append((user_text, screen_context))
@@ -72,6 +79,19 @@ def _panel_text(app: KorvidApp) -> str:
     from korvid.ui.widgets.agent_panel import ChatEntry
 
     return "\n".join(entry.raw for entry in app.query_one(AgentPanel).query(ChatEntry))
+
+
+def _snapshot() -> OutboundSnapshot:
+    return OutboundSnapshot(
+        provider="ollama",
+        iteration=1,
+        payload_json='{"messages":[],"tools":[]}',
+        redactions=(),
+    )
+
+
+def _notification_text(app: KorvidApp) -> str:
+    return " ".join(str(notification.message) for notification in app._notifications)
 
 
 async def test_ctrl_a_toggles_panel_display() -> None:
@@ -252,6 +272,69 @@ async def test_ai_command_without_configurator_notifies() -> None:
         from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
 
         assert not isinstance(app.screen, AgentSetupScreen)
+
+
+async def test_ai_payload_without_runtime_notifies_agent_is_off() -> None:
+    from korvid.ui.messages import UnknownCommand
+    from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
+
+    app = make_app(runtime=None, model=None)
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("ai payload"))
+        await until(
+            pilot,
+            lambda: "Agent is off" in _notification_text(app),
+            label="agent-off payload notification",
+        )
+        assert not isinstance(app.screen, PayloadInspectorScreen)
+
+
+async def test_ai_payload_without_snapshot_notifies_nothing_was_sent() -> None:
+    from korvid.ui.messages import UnknownCommand
+    from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
+
+    app = make_app(StubRuntime([]))
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("ai payload"))
+        await until(
+            pilot,
+            lambda: "No provider payload has been sent" in _notification_text(app),
+            label="missing payload notification",
+        )
+        assert not isinstance(app.screen, PayloadInspectorScreen)
+
+
+async def test_ai_payload_refuses_transient_snapshot_during_busy_turn() -> None:
+    from korvid.ui.messages import UnknownCommand
+    from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
+
+    runtime = StubRuntime([], block=True, snapshot=_snapshot())
+    app = make_app(runtime)
+    async with app.run_test() as pilot:
+        app.on_agent_prompt_submitted(AgentPromptSubmitted("inspect pods"))
+        await until(pilot, lambda: runtime.calls, label="agent turn running")
+        app.on_unknown_command(UnknownCommand("ai payload"))
+        await until(
+            pilot,
+            lambda: "busy" in _notification_text(app).lower(),
+            label="busy payload refusal",
+        )
+        assert not isinstance(app.screen, PayloadInspectorScreen)
+
+
+async def test_ai_payload_opens_inspector_for_idle_snapshot() -> None:
+    from korvid.ui.messages import UnknownCommand
+    from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
+
+    app = make_app(StubRuntime([], snapshot=_snapshot()))
+    async with app.run_test() as pilot:
+        app.on_unknown_command(UnknownCommand("ai payload"))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, PayloadInspectorScreen),
+            label="payload inspector open",
+        )
+        assert isinstance(app.screen, PayloadInspectorScreen)
 
 
 async def test_apply_agent_settings_enables_agent() -> None:

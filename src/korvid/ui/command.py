@@ -22,7 +22,7 @@ _CTX_KEYWORDS = {"ctx", "context", "contexts"}
 # (e.g. a `Model` resource) must never shadow them.  Help rows live beside
 # the set so adding a builtin updates the overlay in the same review.
 _BUILTIN_COMMAND_HELP: tuple[tuple[str, str], ...] = (
-    (":ai", "Open agent setup (also :agent)"),
+    (":ai [off|follow|payload]", "Open agent setup (also :agent)"),
     (":model [name]", "Show or switch the agent model"),
     (":mcp [on|off]", "Show MCP tool state, or toggle it live"),
     (":mcp follow [on|off]", "Mirror external MCP reads in the TUI (toggle)"),
