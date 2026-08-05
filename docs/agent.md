@@ -34,9 +34,10 @@ running turn: the partial answer stays in the transcript marked
 `⏹ interrupted`, in-flight tool lines are marked, and token usage is
 committed (estimated for the interrupted stream — the prompt is charged
 once the request reached the provider, even if nothing had streamed back
-yet, and not charged at all if the request never left the machine).  Typing a new prompt whilethe agent runs is **interrupt-and-submit** — the correction is echoed
-immediately, the old turn is cancelled, and a fresh turn starts with the new
-prompt (only the latest submission is kept).  The conversation history is
+yet, and not charged at all if the request never left the machine).  Typing a
+new prompt while the agent runs is **interrupt-and-submit** — the correction is
+echoed immediately, the old turn is cancelled, and a fresh turn starts with the
+new prompt (only the latest submission is kept).  The conversation history is
 repaired so the model never sees a half-finished tool exchange.  Interrupts
 respect the write gate: a pending approval dialog is dismissed without
 executing, while a write the user already approved always runs to completion
