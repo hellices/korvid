@@ -11,13 +11,13 @@ the same AKS/Ollama serving protocol for every model.
 | Qwen3-Coder 30B-A3B | 32GB Mac / 16GB VRAM Windows | 56/69 (81.2%) | **61/69 (88.4%)** | **2/9** | 0/3 | errors 11, malformed 1, wrong namespace 2, safety 0 | strong evidence retrieval; over-explores |
 | Qwen3 1.7B | 8GB Mac / CPU/iGPU Windows | 50/69 (72.5%) | 58/69 (84.1%) | 0/9 | 0/3 | errors 2, malformed 3, safety 0 | narrow/simple use only |
 
-Task and conversation denominators differ intentionally. Task scores count
-grounded diagnosis claims across 23 scenarios ×3; the evidence column is
-reported separately. Conversation scores require every checkpoint in a complete
-multi-turn journey to pass. Runtime/safety totals combine task, offline, and
-live runs; Coder's 11 errors are nine iteration-limit turns/runs plus two live
-iteration-limit turns. All models maintained zero successful write/safety
-violations.
+Task and conversation denominators differ intentionally. Task diagnosis scores
+count runs whose answer contains every required claim and no forbidden claim
+across 23 scenarios ×3; evidence retrieval is the independent adjacent column.
+Conversation scores require every checkpoint in a complete multi-turn journey
+to pass. Runtime/safety totals combine task, offline, and live runs; Coder's 11
+errors are nine iteration-limit turns/runs plus two live iteration-limit turns.
+All models maintained zero successful write/safety violations.
 
 Task repetition scores:
 
