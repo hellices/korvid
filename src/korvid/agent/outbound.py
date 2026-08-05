@@ -329,6 +329,32 @@ def sanitize_tool_result(
         )
 
 
+def sanitize_recorded_tool_result(
+    name: str,
+    result: str,
+    produced: Sequence[RedactionRecord],
+    *,
+    max_chars: int | None = None,
+) -> tuple[str, tuple[RedactionRecord, ...]]:
+    """Sanitize one tool result and return it with its complete record trail.
+
+    Two passes see this content: the producer, which redacts before the
+    size bound and reports what it *removed*, and this one, which redacts
+    what reaches history. They are two views of one document, so the
+    producer's trail is re-rooted onto `tool_result` — where the content
+    actually lands — and merged, reporting a mask both passes saw once
+    while genuine multiplicity survives.
+
+    One function rather than the same three lines at each call site: the
+    runtime and the eval recorder both sit on this path, and an inventory
+    that differed between them would make an eval run stop describing
+    production (PR #197 review).
+    """
+    ingress: list[RedactionRecord] = []
+    text = sanitize_tool_result(name, result, max_chars=max_chars, records=ingress)
+    return text, tuple(merge_records(ingress, [rebase(item, "tool_result") for item in produced]))
+
+
 def provider_prepared_messages(
     provider: Any, messages: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -346,12 +372,21 @@ def provider_prepared_messages(
     runtime's history, and a hook that fails or returns an unusable shape
     blocks the request rather than silently falling back.
 
+    Each output position must still carry its input's `role` and
+    `content`. Carried ingress redaction records travel by position, so a
+    hook that reordered the list — or rewrote what a position says — would
+    hand each message another's inventory while the payload itself looked
+    plausible. Adding dialect fields is the whole point of the hook and
+    stays allowed: Ollama's `tool_name`, `thinking`, `function.index` and
+    object-valued arguments all leave role and content untouched.
+
     Args:
         provider: The provider adapter; a missing hook means the identity.
         messages: Conversation history to adapt.
 
     Raises:
-        OutboundPolicyError: if the hook raised or returned a non-list.
+        OutboundPolicyError: if the hook raised, returned a non-list,
+            changed the message count, or reordered or rewrote a message.
     """
     private = copy.deepcopy(messages)
     hook = getattr(provider, "prepare_messages", None)
@@ -369,7 +404,22 @@ def provider_prepared_messages(
         # after it onto the wrong message, so the request is blocked
         # rather than reported inaccurately.
         raise _blocked("provider message preparation changed the message count")
+    for adapted, original in zip(prepared, private, strict=True):
+        if not isinstance(adapted, dict) or not _same_position(adapted, original):
+            raise _blocked("provider message preparation reordered or rewrote a message")
     return prepared
+
+
+def _same_position(adapted: Mapping[str, Any], original: Mapping[str, Any]) -> bool:
+    """True when an adapted message still says what its position said.
+
+    Identity for this purpose is `role` plus `content`: everything else a
+    dialect hook touches is representation, and these two are what a
+    carried record's path resolves against.
+    """
+    return adapted.get("role") == original.get("role") and adapted.get("content") == original.get(
+        "content"
+    )
 
 
 def _sanitize_arguments(
@@ -659,7 +709,11 @@ class OutboundPolicy:
             messages: Runtime history, already through the provider's
                 dialect hook.
             tools: Tool schemas as the provider will receive them.
-            iteration: Zero-based tool-loop iteration of this request.
+            iteration: One-based tool-loop iteration of this request:
+                the first request of a turn is 1, and each tool round-trip
+                that follows increments it. The value is recorded verbatim
+                in the snapshot and shown by the payload inspector, so it
+                is what a reader counts requests with.
             ingress: Redactions already applied to a message's content
                 before it entered history, keyed by that message's index
                 in `messages`. This pass re-derives what it can see, but

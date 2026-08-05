@@ -2357,3 +2357,18 @@ async def test_a_string_only_executor_still_drives_a_turn() -> None:
     await collect(runtime, "why?")
 
     assert any("restarts: 7" in str(m.get("content")) for m in runtime._messages)
+
+
+async def test_the_first_request_of_a_turn_is_iteration_one() -> None:
+    """The exported number is what a reader counts requests with, and a
+    reader counts from one — as `OutboundPolicy.prepare` now documents."""
+    runtime = AgentRuntime(
+        ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]]), EchoExecutor()
+    )
+
+    await collect(runtime, "why?")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert snapshot.iteration == 1
+    assert json.loads(snapshot.export_json())["iteration"] == 1

@@ -1140,3 +1140,78 @@ def test_a_hook_that_keeps_the_message_count_is_allowed() -> None:
 
     assert len(prepared) == 2
     assert all("thinking" in message for message in prepared)
+
+
+def test_a_hook_that_reorders_messages_is_blocked() -> None:
+    """Count is preserved, so the count check alone lets this through.
+
+    Carried ingress records are keyed by position; swapping two messages
+    hands each one the other's inventory while the payload looks fine.
+    """
+
+    class _Swapping:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [messages[1], messages[0]]
+
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_Swapping(), _basic("hi"))
+
+
+def test_a_hook_that_rewrites_a_role_is_blocked() -> None:
+    class _Rerole:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [{**message, "role": "assistant"} for message in messages]
+
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_Rerole(), _basic("hi"))
+
+
+def test_a_hook_that_rewrites_content_is_blocked() -> None:
+    """The snapshot must describe what the boundary sanitized."""
+
+    class _Rewriting:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [{**message, "content": "something else"} for message in messages]
+
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_Rewriting(), _basic("hi"))
+
+
+def test_a_hook_that_drops_content_is_blocked() -> None:
+    class _Dropping:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [{"role": message["role"]} for message in messages]
+
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_Dropping(), _basic("hi"))
+
+
+def test_the_real_ollama_hook_satisfies_the_position_contract() -> None:
+    """Adding `tool_name`, `thinking`, `index` and object arguments is
+    exactly the dialect work the hook exists for, and none of it touches
+    a position's role or content."""
+    from korvid.providers.ollama import OllamaProvider
+
+    provider = OllamaProvider(base_url="http://x:11434", model="qwen3:8b")
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "why?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_resource", "arguments": '{"kind": "pods"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "kind: Pod\n"},
+    ]
+
+    prepared = provider_prepared_messages(provider, messages)
+
+    assert [m["role"] for m in prepared] == ["system", "user", "assistant", "tool"]
+    assert prepared[3]["tool_name"] == "get_resource"
+    assert prepared[2]["tool_calls"][0]["function"]["arguments"] == {"kind": "pods"}

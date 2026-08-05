@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -26,11 +26,11 @@ from korvid.agent.outbound import (
     ToolResultBlockedError,
     provider_prepared_messages,
     request_char_budget,
+    sanitize_recorded_tool_result,
     sanitize_screen_context,
-    sanitize_tool_result,
 )
 from korvid.agent.prompts import compose_system_prompt
-from korvid.core.redaction import RedactionRecord, merge_records, rebase
+from korvid.core.redaction import RedactionRecord
 from korvid.tools.executor import (
     READ_TOOLS,
     RecordedExecution,
@@ -252,7 +252,9 @@ class AgentRuntime:
         """
         return self._latest_outbound_payload
 
-    def _remember_ingress(self, message: dict[str, Any], records: list[RedactionRecord]) -> None:
+    def _remember_ingress(
+        self, message: dict[str, Any], records: Sequence[RedactionRecord]
+    ) -> None:
         """Keep the redactions applied to one message's content on the way in.
 
         The entry holds the message itself, which both identifies it and
@@ -437,18 +439,16 @@ class AgentRuntime:
                         # Same ingest cap as ToolExecutor — a huge exception
                         # message must not bypass the limit into history.
                         result = cap_result(f"ERROR: {exc}")
-            ingress: list[RedactionRecord] = []
-            if self._max_result_chars is not None:
-                # Head+tail compaction, not a prefix cut: reports place
-                # their evidence (events, log excerpts) last by design.
-                # Structured results are shrunk structurally instead —
-                # `sanitize_tool_result` redacts the document first and
-                # bounds the redacted document, so it stays parseable.
-                result = sanitize_tool_result(
-                    name, result, max_chars=self._max_result_chars, records=ingress
-                )
-            else:
-                result = sanitize_tool_result(name, result, records=ingress)
+            # Head+tail compaction, not a prefix cut: reports place their
+            # evidence (events, log excerpts) last by design. Structured
+            # results are shrunk structurally instead — the document is
+            # redacted first and the redacted document bounded, so it
+            # stays parseable. The producer's trail and this pass's are
+            # two views of one document, merged onto the same origin so a
+            # redaction both of them saw is not counted twice.
+            result, ingress_records = sanitize_recorded_tool_result(
+                name, result, produced, max_chars=self._max_result_chars
+            )
             if excess and index == len(kept) - 1:
                 # Appended after compaction, without re-compacting: the
                 # notice is a fixed-size constant carrying no evidence, so
@@ -468,13 +468,7 @@ class AgentRuntime:
             )
             tool_message = {"role": "tool", "tool_call_id": call_id, "content": result}
             self._messages.append(tool_message)
-            # The producer's trail and this pass's are two views of one
-            # document, re-rooted onto the same origin so a redaction both
-            # of them saw is not counted twice.
-            self._remember_ingress(
-                tool_message,
-                merge_records(ingress, [rebase(item, "tool_result") for item in produced]),
-            )
+            self._remember_ingress(tool_message, ingress_records)
         for tc in excess:
             summary = "discarded: too many tool calls in one response"
             yield ToolCallStarted(
@@ -528,9 +522,9 @@ class AgentRuntime:
 
         Trimming runs again here because the pre-append trim cannot see
         the new user message: a retained turn just below the cap plus the
-        new prompt would otherwise go over the wire on iteration zero.
-        Once appended, the previous turn is no longer the newest, so the
-        normal trim drops it; True means even that was not enough — the
+        new prompt would otherwise go over the wire on the turn's first
+        request. Once appended, the previous turn is no longer the newest,
+        so the normal trim drops it; True means even that was not enough — the
         request cannot fit by itself and must be rejected, not sent.
         """
         if not self._strict_history_budget:
