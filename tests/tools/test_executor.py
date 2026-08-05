@@ -274,6 +274,17 @@ async def test_get_resource_keeps_non_sensitive_content_readable() -> None:
     assert container["env"][1]["valueFrom"] == {"secretKeyRef": {"name": "db"}}
 
 
+async def test_get_resource_fails_closed_on_an_unredactable_manifest() -> None:
+    """Data the redactor cannot reason about is refused, not forwarded."""
+    kube = FakeKube()
+    kube.manifest = {"kind": "Pod", "metadata": {"name": "p"}, "spec": {1: "unmasked-value"}}
+    out = await make_executor(kube).execute(
+        "get_resource", {"kind": "pods", "name": "p", "namespace": "d"}
+    )
+    assert out.startswith("ERROR:")
+    assert "unmasked-value" not in out
+
+
 async def test_unknown_tool_and_kind_return_error_text() -> None:
     ex = make_executor(FakeKube())
     assert (await ex.execute("nope", {})).startswith("ERROR:")

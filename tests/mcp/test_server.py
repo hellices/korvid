@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from korvid.k8s.discovery import PODS_META
 from korvid.mcp.server import (
@@ -21,7 +22,12 @@ from korvid.mcp.server import (
 )
 from korvid.tools.executor import PROPOSAL_TOOLS, READ_TOOLS, UI_TOOLS, ToolExecutor
 from tests.platforms import POSIX
-from tests.tools.test_executor import FakeBridge
+from tests.tools.test_executor import (
+    LONG_NAME_ENV_SENTINEL,
+    NESTED_SECRET_SENTINEL,
+    FakeBridge,
+    oversized_crd_with_nested_credentials,
+)
 
 
 class RecordingExecutor(ToolExecutor):
@@ -127,6 +133,31 @@ async def test_call_tool_passes_error_text_through() -> None:
     server = make_server(executor)
     content = await server.call_tool("get_resource", {"kind": "pods", "name": "x"})
     assert content[0].text == "ERROR: boom"
+
+
+async def test_mcp_results_are_redacted_like_the_agent_path() -> None:
+    """MCP hosts are outside korvid too (PR #197 review).
+
+    The MCP server dispatches through the same `ToolExecutor`, so a
+    manifest too large to send whole must be redacted before it is
+    shrunk here as well — the reduction removes the nested `kind:
+    Secret` and clamps the credential env name that identify the values.
+    """
+
+    class ManifestKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            return oversized_crd_with_nested_credentials()
+
+    executor = ToolExecutor(ManifestKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_resource", {"kind": "pods", "name": "composite-0", "namespace": "prod"}
+    )
+
+    assert NESTED_SECRET_SENTINEL not in content[0].text
+    assert LONG_NAME_ENV_SENTINEL not in content[0].text
+    assert yaml.safe_load(content[0].text)["kind"] == "CompositeApp"
 
 
 async def test_call_tool_rejects_names_outside_configured_surface() -> None:
