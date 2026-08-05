@@ -116,6 +116,21 @@ uv run python -m korvid.evals.journeys_cli \
 - live target: `aks-korvid-contract-test`;
 - live namespace: `korvid-agent-eval-20260804200747` (deleted after run).
 
+## 2026-08-05 Post-Merge Protocol Metadata
+
+- source revision: `124b1aa` (squash merge of PR #185);
+- models: Qwen3 1.7B, Qwen3 8B, Qwen3-Coder 30B-A3B;
+- serving engine: Ollama 0.32.5, OpenAI-compatible endpoint;
+- model node: zone-2 `Standard_D32s_v5` Spot, 30 CPU / 112Gi limit;
+- profile: `small`, six iterations, one tool call per iteration;
+- task pack: 23 scenarios ×3 repetitions;
+- offline pack: 3 journeys ×3 repetitions;
+- live pack: 1 guarded real-cluster journey ×3 repetitions;
+- result timeout: 300 seconds for 1.7B/8B, 600 seconds for Coder 30B;
+- live namespace: `korvid-agent-eval-124b1aa` (deleted after run);
+- final state: contract cluster Stopped, `modeleval` zero nodes, Ollama Ready
+  on its default pool.
+
 ## Interpretation Limits
 
 - Task success does not prove conversational usability.

@@ -2,101 +2,95 @@
 
 ## Current Results
 
-| Model | Personal-device tier | Task | Offline conversation | Live AKS journey | Malformed / stale | Usability verdict |
-|---|---|---:|---:|---:|---:|---|
-| Qwen3 8B | 16GB Mac / 8GB VRAM Windows | 20/23 (87%, one run) | rerun required | rerun required | — | candidate |
-| Qwen3-Coder 30B-A3B | 32GB Mac / 16GB VRAM Windows | **59/69 (85.5%)** | rerun required | rerun required | — | Task A; conversation pending |
-| Qwen3 1.7B | 8GB Mac / CPU/iGPU Windows | 4/6 smoke | rerun required | rerun required | — | limited candidate |
+These are post-merge results from `main` revision `124b1aa` (PR #185), using
+the same AKS/Ollama serving protocol for every model.
 
-Task and conversation denominators differ intentionally. Task scores measure
-fault diagnosis; conversation scores measure complete multi-turn journeys.
-Offline v2 grades each checkpoint from calls made in that turn only; earlier
-v1 results incorrectly credited prior-turn evidence and are superseded. Review
-then exposed that the triage checkpoint mentioned both candidates without
-requiring an explicit priority. The fixture now requires `checkout` first, so
-both offline and live conversation rates must be regenerated after merge before
-any conversational recommendation is published.
-Qwen3 8B's task row is a single run and the conversation pack currently has
-three journeys, so the recommendation remains provisional until #176 completes
-three task repetitions and expands the pack to eight journeys.
+| Model | Personal-device tier | Task diagnosis | Evidence fetched | Offline conversation | Live AKS journey | Runtime / safety | Usability verdict |
+|---|---|---:|---:|---:|---:|---|---|
+| Qwen3 8B | 16GB Mac / 8GB VRAM Windows | **61/69 (88.4%)** | 58/69 (84.1%) | **1/9** | 0/3 | errors 0, malformed 0, safety 0 | best task model tested; conversation not reliable |
+| Qwen3-Coder 30B-A3B | 32GB Mac / 16GB VRAM Windows | 56/69 (81.2%) | **61/69 (88.4%)** | **2/9** | 0/3 | errors 11, malformed 1, wrong namespace 2, safety 0 | strong evidence retrieval; over-explores |
+| Qwen3 1.7B | 8GB Mac / CPU/iGPU Windows | 50/69 (72.5%) | 58/69 (84.1%) | 0/9 | 0/3 | errors 2, malformed 3, safety 0 | narrow/simple use only |
 
-Qwen3-Coder 30B-A3B task repetitions were `20/23`, `19/23`, and `20/23`
-(`87.0%`, `82.6%`, `87.0%`). Mean success was `85.5%`; population variance
-was `4.20 percentage-points²` (standard deviation `2.05pp`). Its Task A grade
-therefore has the required three-run dispersion evidence.
+Task and conversation denominators differ intentionally. Task scores count
+grounded diagnosis claims across 23 scenarios ×3; the evidence column is
+reported separately. Conversation scores require every checkpoint in a complete
+multi-turn journey to pass. Runtime/safety totals combine task, offline, and
+live runs; Coder's 11 errors are nine iteration-limit turns/runs plus two live
+iteration-limit turns. All models maintained zero successful write/safety
+violations.
+
+Task repetition scores:
+
+- Qwen3 8B: `20/23`, `19/23`, `22/23` (standard deviation `5.42pp`);
+- Qwen3-Coder 30B-A3B: `18/23`, `18/23`, `20/23` (`4.10pp`);
+- Qwen3 1.7B: `16/23`, `18/23`, `16/23` (`4.10pp`).
+
+The conversation pack currently has three offline journeys and one live journey,
+so #176 still tracks expansion to eight journeys. The current result is already
+enough to reject a general conversational recommendation: none of the tested
+models passed the strengthened real-cluster journey.
 
 ## Detailed Findings
 
-### Qwen3 8B (superseded exploratory conversation runs)
+### Qwen3 8B
 
 Strengths:
 
-- preserved namespace and target identity across all corrected live runs;
-- broad listing found both real broken Pods and the healthy control;
-- obeyed “payments, not checkout” without stale calls;
-- used events to identify the nonexistent image;
-- emitted `open_describe` on every final live turn;
-- malformed calls and safety violations remained zero.
+- highest repeated task diagnosis score: 61/69;
+- no malformed calls, runtime errors, wrong-namespace calls, or safety
+  violations across this post-merge matrix;
+- completed one full offline `triage-and-correct` journey.
 
 Weaknesses:
 
-- offline `healthy-stop` passed 0/3 because the final checkpoint did not perform
-  its declared verification read (one run also hedged the initial health claim);
-- offline `logs-to-events` passed 0/3: it reused prior evidence or fetched a
-  manifest instead of making the requested events pivot;
-- offline `triage-and-correct` passed 3/3 with turn-local evidence.
+- `healthy-stop` passed 0/3, usually because required current-turn evidence was
+  not fetched;
+- `logs-to-events` passed 0/3 because the final events pivot was skipped;
+- `triage-and-correct` passed 1/3; failed runs did not state the required
+  initial priority or missed correction-turn evidence;
+- live passed 0/3: tool discipline stayed clean, but answer claims missed one or
+  more strict prioritization, exact-cause, or corrective-action checkpoints.
 
-Live representative sequence:
+Verdict: the most useful tested model for one-shot Kubernetes diagnosis, but not
+yet a dependable conversational Korvid agent.
 
-```text
-turn 1: list_resources(pods, namespace) -> finds checkout, payments, search
-turn 2: get_events(payments-1) -> image tag not found / ImagePullBackOff
-turn 3: open_describe(payments-1) -> visible evidence and corrective action
-```
-
-Verdict: candidate for post-merge rerun; no current conversational grade.
-
-### Qwen3-Coder 30B-A3B (superseded exploratory conversation runs)
+### Qwen3-Coder 30B-A3B
 
 Strengths:
 
-- highest task depth: 59/69 across 23 scenarios ×3;
-- no malformed calls across 124 task calls;
-- fast MoE CPU inference relative to dense 30B models.
+- strongest evidence acquisition: 61/69;
+- task inference averaged 22.0 seconds per run on the standardized CPU node;
+- passed `logs-to-events` 2/3 offline.
 
 Conversation weaknesses:
 
-- `healthy-stop` passed 0/3 due unnecessary follow-up diagnosis or no final
-  verification read;
-- `logs-to-events` passed 2/3;
-- `triage-and-correct` passed 0/3 due over-exploration and missed checkpoint
-  evidence;
-- after “payments, not checkout,” one live run called checkout again;
-- one live run described both faults but failed to state the requested payments
-  ImagePullBackOff cause;
-- another exhausted the six-iteration budget during broad exploration.
+- task score fell to 56/69 and six task runs exhausted the iteration budget;
+- offline `healthy-stop` and `triage-and-correct` passed 0/3;
+- offline produced three iteration-limit turns and one wrong-namespace call;
+- live passed 0/3, with two initial-turn iteration limits, one wrong-namespace
+  call, and one stale checkout call after the payments correction.
 
-Verdict: useful as a task-oriented diagnostic model, but currently less usable
-than Qwen3 8B for interactive correction and concise exploration.
+Verdict: useful when exhaustive evidence collection is preferred, but extra
+memory does not buy better Korvid conversation behavior than Qwen3 8B.
 
-### Qwen3 1.7B (superseded exploratory conversation runs)
+### Qwen3 1.7B
 
 Strengths:
 
 - fits the 8GB personal-device tier;
-- task smoke fetched all declared evidence with no malformed calls;
-- one live run completed all three turns correctly.
+- task diagnosis reached 50/69 while evidence retrieval reached 58/69;
+- no wrong-namespace, stale-target, or safety violations in conversation runs.
 
 Weaknesses:
 
-- one malformed call appeared in the nine offline journey runs;
+- one malformed task call and two malformed offline calls occurred;
+- two task runs exhausted the iteration budget;
 - often skipped the required evidence tool on follow-up turns;
-- sometimes lost the requested payments focus even without making a stale tool
-  call;
-- only 1/3 offline triage journeys and 1/3 real-cluster journeys completed.
+- all three offline journeys and all three live runs failed at least one
+  checkpoint.
 
-Verdict: usable for simple listing and narrow inspection, not reliable as the
-default conversational agent.
+Verdict: usable for simple listing and narrow inspection only; not suitable as
+the default conversational agent.
 
 ## Real-Cluster Validation
 
@@ -108,7 +102,8 @@ The live result used actual Kubernetes failure states, not fake responses:
 
 The namespace was uniquely labelled, deleted after evaluation, and the
 dedicated cluster returned to Stopped. The model-serving `modeleval` pool also
-returned to zero nodes.
+returned to zero nodes. The post-merge live namespace was
+`korvid-agent-eval-124b1aa`.
 
 ## Raw Results
 
@@ -117,6 +112,9 @@ Generated files are kept off the source branch:
 - [2026-08-04 artifact directory](https://github.com/hellices/korvid/tree/eval-results/results/2026-08-04)
 - [turn-local conversation rerun archive](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-04-r2-artifacts.tar.gz)
 - [turn-local rerun metadata](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-04-r2-metadata.json)
+- [post-merge raw archive](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-05-postmerge-artifacts.tar.gz)
+- [post-merge metadata](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-05-postmerge-metadata.json)
+- [post-merge checksums](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-05-postmerge-SHA256SUMS)
 - [initial compressed raw artifacts](https://github.com/hellices/korvid/raw/refs/heads/eval-results/results/2026-08-04/artifacts.tar.gz)
 - [metadata](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-04/metadata.json)
 - [SHA-256 checksums](https://github.com/hellices/korvid/blob/eval-results/results/2026-08-04/SHA256SUMS)
