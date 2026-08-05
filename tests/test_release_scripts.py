@@ -19,6 +19,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import bundle  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import check_artifacts  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
+import check_dry_run  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import check_sbom  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import check_source  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import check_version  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
@@ -167,6 +168,59 @@ def test_source_policy_errors_do_not_log_commit_hashes(
     assert commit not in error
     assert "v1.2.3" not in error
     assert "main" not in error
+
+
+# --- check_dry_run ----------------------------------------------------------
+
+
+def test_dry_run_at_trusted_head_prints_version(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _release_repo(tmp_path)
+    assert check_dry_run.main(["main", str(repo), str(_pyproject(repo, "0.1.0"))]) == 0
+    assert capsys.readouterr().out.strip() == "0.1.0"
+
+
+def test_dry_run_refuses_a_commit_behind_trusted_head(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _release_repo(tmp_path)
+    reviewed_commit = _git(repo, "rev-parse", "HEAD")
+    (repo / "tracked.txt").write_text("trusted update\n")
+    _git(repo, "commit", "-am", "trusted update")
+    trusted_head = _git(repo, "rev-parse", "main")
+    _git(repo, "checkout", "--detach", reviewed_commit)
+    assert check_dry_run.main(["main", str(repo), str(_pyproject(repo, "0.1.0"))]) == 1
+    error = capsys.readouterr().err
+    assert "trusted branch head" in error
+    assert reviewed_commit not in error
+    assert trusted_head not in error
+
+
+def test_dry_run_refuses_an_unreviewed_commit_ahead_of_trusted_head(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _release_repo(tmp_path)
+    trusted_head = _git(repo, "rev-parse", "main")
+    _git(repo, "checkout", "--detach")
+    (repo / "tracked.txt").write_text("unreviewed ahead\n")
+    _git(repo, "commit", "-am", "unreviewed ahead")
+    ahead_commit = _git(repo, "rev-parse", "HEAD")
+    assert check_dry_run.main(["main", str(repo), str(_pyproject(repo, "0.1.0"))]) == 1
+    error = capsys.readouterr().err
+    assert "trusted branch head" in error
+    assert ahead_commit not in error
+    assert trusted_head not in error
+
+
+def test_dry_run_refuses_invalid_project_metadata(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _release_repo(tmp_path)
+    pyproject = repo / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "korvid"\n')
+    assert check_dry_run.main(["main", str(repo), str(pyproject)]) == 1
+    assert "project metadata is invalid" in capsys.readouterr().err
 
 
 # --- checksums --------------------------------------------------------------
@@ -652,6 +706,26 @@ def test_workflow_exports_source_commit_without_logging_it_from_python() -> None
     workflow = _release_workflow()
     assert 'source_commit=$(git rev-list -n 1 "refs/tags/$TAG")' in workflow
     assert "source_commit=$(uv run" not in workflow
+
+
+def test_release_workflow_has_a_main_only_non_publishing_manual_dry_run() -> None:
+    workflow = _release_workflow()
+    verify = workflow.index("\n  verify:")
+    build = workflow.index("\n  build:")
+    stage = workflow.index("\n  stage-github-release:")
+    publish = workflow.index("\n  publish-pypi:")
+    finalize = workflow.index("\n  finalize-github-release:")
+    assert "workflow_dispatch:" in workflow
+    assert "scripts/release/check_dry_run.py" in workflow
+    assert "refs/heads/main" in workflow[verify:build]
+    assert "check_dry_run.py origin/main" in workflow[verify:build]
+    assert "check_source.py" in workflow[verify:build]
+    manual_start = workflow.index('elif [ "$EVENT_NAME" = "workflow_dispatch" ]', verify, build)
+    manual_end = workflow.index("\n          else", manual_start, build)
+    assert "check_source.py" not in workflow[manual_start:manual_end]
+    assert "github.event_name == 'push'" in workflow[stage:publish]
+    assert "github.event_name == 'push'" in workflow[publish:finalize]
+    assert "github.event_name == 'push'" in workflow[finalize:]
 
 
 # --- metadata ---------------------------------------------------------------

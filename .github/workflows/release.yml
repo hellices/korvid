@@ -9,6 +9,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -33,20 +34,41 @@ jobs:
           enable-cache: false
       - id: version
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
           TAG: ${{ github.ref_name }}
         run: |
-          version=$(uv run --no-project python scripts/release/check_version.py "$TAG")
+          if [ "$EVENT_NAME" = "push" ]; then
+            version=$(uv run --no-project python scripts/release/check_version.py "$TAG")
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$REF" != "refs/heads/main" ]; then
+              echo "manual dry runs only support refs/heads/main"
+              exit 1
+            fi
+            version=$(uv run --no-project python scripts/release/check_dry_run.py origin/main)
+          else
+            echo "unsupported release event"
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - id: source
-        name: Require an annotated tag from the trusted release branch
+        name: Require trusted source for release publication or dry run
         env:
+          EVENT_NAME: ${{ github.event_name }}
           TAG: ${{ github.ref_name }}
         run: |
-          uv run --no-project python scripts/release/check_source.py \
-            "$TAG" origin/main
-          # check_source deliberately logs no hashes (CodeQL). Export the
-          # verified commit directly through GitHub's output channel.
-          source_commit=$(git rev-list -n 1 "refs/tags/$TAG")
+          if [ "$EVENT_NAME" = "push" ]; then
+            uv run --no-project python scripts/release/check_source.py \
+              "$TAG" origin/main
+            # check_source deliberately logs no hashes (CodeQL). Export the
+            # verified commit directly through GitHub's output channel.
+            source_commit=$(git rev-list -n 1 "refs/tags/$TAG")
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            source_commit=$(git rev-parse HEAD)
+          else
+            echo "unsupported release event"
+            exit 1
+          fi
           echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
       - run: uv sync --locked --dev --all-extras
       - run: uv run ruff check src/ tests/
@@ -296,6 +318,7 @@ jobs:
 
   stage-github-release:
     needs: [verify, smoke, attest]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -357,6 +380,7 @@ jobs:
 
   publish-pypi:
     needs: [verify, stage-github-release]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     # Protected environment: PyPI Trusted Publishing binds to this exact
     # workflow + environment; there is no API token anywhere.
@@ -395,6 +419,7 @@ jobs:
 
   finalize-github-release:
     needs: [verify, publish-pypi]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
