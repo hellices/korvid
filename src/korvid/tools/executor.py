@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, ClassVar
 
 from korvid.core.portforward import controller_owner
-from korvid.core.secrets import mask_secret_manifest
+from korvid.core.redaction import redact_manifest
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HelmReleaseSummary, HelmRevisionSummary
@@ -1317,18 +1317,24 @@ class ToolExecutor:
 
 
 def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Strip managedFields for all kinds; mask Secret data.
+    """Strip managedFields, then redact the whole document recursively.
 
-    Secret masking delegates to `korvid.core.secrets.mask_secret_manifest`
-    so the leak filter has exactly one implementation across every
-    LLM-facing path (agent tools here, the UI describe path in `app.py`).
+    Redaction runs here, on the full manifest, *before* the size bound:
+    what marks a value secret is structure — a nested `kind: Secret`, an
+    env entry's `name` — and structural shrinking elides mapping entries
+    and clamps long scalars, so a document bounded first can arrive at
+    the outbound policy with its credentials intact and every classifier
+    that would have identified them gone (PR #197 review).
+
+    `korvid.core.redaction` is the single implementation, shared with the
+    outbound policy, so the agent path, the MCP server that dispatches
+    through this executor, and the provider boundary cannot disagree
+    about what counts as a secret.
     """
     meta = manifest.get("metadata")
     if isinstance(meta, dict):
         meta.pop("managedFields", None)
-    if manifest.get("kind") == "Secret":
-        return mask_secret_manifest(manifest)
-    return manifest
+    return redact_manifest(manifest)
 
 
 # Fail at import time (startup/tests), not at a live tool call, when a

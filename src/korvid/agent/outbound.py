@@ -6,52 +6,28 @@ import copy
 import dataclasses
 import json
 import math
-import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
 import yaml
 
-from korvid.core.secrets import MASK_PLACEHOLDER, mask_secret_manifest
+from korvid.core.redaction import (
+    RedactionError,
+    RedactionRecord,
+    key_path,
+    record,
+    redact_text,
+    redact_value,
+    sanitize_mapping_key,
+    strip_control_characters,
+)
 from korvid.tools.executor import MAX_RESULT_CHARS, compact_result
 from korvid.tools.registry import tool_result_format
 from korvid.tools.structured import ERROR_PREFIX, dump_bounded_yaml, dump_yaml
 
-_LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
 _ALLOWED_ROLES = frozenset({"system", "user", "assistant", "tool"})
-_SENSITIVE_NAMES = frozenset(
-    {
-        "password",
-        "token",
-        "apikey",
-        "authorization",
-        "clientsecret",
-        "accesstoken",
-        "refreshtoken",
-        "credentials",
-    }
-)
-_WORD_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
-#: Longest sensitive name in words (`access` + `token`) plus one word of
-#: slack — bounds the window scan over a hostile, very long key.
-_MAX_NAME_WINDOW = 3
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
-_DOUBLE_QUOTED_VALUE = r'"(?:\\.|[^"\\\r\n])*"'
-_SINGLE_QUOTED_VALUE = r"'(?:\\.|[^'\\\r\n])*'"
-_AUTHORIZATION_RE = re.compile(
-    r"(?im)(?P<prefix>(?<![A-Za-z0-9])"
-    r"(?P<auth_key_quote>[\"']?)authorization(?P=auth_key_quote)\s*[:=]\s*)"
-    rf"(?P<value>{_DOUBLE_QUOTED_VALUE}|{_SINGLE_QUOTED_VALUE}|"
-    r"(?:(?:bearer|basic)\s+)?[^\s,;}\]]+)"
-)
-_CREDENTIAL_RE = re.compile(
-    r"(?im)(?P<prefix>(?<![A-Za-z0-9])(?P<credential_key_quote>[\"']?)(?:"
-    r"password|api[\s_-]?key|client[\s_-]?secret|access[\s_-]?token|"
-    r"refresh[\s_-]?token|credentials|token"
-    r")(?P=credential_key_quote)\s*[:=]\s*)"
-    rf"(?P<value>{_DOUBLE_QUOTED_VALUE}|{_SINGLE_QUOTED_VALUE}|[^\s,;}}\]]+)"
-)
 
 
 class OutboundPolicyError(ValueError):
@@ -100,14 +76,6 @@ def request_char_budget(*, max_history_chars: int, tools_chars: int) -> int:
 
 
 @dataclass(frozen=True)
-class RedactionRecord:
-    """One deterministic change made while preparing a provider request."""
-
-    path: str
-    reason: str
-
-
-@dataclass(frozen=True)
 class OutboundSnapshot:
     """Immutable canonical record of the exact redacted provider payload."""
 
@@ -147,208 +115,19 @@ def _blocked(reason: str) -> OutboundPolicyError:
     return OutboundPolicyError(f"outbound request blocked: {reason}")
 
 
-def _normalize_name(value: str) -> str:
-    return "".join(character for character in value.casefold() if character.isalnum())
+@contextmanager
+def _fail_closed() -> Iterator[None]:
+    """Translate the shared redactor's refusals into a policy block.
 
-
-def _denotes_secret(value: str) -> bool:
-    """True when consecutive words of `value` spell a credential name.
-
-    Kubernetes names are compounds (`DB_PASSWORD`, `dbPassword`,
-    `github-access-token`), so exact normalization alone never recognizes
-    them; splitting into words and scanning short windows does, without
-    matching unrelated names that merely start the same (`TOKENIZER_PATH`).
+    `korvid.core.redaction` refuses data it cannot redact safely. Every
+    public entry point here re-raises that refusal as an
+    `OutboundPolicyError` so callers keep the one exception type they
+    already handle (and the message the block reports stays the same).
     """
-    words = tuple(word.casefold() for word in _WORD_RE.findall(value))
-    return any(
-        "".join(words[start : start + size]) in _SENSITIVE_NAMES
-        for start in range(len(words))
-        for size in range(1, min(_MAX_NAME_WINDOW, len(words) - start) + 1)
-    )
-
-
-def _key_path(path: str, key: str) -> str:
-    if key.isidentifier():
-        return f"{path}.{key}"
-    return f"{path}[{json.dumps(key, ensure_ascii=False)}]"
-
-
-def _record(records: list[RedactionRecord], path: str, reason: str) -> None:
-    records.append(RedactionRecord(path=path, reason=reason))
-
-
-def _sanitize_mapping_key(
-    key: str,
-    path: str,
-    records: list[RedactionRecord],
-) -> str:
-    if not _CONTROL_RE.search(key):
-        return key
-    _record(records, path, "control-character")
-    return _CONTROL_RE.sub("\N{REPLACEMENT CHARACTER}", key)
-
-
-def _replace_match(
-    match: re.Match[str],
-    *,
-    path: str,
-    records: list[RedactionRecord],
-    reason: str,
-) -> str:
-    _record(records, path, reason)
-    value = match.group("value")
-    if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
-        replacement = f"{value[0]}{MASK_PLACEHOLDER}{value[-1]}"
-    else:
-        replacement = MASK_PLACEHOLDER
-    return f"{match.group('prefix')}{replacement}"
-
-
-def _sanitize_text(text: str, path: str, records: list[RedactionRecord]) -> str:
-    if _CONTROL_RE.search(text):
-        text = _CONTROL_RE.sub("\N{REPLACEMENT CHARACTER}", text)
-        _record(records, path, "control-character")
-    text = _AUTHORIZATION_RE.sub(
-        lambda match: _replace_match(
-            match,
-            path=path,
-            records=records,
-            reason="authorization-value",
-        ),
-        text,
-    )
-    return _CREDENTIAL_RE.sub(
-        lambda match: _replace_match(
-            match,
-            path=path,
-            records=records,
-            reason="credential-assignment",
-        ),
-        text,
-    )
-
-
-def _secret_redactions(
-    value: Mapping[str, Any],
-    path: str,
-    records: list[RedactionRecord],
-) -> dict[str, Any]:
     try:
-        masked = mask_secret_manifest(dict(value))
-    except ValueError as exc:
+        yield
+    except RedactionError as exc:
         raise _blocked(str(exc)) from exc
-    for section in ("data", "stringData"):
-        entries = value.get(section)
-        if isinstance(entries, Mapping):
-            for key in entries:
-                _record(records, _key_path(_key_path(path, section), str(key)), "secret-value")
-    metadata = value.get("metadata")
-    if isinstance(metadata, Mapping):
-        annotations = metadata.get("annotations")
-        if isinstance(annotations, Mapping) and _LAST_APPLIED in annotations:
-            _record(
-                records,
-                _key_path(_key_path(_key_path(path, "metadata"), "annotations"), _LAST_APPLIED),
-                "last-applied-configuration",
-            )
-    return masked
-
-
-def _names_a_secret_sibling(value: Mapping[str, Any]) -> bool:
-    """True for a `{"name": "DB_PASSWORD", "value": ...}` pair.
-
-    Kubernetes carries container environment variables (and several
-    similar list shapes) as sibling `name`/`value` keys, so the credential
-    word lives in a *value*, not a key — a key-name rule alone never sees
-    it and the secret ships in the sibling.
-    """
-    name = value.get("name")
-    return isinstance(name, str) and "value" in value and _denotes_secret(name)
-
-
-def _mask_reason(key: str, item: Any, *, secret_sibling: bool) -> str | None:
-    """Why this entry must be masked, or None to sanitize it normally."""
-    if secret_sibling and key == "value" and isinstance(item, str | int | float):
-        return "sensitive-env-value"
-    if _normalize_name(key) in _SENSITIVE_NAMES:
-        return "sensitive-key"
-    # Compound keys (`dbPassword`, `admin-api-key`) only mask text values:
-    # a flag like `automountServiceAccountToken: true` names a credential
-    # without carrying one, and masking it would lose real information.
-    if isinstance(item, str) and _denotes_secret(key):
-        return "sensitive-key"
-    return None
-
-
-def _sanitize_mapping(
-    value: Mapping[Any, Any],
-    path: str,
-    records: list[RedactionRecord],
-    active: set[int],
-) -> dict[str, Any]:
-    for key in value:
-        if not isinstance(key, str):
-            raise _blocked("mapping keys must be strings")
-    source: Mapping[str, Any] = value
-    kind = source.get("kind")
-    if isinstance(kind, str) and _normalize_name(kind) == "secret":
-        source = _secret_redactions(source, path, records)
-    secret_sibling = _names_a_secret_sibling(source)
-
-    result: dict[str, Any] = {}
-    for key, item in source.items():
-        item_path = _key_path(path, key)
-        if key == _LAST_APPLIED:
-            _record(records, item_path, "last-applied-configuration")
-            continue
-        output_key = _sanitize_mapping_key(key, item_path, records)
-        if output_key in result:
-            raise _blocked("redacted mapping keys must remain unique")
-        reason = _mask_reason(key, item, secret_sibling=secret_sibling)
-        if reason is not None:
-            result[output_key] = MASK_PLACEHOLDER
-            _record(records, item_path, reason)
-            continue
-        result[output_key] = _sanitize_value(item, item_path, records, active)
-    return result
-
-
-def _sanitize_value(
-    value: Any,
-    path: str,
-    records: list[RedactionRecord],
-    active: set[int],
-) -> Any:
-    if value is None or isinstance(value, bool | int):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise _blocked("non-finite numbers are not allowed")
-        return value
-    if isinstance(value, str):
-        return _sanitize_text(value, path, records)
-    if isinstance(value, Mapping):
-        identity = id(value)
-        if identity in active:
-            raise _blocked("recursive data structures are not allowed")
-        active.add(identity)
-        try:
-            return _sanitize_mapping(value, path, records, active)
-        finally:
-            active.remove(identity)
-    if isinstance(value, list):
-        identity = id(value)
-        if identity in active:
-            raise _blocked("recursive data structures are not allowed")
-        active.add(identity)
-        try:
-            return [
-                _sanitize_value(item, f"{path}[{index}]", records, active)
-                for index, item in enumerate(value)
-            ]
-        finally:
-            active.remove(identity)
-    raise _blocked("unsupported outbound data type")
 
 
 def _copy_tool_value(
@@ -364,10 +143,7 @@ def _copy_tool_value(
             raise _blocked("non-finite numbers are not allowed")
         return value
     if isinstance(value, str):
-        if _CONTROL_RE.search(value):
-            value = _CONTROL_RE.sub("\N{REPLACEMENT CHARACTER}", value)
-            _record(records, path, "control-character")
-        return value
+        return strip_control_characters(value, path, records)
     if isinstance(value, Mapping):
         return _copy_tool_mapping(value, path, records, active)
     if isinstance(value, list):
@@ -390,8 +166,8 @@ def _copy_tool_mapping(
         for key, item in value.items():
             if not isinstance(key, str):
                 raise _blocked("mapping keys must be strings")
-            item_path = _key_path(path, key)
-            output_key = _sanitize_mapping_key(key, item_path, records)
+            item_path = key_path(path, key)
+            output_key = sanitize_mapping_key(key, item_path, records)
             if output_key in result:
                 raise _blocked("redacted mapping keys must remain unique")
             result[output_key] = _copy_tool_value(item, item_path, records, active)
@@ -423,7 +199,8 @@ def sanitize_screen_context(text: str) -> str:
     """Sanitize cluster-derived screen text before it enters a provider request."""
     if not isinstance(text, str):
         raise _blocked("screen context must be text")
-    return _sanitize_text(text, "screen_context", [])
+    with _fail_closed():
+        return redact_text(text, "screen_context", [])
 
 
 def _sanitize_structured_result(
@@ -447,7 +224,7 @@ def _sanitize_structured_result(
     if not isinstance(loaded, dict | list):
         raise _blocked("structured tool result must be a mapping or list")
     try:
-        sanitized = _sanitize_value(loaded, path, records, set())
+        sanitized = redact_value(loaded, path, records, set())
         bounded = dump_yaml(sanitized)
         elided = len(bounded) > max_chars
         if elided:
@@ -455,7 +232,7 @@ def _sanitize_structured_result(
     except (RecursionError, yaml.YAMLError) as exc:
         raise _blocked("structured tool result could not be redacted") from exc
     if elided:
-        _record(records, path, "size-elision")
+        record(records, path, "size-elision")
     return bounded
 
 
@@ -478,7 +255,7 @@ def _sanitize_tool_result(
             records,
             max_chars if max_chars is not None else MAX_RESULT_CHARS,
         )
-    sanitized = _sanitize_text(result, path, records)
+    sanitized = redact_text(result, path, records)
     if max_chars is None:
         return sanitized
     return compact_result(sanitized, max_chars)
@@ -497,7 +274,8 @@ def sanitize_tool_result(name: str, result: str, *, max_chars: int | None = None
             compacted only when a budget is given, leaving the executor's
             own cap in place otherwise.
     """
-    return _sanitize_tool_result(name, result, "tool_result", [], max_chars)
+    with _fail_closed():
+        return _sanitize_tool_result(name, result, "tool_result", [], max_chars)
 
 
 def provider_prepared_messages(
@@ -545,8 +323,8 @@ def _sanitize_arguments(
     try:
         parsed = json.loads(arguments)
     except json.JSONDecodeError:
-        return _sanitize_text(arguments, path, records)
-    sanitized = _sanitize_value(parsed, path, records, set())
+        return redact_text(arguments, path, records)
+    sanitized = redact_value(parsed, path, records, set())
     return json.dumps(
         sanitized,
         ensure_ascii=False,
@@ -580,7 +358,7 @@ def _sanitize_call_arguments(
     if isinstance(arguments, str):
         return _sanitize_arguments(arguments, path, records)
     if isinstance(arguments, Mapping):
-        sanitized = _sanitize_value(dict(arguments), path, records, set())
+        sanitized = redact_value(dict(arguments), path, records, set())
         if not isinstance(sanitized, dict):  # pragma: no cover - defensive
             raise _blocked("assistant tool call has an invalid function")
         return sanitized
@@ -620,10 +398,10 @@ def _sanitize_tool_calls(
             raise _blocked("assistant tool call IDs must be unique")
         pending[call_id] = name
         prepared_function: dict[str, Any] = {
-            "name": _sanitize_text(name, _key_path(call_path, "name"), records),
+            "name": redact_text(name, key_path(call_path, "name"), records),
             "arguments": _sanitize_call_arguments(
                 function["arguments"],
-                _key_path(call_path, "arguments"),
+                key_path(call_path, "arguments"),
                 records,
             ),
         }
@@ -644,7 +422,7 @@ def _sanitize_content(
         return None
     if not isinstance(value, str | list):
         raise _blocked("message content has an invalid type")
-    return _sanitize_value(value, path, records, set())
+    return redact_value(value, path, records, set())
 
 
 def _sanitize_standard_message(
@@ -659,7 +437,7 @@ def _sanitize_standard_message(
         "role": role,
         "content": _sanitize_content(
             raw_message["content"],
-            _key_path(path, "content"),
+            key_path(path, "content"),
             records,
             allow_none=False,
         ),
@@ -680,7 +458,7 @@ def _sanitize_assistant_message(
         "role": "assistant",
         "content": _sanitize_content(
             raw_message["content"],
-            _key_path(path, "content"),
+            key_path(path, "content"),
             records,
             allow_none=True,
         ),
@@ -691,11 +469,11 @@ def _sanitize_assistant_message(
             raise _blocked("assistant thinking must be text")
         # Model-authored text that quotes tool results: untrusted data,
         # redacted exactly like any other outbound content.
-        result["thinking"] = _sanitize_text(thinking, _key_path(path, "thinking"), records)
+        result["thinking"] = redact_text(thinking, key_path(path, "thinking"), records)
     if "tool_calls" in raw_message:
         result["tool_calls"] = _sanitize_tool_calls(
             raw_message["tool_calls"],
-            _key_path(path, "tool_calls"),
+            key_path(path, "tool_calls"),
             records,
             pending,
         )
@@ -723,7 +501,7 @@ def _sanitize_tool_message(
         "content": _sanitize_tool_result(
             name,
             content,
-            _key_path(path, "content"),
+            key_path(path, "content"),
             records,
         ),
     }
@@ -734,7 +512,7 @@ def _sanitize_tool_message(
         tool_name = raw_message["tool_name"]
         if not isinstance(tool_name, str) or tool_name != name:
             raise _blocked("tool message names a different tool than its call")
-        result["tool_name"] = _sanitize_text(tool_name, _key_path(path, "tool_name"), records)
+        result["tool_name"] = redact_text(tool_name, key_path(path, "tool_name"), records)
     return result
 
 
@@ -764,7 +542,7 @@ def _sanitize_message(
         name_value = raw_message["name"]
         if not isinstance(name_value, str):
             raise _blocked("message name must be text")
-        result["name"] = _sanitize_text(name_value, _key_path(path, "name"), records)
+        result["name"] = redact_text(name_value, key_path(path, "name"), records)
     return result
 
 
@@ -789,10 +567,11 @@ class OutboundPolicy:
         iteration: int,
     ) -> PreparedOutbound:
         """Validate, redact, bound, and snapshot one provider request."""
-        try:
-            return self._prepare(provider, messages, tools, iteration=iteration)
-        except RecursionError as exc:
-            raise _blocked("outbound data is too deeply nested") from exc
+        with _fail_closed():
+            try:
+                return self._prepare(provider, messages, tools, iteration=iteration)
+            except RecursionError as exc:
+                raise _blocked("outbound data is too deeply nested") from exc
 
     def _prepare(
         self,

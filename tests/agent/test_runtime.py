@@ -13,6 +13,11 @@ from korvid.agent.runtime import MAX_HISTORY_TURNS, AgentRuntime
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
 from korvid.tools.executor import MAX_RESULT_CHARS, ToolExecutor
+from tests.tools.test_executor import (
+    LONG_NAME_ENV_SENTINEL,
+    NESTED_SECRET_SENTINEL,
+    oversized_crd_with_nested_credentials,
+)
 
 
 class ScriptedProvider:
@@ -1226,6 +1231,36 @@ async def test_small_profile_bounds_oversized_manifest_without_blocking() -> Non
     payload = json.dumps(provider.calls)
     assert "last-applied-hunter2" not in payload
     assert "env-hunter2" not in payload
+
+
+async def test_nested_credentials_never_reach_the_wire_from_an_oversized_manifest() -> None:
+    """Redaction must happen before the result is shrunk (PR #197 review).
+
+    The oversized CRD hides a Secret template and a long credential env
+    name. Structural reduction removes both classifiers, so a result that
+    is bounded before it is redacted arrives at the central policy as an
+    ordinary document — nothing left to recognize — and the values go out
+    over the wire.
+    """
+    executor = _manifest_executor(oversized_crd_with_nested_credentials())
+    provider = _get_resource_provider()
+    runtime = AgentRuntime(provider, executor)
+
+    events = await collect(runtime, "show me the composite app")
+
+    assert not [event for event in events if isinstance(event, AgentError)]
+    wire = json.dumps(provider.calls)
+    assert NESTED_SECRET_SENTINEL not in wire
+    assert LONG_NAME_ENV_SENTINEL not in wire
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert NESTED_SECRET_SENTINEL not in snapshot.payload_json
+    assert LONG_NAME_ENV_SENTINEL not in snapshot.payload_json
+    tool_message = provider.calls[1][-1]
+    assert tool_message["role"] == "tool"
+    manifest = yaml.safe_load(tool_message["content"])
+    assert manifest["kind"] == "CompositeApp"
+    assert len(tool_message["content"]) <= MAX_RESULT_CHARS
 
 
 def _bulk_text_executor(chars: int) -> Any:

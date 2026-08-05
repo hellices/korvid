@@ -180,6 +180,100 @@ async def test_get_resource_strips_managed_fields_for_non_secret() -> None:
     assert "managedFields" not in out
 
 
+#: Marker values that must never reach any consumer of a tool result.
+NESTED_SECRET_SENTINEL = "bmVzdGVkLWNyZWQ="
+LONG_NAME_ENV_SENTINEL = "primary-db-admin-pw"
+
+
+def oversized_crd_with_nested_credentials() -> dict[str, Any]:
+    """A CRD too large for the result budget that buries two classifiers.
+
+    The embedded Secret's `kind` and the env entry's long `name` are what
+    tell a redactor that `data.kubeconfig` and `value` are credentials.
+    Both are removed by *size* reduction (mapping elision, scalar
+    clamping), so anything that bounds before it redacts can no longer
+    recognize the values it is about to ship.
+    """
+    return {
+        "apiVersion": "apps.example.com/v1",
+        "kind": "CompositeApp",
+        "metadata": {"name": "composite-0", "namespace": "prod"},
+        "spec": {
+            "secretTemplate": {
+                "data": {"kubeconfig": NESTED_SECRET_SENTINEL},
+                **{f"annotationTemplate{index}": "x" * 200 for index in range(240)},
+                "kind": "Secret",
+                "apiVersion": "v1",
+            },
+            "podTemplate": {
+                "containers": [
+                    {
+                        "name": "api",
+                        "env": [
+                            {
+                                "name": "PRIMARY_DATABASE_CONNECTION_STRING_ADMIN_PASSWORD",
+                                "value": LONG_NAME_ENV_SENTINEL,
+                            }
+                        ],
+                    }
+                ]
+            },
+        },
+    }
+
+
+async def test_get_resource_redacts_nested_credentials_before_size_reduction() -> None:
+    """Size reduction must never precede redaction (PR #197 review).
+
+    Elision drops the nested `kind: Secret`, and clamping cuts the
+    credential word off a long env `name`; a document reduced first
+    arrives at the central policy with the values still in it and no
+    remaining evidence that they are secrets.
+    """
+    kube = FakeKube()
+    kube.manifest = oversized_crd_with_nested_credentials()
+    out = await make_executor(kube).execute(
+        "get_resource", {"kind": "pods", "name": "composite-0", "namespace": "prod"}
+    )
+    assert NESTED_SECRET_SENTINEL not in out
+    assert LONG_NAME_ENV_SENTINEL not in out
+    # Still a bounded, parseable document that identifies its object.
+    assert len(out) <= MAX_RESULT_CHARS
+    loaded = yaml.safe_load(out)
+    assert loaded["kind"] == "CompositeApp"
+    assert loaded["metadata"]["name"] == "composite-0"
+
+
+async def test_get_resource_keeps_non_sensitive_content_readable() -> None:
+    """Redacting before bounding must not blank out ordinary manifests."""
+    kube = FakeKube()
+    kube.manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "api-0", "namespace": "prod"},
+        "spec": {
+            "containers": [
+                {
+                    "name": "api",
+                    "image": "example/api:1.2.3",
+                    "env": [
+                        {"name": "LOG_LEVEL", "value": "debug"},
+                        {"name": "DB_PASSWORD", "valueFrom": {"secretKeyRef": {"name": "db"}}},
+                    ],
+                }
+            ]
+        },
+    }
+    out = await make_executor(kube).execute(
+        "get_resource", {"kind": "pods", "name": "api-0", "namespace": "prod"}
+    )
+    loaded = yaml.safe_load(out)
+    container = loaded["spec"]["containers"][0]
+    assert container["image"] == "example/api:1.2.3"
+    assert container["env"][0] == {"name": "LOG_LEVEL", "value": "debug"}
+    assert container["env"][1]["valueFrom"] == {"secretKeyRef": {"name": "db"}}
+
+
 async def test_unknown_tool_and_kind_return_error_text() -> None:
     ex = make_executor(FakeKube())
     assert (await ex.execute("nope", {})).startswith("ERROR:")
