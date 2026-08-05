@@ -1056,6 +1056,10 @@ def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> N
     assert "python -m pip uninstall -y korvid" in runbook
     assert "opt-in cleanup" in runbook
     assert "rerun your package manager with the full desired extra set" in runbook
+    assert 'state_root="${XDG_STATE_HOME:-$HOME/.local/state}/korvid"' in runbook
+    assert 'data_root="${XDG_DATA_HOME:-$HOME/.local/share}/korvid"' in runbook
+    assert 'rm -f "$state_root/audit.jsonl"' in runbook
+    assert 'rm -rf "$data_root/logs" "$data_root/agent-payloads"' in runbook
     assert stop_processes < remove_files
 
 

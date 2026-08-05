@@ -225,14 +225,13 @@ Then remove the retained files:
 ```sh
 # config and credentials are always under ~/.config/korvid
 rm -f ~/.config/korvid/config.yaml ~/.config/korvid/credentials.json
-# state honors XDG_STATE_HOME; substitute "${XDG_STATE_HOME:-$HOME/.local/state}"
-rm -f ~/.local/state/korvid/audit.jsonl ~/.local/state/korvid/audit.jsonl.1 \
-  ~/.local/state/korvid/audit.jsonl.2 ~/.local/state/korvid/audit.jsonl.3 \
-  ~/.local/state/korvid/audit.jsonl.lock
-rm -f ~/.local/state/korvid/mcp-endpoint.json \
-  ~/.local/state/korvid/mcp-endpoint.json.lock
-# data honors XDG_DATA_HOME; substitute "${XDG_DATA_HOME:-$HOME/.local/share}"
-rm -rf ~/.local/share/korvid/logs ~/.local/share/korvid/agent-payloads
+state_root="${XDG_STATE_HOME:-$HOME/.local/state}/korvid"
+data_root="${XDG_DATA_HOME:-$HOME/.local/share}/korvid"
+rm -f "$state_root/audit.jsonl" "$state_root/audit.jsonl.1" \
+  "$state_root/audit.jsonl.2" "$state_root/audit.jsonl.3" \
+  "$state_root/audit.jsonl.lock"
+rm -f "$state_root/mcp-endpoint.json" "$state_root/mcp-endpoint.json.lock"
+rm -rf "$data_root/logs" "$data_root/agent-payloads"
 ```
 
 The package uninstall command does not run that cleanup for you.
