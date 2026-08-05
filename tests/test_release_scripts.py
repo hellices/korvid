@@ -27,6 +27,7 @@ import compare_assets  # type: ignore[import-not-found]  # noqa: E402  # scripts
 import metadata  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import offline_verify  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 import release_manifest  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
+import smoke_install  # type: ignore[import-not-found]  # noqa: E402  # scripts/release via sys.path
 
 
 def _pyproject(tmp_path: Path, version: str) -> Path:
@@ -378,6 +379,43 @@ def test_bundle_checksums_cover_every_wheel(tmp_path: Path) -> None:
 # --- offline verification helpers -------------------------------------------
 
 
+def test_smoke_install_requirement_for_base_uses_the_local_wheel_url(tmp_path: Path) -> None:
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    assert smoke_install.requirement_for(wheel, "base") == wheel.resolve().as_uri()
+
+
+def test_smoke_install_requirement_for_agent_uses_a_pep_508_direct_reference(
+    tmp_path: Path,
+) -> None:
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    assert smoke_install.requirement_for(wheel, "agent") == (
+        f"korvid[agent] @ {wheel.resolve().as_uri()}"
+    )
+
+
+def test_smoke_install_required_modules_follow_the_selected_variant() -> None:
+    assert smoke_install.required_modules("mcp") == {"mcp"}
+    assert smoke_install.required_modules("all") == {"keyring", "mcp"}
+
+
+def test_smoke_install_rejects_unknown_variants(tmp_path: Path) -> None:
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    with pytest.raises(ValueError, match="unknown variant"):
+        smoke_install.requirement_for(wheel, "nope")
+    with pytest.raises(ValueError, match="unknown variant"):
+        smoke_install.required_modules("nope")
+
+
+def test_smoke_install_rejects_a_wheel_with_the_wrong_version(tmp_path: Path) -> None:
+    wheel = tmp_path / "korvid-1.2.4-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    with pytest.raises(ValueError, match=r"1\.2\.3"):
+        smoke_install.validate_wheel_version(wheel, "1.2.3")
+
+
 def test_pick_removable_wheel_never_picks_korvid(tmp_path: Path) -> None:
     wheels = _fake_wheelhouse(tmp_path)
     victim = offline_verify.pick_removable_wheel(wheels)
@@ -726,6 +764,31 @@ def test_release_workflow_has_a_main_only_non_publishing_manual_dry_run() -> Non
     assert "github.event_name == 'push'" in workflow[stage:publish]
     assert "github.event_name == 'push'" in workflow[publish:finalize]
     assert "github.event_name == 'push'" in workflow[finalize:]
+
+
+def test_release_workflow_smoke_matrix_covers_every_supported_runner_and_variant() -> None:
+    workflow = _release_workflow()
+    smoke = workflow.index("\n  smoke:")
+    sbom = workflow.index("\n  sbom:")
+    smoke_job = workflow[smoke:sbom]
+    assert "fail-fast: false" in smoke_job
+    assert "os: [ubuntu-latest, macos-latest, windows-latest]" in smoke_job
+    assert 'python-version: ["3.11", "3.12", "3.13"]' in smoke_job
+    assert "variant: [base, agent, mcp, all]" in smoke_job
+    assert "runs-on: ${{ matrix.os }}" in smoke_job
+
+
+def test_release_workflow_smokes_the_downloaded_wheel_once_without_rebuilding() -> None:
+    workflow = _release_workflow()
+    smoke = workflow.index("\n  smoke:")
+    sbom = workflow.index("\n  sbom:")
+    smoke_job = workflow[smoke:sbom]
+    assert smoke_job.count("scripts/release/smoke_install.py") == 1
+    assert "name: dist" in smoke_job
+    assert "path: dist" in smoke_job
+    assert "python-version: ${{ matrix.python-version }}" in smoke_job
+    assert "${{ runner.temp }}" in smoke_job
+    assert "uv build" not in smoke_job
 
 
 # --- metadata ---------------------------------------------------------------
