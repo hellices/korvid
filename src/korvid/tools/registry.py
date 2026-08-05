@@ -18,6 +18,7 @@ approval policy need their own threat model.
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -140,9 +141,107 @@ def _validate_write_policy(d: ToolDef) -> None:
         )
 
 
-def tool_result_format(name: str) -> ResultFormat:
+def tool_result_format(name: str) -> ResultFormat | None:
+    """The registry's result format for `name`, or None if it defines none.
+
+    None is not a default — it means this registry has nothing to say
+    about the tool, and the caller has to have been told. Returning
+    "untrusted_text" here let an undeclared tool return a `Secret`
+    document that took only the text pass (PR #197 review).
+    """
     definition = TOOLS_BY_NAME.get(name)
-    return definition.result_format if definition is not None else "untrusted_text"
+    return definition.result_format if definition is not None else None
+
+
+@dataclass(frozen=True, slots=True)
+class CustomToolResult:
+    """The result format of a tool this registry does not define.
+
+    A caller that offers the agent its own tool has to say which of the
+    two treatments its results get, because the boundary cannot tell a
+    manifest from a paragraph by looking, and the wrong guess is a leak:
+    a document that only gets the text pass ships every entry that is not
+    spelled like a credential.
+
+    Attributes:
+        name: The tool name, exactly as its schema declares it.
+        result_format: `structured_yaml` for results that are documents —
+            parsed and recursively redacted — or `untrusted_text` for
+            free-form output that gets pattern redaction.
+    """
+
+    name: str
+    result_format: ResultFormat
+
+
+def tool_schema_names(tools: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The tool names an OpenAI-style schema list offers, in order.
+
+    Raises:
+        ValueError: if an entry is not a function schema with a name.
+    """
+    names: list[str] = []
+    for tool in tools:
+        if not isinstance(tool, Mapping):
+            raise ValueError("each tool schema must be a mapping")
+        function = tool.get("function")
+        name = function.get("name") if isinstance(function, Mapping) else None
+        if not isinstance(name, str) or not name:
+            raise ValueError("each tool schema must name a function")
+        names.append(name)
+    return names
+
+
+def resolve_result_formats(
+    tools: Sequence[Mapping[str, Any]],
+    declared: Sequence[CustomToolResult] = (),
+) -> dict[str, ResultFormat]:
+    """Map every offered tool to the treatment its results get.
+
+    Registry tools resolve from the registry and cannot be redeclared —
+    otherwise a caller could downgrade `get_resource` to the text pass,
+    which is the hole this closes. Every other offered tool must be
+    declared, exactly once, with a valid format.
+
+    Args:
+        tools: Tool schemas as the agent will offer them.
+        declared: Formats for the tools this registry does not define.
+
+    Returns:
+        Tool name to result format, covering every offered tool.
+
+    Raises:
+        ValueError: on an unusable schema, a duplicate or unmatched
+            declaration, an attempt to redeclare a registry tool, an
+            invalid format, or an offered tool nobody declared.
+    """
+    offered = tool_schema_names(tools)
+    duplicates = {name for name in offered if offered.count(name) > 1}
+    if duplicates:
+        raise ValueError(f"tool {sorted(duplicates)[0]!r}: offered more than once")
+
+    resolved: dict[str, ResultFormat] = {}
+    for item in declared:
+        if item.result_format not in _RESULT_FORMATS:
+            raise ValueError(f"tool {item.name!r}: unknown result format {item.result_format!r}")
+        if item.name in resolved:
+            raise ValueError(f"tool {item.name!r}: declared more than once")
+        if item.name in TOOLS_BY_NAME:
+            raise ValueError(f"tool {item.name!r}: the registry already defines its result format")
+        if item.name not in offered:
+            raise ValueError(f"tool {item.name!r}: declared a result format but is not offered")
+        resolved[item.name] = item.result_format
+
+    for name in offered:
+        builtin = tool_result_format(name)
+        if builtin is not None:
+            resolved[name] = builtin
+        elif name not in resolved:
+            raise ValueError(
+                f"tool {name!r}: result format must be declared as "
+                f"structured_yaml or untrusted_text — the boundary cannot guess it"
+            )
+    return resolved
 
 
 def validate_dispatch_targets(defs: list[ToolDef], *, executor_cls: type, bridge_cls: type) -> None:

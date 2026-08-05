@@ -39,6 +39,12 @@ from korvid.tools.executor import (
     as_recorded,
     cap_result,
 )
+from korvid.tools.registry import (
+    CustomToolResult,
+    ResultFormat,
+    resolve_result_formats,
+    tool_schema_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,10 +158,19 @@ class AgentRuntime:
         cluster_context: str | None = None,
         system_prompt: str | None = None,
         ui_prompt: str | None = None,
+        custom_tool_results: Sequence[CustomToolResult] = (),
     ) -> None:
         self._provider = provider
         self._executor: RecordedExecution = as_recorded(executor)
         self._tools = tools if tools is not None else READ_TOOLS
+        # How each offered tool's results are treated. A tool this build
+        # does not define has to be declared: the boundary cannot tell a
+        # manifest from a paragraph by looking, and assuming "text" let a
+        # custom tool return a `Secret` document (PR #197 review).
+        self._custom_tool_results = tuple(custom_tool_results)
+        self._result_formats: dict[str, ResultFormat] = resolve_result_formats(
+            self._tools, self._custom_tool_results
+        )
         self._latest_outbound_payload: OutboundSnapshot | None = None
         # The serialized tool schemas ride along on every request; they are
         # part of the prompt cost when a provider omits usage.
@@ -229,7 +244,7 @@ class AgentRuntime:
                 max_history_chars=max_history_chars,
                 tools_chars=self._tools_chars,
             )
-        return OutboundPolicy(max_request_chars=limit)
+        return OutboundPolicy(max_request_chars=limit, result_formats=self._result_formats)
 
     def retarget(self, *, tools: list[dict[str, Any]], cluster_context: str | None) -> None:
         """Re-arm the runtime for a new cluster (issue #36, `:ctx`).
@@ -240,6 +255,15 @@ class AgentRuntime:
         instead of the cluster the runtime was originally built against.
         """
         self._tools = tools
+        # A new surface is a new set of declarations to honour: the ones
+        # for tools it no longer offers simply do not apply, and anything
+        # it does offer must still resolve or construction-time validation
+        # would have been theatre.
+        offered = set(tool_schema_names(tools))
+        self._custom_tool_results = tuple(
+            item for item in self._custom_tool_results if item.name in offered
+        )
+        self._result_formats = resolve_result_formats(tools, self._custom_tool_results)
         # Keep the omitted-usage estimate honest for the new tool set.
         self._tools_chars = len(json.dumps(self._tools))
         # A different tool surface is a different per-request overhead.
@@ -379,7 +403,12 @@ class AgentRuntime:
                 # message must not bypass the limit into history.
                 result = cap_result(f"ERROR: {exc}")
         text, records = sanitize_recorded_tool_result(
-            name, result, produced, max_chars=self._max_result_chars, error=errored
+            name,
+            result,
+            produced,
+            max_chars=self._max_result_chars,
+            error=errored,
+            result_format=self._result_formats.get(name),
         )
         return text, records, errored
 

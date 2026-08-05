@@ -167,6 +167,16 @@ flowchart LR
 - **Untrusted-text treatment** — all tool results and screen context are
   sanitized as data (control-character stripping, credential-pattern
   masking) rather than parsed as trusted instructions.
+- **Declared result formats** — which of the two treatments a tool's
+  results get (`structured_yaml`, parsed and recursively redacted, or
+  `untrusted_text`) comes from the tool registry, and a tool the registry
+  does not define must be declared by whoever offers it
+  (`CustomToolResult`, validated by `resolve_result_formats`). There is no
+  default: a document treated as text ships every entry that is not
+  spelled like a credential, so an undeclared result is refused rather
+  than guessed at, and a declaration cannot override a registry tool. A
+  result the *producer* reports as a failure is text either way, so
+  ordinary tool errors stay readable to the model.
 - **Request caps** — structured tool results are bounded while staying
   parsable (`dump_bounded_yaml` in `tools/structured.py`), text results are
   capped (`cap_result`/`compact_result` in `tools/executor.py`), retained

@@ -15,9 +15,11 @@ from korvid.k8s.discovery import PODS_META
 from korvid.k8s.errors import ApiStatusError
 from korvid.tools.executor import (
     MAX_RESULT_CHARS,
+    READ_TOOLS,
     RecordedExecution,
     ToolExecutor,
 )
+from korvid.tools.registry import CustomToolResult
 from tests.tools.test_executor import (
     _LOG_SECRET,
     LONG_NAME_ENV_SENTINEL,
@@ -105,7 +107,10 @@ async def test_tool_call_with_non_mapping_arguments_is_rejected() -> None:
 
 
 async def test_iteration_cap() -> None:
-    turn = [{"type": "tool_call", "id": "c", "name": "t", "arguments": "{}"}, {"type": "done"}]
+    turn = [
+        {"type": "tool_call", "id": "c", "name": "get_logs", "arguments": "{}"},
+        {"type": "done"},
+    ]
     p = ScriptedProvider([list(turn) for _ in range(20)])
     events = await collect(AgentRuntime(p, EchoExecutor(), max_iterations=3), "loop")
     errs = [e for e in events if isinstance(e, AgentError)]
@@ -187,7 +192,7 @@ async def test_usage_accumulates_across_tool_iterations() -> None:
     p = ScriptedProvider(
         [
             [
-                {"type": "tool_call", "id": "c1", "name": "t", "arguments": "{}"},
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "{}"},
                 {"type": "usage", "input_tokens": 50, "output_tokens": 5},
                 {"type": "done"},
             ],
@@ -246,7 +251,7 @@ async def test_history_trimmed_to_recent_turns() -> None:
 async def test_provider_error_still_accounts_usage() -> None:
     tool_turn: list[dict[str, Any]] = [
         {"type": "usage", "input_tokens": 40, "output_tokens": 7},
-        {"type": "tool_call", "id": "c", "name": "t", "arguments": "{}"},
+        {"type": "tool_call", "id": "c", "name": "get_logs", "arguments": "{}"},
         {"type": "done"},
     ]
 
@@ -316,7 +321,7 @@ async def test_usage_missing_in_any_iteration_marks_estimated() -> None:
         [
             [
                 # tool-calling iteration omits usage …
-                {"type": "tool_call", "id": "c1", "name": "t", "arguments": "{}"},
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "{}"},
                 {"type": "done"},
             ],
             [
@@ -368,7 +373,7 @@ async def test_executor_exception_result_is_capped() -> None:
     p = ScriptedProvider(
         [
             [
-                {"type": "tool_call", "id": "c1", "name": "t", "arguments": "{}"},
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "{}"},
                 {"type": "done"},
             ],
             [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
@@ -785,7 +790,7 @@ async def test_in_turn_history_budget_ends_the_turn_early() -> None:
     p = ScriptedProvider(
         [
             [
-                {"type": "tool_call", "id": "c1", "name": "apply", "arguments": huge},
+                {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": huge},
                 {"type": "done"},
             ],
         ]
@@ -2912,3 +2917,130 @@ async def test_every_inventory_path_is_spelled_as_the_payload_spells_it() -> Non
         tail = path.rsplit(".data", 1)[1]
         spelled = json.loads(tail[1:-1]) if tail.startswith("[") else tail[1:]
         assert spelled in keys, path
+
+
+# --- A custom tool declares what its results are (round 10) ---------------
+
+_CUSTOM_TOOL = {
+    "type": "function",
+    "function": {"name": "fetch_manifest", "description": "d", "parameters": {}},
+}
+
+_CUSTOM_SECRET = """kind: Secret
+apiVersion: v1
+metadata:
+  name: tls
+data:
+  ca.crt: Y2EtY2VydGlmaWNhdGUtYm9keQ==
+"""
+
+
+class _CustomExecutor:
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        return _CUSTOM_SECRET
+
+
+def _custom_turn() -> list[list[dict[str, Any]]]:
+    return [
+        [
+            {"type": "tool_call", "id": "c1", "name": "fetch_manifest", "arguments": "{}"},
+            {"type": "done"},
+        ],
+        [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+    ]
+
+
+def test_a_custom_tool_without_a_declared_result_format_is_refused() -> None:
+    """Offering a tool the boundary knows nothing about used to be silent,
+    and its results were assumed to be text (PR #197 review)."""
+    with pytest.raises(ValueError, match="result format must be declared"):
+        AgentRuntime(ScriptedProvider([]), _CustomExecutor(), tools=[_CUSTOM_TOOL])
+
+
+async def test_a_custom_tool_declared_structured_is_redacted_as_a_document() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider(_custom_turn()),
+        _CustomExecutor(),
+        tools=[_CUSTOM_TOOL],
+        custom_tool_results=[CustomToolResult("fetch_manifest", "structured_yaml")],
+    )
+
+    events = await collect(runtime, "fetch it")
+
+    assert not [event for event in events if isinstance(event, AgentError)]
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "Y2EtY2VydGlmaWNhdGUtYm9keQ==" not in snapshot.payload_json
+    tool_message = next(
+        message
+        for message in reversed(json.loads(snapshot.payload_json)["messages"])
+        if message["role"] == "tool"
+    )
+    assert yaml.safe_load(tool_message["content"])["kind"] == "Secret"
+
+
+async def test_a_custom_tool_declared_text_keeps_the_text_pass() -> None:
+    class _NotesExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "restart the deployment at 02:00"
+
+    provider = ScriptedProvider(_custom_turn())
+    runtime = AgentRuntime(
+        provider,
+        _NotesExecutor(),
+        tools=[_CUSTOM_TOOL],
+        custom_tool_results=[CustomToolResult("fetch_manifest", "untrusted_text")],
+    )
+
+    await collect(runtime, "fetch it")
+
+    assert provider.calls[1][-1]["content"] == "restart the deployment at 02:00"
+
+
+async def test_a_result_for_a_tool_that_was_never_offered_is_blocked() -> None:
+    """A model-invented name has no declaration and no registry entry, so
+    there is nothing to treat it as."""
+    provider = ScriptedProvider(_custom_turn())
+    runtime = AgentRuntime(provider, _CustomExecutor())
+
+    events = await collect(runtime, "fetch it")
+
+    assert len(provider.calls) == 1
+    errors = [event for event in events if isinstance(event, AgentError)]
+    assert errors
+    assert "result format" in errors[0].message
+    assert "Y2EtY2VydGlmaWNhdGUtYm9keQ==" not in json.dumps(provider.calls)
+
+
+async def test_an_undeclared_tool_that_fails_still_tells_the_model_why() -> None:
+    """A producer-declared failure is text either way — this must not
+    become a way to lose ordinary "unknown tool" errors."""
+
+    class _RaisingExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            raise RuntimeError("unknown tool 'fetch_manifest'")
+
+    provider = ScriptedProvider(_custom_turn())
+    runtime = AgentRuntime(provider, _RaisingExecutor())
+
+    events = await collect(runtime, "fetch it")
+
+    assert len(provider.calls) == 2
+    assert not [event for event in events if isinstance(event, AgentError)]
+    assert "unknown tool" in provider.calls[1][-1]["content"]
+
+
+def test_retarget_keeps_the_declarations_the_new_surface_still_offers() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider([]),
+        _CustomExecutor(),
+        tools=[_CUSTOM_TOOL],
+        custom_tool_results=[CustomToolResult("fetch_manifest", "structured_yaml")],
+    )
+
+    runtime.retarget(tools=[_CUSTOM_TOOL], cluster_context=None)
+    assert runtime._result_formats == {"fetch_manifest": "structured_yaml"}
+
+    runtime.retarget(tools=list(READ_TOOLS), cluster_context=None)
+    assert "fetch_manifest" not in runtime._result_formats
+    assert runtime._result_formats["get_resource"] == "structured_yaml"

@@ -1459,3 +1459,56 @@ def test_nested_caller_content_is_never_touched_by_a_hook() -> None:
         provider_prepared_messages(_NestedVandal(), messages)
 
     assert messages[1]["content"] == [{"type": "text", "text": "original"}]
+
+
+# --- An undeclared tool result is not assumed to be text (round 10) -------
+
+_CUSTOM_SECRET_YAML = """kind: Secret
+apiVersion: v1
+metadata:
+  name: tls
+data:
+  ca.crt: Y2EtY2VydGlmaWNhdGUtYm9keQ==
+  tls.key: cHJpdmF0ZS1rZXktYm9keQ==
+"""
+
+
+def test_an_undeclared_tool_result_is_blocked() -> None:
+    """Unknown names fell back to the text pass, so a custom tool could
+    return a `Secret` document and ship every entry that is not spelled
+    like a credential (PR #197 review)."""
+    with pytest.raises(OutboundPolicyError, match="result format"):
+        sanitize_tool_result("fetch_manifest", _CUSTOM_SECRET_YAML)
+
+
+def test_a_custom_tool_declared_structured_is_redacted_as_a_document() -> None:
+    out = sanitize_tool_result(
+        "fetch_manifest", _CUSTOM_SECRET_YAML, result_format="structured_yaml"
+    )
+
+    assert "Y2EtY2VydGlmaWNhdGUtYm9keQ==" not in out
+    assert "cHJpdmF0ZS1rZXktYm9keQ==" not in out
+    assert yaml.safe_load(out)["kind"] == "Secret"
+
+
+def test_a_custom_tool_declared_text_takes_the_text_pass() -> None:
+    """An explicit declaration is a decision its author owns."""
+    out = sanitize_tool_result(
+        "fetch_notes", "deploy notes: restart at 02:00", result_format="untrusted_text"
+    )
+
+    assert out == "deploy notes: restart at 02:00"
+
+
+def test_a_registry_tool_still_needs_no_declaration() -> None:
+    out = sanitize_tool_result("get_resource", "kind: Pod\nmetadata:\n  name: api-0\n")
+
+    assert yaml.safe_load(out)["kind"] == "Pod"
+
+
+def test_an_undeclared_tool_error_stays_readable() -> None:
+    """A producer-declared failure is text either way — an unknown tool
+    that could not run must still tell the model why."""
+    out = sanitize_tool_result("fetch_manifest", "ERROR: unknown tool", error=True)
+
+    assert out == "ERROR: unknown tool"

@@ -34,7 +34,7 @@ from korvid.core.redaction import (
     strip_control_characters,
 )
 from korvid.tools.executor import MAX_RESULT_CHARS, compact_result
-from korvid.tools.registry import tool_result_format
+from korvid.tools.registry import ResultFormat, tool_result_format
 from korvid.tools.structured import dump_bounded_yaml, dump_yaml
 
 _ALLOWED_ROLES = frozenset({"system", "user", "assistant", "tool"})
@@ -275,6 +275,21 @@ def _sanitize_structured_result(
     return bounded
 
 
+def _resolved_result_format(name: str, declared: ResultFormat | None) -> ResultFormat:
+    """How this tool's results are treated, or a refusal.
+
+    An undeclared name used to fall back to the text pass, so a custom
+    tool could return a `Secret` document and ship every entry that is
+    not spelled like a credential. There is no safe guess: a document
+    treated as text leaks, and a paragraph treated as a document blocks
+    the turn — so the caller has to have said (PR #197 review).
+    """
+    resolved = declared if declared is not None else tool_result_format(name)
+    if resolved is None:
+        raise _blocked(f"tool {name!r} has no declared result format")
+    return resolved
+
+
 def _sanitize_tool_result(
     name: str,
     result: str,
@@ -283,10 +298,11 @@ def _sanitize_tool_result(
     max_chars: int | None = None,
     *,
     error: bool = False,
+    result_format: ResultFormat | None = None,
 ) -> str:
     if not isinstance(name, str) or not isinstance(result, str):
         raise _blocked("tool name and result must be text")
-    if tool_result_format(name) == "structured_yaml" and not error:
+    if not error and _resolved_result_format(name, result_format) == "structured_yaml":
         # A structured result is always bounded: the ingest cap applies
         # even when no tighter profile budget was given, because the
         # bound must be enforced on the *redacted* document.
@@ -309,6 +325,7 @@ def sanitize_tool_result(
     max_chars: int | None = None,
     records: list[RedactionRecord] | None = None,
     error: bool = False,
+    result_format: ResultFormat | None = None,
 ) -> str:
     """Sanitize one tool result and bound it in its own format.
 
@@ -343,6 +360,7 @@ def sanitize_tool_result(
             records if records is not None else [],
             max_chars,
             error=error,
+            result_format=result_format,
         )
 
 
@@ -353,6 +371,7 @@ def sanitize_recorded_tool_result(
     *,
     max_chars: int | None = None,
     error: bool = False,
+    result_format: ResultFormat | None = None,
 ) -> tuple[str, tuple[RedactionRecord, ...]]:
     """Sanitize one tool result and return it with its complete record trail.
 
@@ -369,7 +388,14 @@ def sanitize_recorded_tool_result(
     production (PR #197 review).
     """
     ingress: list[RedactionRecord] = []
-    text = sanitize_tool_result(name, result, max_chars=max_chars, records=ingress, error=error)
+    text = sanitize_tool_result(
+        name,
+        result,
+        max_chars=max_chars,
+        records=ingress,
+        error=error,
+        result_format=result_format,
+    )
     return text, tuple(merge_records(ingress, [rebase(item, "tool_result") for item in produced]))
 
 
@@ -638,6 +664,7 @@ def _sanitize_tool_message(
     pending: dict[str, str],
     *,
     error: bool = False,
+    result_formats: Mapping[str, ResultFormat] | None = None,
 ) -> dict[str, Any]:
     if set(raw_message) - {"role", "content", "name", "tool_call_id", "tool_name"}:
         raise _blocked("tool message has an invalid shape")
@@ -660,6 +687,7 @@ def _sanitize_tool_message(
             key_path(path, "content"),
             records,
             error=error,
+            result_format=result_formats.get(name) if result_formats else None,
         ),
     }
     if "tool_name" in raw_message:
@@ -698,6 +726,7 @@ def _sanitize_message(
     pending: dict[str, str],
     *,
     error: bool = False,
+    result_formats: Mapping[str, ResultFormat] | None = None,
 ) -> dict[str, Any]:
     path = f"messages[{index}]"
     if not isinstance(raw_message, Mapping):
@@ -713,7 +742,9 @@ def _sanitize_message(
     elif role == "assistant":
         result = _sanitize_assistant_message(raw_message, path, records, pending)
     else:
-        result = _sanitize_tool_message(raw_message, path, records, pending, error=error)
+        result = _sanitize_tool_message(
+            raw_message, path, records, pending, error=error, result_formats=result_formats
+        )
 
     if "name" in raw_message:
         name_value = raw_message["name"]
@@ -726,7 +757,20 @@ def _sanitize_message(
 class OutboundPolicy:
     """Prepare bounded, redacted, canonical requests for embedded providers."""
 
-    def __init__(self, max_request_chars: int) -> None:
+    def __init__(
+        self,
+        max_request_chars: int,
+        result_formats: Mapping[str, ResultFormat] | None = None,
+    ) -> None:
+        """Build a policy for one tool surface.
+
+        Args:
+            max_request_chars: Hard ceiling on the serialized request.
+            result_formats: How each offered tool's results are treated,
+                from `resolve_result_formats`. Names absent from it fall
+                back to the registry, and a name neither knows is refused
+                rather than assumed to be text.
+        """
         if (
             isinstance(max_request_chars, bool)
             or not isinstance(max_request_chars, int)
@@ -734,6 +778,7 @@ class OutboundPolicy:
         ):
             raise ValueError("max_request_chars must be a positive integer")
         self._max_request_chars = max_request_chars
+        self._result_formats = dict(result_formats) if result_formats else None
 
     def prepare(
         self,
@@ -816,6 +861,7 @@ class OutboundPolicy:
                     records,
                     pending,
                     error=tool_errors is not None and index in tool_errors,
+                    result_formats=self._result_formats,
                 )
             )
             carried = _carried_records(index, ingress)
