@@ -62,6 +62,7 @@ async def test_replay_time_scale_1_uses_relative_inter_event_delays() -> None:
     report = await run_replay(profile, ReplayOptions(time_scale=1))
     assert report.dropped_updates == 0
     assert report.object_count == 20
+    assert report.expected_digest == report.final_digest
 
 
 async def test_replay_gone_reconnects_and_digest_matches() -> None:
