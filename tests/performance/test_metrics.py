@@ -349,6 +349,38 @@ async def test_process_sampler_rejects_double_start(
 
 
 @pytest.mark.asyncio
+async def test_process_sampler_keeps_owned_tracemalloc_until_last_overlapping_sampler_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, lifecycle, original_sleep = _patch_sampler_runtime(
+        monkeypatch,
+        cpu_values=(0.0, 12.5),
+        rss_values=(100,),
+        tracing=False,
+        python_bytes=(1000, 2000),
+        strict_tracing=True,
+    )
+
+    first = ProcessSampler(interval_seconds=0.01, clock=lambda: 11.0)
+    second = ProcessSampler(interval_seconds=0.01, clock=lambda: 12.0)
+
+    first.start()
+    await original_sleep(0)
+    second.start()
+    await original_sleep(0)
+
+    await first.stop()
+
+    assert lifecycle == ["start"]
+    assert state["tracing"] is True
+
+    await second.stop()
+
+    assert lifecycle == ["start", "stop"]
+    assert state["tracing"] is False
+
+
+@pytest.mark.asyncio
 async def test_process_sampler_starts_and_stops_owned_tracemalloc(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

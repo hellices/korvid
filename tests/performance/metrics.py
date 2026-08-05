@@ -190,6 +190,8 @@ class BenchmarkReport:
 
 
 class ProcessSampler:
+    _managed_tracemalloc_users = 0
+
     def __init__(self, interval_seconds: float, clock: Callable[[], float] = monotonic) -> None:
         self._interval_seconds = interval_seconds
         self._clock = clock
@@ -197,7 +199,7 @@ class ProcessSampler:
         self._start_time: float | None = None
         self._samples: list[ProcessSample] = []
         self._task: asyncio.Task[None] | None = None
-        self._owns_tracemalloc = False
+        self._uses_managed_tracing = False
 
     def start(self) -> None:
         if self._task is not None:
@@ -206,9 +208,7 @@ class ProcessSampler:
             )
         self._samples.clear()
         self._start_time = self._clock()
-        self._owns_tracemalloc = not tracemalloc.is_tracing()
-        if self._owns_tracemalloc:
-            tracemalloc.start()
+        self._uses_managed_tracing = self._acquire_tracemalloc()
         self._process.cpu_percent()
         self._task = asyncio.create_task(self._run())
 
@@ -220,10 +220,26 @@ class ProcessSampler:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
-        if self._owns_tracemalloc and tracemalloc.is_tracing():
-            tracemalloc.stop()
-        self._owns_tracemalloc = False
+        if self._uses_managed_tracing:
+            self._release_tracemalloc()
+        self._uses_managed_tracing = False
         return tuple(self._samples)
+
+    @classmethod
+    def _acquire_tracemalloc(cls) -> bool:
+        if tracemalloc.is_tracing():
+            if cls._managed_tracemalloc_users == 0:
+                return False
+        else:
+            tracemalloc.start()
+        cls._managed_tracemalloc_users += 1
+        return True
+
+    @classmethod
+    def _release_tracemalloc(cls) -> None:
+        cls._managed_tracemalloc_users -= 1
+        if cls._managed_tracemalloc_users == 0 and tracemalloc.is_tracing():
+            tracemalloc.stop()
 
     async def _run(self) -> None:
         assert self._start_time is not None
