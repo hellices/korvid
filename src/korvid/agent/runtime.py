@@ -29,6 +29,7 @@ from korvid.agent.outbound import (
     sanitize_tool_result,
 )
 from korvid.agent.prompts import compose_system_prompt
+from korvid.core.redaction import RedactionRecord
 from korvid.tools.executor import (
     READ_TOOLS,
     cap_result,
@@ -161,6 +162,15 @@ class AgentRuntime:
         # the full profile keeps the pre-profile runtime behavior exactly.
         self._strict_history_budget = strict_history_budget
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
+        # Redactions applied to screen text and tool results *before* they
+        # entered history, keyed by the exact sanitized content they were
+        # applied to. The outbound policy re-derives what it can still
+        # see, but a redaction that removed its evidence rather than
+        # masking it leaves nothing to re-derive, so the inspector would
+        # show a payload that looks untouched. Keying by content instead
+        # of position keeps this correct across trimming, rollback and
+        # recovery reordering without any index bookkeeping.
+        self._ingress_records: dict[str, tuple[RedactionRecord, ...]] = {}
         self._total_in = 0
         self._total_out = 0
         self._estimated = False
@@ -232,6 +242,30 @@ class AgentRuntime:
         """
         return self._latest_outbound_payload
 
+    def _remember_ingress(self, content: str, records: list[RedactionRecord]) -> None:
+        """Keep the redactions applied to one message's content on the way in."""
+        if records:
+            self._ingress_records[content] = tuple(records)
+
+    def _forget_dropped_ingress_records(self) -> None:
+        """Drop records for content no longer in history.
+
+        Their message is gone from the payload, so reporting them would
+        name a path nobody can find.
+        """
+        if not self._ingress_records:
+            return
+        live = {
+            message["content"]
+            for message in self._messages
+            if isinstance(message.get("content"), str)
+        }
+        self._ingress_records = {
+            content: records
+            for content, records in self._ingress_records.items()
+            if content in live
+        }
+
     def _trim_history(self) -> None:
         """Keep the system prompt plus at most MAX_HISTORY_TURNS-1 recent turns,
         then drop oldest complete turns until within the character budget."""
@@ -251,6 +285,7 @@ class AgentRuntime:
         if len(self._messages) < before:
             removed = before - len(self._messages)
             self._shift_turn_bases(removed)
+            self._forget_dropped_ingress_records()
             # Dropped context makes the agent "forget" earlier exchanges;
             # leave a trace so such reports are debuggable.
             logger.info(
@@ -336,15 +371,18 @@ class AgentRuntime:
                         # Same ingest cap as ToolExecutor — a huge exception
                         # message must not bypass the limit into history.
                         result = cap_result(f"ERROR: {exc}")
+            ingress: list[RedactionRecord] = []
             if self._max_result_chars is not None:
                 # Head+tail compaction, not a prefix cut: reports place
                 # their evidence (events, log excerpts) last by design.
                 # Structured results are shrunk structurally instead —
                 # `sanitize_tool_result` redacts the document first and
                 # bounds the redacted document, so it stays parseable.
-                result = sanitize_tool_result(name, result, max_chars=self._max_result_chars)
+                result = sanitize_tool_result(
+                    name, result, max_chars=self._max_result_chars, records=ingress
+                )
             else:
-                result = sanitize_tool_result(name, result)
+                result = sanitize_tool_result(name, result, records=ingress)
             if excess and index == len(kept) - 1:
                 # Appended after compaction, without re-compacting: the
                 # notice is a fixed-size constant carrying no evidence, so
@@ -363,6 +401,7 @@ class AgentRuntime:
                 summary=result[:120],
             )
             self._messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+            self._remember_ingress(result, ingress)
         for tc in excess:
             summary = "discarded: too many tool calls in one response"
             yield ToolCallStarted(
@@ -451,12 +490,14 @@ class AgentRuntime:
         the turn is rejected with a message the user can act on.
         """
         while True:
+            self._forget_dropped_ingress_records()
             try:
                 return self._outbound.prepare(
                     self._provider.name,
                     provider_prepared_messages(self._provider, self._messages),
                     self._tools,
                     iteration=iteration,
+                    ingress=self._ingress_records,
                 )
             except OutboundRequestTooLarge:
                 removed = self._drop_oldest_retained_turn()
@@ -580,18 +621,16 @@ class AgentRuntime:
         # one missing iteration makes the whole turn an estimate.
         usage_missing = False
         try:
-            safe_screen_context = sanitize_screen_context(screen_context)
-            self._messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "[screen context: untrusted evidence]\n"
-                        f"{safe_screen_context}\n"
-                        "[end screen context]\n\n"
-                        f"{user_text}"
-                    ),
-                }
+            ingress: list[RedactionRecord] = []
+            safe_screen_context = sanitize_screen_context(screen_context, ingress)
+            content = (
+                "[screen context: untrusted evidence]\n"
+                f"{safe_screen_context}\n"
+                "[end screen context]\n\n"
+                f"{user_text}"
             )
+            self._messages.append({"role": "user", "content": content})
+            self._remember_ingress(content, ingress)
             if self._strict_preflight_over_budget():
                 # Drop the unfittable prompt so it cannot poison later turns.
                 del self._messages[self._turn_base :]

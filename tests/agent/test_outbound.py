@@ -19,6 +19,7 @@ from korvid.agent.outbound import (
     sanitize_tool_result,
 )
 from korvid.agent.profiles import build_profile
+from korvid.core.redaction import RedactionRecord
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.tools.structured import dump_yaml
 
@@ -806,3 +807,68 @@ def test_executor_error_text_is_still_treated_as_text() -> None:
     sanitized = sanitize_tool_result("get_resource", "ERROR: [Errno 111] Connection refused")
 
     assert sanitized == "ERROR: [Errno 111] Connection refused"
+
+
+# --- Carried ingress records (issue #189, review round 3) --------------------
+
+
+def _basic(content: str) -> list[dict[str, Any]]:
+    return [{"role": "system", "content": "sys"}, {"role": "user", "content": content}]
+
+
+def test_carried_records_are_reported_on_their_payload_path() -> None:
+    records: list[RedactionRecord] = []
+    safe = sanitize_screen_context("view=pods\x07ns=default", records)
+
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m",
+        _basic(safe),
+        [],
+        iteration=0,
+        ingress={safe: tuple(records)},
+    )
+
+    assert [(r.path, r.reason) for r in prepared.snapshot.redactions] == [
+        ("messages[1].content", "control-character")
+    ]
+
+
+def test_a_carried_record_the_policy_re_derives_is_reported_once() -> None:
+    records: list[RedactionRecord] = []
+    safe = sanitize_screen_context("DB_PASSWORD=hunter2", records)
+    assert [r.reason for r in records] == ["credential-assignment"]
+
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m",
+        _basic(safe),
+        [],
+        iteration=0,
+        ingress={safe: tuple(records)},
+    )
+
+    assert [(r.path, r.reason) for r in prepared.snapshot.redactions] == [
+        ("messages[1].content", "credential-assignment")
+    ]
+
+
+def test_carried_records_for_absent_content_are_not_reported() -> None:
+    stale = RedactionRecord(path="screen_context", reason="control-character")
+
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m",
+        _basic("clean"),
+        [],
+        iteration=0,
+        ingress={"content that was trimmed away": (stale,)},
+    )
+
+    assert prepared.snapshot.redactions == ()
+
+
+def test_preparing_without_an_ingress_map_is_unchanged() -> None:
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m", _basic("clean"), [], iteration=0
+    )
+
+    assert prepared.snapshot.redactions == ()
+    assert prepared.messages[1]["content"] == "clean"

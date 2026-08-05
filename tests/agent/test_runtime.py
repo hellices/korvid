@@ -1632,3 +1632,239 @@ async def test_estimated_prompt_cost_reflects_the_history_actually_sent() -> Non
     assert runtime.usage_estimated
     assert second_turn_in <= (sent_chars + runtime._tools_chars) // 4
     assert second_turn_in < (sent_chars + runtime._tools_chars + 6_000) // 4
+
+
+# --- Redaction inventory completeness (issue #189, review round 3) -----------
+#
+# Screen context and tool results are sanitized at ingress, before the
+# outbound policy ever sees them. The policy re-derives an inventory from
+# the message it is handed, which only finds redactions whose evidence
+# survives as a still-matching mask. Redactions that *removed* their
+# evidence (a stripped control character, a deleted last-applied
+# annotation) leave no trace, so the inspector shows a payload that looks
+# untouched. These pin that every redaction reaching the displayed payload
+# is inventoried, exactly once, at the path it occupies in that payload.
+
+
+class _FixedExecutor:
+    def __init__(self, result: str) -> None:
+        self.result = result
+
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        return self.result
+
+
+def _one_tool_turn(tool: str) -> list[list[dict[str, Any]]]:
+    return [
+        [{"type": "tool_call", "id": "c1", "name": tool, "arguments": "{}"}, {"type": "done"}],
+        [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+    ]
+
+
+def _reasons(runtime: AgentRuntime) -> list[str]:
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    return [r.reason for r in snapshot.redactions]
+
+
+def _records_at(runtime: AgentRuntime, path: str) -> list[str]:
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    return [r.reason for r in snapshot.redactions if r.path == path]
+
+
+async def test_control_characters_stripped_from_screen_context_are_inventoried() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]]),
+        EchoExecutor(),
+    )
+
+    await collect(runtime, "why?", "view=pods\x07\x1b[2Jns=default")
+
+    assert "control-character" in _records_at(runtime, "messages[1].content")
+
+
+async def test_control_characters_stripped_from_a_tool_result_are_inventoried() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider(_one_tool_turn("get_logs")),
+        _FixedExecutor("starting\x07 pod\x00 ready"),
+    )
+
+    await collect(runtime, "why?")
+
+    assert "control-character" in _records_at(runtime, "messages[3].content")
+
+
+async def test_a_removed_last_applied_annotation_is_inventoried() -> None:
+    manifest = yaml.safe_dump(
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": "web",
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": '{"spec":{"x":1}}'
+                },
+            },
+        }
+    )
+    runtime = AgentRuntime(
+        ScriptedProvider(_one_tool_turn("get_resource")),
+        _FixedExecutor(manifest),
+    )
+
+    await collect(runtime, "why?")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "last-applied-configuration" in _reasons(runtime)
+    assert "last-applied-configuration" not in snapshot.payload_json
+
+
+async def test_a_screen_credential_is_inventoried_exactly_once() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]]),
+        EchoExecutor(),
+    )
+
+    await collect(runtime, "why?", "DB_PASSWORD=hunter2-raw")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert _records_at(runtime, "messages[1].content") == ["credential-assignment"]
+    assert "hunter2-raw" not in snapshot.payload_json
+
+
+async def test_two_screen_credentials_are_inventoried_twice() -> None:
+    """The count is a max over passes, not a sum: two masks, two records."""
+    runtime = AgentRuntime(
+        ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]]),
+        EchoExecutor(),
+    )
+
+    await collect(runtime, "why?", "DB_PASSWORD=one-raw API_KEY=two-raw")
+
+    assert _records_at(runtime, "messages[1].content") == [
+        "credential-assignment",
+        "credential-assignment",
+    ]
+
+
+async def test_an_untrusted_text_tool_result_credential_is_inventoried_once() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider(_one_tool_turn("get_logs")),
+        _FixedExecutor("connecting with password=hunter2-raw now"),
+    )
+
+    await collect(runtime, "why?")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert _records_at(runtime, "messages[3].content") == ["credential-assignment"]
+    assert "hunter2-raw" not in snapshot.payload_json
+
+
+async def test_a_structured_tool_result_secret_is_inventoried_at_its_payload_path() -> None:
+    manifest = yaml.safe_dump(
+        {"apiVersion": "v1", "kind": "Secret", "data": {"password": "cmF3LXNlY3JldA=="}}
+    )
+    runtime = AgentRuntime(
+        ScriptedProvider(_one_tool_turn("get_resource")),
+        _FixedExecutor(manifest),
+    )
+
+    await collect(runtime, "why?")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert _records_at(runtime, "messages[3].content.data.password") == [
+        "secret-value",
+        "sensitive-key",
+    ]
+    assert "cmF3LXNlY3JldA==" not in snapshot.payload_json
+
+
+async def test_ingress_redactions_are_still_inventoried_a_turn_later() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider(
+            [
+                [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+                [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+            ]
+        ),
+        EchoExecutor(),
+    )
+
+    await collect(runtime, "first", "view=pods\x07ns=default")
+    await collect(runtime, "second", "clean screen")
+
+    assert "control-character" in _records_at(runtime, "messages[1].content")
+
+
+async def test_trimming_history_leaves_no_stale_redaction_records() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]] * 12),
+        EchoExecutor(),
+    )
+
+    await collect(runtime, "first", "view=pods\x07ns=default")
+    for i in range(11):
+        await collect(runtime, f"question {i}", "clean screen")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "control-character" not in _reasons(runtime)
+    assert not runtime._ingress_records
+
+
+async def test_a_blocked_turn_leaves_no_stale_records_for_the_next_one() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider(
+            [
+                [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+                [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+            ]
+        ),
+        EchoExecutor(),
+        max_request_chars=20_000,
+    )
+
+    await collect(runtime, "first", "clean")
+    await collect(runtime, "x" * 60_000, "blocked\x07screen")
+    await collect(runtime, "third", "clean")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "control-character" not in _reasons(runtime)
+    assert "blocked" not in snapshot.payload_json
+
+
+async def test_the_exported_snapshot_lists_the_full_inventory() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider(_one_tool_turn("get_logs")),
+        _FixedExecutor("starting\x07 pod ready"),
+    )
+
+    await collect(runtime, "why?", "view=pods\x1b[2Jns=default")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    exported = json.loads(snapshot.export_json())
+    paths = {(r["path"], r["reason"]) for r in exported["redactions"]}
+    assert ("messages[1].content", "control-character") in paths
+    assert ("messages[3].content", "control-character") in paths
+
+
+async def test_the_ingress_record_map_never_retains_raw_content() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider(_one_tool_turn("get_logs")),
+        _FixedExecutor("connecting with password=hunter2-raw now"),
+    )
+
+    await collect(runtime, "why?", "DB_PASSWORD=screen-raw")
+
+    stored = json.dumps(
+        {k: [(r.path, r.reason) for r in v] for k, v in runtime._ingress_records.items()}
+    )
+    assert "hunter2-raw" not in stored
+    assert "screen-raw" not in stored

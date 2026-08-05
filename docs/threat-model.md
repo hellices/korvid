@@ -247,11 +247,17 @@ The `:ai payload` inspector (`PayloadInspectorScreen`) renders
 `tools` JSON that `OutboundPolicy.prepare()` produced for the most recent
 provider call, the `model` it was addressed to, and the list of redactions
 applied. The label is `model`, not `provider`, because that is what it
-holds — every adapter's `name` returns its model tag. This is the real
-payload — not a re-derived approximation — so what you read is what was
-sent. A turn that was blocked or rolled back sent nothing, so it leaves
-the previous handoff on display rather than clearing the view. It does
-**not** show:
+holds — every adapter's `name` returns its model tag. The redaction list
+covers the whole pipeline, not just the final pass: screen text and tool
+results are redacted as they enter history, and redactions that *removed*
+their evidence there (a stripped control character, a deleted
+last-applied annotation) leave nothing for the boundary pass to
+rediscover, so those records are carried forward and reported on the
+payload path they occupy. A redaction both passes can see is listed once.
+This is the real payload — not a re-derived approximation — so what you
+read is what was sent. A turn that was blocked or rolled back sent
+nothing, so it leaves the previous handoff on display rather than
+clearing the view. It does **not** show:
 
 - transport-level HTTP headers (`Authorization`, API keys, tenant headers),
   which are attached separately by each provider's `CredentialSource` and

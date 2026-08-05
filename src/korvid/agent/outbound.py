@@ -14,7 +14,7 @@ import copy
 import dataclasses
 import json
 import math
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +25,8 @@ from korvid.core.redaction import (
     RedactionError,
     RedactionRecord,
     key_path,
+    merge_records,
+    rebase,
     record,
     redact_text,
     redact_value,
@@ -207,12 +209,20 @@ def _copy_tool_list(
         active.remove(identity)
 
 
-def sanitize_screen_context(text: str) -> str:
-    """Sanitize cluster-derived screen text before it enters a provider request."""
+def sanitize_screen_context(text: str, records: list[RedactionRecord] | None = None) -> str:
+    """Sanitize cluster-derived screen text before it enters a provider request.
+
+    Args:
+        text: The raw screen text.
+        records: Optional accumulator; the redactions applied here are
+            appended to it, rooted at `screen_context`. The caller keeps
+            them so the outbound inventory can report redactions whose
+            evidence this pass removed rather than masked.
+    """
     if not isinstance(text, str):
         raise _blocked("screen context must be text")
     with _fail_closed():
-        return redact_text(text, "screen_context", [])
+        return redact_text(text, "screen_context", records if records is not None else [])
 
 
 def _sanitize_structured_result(
@@ -273,7 +283,13 @@ def _sanitize_tool_result(
     return compact_result(sanitized, max_chars)
 
 
-def sanitize_tool_result(name: str, result: str, *, max_chars: int | None = None) -> str:
+def sanitize_tool_result(
+    name: str,
+    result: str,
+    *,
+    max_chars: int | None = None,
+    records: list[RedactionRecord] | None = None,
+) -> str:
     """Sanitize one tool result and bound it in its own format.
 
     Args:
@@ -285,9 +301,15 @@ def sanitize_tool_result(name: str, result: str, *, max_chars: int | None = None
             bounded by the ingest cap); text results are head+tail
             compacted only when a budget is given, leaving the executor's
             own cap in place otherwise.
+        records: Optional accumulator; the redactions applied here are
+            appended to it, rooted at `tool_result`. The caller keeps
+            them so the outbound inventory can report redactions whose
+            evidence this pass removed rather than masked.
     """
     with _fail_closed():
-        return _sanitize_tool_result(name, result, "tool_result", [], max_chars)
+        return _sanitize_tool_result(
+            name, result, "tool_result", records if records is not None else [], max_chars
+        )
 
 
 def provider_prepared_messages(
@@ -528,6 +550,27 @@ def _sanitize_tool_message(
     return result
 
 
+def _carried_records(
+    raw_message: Any,
+    index: int,
+    ingress: Mapping[str, Sequence[RedactionRecord]] | None,
+) -> list[RedactionRecord]:
+    """Records from this message's ingress redaction, on payload paths.
+
+    Keyed by the sanitized content itself rather than by position, so
+    trimming, rollback and recovery need no bookkeeping: a message that
+    is no longer in history simply has no content to look up, and one
+    that moved is found wherever it moved to.
+    """
+    if not ingress or not isinstance(raw_message, Mapping):
+        return []
+    content = raw_message.get("content")
+    if not isinstance(content, str):
+        return []
+    root = key_path(f"messages[{index}]", "content")
+    return [rebase(item, root) for item in ingress.get(content, ())]
+
+
 def _sanitize_message(
     raw_message: Any,
     index: int,
@@ -577,11 +620,27 @@ class OutboundPolicy:
         tools: list[dict[str, Any]],
         *,
         iteration: int,
+        ingress: Mapping[str, Sequence[RedactionRecord]] | None = None,
     ) -> PreparedOutbound:
-        """Validate, redact, bound, and snapshot one provider request."""
+        """Validate, redact, bound, and snapshot one provider request.
+
+        Args:
+            model: The model identifier the request is destined for.
+            messages: Runtime history, already through the provider's
+                dialect hook.
+            tools: Tool schemas as the provider will receive them.
+            iteration: Zero-based tool-loop iteration of this request.
+            ingress: Redactions already applied to a message's content
+                before it entered history, keyed by that exact sanitized
+                content. This pass re-derives what it can see, but a
+                redaction that *removed* its evidence (a stripped control
+                character, a deleted last-applied annotation) leaves
+                nothing to find, so those records are carried in here and
+                re-rooted onto the payload path they occupy.
+        """
         with _fail_closed():
             try:
-                return self._prepare(model, messages, tools, iteration=iteration)
+                return self._prepare(model, messages, tools, iteration=iteration, ingress=ingress)
             except RecursionError as exc:
                 raise _blocked("outbound data is too deeply nested") from exc
 
@@ -592,6 +651,7 @@ class OutboundPolicy:
         tools: list[dict[str, Any]],
         *,
         iteration: int,
+        ingress: Mapping[str, Sequence[RedactionRecord]] | None = None,
     ) -> PreparedOutbound:
         if not isinstance(model, str) or not model:
             raise _blocked("model name must be non-empty text")
@@ -602,10 +662,15 @@ class OutboundPolicy:
 
         records: list[RedactionRecord] = []
         pending: dict[str, str] = {}
-        prepared_messages = [
-            _sanitize_message(message, index, records, pending)
-            for index, message in enumerate(messages)
-        ]
+        prepared_messages = []
+        for index, message in enumerate(messages):
+            own_start = len(records)
+            prepared_messages.append(_sanitize_message(message, index, records, pending))
+            carried = _carried_records(message, index, ingress)
+            if carried:
+                own = records[own_start:]
+                del records[own_start:]
+                records.extend(merge_records(own, carried))
         if pending:
             raise _blocked("assistant tool calls must have matching tool results")
 

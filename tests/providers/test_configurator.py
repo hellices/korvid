@@ -117,14 +117,7 @@ async def test_probe_policy_failure_prevents_delegation_and_closes_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class BlockingPolicy(OutboundPolicy):
-        def prepare(
-            self,
-            provider: str,
-            messages: list[dict[str, Any]],
-            tools: list[dict[str, Any]],
-            *,
-            iteration: int,
-        ) -> Any:
+        def prepare(self, *args: Any, **kwargs: Any) -> Any:
             raise OutboundPolicyError("injected policy failure")
 
     provider = ScriptedProvider([{"type": "text_delta", "text": "unexpected"}])

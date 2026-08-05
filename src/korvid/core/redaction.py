@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -118,6 +118,51 @@ def key_path(path: str, key: str) -> str:
 def record(records: list[RedactionRecord], path: str, reason: str) -> None:
     """Append one redaction record."""
     records.append(RedactionRecord(path=path, reason=reason))
+
+
+def _path_root(path: str) -> str:
+    """The leading name of a path, before its first key or index."""
+    for index, char in enumerate(path):
+        if char in ".[":
+            return path[:index]
+    return path
+
+
+def rebase(item: RedactionRecord, root: str) -> RedactionRecord:
+    """Re-root one record's path under `root`, keeping the rest of it.
+
+    A fragment sanitized on its own (screen text, a single tool result)
+    records its redactions against that fragment's root, but the fragment
+    ends up somewhere else in the request that finally carries it. An
+    inventory is only useful if its paths name places a reader can find
+    in the payload, so a carried record is re-rooted where it landed.
+    """
+    return RedactionRecord(path=root + item.path[len(_path_root(item.path)) :], reason=item.reason)
+
+
+def merge_records(
+    primary: Sequence[RedactionRecord], secondary: Sequence[RedactionRecord]
+) -> list[RedactionRecord]:
+    """Combine two views of the same content without double counting.
+
+    Redacting at ingress and re-deriving the inventory at the boundary
+    are two looks at one redaction, not two redactions, so a mask both
+    passes can see is reported once. Multiplicity still carries
+    information — two credentials masked in one message is genuinely two
+    records — so each (path, reason) keeps the larger of the two counts
+    rather than their sum.
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for item in primary:
+        counts[(item.path, item.reason)] = counts.get((item.path, item.reason), 0) + 1
+    merged = list(primary)
+    seen: dict[tuple[str, str], int] = {}
+    for item in secondary:
+        key = (item.path, item.reason)
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] > counts.get(key, 0):
+            merged.append(item)
+    return merged
 
 
 def strip_control_characters(text: str, path: str, records: list[RedactionRecord]) -> str:

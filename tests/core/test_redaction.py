@@ -11,6 +11,8 @@ from korvid.core.redaction import (
     RedactionError,
     RedactionRecord,
     denotes_secret,
+    merge_records,
+    rebase,
     redact_document,
     redact_manifest,
     redact_text,
@@ -308,3 +310,49 @@ def test_a_secret_key_reference_in_free_form_text_stays_readable() -> None:
     records: list[RedactionRecord] = []
     text = redact_text("mounted secretKeyRef=db-credentials-key", "doc", records)
     assert "db-credentials-key" in text
+
+
+# --- Carrying records across a boundary (issue #189, review round 3) ---------
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("tool_result", "messages[3].content"),
+        ("tool_result.data.password", "messages[3].content.data.password"),
+        (
+            "tool_result.spec.containers[0].env[1].value",
+            "messages[3].content.spec.containers[0].env[1].value",
+        ),
+        ('tool_result["odd key"].x', 'messages[3].content["odd key"].x'),
+    ],
+)
+def test_rebase_replaces_only_the_root_of_a_path(path: str, expected: str) -> None:
+    rebased = rebase(RedactionRecord(path=path, reason="secret-value"), "messages[3].content")
+    assert rebased.path == expected
+    assert rebased.reason == "secret-value"
+
+
+def test_merge_reports_a_redaction_both_passes_saw_only_once() -> None:
+    seen_twice = RedactionRecord(path="messages[1].content", reason="credential-assignment")
+    merged = merge_records([seen_twice], [seen_twice])
+    assert merged == [seen_twice]
+
+
+def test_merge_keeps_a_redaction_only_the_carried_pass_saw() -> None:
+    derived = RedactionRecord(path="messages[1].content", reason="credential-assignment")
+    carried = RedactionRecord(path="messages[1].content", reason="control-character")
+    merged = merge_records([derived], [carried])
+    assert merged == [derived, carried]
+
+
+def test_merge_keeps_the_larger_count_of_a_repeated_redaction() -> None:
+    item = RedactionRecord(path="messages[1].content", reason="credential-assignment")
+    assert merge_records([item], [item, item]) == [item, item]
+    assert merge_records([item, item], [item]) == [item, item]
+
+
+def test_merge_of_nothing_carried_is_the_derived_inventory() -> None:
+    item = RedactionRecord(path="messages[1].content", reason="control-character")
+    assert merge_records([item], []) == [item]
+    assert merge_records([], [item]) == [item]
