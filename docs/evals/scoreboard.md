@@ -33,6 +33,24 @@ so #176 still tracks expansion to eight journeys. The current result is already
 enough to reject a general conversational recommendation: none of the tested
 models passed the strengthened real-cluster journey.
 
+## Artifact and Operational Detail
+
+| Model / resolved digest | Parameters / quantization | Ollama layer |
+|---|---:|---:|
+| Qwen3 1.7B / `8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7` | 2.0B / Q4_K_M | 1.4 GB |
+| Qwen3 8B / `500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41` | 8.2B / Q4_K_M | 5.2 GB |
+| Qwen3-Coder 30B-A3B / `06c1097efce0431c2045fe7b2e5108366e43bee1b4603a7aded8f21689e90bca` | 30.5B MoE / Q4_K_M | 18 GB |
+
+Task metrics cover 69 runs per model. “All” totals also include offline and
+live conversation turns. Wall time is end-to-end runtime, including tools and
+agent overhead.
+
+| Model | Task calls | Task tokens in/out | Task wall mean / p50 | Offline passes by repetition (population σ) | Live passes by repetition (population σ) | All calls | All tokens in/out |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Qwen3 1.7B | 116 | 386,250 / 67,019 | 25.2s / 20.4s | 0/0/0 (0.00 journeys) | 0/0/0 (0.00 journeys) | 145 | 500,957 / 86,153 |
+| Qwen3 8B | 83 | 313,499 / 65,792 | 68.6s / 63.0s | 0/0/1 (0.47 journeys) | 0/0/0 (0.00 journeys) | 113 | 440,159 / 92,705 |
+| Qwen3-Coder 30B-A3B | 142 | 593,696 / 18,949 | 22.0s / 15.6s | 0/1/1 (0.47 journeys) | 0/0/0 (0.00 journeys) | 209 | 872,691 / 27,498 |
+
 ## Detailed Findings
 
 ### Qwen3 8B
