@@ -22,6 +22,13 @@ from korvid.agent.outbound import (
 from korvid.agent.profiles import build_profile
 from korvid.core.redaction import RedactionRecord
 from korvid.core.secrets import MASK_PLACEHOLDER
+from korvid.tools.executor import (
+    PROPOSAL_TOOLS,
+    READ_TOOLS,
+    RESIZE_TOOLS,
+    UI_TOOLS,
+    WRITE_TOOLS,
+)
 from korvid.tools.structured import dump_yaml
 
 _DEEP_NESTING = 2_000
@@ -1512,3 +1519,108 @@ def test_an_undeclared_tool_error_stays_readable() -> None:
     out = sanitize_tool_result("fetch_manifest", "ERROR: unknown tool", error=True)
 
     assert out == "ERROR: unknown tool"
+
+
+# --- Credential text inside a tool schema's string values (round 11) --------
+
+
+def _schema_with_strings() -> list[dict[str, Any]]:
+    """A custom tool whose prose carries credentials at several depths."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "fetch_manifest",
+                "description": "call it with api_key=raw-schema-secret",
+                "parameters": {
+                    "type": "object",
+                    "title": "Authorization: Bearer raw-schema-token",
+                    "properties": {
+                        "namespace": {
+                            "type": "string",
+                            "description": "the namespace",
+                            "default": "password=raw-schema-default",
+                        },
+                        "auth": {
+                            "type": "object",
+                            "properties": {
+                                "token": {
+                                    "type": "string",
+                                    "description": "AWS_SECRET_ACCESS_KEY=raw-schema-deep",
+                                }
+                            },
+                        },
+                    },
+                },
+            },
+        }
+    ]
+
+
+def _prepared_schema() -> Any:
+    return OutboundPolicy(max_request_chars=20_000).prepare(
+        "m", [{"role": "user", "content": "hi"}], _schema_with_strings(), iteration=1
+    )
+
+
+def test_credential_prose_in_a_tool_schema_never_reaches_the_wire() -> None:
+    """Schema strings only had their control characters stripped, so a
+    custom tool's description could hand a provider a live key."""
+    prepared = _prepared_schema()
+
+    for sentinel in (
+        "raw-schema-secret",
+        "raw-schema-token",
+        "raw-schema-default",
+        "raw-schema-deep",
+    ):
+        assert sentinel not in prepared.snapshot.payload_json, sentinel
+        assert sentinel not in prepared.snapshot.export_json(), sentinel
+        assert sentinel not in json.dumps(prepared.tools), sentinel
+
+
+def test_credential_prose_in_a_tool_schema_is_masked_in_place() -> None:
+    """The description still reads as a description; only the value goes."""
+    tool = _prepared_schema().tools[0]
+    described = tool["function"]["description"]
+
+    assert described.startswith("call it with api_key=")
+    assert MASK_PLACEHOLDER in described
+
+
+def test_schema_string_redactions_are_recorded_at_payload_paths() -> None:
+    prepared = _prepared_schema()
+    paths = {item.path for item in prepared.snapshot.redactions}
+
+    assert "tools[0].function.description" in paths
+    assert "tools[0].function.parameters.title" in paths
+    assert "tools[0].function.parameters.properties.namespace.default" in paths, sorted(paths)
+    assert "tools[0].function.parameters.properties.auth.properties.token.description" in paths, (
+        sorted(paths)
+    )
+    assert {item.reason for item in prepared.snapshot.redactions} == {
+        "credential-assignment",
+        "authorization-value",
+    }
+
+
+def test_ordinary_schema_prose_is_left_alone() -> None:
+    """Masking descriptions would cost the model the tool's meaning."""
+    tool = _prepared_schema().tools[0]
+    namespace = tool["function"]["parameters"]["properties"]["namespace"]
+
+    assert namespace["description"] == "the namespace"
+    assert namespace["type"] == "string"
+
+
+def test_the_builtin_tool_schemas_survive_the_boundary_unchanged() -> None:
+    """Nothing in the shipped surface reads like an assignment, so the
+    model still gets every word korvid wrote for it."""
+    shipped = [*READ_TOOLS, *UI_TOOLS, *WRITE_TOOLS, *RESIZE_TOOLS, *PROPOSAL_TOOLS]
+
+    prepared = OutboundPolicy(max_request_chars=400_000).prepare(
+        "m", [{"role": "user", "content": "hi"}], shipped, iteration=1
+    )
+
+    assert prepared.tools == shipped
+    assert prepared.snapshot.redactions == ()

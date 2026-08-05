@@ -31,7 +31,6 @@ from korvid.core.redaction import (
     redact_text,
     redact_value,
     sanitize_mapping_key,
-    strip_control_characters,
 )
 from korvid.tools.executor import MAX_RESULT_CHARS, compact_result
 from korvid.tools.registry import ResultFormat, tool_result_format
@@ -174,7 +173,10 @@ def _copy_tool_value(
             raise _blocked("non-finite numbers are not allowed")
         return value
     if isinstance(value, str):
-        return strip_control_characters(value, path, records)
+        # Schema prose is authored data too: a plugin's description or a
+        # default value can carry an assignment, and control stripping
+        # alone let it through to the provider (PR #197 review).
+        return redact_text(value, path, records)
     if isinstance(value, Mapping):
         return _copy_tool_mapping(value, path, records, active)
     if isinstance(value, list):

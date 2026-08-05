@@ -34,6 +34,7 @@ class ScriptedProvider:
     def __init__(self, turns: list[list[dict[str, Any]]]) -> None:
         self.turns = turns
         self.calls: list[list[dict[str, Any]]] = []
+        self.tool_surfaces: list[list[dict[str, Any]]] = []
 
     @property
     def name(self) -> str:
@@ -43,6 +44,7 @@ class ScriptedProvider:
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *, stream: bool = True
     ) -> AsyncIterator[dict[str, Any]]:
         self.calls.append([dict(m) for m in messages])
+        self.tool_surfaces.append(tools)
         for ev in self.turns.pop(0):
             yield ev
 
@@ -3292,3 +3294,41 @@ def test_a_retarget_that_fails_leaves_the_declarations_intact() -> None:
     assert runtime._tools == [_CUSTOM_TOOL]
     runtime.retarget(tools=[_CUSTOM_TOOL], cluster_context=None)
     assert runtime._result_formats == {"fetch_manifest": "structured_yaml"}
+
+
+# --- Schema prose is authored data too (round 11) --------------------------
+
+_POISONED_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "fetch_manifest",
+        "description": "authenticate with api_key=raw-wire-secret",
+        "parameters": {
+            "type": "object",
+            "properties": {"host": {"type": "string", "default": "password=raw-wire-default"}},
+        },
+    },
+}
+
+
+async def test_a_tool_schemas_credential_prose_never_reaches_the_provider() -> None:
+    provider = ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
+    runtime = AgentRuntime(
+        provider,
+        _CustomExecutor(),
+        tools=[_POISONED_TOOL],
+        custom_tool_results=[CustomToolResult("fetch_manifest", "structured_yaml")],
+    )
+
+    await collect(runtime, "hello")
+
+    wire = json.dumps(provider.tool_surfaces)
+    assert "raw-wire-secret" not in wire
+    assert "raw-wire-default" not in wire
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "raw-wire-secret" not in snapshot.export_json()
+    assert {item.path for item in snapshot.redactions} == {
+        "tools[0].function.description",
+        "tools[0].function.parameters.properties.host.default",
+    }

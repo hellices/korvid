@@ -167,6 +167,13 @@ flowchart LR
 - **Untrusted-text treatment** — all tool results and screen context are
   sanitized as data (control-character stripping, credential-pattern
   masking) rather than parsed as trusted instructions.
+- **Tool definitions** — the schemas offered alongside the messages are
+  authored data too: a plugin's or a caller's `description`, `title`, or
+  `default` can carry a credential. Every string in a tool definition —
+  keys and values alike — takes the same text pass as a tool result, so
+  the shape of the schema survives while an assignment inside it does
+  not. korvid's own shipped schemas contain nothing that matches, and
+  cross the boundary unchanged.
 - **Declared result formats** — which of the two treatments a tool's
   results get (`structured_yaml`, parsed and recursively redacted, or
   `untrusted_text`) comes from the tool registry, and a tool the registry
