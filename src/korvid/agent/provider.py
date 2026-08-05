@@ -35,5 +35,26 @@ class LLMProvider(ABC):
         produces a coroutine and fails the override check.
         """
 
+    def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Adapt conversation history to this provider's wire dialect.
+
+        Called *before* the outbound policy, so anything an adapter adds
+        here is sanitized, size-checked and recorded in the exact payload
+        snapshot the user can inspect — an adapter must never reshape
+        messages inside `complete`, because that content would bypass the
+        boundary. Default: the identity, so existing adapters keep
+        sending exactly the messages the policy prepared.
+
+        Args:
+            messages: Conversation history, OpenAI-shaped, safe to consume
+                (a private copy — mutating it cannot affect the runtime).
+
+        Returns:
+            The messages to hand to the policy, still OpenAI-shaped apart
+            from provider-specific fields the policy knows how to
+            sanitize.
+        """
+        return messages
+
     async def aclose(self) -> None:  # noqa: B027 - optional hook, no-op by default
         """Release provider-owned resources (HTTP clients etc). Default: no-op."""

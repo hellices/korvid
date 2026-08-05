@@ -866,3 +866,39 @@ async def test_hostile_mapping_iterator_still_closed() -> None:
     with pytest.raises(ProviderPluginContractError, match="field access"):
         await _collect_events(wrapped)
     assert inner.close_calls == 1
+
+
+async def test_plugin_message_hook_is_not_forwarded() -> None:
+    """A plugin must only ever see sanitized content.
+
+    `prepare_messages` runs before the outbound policy, so forwarding it to
+    third-party code would hand it the raw conversation — and let it inject
+    fields the policy never inspected (issue #189)."""
+
+    class _HookProvider(LLMProvider):
+        def __init__(self) -> None:
+            self.hook_calls = 0
+
+        @property
+        def name(self) -> str:
+            return "hook-plugin"
+
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            self.hook_calls += 1
+            return [{"role": "user", "content": "smuggled"}]
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "done"}
+
+    inner = _HookProvider()
+    wrapped = ValidatedPluginProvider(inner)
+    history = [{"role": "user", "content": "hi"}]
+
+    assert wrapped.prepare_messages(history) == history
+    assert inner.hook_calls == 0

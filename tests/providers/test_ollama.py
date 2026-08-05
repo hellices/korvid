@@ -6,6 +6,8 @@ import pytest
 import yaml
 
 from korvid.agent.outbound import OutboundPolicy
+from korvid.agent.provider import LLMProvider
+from korvid.agent.runtime import AgentRuntime
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.providers.ollama import OllamaOptions, OllamaProvider
 from korvid.providers.openai_compat import ProviderError
@@ -155,7 +157,7 @@ async def test_assistant_tool_call_arguments_converted_to_objects() -> None:
         },
         {"role": "tool", "tool_call_id": "call_0", "content": "ok"},
     ]
-    await _events(provider, messages)
+    await _events(provider, provider.prepare_messages(messages))
     sent = capture["json"]["messages"]
     assert sent[1]["tool_calls"][0]["function"]["arguments"] == {"pod": "web-1"}
     assert sent[2] == {
@@ -176,7 +178,7 @@ async def test_unparsable_assistant_arguments_fall_back_to_empty_object() -> Non
             "tool_calls": [{"function": {"name": "t", "arguments": "{broken"}}],
         },
     ]
-    await _events(provider, messages)
+    await _events(provider, provider.prepare_messages(messages))
     assert capture["json"]["messages"][0]["tool_calls"][0]["function"]["arguments"] == {}
 
 
@@ -256,7 +258,7 @@ async def test_tool_result_messages_gain_tool_name() -> None:
         {"role": "tool", "tool_call_id": "call_0", "content": "ok"},
         {"role": "tool", "tool_call_id": "unknown", "content": "orphan"},
     ]
-    await _events(provider, messages)
+    await _events(provider, provider.prepare_messages(messages))
     sent = capture["json"]["messages"]
     assert sent[1]["tool_name"] == "get_logs"
     assert sent[1]["tool_call_id"] == "call_0"
@@ -340,7 +342,7 @@ async def test_thinking_is_reattached_to_assistant_history() -> None:
         },
         {"role": "tool", "tool_call_id": call_id, "content": "ok"},
     ]
-    await _events(provider, history)
+    await _events(provider, provider.prepare_messages(history))
     sent = capture["json"]["messages"]
     assert sent[1]["thinking"] == "step 1; step 2"
 
@@ -358,7 +360,7 @@ async def test_history_tool_calls_gain_sequential_indices() -> None:
             ],
         },
     ]
-    await _events(provider, messages)
+    await _events(provider, provider.prepare_messages(messages))
     sent_calls = capture["json"]["messages"][0]["tool_calls"]
     assert [c["function"]["index"] for c in sent_calls] == [0, 1]
 
@@ -424,15 +426,6 @@ async def test_prepared_request_converts_only_sanitized_content() -> None:
             },
         }
     ]
-    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
-        "ollama",
-        messages,
-        tools,
-        iteration=2,
-    )
-    expected_payload = json.loads(prepared.snapshot.payload_json)
-    assert expected_payload == {"messages": prepared.messages, "tools": prepared.tools}
-
     provider = _provider(
         _ndjson(_done()),
         capture=cap,
@@ -441,19 +434,25 @@ async def test_prepared_request_converts_only_sanitized_content() -> None:
     )
     provider._thinking_by_call_id["call-1"] = "step 1; "
 
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "ollama",
+        provider.prepare_messages(messages),
+        tools,
+        iteration=2,
+    )
+    expected_payload = json.loads(prepared.snapshot.payload_json)
+    assert expected_payload == {"messages": prepared.messages, "tools": prepared.tools}
+
     _ = [e async for e in provider.complete(prepared.messages, prepared.tools)]
 
     sent = cap["json"]["messages"]
     assert cap["json"]["tools"] == expected_payload["tools"]
-    assert sent[0] == expected_payload["messages"][0]
-    assert sent[1]["content"] == expected_payload["messages"][1]["content"]
-    assert sent[2]["content"] == expected_payload["messages"][2]["content"]
+    assert sent == expected_payload["messages"]
     assert sent[2]["tool_calls"][0]["function"]["arguments"] == {
         "pod": "web-1",
         "token": MASK_PLACEHOLDER,
     }
     assert sent[2]["thinking"] == "step 1; "
-    assert sent[3]["content"] == expected_payload["messages"][3]["content"]
     assert sent[3]["tool_name"] == "get_resource"
     wire = json.dumps(cap["json"], ensure_ascii=False)
     assert "raw-token" not in wire
@@ -462,3 +461,118 @@ async def test_prepared_request_converts_only_sanitized_content() -> None:
     assert MASK_PLACEHOLDER in wire
     assert cap["headers"]["authorization"] == "Bearer sk-test"
     assert "Authorization" not in prepared.snapshot.payload_json
+
+
+def _thinking_history(call_id: str = "call-1") -> list[dict[str, Any]]:
+    return [
+        {"role": "user", "content": "why is web-1 failing?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": "get_logs", "arguments": json.dumps({"pod": "web-1"})},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": call_id, "content": "boot failed"},
+    ]
+
+
+async def test_provider_augmentation_is_sanitized_and_snapshotted() -> None:
+    """Reasoning replayed to the model is outbound data like any other.
+
+    `thinking` was injected inside the provider, after the policy had
+    already produced the exact snapshot, so it reached the wire
+    unsanitized and invisible to the inspector (issue #189)."""
+    cap: dict[str, Any] = {}
+    provider = _provider(
+        _ndjson(_done()),
+        capture=cap,
+        options=OllamaOptions(think=True),
+    )
+    provider._thinking_by_call_id["call-1"] = 'recalling api_key: "raw-thinking-secret"'
+
+    augmented = provider.prepare_messages(_thinking_history())
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "ollama", augmented, [], iteration=2
+    )
+
+    _ = [event async for event in provider.complete(prepared.messages, prepared.tools)]
+
+    wire = json.dumps(cap["json"], ensure_ascii=False)
+    assert cap["json"]["messages"] == prepared.messages
+    assert "raw-thinking-secret" not in wire
+    assert "raw-thinking-secret" not in prepared.snapshot.payload_json
+    assert MASK_PLACEHOLDER in prepared.messages[1]["thinking"]
+    assert MASK_PLACEHOLDER in json.loads(prepared.snapshot.payload_json)["messages"][1]["thinking"]
+
+
+async def test_default_provider_augmentation_is_the_identity() -> None:
+    """The hook is opt-in: API v1 providers that do not override it keep
+    sending exactly the messages the policy prepared."""
+    provider = _provider(_ndjson(_done()))
+    history = _thinking_history()
+
+    assert provider.prepare_messages([]) == []
+    assert OllamaProvider.prepare_messages is not LLMProvider.prepare_messages
+    assert LLMProvider.prepare_messages(provider, history) == history
+
+
+async def test_runtime_sends_exactly_the_snapshot_to_ollama() -> None:
+    """End-to-end: what the inspector shows is what the socket carries.
+
+    The model's reasoning quotes a credential it saw in a tool result; the
+    replayed `thinking` must be redacted on the wire and byte-identical to
+    the snapshot the payload inspector renders (issue #189)."""
+    bodies: list[dict[str, Any]] = []
+    streams = [
+        _ndjson(
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "thinking": 'the log shows api_key: "raw-thinking-secret"',
+                    "tool_calls": [
+                        {"id": "c1", "function": {"name": "get_logs", "arguments": {"pod": "w"}}}
+                    ],
+                },
+                "done": False,
+            },
+            _done(),
+        ),
+        _ndjson(
+            {"message": {"role": "assistant", "content": "the key is rotated"}, "done": False},
+            _done(),
+        ),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        body = streams[min(len(bodies) - 1, len(streams) - 1)]
+        return httpx.Response(200, text=body, headers={"content-type": "application/x-ndjson"})
+
+    class _Executor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return 'api_key: "raw-thinking-secret"'
+
+    provider = OllamaProvider(
+        base_url="http://x:11434",
+        model="m1",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        options=OllamaOptions(think=True),
+    )
+    runtime = AgentRuntime(provider, _Executor())
+
+    events = [event async for event in runtime.run_turn("why?", "view=pods")]
+
+    assert not [event for event in events if type(event).__name__ == "AgentError"]
+    assert len(bodies) == 2
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert bodies[1]["messages"] == json.loads(snapshot.payload_json)["messages"]
+    assert "raw-thinking-secret" not in json.dumps(bodies, ensure_ascii=False)
+    assert "raw-thinking-secret" not in snapshot.payload_json
+    assert MASK_PLACEHOLDER in bodies[1]["messages"][2]["thinking"]

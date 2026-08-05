@@ -162,6 +162,12 @@ Notes:
   Treat it as forward-compatibility metadata for now.
 - `LLMProvider.complete()` must be an **async generator** (`async def` with
   `yield`), not a plain coroutine that returns an iterator.
+- `LLMProvider` also defines `prepare_messages(messages)`, the built-in
+  adapters' hook for dialect conversion ahead of `OutboundPolicy`. korvid
+  does **not** call it on plugin providers — plugins only ever receive the
+  sanitized canonical payload — so overriding it in a plugin has no effect.
+  Adapt the payload inside `complete()` instead, and treat everything you
+  add there as leaving korvid's inspected boundary.
 
 ## Complete minimal adapter
 

@@ -58,7 +58,12 @@ flowchart LR
 - **Local endpoints** (Ollama, a self-hosted OpenAI-compatible server) — the
   same `OutboundPolicy` sanitization applies; korvid trusts the configured
   `base_url` to be the intended local process and does not itself verify
-  that nothing else is listening on it.
+  that nothing else is listening on it. Dialect differences (Ollama's
+  native API replays reasoning as `thinking`, names the executed tool, and
+  wants object-shaped tool arguments) are applied by
+  `LLMProvider.prepare_messages` *before* the policy runs, so those fields
+  are redacted and appear in the snapshot like everything else; adapters
+  must never reshape messages inside `complete()`.
 - **Trusted provider plugins** — third-party `korvid.provider` entry points
   run as **trusted in-process** Python code (see
   [`docs/provider-plugins.md`](provider-plugins.md)). They receive only the
@@ -201,5 +206,8 @@ sent. It does **not** show:
 - transport-level HTTP headers (`Authorization`, API keys, tenant headers),
   which are attached separately by each provider's `CredentialSource` and
   never enter the canonical snapshot;
+- non-message request fields an adapter sets for itself (Ollama's `model`,
+  `think`, `options.num_ctx`, `keep_alive`), which carry no conversation
+  data;
 - anything a plugin or remote endpoint does with the payload after
   receiving it.

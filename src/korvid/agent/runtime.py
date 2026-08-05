@@ -23,6 +23,7 @@ from korvid.agent.outbound import (
     OutboundRequestTooLarge,
     OutboundSnapshot,
     PreparedOutbound,
+    provider_prepared_messages,
     request_char_budget,
     sanitize_screen_context,
     sanitize_tool_result,
@@ -447,7 +448,7 @@ class AgentRuntime:
             try:
                 return self._outbound.prepare(
                     self._provider.name,
-                    self._messages,
+                    provider_prepared_messages(self._provider, self._messages),
                     self._tools,
                     iteration=iteration,
                 )

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from korvid.agent.outbound import OutboundPolicy
+from korvid.agent.outbound import OutboundPolicy, provider_prepared_messages
 from korvid.agent.setup import AgentConfigurator, AgentSettings, DeviceLoginPrompt
 from korvid.providers.github_copilot import (
     COPILOT_CHAT_BASE_URL,
@@ -194,7 +194,7 @@ class ProviderConfigurator(AgentConfigurator):
         try:
             prepared = self._outbound.prepare(
                 provider.name,
-                [_PROBE_MESSAGE],
+                provider_prepared_messages(provider, [_PROBE_MESSAGE]),
                 [],
                 iteration=1,
             )

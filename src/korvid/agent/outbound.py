@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 import math
@@ -499,6 +500,43 @@ def sanitize_tool_result(name: str, result: str, *, max_chars: int | None = None
     return _sanitize_tool_result(name, result, "tool_result", [], max_chars)
 
 
+def provider_prepared_messages(
+    provider: Any, messages: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Apply a provider's dialect hook before the policy sees the messages.
+
+    Providers whose wire format differs from the runtime's (Ollama's
+    native API re-attaches `thinking`, names the executed tool, wants
+    object arguments) adapt history through `LLMProvider.prepare_messages`.
+    Running it here means every field an adapter adds is sanitized,
+    size-checked and captured in the exact snapshot — an adapter that
+    reshaped messages inside `complete` would ship content the boundary
+    never saw.
+
+    The hook receives a private deep copy, so an adapter cannot mutate the
+    runtime's history, and a hook that fails or returns an unusable shape
+    blocks the request rather than silently falling back.
+
+    Args:
+        provider: The provider adapter; a missing hook means the identity.
+        messages: Conversation history to adapt.
+
+    Raises:
+        OutboundPolicyError: if the hook raised or returned a non-list.
+    """
+    private = copy.deepcopy(messages)
+    hook = getattr(provider, "prepare_messages", None)
+    if not callable(hook):
+        return private
+    try:
+        prepared = hook(private)
+    except Exception as exc:
+        raise _blocked("provider message preparation failed") from exc
+    if not isinstance(prepared, list):
+        raise _blocked("provider message preparation returned an invalid shape")
+    return prepared
+
+
 def _sanitize_arguments(
     arguments: str,
     path: str,
@@ -516,6 +554,37 @@ def _sanitize_arguments(
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def _sanitize_call_index(function: Mapping[Any, Any]) -> int | None:
+    """Validate the native-dialect `function.index` (Ollama tool ordering)."""
+    if "index" not in function:
+        return None
+    index = function["index"]
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        raise _blocked("assistant tool call has an invalid function")
+    return index
+
+
+def _sanitize_call_arguments(
+    arguments: Any,
+    path: str,
+    records: list[RedactionRecord],
+) -> str | dict[str, Any]:
+    """Redact tool-call arguments in whichever dialect they arrive in.
+
+    The runtime stores arguments as a JSON string; native dialects (Ollama)
+    want the parsed object. Both are sanitized the same way — the object
+    form is not a hole.
+    """
+    if isinstance(arguments, str):
+        return _sanitize_arguments(arguments, path, records)
+    if isinstance(arguments, Mapping):
+        sanitized = _sanitize_value(dict(arguments), path, records, set())
+        if not isinstance(sanitized, dict):  # pragma: no cover - defensive
+            raise _blocked("assistant tool call has an invalid function")
+        return sanitized
+    raise _blocked("assistant tool call has an invalid function")
 
 
 def _sanitize_tool_calls(
@@ -539,30 +608,28 @@ def _sanitize_tool_calls(
             or not call_id
             or call_type != "function"
             or not isinstance(function, Mapping)
-            or set(function) != {"name", "arguments"}
+            or set(function) - {"name", "arguments", "index"} != set()
+            or not {"name", "arguments"} <= set(function)
         ):
             raise _blocked("assistant tool call has an invalid shape")
         name = function["name"]
-        arguments = function["arguments"]
-        if not isinstance(name, str) or not name or not isinstance(arguments, str):
+        if not isinstance(name, str) or not name:
             raise _blocked("assistant tool call has an invalid function")
+        call_index = _sanitize_call_index(function)
         if call_id in pending:
             raise _blocked("assistant tool call IDs must be unique")
         pending[call_id] = name
-        calls.append(
-            {
-                "id": call_id,
-                "type": "function",
-                "function": {
-                    "name": _sanitize_text(name, _key_path(call_path, "name"), records),
-                    "arguments": _sanitize_arguments(
-                        arguments,
-                        _key_path(call_path, "arguments"),
-                        records,
-                    ),
-                },
-            }
-        )
+        prepared_function: dict[str, Any] = {
+            "name": _sanitize_text(name, _key_path(call_path, "name"), records),
+            "arguments": _sanitize_call_arguments(
+                function["arguments"],
+                _key_path(call_path, "arguments"),
+                records,
+            ),
+        }
+        if call_index is not None:
+            prepared_function["index"] = call_index
+        calls.append({"id": call_id, "type": "function", "function": prepared_function})
     return calls
 
 
@@ -605,7 +672,7 @@ def _sanitize_assistant_message(
     records: list[RedactionRecord],
     pending: dict[str, str],
 ) -> dict[str, Any]:
-    if set(raw_message) - {"role", "content", "name", "tool_calls"}:
+    if set(raw_message) - {"role", "content", "name", "tool_calls", "thinking"}:
         raise _blocked("assistant message has an invalid shape")
     if "content" not in raw_message:
         raise _blocked("assistant message requires content")
@@ -618,6 +685,13 @@ def _sanitize_assistant_message(
             allow_none=True,
         ),
     }
+    if "thinking" in raw_message:
+        thinking = raw_message["thinking"]
+        if not isinstance(thinking, str):
+            raise _blocked("assistant thinking must be text")
+        # Model-authored text that quotes tool results: untrusted data,
+        # redacted exactly like any other outbound content.
+        result["thinking"] = _sanitize_text(thinking, _key_path(path, "thinking"), records)
     if "tool_calls" in raw_message:
         result["tool_calls"] = _sanitize_tool_calls(
             raw_message["tool_calls"],
@@ -634,7 +708,7 @@ def _sanitize_tool_message(
     records: list[RedactionRecord],
     pending: dict[str, str],
 ) -> dict[str, Any]:
-    if set(raw_message) - {"role", "content", "name", "tool_call_id"}:
+    if set(raw_message) - {"role", "content", "name", "tool_call_id", "tool_name"}:
         raise _blocked("tool message has an invalid shape")
     call_id = raw_message.get("tool_call_id")
     content = raw_message.get("content")
@@ -643,7 +717,7 @@ def _sanitize_tool_message(
     name = pending.pop(call_id, None)
     if name is None:
         raise _blocked("tool message does not match an assistant tool call")
-    return {
+    result = {
         "role": "tool",
         "tool_call_id": call_id,
         "content": _sanitize_tool_result(
@@ -653,6 +727,15 @@ def _sanitize_tool_message(
             records,
         ),
     }
+    if "tool_name" in raw_message:
+        # Native dialects name the executed function here. It must agree
+        # with the correlated call: a mismatch would mean the result is
+        # sanitized under one tool's rules and attributed to another.
+        tool_name = raw_message["tool_name"]
+        if not isinstance(tool_name, str) or tool_name != name:
+            raise _blocked("tool message names a different tool than its call")
+        result["tool_name"] = _sanitize_text(tool_name, _key_path(path, "tool_name"), records)
+    return result
 
 
 def _sanitize_message(
