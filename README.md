@@ -62,9 +62,10 @@ korvid                        # uses your current kubeconfig context
 ```
 
 `korvid[all]` is the simplest first-release install: the TUI, embedded agent,
-and MCP server together. For slimmer extras, reinstall guidance, retained local
-state, and the exact v0.1.0 publish procedure, see the
-[release runbook](docs/release.md).
+and MCP server together. Until `v0.1.0` is published on PyPI, install from
+source instead (see [Installation](#installation)). For slimmer extras,
+reinstall guidance, retained local state, and the exact v0.1.0 publish
+procedure, see the [release runbook](docs/release.md).
 
 | Key | Action |
 |-----|--------|
@@ -150,6 +151,15 @@ python -m pip install --upgrade 'korvid[all]==0.1.0'
 With other installers, use their reinstall/upgrade equivalent or uninstall
 first, then install the exact requirement you want.
 
+Until `v0.1.0` is actually published, install straight from the repository:
+
+```sh
+python -m pip install 'korvid[all] @ git+https://github.com/hellices/korvid'
+```
+
+That source install is the fallback for the brief pre-publication window and
+for unreleased code; once the tag is published, PyPI is the release path.
+
 Without the `[agent]` extra the agent surface is simply absent — no agent
 panel, and `Ctrl-A` / `:ai` / `:model` are not registered. Without the
 `[mcp]` extra the `:mcp` command reports the feature as unavailable with
@@ -160,8 +170,12 @@ message. `[entra]` adds Entra ID auth for Azure OpenAI.
 `python -m pip uninstall -y korvid` removes the package only. It does **not**
 remove `~/.config/korvid/config.yaml`, the fallback
 `~/.config/korvid/credentials.json`, `~/.local/state/korvid/audit.jsonl`,
+`~/.local/state/korvid/mcp-endpoint.json` (and its `.lock` sibling),
 `~/.local/share/korvid/logs`, or `~/.local/share/korvid/agent-payloads`;
 cleanup is explicit and opt-in in the [release runbook](docs/release.md).
+Note that `XDG_CONFIG_HOME` does not relocate the two `~/.config/korvid`
+paths — only `XDG_STATE_HOME` and `XDG_DATA_HOME` are honored, for the state
+and data paths respectively.
 
 ### Releases
 

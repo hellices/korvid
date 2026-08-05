@@ -26,6 +26,10 @@ not a substitute for the external trust boundary.
   release. Do not plan on moving or deleting a published release tag.
 - PyPI publication is irreversible. A published version number cannot be reused
   for different artifacts.
+- Build-provenance **attestation is irreversible**: `actions/attest-build-provenance`
+  signs through the public Sigstore infrastructure and records the entry in the
+  public Rekor transparency log. Those entries cannot be withdrawn, so the
+  `attest` job is gated to tag pushes and never runs for a dry run.
 - Deleting or moving a published tag/version is not rollback. Treat it as an
   incident that needs diagnosis and a new version if the published artifacts are
   wrong.
@@ -33,15 +37,40 @@ not a substitute for the external trust boundary.
 ## Dry run on `main` before tagging
 
 Manual dry runs are non-publishing and only supported from `main`.
+`workflow_dispatch` is offered by GitHub only after this workflow file exists on
+the repository's **default branch**, so the first dry run is possible only once
+the release workflow has landed on `main`.
 
 ```sh
 gh workflow run Release --ref main
+RUN_ID=$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId')
 gh run watch RUN_ID --exit-status
 ```
 
-Replace `RUN_ID` with the workflow run you just started. Do not tag anything
-until that dry run succeeds and you have recorded the exact reviewed commit you
-intend to publish as `COMMIT`.
+The second command retrieves the run that was just queued; substitute its value
+for `RUN_ID` (`gh run watch "$RUN_ID" --exit-status`). Do not tag anything until
+that dry run succeeds and you have recorded the exact reviewed commit you intend
+to publish as `COMMIT`.
+
+### What the dry run proves — and what it cannot
+
+The dry run executes `verify`, `build`, `smoke`, `sbom`, `offline`, and
+`collect`. It builds the same artifacts, runs the same 36-cell install matrix,
+and assembles the same release file set.
+
+It deliberately stops there. The dry run **does not exercise attestation**,
+`stage-github-release`, PyPI publication, `finalize-github-release`, the
+compare-assets recovery path (`scripts/release/compare_assets.py`), or the
+pre-publication **tag revalidation** performed by
+`check_source.py --expected-commit`. Those jobs require a tag push,
+a protected environment approval, and irreversible external side effects. A
+green dry run therefore **reduces but does not eliminate** first-publication
+risk: the staging, publication, and finalization path is first exercised for
+real during `v0.1.0`.
+
+The dry run's source policy compares the checked-out `HEAD` against the live
+`origin/main`, which the workflow re-fetches explicitly after checkout. A stale
+dispatch SHA is rejected.
 
 ## Publish `v0.1.0`
 
@@ -87,6 +116,16 @@ The simplest first-release install is the full feature set:
 python -m pip install 'korvid[all]==0.1.0'
 ```
 
+During the brief window between this workflow landing on `main` and `v0.1.0`
+appearing on PyPI, install from source instead:
+
+```sh
+python -m pip install 'korvid[all] @ git+https://github.com/hellices/korvid'
+```
+
+Once `v0.1.0` is published, PyPI is the release path and the source install is
+only a fallback for unreleased code.
+
 If you already installed `korvid`, `korvid[agent]`, or `korvid[mcp]`, rerun your package manager with the full desired extra set rather than assuming it will expand extras in place. With pip, the explicit reinstall/extra-expansion command is:
 
 ```sh
@@ -102,6 +141,27 @@ To remove the package itself:
 python -m pip uninstall -y korvid
 ```
 
+## What the smoke matrix proves
+
+For each of the 36 runner/Python/variant cells, the release workflow performs a
+**fresh install of each variant**: one direct install of that variant's own
+requirement (for example `korvid[mcp]`) from the single wheel built by this run,
+into a brand-new virtual environment. It then asserts the reported version, that
+the variant's feature packages import, that feature packages from *other* extras
+are absent, that the `korvid` launcher answers `--help` and `--version`, that
+uninstall removes the package and the launcher, and that a noninteractive run
+leaves no user state behind.
+
+Every non-base variant additionally gets a
+**separate base-to-extra expansion check** in its own clean virtual
+environment: install base `korvid`, then run the documented
+`--upgrade 'korvid[extra]'` command and re-assert the same contract. The two
+checks are independent, so a passing fresh install is never inferred from an
+expansion (or vice versa).
+
+`entra` is deliberately outside this matrix; it stays covered by the standard
+test suite rather than the release smoke.
+
 ## Retained local state after uninstall
 
 Uninstalling the package does **not** delete operator data. By default, korvid
@@ -112,23 +172,41 @@ retains these paths:
   unavailable or broken)
 - `~/.local/state/korvid/audit.jsonl` (plus rotated `audit.jsonl.1`-`.3`
   backups when rotation has occurred)
+- `~/.local/state/korvid/mcp-endpoint.json` (MCP discovery registry) and its
+  sibling lock file `~/.local/state/korvid/mcp-endpoint.json.lock`
 - `~/.local/share/korvid/logs`
 - `~/.local/share/korvid/agent-payloads`
 
-If you set `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, or `XDG_DATA_HOME`, replace the
-leading `~/.config`, `~/.local/state`, or `~/.local/share` prefixes
-accordingly.
+Environment overrides are **not** uniform:
+
+- `XDG_STATE_HOME` relocates the `~/.local/state/korvid` paths (audit log, MCP
+  endpoint registry).
+- `XDG_DATA_HOME` relocates the `~/.local/share/korvid` paths (log exports,
+  agent payloads).
+- `XDG_CONFIG_HOME` is not honored. `config.yaml` and the `credentials.json`
+  fallback are always under `~/.config/korvid`, resolved from the user's home
+  directory. Do not rewrite those two paths when cleaning up, or you will leave
+  credentials behind.
 
 ## opt-in cleanup
 
 This opt-in cleanup is explicit. Only remove the retained paths if you deliberately want to discard local state:
 
 ```sh
+# config and credentials are always under ~/.config/korvid
 rm -f ~/.config/korvid/config.yaml ~/.config/korvid/credentials.json
+# state honors XDG_STATE_HOME; substitute "${XDG_STATE_HOME:-$HOME/.local/state}"
 rm -f ~/.local/state/korvid/audit.jsonl ~/.local/state/korvid/audit.jsonl.1 \
   ~/.local/state/korvid/audit.jsonl.2 ~/.local/state/korvid/audit.jsonl.3
+rm -f ~/.local/state/korvid/mcp-endpoint.json \
+  ~/.local/state/korvid/mcp-endpoint.json.lock
+# data honors XDG_DATA_HOME; substitute "${XDG_DATA_HOME:-$HOME/.local/share}"
 rm -rf ~/.local/share/korvid/logs ~/.local/share/korvid/agent-payloads
 ```
+
+Stop korvid (including any `korvid --mcp` server) before removing
+`mcp-endpoint.json`; deleting a live registry entry out from under a running
+server leaves external MCP hosts without a discovery record.
 
 The package uninstall command does not run that cleanup for you.
 
@@ -140,3 +218,9 @@ base, `agent`, `mcp`, and `all` variants plus package uninstall; it does not
 yet prove upgrading an older published wheel in place. The next release must
 validate upgrading from `0.1.0` before claiming a cross-version PyPI upgrade
 path.
+
+Nor can any dry run prove the publication path itself. Attestation, staging,
+PyPI upload, finalization, compare-assets recovery, and pre-publication tag
+revalidation are exercised for the first time during the real `v0.1.0` push.
+Plan the first release as a supervised operation with a maintainer watching the
+run, not as a rehearsed one.

@@ -1171,6 +1171,61 @@ def test_pyproject_version_matches_the_package_version() -> None:
     assert pyproject["project"]["version"] == korvid.__version__
 
 
+# --- release documentation invariants ---------------------------------------
+
+
+def test_release_docs_call_provenance_attestation_irreversible() -> None:
+    runbook = _release_runbook()
+    assert "Sigstore" in runbook
+    assert "Rekor" in runbook
+    assert "attestation is irreversible" in runbook
+
+
+def test_release_docs_state_the_dry_run_skips_attestation_and_publication() -> None:
+    runbook = _release_runbook()
+    assert "does not exercise attestation" in runbook
+    assert "stage-github-release" in runbook
+    assert "compare-assets recovery" in runbook
+    assert "tag revalidation" in runbook
+    assert "reduces but does not eliminate" in runbook
+
+
+def test_release_docs_show_how_to_find_the_run_id_and_the_dispatch_precondition() -> None:
+    runbook = _release_runbook()
+    assert "gh run list --workflow Release --limit 1" in runbook
+    assert "default branch" in runbook
+
+
+def test_release_docs_correct_the_xdg_config_claim() -> None:
+    runbook = _release_runbook()
+    assert "`XDG_CONFIG_HOME` is not honored" in runbook
+    assert "always under `~/.config/korvid`" in runbook
+
+
+def test_release_docs_list_and_clean_the_mcp_endpoint_state() -> None:
+    runbook = _release_runbook()
+    assert "~/.local/state/korvid/mcp-endpoint.json" in runbook
+    assert "~/.local/state/korvid/mcp-endpoint.json.lock" in runbook
+    cleanup = runbook.index("## opt-in cleanup")
+    assert "mcp-endpoint.json" in runbook[cleanup:]
+    assert "~/.config/korvid/credentials.json" in runbook[cleanup:]
+
+
+def test_release_docs_keep_a_source_install_fallback_before_publication() -> None:
+    runbook = _release_runbook()
+    readme = _readme()
+    source_install = "pip install 'korvid[all] @ git+https://github.com/hellices/korvid'"
+    assert source_install in runbook
+    assert source_install in readme
+    assert "PyPI is the release path" in readme
+
+
+def test_release_docs_describe_fresh_installs_and_extra_expansion_separately() -> None:
+    runbook = _release_runbook()
+    assert "fresh install of each variant" in runbook
+    assert "separate base-to-extra expansion check" in runbook
+
+
 # --- metadata ---------------------------------------------------------------
 
 
