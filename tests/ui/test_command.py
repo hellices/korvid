@@ -245,3 +245,17 @@ def test_command_help_lists_ctx() -> None:
 
     commands = [cmd for cmd, _ in command_help()]
     assert any("ctx" in cmd for cmd in commands)
+
+
+def test_command_help_describes_every_ai_argument() -> None:
+    """`:ai` is three actions, not one. A description that names only
+    setup leaves `off` and `payload` as bare words in the usage column
+    with nothing saying what they do."""
+    from korvid.ui.command import command_help
+
+    description = next(text for command, text in command_help() if command == ":ai [off|payload]")
+
+    assert "setup" in description.lower()
+    assert "disconnect" in description.lower()
+    assert "payload" in description.lower()
+    assert "(also :agent)" in description
