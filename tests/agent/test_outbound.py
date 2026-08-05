@@ -897,3 +897,111 @@ def test_a_structured_result_with_malformed_secret_metadata_is_blocked(
         sanitize_tool_result("get_resource", result)
 
     assert _WIRE_SECRET_SENTINEL not in str(excinfo.value)
+
+
+# --- Tool-call IDs are sanitized (issue #189, review round 4) ----------------
+
+
+def _call(call_id: str, name: str = "get_logs") -> dict[str, Any]:
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}
+
+
+def _turn(call_id: str, result: str = "ok") -> list[dict[str, Any]]:
+    return [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "why?"},
+        {"role": "assistant", "content": None, "tool_calls": [_call(call_id)]},
+        {"role": "tool", "tool_call_id": call_id, "content": result},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("call_id", "sentinel"),
+    [
+        pytest.param("call_api_key=raw-secret", "raw-secret", id="credential-assignment"),
+        pytest.param("call_authorization: Bearer raw-token", "raw-token", id="authorization"),
+    ],
+)
+def test_a_tool_call_id_carrying_a_credential_is_redacted(call_id: str, sentinel: str) -> None:
+    """Model-authored IDs are untrusted text like any other model output."""
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m", _turn(call_id), [], iteration=0
+    )
+
+    assert sentinel not in prepared.snapshot.payload_json
+    assert sentinel not in json.dumps(prepared.messages, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    "call_id",
+    [
+        pytest.param("call\x07bell", id="c0-control"),
+        pytest.param("call\x1b[2Jclear", id="escape-sequence"),
+        pytest.param("call\x9dosc", id="c1-control"),
+    ],
+)
+def test_a_tool_call_id_carrying_control_characters_is_sanitized(call_id: str) -> None:
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m", _turn(call_id), [], iteration=0
+    )
+
+    payload = prepared.snapshot.payload_json
+    assert "\x07" not in payload
+    assert "\x1b" not in payload
+    assert "\x9d" not in payload
+    assert "\\u0007" not in payload
+    assert "\\u001b" not in payload
+
+
+def test_the_sanitized_id_is_what_correlates_the_call_and_its_result() -> None:
+    """One spelling on the wire, or the pair stops matching downstream."""
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m", _turn("call\x07one"), [], iteration=0
+    )
+
+    assistant, tool = prepared.messages[2], prepared.messages[3]
+    assert assistant["tool_calls"][0]["id"] == "call\ufffdone"
+    assert tool["tool_call_id"] == "call\ufffdone"
+
+
+def test_ids_that_collide_only_after_sanitization_are_rejected() -> None:
+    """Two distinct raw IDs that redact to one spelling cannot be correlated."""
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "why?"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [_call("call\x07x"), _call("call\x08x")],
+        },
+        {"role": "tool", "tool_call_id": "call\x07x", "content": "a"},
+        {"role": "tool", "tool_call_id": "call\x08x", "content": "b"},
+    ]
+
+    with pytest.raises(OutboundPolicyError, match="unique"):
+        OutboundPolicy(max_request_chars=20_000).prepare("m", messages, [], iteration=0)
+
+
+def test_an_empty_tool_call_id_is_rejected() -> None:
+    with pytest.raises(OutboundPolicyError, match="tool call"):
+        OutboundPolicy(max_request_chars=20_000).prepare("m", _turn(""), [], iteration=0)
+
+
+def test_an_id_made_only_of_control_characters_still_correlates() -> None:
+    """Sanitizing never empties an ID, so the pair cannot be orphaned."""
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m", _turn("\x07\x08"), [], iteration=0
+    )
+
+    call_id = prepared.messages[2]["tool_calls"][0]["id"]
+    assert call_id == "\ufffd\ufffd"
+    assert prepared.messages[3]["tool_call_id"] == call_id
+
+
+def test_an_ordinary_tool_call_id_is_untouched() -> None:
+    prepared = OutboundPolicy(max_request_chars=20_000).prepare(
+        "m", _turn("call_abc123"), [], iteration=0
+    )
+
+    assert prepared.messages[2]["tool_calls"][0]["id"] == "call_abc123"
+    assert prepared.messages[3]["tool_call_id"] == "call_abc123"

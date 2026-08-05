@@ -428,6 +428,13 @@ def _sanitize_tool_calls(
         if not isinstance(name, str) or not name:
             raise _blocked("assistant tool call has an invalid function")
         call_index = _sanitize_call_index(function)
+        # The ID is model-authored text, so it is redacted like any other
+        # model output — and the *redacted* spelling is what goes on the
+        # wire and into the correlation table, because a raw ID recorded
+        # here would never match the sanitized one the tool message
+        # carries. Two IDs that collapse to one spelling can no longer be
+        # told apart, so the uniqueness check runs after redaction.
+        call_id = redact_text(call_id, key_path(call_path, "id"), records)
         if call_id in pending:
             raise _blocked("assistant tool call IDs must be unique")
         pending[call_id] = name
@@ -526,6 +533,9 @@ def _sanitize_tool_message(
     content = raw_message.get("content")
     if not isinstance(call_id, str) or not isinstance(content, str):
         raise _blocked("tool message has invalid fields")
+    # Redacted the same way the assistant call's ID was, so the pair still
+    # matches — correlation is on the spelling that ships, not the raw one.
+    call_id = redact_text(call_id, key_path(path, "tool_call_id"), records)
     name = pending.pop(call_id, None)
     if name is None:
         raise _blocked("tool message does not match an assistant tool call")
