@@ -12,8 +12,9 @@ single deterministic call — projected evidence instead of raw YAML dumps, whic
 is where small local models otherwise fail.  It can also drive the TUI itself — navigate views, apply filters,
 drill down, and open the log pane or describe screen — so "show me the crashing
 pod's logs" lands you in the actual log viewer instead of a text dump.
-Tool results are capped at 8,000 characters and `Secret` data is masked before
-it ever reaches the model.  The header shows the model name and cumulative
+Tool results are capped at 8,000 characters — manifests are shrunk
+structurally so they stay valid YAML the model can parse — and `Secret`
+data is masked before it ever reaches the model.  The header shows the model name and cumulative
 token usage (`~` marks estimated counts when the provider omits usage data).
 
 The agent can also *request* write operations — delete, scale, rollout
@@ -259,14 +260,16 @@ approval gate) but trims verbose tool descriptions, offers only the two
 evidence-showing UI tools (`open_logs`, `open_describe`) instead of all
 five, caps turns at 6 tool iterations with one tool call per response
 (extra parallel calls are discarded without entering history) and at most
-3k characters per tool result (compacted keeping head and tail so a
-report's trailing evidence sections survive; when parallel calls were
+3k characters per tool result (text results are compacted keeping head and
+tail so a report's trailing evidence sections survive; manifests are
+shrunk structurally and stay parseable; when parallel calls were
 discarded, a short fixed-size notice rides on top of the capped result),
 and retains ~24k characters of history as a hard bound (sized to a
 realistic local
 serving context, not the model's advertised window) — a turn whose
 retained text and tool-call arguments would push a follow-up request past
-that bound ends early instead of sending it. The system
+that bound ends early instead of sending it, and a single prompt that
+cannot fit on its own is rejected without disturbing the next one. The system
 prompt is swapped for a short one with a single worked example. `full`
 reproduces the
 default wiring exactly, so frontier models are unaffected.

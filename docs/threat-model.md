@@ -120,6 +120,13 @@ flowchart LR
   `accesstoken`, `refreshtoken`, or `credentials` are replaced with the
   mask placeholder; free-form text matching `authorization: ...` or a
   `password=`/`token=`/etc. assignment pattern is masked the same way.
+- **Credential-named env values** — a container env entry whose `name`
+  denotes a credential (`DB_PASSWORD`, `API_KEY`, `OAUTH_CLIENT_SECRET`,
+  `GITHUB_ACCESS_TOKEN`, `REFRESH_TOKEN`, `REGISTRY_CREDENTIALS`,
+  `dbPassword`, …) has its sibling `value` masked, because the secret is
+  in the value while only the name says what it is. Non-credential env
+  values (`LOG_LEVEL`, `TOKENIZER_PATH`) and `valueFrom` references are
+  preserved so the model can still reason about configuration.
 - **Untrusted-text treatment** — all tool results and screen context are
   sanitized as data (control-character stripping, credential-pattern
   masking) rather than parsed as trusted instructions.
@@ -163,7 +170,11 @@ These are explicit, current limitations — not aspirational future work:
   `Secret` object fields; it cannot recognize an application-specific
   token, key, or password embedded in unstructured log or event text that
   does not match those patterns. Treat any pod's logs as potentially
-  containing secrets the policy will not catch.
+  containing secrets the policy will not catch. The same limit applies to
+  positional secrets inside a manifest: a credential passed as a bare
+  container `args` element (`--token=…` is masked, `--token` followed by
+  the value as a separate element is not), or hidden in a free-form
+  annotation body, carries nothing that names it as a credential.
 - **Local endpoint trust is not verified.** For `provider: ollama` or a
   self-hosted OpenAI-compatible `base_url`, korvid sends the sanitized
   payload to whatever process is actually listening at that address; it
