@@ -37,15 +37,30 @@ _REDUCTION_STEPS: tuple[tuple[int, int, int], ...] = (
 
 _TRAILING_ELLIPSIS = "…"
 
+#: Prefix the executor puts in front of a failed tool result. The outbound
+#: boundary uses it to tell an executor error from a document, so a real
+#: document must never be able to start with it.
+ERROR_PREFIX = "ERROR:"
+
 
 def dump_yaml(document: Any) -> str:
-    """Serialize a document with the canonical structured-result options."""
-    return yaml.safe_dump(
+    """Serialize a document with the canonical structured-result options.
+
+    Keys are sorted, so a document whose first key sorts before
+    `apiVersion` (`ERROR`, on a CRD) would otherwise serialize into
+    something indistinguishable from an executor error and skip the
+    structured redaction pipeline. Such a document is emitted with an
+    explicit `---` document start: same parse, unambiguous prefix.
+    """
+    text = yaml.safe_dump(
         document,
         default_flow_style=False,
         allow_unicode=True,
         sort_keys=True,
     ).rstrip()
+    if text.startswith(ERROR_PREFIX):
+        return f"---\n{text}"
+    return text
 
 
 def dump_bounded_yaml(document: Any, limit: int) -> str:

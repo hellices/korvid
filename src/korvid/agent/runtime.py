@@ -635,18 +635,19 @@ class AgentRuntime:
                 state = _StreamState()
                 self._iteration_base = len(self._messages)
                 self._live_state = state
+                self._latest_outbound_payload = None
+                prepared = self._prepare_request(iteration + 1)
+                self._latest_outbound_payload = prepared.snapshot
                 # Estimate of the prompt this iteration sends — used only when
                 # the provider omits usage, so token totals never read as zero
                 # input for a request that was really transmitted. Counts what
                 # actually goes over the wire: tool schemas, message content,
-                # and prior assistant tool-call arguments.
+                # and prior assistant tool-call arguments — measured after
+                # preparation, which may have dropped history to fit.
                 prompt_estimate = (
                     self._tools_chars + sum(_message_chars(message) for message in self._messages)
                 ) // 4
                 self._live_prompt_estimate = prompt_estimate
-                self._latest_outbound_payload = None
-                prepared = self._prepare_request(iteration + 1)
-                self._latest_outbound_payload = prepared.snapshot
                 try:
                     stream = self._provider.complete(prepared.messages, prepared.tools)
                     async for event in self._consume_stream(stream, state):

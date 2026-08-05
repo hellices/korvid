@@ -20,6 +20,7 @@ from korvid.agent.outbound import (
 )
 from korvid.agent.profiles import build_profile
 from korvid.core.secrets import MASK_PLACEHOLDER
+from korvid.tools.structured import dump_yaml
 
 _DEEP_NESTING = 2_000
 
@@ -577,3 +578,114 @@ def test_an_over_ceiling_request_is_a_recoverable_policy_error() -> None:
     """Callers distinguish "too big" from fail-closed content blocks: the
     first is fixed by dropping history, the second never is."""
     assert issubclass(OutboundRequestTooLarge, OutboundPolicyError)
+
+
+def _native_dialect_messages(*, tool_name: str = "get_logs") -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "thinking": 'the log said password: "hunter2"',
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "get_logs",
+                        "index": 0,
+                        "arguments": {"pod": "web-1", "token": "raw-token"},
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "tool_name": tool_name, "content": "ok"},
+    ]
+
+
+def test_native_dialect_fields_are_sanitized_not_rejected() -> None:
+    policy = OutboundPolicy(max_request_chars=20_000)
+
+    prepared = policy.prepare("ollama", _native_dialect_messages(), [], iteration=1)
+
+    assistant, tool_message = prepared.messages
+    assert MASK_PLACEHOLDER in assistant["thinking"]
+    assert "hunter2" not in prepared.snapshot.payload_json
+    assert assistant["tool_calls"][0]["function"]["index"] == 0
+    assert assistant["tool_calls"][0]["function"]["arguments"] == {
+        "pod": "web-1",
+        "token": MASK_PLACEHOLDER,
+    }
+    assert tool_message["tool_name"] == "get_logs"
+    assert "raw-token" not in prepared.snapshot.payload_json
+    assert any(record.reason for record in prepared.snapshot.redactions)
+
+
+def test_a_tool_result_attributed_to_another_tool_is_blocked() -> None:
+    """`tool_name` decides nothing about sanitization — the correlated call
+    does. A mismatch would ship a result masked under one tool's rules
+    while telling the model it came from another."""
+    policy = OutboundPolicy(max_request_chars=20_000)
+
+    with pytest.raises(OutboundPolicyError, match="names a different tool than its call"):
+        policy.prepare(
+            "ollama", _native_dialect_messages(tool_name="get_resource"), [], iteration=1
+        )
+
+
+@pytest.mark.parametrize(
+    "function",
+    [
+        {"name": "get_logs", "arguments": "{}", "index": -1},
+        {"name": "get_logs", "arguments": "{}", "index": "0"},
+        {"name": "get_logs", "arguments": "{}", "index": True},
+        {"name": "get_logs", "arguments": 7},
+        {"name": "get_logs", "arguments": "{}", "extra": 1},
+    ],
+)
+def test_malformed_native_tool_call_fields_are_blocked(function: dict[str, Any]) -> None:
+    policy = OutboundPolicy(max_request_chars=20_000)
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "type": "function", "function": function}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+    ]
+
+    with pytest.raises(OutboundPolicyError, match=r"invalid (shape|function)"):
+        policy.prepare("ollama", messages, [], iteration=1)
+
+
+def test_non_text_thinking_is_blocked() -> None:
+    policy = OutboundPolicy(max_request_chars=20_000)
+    messages = [{"role": "assistant", "content": "answer", "thinking": {"step": 1}}]
+
+    with pytest.raises(OutboundPolicyError, match="assistant thinking must be text"):
+        policy.prepare("ollama", messages, [], iteration=1)
+
+
+def test_a_manifest_cannot_impersonate_the_executor_error_marker() -> None:
+    """`ERROR:` routes a structured result to the text path, so a document
+    whose first key sorts there would skip `Secret` stripping entirely —
+    the producing site must keep real documents unambiguous (issue #189)."""
+    document = {
+        "ERROR": "a CRD field that sorts before apiVersion",
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "data": {"config.json": "c2VjcmV0LXZhbHVl"},
+    }
+
+    sanitized = sanitize_tool_result("get_resource", dump_yaml(document))
+
+    assert "c2VjcmV0LXZhbHVl" not in sanitized
+    assert yaml.safe_load(sanitized)["data"]["config.json"] == MASK_PLACEHOLDER
+    assert yaml.safe_load(sanitized)["ERROR"] == "a CRD field that sorts before apiVersion"
+
+
+def test_executor_error_text_is_still_treated_as_text() -> None:
+    """The marker keeps working for what it is for: an executor failure is
+    not a document and must not be blocked as invalid YAML."""
+    sanitized = sanitize_tool_result("get_resource", "ERROR: [Errno 111] Connection refused")
+
+    assert sanitized == "ERROR: [Errno 111] Connection refused"

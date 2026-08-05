@@ -1445,3 +1445,33 @@ async def test_rollback_after_recovery_trimming_removes_the_whole_blocked_turn()
         estimated=recovered[-1].estimated,
     )
     assert TextDelta(text="third answer") in recovered
+
+
+async def test_estimated_prompt_cost_reflects_the_history_actually_sent() -> None:
+    """A usage-less provider is charged for the request that shipped.
+
+    Recovery trimming happens during preparation, so an estimate taken
+    before it would bill the caller for turns that were dropped from the
+    payload (issue #189)."""
+    provider = ScriptedProvider(
+        [
+            [{"type": "text_delta", "text": "first answer"}, {"type": "done"}],
+            [{"type": "text_delta", "text": "second answer"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(
+        provider,
+        EchoExecutor(),
+        max_history_chars=40_000,
+        max_request_chars=12_000,
+    )
+
+    await collect(runtime, "a" * 6_000)
+    first_total_in = runtime.total_tokens[0]
+    await collect(runtime, "b" * 6_000)
+
+    sent_chars = len(json.dumps(provider.calls[1], ensure_ascii=False))
+    second_turn_in = runtime.total_tokens[0] - first_total_in
+    assert runtime.usage_estimated
+    assert second_turn_in <= (sent_chars + runtime._tools_chars) // 4
+    assert second_turn_in < (sent_chars + runtime._tools_chars + 6_000) // 4

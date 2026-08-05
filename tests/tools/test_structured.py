@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 import yaml
 
-from korvid.tools.structured import ELISION, dump_bounded_yaml, dump_yaml
+from korvid.tools.structured import ELISION, ERROR_PREFIX, dump_bounded_yaml, dump_yaml
 
 
 def test_small_document_is_returned_unmodified() -> None:
@@ -68,3 +68,15 @@ def test_top_level_list_stays_a_list() -> None:
     assert isinstance(loaded, list)
     assert loaded[0]["name"] == "item-0"
     assert len(text) <= 1_000
+
+
+def test_a_document_never_serializes_into_the_error_marker() -> None:
+    """The boundary tells an executor error from a document by its `ERROR:`
+    prefix; a sorted-key dump must not be able to produce that prefix."""
+    document = {"ERROR": "a CRD status field", "kind": "Widget"}
+
+    text = dump_yaml(document)
+
+    assert not text.startswith(ERROR_PREFIX)
+    assert yaml.safe_load(text) == document
+    assert yaml.safe_load(dump_bounded_yaml(document, 40)) is not None

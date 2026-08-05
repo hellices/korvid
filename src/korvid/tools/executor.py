@@ -38,7 +38,7 @@ from korvid.tools.diagnose import (
     warning_event_lines,
 )
 from korvid.tools.registry import TOOL_DEFS, TOOLS_BY_NAME, ToolDef, validate_dispatch_targets
-from korvid.tools.structured import dump_bounded_yaml
+from korvid.tools.structured import ERROR_PREFIX, dump_bounded_yaml
 
 MAX_RESULT_CHARS = 8000
 
@@ -528,7 +528,7 @@ class ToolExecutor:
         except Exception as exc:
             # Errors flow through the same cap below: a client error with a
             # long reason must not bypass the ingest limit.
-            result = f"ERROR: {exc}"
+            result = f"{ERROR_PREFIX} {exc}"
         return cap_result(result)
 
     async def _dispatch(self, name: str, arguments: dict[str, Any]) -> str:

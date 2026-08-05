@@ -715,3 +715,21 @@ async def test_discard_notice_does_not_retruncate_the_recorded_result() -> None:
     assert "OOMKilled" in recording.records[0].result
     assert "OOMKilled" in tool_msg["content"]
     assert "discarded" in tool_msg["content"]
+
+
+async def test_counting_provider_forwards_the_message_hook() -> None:
+    """Evals must exercise the same request shape production sends: the
+    counting wrapper only counts round-trips, so the wrapped provider's
+    dialect conversion still runs ahead of the outbound policy (issue
+    #189)."""
+    from korvid.evals.runner import _CountingProvider
+
+    class DialectProvider(ScriptedProvider):
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [{**message, "thinking": "recalled"} for message in messages]
+
+    wrapped = _CountingProvider(DialectProvider([[{"type": "done"}]]))
+
+    prepared = wrapped.prepare_messages([{"role": "user", "content": "hi"}])
+
+    assert prepared == [{"role": "user", "content": "hi", "thinking": "recalled"}]

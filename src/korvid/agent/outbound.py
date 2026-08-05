@@ -16,7 +16,7 @@ import yaml
 from korvid.core.secrets import MASK_PLACEHOLDER, mask_secret_manifest
 from korvid.tools.executor import MAX_RESULT_CHARS, compact_result
 from korvid.tools.registry import tool_result_format
-from korvid.tools.structured import dump_bounded_yaml, dump_yaml
+from korvid.tools.structured import ERROR_PREFIX, dump_bounded_yaml, dump_yaml
 
 _LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
 _ALLOWED_ROLES = frozenset({"system", "user", "assistant", "tool"})
@@ -468,7 +468,7 @@ def _sanitize_tool_result(
 ) -> str:
     if not isinstance(name, str) or not isinstance(result, str):
         raise _blocked("tool name and result must be text")
-    if tool_result_format(name) == "structured_yaml" and not result.startswith("ERROR:"):
+    if tool_result_format(name) == "structured_yaml" and not result.startswith(ERROR_PREFIX):
         # A structured result is always bounded: the ingest cap applies
         # even when no tighter profile budget was given, because the
         # bound must be enforced on the *redacted* document.
