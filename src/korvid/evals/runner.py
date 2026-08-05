@@ -21,11 +21,12 @@ from korvid.agent.events import (
     ToolCallFinished,
     ToolCallStarted,
 )
+from korvid.agent.outbound import sanitize_tool_result
 from korvid.agent.profiles import AgentProfile, build_profile
 from korvid.agent.runtime import AgentRuntime
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Scenario
-from korvid.tools.executor import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES, compact_result
+from korvid.tools.executor import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES
 
 #: Runs per scenario per configuration (issue #69: report variance, not means).
 DEFAULT_REPETITIONS = 3
@@ -48,12 +49,13 @@ class _RecordingExecutor:
     """Wraps the real executor to keep full tool results for evidence grading
     (the runtime's ToolCallFinished summary is truncated to 120 chars).
 
-    The profile's per-result cap is applied *before* recording: grading must
-    only credit evidence the model could actually have seen, so the recorded
-    content matches what reaches the conversation. `compact_result` is
-    idempotent, so the runtime re-applying the same cap changes nothing;
-    the runtime's discard notice (excess parallel calls) is appended after
-    its own compaction step, so it never re-truncates the recorded content.
+    The runtime's own sanitize-and-bound step is applied *before*
+    recording: grading must only credit evidence the model could actually
+    have seen, so the recorded content matches what reaches the
+    conversation (and carries the same redactions). That step is
+    idempotent, so the runtime re-applying it changes nothing; the
+    runtime's discard notice (excess parallel calls) is appended after
+    its own bounding step, so it never re-truncates the recorded content.
     """
 
     def __init__(self, executor: Any, max_result_chars: int | None = None) -> None:
@@ -63,8 +65,7 @@ class _RecordingExecutor:
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         result: str = await self._executor.execute(name, arguments)
-        if self._max_result_chars is not None:
-            result = compact_result(result, self._max_result_chars)
+        result = sanitize_tool_result(name, result, max_chars=self._max_result_chars)
         self.records.append(ToolRecord(name=name, arguments=dict(arguments), result=result))
         return result
 

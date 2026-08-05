@@ -1,3 +1,4 @@
+import copy
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -10,6 +11,8 @@ from korvid.agent.profiles import build_profile
 from korvid.agent.prompts import NO_WRITE_PROMPT
 from korvid.agent.runtime import MAX_HISTORY_TURNS, AgentRuntime
 from korvid.core.secrets import MASK_PLACEHOLDER
+from korvid.k8s.discovery import PODS_META
+from korvid.tools.executor import MAX_RESULT_CHARS, ToolExecutor
 
 
 class ScriptedProvider:
@@ -1068,3 +1071,143 @@ async def test_profiles_reject_an_over_cap_final_provider_request(profile_name: 
         for event in events
     )
     assert getattr(runtime, "latest_outbound_payload", None) is None
+
+
+def _bulk_pod_manifest(*, labels: int) -> dict[str, Any]:
+    """A benign but bulky Pod manifest — no Secret object, just size.
+
+    Real workloads exceed the 8k ingest cap easily (annotations, long
+    label sets, status conditions), so this is the ordinary case that must
+    reach the model, not an attack.
+    """
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "api-0",
+            "namespace": "prod",
+            "annotations": {
+                "kubectl.kubernetes.io/last-applied-configuration": json.dumps(
+                    {"stringData": {"password": "last-applied-hunter2"}}
+                ),
+                "operator.example.com/notes": "rollout completed cleanly. " * 40,
+            },
+            "labels": {f"team-{index}": f"squad-{index}" for index in range(labels)},
+        },
+        "spec": {
+            "containers": [
+                {
+                    "name": "api",
+                    "image": "registry.example.com/api:1.2.3",
+                    "env": [
+                        {"name": "DB_PASSWORD", "value": "env-hunter2"},
+                        {"name": "API_KEY", "value": "env-raw-key"},
+                        {"name": "LOG_LEVEL", "value": "debug"},
+                    ],
+                }
+            ]
+        },
+        "status": {
+            "phase": "Running",
+            "conditions": [
+                {"type": f"Ready-{index}", "status": "True", "message": "all good " * 20}
+                for index in range(labels // 4 or 1)
+            ],
+        },
+    }
+
+
+class _ManifestKube:
+    """Minimal ReadOps stand-in for the get_resource path."""
+
+    def __init__(self, manifest: dict[str, Any]) -> None:
+        self.manifest = manifest
+
+    async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        return copy.deepcopy(self.manifest)
+
+
+def _manifest_executor(manifest: dict[str, Any]) -> Any:
+    """A real ToolExecutor over a fake cluster returning `manifest`."""
+    return ToolExecutor(_ManifestKube(manifest), {"pods": PODS_META, "pod": PODS_META})  # type: ignore[arg-type]  # test double for ReadOps
+
+
+def _get_resource_provider() -> ScriptedProvider:
+    return ScriptedProvider(
+        [
+            [
+                {
+                    "type": "tool_call",
+                    "id": "c1",
+                    "name": "get_resource",
+                    "arguments": '{"kind":"pods","name":"api-0","namespace":"prod"}',
+                },
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "the pod is healthy"}, {"type": "done"}],
+        ]
+    )
+
+
+async def test_oversized_manifest_reaches_the_model_as_bounded_valid_yaml() -> None:
+    """A benign manifest larger than the 8k ingest cap must not block the
+    turn: capping happens *before* the policy parses the structured
+    result, so a byte-level truncation would make it unparseable YAML and
+    the whole turn would be rolled back (issue #189 final review)."""
+    executor = _manifest_executor(_bulk_pod_manifest(labels=200))
+    provider = _get_resource_provider()
+    runtime = AgentRuntime(provider, executor)
+
+    events = await collect(runtime, "show me the pod")
+
+    assert not [event for event in events if isinstance(event, AgentError)]
+    assert isinstance(events[-1], TurnComplete)
+    assert len(provider.calls) == 2
+    tool_message = provider.calls[1][-1]
+    assert tool_message["role"] == "tool"
+    manifest = yaml.safe_load(tool_message["content"])
+    assert isinstance(manifest, dict)
+    assert manifest["kind"] == "Pod"
+    assert manifest["metadata"]["name"] == "api-0"
+    assert len(tool_message["content"]) <= MAX_RESULT_CHARS
+    payload = json.dumps(provider.calls)
+    assert "last-applied-hunter2" not in payload
+    assert "env-hunter2" not in payload
+    assert "env-raw-key" not in payload
+    # The benign turn stays in history: the next question keeps its context.
+    assert any(message["role"] == "tool" for message in runtime._messages)
+
+
+async def test_small_profile_bounds_oversized_manifest_without_blocking() -> None:
+    """Same failure with the small profile's tighter per-result cap: its
+    head+tail compaction cuts the YAML mid-document (issue #189)."""
+    profile = build_profile("small", readonly=True, resize_supported=False)
+    assert profile.max_result_chars is not None
+    executor = _manifest_executor(_bulk_pod_manifest(labels=60))
+    provider = _get_resource_provider()
+    runtime = AgentRuntime(
+        provider,
+        executor,
+        tools=profile.tools,
+        max_iterations=profile.max_iterations,
+        max_history_chars=profile.max_history_chars,
+        max_result_chars=profile.max_result_chars,
+        max_tool_calls_per_iteration=profile.max_tool_calls_per_iteration,
+        strict_history_budget=profile.strict_history_budget,
+        system_prompt=profile.system_prompt,
+        ui_prompt=profile.ui_prompt,
+    )
+
+    events = await collect(runtime, "show me the pod")
+
+    assert not [event for event in events if isinstance(event, AgentError)]
+    assert isinstance(events[-1], TurnComplete)
+    assert len(provider.calls) == 2
+    tool_message = provider.calls[1][-1]
+    manifest = yaml.safe_load(tool_message["content"])
+    assert isinstance(manifest, dict)
+    assert manifest["kind"] == "Pod"
+    assert len(tool_message["content"]) <= profile.max_result_chars
+    payload = json.dumps(provider.calls)
+    assert "last-applied-hunter2" not in payload
+    assert "env-hunter2" not in payload

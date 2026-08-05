@@ -13,7 +13,9 @@ from typing import Any
 import yaml
 
 from korvid.core.secrets import MASK_PLACEHOLDER, mask_secret_manifest
+from korvid.tools.executor import MAX_RESULT_CHARS, compact_result
 from korvid.tools.registry import tool_result_format
+from korvid.tools.structured import dump_bounded_yaml, dump_yaml
 
 _LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
 _ALLOWED_ROLES = frozenset({"system", "user", "assistant", "tool"})
@@ -29,6 +31,10 @@ _SENSITIVE_NAMES = frozenset(
         "credentials",
     }
 )
+_WORD_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
+#: Longest sensitive name in words (`access` + `token`) plus one word of
+#: slack — bounds the window scan over a hostile, very long key.
+_MAX_NAME_WINDOW = 3
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _DOUBLE_QUOTED_VALUE = r'"(?:\\.|[^"\\\r\n])*"'
 _SINGLE_QUOTED_VALUE = r"'(?:\\.|[^'\\\r\n])*'"
@@ -101,6 +107,22 @@ def _blocked(reason: str) -> OutboundPolicyError:
 
 def _normalize_name(value: str) -> str:
     return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def _denotes_secret(value: str) -> bool:
+    """True when consecutive words of `value` spell a credential name.
+
+    Kubernetes names are compounds (`DB_PASSWORD`, `dbPassword`,
+    `github-access-token`), so exact normalization alone never recognizes
+    them; splitting into words and scanning short windows does, without
+    matching unrelated names that merely start the same (`TOKENIZER_PATH`).
+    """
+    words = tuple(word.casefold() for word in _WORD_RE.findall(value))
+    return any(
+        "".join(words[start : start + size]) in _SENSITIVE_NAMES
+        for start in range(len(words))
+        for size in range(1, min(_MAX_NAME_WINDOW, len(words) - start) + 1)
+    )
 
 
 def _key_path(path: str, key: str) -> str:
@@ -190,6 +212,32 @@ def _secret_redactions(
     return masked
 
 
+def _names_a_secret_sibling(value: Mapping[str, Any]) -> bool:
+    """True for a `{"name": "DB_PASSWORD", "value": ...}` pair.
+
+    Kubernetes carries container environment variables (and several
+    similar list shapes) as sibling `name`/`value` keys, so the credential
+    word lives in a *value*, not a key — a key-name rule alone never sees
+    it and the secret ships in the sibling.
+    """
+    name = value.get("name")
+    return isinstance(name, str) and "value" in value and _denotes_secret(name)
+
+
+def _mask_reason(key: str, item: Any, *, secret_sibling: bool) -> str | None:
+    """Why this entry must be masked, or None to sanitize it normally."""
+    if secret_sibling and key == "value" and isinstance(item, str | int | float):
+        return "sensitive-env-value"
+    if _normalize_name(key) in _SENSITIVE_NAMES:
+        return "sensitive-key"
+    # Compound keys (`dbPassword`, `admin-api-key`) only mask text values:
+    # a flag like `automountServiceAccountToken: true` names a credential
+    # without carrying one, and masking it would lose real information.
+    if isinstance(item, str) and _denotes_secret(key):
+        return "sensitive-key"
+    return None
+
+
 def _sanitize_mapping(
     value: Mapping[Any, Any],
     path: str,
@@ -203,6 +251,7 @@ def _sanitize_mapping(
     kind = source.get("kind")
     if isinstance(kind, str) and _normalize_name(kind) == "secret":
         source = _secret_redactions(source, path, records)
+    secret_sibling = _names_a_secret_sibling(source)
 
     result: dict[str, Any] = {}
     for key, item in source.items():
@@ -213,9 +262,10 @@ def _sanitize_mapping(
         output_key = _sanitize_mapping_key(key, item_path, records)
         if output_key in result:
             raise _blocked("redacted mapping keys must remain unique")
-        if _normalize_name(key) in _SENSITIVE_NAMES:
+        reason = _mask_reason(key, item, secret_sibling=secret_sibling)
+        if reason is not None:
             result[output_key] = MASK_PLACEHOLDER
-            _record(records, item_path, "sensitive-key")
+            _record(records, item_path, reason)
             continue
         result[output_key] = _sanitize_value(item, item_path, records, active)
     return result
@@ -338,7 +388,16 @@ def _sanitize_structured_result(
     result: str,
     path: str,
     records: list[RedactionRecord],
+    max_chars: int,
 ) -> str:
+    """Redact a structured result, then bound it without breaking it.
+
+    Order matters and is the whole point: the document is parsed and
+    recursively redacted *first*, and only the redacted document is
+    shrunk — structurally, so what leaves here is still parseable YAML.
+    Reducing first (a byte cut) would hand this function wreckage, which
+    is fail-closed blocked and takes the whole turn with it.
+    """
     try:
         loaded = yaml.safe_load(result)
     except (yaml.YAMLError, RecursionError) as exc:
@@ -347,13 +406,15 @@ def _sanitize_structured_result(
         raise _blocked("structured tool result must be a mapping or list")
     try:
         sanitized = _sanitize_value(loaded, path, records, set())
-        return yaml.safe_dump(
-            sanitized,
-            allow_unicode=True,
-            sort_keys=True,
-        ).rstrip()
+        bounded = dump_yaml(sanitized)
+        elided = len(bounded) > max_chars
+        if elided:
+            bounded = dump_bounded_yaml(sanitized, max_chars)
     except (RecursionError, yaml.YAMLError) as exc:
         raise _blocked("structured tool result could not be redacted") from exc
+    if elided:
+        _record(records, path, "size-elision")
+    return bounded
 
 
 def _sanitize_tool_result(
@@ -361,17 +422,40 @@ def _sanitize_tool_result(
     result: str,
     path: str,
     records: list[RedactionRecord],
+    max_chars: int | None = None,
 ) -> str:
     if not isinstance(name, str) or not isinstance(result, str):
         raise _blocked("tool name and result must be text")
     if tool_result_format(name) == "structured_yaml" and not result.startswith("ERROR:"):
-        return _sanitize_structured_result(result, path, records)
-    return _sanitize_text(result, path, records)
+        # A structured result is always bounded: the ingest cap applies
+        # even when no tighter profile budget was given, because the
+        # bound must be enforced on the *redacted* document.
+        return _sanitize_structured_result(
+            result,
+            path,
+            records,
+            max_chars if max_chars is not None else MAX_RESULT_CHARS,
+        )
+    sanitized = _sanitize_text(result, path, records)
+    if max_chars is None:
+        return sanitized
+    return compact_result(sanitized, max_chars)
 
 
-def sanitize_tool_result(name: str, result: str) -> str:
-    """Sanitize one tool result according to its registered result format."""
-    return _sanitize_tool_result(name, result, "tool_result", [])
+def sanitize_tool_result(name: str, result: str, *, max_chars: int | None = None) -> str:
+    """Sanitize one tool result and bound it in its own format.
+
+    Args:
+        name: Registered tool name; its result format decides the
+            treatment (structured document vs. untrusted text).
+        result: The raw result as the executor produced it.
+        max_chars: Optional tighter budget for the sanitized result.
+            Structured results are shrunk structurally (and are always
+            bounded by the ingest cap); text results are head+tail
+            compacted only when a budget is given, leaving the executor's
+            own cap in place otherwise.
+    """
+    return _sanitize_tool_result(name, result, "tool_result", [], max_chars)
 
 
 def _sanitize_arguments(

@@ -28,7 +28,6 @@ from korvid.agent.prompts import compose_system_prompt
 from korvid.tools.executor import (
     READ_TOOLS,
     cap_result,
-    compact_result,
 )
 
 logger = logging.getLogger(__name__)
@@ -296,8 +295,12 @@ class AgentRuntime:
             if self._max_result_chars is not None:
                 # Head+tail compaction, not a prefix cut: reports place
                 # their evidence (events, log excerpts) last by design.
-                result = compact_result(result, self._max_result_chars)
-            result = sanitize_tool_result(name, result)
+                # Structured results are shrunk structurally instead —
+                # `sanitize_tool_result` redacts the document first and
+                # bounds the redacted document, so it stays parseable.
+                result = sanitize_tool_result(name, result, max_chars=self._max_result_chars)
+            else:
+                result = sanitize_tool_result(name, result)
             if excess and index == len(kept) - 1:
                 # Appended after compaction, without re-compacting: the
                 # notice is a fixed-size constant carrying no evidence, so

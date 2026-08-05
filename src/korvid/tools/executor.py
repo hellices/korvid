@@ -8,8 +8,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, ClassVar
 
-import yaml
-
 from korvid.core.portforward import controller_owner
 from korvid.core.secrets import mask_secret_manifest
 from korvid.k8s.discovery import ResourceMeta
@@ -40,6 +38,7 @@ from korvid.tools.diagnose import (
     warning_event_lines,
 )
 from korvid.tools.registry import TOOL_DEFS, TOOLS_BY_NAME, ToolDef, validate_dispatch_targets
+from korvid.tools.structured import dump_bounded_yaml
 
 MAX_RESULT_CHARS = 8000
 
@@ -748,7 +747,11 @@ class ToolExecutor:
             raise ValueError(f"kind {kind!r} is namespaced — provide the 'namespace' argument")
         manifest = await self._kube.get_object(meta, namespace, name)
         manifest = _mask_manifest(manifest)
-        return yaml.safe_dump(manifest, default_flow_style=False, allow_unicode=True)
+        # Bounded here, at the point the document is produced: the shared
+        # `cap_result` byte cut would leave a fragment that is no longer
+        # YAML, which every consumer (the model, the outbound policy's
+        # recursive redaction, an MCP client) needs it to be.
+        return dump_bounded_yaml(manifest, MAX_RESULT_CHARS)
 
     async def _get_logs(self, args: dict[str, Any]) -> str:
         pod = _reject_slash_name(str(args["pod"]), "pod")

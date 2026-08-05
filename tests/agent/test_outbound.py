@@ -422,3 +422,101 @@ def test_snapshot_export_contains_the_exact_redacted_payload() -> None:
     assert exported["payload"] == json.loads(prepared.snapshot.payload_json)
     assert exported["redactions"]
     assert "hunter2" not in prepared.snapshot.export_json()
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    [
+        "DB_PASSWORD",
+        "API_KEY",
+        "OAUTH_CLIENT_SECRET",
+        "GITHUB_ACCESS_TOKEN",
+        "REFRESH_TOKEN",
+        "REGISTRY_CREDENTIALS",
+        "dbPassword",
+    ],
+)
+def test_structured_env_entry_masks_the_value_named_by_its_sibling(env_name: str) -> None:
+    """Kubernetes env entries carry the name and the value in *sibling*
+    keys (`{"name": "DB_PASSWORD", "value": "..."}`), so a key-name rule
+    alone never sees a credential key (issue #189 final review)."""
+    result = yaml.safe_dump(
+        {
+            "kind": "Pod",
+            "spec": {
+                "containers": [
+                    {
+                        "name": "api",
+                        "env": [
+                            {"name": env_name, "value": "raw-sensitive-value"},
+                            {"name": "LOG_LEVEL", "value": "debug"},
+                        ],
+                    }
+                ]
+            },
+        }
+    )
+    sanitized = sanitize_tool_result("get_resource", result)
+    loaded = yaml.safe_load(sanitized)
+    entries = loaded["spec"]["containers"][0]["env"]
+    assert entries[0] == {"name": env_name, "value": MASK_PLACEHOLDER}
+    assert entries[1] == {"name": "LOG_LEVEL", "value": "debug"}
+    assert "raw-sensitive-value" not in sanitized
+
+
+def test_structured_env_entries_keep_non_sensitive_values_and_references() -> None:
+    result = yaml.safe_dump(
+        {
+            "kind": "Deployment",
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": "api",
+                                "env": [
+                                    {"name": "TOKENIZER_PATH", "value": "/models/tokenizer"},
+                                    {"name": "REPLICA_COUNT", "value": "3"},
+                                    {
+                                        "name": "DB_PASSWORD",
+                                        "valueFrom": {
+                                            "secretKeyRef": {"name": "db", "key": "password"}
+                                        },
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+    )
+    sanitized = sanitize_tool_result("get_resource", result)
+    entries = yaml.safe_load(sanitized)["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert entries[0] == {"name": "TOKENIZER_PATH", "value": "/models/tokenizer"}
+    assert entries[1] == {"name": "REPLICA_COUNT", "value": "3"}
+    assert entries[2]["valueFrom"]["secretKeyRef"] == {"name": "db", "key": "password"}
+
+
+def test_structured_string_values_under_compound_credential_keys_are_masked() -> None:
+    result = yaml.safe_dump(
+        {
+            "kind": "MyDatabase",
+            "spec": {
+                "dbPassword": "raw-sensitive-value",
+                "adminApiKey": "raw-api-key",
+                "automountServiceAccountToken": True,
+                "tokenizerPath": "/models/tokenizer",
+                "secretName": "db-credentials",
+            },
+        }
+    )
+    sanitized = sanitize_tool_result("get_resource", result)
+    spec = yaml.safe_load(sanitized)["spec"]
+    assert spec["dbPassword"] == MASK_PLACEHOLDER
+    assert spec["adminApiKey"] == MASK_PLACEHOLDER
+    assert spec["automountServiceAccountToken"] is True
+    assert spec["tokenizerPath"] == "/models/tokenizer"
+    assert spec["secretName"] == "db-credentials"
+    assert "raw-sensitive-value" not in sanitized
+    assert "raw-api-key" not in sanitized

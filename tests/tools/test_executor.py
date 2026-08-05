@@ -6,6 +6,7 @@ import copy
 from typing import Any
 
 import pytest
+import yaml
 
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
@@ -209,14 +210,39 @@ async def test_synthetic_kinds_are_not_api_resources() -> None:
         assert "not an API resource" in out
 
 
-async def test_result_is_capped() -> None:
+async def test_structured_result_is_bounded_and_stays_parseable() -> None:
+    """The ingest cap is enforced on the *document*: a byte cut would
+    leave a fragment that is no longer YAML (issue #189)."""
     kube = FakeKube()
     kube.manifest = {"kind": "Pod", "metadata": {"name": "a"}, "blob": "x" * 20000}
     out = await make_executor(kube).execute(
         "get_resource", {"kind": "pods", "name": "a", "namespace": "d"}
     )
-    assert len(out) <= MAX_RESULT_CHARS + 50
-    assert "[truncated" in out
+    assert len(out) <= MAX_RESULT_CHARS
+    loaded = yaml.safe_load(out)
+    assert loaded["kind"] == "Pod"
+    assert loaded["metadata"]["name"] == "a"
+    assert loaded["blob"].endswith("…")
+
+
+async def test_structured_result_elides_bulk_collections_but_keeps_identity() -> None:
+    kube = FakeKube()
+    kube.manifest = {
+        "kind": "Pod",
+        "metadata": {
+            "name": "a",
+            "labels": {f"label-{index}": "x" * 200 for index in range(500)},
+        },
+        "spec": {"containers": [{"name": f"c{index}"} for index in range(400)]},
+    }
+    out = await make_executor(kube).execute(
+        "get_resource", {"kind": "pods", "name": "a", "namespace": "d"}
+    )
+    assert len(out) <= MAX_RESULT_CHARS
+    loaded = yaml.safe_load(out)
+    assert loaded["kind"] == "Pod"
+    assert loaded["metadata"]["name"] == "a"
+    assert "elided" in out
 
 
 async def test_executor_never_raises() -> None:
