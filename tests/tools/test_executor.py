@@ -180,6 +180,31 @@ async def test_get_resource_strips_managed_fields_for_non_secret() -> None:
     assert "managedFields" not in out
 
 
+async def test_get_resource_masks_an_aws_credential_env_value() -> None:
+    """`AWS_SECRET_ACCESS_KEY` is the name people actually paste into a pod."""
+    kube = FakeKube()
+    kube.manifest = {
+        "kind": "Pod",
+        "metadata": {"name": "p", "namespace": "d"},
+        "spec": {
+            "containers": [
+                {
+                    "name": "main",
+                    "env": [
+                        {"name": "AWS_SECRET_ACCESS_KEY", "value": "aws-producer-sentinel"},
+                        {"name": "AWS_REGION", "value": "eu-west-1"},
+                    ],
+                }
+            ]
+        },
+    }
+    out = await make_executor(kube).execute(
+        "get_resource", {"kind": "pods", "name": "p", "namespace": "d"}
+    )
+    assert "aws-producer-sentinel" not in out
+    assert "eu-west-1" in out
+
+
 #: Marker values that must never reach any consumer of a tool result.
 NESTED_SECRET_SENTINEL = "bmVzdGVkLWNyZWQ="
 LONG_NAME_ENV_SENTINEL = "primary-db-admin-pw"

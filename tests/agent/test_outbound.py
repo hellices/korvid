@@ -587,6 +587,32 @@ def test_structured_string_values_under_compound_credential_keys_are_masked() ->
     assert "raw-api-key" not in sanitized
 
 
+def test_an_aws_credential_env_value_is_masked_on_the_wire() -> None:
+    """Producer-side masking is not the only line: the boundary agrees."""
+    result = yaml.safe_dump(
+        {
+            "kind": "Pod",
+            "spec": {
+                "containers": [
+                    {
+                        "env": [
+                            {"name": "AWS_SECRET_ACCESS_KEY", "value": "aws-wire-sentinel"},
+                            {"name": "AWS_ACCESS_KEY_ID", "value": "AKIAEXAMPLE"},
+                            {"name": "AWS_REGION", "value": "eu-west-1"},
+                        ]
+                    }
+                ]
+            },
+        }
+    )
+    sanitized = sanitize_tool_result("get_resource", result)
+    entries = yaml.safe_load(sanitized)["spec"]["containers"][0]["env"]
+    assert entries[0]["value"] == MASK_PLACEHOLDER
+    assert entries[1]["value"] == "AKIAEXAMPLE"
+    assert entries[2]["value"] == "eu-west-1"
+    assert "aws-wire-sentinel" not in sanitized
+
+
 def test_structured_values_of_any_shape_under_compound_credential_keys_are_masked() -> None:
     """A compound key is as strong a classifier as an exact one.
 

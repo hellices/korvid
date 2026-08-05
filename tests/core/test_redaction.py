@@ -222,3 +222,89 @@ def test_non_credential_keys_keep_their_structured_values() -> None:
     assert redacted["spec"]["replicas"] == 3
     assert redacted["spec"]["secretName"] == "db-credentials"
     assert redacted["spec"]["resources"] == {"limits": {"cpu": "500m"}}
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "AWS_SECRET_ACCESS_KEY",
+        "aws_secret_access_key",
+        "awsSecretAccessKey",
+        "secret-access-key",
+    ],
+)
+def test_the_aws_secret_access_key_is_a_credential_name(name: str) -> None:
+    """The single most-copied cloud credential name in the world.
+
+    Its words are `secret access key` — three of them, and none of the
+    shorter combinations (`secret`, `accesskey`) is a name on its own, so
+    without the full compound in the vocabulary nothing matches and the
+    value ships.
+    """
+    assert denotes_secret(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["secretKeyRef", "SECRET_NAME", "AWS_REGION", "AWS_DEFAULT_REGION", "accessModes"],
+)
+def test_neighbouring_aws_and_secret_names_stay_readable(name: str) -> None:
+    """The new compound must not swallow the names next to it.
+
+    `secretKeyRef` is the *pointer* the docs promise to preserve, and a
+    region or access mode is ordinary configuration.
+    """
+    assert not denotes_secret(name)
+
+
+def test_an_aws_credential_env_entry_is_masked() -> None:
+    document = {
+        "kind": "Pod",
+        "spec": {
+            "containers": [
+                {
+                    "env": [
+                        {"name": "AWS_SECRET_ACCESS_KEY", "value": "aws-env-sentinel"},
+                        {"name": "AWS_ACCESS_KEY_ID", "value": "AKIAEXAMPLE"},
+                        {"name": "AWS_REGION", "value": "eu-west-1"},
+                        {
+                            "name": "AWS_SESSION_TOKEN",
+                            "valueFrom": {"secretKeyRef": {"name": "aws", "key": "session"}},
+                        },
+                    ]
+                }
+            ]
+        },
+    }
+    entries = redact_manifest(document)["spec"]["containers"][0]["env"]
+    assert entries[0]["value"] == MASK_PLACEHOLDER
+    assert entries[1]["value"] == "AKIAEXAMPLE"
+    assert entries[2]["value"] == "eu-west-1"
+    assert entries[3]["valueFrom"] == {"secretKeyRef": {"name": "aws", "key": "session"}}
+
+
+def test_an_aws_credential_mapping_key_is_masked() -> None:
+    document = {"spec": {"awsSecretAccessKey": "key-sentinel", "awsRegion": "eu-west-1"}}
+    redacted = redact_manifest(document)
+    assert redacted["spec"]["awsSecretAccessKey"] == MASK_PLACEHOLDER
+    assert redacted["spec"]["awsRegion"] == "eu-west-1"
+
+
+def test_an_aws_credential_assignment_in_free_form_text_is_masked() -> None:
+    """The text vocabulary has to agree with the structured one.
+
+    A log line or diagnosis is masked by pattern, not by structure; if
+    the two lists disagree, the same credential name is caught in a
+    manifest and printed in an event.
+    """
+    records: list[RedactionRecord] = []
+    text = redact_text("env AWS_SECRET_ACCESS_KEY=aws-text-sentinel loaded", "doc", records)
+    assert "aws-text-sentinel" not in text
+    assert MASK_PLACEHOLDER in text
+    assert records
+
+
+def test_a_secret_key_reference_in_free_form_text_stays_readable() -> None:
+    records: list[RedactionRecord] = []
+    text = redact_text("mounted secretKeyRef=db-credentials-key", "doc", records)
+    assert "db-credentials-key" in text

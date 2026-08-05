@@ -41,11 +41,16 @@ _SENSITIVE_NAMES = frozenset(
         "accesstoken",
         "refreshtoken",
         "credentials",
+        # Neither half is a credential name alone: `secret` also spells
+        # `secretKeyRef` and `SECRET_NAME` (pointers the model needs to
+        # read), and `accesskey` also spells `AWS_ACCESS_KEY_ID` (an
+        # identifier, not a secret). Only the full compound is one.
+        "secretaccesskey",
     }
 )
 _WORD_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
-#: Longest sensitive name in words (`access` + `token`) plus one word of
-#: slack — bounds the window scan over a hostile, very long key.
+#: Longest sensitive name in words (`secret` + `access` + `key`) — bounds
+#: the window scan over a hostile, very long key.
 _MAX_NAME_WINDOW = 3
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _DOUBLE_QUOTED_VALUE = r'"(?:\\.|[^"\\\r\n])*"'
@@ -59,7 +64,7 @@ _AUTHORIZATION_RE = re.compile(
 _CREDENTIAL_RE = re.compile(
     r"(?im)(?P<prefix>(?<![A-Za-z0-9])(?P<credential_key_quote>[\"']?)(?:"
     r"password|api[\s_-]?key|client[\s_-]?secret|access[\s_-]?token|"
-    r"refresh[\s_-]?token|credentials|token"
+    r"refresh[\s_-]?token|secret[\s_-]?access[\s_-]?key|credentials|token"
     r")(?P=credential_key_quote)\s*[:=]\s*)"
     rf"(?P<value>{_DOUBLE_QUOTED_VALUE}|{_SINGLE_QUOTED_VALUE}|[^\s,;}}\]]+)"
 )

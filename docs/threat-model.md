@@ -131,27 +131,34 @@ flowchart LR
   still see that the field exists and reason about the shape of the object,
   while the material it held never leaves. A key that normalizes exactly to
   `password`, `token`, `apikey`, `authorization`, `clientsecret`,
-  `accesstoken`, `refreshtoken`, or `credentials` loses its value whatever
-  type that value has. A *compound* key whose words spell one of those
-  names (`dbPassword`, `admin-api-key`, `github-access-token`) loses its
-  value the same way — mapping, list, string, or number alike, because only
-  the key names the credential and a nested value would otherwise be
-  shipped under inner keys that name nothing. The one exception is a
-  boolean, which is kept: one bit cannot carry a credential, and
-  `automountServiceAccountToken: true` is real diagnostic information. In
-  free-form text, an `authorization: …` header and a
-  `<credential-word>: …` or `<credential-word>=…` assignment likewise keep
-  their key and have their value replaced.
+  `accesstoken`, `refreshtoken`, `secretaccesskey`, or `credentials` loses
+  its value whatever type that value has. A *compound* key whose words
+  spell one of those names (`dbPassword`, `admin-api-key`,
+  `AWS_SECRET_ACCESS_KEY`) loses its value the same way — mapping, list,
+  string, or number alike, because only the key names the credential and a
+  nested value would otherwise be shipped under inner keys that name
+  nothing. The one exception is a boolean, which is kept: one bit cannot
+  carry a credential, and `automountServiceAccountToken: true` is real
+  diagnostic information. In free-form text, an `authorization: …` header
+  and a `<credential-word>: …` or `<credential-word>=…` assignment likewise
+  keep their key and have their value replaced.
+
+  Only whole compounds count, which is what keeps neighbouring names
+  readable: `secret` alone also spells `secretKeyRef` and `SECRET_NAME`
+  (pointers the model needs), and `accesskey` alone also spells
+  `AWS_ACCESS_KEY_ID` — an identifier, not a secret — so neither half of
+  `secretaccesskey` is a credential name on its own.
 - **Credential-named env values** — a container env entry whose `name`
   denotes a credential (`DB_PASSWORD`, `API_KEY`, `OAUTH_CLIENT_SECRET`,
   `GITHUB_ACCESS_TOKEN`, `REFRESH_TOKEN`, `REGISTRY_CREDENTIALS`,
-  `dbPassword`, …) keeps its `name` and its `value` key, and the value
-  itself is replaced with `MASK_PLACEHOLDER` — the secret is in the value
-  while only the name says what it is. The whole value is replaced whatever
-  type it has: the API types it as a string, so a mapping or list there is
-  malformed or hostile and is not descended into. Non-credential env values
-  (`LOG_LEVEL`, `TOKENIZER_PATH`) and `valueFrom` references are preserved
-  so the model can still reason about configuration.
+  `AWS_SECRET_ACCESS_KEY`, `dbPassword`, …) keeps its `name` and its
+  `value` key, and the value itself is replaced with `MASK_PLACEHOLDER` —
+  the secret is in the value while only the name says what it is. The whole
+  value is replaced whatever type it has: the API types it as a string, so
+  a mapping or list there is malformed or hostile and is not descended
+  into. Non-credential env values (`LOG_LEVEL`, `TOKENIZER_PATH`,
+  `AWS_REGION`) and `valueFrom` references are preserved so the model can
+  still reason about configuration.
 - **Untrusted-text treatment** — all tool results and screen context are
   sanitized as data (control-character stripping, credential-pattern
   masking) rather than parsed as trusted instructions.
