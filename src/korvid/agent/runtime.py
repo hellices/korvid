@@ -17,6 +17,13 @@ from korvid.agent.events import (
     TurnComplete,
     TurnInterrupted,
 )
+from korvid.agent.outbound import (
+    OutboundPolicy,
+    OutboundPolicyError,
+    OutboundSnapshot,
+    sanitize_screen_context,
+    sanitize_tool_result,
+)
 from korvid.agent.prompts import compose_system_prompt
 from korvid.tools.executor import (
     READ_TOOLS,
@@ -41,6 +48,9 @@ INTERRUPT_PARTIAL_CHARS = 2_000
 
 
 class _Provider(Protocol):
+    @property
+    def name(self) -> str: ...
+
     def complete(
         self,
         messages: list[dict[str, Any]],
@@ -109,6 +119,8 @@ class AgentRuntime:
         self._provider = provider
         self._executor = executor
         self._tools = tools if tools is not None else READ_TOOLS
+        self._outbound = OutboundPolicy(max_request_chars=max_history_chars)
+        self._latest_outbound_payload: OutboundSnapshot | None = None
         # The serialized tool schemas ride along on every request; they are
         # part of the prompt cost when a provider omits usage.
         self._tools_chars = len(json.dumps(self._tools))
@@ -183,6 +195,11 @@ class AgentRuntime:
     def usage_estimated(self) -> bool:
         """True if any counted turn lacked provider usage (totals are estimates)."""
         return self._estimated
+
+    @property
+    def latest_outbound_payload(self) -> OutboundSnapshot | None:
+        """The exact redacted payload prepared for the latest provider call."""
+        return self._latest_outbound_payload
 
     def _trim_history(self) -> None:
         """Keep the system prompt plus at most MAX_HISTORY_TURNS-1 recent turns,
@@ -280,6 +297,7 @@ class AgentRuntime:
                 # Head+tail compaction, not a prefix cut: reports place
                 # their evidence (events, log excerpts) last by design.
                 result = compact_result(result, self._max_result_chars)
+            result = sanitize_tool_result(name, result)
             if excess and index == len(kept) - 1:
                 # Appended after compaction, without re-compacting: the
                 # notice is a fixed-size constant carrying no evidence, so
@@ -361,6 +379,51 @@ class AgentRuntime:
         self._trim_history()
         return sum(_message_chars(m) for m in self._messages) > self._max_history_chars
 
+    def _rollback_policy_block(
+        self,
+        turn_base: int,
+        turn_in: int,
+        turn_out: int,
+        usage_missing: bool,
+        error: OutboundPolicyError,
+    ) -> tuple[AgentError, TurnComplete]:
+        """Drop a blocked turn while retaining cost from completed iterations."""
+        self._turn_active = False
+        self._live_state = None
+        self._latest_outbound_payload = None
+        del self._messages[turn_base:]
+        self._total_in += turn_in
+        self._total_out += turn_out
+        self._estimated = self._estimated or usage_missing
+        return (
+            AgentError(message=f"outbound policy blocked the provider request: {error}"),
+            TurnComplete(
+                input_tokens=turn_in,
+                output_tokens=turn_out,
+                estimated=usage_missing,
+            ),
+        )
+
+    def _provider_error_event(
+        self,
+        state: _StreamState,
+        prompt_estimate: int,
+        turn_in: int,
+        turn_out: int,
+        usage_missing: bool,
+        error: Exception,
+    ) -> AgentError:
+        """Commit real provider cost and return the safe terminal error event."""
+        self._turn_active = False
+        if not state.has_usage and (state.text or state.tool_calls):
+            state.in_tok = prompt_estimate
+            state.out_tok = _stream_output_chars(state) // 4
+        self._total_in += turn_in + state.in_tok
+        self._total_out += turn_out + state.out_tok
+        if usage_missing or not state.has_usage:
+            self._estimated = True
+        return AgentError(message=str(error) or type(error).__name__)
+
     def finalize_interrupt(self) -> TurnInterrupted:
         """Repair state after the driving task cancelled a turn (issue #170).
 
@@ -420,125 +483,160 @@ class AgentRuntime:
         screen_context: str,
     ) -> AsyncIterator[AgentEvent]:
         """Async generator: run one conversation turn, yielding events until done."""
+        self._latest_outbound_payload = None
         self._trim_history()
-        self._messages.append(
-            {"role": "user", "content": f"[screen] {screen_context}\n\n{user_text}"}
-        )
-        if self._strict_preflight_over_budget():
-            # Drop the unfittable prompt so it cannot poison later turns.
-            self._messages.pop()
-            logger.warning(
-                "strict history budget: rejected a prompt that cannot fit by itself "
-                "(budget %d chars)",
-                self._max_history_chars,
-            )
-            yield AgentError(
-                message=(
-                    f"request too large for the history budget "
-                    f"({self._max_history_chars} chars) — shorten the question"
-                )
-            )
-            yield TurnComplete(input_tokens=0, output_tokens=0, estimated=False)
-            return
-
+        turn_base = len(self._messages)
         turn_in = 0
         turn_out = 0
         # Token counts are exact only when EVERY iteration reported usage;
         # one missing iteration makes the whole turn an estimate.
         usage_missing = False
-        # Arm interruption bookkeeping (issue #170): from here on a
-        # cancellation is repairable by finalize_interrupt.
-        self._turn_active = True
-        self._iteration_base = len(self._messages)
-        self._live_state = None
-        self._live_prompt_estimate = 0
-        self._turn_in = 0
-        self._turn_out = 0
-        self._turn_usage_missing = False
-        for iteration in range(self._max_iterations):
-            if self._over_history_budget(iteration):
-                self._turn_active = False
-                self._total_in += turn_in
-                self._total_out += turn_out
-                self._estimated = self._estimated or usage_missing
+        try:
+            safe_screen_context = sanitize_screen_context(screen_context)
+            self._messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "[screen context: untrusted evidence]\n"
+                        f"{safe_screen_context}\n"
+                        "[end screen context]\n\n"
+                        f"{user_text}"
+                    ),
+                }
+            )
+            if self._strict_preflight_over_budget():
+                # Drop the unfittable prompt so it cannot poison later turns.
+                del self._messages[turn_base:]
+                logger.warning(
+                    "strict history budget: rejected a prompt that cannot fit by itself "
+                    "(budget %d chars)",
+                    self._max_history_chars,
+                )
                 yield AgentError(
                     message=(
-                        f"history budget exceeded mid-turn "
-                        f"({self._max_history_chars} chars) — turn ended early"
+                        f"request too large for the history budget "
+                        f"({self._max_history_chars} chars) — shorten the question"
                     )
                 )
-                yield TurnComplete(
-                    input_tokens=turn_in, output_tokens=turn_out, estimated=usage_missing
-                )
+                yield TurnComplete(input_tokens=0, output_tokens=0, estimated=False)
                 return
-            state = _StreamState()
+
+            # Arm interruption bookkeeping (issue #170): from here on a
+            # cancellation is repairable by finalize_interrupt.
+            self._turn_active = True
             self._iteration_base = len(self._messages)
-            self._live_state = state
-            # Estimate of the prompt this iteration sends — used only when
-            # the provider omits usage, so token totals never read as zero
-            # input for a request that was really transmitted. Counts what
-            # actually goes over the wire: tool schemas, message content,
-            # and prior assistant tool-call arguments.
-            prompt_estimate = (
-                self._tools_chars + sum(_message_chars(message) for message in self._messages)
-            ) // 4
-            self._live_prompt_estimate = prompt_estimate
-            try:
-                stream = self._provider.complete(self._messages, self._tools)
-                async for event in self._consume_stream(stream, state):
-                    yield event
-            except Exception as exc:
-                self._turn_active = False
-                # Tokens spent in earlier iterations (and the partial stream)
-                # are real cost — account for them before bailing out. A
-                # stream that produced output before dying definitely had
-                # its prompt processed, so apply the same estimates as the
-                # normal path; one that died before yielding anything gets
-                # no speculative charge.
-                if not state.has_usage and (state.text or state.tool_calls):
-                    state.in_tok = prompt_estimate
-                    state.out_tok = _stream_output_chars(state) // 4
-                self._total_in += turn_in + state.in_tok
-                self._total_out += turn_out + state.out_tok
-                if usage_missing or not state.has_usage:
-                    self._estimated = True
-                yield AgentError(message=str(exc) or type(exc).__name__)
-                return
-
-            _estimate_missing_usage(state, prompt_estimate)
-            turn_in += state.in_tok
-            turn_out += state.out_tok
-            usage_missing = usage_missing or not state.has_usage
-            # This iteration's stream is complete: its usage is committed
-            # and its state must no longer be double-counted on interrupt.
-            self._turn_in = turn_in
-            self._turn_out = turn_out
-            self._turn_usage_missing = usage_missing
             self._live_state = None
-
-            assistant_msg = self._assistant_message(state)
-            self._messages.append(assistant_msg)
-
-            if not state.tool_calls:
-                self._turn_active = False
-                self._total_in += turn_in
-                self._total_out += turn_out
-                self._estimated = self._estimated or usage_missing
-                yield TurnComplete(
-                    input_tokens=turn_in,
-                    output_tokens=turn_out,
-                    estimated=usage_missing,
+            self._live_prompt_estimate = 0
+            self._turn_in = 0
+            self._turn_out = 0
+            self._turn_usage_missing = False
+            for iteration in range(self._max_iterations):
+                if self._over_history_budget(iteration):
+                    self._turn_active = False
+                    self._total_in += turn_in
+                    self._total_out += turn_out
+                    self._estimated = self._estimated or usage_missing
+                    yield AgentError(
+                        message=(
+                            f"history budget exceeded mid-turn "
+                            f"({self._max_history_chars} chars) — turn ended early"
+                        )
+                    )
+                    yield TurnComplete(
+                        input_tokens=turn_in,
+                        output_tokens=turn_out,
+                        estimated=usage_missing,
+                    )
+                    return
+                state = _StreamState()
+                self._iteration_base = len(self._messages)
+                self._live_state = state
+                # Estimate of the prompt this iteration sends — used only when
+                # the provider omits usage, so token totals never read as zero
+                # input for a request that was really transmitted. Counts what
+                # actually goes over the wire: tool schemas, message content,
+                # and prior assistant tool-call arguments.
+                prompt_estimate = (
+                    self._tools_chars + sum(_message_chars(message) for message in self._messages)
+                ) // 4
+                self._live_prompt_estimate = prompt_estimate
+                self._latest_outbound_payload = None
+                prepared = self._outbound.prepare(
+                    self._provider.name,
+                    self._messages,
+                    self._tools,
+                    iteration=iteration + 1,
                 )
-                return
+                self._latest_outbound_payload = prepared.snapshot
+                try:
+                    stream = self._provider.complete(prepared.messages, prepared.tools)
+                    async for event in self._consume_stream(stream, state):
+                        yield event
+                except Exception as exc:
+                    # Tokens spent in earlier iterations (and the partial stream)
+                    # are real cost — account for them before bailing out. A
+                    # stream that produced output before dying definitely had
+                    # its prompt processed, so apply the same estimates as the
+                    # normal path; one that died before yielding anything gets
+                    # no speculative charge.
+                    yield self._provider_error_event(
+                        state,
+                        prompt_estimate,
+                        turn_in,
+                        turn_out,
+                        usage_missing,
+                        exc,
+                    )
+                    return
 
-            async for event in self._dispatch_tools(state.tool_calls):
-                yield event
+                _estimate_missing_usage(state, prompt_estimate)
+                turn_in += state.in_tok
+                turn_out += state.out_tok
+                usage_missing = usage_missing or not state.has_usage
+                # This iteration's stream is complete: its usage is committed
+                # and its state must no longer be double-counted on interrupt.
+                self._turn_in = turn_in
+                self._turn_out = turn_out
+                self._turn_usage_missing = usage_missing
+                self._live_state = None
 
-        self._turn_active = False
-        self._total_in += turn_in
-        self._total_out += turn_out
-        self._estimated = self._estimated or usage_missing
-        yield AgentError(
-            message=(f"iteration limit reached ({self._max_iterations}) — refine the question")
-        )
-        yield TurnComplete(input_tokens=turn_in, output_tokens=turn_out, estimated=usage_missing)
+                assistant_msg = self._assistant_message(state)
+                self._messages.append(assistant_msg)
+
+                if not state.tool_calls:
+                    self._turn_active = False
+                    self._total_in += turn_in
+                    self._total_out += turn_out
+                    self._estimated = self._estimated or usage_missing
+                    yield TurnComplete(
+                        input_tokens=turn_in,
+                        output_tokens=turn_out,
+                        estimated=usage_missing,
+                    )
+                    return
+
+                async for event in self._dispatch_tools(state.tool_calls):
+                    yield event
+
+            self._turn_active = False
+            self._total_in += turn_in
+            self._total_out += turn_out
+            self._estimated = self._estimated or usage_missing
+            yield AgentError(
+                message=(f"iteration limit reached ({self._max_iterations}) — refine the question")
+            )
+            yield TurnComplete(
+                input_tokens=turn_in,
+                output_tokens=turn_out,
+                estimated=usage_missing,
+            )
+        except OutboundPolicyError as exc:
+            error, complete = self._rollback_policy_block(
+                turn_base,
+                turn_in,
+                turn_out,
+                usage_missing,
+                exc,
+            )
+            yield error
+            yield complete

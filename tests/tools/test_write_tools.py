@@ -156,6 +156,10 @@ async def test_executor_write_without_ui_is_error() -> None:
 
 
 class _NullProvider:
+    @property
+    def name(self) -> str:
+        return "null"
+
     def complete(self, messages: Any, tools: Any, *, stream: bool = True) -> Any:
         raise NotImplementedError
 

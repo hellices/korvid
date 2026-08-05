@@ -5,8 +5,9 @@ from typing import Any, cast
 import httpx
 import pytest
 
+from korvid.agent.outbound import OutboundPolicy, OutboundPolicyError
 from korvid.agent.setup import AgentSettings
-from korvid.providers.configurator import ProviderConfigurator
+from korvid.providers.configurator import _PROBE_MESSAGE, ProviderConfigurator
 from korvid.providers.github_copilot import DeviceCodePrompt, GitHubDeviceFlow
 from korvid.providers.token_store import TokenStore
 
@@ -36,6 +37,7 @@ class ScriptedProvider:
     def __init__(self, events: list[dict[str, Any]]) -> None:
         self._events = events
         self.closed = False
+        self.calls: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
 
     @property
     def name(self) -> str:
@@ -48,6 +50,8 @@ class ScriptedProvider:
         *,
         stream: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
+        self.calls.append((messages, tools))
+
         async def gen() -> AsyncIterator[dict[str, Any]]:
             for ev in self._events:
                 yield ev
@@ -90,6 +94,49 @@ async def test_probe_returns_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     cfg = ProviderConfigurator(_store(tmp_path), persist=lambda s: None)
     assert await cfg.test(_SETTINGS) == "ok"
     assert provider.closed  # aclose'd even on success
+
+
+async def test_probe_receives_a_prepared_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = ScriptedProvider([{"type": "text_delta", "text": "ok"}, {"type": "done"}])
+    monkeypatch.setattr("korvid.providers.configurator.create_provider", lambda **kw: provider)
+    cfg = ProviderConfigurator(_store(tmp_path), persist=lambda s: None)
+
+    assert await cfg.test(_SETTINGS) == "ok"
+
+    messages, tools = provider.calls[0]
+    assert messages == [_PROBE_MESSAGE]
+    assert messages[0] is not _PROBE_MESSAGE
+    assert tools == []
+    messages[0]["content"] = "provider mutation"
+    assert _PROBE_MESSAGE["content"] == "Reply with the single word: ok"
+
+
+async def test_probe_policy_failure_prevents_delegation_and_closes_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class BlockingPolicy(OutboundPolicy):
+        def prepare(
+            self,
+            provider: str,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            iteration: int,
+        ) -> Any:
+            raise OutboundPolicyError("injected policy failure")
+
+    provider = ScriptedProvider([{"type": "text_delta", "text": "unexpected"}])
+    monkeypatch.setattr("korvid.providers.configurator.create_provider", lambda **kw: provider)
+    cfg = ProviderConfigurator(_store(tmp_path), persist=lambda s: None)
+    cfg._outbound = BlockingPolicy(max_request_chars=4_096)
+
+    with pytest.raises(OutboundPolicyError, match="injected policy failure"):
+        await cfg.test(_SETTINGS)
+
+    assert provider.calls == []
+    assert provider.closed
 
 
 async def test_probe_raises_when_provider_none(
