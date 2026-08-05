@@ -323,7 +323,7 @@ jobs:
           if-no-files-found: error
 
   attest:
-    needs: [collect, smoke]
+    needs: [verify, collect, smoke]
     # Provenance attestation signs through public Sigstore and records the
     # entry in the public Rekor transparency log. That is irreversible, so it
     # only ever runs for a real tag push — never for a dry run.
@@ -334,10 +334,24 @@ jobs:
       attestations: write
       contents: read
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: release-files
           path: release-files
+      - name: Revalidate the remote tag immediately before attestation
+        env:
+          TAG: ${{ github.ref_name }}
+          EXPECTED_COMMIT: ${{ needs.verify.outputs.source_commit }}
+        run: |
+          git fetch --force origin \
+            "+refs/tags/$TAG:refs/tags/$TAG" \
+            "refs/heads/main:refs/remotes/origin/main"
+          python scripts/release/check_source.py "$TAG" origin/main \
+            --expected-commit "$EXPECTED_COMMIT"
       # Verifiable build provenance for the wheel, sdist, SBOM, checksums,
       # metadata, and every offline archive.
       - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1

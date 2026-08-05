@@ -474,6 +474,16 @@ def test_smoke_install_required_modules_follow_the_selected_variant() -> None:
     assert smoke_install.required_modules("all") == {"httpx", "keyring", "mcp"}
 
 
+def test_smoke_install_required_korvid_modules_follow_the_selected_variant() -> None:
+    base = {"korvid.__main__", "korvid.ui.app"}
+    agent = {"korvid.providers.registry", "korvid.providers.token_store"}
+    mcp = {"korvid.mcp.server"}
+    assert smoke_install.required_korvid_modules("base") == base
+    assert smoke_install.required_korvid_modules("agent") == base | agent
+    assert smoke_install.required_korvid_modules("mcp") == base | mcp
+    assert smoke_install.required_korvid_modules("all") == base | agent | mcp
+
+
 def test_smoke_install_forbids_optional_feature_packages_outside_their_variant() -> None:
     """`mcp` pulls httpx transitively, so httpx is only forbidden where no
     selected extra provides it."""
@@ -534,6 +544,8 @@ def test_smoke_install_rejects_unknown_variants(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown variant"):
         smoke_install.required_modules("nope")
     with pytest.raises(ValueError, match="unknown variant"):
+        smoke_install.required_korvid_modules("nope")
+    with pytest.raises(ValueError, match="unknown variant"):
         smoke_install.forbidden_modules("nope")
     with pytest.raises(ValueError, match="unknown variant"):
         smoke_install.install_plan(wheel, "nope")
@@ -590,6 +602,8 @@ def test_smoke_install_runs_a_fresh_install_then_a_separate_expansion(
     # The fresh install must never be reached through a base install first.
     assert base_requirement not in installs[0]
     assert any("keyring" in " ".join(args) for args in commands)
+    assert any("korvid.providers.registry" in " ".join(args) for args in commands)
+    assert any("korvid.__main__" in " ".join(args) for args in commands)
     assert any("find_spec('mcp')" in " ".join(args) for args in commands)
 
 
@@ -1016,6 +1030,8 @@ def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -
     assert (
         "gh attestation verify dist/v0.1.0/korvid-0.1.0-py3-none-any.whl --repo hellices/korvid"
     ) in runbook
+    assert ("gh attestation verify dist/v0.1.0/SHA256SUMS --repo hellices/korvid") in runbook
+    assert ("cd dist/v0.1.0 && shasum --algorithm 256 --check SHA256SUMS") in runbook
     assert "PyPI publication is irreversible" in runbook
     assert "annotated tag publication is irreversible" in runbook
 
@@ -1031,6 +1047,7 @@ def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> N
     assert "~/.config/korvid/config.yaml" in runbook
     assert "~/.config/korvid/credentials.json" in runbook
     assert "~/.local/state/korvid/audit.jsonl" in runbook
+    assert "~/.local/state/korvid/audit.jsonl.lock" in runbook
     assert "~/.local/share/korvid/logs" in runbook
     assert "~/.local/share/korvid/agent-payloads" in runbook
     assert "python -m pip install 'korvid[all]==0.1.0'" in runbook
@@ -1143,9 +1160,30 @@ def test_attestation_is_gated_to_tag_pushes_and_never_runs_on_a_dry_run() -> Non
     stage = workflow.index("\n  stage-github-release:")
     assert collect < attest < stage
     assert "github.event_name == 'push'" not in workflow[collect:attest]
-    assert document["jobs"]["attest"]["needs"] == ["collect", "smoke"]
+    assert document["jobs"]["attest"]["needs"] == ["verify", "collect", "smoke"]
     assert "if: github.event_name == 'push'" in workflow[attest:stage]
     assert "actions/attest-build-provenance" in workflow[attest:stage]
+
+
+def test_attestation_revalidates_live_tag_and_main_immediately_before_signing() -> None:
+    workflow = _release_workflow()
+    attest = workflow.index("\n  attest:")
+    stage = workflow.index("\n  stage-github-release:")
+    attest_job = workflow[attest:stage]
+    fetch = attest_job.index(
+        "git fetch --force origin \\\n"
+        '            "+refs/tags/$TAG:refs/tags/$TAG" \\\n'
+        '            "refs/heads/main:refs/remotes/origin/main"'
+    )
+    check = attest_job.index(
+        'python scripts/release/check_source.py "$TAG" origin/main \\\n'
+        '            --expected-commit "$EXPECTED_COMMIT"'
+    )
+    sign = attest_job.index("actions/attest-build-provenance")
+    assert fetch < check < sign
+    assert "fetch-depth: 0" in attest_job
+    assert "TAG: ${{ github.ref_name }}" in attest_job
+    assert "EXPECTED_COMMIT: ${{ needs.verify.outputs.source_commit }}" in attest_job
 
 
 # --- no GitHub expressions inside shell bodies ------------------------------

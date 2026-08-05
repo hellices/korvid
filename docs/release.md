@@ -106,10 +106,12 @@ attestation from GitHub:
 ```sh
 gh release download v0.1.0 --dir dist/v0.1.0
 gh attestation verify dist/v0.1.0/korvid-0.1.0-py3-none-any.whl --repo hellices/korvid
+gh attestation verify dist/v0.1.0/SHA256SUMS --repo hellices/korvid
+(cd dist/v0.1.0 && shasum --algorithm 256 --check SHA256SUMS)
 ```
 
-If you also downloaded `SHA256SUMS`, verify that file locally before
-redistributing artifacts.
+The attestation check establishes the provenance of `SHA256SUMS`; the final
+command then verifies every downloaded release asset against that manifest.
 
 ## Install, reinstall, and uninstall from PyPI
 
@@ -175,8 +177,9 @@ retains these paths:
   unavailable or broken)
 - The OS keyring credential stored under service `korvid`, account
   `github-oauth` (when the keyring was available during GitHub Copilot login)
-- `~/.local/state/korvid/audit.jsonl` (plus rotated `audit.jsonl.1`-`.3`
-  backups when rotation has occurred)
+- `~/.local/state/korvid/audit.jsonl`, its sibling lock file
+  `~/.local/state/korvid/audit.jsonl.lock`, and rotated `audit.jsonl.1`-`.3`
+  backups when rotation has occurred
 - `~/.local/state/korvid/mcp-endpoint.json` (MCP discovery registry) and its
   sibling lock file `~/.local/state/korvid/mcp-endpoint.json.lock`
 - `~/.local/share/korvid/logs`
@@ -219,7 +222,8 @@ Then remove the retained files:
 rm -f ~/.config/korvid/config.yaml ~/.config/korvid/credentials.json
 # state honors XDG_STATE_HOME; substitute "${XDG_STATE_HOME:-$HOME/.local/state}"
 rm -f ~/.local/state/korvid/audit.jsonl ~/.local/state/korvid/audit.jsonl.1 \
-  ~/.local/state/korvid/audit.jsonl.2 ~/.local/state/korvid/audit.jsonl.3
+  ~/.local/state/korvid/audit.jsonl.2 ~/.local/state/korvid/audit.jsonl.3 \
+  ~/.local/state/korvid/audit.jsonl.lock
 rm -f ~/.local/state/korvid/mcp-endpoint.json \
   ~/.local/state/korvid/mcp-endpoint.json.lock
 # data honors XDG_DATA_HOME; substitute "${XDG_DATA_HOME:-$HOME/.local/share}"

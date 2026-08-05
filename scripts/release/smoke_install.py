@@ -31,6 +31,17 @@ _VARIANT_MODULES = {
     "mcp": frozenset({"mcp"}),
     "all": frozenset({"httpx", "keyring", "mcp"}),
 }
+#: First-party modules that exercise the installed variant rather than only
+#: proving that its third-party dependencies resolved.
+_BASE_KORVID_MODULES = frozenset({"korvid.__main__", "korvid.ui.app"})
+_AGENT_KORVID_MODULES = frozenset({"korvid.providers.registry", "korvid.providers.token_store"})
+_MCP_KORVID_MODULES = frozenset({"korvid.mcp.server"})
+_VARIANT_KORVID_MODULES = {
+    "base": _BASE_KORVID_MODULES,
+    "agent": _BASE_KORVID_MODULES | _AGENT_KORVID_MODULES,
+    "mcp": _BASE_KORVID_MODULES | _MCP_KORVID_MODULES,
+    "all": _BASE_KORVID_MODULES | _AGENT_KORVID_MODULES | _MCP_KORVID_MODULES,
+}
 #: Feature packages that must be absent, so an extra can never leak into a
 #: narrower variant. `mcp` depends on httpx, so httpx is only forbidden where
 #: no selected extra legitimately provides it.
@@ -67,6 +78,12 @@ def required_modules(variant: str) -> set[str]:
     """Modules that must import after installing *variant*."""
     normalized = _normalize_variant(variant)
     return set(_VARIANT_MODULES[normalized])
+
+
+def required_korvid_modules(variant: str) -> set[str]:
+    """First-party modules that must import after installing *variant*."""
+    normalized = _normalize_variant(variant)
+    return set(_VARIANT_KORVID_MODULES[normalized])
 
 
 def forbidden_modules(variant: str) -> set[str]:
@@ -338,6 +355,7 @@ def _run_phase(
 
     _assert_version(python, version, env=env, cwd=workspace)
     _assert_module_imports(python, required_modules(variant), env=env, cwd=workspace)
+    _assert_module_imports(python, required_korvid_modules(variant), env=env, cwd=workspace)
     _assert_modules_absent(python, forbidden_modules(variant), env=env, cwd=workspace)
     _assert_help_and_version(launcher, version, env=env, cwd=workspace)
     _pip_uninstall(python, "korvid", env=env, cwd=workspace)
