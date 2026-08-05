@@ -1,4 +1,12 @@
-"""Fail-closed policy for data crossing the embedded-provider boundary."""
+"""Fail-closed policy for data crossing the embedded-provider boundary.
+
+Shape, correlation, bounding and the exact snapshot live here — they are
+about how a provider request is built. *What must never leave* lives in
+`korvid.core.redaction`, one layer down, so the tool executor can apply
+the identical rules where a document is produced (before any size
+reduction removes the classifiers those rules read) instead of a second
+copy of them drifting apart from this one.
+"""
 
 from __future__ import annotations
 

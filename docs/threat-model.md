@@ -3,8 +3,9 @@
 This document describes what korvid sends to embedded AI providers, what it
 withholds, where the trust boundaries are, and the residual risks that are
 **not** mitigated. It documents only guarantees that exist in the current
-code (`src/korvid/agent/outbound.py`, `src/korvid/agent/runtime.py`,
-`src/korvid/ui/widgets/payload_inspector.py`, `src/korvid/core/private_export.py`).
+code (`src/korvid/agent/outbound.py`, `src/korvid/core/redaction.py`,
+`src/korvid/agent/runtime.py`, `src/korvid/ui/widgets/payload_inspector.py`,
+`src/korvid/core/private_export.py`).
 It is not a general product security overview — see
 [`docs/ops.md`](ops.md) for the cluster-write safety model and
 [`SECURITY.md`](../SECURITY.md) for how to report a vulnerability.
