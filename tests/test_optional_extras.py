@@ -152,3 +152,15 @@ def test_base_import_does_not_load_the_agent_loop(module: str) -> None:
         [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_agent_outbound_does_not_load_optional_extras() -> None:
+    probe = (
+        "import sys\n"
+        "import korvid.agent.outbound  # noqa: F401\n"
+        "watched = ('textual', 'httpx', 'keyring', 'mcp', 'anyio', 'starlette', 'uvicorn')\n"
+        "leaked = [m for m in watched if m in sys.modules]\n"
+        "if leaked:\n"
+        "    raise SystemExit(f'agent outbound leaked optional extras into base import: {leaked}')\n"
+    )
+    _run_subprocess_probe(probe)

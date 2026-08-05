@@ -17,7 +17,11 @@ def _sse(*chunks: dict[str, Any]) -> str:
 
 
 def _provider(
-    body: str, status: int = 200, capture: dict[str, Any] | None = None
+    body: str,
+    status: int = 200,
+    capture: dict[str, Any] | None = None,
+    *,
+    credentials: StaticHeaderSource | None = None,
 ) -> OpenAICompatProvider:
     def handler(request: httpx.Request) -> httpx.Response:
         if capture is not None:
@@ -29,7 +33,7 @@ def _provider(
     return OpenAICompatProvider(
         base_url="http://x/v1",
         model="m1",
-        credentials=StaticHeaderSource("sk-test"),
+        credentials=credentials or StaticHeaderSource("sk-test"),
         client=client,
     )
 
@@ -253,7 +257,14 @@ async def test_prepared_request_keeps_canonical_messages_and_transport_only_auth
     assert expected_payload == {"messages": prepared.messages, "tools": prepared.tools}
 
     body = _sse({"choices": [{"delta": {"content": "x"}}]})
-    _ = [e async for e in _provider(body, capture=cap).complete(prepared.messages, prepared.tools)]
+    _ = [
+        e
+        async for e in _provider(
+            body,
+            capture=cap,
+            credentials=StaticHeaderSource("sk-test"),
+        ).complete(prepared.messages, prepared.tools)
+    ]
 
     assert cap["json"]["messages"] == expected_payload["messages"]
     assert cap["json"]["tools"] == expected_payload["tools"]
@@ -262,4 +273,5 @@ async def test_prepared_request_keeps_canonical_messages_and_transport_only_auth
     assert "hunter2" not in wire
     assert "******" not in wire
     assert MASK_PLACEHOLDER in wire
+    assert cap["headers"]["authorization"] == "Bearer sk-test"
     assert "Authorization" not in prepared.snapshot.payload_json

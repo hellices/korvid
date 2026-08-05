@@ -460,4 +460,5 @@ async def test_prepared_request_converts_only_sanitized_content() -> None:
     assert "hunter2" not in wire
     assert "******" not in wire
     assert MASK_PLACEHOLDER in wire
+    assert cap["headers"]["authorization"] == "Bearer sk-test"
     assert "Authorization" not in prepared.snapshot.payload_json
