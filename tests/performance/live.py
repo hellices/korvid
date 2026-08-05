@@ -23,6 +23,15 @@ Every mutation is fail-closed:
    `status.phase`. A failed `test` op aborts the *entire* run - there is no
    unguarded fallback.
 
+Two separate `KubeReadClient` connections are used deliberately: a
+non-instrumented *harness* client (`LiveDependencies.harness_kube_client_factory`)
+performs the ownership gate, the post-churn independent re-read, and nothing
+else, while a single telemetry-wired *application-path* client
+(`LiveDependencies.kube_client_factory`) is only ever handed to
+`make_live_watch_source`. This keeps `ReplayReport.api` reporting exactly the
+production application read path (the real `KubeClient.watch_pods` LIST+WATCH
+telemetry) instead of being diluted by the harness's own bookkeeping reads.
+
 Unit tests substitute every external boundary via `LiveDependencies`; none of
 them may contact Azure, a real kubeconfig, or a real cluster.
 """
@@ -122,12 +131,24 @@ class LiveDependencies:
     """Every external boundary `run_live_replay` crosses, as an injectable
     seam. Production callers get real wiring from `_default_dependencies`;
     tests always construct this explicitly with fakes, so no unit test can
-    reach Azure, a real kubeconfig, or a real cluster."""
+    reach Azure, a real kubeconfig, or a real cluster.
+
+    `kube_client_factory` and `harness_kube_client_factory` are deliberately
+    two separate seams (constructing two separate `KubeReadClient`
+    connections at runtime): the former is wired with `recorder.record_api`
+    and used *only* for the real application read path
+    (`make_live_watch_source`'s `watch_pods`), so `ReplayReport.api` reports
+    exactly the production LIST+WATCH telemetry an operator would see. The
+    latter is never wired to telemetry and is used *only* for the harness's
+    own bookkeeping reads (the ownership gate and the post-churn independent
+    re-read) - those reads must never dilute the application-path signal.
+    """
 
     command_runner: CommandRunner
     active_context: Callable[[], str | None]
     context_host: Callable[[str], Awaitable[str]]
     kube_client_factory: Callable[[ReadTelemetry], KubeReadClient]
+    harness_kube_client_factory: Callable[[], KubeReadClient]
     mutation_client_factory: Callable[[str], MutationClient]
 
 
@@ -239,12 +260,20 @@ class _KubeMutationClient:
 
 
 def _default_dependencies(context: str) -> LiveDependencies:
-    """Real production wiring: subprocess `az`, real kubeconfig, real `KubeClient`."""
+    """Real production wiring: subprocess `az`, real kubeconfig, real `KubeClient`.
+
+    Two independent `KubeClient` connections are constructed: the
+    telemetry-wired one `run_live_replay` hands to `make_live_watch_source`,
+    and a plain, non-instrumented one (`read_telemetry=None`, so
+    `KubeClient._observe_read` is a no-op) for the harness's own ownership
+    and post-churn reads.
+    """
     return LiveDependencies(
         command_runner=_default_command_runner,
         active_context=_default_active_context,
         context_host=_default_context_host,
         kube_client_factory=lambda read_telemetry: KubeClient(read_telemetry=read_telemetry),
+        harness_kube_client_factory=lambda: KubeClient(),
         mutation_client_factory=lambda run_id: _KubeMutationClient(context, run_id),
     )
 
@@ -333,13 +362,17 @@ async def _verify_cluster_identity(
 
 async def _verify_ownership(
     kube: KubeReadClient, *, run_id: str, namespace_count: int, object_count: int
-) -> None:
+) -> dict[tuple[str, str], PodSummary]:
     """Ownership gate: every expected namespace and every expected Pod must
     already exist with both ownership labels, checked before any churn.
 
     Collects every mismatch across all namespaces/Pods before raising, so a
     single failed run surfaces the full blast radius at once instead of
     stopping at the first namespace.
+
+    Returns the validated `(namespace, name) -> PodSummary` snapshot so
+    callers can reuse it (e.g. as the pre-churn uid snapshot) instead of
+    immediately re-listing the same Pods a second time.
     """
     expected_namespaces = [manifests.namespace_name(run_id, i) for i in range(namespace_count)]
     actual_namespaces = {obj.name: obj for obj in await kube.list_objects(_NAMESPACES_META, None)}
@@ -363,6 +396,7 @@ async def _verify_ownership(
     ]
     missing_pods: list[str] = []
     mismatched_pods: list[str] = []
+    validated_pods: dict[tuple[str, str], PodSummary] = {}
     for namespace in expected_namespaces:
         pods_by_name = {pod.name: pod for pod in await kube.list_pods(namespace)}
         for name in expected_pod_names:
@@ -371,10 +405,13 @@ async def _verify_ownership(
                 missing_pods.append(f"{namespace}/{name}")
             elif not _owns(pod.labels, run_id):
                 mismatched_pods.append(f"{namespace}/{name}")
+            else:
+                validated_pods[(namespace, name)] = pod
     if missing_pods:
         raise ValueError(f"missing expected pods: {', '.join(missing_pods)}")
     if mismatched_pods:
         raise ValueError(f"pods with mismatched ownership labels: {', '.join(mismatched_pods)}")
+    return validated_pods
 
 
 def make_live_watch_source(
@@ -447,6 +484,13 @@ async def run_live_replay(
     real application-path wiring (`KubeClient` -> `WatchManager` ->
     `ResourceStore` -> `MeasuredKorvidApp`), guarded churn, and digest parity
     against an independent post-churn re-read of the cluster.
+
+    Two `KubeReadClient` connections are used: `harness_kube` (never wired to
+    telemetry) performs the ownership gate and the post-churn independent
+    re-read; `kube` (wired to `recorder.record_api`) is only ever handed to
+    `make_live_watch_source`, so `ReplayReport.api` reports exactly the
+    production application read path. The ownership gate's validated Pod
+    snapshot is reused as the pre-churn uid snapshot - it is never re-listed.
     """
     _validate_time_scale(options)
     manifests.validate_run_id(run_id)
@@ -460,12 +504,14 @@ async def run_live_replay(
     store = ResourceStore()
     recorder = BenchmarkRecorder()
     sampler = ProcessSampler(options.sample_interval)
-    kube = active_deps.kube_client_factory(recorder.record_api)
 
-    await kube.connect(context)
+    harness_kube = active_deps.harness_kube_client_factory()
+    await harness_kube.connect(context)
     try:
-        await _verify_ownership(
-            kube,
+        # Reused directly as the pre-churn uid snapshot below - no second,
+        # redundant listing pass over the same Pods.
+        live_state = await _verify_ownership(
+            harness_kube,
             run_id=run_id,
             namespace_count=profile.namespace_count,
             object_count=profile.object_count,
@@ -474,83 +520,84 @@ async def run_live_replay(
         expected_namespaces = frozenset(
             manifests.namespace_name(run_id, i) for i in range(profile.namespace_count)
         )
-        source = make_live_watch_source(kube, expected_namespaces)
-        watch_manager = WatchManager(store, source, retry_delay=0.0)
-        manifest = _build_manifest(profile)
-        mutation_client = active_deps.mutation_client_factory(run_id)
 
-        app = MeasuredKorvidApp(
-            config=KorvidConfig(namespace=ALL_NAMESPACES),
-            store=store,
-            watch_manager=watch_manager,
-            recorder=recorder,
-        )
-
-        # Snapshot Pod uids once, before churn, per namespace: guarded
-        # patches test against the uid observed at ownership-gate time, so a
-        # concurrently replaced Pod fails its `test` op instead of silently
-        # patching a different object.
-        live_state: dict[tuple[str, str], PodSummary] = {}
-        for namespace in expected_namespaces:
-            for pod in await kube.list_pods(namespace):
-                live_state[(namespace, pod.name)] = pod
-
-        sampler.start()
-        churn_started_before_input = False
+        kube = active_deps.kube_client_factory(recorder.record_api)
+        await kube.connect(context)
         try:
-            async with app.run_test() as pilot:
-                table = app.query_one(ResourceTable)
+            source = make_live_watch_source(kube, expected_namespaces)
+            watch_manager = WatchManager(store, source, retry_delay=0.0)
+            manifest = _build_manifest(profile)
+            mutation_client = active_deps.mutation_client_factory(run_id)
 
-                await until(
-                    pilot,
-                    lambda: table.row_count == profile.object_count,
-                    timeout=60.0,
-                    label="initial owned pods rendered",
-                )
+            app = MeasuredKorvidApp(
+                config=KorvidConfig(namespace=ALL_NAMESPACES),
+                store=store,
+                watch_manager=watch_manager,
+                recorder=recorder,
+            )
 
-                events = scheduled_events(profile)
-                churn_task = asyncio.create_task(
-                    drive_live_churn(
-                        events,
-                        run_id=run_id,
-                        namespace_count=profile.namespace_count,
-                        live_state=live_state,
-                        mutation_client=mutation_client,
-                        recorder=recorder,
-                        options=options,
+            sampler.start()
+            churn_started_before_input = False
+            try:
+                async with app.run_test() as pilot:
+                    table = app.query_one(ResourceTable)
+
+                    await until(
+                        pilot,
+                        lambda: table.row_count == profile.object_count,
+                        timeout=60.0,
+                        label="initial owned pods rendered",
                     )
-                )
-                churn_started_before_input = True
 
-                t0 = monotonic()
-                await pilot.press("down")
-                recorder.record_input(monotonic() - t0)
-                t0 = monotonic()
-                await pilot.press("up")
-                recorder.record_input(monotonic() - t0)
+                    events = scheduled_events(profile)
+                    churn_task = asyncio.create_task(
+                        drive_live_churn(
+                            events,
+                            run_id=run_id,
+                            namespace_count=profile.namespace_count,
+                            live_state=live_state,
+                            mutation_client=mutation_client,
+                            recorder=recorder,
+                            options=options,
+                        )
+                    )
+                    churn_started_before_input = True
 
-                await churn_task
+                    t0 = monotonic()
+                    await pilot.press("down")
+                    recorder.record_input(monotonic() - t0)
+                    t0 = monotonic()
+                    await pilot.press("up")
+                    recorder.record_input(monotonic() - t0)
 
-                await until(
-                    pilot,
-                    lambda: not recorder._pending_events,
-                    timeout=60.0,
-                    label="churn complete and all events rendered",
-                )
+                    await churn_task
+
+                    await until(
+                        pilot,
+                        lambda: not recorder._pending_events,
+                        timeout=60.0,
+                        label="churn complete and all events rendered",
+                    )
+            finally:
+                process_samples = await sampler.stop()
+                await watch_manager.stop_all()
+                await mutation_client.close()
+
+            # Independently re-read the cluster's actual Pods for ground-truth
+            # digest parity via the non-instrumented harness client, rather
+            # than trusting the driver's own bookkeeping or polluting the
+            # application-path telemetry with this harness-only read.
+            final_pods: list[PodSummary] = []
+            for namespace in expected_namespaces:
+                final_pods.extend(await harness_kube.list_pods(namespace))
+            expected_digest = summary_digest(final_pods)
+            final_digest = summary_digest(
+                cast(Iterable[PodSummary], store.get("pods", ALL_NAMESPACES))
+            )
         finally:
-            process_samples = await sampler.stop()
-            await watch_manager.stop_all()
-            await mutation_client.close()
-
-        # Independently re-read the cluster's actual Pods for ground-truth
-        # digest parity, rather than trusting the driver's own bookkeeping.
-        final_pods: list[PodSummary] = []
-        for namespace in expected_namespaces:
-            final_pods.extend(await kube.list_pods(namespace))
-        expected_digest = summary_digest(final_pods)
-        final_digest = summary_digest(cast(Iterable[PodSummary], store.get("pods", ALL_NAMESPACES)))
+            await kube.close()
     finally:
-        await kube.close()
+        await harness_kube.close()
 
     benchmark = recorder.report(manifest, process_samples, final_digest=final_digest)
 
