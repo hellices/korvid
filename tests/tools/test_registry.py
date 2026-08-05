@@ -573,5 +573,13 @@ def test_a_malformed_tool_schema_is_rejected() -> None:
         registry_mod.resolve_result_formats([{"type": "function"}])
 
 
+def test_a_non_function_tool_schema_is_rejected() -> None:
+    schema = _schema("get_logs")
+    schema["type"] = "image"
+
+    with pytest.raises(ValueError, match="function schema"):
+        registry_mod.resolve_result_formats([schema])
+
+
 def test_an_unknown_tool_has_no_result_format() -> None:
     assert registry_mod.tool_result_format("fetch_manifest") is None

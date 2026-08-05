@@ -184,6 +184,8 @@ def tool_schema_names(tools: Sequence[Mapping[str, Any]]) -> list[str]:
     for tool in tools:
         if not isinstance(tool, Mapping):
             raise ValueError("each tool schema must be a mapping")
+        if tool.get("type") != "function":
+            raise ValueError("each tool schema must be a function schema")
         function = tool.get("function")
         name = function.get("name") if isinstance(function, Mapping) else None
         if not isinstance(name, str) or not name:
