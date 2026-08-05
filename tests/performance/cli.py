@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import cProfile
+import dataclasses
 import json
 import sys
 import tracemalloc
@@ -23,6 +24,7 @@ from typing import Any
 import yaml
 
 from korvid.k8s.errors import ApiStatusError
+from tests.performance.live import run_live_replay
 from tests.performance.manifests import build_seed_manifests
 from tests.performance.metrics import BenchmarkReport, render_markdown, report_payload
 from tests.performance.profile import WorkloadProfile, load_profile
@@ -125,6 +127,66 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Destination path for the multi-document YAML output.",
     )
+
+    lp = subparsers.add_parser(
+        "replay-live",
+        help="Replay churn against an already-seeded, owned real AKS cluster.",
+    )
+    lp.add_argument("--profile", required=True, metavar="PATH", help="Workload profile JSON.")
+    lp.add_argument(
+        "--context", required=True, metavar="TEXT", help="Exact active kubeconfig context."
+    )
+    lp.add_argument(
+        "--expected-cluster-id",
+        dest="expected_cluster_id",
+        required=True,
+        metavar="TEXT",
+        help="Exact AKS cluster ARM resource ID (`az aks show --ids ...`).",
+    )
+    lp.add_argument(
+        "--run-id", dest="run_id", required=True, metavar="TEXT", help="Unique run identifier."
+    )
+    lp.add_argument(
+        "--duration",
+        type=int,
+        default=None,
+        metavar="INT",
+        help="Override profile duration_seconds (positive); rate, bursts, "
+        "seed, topology, and failures are preserved.",
+    )
+    lp.add_argument(
+        "--sample-interval",
+        type=float,
+        default=1.0,
+        metavar="FLOAT",
+        help="Seconds between process-memory samples (positive).",
+    )
+    lp.add_argument(
+        "--json",
+        dest="json_path",
+        default=None,
+        metavar="PATH",
+        help="Write machine-readable JSON report.",
+    )
+    lp.add_argument(
+        "--out",
+        dest="out_path",
+        default=None,
+        metavar="PATH",
+        help="Write Markdown report to file (also printed to stdout).",
+    )
+    lp.add_argument(
+        "--cpu-profile",
+        default=None,
+        metavar="PATH",
+        help="Write cProfile pstats file.",
+    )
+    lp.add_argument(
+        "--allocation-snapshot",
+        default=None,
+        metavar="PATH",
+        help="Write top-100 tracemalloc source locations.",
+    )
     return parser
 
 
@@ -138,6 +200,33 @@ def _run_with_cpu_profile(
     pr.enable()
     try:
         return asyncio.run(run_replay(profile, options))
+    finally:
+        pr.disable()
+        pr.dump_stats(cpu_profile_path)
+
+
+def _run_live_with_cpu_profile(
+    profile: WorkloadProfile,
+    options: ReplayOptions,
+    *,
+    context: str,
+    expected_cluster_id: str,
+    run_id: str,
+    cpu_profile_path: str,
+) -> ReplayReport:
+    """Run *run_live_replay* and dump a cProfile pstats file to *cpu_profile_path*."""
+    pr = cProfile.Profile()
+    pr.enable()
+    try:
+        return asyncio.run(
+            run_live_replay(
+                profile,
+                options,
+                context=context,
+                expected_cluster_id=expected_cluster_id,
+                run_id=run_id,
+            )
+        )
     finally:
         pr.disable()
         pr.dump_stats(cpu_profile_path)
@@ -223,6 +312,63 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_replay_live(args: argparse.Namespace) -> int:
+    if args.duration is not None and args.duration <= 0:
+        print("error: --duration must be positive", file=sys.stderr)
+        return 1
+    if args.sample_interval <= 0:
+        print("error: --sample-interval must be positive", file=sys.stderr)
+        return 1
+
+    try:
+        profile = load_profile(Path(args.profile))
+    except (OSError, UnicodeError, ValueError) as exc:
+        print(f"error loading profile: {exc}", file=sys.stderr)
+        return 1
+
+    if args.duration is not None:
+        profile = dataclasses.replace(profile, duration_seconds=args.duration)
+
+    # No --time-scale option: live churn always replays at real wall-clock
+    # time (ReplayOptions.time_scale defaults to 1.0).
+    options = ReplayOptions(sample_interval=args.sample_interval)
+
+    if args.allocation_snapshot:
+        tracemalloc.start()
+
+    try:
+        if args.cpu_profile:
+            replay = _run_live_with_cpu_profile(
+                profile,
+                options,
+                context=args.context,
+                expected_cluster_id=args.expected_cluster_id,
+                run_id=args.run_id,
+                cpu_profile_path=args.cpu_profile,
+            )
+        else:
+            replay = asyncio.run(
+                run_live_replay(
+                    profile,
+                    options,
+                    context=args.context,
+                    expected_cluster_id=args.expected_cluster_id,
+                    run_id=args.run_id,
+                )
+            )
+    except (ValueError, ApiStatusError, AssertionError, OSError) as exc:
+        print(f"error during replay: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if args.allocation_snapshot:
+            _flush_allocation_snapshot(args.allocation_snapshot)
+
+    _write_outputs(args, replay)
+    if replay.dropped_updates > 0 or replay.expected_digest != replay.final_digest:
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point for the large-cluster benchmark.
 
@@ -238,6 +384,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_replay(args)
     if args.command == "seed-manifests":
         return _cmd_seed_manifests(args)
+    if args.command == "replay-live":
+        return _cmd_replay_live(args)
     return 1
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
@@ -179,6 +180,76 @@ async def fake_programmer_error(
 ) -> ReplayReport:
     """Unexpected implementation error that must retain its traceback."""
     raise TypeError("unexpected replay defect")
+
+
+# ---------------------------------------------------------------------------
+# Fake coroutines for `replay-live` (mirrors `run_replay`'s keyword-only
+# identity arguments).
+# ---------------------------------------------------------------------------
+
+
+def _make_recording_live_replay(
+    calls: list[dict[str, object]],
+) -> Callable[..., Awaitable[ReplayReport]]:
+    """Build a fake `run_live_replay` that records every call's arguments into
+    *calls* (a fresh list per test, to stay independent of execution order)."""
+
+    async def fake(
+        profile: WorkloadProfile,
+        options: ReplayOptions,
+        *,
+        context: str,
+        expected_cluster_id: str,
+        run_id: str,
+    ) -> ReplayReport:
+        calls.append(
+            {
+                "profile": profile,
+                "options": options,
+                "context": context,
+                "expected_cluster_id": expected_cluster_id,
+                "run_id": run_id,
+            }
+        )
+        return await fake_run_replay(profile, options)
+
+    return fake
+
+
+async def fake_live_failed_report(
+    profile: WorkloadProfile,
+    options: ReplayOptions,
+    *,
+    context: str,
+    expected_cluster_id: str,
+    run_id: str,
+) -> ReplayReport:
+    """Failed live replay — digest mismatch simulates store corruption."""
+    return await fake_failed_report(profile, options)
+
+
+async def fake_live_api_failure(
+    profile: WorkloadProfile,
+    options: ReplayOptions,
+    *,
+    context: str,
+    expected_cluster_id: str,
+    run_id: str,
+) -> ReplayReport:
+    """Expected live replay failure surfaced by a fail-closed gate."""
+    raise ValueError("wrong active context: expected aks-context, got other-context")
+
+
+async def fake_live_programmer_error(
+    profile: WorkloadProfile,
+    options: ReplayOptions,
+    *,
+    context: str,
+    expected_cluster_id: str,
+    run_id: str,
+) -> ReplayReport:
+    """Unexpected implementation error that must retain its traceback."""
+    raise TypeError("unexpected live replay defect")
 
 
 # ---------------------------------------------------------------------------
@@ -395,3 +466,258 @@ def test_cli_seed_manifests_does_not_hide_unexpected_programmer_errors(
                 "seed.yaml",
             ]
         )
+
+
+# ---------------------------------------------------------------------------
+# `replay-live`
+# ---------------------------------------------------------------------------
+
+_LIVE_IDENTITY_ARGS = [
+    "--context",
+    "aks-context",
+    "--expected-cluster-id",
+    "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks",
+    "--run-id",
+    "aks186",
+]
+
+
+def test_cli_replay_live_writes_json_and_markdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    json_path = tmp_path / "result.json"
+    markdown_path = tmp_path / "result.md"
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay(calls))
+    result = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            "--json",
+            str(json_path),
+            "--out",
+            str(markdown_path),
+        ]
+    )
+    assert result == 0
+    assert json.loads(json_path.read_text())["schema_version"] == 1
+    assert "# Large-cluster benchmark" in markdown_path.read_text()
+    assert len(calls) == 1
+    assert calls[0]["context"] == "aks-context"
+    assert calls[0]["run_id"] == "aks186"
+    assert calls[0]["expected_cluster_id"] == _LIVE_IDENTITY_ARGS[3]
+    # No --time-scale option: production real-time replay always uses 1.0.
+    assert calls[0]["options"].time_scale == 1.0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "missing_arguments",
+    [
+        [],
+        ["--context", "aks-context"],
+        ["--expected-cluster-id", "/subscriptions/sub/x"],
+        ["--run-id", "aks186"],
+    ],
+)
+def test_cli_replay_live_requires_identity_arguments(
+    tmp_path: Path, missing_arguments: list[str]
+) -> None:
+    """Every one of --context/--expected-cluster-id/--run-id is mandatory;
+    dropping any one of them (while supplying the others is exercised by the
+    full identity-args fixture in other tests) must fail argument parsing."""
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "replay-live",
+                "--profile",
+                str(profile_path(tmp_path)),
+                *missing_arguments,
+            ]
+        )
+
+
+def test_cli_replay_live_rejects_time_scale_option(tmp_path: Path) -> None:
+    """`replay-live` must never accept `--time-scale`: live churn always
+    replays at real wall-clock time (`ReplayOptions.time_scale == 1.0`)."""
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "replay-live",
+                "--profile",
+                str(profile_path(tmp_path)),
+                *_LIVE_IDENTITY_ARGS,
+                "--time-scale",
+                "0",
+            ]
+        )
+
+
+def test_cli_replay_live_rejects_non_positive_duration(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        cli.main(
+            [
+                "replay-live",
+                "--profile",
+                str(profile_path(tmp_path)),
+                *_LIVE_IDENTITY_ARGS,
+                "--duration",
+                "0",
+            ]
+        )
+        == 1
+    )
+    assert "--duration must be positive" in capsys.readouterr().err
+
+
+def test_cli_replay_live_duration_overrides_profile_duration_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--duration` must override only `duration_seconds`, preserving the
+    profile's rate, bursts, seed, topology, and failures untouched."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay(calls))
+    result = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            "--duration",
+            "5",
+        ]
+    )
+    assert result == 0
+    used_profile = calls[0]["profile"]
+    assert isinstance(used_profile, WorkloadProfile)
+    original = _make_minimal_profile()
+    assert used_profile.duration_seconds == 5
+    assert used_profile.steady_events_per_second == original.steady_events_per_second
+    assert used_profile.bursts == original.bursts
+    assert used_profile.seed == original.seed
+    assert used_profile.object_count == original.object_count
+    assert used_profile.namespace_count == original.namespace_count
+    assert used_profile.failures == original.failures
+
+
+def test_cli_replay_live_rejects_non_positive_sample_interval(tmp_path: Path) -> None:
+    assert (
+        cli.main(
+            [
+                "replay-live",
+                "--profile",
+                str(profile_path(tmp_path)),
+                *_LIVE_IDENTITY_ARGS,
+                "--sample-interval",
+                "0",
+            ]
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    "failed_replay",
+    [fake_live_failed_report],
+)
+def test_cli_replay_live_returns_nonzero_for_digest_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_replay: object,
+) -> None:
+    monkeypatch.setattr(cli, "run_live_replay", failed_replay)
+    assert (
+        cli.main(
+            [
+                "replay-live",
+                "--profile",
+                str(profile_path(tmp_path)),
+                *_LIVE_IDENTITY_ARGS,
+            ]
+        )
+        == 1
+    )
+
+
+def test_cli_replay_live_reports_expected_operational_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "run_live_replay", fake_live_api_failure)
+    assert (
+        cli.main(
+            [
+                "replay-live",
+                "--profile",
+                str(profile_path(tmp_path)),
+                *_LIVE_IDENTITY_ARGS,
+            ]
+        )
+        == 1
+    )
+    assert "error during replay: wrong active context" in capsys.readouterr().err
+
+
+def test_cli_replay_live_does_not_hide_unexpected_programmer_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "run_live_replay", fake_live_programmer_error)
+    with pytest.raises(TypeError, match="unexpected live replay defect"):
+        cli.main(
+            [
+                "replay-live",
+                "--profile",
+                str(profile_path(tmp_path)),
+                *_LIVE_IDENTITY_ARGS,
+            ]
+        )
+
+
+def test_cli_replay_live_does_not_hide_unexpected_profile_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_profile(_path: Path) -> WorkloadProfile:
+        raise TypeError("unexpected profile defect")
+
+    monkeypatch.setattr(cli, "load_profile", fail_profile)
+    with pytest.raises(TypeError, match="unexpected profile defect"):
+        cli.main(
+            [
+                "replay-live",
+                "--profile",
+                "profile.json",
+                *_LIVE_IDENTITY_ARGS,
+            ]
+        )
+
+
+def test_replay_and_seed_manifests_commands_still_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adding `replay-live` must not disturb the pre-existing subcommands."""
+    monkeypatch.setattr(cli, "run_replay", fake_run_replay)
+    assert cli.main(["replay", "--profile", str(profile_path(tmp_path)), "--time-scale", "0"]) == 0
+
+    output_path = tmp_path / "seed.yaml"
+    assert (
+        cli.main(
+            [
+                "seed-manifests",
+                "--run-id",
+                "aks186",
+                "--namespace-count",
+                "1",
+                "--pods-per-namespace",
+                "1",
+                "--node-selector",
+                "korvid.dev/pool=perftest",
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 0
+    )

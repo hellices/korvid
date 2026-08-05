@@ -8,6 +8,12 @@ _SELECTOR_VALUE_PATTERN = re.compile(r"^[a-z0-9](?:[-a-z0-9.]{0,61}[a-z0-9])?$")
 _MANAGED_BY = "korvid-performance"
 _BENCH_IMAGE = "registry.k8s.io/pause:3.10"
 
+#: Public ownership-label contract shared with `live.py`'s ownership gate, so
+#: both modules agree on exactly what "owned by this seed run" means.
+MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
+MANAGED_BY_VALUE = _MANAGED_BY
+RUN_LABEL = "korvid.dev/performance-run"
+
 
 def _validate_positive(value: int, label: str) -> int:
     if value < 1:
@@ -19,6 +25,13 @@ def _validate_run_id(run_id: str) -> str:
     if _RUN_ID_PATTERN.fullmatch(run_id):
         return run_id
     raise ValueError("run_id must be 1-48 lowercase letters, digits, or hyphens")
+
+
+def validate_run_id(run_id: str) -> str:
+    """Public entry point so other benchmark modules (e.g. `live.py`) share
+    the exact `run_id` contract `seed-manifests` enforces, without importing
+    a private name across modules."""
+    return _validate_run_id(run_id)
 
 
 def _parse_node_selector(node_selector: str) -> dict[str, str]:
@@ -36,8 +49,8 @@ def _parse_node_selector(node_selector: str) -> dict[str, str]:
 
 def _common_labels(run_id: str) -> dict[str, str]:
     return {
-        "app.kubernetes.io/managed-by": _MANAGED_BY,
-        "korvid.dev/performance-run": run_id,
+        MANAGED_BY_LABEL: _MANAGED_BY,
+        RUN_LABEL: run_id,
     }
 
 
@@ -46,6 +59,19 @@ def _namespace_name(run_id: str, namespace_index: int) -> str:
     if len(name) > 63:
         raise ValueError("generated namespace name must be 63 characters or fewer")
     return name
+
+
+def namespace_name(run_id: str, namespace_index: int) -> str:
+    """Public entry point for the exact namespace-naming formula
+    `seed-manifests` uses, so `live.py` maps object indices onto the same
+    namespaces without duplicating (and risking drift from) this formula."""
+    return _namespace_name(run_id, namespace_index)
+
+
+def pod_name(namespace_count: int, object_index: int) -> str:
+    """Public entry point for the exact Pod-naming formula `seed-manifests`
+    uses; see `namespace_name`."""
+    return f"bench-{object_index // namespace_count}"
 
 
 def build_seed_manifests(
@@ -77,13 +103,12 @@ def build_seed_manifests(
 
     for object_index in range(namespaces * pods_each):
         namespace_index = object_index % namespaces
-        pod_name = f"bench-{object_index // namespaces}"
         manifests.append(
             {
                 "apiVersion": "v1",
                 "kind": "Pod",
                 "metadata": {
-                    "name": pod_name,
+                    "name": pod_name(namespaces, object_index),
                     "namespace": namespace_names[namespace_index],
                     "labels": dict(labels),
                 },
