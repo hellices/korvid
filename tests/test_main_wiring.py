@@ -1007,7 +1007,7 @@ def test_cli_namespace_flag_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == ["team-a", "team-b", None]
 
 
-def test_cli_version_exits_before_startup(
+def test_main_module_version_exits_before_startup(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     import korvid.__main__ as main_mod
