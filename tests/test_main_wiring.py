@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -1004,6 +1005,24 @@ def test_cli_namespace_flag_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["korvid"])
     main_mod.main()
     assert calls == ["team-a", "team-b", None]
+
+
+def test_cli_version_exits_before_startup(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import korvid.__main__ as main_mod
+
+    monkeypatch.setattr(sys, "argv", ["korvid", "--version"])
+    monkeypatch.setattr(
+        main_mod,
+        "_run",
+        lambda *args, **kwargs: pytest.fail("startup must not run"),
+    )
+
+    with pytest.raises(SystemExit, match="0"):
+        main_mod.main()
+
+    assert capsys.readouterr().out.strip() == "korvid 0.1.0"
 
 
 def test_protected_context_name_glob_match(monkeypatch: pytest.MonkeyPatch) -> None:
