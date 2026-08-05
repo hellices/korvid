@@ -23,6 +23,7 @@ from korvid.agent.outbound import (
     OutboundRequestTooLarge,
     OutboundSnapshot,
     PreparedOutbound,
+    ToolResultBlockedError,
     provider_prepared_messages,
     request_char_budget,
     sanitize_screen_context,
@@ -33,6 +34,7 @@ from korvid.core.redaction import RedactionRecord, merge_records, rebase
 from korvid.tools.executor import (
     READ_TOOLS,
     ToolOutcome,
+    ToolResultBlocked,
     cap_result,
 )
 
@@ -302,7 +304,17 @@ class AgentRuntime:
         """
         executor = self._executor
         if isinstance(executor, _RecordingExecutor):
-            outcome = await executor.execute_recorded(name, arguments)
+            try:
+                outcome = await executor.execute_recorded(name, arguments)
+            except ToolResultBlocked as exc:
+                # Not an answer the model can react to: the redactor could
+                # not promise this document holds no credentials, so the
+                # turn stops here rather than sending another request with
+                # an unvetted result in history (PR #197 review). Reusing
+                # the outbound block means one rollback path — history
+                # truncated to the turn base, records purged, the last
+                # successful snapshot left standing.
+                raise ToolResultBlockedError(str(exc)) from exc
             return outcome.text, outcome.redactions
         return await executor.execute(name, arguments), ()
 
@@ -431,6 +443,13 @@ class AgentRuntime:
                 else:
                     try:
                         result, produced = await self._execute_tool(name, parsed)
+                    except OutboundPolicyError:
+                        # A blocked result is not reportable to the model:
+                        # let it reach run_turn's rollback.
+                        yield ToolCallFinished(
+                            call_id=call_id, name=name, ok=False, summary="blocked"
+                        )
+                        raise
                     except Exception as exc:  # defensive: executor contract is never-raise
                         # Same ingest cap as ToolExecutor — a huge exception
                         # message must not bypass the limit into history.
@@ -597,7 +616,7 @@ class AgentRuntime:
         self._total_out += turn_out
         self._estimated = self._estimated or usage_missing
         return (
-            AgentError(message=f"outbound policy blocked the provider request: {error}"),
+            AgentError(message=f"{error.headline}: {error}"),
             TurnComplete(
                 input_tokens=turn_in,
                 output_tokens=turn_out,

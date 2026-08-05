@@ -1019,3 +1019,31 @@ async def test_refused_mirror_falls_back_to_an_activity_note() -> None:
     await _drain_follow(server)
     assert len(notes) == 1
     assert "list_operators" in notes[0]
+
+
+async def test_mcp_gets_a_safe_error_when_redaction_blocks_a_result() -> None:
+    """A blocked result stops korvid's *turn*; MCP has no turn to stop.
+
+    The string contract holds: the host sees an `ERROR: ...` result
+    naming the shape that failed, never the document behind it, and
+    `call_tool` does not start raising at this boundary (PR #197 review).
+    """
+
+    class UnredactableKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            return {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": "not-a-mapping",
+                "data": {"password": "cmF3LXNlY3JldA=="},
+            }
+
+    executor = ToolExecutor(UnredactableKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_resource", {"kind": "pods", "name": "s", "namespace": "d"}
+    )
+
+    assert content[0].text.startswith("ERROR:")
+    assert "cmF3LXNlY3JldA==" not in content[0].text

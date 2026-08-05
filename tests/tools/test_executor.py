@@ -18,10 +18,12 @@ from korvid.tools.executor import (
     READ_TOOLS,
     UI_TOOLS,
     ToolExecutor,
+    ToolResultBlocked,
     UIBridge,
     compact_result,
 )
 from korvid.tools.registry import TOOLS_BY_NAME, ToolDef
+from korvid.tools.structured import ERROR_PREFIX
 
 
 class FakeKube:
@@ -2470,3 +2472,71 @@ async def test_execute_recorded_reports_nothing_for_a_text_tool() -> None:
 
     assert outcome.redactions == ()
     assert isinstance(outcome.text, str)
+
+
+# --- A redaction failure is not an ordinary tool error (round 6) ------------
+#
+# `redact_document` refuses shapes it cannot reason about — a `kind:
+# Secret` whose metadata is not a mapping, a cycle, a non-string key.
+# Collapsing that into an `ERROR: ...` string made it indistinguishable
+# from "the API said no", so the agent kept the turn going.
+
+_UNREDACTABLE_SECRET = {
+    "apiVersion": "v1",
+    "kind": "Secret",
+    "metadata": "not-a-mapping",
+    "data": {"password": "cmF3LXNlY3JldA=="},
+}
+
+
+async def test_execute_recorded_raises_when_a_result_cannot_be_redacted() -> None:
+    kube = FakeKube()
+    kube.manifest = _UNREDACTABLE_SECRET
+
+    with pytest.raises(ToolResultBlocked, match="could not redact the result"):
+        await make_executor(kube).execute_recorded(
+            "get_resource", {"kind": "pods", "name": "s", "namespace": "d"}
+        )
+
+
+async def test_a_blocked_result_carries_no_raw_data() -> None:
+    kube = FakeKube()
+    kube.manifest = _UNREDACTABLE_SECRET
+
+    with pytest.raises(ToolResultBlocked) as caught:
+        await make_executor(kube).execute_recorded(
+            "get_resource", {"kind": "pods", "name": "s", "namespace": "d"}
+        )
+
+    assert "cmF3LXNlY3JldA==" not in str(caught.value)
+
+
+async def test_execute_still_returns_a_safe_error_string_when_redaction_fails() -> None:
+    """MCP and the eval runner take strings; they must not start raising."""
+    kube = FakeKube()
+    kube.manifest = _UNREDACTABLE_SECRET
+
+    result = await make_executor(kube).execute(
+        "get_resource", {"kind": "pods", "name": "s", "namespace": "d"}
+    )
+
+    assert type(result) is str
+    assert result.startswith(ERROR_PREFIX)
+    assert "cmF3LXNlY3JldA==" not in result
+
+
+async def test_an_ordinary_tool_error_is_still_an_error_string() -> None:
+    """A cluster or argument failure stays model-visible and non-blocking."""
+    outcome = await make_executor(_ExplodingKube()).execute_recorded(
+        "get_resource", {"kind": "pods", "name": "s", "namespace": "d"}
+    )
+
+    assert outcome.text.startswith(ERROR_PREFIX)
+
+
+async def test_an_unknown_kind_is_still_an_error_string() -> None:
+    outcome = await make_executor(FakeKube()).execute_recorded(
+        "get_resource", {"kind": "widgets", "name": "s", "namespace": "d"}
+    )
+
+    assert outcome.text.startswith(ERROR_PREFIX)

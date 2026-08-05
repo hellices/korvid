@@ -70,6 +70,22 @@ def _reject_slash_name(value: str, field: str) -> str:
     return value
 
 
+class ToolResultBlocked(Exception):
+    """A result could not be redacted, so it must not be used at all.
+
+    Distinct from the `ERROR: ...` strings every other failure produces.
+    Those describe something the *cluster* said and are the model's to
+    reason about; this one says the redactor met a shape it cannot
+    reason about — a `kind: Secret` with non-mapping metadata, a
+    non-string key — and therefore cannot promise the document holds no
+    credentials. Collapsing the two let the agent append the failure and
+    send another request, which is exactly the request that must not
+    happen (PR #197 review).
+
+    The message never quotes the offending document; it names the shape.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ToolOutcome:
     """One tool result plus the redactions applied while producing it.
@@ -542,8 +558,17 @@ class ToolExecutor:
         self._custom_columns = dict(custom_columns or {})
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-        """Dispatch a tool call; never raises — exceptions are returned as 'ERROR: ...'."""
-        return (await self.execute_recorded(name, arguments)).text
+        """Dispatch a tool call; never raises — exceptions are returned as 'ERROR: ...'.
+
+        The string API every non-agent consumer uses (the MCP server, the
+        eval runner). A blocked result becomes a safe `ERROR: ...` string
+        here: those consumers have no turn to stop, and the string carries
+        the shape that failed, never the document.
+        """
+        try:
+            return (await self.execute_recorded(name, arguments)).text
+        except ToolResultBlocked as exc:
+            return cap_result(f"{ERROR_PREFIX} {exc}")
 
     async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
         """Dispatch a tool call, keeping the redactions applied while producing it.
@@ -555,11 +580,18 @@ class ToolExecutor:
         rather than storing it keeps concurrent calls independent — there
         is no per-executor "last call" state to race over.
 
-        `execute` remains the string API every other consumer (the MCP
-        server, the eval runner) uses.
+        Raises:
+            ToolResultBlocked: the result could not be redacted. Every
+                other failure is returned as an `ERROR: ...` string,
+                because every other failure is something the cluster or
+                the arguments did and the model can react to it. This one
+                is not answerable by the model and must not travel with
+                the conversation (PR #197 review).
         """
         try:
             result = await self._dispatch(name, arguments)
+        except RedactionError as exc:
+            raise ToolResultBlocked(f"could not redact the result: {exc}") from exc
         except Exception as exc:
             # Errors flow through the same cap below: a client error with a
             # long reason must not bypass the ingest limit.

@@ -2215,3 +2215,117 @@ async def test_a_freed_message_cannot_hand_its_records_to_a_new_one() -> None:
     assert all(entry.message in runtime._messages for entry in runtime._ingress_records.values())
     for item in _reasons(runtime):
         assert item != "control-character"
+
+
+# --- A producer redaction failure stops the turn (round 6) ------------------
+#
+# `redact_document` refusing a shape means nothing downstream can be
+# trusted to have been redacted. Collapsing that into an `ERROR: ...`
+# tool result let the runtime append it and send another request.
+
+_UNREDACTABLE_SECRET = {
+    "apiVersion": "v1",
+    "kind": "Secret",
+    "metadata": "not-a-mapping",
+    "data": {"password": "cmF3LXNlY3JldA=="},
+}
+
+
+async def test_an_unredactable_tool_result_makes_no_further_provider_call() -> None:
+    provider = ScriptedProvider(_get_resource_turn())
+    runtime = AgentRuntime(provider, _manifest_executor(_UNREDACTABLE_SECRET))
+
+    await collect(runtime, "why?")
+
+    assert len(provider.calls) == 1
+
+
+async def test_an_unredactable_tool_result_ends_the_turn_with_an_error() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider(_get_resource_turn()), _manifest_executor(_UNREDACTABLE_SECRET)
+    )
+
+    events = await collect(runtime, "why?")
+
+    assert isinstance(events[-1], TurnComplete)
+    assert any(isinstance(event, AgentError) for event in events)
+
+
+async def test_an_unredactable_tool_result_leaves_no_history_behind() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider(_get_resource_turn()), _manifest_executor(_UNREDACTABLE_SECRET)
+    )
+
+    await collect(runtime, "why?")
+
+    assert [m.get("role") for m in runtime._messages] == ["system"]
+    assert not runtime._ingress_records
+
+
+async def test_an_unredactable_tool_result_reports_nothing_raw() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider(_get_resource_turn()), _manifest_executor(_UNREDACTABLE_SECRET)
+    )
+
+    events = await collect(runtime, "why?")
+
+    rendered = json.dumps([str(event) for event in events])
+    assert "cmF3LXNlY3JldA==" not in rendered
+
+
+async def test_an_unredactable_tool_result_keeps_the_last_successful_snapshot() -> None:
+    """The block rolls history back; it does not erase the handoff already sent."""
+    turns = [
+        [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+        *_get_resource_turn(),
+    ]
+    runtime = AgentRuntime(ScriptedProvider(turns), _manifest_executor(_UNREDACTABLE_SECRET))
+
+    await collect(runtime, "first")
+    await collect(runtime, "second")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "second" in snapshot.payload_json
+    assert "cmF3LXNlY3JldA==" not in snapshot.payload_json
+
+
+async def test_an_ordinary_tool_error_still_continues_the_turn() -> None:
+    """A cluster failure is the model's problem to reason about, not a stop."""
+
+    class _Failing:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            raise RuntimeError("connection refused")
+
+    executor = ToolExecutor(_Failing(), {"pods": PODS_META})  # type: ignore[arg-type]  # test double for ReadOps
+    provider = ScriptedProvider(_get_resource_turn())
+    runtime = AgentRuntime(provider, executor)
+
+    await collect(runtime, "why?")
+
+    assert len(provider.calls) == 2
+    assert any("ERROR" in str(m.get("content")) for m in runtime._messages)
+
+
+async def test_a_blocked_turn_names_the_boundary_that_refused() -> None:
+    """Not "outbound policy blocked": the payload was never inspected."""
+    runtime = AgentRuntime(
+        ScriptedProvider(_get_resource_turn()), _manifest_executor(_UNREDACTABLE_SECRET)
+    )
+
+    events = await collect(runtime, "why?")
+
+    error = next(event for event in events if isinstance(event, AgentError))
+    assert error.message.startswith("the turn stopped before its next provider request")
+    assert "a Secret's metadata must be a mapping" in error.message
+
+
+async def test_a_blocked_turn_leaves_the_session_usable() -> None:
+    turns = [*_get_resource_turn(), [{"type": "text_delta", "text": "ok"}, {"type": "done"}]]
+    runtime = AgentRuntime(ScriptedProvider(turns), _manifest_executor(_UNREDACTABLE_SECRET))
+
+    await collect(runtime, "why?")
+    events = await collect(runtime, "again?")
+
+    assert not any(isinstance(event, AgentError) for event in events)
+    assert [m.get("role") for m in runtime._messages] == ["system", "user", "assistant"]

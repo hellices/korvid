@@ -17,7 +17,7 @@ import math
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import yaml
 
@@ -42,6 +42,23 @@ _ALLOWED_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 class OutboundPolicyError(ValueError):
     """The provider request was blocked before network I/O."""
+
+    #: How the block is announced to the user. Subclasses name the
+    #: boundary that actually refused, so a producer-side failure is not
+    #: reported as if the outbound policy had inspected the payload.
+    headline: ClassVar[str] = "outbound policy blocked the provider request"
+
+
+class ToolResultBlockedError(OutboundPolicyError):
+    """A tool result could not be redacted, so the turn stops before its next request.
+
+    The refusal happens where the document is produced, not at the
+    payload boundary, but it lands here so a blocked turn has exactly one
+    rollback: history truncated to the turn base, carried records purged,
+    the last successful snapshot left standing (PR #197 review).
+    """
+
+    headline = "the turn stopped before its next provider request"
 
 
 class OutboundRequestTooLarge(OutboundPolicyError):
