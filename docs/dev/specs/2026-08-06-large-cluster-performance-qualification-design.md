@@ -55,10 +55,12 @@ merged and the issue worktree is synchronized with the resulting `main`.
 ### Workload profiles
 
 Profiles are versioned JSON documents with a schema version, seed, object count,
-namespace count, initial-state distribution, churn rate, burst pattern, failure
-injections, and duration. A resolved run manifest records the profile plus the
-korvid SHA, Python, Textual, OS, CPU, memory, Kubernetes, cluster, and node-pool
-versions.
+namespace count, churn rate, burst pattern, failure injections, and duration.
+Schema v1, as reviewed in `tests/performance/profile.py`, fixes the initial
+state to all Pods already Running and Ready for the chosen object count; varied
+initial-state distributions require a future schema version with an explicit
+field. A resolved run manifest records the profile plus the korvid SHA, Python,
+Textual, OS, CPU, memory, Kubernetes, cluster, and node-pool versions.
 
 The initial profiles are:
 
@@ -171,7 +173,7 @@ The live sequence is:
 1. start the stopped cluster and scale `perftest` to five;
 2. run the janitor for stale, labelled performance namespaces;
 3. create all 1,000 Pods and require exactly 1,000 Running, Ready Pods before
-   measuring;
+   measuring, matching schema v1's fixed initial state;
 4. capture cold startup and initial LIST/render metrics;
 5. run 30 minutes of metadata-only watch churn at 20 events per second;
 6. inject three 30-second bursts at 100 events per second during that window;
