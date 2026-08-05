@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Smoke-test the built korvid wheel in a clean, disposable environment."""
+"""Smoke-test the built korvid wheel in a clean, disposable environment.
+
+Every variant is first installed *fresh*: one direct install of that variant's
+own requirement from the single downloaded wheel, in a brand-new virtual
+environment. Non-base variants then get a second, separate clean environment
+that exercises the documented base-to-extra expansion command.
+"""
 
 from __future__ import annotations
 
@@ -18,12 +24,27 @@ _VARIANT_EXTRAS = {
     "mcp": "mcp",
     "all": "all",
 }
+#: Feature packages that must import once the variant's extra is installed.
 _VARIANT_MODULES = {
     "base": frozenset(),
-    "agent": frozenset({"keyring"}),
+    "agent": frozenset({"httpx", "keyring"}),
     "mcp": frozenset({"mcp"}),
-    "all": frozenset({"keyring", "mcp"}),
+    "all": frozenset({"httpx", "keyring", "mcp"}),
 }
+#: Feature packages that must be absent, so an extra can never leak into a
+#: narrower variant. `mcp` depends on httpx, so httpx is only forbidden where
+#: no selected extra legitimately provides it.
+_VARIANT_FORBIDDEN_MODULES = {
+    "base": frozenset({"httpx", "keyring", "mcp"}),
+    "agent": frozenset({"mcp"}),
+    "mcp": frozenset({"keyring"}),
+    "all": frozenset(),
+}
+
+
+def variants() -> tuple[str, ...]:
+    """Smoke-tested variants. `entra` is deliberately out of scope."""
+    return tuple(sorted(_VARIANT_EXTRAS))
 
 
 def _normalize_variant(variant: str) -> str:
@@ -46,6 +67,56 @@ def required_modules(variant: str) -> set[str]:
     """Modules that must import after installing *variant*."""
     normalized = _normalize_variant(variant)
     return set(_VARIANT_MODULES[normalized])
+
+
+def forbidden_modules(variant: str) -> set[str]:
+    """Optional feature modules that must *not* be importable for *variant*."""
+    normalized = _normalize_variant(variant)
+    return set(_VARIANT_FORBIDDEN_MODULES[normalized])
+
+
+@dataclass(frozen=True)
+class InstallPhase:
+    """One clean virtual environment exercised by the smoke test.
+
+    Attributes:
+        name: `fresh` for the primary direct install, `expansion` for the
+            separate package-manager base-to-extra expansion check.
+        env_dir_name: Virtual environment directory, relative to the workspace.
+        requirements: Requirements installed in order. Everything after the
+            first is installed with `--upgrade`.
+    """
+
+    name: str
+    env_dir_name: str
+    requirements: tuple[str, ...]
+
+
+def install_plan(wheel: Path, variant: str) -> tuple[InstallPhase, ...]:
+    """Return the install phases for *variant*.
+
+    The primary phase is always a fresh, direct install of the variant's own
+    requirement — never a base install that is later widened. Non-base variants
+    additionally get a *separate* clean environment that proves the documented
+    base-to-extra expansion command really adds the extra in place.
+    """
+    normalized = _normalize_variant(variant)
+    fresh = InstallPhase(
+        name="fresh",
+        env_dir_name="venv-fresh",
+        requirements=(requirement_for(wheel, normalized),),
+    )
+    if normalized == "base":
+        return (fresh,)
+    expansion = InstallPhase(
+        name="expansion",
+        env_dir_name="venv-expansion",
+        requirements=(
+            requirement_for(wheel, "base"),
+            requirement_for(wheel, normalized),
+        ),
+    )
+    return (fresh, expansion)
 
 
 def validate_wheel_version(wheel: Path, version: str) -> None:
@@ -180,6 +251,23 @@ def _assert_module_imports(
         _run([str(python), "-c", f"import {module}"], env=env, cwd=cwd)
 
 
+def _assert_modules_absent(
+    python: Path, modules: set[str], *, env: dict[str, str], cwd: Path
+) -> None:
+    """Fail if an optional feature package leaked into a narrower variant."""
+    for module in sorted(modules):
+        probe = (
+            "import importlib.util; "
+            f"raise SystemExit(0 if importlib.util.find_spec({module!r}) is None else 1)"
+        )
+        try:
+            _run([str(python), "-c", probe], env=env, cwd=cwd)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"optional feature package {module!r} is installed outside its extra"
+            ) from exc
+
+
 def _assert_help_and_version(
     launcher: Path, version: str, *, env: dict[str, str], cwd: Path
 ) -> None:
@@ -229,33 +317,41 @@ def _assert_no_user_state(roots: _StateRoots) -> None:
         raise RuntimeError(f"noninteractive smoke created user-state files: {rendered}")
 
 
+def _run_phase(
+    phase: InstallPhase,
+    *,
+    version: str,
+    variant: str,
+    workspace: Path,
+    env: dict[str, str],
+) -> None:
+    env_dir = workspace / phase.env_dir_name
+    venv.create(env_dir, with_pip=True)
+    python = _venv_python(env_dir)
+
+    for index, requirement in enumerate(phase.requirements):
+        _pip_install(python, requirement, env=env, cwd=workspace, upgrade=index > 0)
+
+    launcher = _resolve_launcher(env_dir)
+    if launcher is None:
+        raise RuntimeError(f"korvid console launcher was not installed ({phase.name} install)")
+
+    _assert_version(python, version, env=env, cwd=workspace)
+    _assert_module_imports(python, required_modules(variant), env=env, cwd=workspace)
+    _assert_modules_absent(python, forbidden_modules(variant), env=env, cwd=workspace)
+    _assert_help_and_version(launcher, version, env=env, cwd=workspace)
+    _pip_uninstall(python, "korvid", env=env, cwd=workspace)
+    _assert_korvid_removed(python, env_dir, env=env, cwd=workspace)
+
+
 def _smoke_install(wheel: Path, version: str, variant: str, workspace: Path) -> None:
     validate_wheel_version(wheel, version)
     roots = _state_roots(workspace)
     env = _command_env(roots)
-    env_dir = workspace / "venv"
-    venv.create(env_dir, with_pip=True)
-    python = _venv_python(env_dir)
 
-    _pip_install(python, requirement_for(wheel, "base"), env=env, cwd=workspace)
-    if variant != "base":
-        _pip_install(
-            python,
-            requirement_for(wheel, variant),
-            env=env,
-            cwd=workspace,
-            upgrade=True,
-        )
+    for phase in install_plan(wheel, variant):
+        _run_phase(phase, version=version, variant=variant, workspace=workspace, env=env)
 
-    launcher = _resolve_launcher(env_dir)
-    if launcher is None:
-        raise RuntimeError("korvid console launcher was not installed")
-
-    _assert_version(python, version, env=env, cwd=workspace)
-    _assert_module_imports(python, required_modules(variant), env=env, cwd=workspace)
-    _assert_help_and_version(launcher, version, env=env, cwd=workspace)
-    _pip_uninstall(python, "korvid", env=env, cwd=workspace)
-    _assert_korvid_removed(python, env_dir, env=env, cwd=workspace)
     _assert_no_user_state(roots)
 
 
@@ -263,7 +359,7 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wheel", required=True)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--variant", required=True, choices=sorted(_VARIANT_EXTRAS))
+    parser.add_argument("--variant", required=True, choices=variants())
     parser.add_argument("--workspace", required=True)
     args = parser.parse_args(argv)
 
@@ -272,7 +368,7 @@ def main(argv: list[str]) -> int:
         print(f"wheel not found: {wheel}", file=sys.stderr)
         return 1
 
-    workspace = Path(args.workspace)
+    workspace = Path(args.workspace).resolve()
     if workspace.exists():
         print(f"workspace must not already exist: {workspace}", file=sys.stderr)
         return 1

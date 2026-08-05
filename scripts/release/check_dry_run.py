@@ -3,6 +3,10 @@
 
 Usage: check_dry_run.py TRUSTED_REF [REPOSITORY] [PYPROJECT]
 Prints the version on success (for later workflow steps).
+
+The caller must refresh TRUSTED_REF from the remote before running this check.
+`actions/checkout` can leave `refs/remotes/origin/main` pointing at the
+dispatched SHA, which would make the HEAD comparison below vacuous.
 """
 
 from __future__ import annotations
@@ -11,6 +15,8 @@ import sys
 import tomllib
 from pathlib import Path
 from subprocess import CompletedProcess, run
+
+from version_format import UNSUPPORTED_VERSION, is_supported_release_version
 
 
 def _git(repo: Path, *args: str) -> CompletedProcess[str]:
@@ -45,6 +51,12 @@ def main(argv: list[str]) -> int:
         version = _read_version(pyproject)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
+        return 1
+
+    # Never echo the rejected value: it is untrusted with respect to the shell
+    # and file names this version later feeds.
+    if not is_supported_release_version(version):
+        print(UNSUPPORTED_VERSION, file=sys.stderr)
         return 1
 
     head = _git(repo, "rev-parse", "HEAD")

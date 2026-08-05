@@ -1,10 +1,15 @@
 name: Release
 
 # Signed PyPI releases with SBOMs and verified offline bundles (issue #169).
-# Triggered only by an annotated vX.Y.Z tag; the tag must match
+# Publication is triggered only by an annotated vX.Y.Z tag; the tag must match
 # pyproject.toml or nothing is built. One build's artifacts are promoted to
 # both PyPI (OIDC Trusted Publishing — no stored token) and the GitHub
 # Release. Every gate below is fail-closed for publication.
+#
+# workflow_dispatch is a non-publishing dry run from main. It runs verify,
+# build, smoke, sbom, offline, and collect. It deliberately stops before
+# `attest` (public Sigstore/Rekor provenance is irreversible), staging,
+# PyPI publication, and finalization.
 
 on:
   push:
@@ -32,6 +37,12 @@ jobs:
           version: "0.10.9"
           # Publishing workflow: caching is a poisoning vector (zizmor).
           enable-cache: false
+      - name: Fetch the live trusted branch head
+        # actions/checkout can leave refs/remotes/origin/main pointing at the
+        # ref this run was dispatched from, which would make the dry run's
+        # HEAD == origin/main comparison vacuous. Refresh it from the remote
+        # before any source policy reads it.
+        run: git fetch --force --no-tags origin "refs/heads/main:refs/remotes/origin/main"
       - id: version
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -121,6 +132,9 @@ jobs:
   smoke:
     needs: [verify, build]
     runs-on: ${{ matrix.os }}
+    # 36 cells, each building two clean virtual environments; a hung cell must
+    # never stall a release.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -139,7 +153,17 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Smoke-test the downloaded wheel in a clean workspace
-        run: python scripts/release/smoke_install.py --wheel "dist/korvid-${{ needs.verify.outputs.version }}-py3-none-any.whl" --version "${{ needs.verify.outputs.version }}" --variant "${{ matrix.variant }}" --workspace "${{ runner.temp }}/smoke-install-${{ matrix.os }}-${{ matrix.python-version }}-${{ matrix.variant }}"
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          VARIANT: ${{ matrix.variant }}
+          WORKSPACE: ${{ runner.temp }}/smoke-${{ matrix.os }}-${{ matrix.python-version }}-${{ matrix.variant }}
+        run: |
+          python scripts/release/smoke_install.py \
+            --wheel "dist/korvid-${VERSION}-py3-none-any.whl" \
+            --version "$VERSION" \
+            --variant "$VARIANT" \
+            --workspace "$WORKSPACE"
 
   sbom:
     needs: [verify, build]
@@ -300,6 +324,10 @@ jobs:
 
   attest:
     needs: collect
+    # Provenance attestation signs through public Sigstore and records the
+    # entry in the public Rekor transparency log. That is irreversible, so it
+    # only ever runs for a real tag push — never for a dry run.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
