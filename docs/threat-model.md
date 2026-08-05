@@ -64,7 +64,12 @@ flowchart LR
   wants object-shaped tool arguments) are applied by
   `LLMProvider.prepare_messages` *before* the policy runs, so those fields
   are redacted and appear in the snapshot like everything else; adapters
-  must never reshape messages inside `complete()`.
+  must never reshape messages inside `complete()`. The hook may only
+  *add*: every output position is checked against a baseline taken before
+  it ran and never handed to it, so a hook that reorders history or
+  rewrites a role or content — in place or otherwise — blocks the
+  request rather than misfiling the redaction records that travel by
+  position.
 - **Trusted provider plugins** — third-party `korvid.provider` entry points
   run as **trusted in-process** Python code (see
   [`docs/provider-plugins.md`](provider-plugins.md)). A plugin's `create()`
@@ -195,7 +200,10 @@ flowchart LR
   cluster said: the agent rolls the turn back and makes no further
   provider request instead of sending an unvetted result. External MCP
   clients, which have no turn to stop, receive a safe error naming the
-  shape that failed rather than the document behind it.
+  shape that failed rather than the document behind it. Which of the two
+  a result is, the *producer* states: the boundary never reads it off the
+  text, so a document cannot skip the structural pass by opening with
+  `ERROR:`, and a producer that cannot say gets the structural pass.
 
 ## Residual risks (not mitigated)
 
