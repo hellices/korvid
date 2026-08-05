@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import copy
 import json
 from collections.abc import AsyncIterator
@@ -7,7 +9,13 @@ import httpx
 import pytest
 import yaml
 
-from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, TurnComplete
+from korvid.agent.events import (
+    AgentError,
+    TextDelta,
+    ToolCallFinished,
+    TurnComplete,
+    TurnInterrupted,
+)
 from korvid.agent.profiles import build_profile
 from korvid.agent.prompts import NO_WRITE_PROMPT
 from korvid.agent.provider import REQUEST_SENT
@@ -3491,3 +3499,163 @@ async def test_a_stream_that_dies_midway_keeps_the_payload_it_sent() -> None:
     snapshot = runtime.latest_outbound_payload
     assert snapshot is not None
     assert "hello" in snapshot.payload_json
+
+
+# --- A transmitted request costs tokens even if it answered badly (r12) ----
+
+
+async def _cancel_mid_turn(runtime: AgentRuntime) -> TurnInterrupted:
+    """Start a turn, cancel it once the provider is reached, and finalize."""
+
+    async def drive() -> list[Any]:
+        return [e async for e in runtime.run_turn("hello", "view=pods ns=default")]
+
+    task = asyncio.create_task(drive())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    return runtime.finalize_interrupt()
+
+
+async def test_an_acknowledged_request_that_fails_is_still_charged() -> None:
+    """The prompt reached the provider and was processed before it answered
+    HTTP 500. Charging nothing reports a session as free that was not."""
+
+    def five_hundred(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    runtime = AgentRuntime(_mock_ollama(five_hundred), EchoExecutor())
+
+    await collect(runtime, "hello")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    charged_in, charged_out = runtime.total_tokens
+    assert charged_in == len(snapshot.payload_json) // 4
+    assert charged_out == 0
+    assert runtime.usage_estimated is True
+
+
+async def test_a_request_that_never_left_is_charged_nothing() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host")
+
+    runtime = AgentRuntime(_mock_ollama(refuse), EchoExecutor())
+
+    await collect(runtime, "hello")
+
+    assert runtime.total_tokens == (0, 0)
+    assert runtime.usage_estimated is False
+
+
+async def test_a_turn_cancelled_right_after_the_handoff_is_still_charged() -> None:
+    """Nothing had streamed back yet, but the payload was on the wire."""
+
+    class _AckThenHang:
+        @property
+        def name(self) -> str:
+            return "hang"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": REQUEST_SENT}
+            await asyncio.sleep(60)
+
+    runtime = AgentRuntime(_AckThenHang(), EchoExecutor())
+    interrupted = await _cancel_mid_turn(runtime)
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert interrupted.input_tokens == len(snapshot.payload_json) // 4
+    assert interrupted.estimated is True
+
+
+async def test_a_turn_cancelled_before_the_handoff_is_charged_nothing() -> None:
+    class _HangBeforeAck:
+        @property
+        def name(self) -> str:
+            return "hang"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            await asyncio.sleep(60)
+            yield {"type": "done"}
+
+    runtime = AgentRuntime(_HangBeforeAck(), EchoExecutor())
+    interrupted = await _cancel_mid_turn(runtime)
+
+    assert (interrupted.input_tokens, interrupted.output_tokens) == (0, 0)
+    assert interrupted.estimated is False
+    assert runtime.latest_outbound_payload is None
+
+
+async def test_a_provider_that_yields_nothing_is_charged_nothing() -> None:
+    """No acknowledgement and no event: there is no evidence a request ran,
+    and the inspector already refuses to call it a handoff."""
+    runtime = AgentRuntime(ScriptedProvider([[]]), EchoExecutor())
+
+    await collect(runtime, "hello")
+
+    assert runtime.total_tokens == (0, 0)
+    assert runtime.latest_outbound_payload is None
+
+
+async def test_a_plugin_style_first_event_is_enough_to_charge_the_prompt() -> None:
+    """A plugin cannot acknowledge, so its first event is the evidence —
+    the same rule the snapshot uses."""
+
+    class _OneEventThenDies:
+        @property
+        def name(self) -> str:
+            return "plugin"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "text_delta", "text": "par"}
+            raise RuntimeError("stream died")
+
+    runtime = AgentRuntime(_OneEventThenDies(), EchoExecutor())
+
+    await collect(runtime, "hello")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert runtime.total_tokens[0] == len(snapshot.payload_json) // 4
+
+
+async def test_an_acknowledged_openai_request_that_fails_is_still_charged() -> None:
+    from korvid.providers.openai_compat import OpenAICompatProvider
+    from korvid.providers.static_creds import StaticHeaderSource
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(401, text="nope"))
+    )
+    provider = OpenAICompatProvider(
+        base_url="http://x/v1",
+        model="m1",
+        credentials=StaticHeaderSource("sk-test"),
+        client=client,
+    )
+    runtime = AgentRuntime(provider, EchoExecutor())
+
+    await collect(runtime, "hello")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert runtime.total_tokens[0] == len(snapshot.payload_json) // 4

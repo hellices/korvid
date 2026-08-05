@@ -117,12 +117,20 @@ class _StreamState:
     in_tok: int = 0
     out_tok: int = 0
     has_usage: bool = False
+    #: The request reached the provider. Set on the first event of any
+    #: kind — a built-in's `REQUEST_SENT` acknowledgement, or any
+    #: completion event from an adapter that cannot acknowledge. Streamed
+    #: output used to stand in for this, which charged nothing for a
+    #: prompt that was processed and then answered HTTP 500, and charged
+    #: a full prompt for a stream that never ran (PR #197 review).
+    transmitted: bool = False
 
 
 def _estimate_missing_usage(state: _StreamState, prompt_estimate: int) -> None:
     """Fill in token estimates when the provider omitted usage — totals must
-    never read as zero for a request that was really transmitted."""
-    if not state.has_usage:
+    never read as zero for a request that was really transmitted, nor
+    charge for one that never was."""
+    if not state.has_usage and state.transmitted:
         state.in_tok = prompt_estimate
         state.out_tok = _stream_output_chars(state) // 4
 
@@ -506,8 +514,11 @@ class AgentRuntime:
             # Recorded here rather than around `complete()`: that call only
             # builds the generator, so a provider that cannot reach its
             # endpoint would otherwise show an unsent payload as the last
-            # thing this session handed over (PR #197 review).
+            # thing this session handed over (PR #197 review). The same
+            # evidence settles the bill — a request that ran costs its
+            # prompt whether or not anything streamed back.
             self._latest_outbound_payload = snapshot
+            state.transmitted = True
             ev_type = ev.get("type", "")
             if ev_type == "text_delta":
                 text = str(ev.get("text", ""))
@@ -732,12 +743,12 @@ class AgentRuntime:
     ) -> AgentError:
         """Commit real provider cost and return the safe terminal error event."""
         self._turn_active = False
-        if not state.has_usage and (state.text or state.tool_calls):
+        if not state.has_usage and state.transmitted:
             state.in_tok = prompt_estimate
             state.out_tok = _stream_output_chars(state) // 4
         self._total_in += turn_in + state.in_tok
         self._total_out += turn_out + state.out_tok
-        if usage_missing or not state.has_usage:
+        if usage_missing or (state.transmitted and not state.has_usage):
             self._estimated = True
         return AgentError(message=str(error) or type(error).__name__)
 
@@ -781,9 +792,10 @@ class AgentRuntime:
             if state.has_usage:
                 in_flight_in = state.in_tok
                 in_flight_out = state.out_tok
-            elif state.text or state.tool_calls:
-                # Same rule as the stream-error path: output before dying
-                # means the prompt was really transmitted.
+            elif state.transmitted:
+                # Same rule as the stream-error path: a request the
+                # provider acknowledged was really transmitted, whether or
+                # not anything had streamed back before the cancellation.
                 in_flight_in = self._live_prompt_estimate
                 in_flight_out = _stream_output_chars(state) // 4
                 estimated = True
