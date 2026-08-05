@@ -52,7 +52,7 @@ async def test_replay_time_scale_1_uses_relative_inter_event_delays() -> None:
         seed=186,
         object_count=20,
         namespace_count=4,
-        steady_events_per_second=20,
+        steady_events_per_second=3,
         duration_seconds=3,
         bursts=(),
         failures=(),
@@ -73,7 +73,7 @@ async def test_replay_gone_reconnects_and_digest_matches() -> None:
         seed=186,
         object_count=20,
         namespace_count=4,
-        steady_events_per_second=3,
+        steady_events_per_second=20,
         duration_seconds=2,
         bursts=(),
         failures=(FailureInjection(kind="gone", at_event=5),),
@@ -89,6 +89,29 @@ async def test_replay_gone_reconnects_and_digest_matches() -> None:
     assert report.final_digest == oracle
     assert report.dropped_updates == 0
     assert report.churn_started_before_input
+    assert report.api.operations["list"] == 2
+    assert report.api.operations["watch_open"] == 2
+    assert report.api.reconnects == 1
+    assert report.api.relists == 1
+
+
+async def test_replay_gone_reconnects_with_time_scale_1() -> None:
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-gone-ts1",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=20,
+        duration_seconds=2,
+        bursts=(),
+        failures=(FailureInjection(kind="gone", at_event=5),),
+    )
+
+    report = await run_replay(profile, ReplayOptions(time_scale=1))
+
+    assert report.expected_digest == report.final_digest
+    assert report.dropped_updates == 0
     assert report.api.operations["list"] == 2
     assert report.api.operations["watch_open"] == 2
     assert report.api.reconnects == 1
