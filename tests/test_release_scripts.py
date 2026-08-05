@@ -1043,7 +1043,9 @@ def test_release_docs_runbook_lists_and_cleans_the_os_keyring_credential() -> No
     runbook = " ".join(_release_runbook().split())
     assert "OS keyring" in runbook
     assert "service `korvid`, account `github-oauth`" in runbook
+    assert 'keyring.get_password("korvid", "github-oauth")' in runbook
     assert 'keyring.delete_password("korvid", "github-oauth")' in runbook
+    assert "except PasswordDeleteError" not in runbook
     assert "before uninstalling korvid" in runbook
 
 

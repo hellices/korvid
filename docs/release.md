@@ -205,12 +205,10 @@ visible and must be resolved before continuing.
 ```sh
 python - <<'PY'
 import keyring
-from keyring.errors import PasswordDeleteError
 
-try:
+credential = keyring.get_password("korvid", "github-oauth")
+if credential is not None:
     keyring.delete_password("korvid", "github-oauth")
-except PasswordDeleteError:
-    pass
 PY
 ```
 
