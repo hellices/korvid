@@ -26,7 +26,15 @@ from korvid.agent.profiles import AgentProfile, build_profile
 from korvid.agent.runtime import AgentRuntime
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Scenario
-from korvid.tools.executor import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES
+from korvid.tools.executor import (
+    READ_TOOLS,
+    UI_TOOL_NAMES,
+    WRITE_TOOL_NAMES,
+    RecordedExecution,
+    SupportsToolExecution,
+    ToolOutcome,
+    as_recorded,
+)
 
 #: Runs per scenario per configuration (issue #69: report variance, not means).
 DEFAULT_REPETITIONS = 3
@@ -45,7 +53,7 @@ def _eval_tools(profile: AgentProfile) -> list[dict[str, Any]]:
     return [t for t in profile.tools if t["function"]["name"] not in UI_TOOL_NAMES]
 
 
-class _RecordingExecutor:
+class _RecordingExecutor(RecordedExecution):
     """Wraps the real executor to keep full tool results for evidence grading
     (the runtime's ToolCallFinished summary is truncated to 120 chars).
 
@@ -56,18 +64,28 @@ class _RecordingExecutor:
     idempotent, so the runtime re-applying it changes nothing; the
     runtime's discard notice (excess parallel calls) is appended after
     its own bounding step, so it never re-truncates the recorded content.
+
+    It sits between the real executor and the runtime, so it is on the
+    path that carries producer redaction records — and the path a blocked
+    result has to travel to stop the turn. Both pass through unchanged:
+    an eval run's boundary behaviour is the behaviour under test.
     """
 
-    def __init__(self, executor: Any, max_result_chars: int | None = None) -> None:
-        self._executor = executor
+    def __init__(
+        self, executor: SupportsToolExecution, max_result_chars: int | None = None
+    ) -> None:
+        self._executor = as_recorded(executor)
         self._max_result_chars = max_result_chars
         self.records: list[ToolRecord] = []
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-        result: str = await self._executor.execute(name, arguments)
-        result = sanitize_tool_result(name, result, max_chars=self._max_result_chars)
+        return (await self.execute_recorded(name, arguments)).text
+
+    async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        outcome = await self._executor.execute_recorded(name, arguments)
+        result = sanitize_tool_result(name, outcome.text, max_chars=self._max_result_chars)
         self.records.append(ToolRecord(name=name, arguments=dict(arguments), result=result))
-        return result
+        return ToolOutcome(text=result, redactions=outcome.redactions)
 
 
 class _CountingProvider:

@@ -6,7 +6,7 @@ import json
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol
 
 from korvid.agent.events import (
     AgentError,
@@ -33,8 +33,10 @@ from korvid.agent.prompts import compose_system_prompt
 from korvid.core.redaction import RedactionRecord, merge_records, rebase
 from korvid.tools.executor import (
     READ_TOOLS,
-    ToolOutcome,
+    RecordedExecution,
+    SupportsToolExecution,
     ToolResultBlocked,
+    as_recorded,
     cap_result,
 )
 
@@ -67,28 +69,12 @@ class _Provider(Protocol):
     ) -> AsyncIterator[dict[str, Any]]: ...
 
 
-class _Executor(Protocol):
-    async def execute(self, name: str, arguments: dict[str, Any]) -> str: ...
-
-
 @dataclass(frozen=True, slots=True)
 class _IngressRecords:
     """Redactions applied to one message, tied to that message."""
 
     message: dict[str, Any]
     records: tuple[RedactionRecord, ...]
-
-
-@runtime_checkable
-class _RecordingExecutor(Protocol):
-    """An executor that also reports what it redacted while producing a result.
-
-    Optional: the string `execute` remains the contract every executor
-    must satisfy, so a fake or a third-party executor keeps working and
-    simply contributes no producer records.
-    """
-
-    async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome: ...
 
 
 def _message_chars(message: dict[str, Any]) -> int:
@@ -131,7 +117,7 @@ class AgentRuntime:
     def __init__(
         self,
         provider: _Provider,
-        executor: _Executor,
+        executor: SupportsToolExecution,
         *,
         tools: list[dict[str, Any]] | None = None,
         max_iterations: int = 15,
@@ -145,7 +131,7 @@ class AgentRuntime:
         ui_prompt: str | None = None,
     ) -> None:
         self._provider = provider
-        self._executor = executor
+        self._executor: RecordedExecution = as_recorded(executor)
         self._tools = tools if tools is not None else READ_TOOLS
         self._latest_outbound_payload: OutboundSnapshot | None = None
         # The serialized tool schemas ride along on every request; they are
@@ -295,28 +281,25 @@ class AgentRuntime:
     async def _execute_tool(
         self, name: str, arguments: dict[str, Any]
     ) -> tuple[str, tuple[RedactionRecord, ...]]:
-        """Run one tool, taking its producer redaction trail when it offers one.
+        """Run one tool, taking the producer redaction trail it reports.
 
         Producer-side redaction happens before the size bound, so it is
         the only pass that can report what it *removed* rather than
-        masked. Executors that satisfy only the string contract simply
-        contribute nothing here.
+        masked. `RecordedExecution` answers for every executor, so there
+        is no capability test here; an implementation with no producer
+        pass reports an empty trail.
         """
-        executor = self._executor
-        if isinstance(executor, _RecordingExecutor):
-            try:
-                outcome = await executor.execute_recorded(name, arguments)
-            except ToolResultBlocked as exc:
-                # Not an answer the model can react to: the redactor could
-                # not promise this document holds no credentials, so the
-                # turn stops here rather than sending another request with
-                # an unvetted result in history (PR #197 review). Reusing
-                # the outbound block means one rollback path — history
-                # truncated to the turn base, records purged, the last
-                # successful snapshot left standing.
-                raise ToolResultBlockedError(str(exc)) from exc
-            return outcome.text, outcome.redactions
-        return await executor.execute(name, arguments), ()
+        try:
+            outcome = await self._executor.execute_recorded(name, arguments)
+        except ToolResultBlocked as exc:
+            # Not an answer the model can react to: the redactor could not
+            # promise this document holds no credentials, so the turn stops
+            # here rather than sending another request with an unvetted
+            # result in history (PR #197 review). Reusing the outbound
+            # block means one rollback path — history truncated to the turn
+            # base, records purged, the last successful snapshot standing.
+            raise ToolResultBlockedError(str(exc)) from exc
+        return outcome.text, outcome.redactions
 
     def _truncate_history(self, start: int) -> None:
         """Drop history from `start` on, and the records that described it.

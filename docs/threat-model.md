@@ -188,6 +188,14 @@ flowchart LR
   MCP write-proposal flow can only *request* a write, never execute one.
 - **Fail-closed audit** — if the audit entry for an executed write cannot
   be written, the write itself is blocked.
+- **Fail-closed redaction** — if a tool result cannot be redacted, the
+  turn stops. The redactor refuses shapes it cannot reason about (a `kind:
+  Secret` whose metadata is not a mapping, a non-string key), and the
+  refusal is distinct from the `ERROR: ...` strings that report what the
+  cluster said: the agent rolls the turn back and makes no further
+  provider request instead of sending an unvetted result. External MCP
+  clients, which have no turn to stop, receive a safe error naming the
+  shape that failed rather than the document behind it.
 
 ## Residual risks (not mitigated)
 

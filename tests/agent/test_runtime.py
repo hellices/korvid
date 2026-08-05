@@ -12,7 +12,7 @@ from korvid.agent.prompts import NO_WRITE_PROMPT
 from korvid.agent.runtime import MAX_HISTORY_TURNS, AgentRuntime
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
-from korvid.tools.executor import MAX_RESULT_CHARS, ToolExecutor
+from korvid.tools.executor import MAX_RESULT_CHARS, RecordedExecution, ToolExecutor
 from tests.tools.test_executor import (
     LONG_NAME_ENV_SENTINEL,
     NESTED_SECRET_SENTINEL,
@@ -2329,3 +2329,31 @@ async def test_a_blocked_turn_leaves_the_session_usable() -> None:
 
     assert not any(isinstance(event, AgentError) for event in events)
     assert [m.get("role") for m in runtime._messages] == ["system", "user", "assistant"]
+
+
+# --- The runtime depends on the tools layer's ABC (round 6) ----------------
+
+
+def test_the_runtime_holds_its_executor_through_the_recorded_contract() -> None:
+    """No private Protocol declared in the consuming layer, no isinstance
+    check at each call: the executor is adapted once, at the edge."""
+
+    class Duck:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    runtime = AgentRuntime(ScriptedProvider([]), Duck())
+
+    assert isinstance(runtime._executor, RecordedExecution)
+
+
+async def test_a_string_only_executor_still_drives_a_turn() -> None:
+    class Duck:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "kind: Pod\nstatus:\n  restarts: 7\n"
+
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), Duck())
+
+    await collect(runtime, "why?")
+
+    assert any("restarts: 7" in str(m.get("content")) for m in runtime._messages)

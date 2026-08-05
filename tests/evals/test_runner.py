@@ -11,6 +11,8 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
+
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.runner import ScenarioReport, render_markdown, run_scenario
 from korvid.evals.scenario import ContainerLogs, Evidence, Scenario
@@ -733,3 +735,46 @@ async def test_counting_provider_forwards_the_message_hook() -> None:
     prepared = wrapped.prepare_messages([{"role": "user", "content": "hi"}])
 
     assert prepared == [{"role": "user", "content": "hi", "thinking": "recalled"}]
+
+
+async def test_the_eval_recorder_forwards_the_producer_redaction_trail() -> None:
+    """The recorder wraps the real executor, so it is on the path that
+    carries producer records into the runtime. Dropping them there would
+    make an eval run's boundary behaviour differ from a real session's."""
+    from korvid.core.redaction import RedactionRecord
+    from korvid.evals.runner import _RecordingExecutor
+    from korvid.tools.executor import RecordedExecution, ToolOutcome
+
+    trail = (RedactionRecord(path="manifest.data", reason="secret-data"),)
+
+    class Recording(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "kind: Pod\n"
+
+        async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            return ToolOutcome(text="kind: Pod\n", redactions=trail)
+
+    recording = _RecordingExecutor(Recording(), max_result_chars=3_000)
+    outcome = await recording.execute_recorded("get_resource", {"kind": "pods"})
+
+    assert outcome.redactions == trail
+
+
+async def test_the_eval_recorder_propagates_a_blocked_result() -> None:
+    """A result that could not be redacted must stop an eval turn too —
+    the recorder must not turn the block back into gradable text."""
+    from korvid.evals.runner import _RecordingExecutor
+    from korvid.tools.executor import RecordedExecution, ToolResultBlocked
+
+    class Blocking(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ERROR: could not redact the result"
+
+        async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> Any:
+            raise ToolResultBlocked("could not redact the result: bad shape")
+
+    recording = _RecordingExecutor(Blocking(), max_result_chars=3_000)
+
+    with pytest.raises(ToolResultBlocked, match="could not redact the result"):
+        await recording.execute_recorded("get_resource", {"kind": "pods"})
+    assert recording.records == []

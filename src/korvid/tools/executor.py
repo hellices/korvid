@@ -7,7 +7,7 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol
 
 from korvid.core.portforward import controller_owner
 from korvid.core.redaction import RedactionError, RedactionRecord, record, redact_document
@@ -103,6 +103,63 @@ class ToolOutcome:
 
     text: str
     redactions: tuple[RedactionRecord, ...] = field(default=())
+
+
+class RecordedExecution(ABC):
+    """The tool-execution contract the agent loop depends on.
+
+    Lives here, in the layer that owns tool execution, rather than as a
+    Protocol declared by its consumer: boundary interfaces are `abc.ABC`
+    (AGENTS.md), so the agent loop can depend on this without describing
+    the shape of something it does not own (PR #197 review).
+
+    Two methods because two callers need different things. `execute`
+    returns the model-visible string every non-agent consumer takes — the
+    MCP host, the eval grader. `execute_recorded` adds the redactions
+    applied while producing it, which cannot be recovered downstream: a
+    redaction that *removes* its evidence leaves nothing for a later pass
+    to find.
+
+    Reporting records stays optional. The default `execute_recorded`
+    answers in terms of `execute`, so an implementation that has no
+    producer pass contributes nothing rather than having to say so.
+    """
+
+    @abstractmethod
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        """Dispatch a tool call and return its model-visible result."""
+
+    async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        """Dispatch a tool call, reporting no producer redactions."""
+        return ToolOutcome(text=await self.execute(name, arguments))
+
+
+class SupportsToolExecution(Protocol):
+    """Anything with the string `execute` — the on-ramp, not the interface.
+
+    `as_recorded` accepts this so a duck-typed executor (a test fake, a
+    third-party integration) keeps working; what the agent loop depends
+    on is `RecordedExecution`.
+    """
+
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str: ...
+
+
+class _AdaptedExecution(RecordedExecution):
+    """A string-only executor seen through the recorded contract."""
+
+    def __init__(self, executor: SupportsToolExecution) -> None:
+        self._executor = executor
+
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        return await self._executor.execute(name, arguments)
+
+
+def as_recorded(executor: SupportsToolExecution) -> RecordedExecution:
+    """View any executor through the recorded contract, adapting if needed."""
+    if isinstance(executor, RecordedExecution):
+        return executor
+    return _AdaptedExecution(executor)
 
 
 def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
@@ -528,7 +585,7 @@ def _validated_proposal_args(
     return action, kind, name, namespace, replicas, resources
 
 
-class ToolExecutor:
+class ToolExecutor(RecordedExecution):
     """Dispatches OpenAI tool calls to the Kubernetes client or the UI bridge.
 
     `proposal_tools` is fail-closed: the write-proposal tools dispatch only

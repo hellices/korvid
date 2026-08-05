@@ -17,9 +17,12 @@ from korvid.tools.executor import (
     MAX_RESULT_CHARS,
     READ_TOOLS,
     UI_TOOLS,
+    RecordedExecution,
     ToolExecutor,
+    ToolOutcome,
     ToolResultBlocked,
     UIBridge,
+    as_recorded,
     compact_result,
 )
 from korvid.tools.registry import TOOLS_BY_NAME, ToolDef
@@ -2540,3 +2543,46 @@ async def test_an_unknown_kind_is_still_an_error_string() -> None:
     )
 
     assert outcome.text.startswith(ERROR_PREFIX)
+
+
+# --- The recorded-execution contract is an ABC (round 6) -------------------
+#
+# The agent loop used to runtime-check a private Protocol it declared
+# itself, which put the interface in the consuming layer. AGENTS.md
+# places boundary interfaces in the owning layer, as abc.ABC.
+
+
+def test_the_real_executor_satisfies_the_recorded_contract() -> None:
+    assert isinstance(make_executor(FakeKube()), RecordedExecution)
+
+
+async def test_a_string_only_executor_reports_no_producer_records() -> None:
+    """The default implementation: the capability stays optional."""
+
+    class Plain(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    outcome = await Plain().execute_recorded("get_resource", {})
+
+    assert outcome == ToolOutcome(text="ok")
+
+
+async def test_as_recorded_adapts_an_executor_that_only_has_execute() -> None:
+    """Duck-typed executors keep working without subclassing anything."""
+
+    class Duck:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    adapted = as_recorded(Duck())
+
+    assert isinstance(adapted, RecordedExecution)
+    assert await adapted.execute("get_resource", {}) == "ok"
+    assert (await adapted.execute_recorded("get_resource", {})).redactions == ()
+
+
+def test_as_recorded_does_not_wrap_what_already_satisfies_the_contract() -> None:
+    executor = make_executor(FakeKube())
+
+    assert as_recorded(executor) is executor
