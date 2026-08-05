@@ -1376,3 +1376,86 @@ def test_an_error_the_executor_reports_is_still_scrubbed_as_text() -> None:
     )
 
     assert "raw-secret" not in sanitized
+
+
+# --- The baseline is a copy, not a view of the copy (round 10) -------------
+
+
+def _structured_content() -> list[dict[str, Any]]:
+    """History whose content is a container, not a string."""
+    return [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": [{"type": "text", "text": "original"}]},
+    ]
+
+
+def test_a_hook_that_rewrites_nested_content_in_place_is_blocked() -> None:
+    """Round 8 stopped comparing the hook's result with the list it was
+    handed, but the baseline still held the *same* content objects. A
+    string cannot be edited in place; a list can, and editing it edited
+    the baseline too, so the check compared a rewrite with itself."""
+
+    class _InPlaceNestedRewrite:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            messages[1]["content"][0]["text"] = "rewritten"
+            return messages
+
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_InPlaceNestedRewrite(), _structured_content())
+
+
+def test_a_hook_that_reorders_nested_content_in_place_is_blocked() -> None:
+    class _InPlaceNestedSwap:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            parts = messages[1]["content"]
+            parts.append({"type": "text", "text": "appended"})
+            parts.reverse()
+            return messages
+
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_InPlaceNestedSwap(), _structured_content())
+
+
+def test_a_hook_that_edits_mapping_content_in_place_is_blocked() -> None:
+    class _InPlaceMappingEdit:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            messages[1]["content"]["text"] = "rewritten"
+            return messages
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": {"text": "original"}},
+    ]
+
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_InPlaceMappingEdit(), messages)
+
+
+def test_structured_content_survives_an_add_only_hook() -> None:
+    """The Ollama shape is unaffected: adding dialect fields leaves the
+    content object exactly as it was."""
+
+    class _Annotate:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            for message in messages:
+                message["thinking"] = "t"
+            return messages
+
+    prepared = provider_prepared_messages(_Annotate(), _structured_content())
+
+    assert prepared[1]["content"] == [{"type": "text", "text": "original"}]
+    assert prepared[1]["thinking"] == "t"
+
+
+def test_nested_caller_content_is_never_touched_by_a_hook() -> None:
+    class _NestedVandal:
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            messages[1]["content"][0]["text"] = "rewritten"
+            return messages
+
+    messages = _structured_content()
+
+    with pytest.raises(OutboundPolicyError, match="reordered or rewrote"):
+        provider_prepared_messages(_NestedVandal(), messages)
+
+    assert messages[1]["content"] == [{"type": "text", "text": "original"}]

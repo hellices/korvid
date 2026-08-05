@@ -399,10 +399,12 @@ def provider_prepared_messages(
     object-valued arguments all leave role and content untouched.
 
     That comparison is made against a baseline taken *before* the hook
-    runs and never handed to it. Comparing with the copy the hook was
-    given would check a mutated list against itself: adapters are free to
-    work in place, and an in-place reorder or rewrite would then agree
-    with its own result (PR #197 review).
+    runs, deep-copied, and never handed to it. Comparing with the copy the
+    hook was given would check a mutated list against itself: adapters are
+    free to work in place, and an in-place reorder or rewrite would then
+    agree with its own result. Holding the same content *objects* has the
+    same hole one level down — content that is a list or a mapping can be
+    edited where it sits (PR #197 review).
 
     Args:
         provider: The provider adapter; a missing hook means the identity.
@@ -416,7 +418,11 @@ def provider_prepared_messages(
     hook = getattr(provider, "prepare_messages", None)
     if not callable(hook):
         return private
-    baseline = [(message.get("role"), message.get("content")) for message in private]
+    # A copy, not a view of the copy: a string cannot be edited in place,
+    # but list- or mapping-valued content can, and holding the same object
+    # the hook was handed would let an in-place edit change the baseline
+    # along with the result (PR #197 review).
+    baseline = copy.deepcopy([(message.get("role"), message.get("content")) for message in private])
     try:
         prepared = hook(private)
     except Exception as exc:
