@@ -13,7 +13,7 @@ import json
 import os
 import platform
 import sys
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from time import monotonic
 from typing import Any, cast
@@ -48,6 +48,11 @@ from tests.performance.workload import (
 from tests.ui.waits import until
 
 
+async def _sleep_default(delay: float) -> None:
+    """Thin wrapper around asyncio.sleep used as the default async sleeper."""
+    await asyncio.sleep(delay)
+
+
 @dataclass(frozen=True)
 class ReplayOptions:
     """Tuning knobs for a replay run.
@@ -56,14 +61,21 @@ class ReplayOptions:
         time_scale: Multiplier applied to every scheduled-event sleep.
             0 skips all sleeps (fastest); 1.0 replays at real time.
         sample_interval: Seconds between process-memory samples.
-        sleep_callback: Optional callable invoked with each scheduled sleep
-            duration (seconds) before the sleep occurs.  Used by tests to
-            accumulate total sleep without modifying the production path.
+        monotonic_fn: Monotonic clock callable injected for testing.
+            Production runs leave this `None` (uses `time.monotonic`).
+        async_sleep: Async sleep callable injected for testing.
+            Production runs leave this `None` (uses `_sleep_default`).
+            A virtual sleeper can advance a shared clock variable and do
+            `asyncio.sleep(0)` to yield without real wall time, making
+            timing-sensitive tests instant and mutation-deterministic.
     """
 
     time_scale: float = 1.0
     sample_interval: float = 1.0
-    sleep_callback: Callable[[float], None] | None = field(default=None, hash=False, compare=False)
+    monotonic_fn: Callable[[], float] | None = field(default=None, hash=False, compare=False)
+    async_sleep: Callable[[float], Awaitable[None]] | None = field(
+        default=None, hash=False, compare=False
+    )
 
 
 @dataclass(frozen=True)
@@ -144,6 +156,13 @@ class _ReplaySource:
         self._current: dict[str, PodSummary] = {
             f"{p.namespace}/{p.name}": p for p in initial_pods(profile)
         }
+        # Virtual-time seam: injected in tests; production uses real clock/sleep.
+        self._now: Callable[[], float] = (
+            options.monotonic_fn if options.monotonic_fn is not None else monotonic
+        )
+        self._sleep: Callable[[float], Awaitable[None]] = (
+            options.async_sleep if options.async_sleep is not None else _sleep_default
+        )
 
     def current_digest(self) -> str:
         """Digest of the source's tracked expected state."""
@@ -162,7 +181,7 @@ class _ReplaySource:
         if failure.kind == "slow":
             tick = 1.0 / max(self._profile.steady_events_per_second, 1)
             if tick * self._options.time_scale > 0:
-                await asyncio.sleep(tick * self._options.time_scale)
+                await self._sleep(tick * self._options.time_scale)
             return
         status = _HARD_FAILURE_STATUS[failure.kind]
         self._recorder.record_api(ReadTelemetryEvent("error", "/api/v1/pods", status=status))
@@ -197,20 +216,18 @@ class _ReplaySource:
             # Pause here until run_replay confirms the table is populated.
             self._churn_ready.set()
             await self._churn_start.wait()
-            # Record the wall-clock instant when churn begins so that
+            # Record the virtual-clock instant when churn begins so that
             # event.offset_seconds (absolute positions within the profile)
             # can be converted to correct inter-event delays below.
-            self._replay_start = monotonic()
+            self._replay_start = self._now()
 
         # --- WATCH phase ---
         for i in range(self._next_event_index, len(self._events)):
             event = self._events[i]
-            elapsed = monotonic() - self._replay_start
+            elapsed = self._now() - self._replay_start
             delay = event.offset_seconds * self._options.time_scale - elapsed
             if delay > 0:
-                if self._options.sleep_callback is not None:
-                    self._options.sleep_callback(delay)
-                await asyncio.sleep(delay)
+                await self._sleep(delay)
 
             await self._handle_failure_if_any(event, i)
 

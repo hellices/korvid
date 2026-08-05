@@ -7,6 +7,8 @@ update accounting, and API telemetry.
 
 from __future__ import annotations
 
+import asyncio
+
 from tests.performance.profile import FailureInjection, WorkloadProfile
 from tests.performance.replay import ReplayOptions, run_replay
 from tests.performance.workload import apply_events, initial_pods, scheduled_events, summary_digest
@@ -42,14 +44,15 @@ async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:
 async def test_replay_time_scale_1_uses_relative_inter_event_delays() -> None:
     """time_scale=1 must use inter-event delays, not absolute offsets.
 
-    If the delay computation uses each event's absolute offset_seconds instead
-    of the elapsed time since churn started, total sleep = sum(all offsets) for
-    60 events at 20 eps over 3 s ≈ 91.5 s > the 30 s until() guard, causing an
-    AssertionError before any assert below is reached.
+    Virtual-time seam: `monotonic_fn` returns a shared virtual clock and
+    `async_sleep` advances that clock then yields via `asyncio.sleep(0)`,
+    so the test completes in ~0 s of wall time regardless of profile length.
 
-    The sleep_callback assertion is a scale-independent deterministic check:
-    with the fix, total_sleep ≈ profile.duration_seconds (inter-event delays);
-    with the bug, total_sleep ≈ 91.5 s (sum of absolute offsets).
+    Sensitivity: with 60 events at 20 eps over 3 s, sum_of_offsets ~= 91.5 s.
+    Under the absolute-offset bug the accumulated delay totals ~= 91.5 s >> 9 s
+    (= duration_seconds x 3), so the assertion fails immediately without any
+    wall-clock race or timeout dependency.
+    With the correct fix, inter-event delays sum ~= 3 s < 9 s -> GREEN.
     """
     profile = WorkloadProfile(
         schema_version=1,
@@ -62,14 +65,22 @@ async def test_replay_time_scale_1_uses_relative_inter_event_delays() -> None:
         bursts=(),
         failures=(),
     )
+    virtual_time: list[float] = [0.0]
     total_sleep: list[float] = [0.0]
 
-    def record_sleep(delay: float) -> None:
-        total_sleep[0] += delay
+    def virtual_monotonic() -> float:
+        return virtual_time[0]
 
-    report = await run_replay(profile, ReplayOptions(time_scale=1, sleep_callback=record_sleep))
-    # Scale-independent check: inter-event delays sum to ≈ duration_seconds, not sum_of_offsets.
-    # Bug: total_sleep ≈ 91.5 s; fix: total_sleep ≈ 3 s.
+    async def virtual_sleep(delay: float) -> None:
+        total_sleep[0] += delay
+        virtual_time[0] += delay
+        await asyncio.sleep(0)  # yield to event loop without real wall time
+
+    report = await run_replay(
+        profile,
+        ReplayOptions(time_scale=1, monotonic_fn=virtual_monotonic, async_sleep=virtual_sleep),
+    )
+    # Bug: total_sleep ≈ 91.5 s; fix: total_sleep ≈ 3 s.  Threshold = 9 s.
     assert total_sleep[0] < profile.duration_seconds * 3
     assert report.dropped_updates == 0
     assert report.object_count == 20
@@ -109,15 +120,16 @@ async def test_replay_gone_reconnects_and_digest_matches() -> None:
 async def test_replay_gone_reconnects_with_time_scale_1() -> None:
     """HTTP 410 reconnect with time_scale=1 must use elapsed-based delay, not absolute offsets.
 
-    With the absolute-offset reconnect bug, gen=1 events (post-reconnect) sleep
-    their full absolute offset_seconds values.  For 95 events at 20 eps over
-    5 s (offsets 0.30-5.00 s), the total gen=1 sleep ~251.75 s >> the 30 s
-    until() guard, causing a deterministic failure even when run in isolation
-    (margin 221.75 s, eliminating the pilot-overhead timing race in duration_seconds=2).
+    Virtual-time seam: same `monotonic_fn` / `async_sleep` pattern as
+    `test_replay_time_scale_1_uses_relative_inter_event_delays`.  The shared
+    virtual clock is never reset across reconnect generations, so gen=1 events
+    correctly see the accumulated elapsed time from gen=0.
 
-    The sleep_callback assertion provides a scale-independent deterministic check:
-    with the fix, total_sleep ≈ profile.duration_seconds; with the bug, gen=1 alone
-    contributes ≈ 251.75 s.
+    Sensitivity: 95 post-reconnect events (20 eps x 5 s profile minus 5 pre-gone
+    events) have sum_of_offsets ~= 251.75 s.  Under the reconnect-reset bug,
+    gen=1 sees elapsed=0 and accumulates full absolute offsets -> total_sleep >> 15 s
+    (= duration_seconds x 3), failing deterministically without a wall-clock race.
+    With the correct fix, total_sleep ~= 5 s < 15 s -> GREEN.
     """
     profile = WorkloadProfile(
         schema_version=1,
@@ -130,15 +142,23 @@ async def test_replay_gone_reconnects_with_time_scale_1() -> None:
         bursts=(),
         failures=(FailureInjection(kind="gone", at_event=5),),
     )
+    virtual_time: list[float] = [0.0]
     total_sleep: list[float] = [0.0]
 
-    def record_sleep(delay: float) -> None:
+    def virtual_monotonic() -> float:
+        return virtual_time[0]
+
+    async def virtual_sleep(delay: float) -> None:
         total_sleep[0] += delay
+        virtual_time[0] += delay
+        await asyncio.sleep(0)  # yield to event loop without real wall time
 
-    report = await run_replay(profile, ReplayOptions(time_scale=1, sleep_callback=record_sleep))
+    report = await run_replay(
+        profile,
+        ReplayOptions(time_scale=1, monotonic_fn=virtual_monotonic, async_sleep=virtual_sleep),
+    )
 
-    # Scale-independent check: total inter-event delays ≈ profile.duration_seconds.
-    # With the absolute-offset bug: gen=1 alone contributes ≈ 251.75 s.
+    # Bug: gen=1 alone contributes ≈ 251.75 s; fix: total ≈ 5 s.  Threshold = 15 s.
     assert total_sleep[0] < profile.duration_seconds * 3
     assert report.expected_digest == report.final_digest
     assert report.dropped_updates == 0
