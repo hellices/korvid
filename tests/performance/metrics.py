@@ -4,7 +4,7 @@ import asyncio
 import math
 import tracemalloc
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from time import monotonic
@@ -209,8 +209,19 @@ class ProcessSampler:
         self._samples.clear()
         self._start_time = self._clock()
         self._uses_managed_tracing = self._acquire_tracemalloc()
-        self._process.cpu_percent()
-        self._task = asyncio.create_task(self._run())
+        task: Coroutine[object, object, None] | None = None
+        try:
+            self._process.cpu_percent()
+            task = self._run()
+            self._task = asyncio.create_task(task)
+        except BaseException:
+            if task is not None:
+                task.close()
+            if self._uses_managed_tracing:
+                self._release_tracemalloc()
+                self._uses_managed_tracing = False
+            self._start_time = None
+            raise
 
     async def stop(self) -> tuple[ProcessSample, ...]:
         if self._task is None:

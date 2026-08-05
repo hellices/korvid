@@ -349,6 +349,32 @@ async def test_process_sampler_rejects_double_start(
 
 
 @pytest.mark.asyncio
+async def test_process_sampler_rolls_back_tracemalloc_if_task_creation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, lifecycle, _ = _patch_sampler_runtime(
+        monkeypatch,
+        cpu_values=(0.0,),
+        rss_values=(100,),
+        tracing=False,
+        python_bytes=(1000,),
+    )
+
+    def _fail_create_task(_: object) -> object:
+        raise RuntimeError("task creation failed")
+
+    monkeypatch.setattr(_metrics_module().asyncio, "create_task", _fail_create_task)
+
+    sampler = ProcessSampler(interval_seconds=0.01, clock=lambda: 10.0)
+
+    with pytest.raises(RuntimeError, match="task creation failed"):
+        sampler.start()
+
+    assert lifecycle == ["start", "stop"]
+    assert state["tracing"] is False
+
+
+@pytest.mark.asyncio
 async def test_process_sampler_keeps_owned_tracemalloc_until_last_overlapping_sampler_stops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
