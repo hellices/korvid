@@ -686,6 +686,11 @@ class ToolExecutor(RecordedExecution):
         """
         try:
             result = await self._dispatch(name, arguments)
+        except ToolResultBlocked:
+            # Already the refusal: a handler that could not vouch for its
+            # own result says so directly, and must not be downgraded to
+            # an ordinary error by the catch-all below.
+            raise
         except RedactionError as exc:
             raise ToolResultBlocked(f"could not redact the result: {exc}") from exc
         except Exception as exc:
@@ -917,15 +922,27 @@ class ToolExecutor(RecordedExecution):
         if meta.namespaced and not namespace:
             raise ValueError(f"kind {kind!r} is namespaced — provide the 'namespace' argument")
         manifest = await self._kube.get_object(meta, namespace, name)
-        redacted, records = _mask_manifest(manifest)
-        # Bounded here, at the point the document is produced: the shared
-        # `cap_result` byte cut would leave a fragment that is no longer
-        # YAML, which every consumer (the model, the outbound policy's
-        # recursive redaction, an MCP client) needs it to be.
-        text = dump_yaml(redacted)
-        if len(text) > MAX_RESULT_CHARS:
-            text = dump_bounded_yaml(redacted, MAX_RESULT_CHARS)
-            record(records, "manifest", "size-elision")
+        try:
+            redacted, records = _mask_manifest(manifest)
+            # Bounded here, at the point the document is produced: the
+            # shared `cap_result` byte cut would leave a fragment that is
+            # no longer YAML, which every consumer (the model, the
+            # outbound policy's recursive redaction, an MCP client) needs
+            # it to be.
+            text = dump_yaml(redacted)
+            if len(text) > MAX_RESULT_CHARS:
+                text = dump_bounded_yaml(redacted, MAX_RESULT_CHARS)
+                record(records, "manifest", "size-elision")
+        except RecursionError as exc:
+            # Both walks are recursive, and running out of stack means
+            # neither finished: the redactor never reached the bottom of
+            # the document, so it can promise nothing about it, and a
+            # half-written serialization is not a document at all. Only
+            # this region is normalized — a recursion failure anywhere
+            # else is a bug in that handler and stays an ordinary error
+            # (PR #197 review). The message is a constant: it names the
+            # shape that failed, never the document.
+            raise ToolResultBlocked("the result is too deeply nested to redact") from exc
         return ToolOutcome(text=text, redactions=tuple(records))
 
     async def _get_logs(self, args: dict[str, Any]) -> str:

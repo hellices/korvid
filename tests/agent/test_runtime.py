@@ -2626,3 +2626,96 @@ async def test_a_shaped_report_reaches_the_provider_already_redacted() -> None:
     assert snapshot is not None
     assert _LOG_SECRET not in snapshot.payload_json
     assert any(r.reason == "credential-assignment" for r in snapshot.redactions)
+
+
+# --- A document too deep to redact stops the turn (round 9) ----------------
+
+
+def _deep_secret_manifest(depth: int = 1500) -> dict[str, Any]:
+    document: Any = {
+        "kind": "Secret",
+        "metadata": {"name": "db"},
+        "data": {"password": "cmF3LXNlY3JldA=="},
+    }
+    for _ in range(depth):
+        document = {"spec": {"nested": document}}
+    return {"apiVersion": "v1", "kind": "CompositeApp", "metadata": {"name": "app"}, **document}
+
+
+class _NoCopyKube(_ManifestKube):
+    """`_ManifestKube` copies each result to mimic a fresh read; at this
+    depth the copy itself would exhaust the stack before the executor ran,
+    which is the cluster client's business, not the boundary's."""
+
+    async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        return self.manifest
+
+
+def _deep_manifest_executor() -> Any:
+    return ToolExecutor(_NoCopyKube(_deep_secret_manifest()), {"pods": PODS_META, "pod": PODS_META})  # type: ignore[arg-type]  # test double for ReadOps
+
+
+async def test_a_manifest_too_deep_to_redact_stops_the_turn() -> None:
+    """Running out of stack means the redactor never reached the bottom of
+    the document, so the turn must stop rather than send what it has
+    (PR #197 review)."""
+    provider = ScriptedProvider(_get_resource_turn())
+    runtime = AgentRuntime(provider, _deep_manifest_executor())
+
+    events = await collect(runtime, "show me the app")
+
+    errors = [event for event in events if isinstance(event, AgentError)]
+    assert errors
+    assert "too deeply nested" in errors[0].message
+    assert "cmF3LXNlY3JldA==" not in errors[0].message
+    # The result never becomes a second request.
+    assert len(provider.calls) == 1
+    assert isinstance(events[-1], TurnComplete)
+
+
+async def test_a_blocked_deep_manifest_leaves_no_history_and_no_records() -> None:
+    """The turn is rolled back whole: no assistant call, no tool row, and
+    nothing left in the provenance store to misattribute later."""
+    provider = ScriptedProvider(_get_resource_turn())
+    runtime = AgentRuntime(provider, _deep_manifest_executor())
+
+    await collect(runtime, "show me the app")
+
+    assert not [message for message in runtime._messages if message["role"] == "tool"]
+    assert not [message for message in runtime._messages if message["role"] == "assistant"]
+    assert "cmF3LXNlY3JldA==" not in json.dumps(runtime._messages)
+    assert not runtime._provenance
+
+
+async def test_a_blocked_deep_manifest_keeps_the_last_good_snapshot() -> None:
+    """Inspection still shows the last handoff that actually happened —
+    here the request that asked for the manifest, since the one carrying
+    the answer was never prepared."""
+    provider = ScriptedProvider(_get_resource_turn())
+    runtime = AgentRuntime(provider, _deep_manifest_executor())
+
+    await collect(runtime, "show me the app")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert snapshot.iteration == 1
+    assert "show me the app" in snapshot.payload_json
+    assert '"role":"tool"' not in snapshot.payload_json
+    assert "cmF3LXNlY3JldA==" not in snapshot.payload_json
+
+
+async def test_the_session_continues_after_a_blocked_deep_manifest() -> None:
+    """A refusal is recoverable — the next question runs normally."""
+    provider = ScriptedProvider(
+        [
+            *_get_resource_turn(),
+            [{"type": "text_delta", "text": "anything else?"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, _deep_manifest_executor())
+
+    await collect(runtime, "show me the app")
+    events = await collect(runtime, "never mind, say hi")
+
+    assert not [event for event in events if isinstance(event, AgentError)]
+    assert len(provider.calls) == 2

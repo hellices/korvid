@@ -162,6 +162,31 @@ async def test_mcp_results_are_redacted_like_the_agent_path() -> None:
     assert yaml.safe_load(content[0].text)["kind"] == "CompositeApp"
 
 
+async def test_mcp_reports_a_manifest_too_deep_to_redact_as_a_safe_error() -> None:
+    """An MCP host has no turn to stop, so a document the redactor could
+    not finish walking comes back as the same safe refusal string every
+    other producer error uses — naming the shape, never the document
+    (PR #197 review)."""
+
+    class DeepKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            document: Any = {"kind": "Secret", "data": {"password": "cmF3LXNlY3JldA=="}}
+            for _ in range(1500):
+                document = {"spec": {"nested": document}}
+            return {"apiVersion": "v1", "kind": "CompositeApp", **document}
+
+    executor = ToolExecutor(DeepKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_resource", {"kind": "pods", "name": "composite-0", "namespace": "prod"}
+    )
+
+    assert content[0].text.startswith("ERROR:")
+    assert "too deeply nested" in content[0].text
+    assert "cmF3LXNlY3JldA==" not in content[0].text
+
+
 async def test_mcp_text_results_carry_only_tool_shaping() -> None:
     """The other half of the boundary `docs/mcp.md` states.
 

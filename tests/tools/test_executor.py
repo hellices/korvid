@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import copy
 from typing import Any
+from unittest import mock
 
 import pytest
 import yaml
 
+import korvid.tools.executor as executor_module
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
 from korvid.k8s.errors import ApiStatusError
@@ -2696,3 +2698,86 @@ async def test_the_string_api_reports_the_same_redacted_report() -> None:
 
     assert _LOG_SECRET not in out
     assert MASK_PLACEHOLDER in out
+
+
+# --- Recursion exhaustion is a refusal, not a result (round 9) -------------
+
+
+def _deeply_nested_secret(depth: int = 1500) -> dict[str, Any]:
+    """A CRD burying a `Secret` deeper than the interpreter can recurse."""
+    document: Any = {
+        "kind": "Secret",
+        "metadata": {"name": "db"},
+        "data": {"password": "cmF3LXNlY3JldA=="},
+    }
+    for _ in range(depth):
+        document = {"spec": {"nested": document}}
+    return {"apiVersion": "v1", "kind": "CompositeApp", **document}
+
+
+class _DeepKube:
+    def __init__(self, document: dict[str, Any]) -> None:
+        self._document = document
+
+    async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        return self._document
+
+
+async def test_a_manifest_too_deep_to_redact_is_blocked_not_reported() -> None:
+    """Running out of stack means the redactor never finished, so it can
+    promise nothing about the document (PR #197 review)."""
+    executor = ToolExecutor(_DeepKube(_deeply_nested_secret()), {"pods": PODS_META})  # type: ignore[arg-type]  # test double for ReadOps
+
+    with pytest.raises(ToolResultBlocked, match="too deeply nested"):
+        await executor.execute_recorded(
+            "get_resource", {"kind": "pods", "name": "a", "namespace": "b"}
+        )
+
+
+async def test_a_manifest_too_deep_to_serialize_is_blocked_not_reported() -> None:
+    """The redacted document still has to be written out, and that walk
+    is just as recursive."""
+    document = _deeply_nested_secret()
+    executor = ToolExecutor(_DeepKube(document), {"pods": PODS_META})  # type: ignore[arg-type]  # test double for ReadOps
+
+    with (
+        mock.patch.object(executor_module, "_mask_manifest", return_value=(document, [])),
+        pytest.raises(ToolResultBlocked, match="too deeply nested"),
+    ):
+        await executor.execute_recorded(
+            "get_resource", {"kind": "pods", "name": "a", "namespace": "b"}
+        )
+
+
+async def test_the_string_api_reports_a_deep_manifest_as_a_safe_error() -> None:
+    """MCP hosts have no turn to stop, so they get the same safe string
+    every other refusal produces — naming the shape, never the document."""
+    executor = ToolExecutor(_DeepKube(_deeply_nested_secret()), {"pods": PODS_META})  # type: ignore[arg-type]  # test double for ReadOps
+
+    out = await executor.execute("get_resource", {"kind": "pods", "name": "a", "namespace": "b"})
+
+    assert out.startswith(ERROR_PREFIX)
+    assert "too deeply nested" in out
+    assert "cmF3LXNlY3JldA==" not in out
+    assert "recursion" not in out
+
+
+async def test_an_unrelated_recursion_failure_stays_an_ordinary_error() -> None:
+    """Only the redaction and serialization walk is normalized; a handler
+    bug elsewhere must not be reported as a redaction refusal."""
+
+    class _RecursingKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            def spin(n: int) -> int:
+                return spin(n + 1)
+
+            return {"kind": "Pod", "depth": spin(0)}
+
+    executor = ToolExecutor(_RecursingKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # test double for ReadOps
+
+    outcome = await executor.execute_recorded(
+        "get_resource", {"kind": "pods", "name": "a", "namespace": "b"}
+    )
+
+    assert outcome.error
+    assert outcome.text.startswith(ERROR_PREFIX)
