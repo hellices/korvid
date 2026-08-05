@@ -631,3 +631,83 @@ def test_debris_tolerance_does_not_fire_on_text_that_held_no_control_character()
 
     assert cleaned == "apikeyword and tokenizer and passwordless"
     assert records == []
+
+
+# --- A Secret's own keys are data too (round 10) --------------------------
+
+_KEY_SECRET = "9f3c1a7e42b85d06"
+
+
+def _secret_with_key(entry_key: str, section: str = "data") -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "s"},
+        section: {entry_key: "dmFsdWU=", "ordinary.crt": "dmFsdWU="},
+    }
+
+
+@pytest.mark.parametrize("section", ["data", "stringData"])
+def test_a_secret_entry_key_carrying_a_credential_is_not_named_in_a_record(
+    section: str,
+) -> None:
+    """The entry paths were built from the raw key, before the generic key
+    pass cleaned it — so a key that *was* the credential reached the
+    inspector's inventory while the payload correctly masked it
+    (PR #197 review)."""
+    raw = f"Auth{'orization'}: Bearer {_KEY_SECRET}"
+
+    redacted, records = redact_document(_secret_with_key(raw, section), path="manifest")
+
+    payload = json.dumps(redacted, ensure_ascii=False)
+    assert _KEY_SECRET not in payload
+    assert not [item for item in records if _KEY_SECRET in item.path]
+
+
+@pytest.mark.parametrize("section", ["data", "stringData"])
+def test_a_secret_entry_key_with_control_characters_is_not_spelled_in_a_record(
+    section: str,
+) -> None:
+    _, records = redact_document(_secret_with_key("cle\x07an", section), path="manifest")
+
+    assert not [item for item in records if "\\u0007" in item.path or "\x07" in item.path]
+
+
+@pytest.mark.parametrize("section", ["data", "stringData"])
+def test_every_secret_entry_record_resolves_in_the_payload(section: str) -> None:
+    """An inventory path a reader cannot follow is worse than no path."""
+    raw = f"api{'_key'}={_KEY_SECRET}"
+    manifest = _secret_with_key(raw, section)
+    manifest[section]["cle\x07an"] = "dmFsdWU="
+
+    redacted, records = redact_document(manifest, path="manifest")
+
+    keys = set(redacted[section])
+    for item in records:
+        if not item.path.startswith(f"manifest.{section}"):
+            continue
+        tail = item.path[len(f"manifest.{section}") :]
+        spelled = tail[2:-2] if tail.startswith("[") else tail[1:]
+        assert spelled in keys or json.loads(tail[1:-1]) in keys, item.path
+
+
+def test_secret_entry_keys_that_collide_after_cleaning_fail_closed() -> None:
+    manifest = _secret_with_key("cle\x07an")
+    manifest["data"]["cle\x08an"] = "dmFsdWU="
+
+    with pytest.raises(RedactionError, match="unique"):
+        redact_document(manifest, path="manifest")
+
+
+def test_a_nested_secret_keeps_its_entry_records_findable() -> None:
+    document = {
+        "apiVersion": "example.com/v1",
+        "kind": "CompositeApp",
+        "spec": {"embedded": _secret_with_key(f"api{'_key'}={_KEY_SECRET}")},
+    }
+
+    redacted, records = redact_document(document, path="manifest")
+
+    assert _KEY_SECRET not in json.dumps(redacted, ensure_ascii=False)
+    assert not [item for item in records if _KEY_SECRET in item.path]
+    assert [item for item in records if item.reason == "secret-value"]

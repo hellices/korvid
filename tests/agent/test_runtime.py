@@ -2853,3 +2853,62 @@ async def test_a_stream_that_dies_mid_flight_still_recorded_its_handoff() -> Non
     snapshot = runtime.latest_outbound_payload
     assert snapshot is not None
     assert "hello" in snapshot.payload_json
+
+
+# --- A Secret's entry keys never reach the inventory raw (round 10) --------
+
+_ENTRY_KEY_SECRET = "9f3c1a7e42b85d06"
+
+
+def _secret_key_manifest() -> dict[str, Any]:
+    raw_auth = f"Auth{'orization'}: Bearer {_ENTRY_KEY_SECRET}"
+    return {
+        "apiVersion": "example.com/v1",
+        "kind": "CompositeApp",
+        "metadata": {"name": "app"},
+        "spec": {
+            "embedded": {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {"name": "creds"},
+                "data": {raw_auth: "dmFsdWU=", "cle\x07an": "dmFsdWU=", "tls.crt": "dmFsdWU="},
+            }
+        },
+    }
+
+
+async def test_a_secret_entry_key_never_reaches_the_inventory_raw() -> None:
+    """The inventory exists to show that nothing raw left; a record path
+    built from an unsanitized entry key put the credential back in
+    (PR #197 review)."""
+    runtime = AgentRuntime(
+        ScriptedProvider(_get_resource_turn()), _manifest_executor(_secret_key_manifest())
+    )
+
+    await collect(runtime, "show me the app")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    exported = snapshot.export_json()
+    assert _ENTRY_KEY_SECRET not in exported
+    assert "\x07" not in exported
+    assert "\\u0007" not in exported
+
+
+async def test_every_inventory_path_is_spelled_as_the_payload_spells_it() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider(_get_resource_turn()), _manifest_executor(_secret_key_manifest())
+    )
+
+    await collect(runtime, "show me the app")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    manifest = yaml.safe_load(json.loads(snapshot.payload_json)["messages"][-1]["content"])
+    keys = set(manifest["spec"]["embedded"]["data"])
+    entry_paths = [item.path for item in snapshot.redactions if ".data" in item.path]
+    assert entry_paths
+    for path in entry_paths:
+        tail = path.rsplit(".data", 1)[1]
+        spelled = json.loads(tail[1:-1]) if tail.startswith("[") else tail[1:]
+        assert spelled in keys, path

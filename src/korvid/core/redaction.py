@@ -307,8 +307,19 @@ def _secret_redactions(
     for section in ("data", "stringData"):
         entries = value.get(section)
         if isinstance(entries, Mapping):
+            section_path = key_path(path, section)
             for key in entries:
-                record(records, key_path(key_path(path, section), str(key)), "secret-value")
+                # A Secret's entry keys are cluster data like any other
+                # string, and the generic key pass that cleans them has
+                # not run yet — it runs when the masked mapping is walked
+                # below. Recording the raw spelling would put credential
+                # text or control debris into the very report whose job is
+                # to show that nothing raw left, at a path no reader could
+                # resolve against the payload (PR #197 review). Cleaned
+                # here for the path only; the key's own record is emitted
+                # once, by that later pass.
+                spelled = sanitize_mapping_key(str(key), section_path, [])
+                record(records, key_path(section_path, spelled), "secret-value")
     if metadata is not None:
         annotations = metadata.get("annotations")
         if isinstance(annotations, Mapping) and LAST_APPLIED in annotations:
