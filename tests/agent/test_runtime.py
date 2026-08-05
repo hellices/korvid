@@ -2430,3 +2430,39 @@ async def test_a_real_executor_error_still_reaches_the_model() -> None:
         isinstance(e, ToolCallFinished) and not e.ok and "not found" in e.summary for e in events
     )
     assert any("not found" in str(m.get("content")) for m in runtime._messages)
+
+
+async def test_a_tool_blocked_at_ingress_is_never_left_running() -> None:
+    """The producer's block path closes its UI event before unwinding; the
+    ingress pass raises from the same place and must do the same, or the
+    tool row stays spinning for the rest of the session (PR #197 review)."""
+
+    class Duck:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ERROR: cluster said: this: is: not: yaml\n\t- [unclosed"
+
+    provider = ScriptedProvider(_get_resource_turn())
+    runtime = AgentRuntime(provider, Duck())
+
+    events = await collect(runtime, "why?")
+
+    order = [type(e).__name__ for e in events if not isinstance(e, TextDelta)]
+    assert order == ["ToolCallStarted", "ToolCallFinished", "AgentError", "TurnComplete"]
+    finished = next(e for e in events if isinstance(e, ToolCallFinished))
+    assert finished.ok is False
+    assert finished.summary == "blocked"
+    assert finished.call_id == "c1"
+
+
+async def test_a_turn_blocked_at_ingress_leaves_no_history_behind() -> None:
+    class Duck:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ERROR: cluster said: this: is: not: yaml\n\t- [unclosed"
+
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), Duck())
+
+    await collect(runtime, "why?")
+
+    assert not [m for m in runtime._messages if m.get("role") in {"tool", "assistant"}]
+    assert not runtime._ingress_records
+    assert len(ScriptedProvider(_get_resource_turn()).turns) == 2

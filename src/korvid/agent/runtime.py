@@ -111,6 +111,19 @@ def _estimate_missing_usage(state: _StreamState, prompt_estimate: int) -> None:
         state.out_tok = _stream_output_chars(state) // 4
 
 
+def _parsed_arguments(arguments: str) -> dict[str, Any] | None:
+    """A tool call's arguments as a mapping, or None when unusable.
+
+    The executor contract takes an argument mapping, so valid JSON of any
+    other shape is as unusable as invalid JSON.
+    """
+    try:
+        parsed = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 class AgentRuntime:
     """Drives the provider + tools loop, emitting typed AgentEvent objects."""
 
@@ -303,6 +316,47 @@ class AgentRuntime:
             raise ToolResultBlockedError(str(exc)) from exc
         return outcome.text, outcome.redactions, outcome.error
 
+    async def _tool_result(
+        self, name: str, arguments: str
+    ) -> tuple[str, tuple[RedactionRecord, ...]]:
+        """Run one tool call and return what history may keep of it.
+
+        Whether the text is a failure is the producer's to state, never
+        the boundary's to read off the text: a structured result that
+        opened with `ERROR:` used to skip the pass that sees nested
+        secrets (PR #197 review). The failures raised here are errors by
+        construction, so they say so.
+
+        Head+tail compaction, not a prefix cut: reports place their
+        evidence (events, log excerpts) last by design. Structured
+        results are shrunk structurally instead — the document is
+        redacted first and the redacted document bounded, so it stays
+        parseable. The producer's trail and this pass's are two views of
+        one document, merged onto the same origin so a redaction both of
+        them saw is not counted twice.
+
+        Raises:
+            OutboundPolicyError: the result cannot be sent — from the
+                producer, or from the ingress pass over what it returned.
+        """
+        produced: tuple[RedactionRecord, ...] = ()
+        errored = True
+        parsed = _parsed_arguments(arguments)
+        if parsed is None:
+            result = "ERROR: bad arguments"
+        else:
+            try:
+                result, produced, errored = await self._execute_tool(name, parsed)
+            except OutboundPolicyError:
+                raise
+            except Exception as exc:  # defensive: executor contract is never-raise
+                # Same ingest cap as ToolExecutor — a huge exception
+                # message must not bypass the limit into history.
+                result = cap_result(f"ERROR: {exc}")
+        return sanitize_recorded_tool_result(
+            name, result, produced, max_chars=self._max_result_chars, error=errored
+        )
+
     def _truncate_history(self, start: int) -> None:
         """Drop history from `start` on, and the records that described it.
 
@@ -415,46 +469,16 @@ class AgentRuntime:
             name = str(tc["name"])
             arguments = str(tc["arguments"])
             yield ToolCallStarted(call_id=call_id, name=name, arguments=arguments)
-            produced: tuple[RedactionRecord, ...] = ()
-            # Whether this text is a failure is the producer's to state,
-            # never the boundary's to read off the text: a structured
-            # result that opened with `ERROR:` used to skip the pass that
-            # sees nested secrets (PR #197 review). The runtime's own
-            # failures below are errors by construction.
-            errored = True
             try:
-                parsed = json.loads(arguments or "{}")
-            except json.JSONDecodeError:
-                result = "ERROR: bad arguments"
-            else:
-                if not isinstance(parsed, dict):
-                    # The executor contract takes an argument mapping; valid
-                    # JSON of any other shape is equally bad arguments.
-                    result = "ERROR: bad arguments"
-                else:
-                    try:
-                        result, produced, errored = await self._execute_tool(name, parsed)
-                    except OutboundPolicyError:
-                        # A blocked result is not reportable to the model:
-                        # let it reach run_turn's rollback.
-                        yield ToolCallFinished(
-                            call_id=call_id, name=name, ok=False, summary="blocked"
-                        )
-                        raise
-                    except Exception as exc:  # defensive: executor contract is never-raise
-                        # Same ingest cap as ToolExecutor — a huge exception
-                        # message must not bypass the limit into history.
-                        result = cap_result(f"ERROR: {exc}")
-            # Head+tail compaction, not a prefix cut: reports place their
-            # evidence (events, log excerpts) last by design. Structured
-            # results are shrunk structurally instead — the document is
-            # redacted first and the redacted document bounded, so it
-            # stays parseable. The producer's trail and this pass's are
-            # two views of one document, merged onto the same origin so a
-            # redaction both of them saw is not counted twice.
-            result, ingress_records = sanitize_recorded_tool_result(
-                name, result, produced, max_chars=self._max_result_chars, error=errored
-            )
+                result, ingress_records = await self._tool_result(name, arguments)
+            except OutboundPolicyError:
+                # A blocked result is not reportable to the model: close
+                # the call the UI is showing, then let it reach run_turn's
+                # rollback. Both boundary passes — the producer's and this
+                # ingress one — unwind through here, so neither can leave
+                # a tool row running for the session (PR #197 review).
+                yield ToolCallFinished(call_id=call_id, name=name, ok=False, summary="blocked")
+                raise
             if excess and index == len(kept) - 1:
                 # Appended after compaction, without re-compacting: the
                 # notice is a fixed-size constant carrying no evidence, so
