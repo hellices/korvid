@@ -167,10 +167,8 @@ class AgentRuntime:
         # does not define has to be declared: the boundary cannot tell a
         # manifest from a paragraph by looking, and assuming "text" let a
         # custom tool return a `Secret` document (PR #197 review).
-        self._custom_tool_results = tuple(custom_tool_results)
-        self._result_formats: dict[str, ResultFormat] = resolve_result_formats(
-            self._tools, self._custom_tool_results
-        )
+        self._declared_tool_results = tuple(custom_tool_results)
+        self._result_formats: dict[str, ResultFormat] = self._resolve_formats(self._tools)
         self._latest_outbound_payload: OutboundSnapshot | None = None
         # The serialized tool schemas ride along on every request; they are
         # part of the prompt cost when a provider omits usage.
@@ -246,6 +244,19 @@ class AgentRuntime:
             )
         return OutboundPolicy(max_request_chars=limit, result_formats=self._result_formats)
 
+    def _resolve_formats(self, tools: list[dict[str, Any]]) -> dict[str, ResultFormat]:
+        """Resolve the result format of every tool `tools` offers.
+
+        Only the declarations that name an offered tool take part: the
+        caller's set describes tools it may offer at some point, and
+        `resolve_result_formats` — rightly — rejects a declaration for a
+        tool that is not on the surface being resolved.
+        """
+        offered = set(tool_schema_names(tools))
+        return resolve_result_formats(
+            tools, [item for item in self._declared_tool_results if item.name in offered]
+        )
+
     def retarget(self, *, tools: list[dict[str, Any]], cluster_context: str | None) -> None:
         """Re-arm the runtime for a new cluster (issue #36, `:ctx`).
 
@@ -254,16 +265,18 @@ class AgentRuntime:
         note) and the new capability-gated tool set (e.g. ``resize_pod``),
         instead of the cluster the runtime was originally built against.
         """
-        self._tools = tools
         # A new surface is a new set of declarations to honour: the ones
         # for tools it no longer offers simply do not apply, and anything
         # it does offer must still resolve or construction-time validation
-        # would have been theatre.
-        offered = set(tool_schema_names(tools))
-        self._custom_tool_results = tuple(
-            item for item in self._custom_tool_results if item.name in offered
-        )
-        self._result_formats = resolve_result_formats(tools, self._custom_tool_results)
+        # would have been theatre. The set the caller made is kept whole —
+        # deriving the active subset each time means a surface that comes
+        # back (`:ctx` to another cluster and back) is still declared, and
+        # a retarget that refuses leaves nothing consumed (PR #197 review).
+        # Resolve before anything is mutated so a refused surface leaves
+        # the runtime on the one it was already armed for.
+        result_formats = self._resolve_formats(tools)
+        self._tools = tools
+        self._result_formats = result_formats
         # Keep the omitted-usage estimate honest for the new tool set.
         self._tools_chars = len(json.dumps(self._tools))
         # A different tool surface is a different per-request overhead.

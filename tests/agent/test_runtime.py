@@ -3238,3 +3238,57 @@ async def test_a_blocked_result_is_still_reported_as_blocked() -> None:
     finished = next(event for event in events if isinstance(event, ToolCallFinished))
     assert not finished.ok
     assert finished.summary == "blocked"
+
+
+# --- Retarget does not consume the declarations it was given (round 11) ----
+
+
+def test_retarget_restores_declarations_when_the_surface_comes_back() -> None:
+    """`:ctx` swaps the tool surface; swapping back must not have cost the
+    caller the declarations it made at construction."""
+    runtime = AgentRuntime(
+        ScriptedProvider([]),
+        _CustomExecutor(),
+        tools=[_CUSTOM_TOOL],
+        custom_tool_results=[CustomToolResult("fetch_manifest", "structured_yaml")],
+    )
+
+    runtime.retarget(tools=list(READ_TOOLS), cluster_context=None)
+    assert "fetch_manifest" not in runtime._result_formats
+
+    runtime.retarget(tools=[_CUSTOM_TOOL], cluster_context=None)
+
+    assert runtime._result_formats == {"fetch_manifest": "structured_yaml"}
+
+
+def test_retarget_to_a_disjoint_custom_surface_still_needs_its_own_declaration() -> None:
+    other = {
+        "type": "function",
+        "function": {"name": "peek", "description": "d", "parameters": {}},
+    }
+    runtime = AgentRuntime(
+        ScriptedProvider([]),
+        _CustomExecutor(),
+        tools=[_CUSTOM_TOOL],
+        custom_tool_results=[CustomToolResult("fetch_manifest", "structured_yaml")],
+    )
+
+    with pytest.raises(ValueError, match="result format must be declared"):
+        runtime.retarget(tools=[other], cluster_context=None)
+
+
+def test_a_retarget_that_fails_leaves_the_declarations_intact() -> None:
+    broken = {"type": "function", "function": {"name": "peek", "parameters": {}}}
+    runtime = AgentRuntime(
+        ScriptedProvider([]),
+        _CustomExecutor(),
+        tools=[_CUSTOM_TOOL],
+        custom_tool_results=[CustomToolResult("fetch_manifest", "structured_yaml")],
+    )
+
+    with pytest.raises(ValueError, match="result format must be declared"):
+        runtime.retarget(tools=[broken], cluster_context=None)
+
+    assert runtime._tools == [_CUSTOM_TOOL]
+    runtime.retarget(tools=[_CUSTOM_TOOL], cluster_context=None)
+    assert runtime._result_formats == {"fetch_manifest": "structured_yaml"}
