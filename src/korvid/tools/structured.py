@@ -63,7 +63,7 @@ def dump_bounded_yaml(document: Any, limit: int) -> str:
     Returns:
         Valid YAML text, at most `limit` characters unless the minimal
         identity notice itself is longer (documents are never returned
-        as unparseable fragments to satisfy a byte bound).
+        as unparsable fragments to satisfy a byte bound).
     """
     text = dump_yaml(document)
     if len(text) <= limit:

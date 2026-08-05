@@ -1152,7 +1152,7 @@ def _get_resource_provider() -> ScriptedProvider:
 async def test_oversized_manifest_reaches_the_model_as_bounded_valid_yaml() -> None:
     """A benign manifest larger than the 8k ingest cap must not block the
     turn: capping happens *before* the policy parses the structured
-    result, so a byte-level truncation would make it unparseable YAML and
+    result, so a byte-level truncation would make it unparsable YAML and
     the whole turn would be rolled back (issue #189 final review)."""
     executor = _manifest_executor(_bulk_pod_manifest(labels=200))
     provider = _get_resource_provider()
