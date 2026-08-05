@@ -21,9 +21,12 @@ violations.
 
 Task repetition scores:
 
-- Qwen3 8B: `20/23`, `19/23`, `22/23` (standard deviation `5.42pp`);
-- Qwen3-Coder 30B-A3B: `18/23`, `18/23`, `20/23` (`4.10pp`);
-- Qwen3 1.7B: `16/23`, `18/23`, `16/23` (`4.10pp`).
+- Qwen3 8B: `20/23`, `19/23`, `22/23` (population standard
+  deviation `5.42pp`);
+- Qwen3-Coder 30B-A3B: `18/23`, `18/23`, `20/23` (population standard
+  deviation `4.10pp`);
+- Qwen3 1.7B: `16/23`, `18/23`, `16/23` (population standard
+  deviation `4.10pp`).
 
 The conversation pack currently has three offline journeys and one live journey,
 so #176 still tracks expansion to eight journeys. The current result is already
@@ -59,7 +62,8 @@ yet a dependable conversational Korvid agent.
 Strengths:
 
 - strongest evidence acquisition: 61/69;
-- task inference averaged 22.0 seconds per run on the standardized CPU node;
+- end-to-end task-run wall time averaged 22.0 seconds on the standardized
+  CPU node;
 - passed `logs-to-events` 2/3 offline.
 
 Conversation weaknesses:

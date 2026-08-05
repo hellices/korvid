@@ -127,6 +127,22 @@ uv run python -m korvid.evals.journeys_cli \
 - offline pack: 3 journeys ×3 repetitions;
 - live pack: 1 guarded real-cluster journey ×3 repetitions;
 - result timeout: 300 seconds for 1.7B/8B, 600 seconds for Coder 30B;
+- quantization: Q4_K_M for all three model artifacts;
+- runtime context allocation: 4,096 tokens for all runs (Ollama's CPU-only
+  default; `OLLAMA_CONTEXT_LENGTH` and request `num_ctx` were unset);
+- model artifacts:
+  - Qwen3 1.7B:
+    `8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7`
+    (native maximum context 40,960);
+  - Qwen3 8B:
+    `500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41`
+    (native maximum context 40,960);
+  - Qwen3-Coder 30B-A3B:
+    `06c1097efce0431c2045fe7b2e5108366e43bee1b4603a7aded8f21689e90bca`
+    (native maximum context 262,144);
+- warm-up before each task/offline/live batch: one non-streaming `/api/chat`
+  request to the selected model with the user message
+  `Reply with exactly OK`; the response was discarded before timed runs;
 - live namespace: `korvid-agent-eval-124b1aa` (deleted after run);
 - final state: contract cluster Stopped, `modeleval` zero nodes, Ollama Ready
   on its default pool.
