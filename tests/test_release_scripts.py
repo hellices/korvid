@@ -677,6 +677,16 @@ def _release_workflow() -> str:
     return (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text()
 
 
+def _readme() -> str:
+    return (Path(__file__).parents[1] / "README.md").read_text()
+
+
+def _release_runbook() -> str:
+    path = Path(__file__).parents[1] / "docs" / "release.md"
+    assert path.is_file(), "docs/release.md is missing"
+    return path.read_text()
+
+
 def test_linux_bundle_pins_and_names_the_manylinux_2_28_baseline() -> None:
     workflow = _release_workflow()
     assert "manylinux_2_28_x86_64@sha256:" in workflow
@@ -733,11 +743,56 @@ def test_draft_release_is_staged_before_irreversible_pypi_publication() -> None:
 
 
 def test_release_docs_require_immutable_protected_tags() -> None:
-    readme = (Path(__file__).parents[1] / "README.md").read_text()
+    readme = _readme()
     assert "immutable `v*` tag ruleset" in readme
     assert "restrict tag creation" in readme
     assert "update and deletion" in readme
     assert "protected tags only" in readme
+
+
+def test_release_docs_readme_pins_first_release_install_and_links_the_runbook() -> None:
+    readme = _readme()
+    assert "python -m pip install 'korvid[all]==0.1.0'" in readme
+    assert "docs/release.md" in readme
+
+
+def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -> None:
+    runbook = _release_runbook()
+    assert "refs/tags/v*" in runbook
+    assert "`release`" in runbook
+    assert "`.github/workflows/release.yml`" in runbook
+    assert "`hellices/korvid`" in runbook
+    assert "gh workflow run Release --ref main" in runbook
+    assert "gh run watch RUN_ID --exit-status" in runbook
+    assert 'git tag -a v0.1.0 COMMIT -m "korvid v0.1.0"' in runbook
+    assert "git push origin refs/tags/v0.1.0" in runbook
+    assert "gh release download v0.1.0 --dir dist/v0.1.0" in runbook
+    assert (
+        "gh attestation verify dist/v0.1.0/korvid-0.1.0-py3-none-any.whl --repo hellices/korvid"
+    ) in runbook
+    assert "PyPI publication is irreversible" in runbook
+    assert "annotated tag publication is irreversible" in runbook
+
+
+def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> None:
+    runbook = _release_runbook()
+    assert "~/.config/korvid/config.yaml" in runbook
+    assert "~/.config/korvid/credentials.json" in runbook
+    assert "~/.local/state/korvid/audit.jsonl" in runbook
+    assert "~/.local/share/korvid/logs" in runbook
+    assert "~/.local/share/korvid/agent-payloads" in runbook
+    assert "python -m pip install 'korvid[all]==0.1.0'" in runbook
+    assert "python -m pip uninstall -y korvid" in runbook
+    assert "opt-in cleanup" in runbook
+    assert "rerun your package manager with the full desired extra set" in runbook
+
+
+def test_release_docs_runbook_marks_recovery_boundaries_and_first_release_upgrade_limit() -> None:
+    runbook = _release_runbook()
+    assert "Deleting or moving a published tag/version is not rollback" in runbook
+    assert "resume the idempotent workflow only when the staged assets match" in runbook
+    assert "stop and diagnose" in runbook
+    assert "v0.1.0 cannot prove a cross-version PyPI upgrade" in runbook
 
 
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:

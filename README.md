@@ -57,9 +57,14 @@ fail-closed like every other write. Details in [docs/ops.md](docs/ops.md).
 ## Quick start
 
 ```sh
-uv tool install 'korvid[agent] @ git+https://github.com/hellices/korvid'
+python -m pip install 'korvid[all]==0.1.0'
 korvid                        # uses your current kubeconfig context
 ```
+
+`korvid[all]` is the simplest first-release install: the TUI, embedded agent,
+and MCP server together. For slimmer extras, reinstall guidance, retained local
+state, and the exact v0.1.0 publish procedure, see the
+[release runbook](docs/release.md).
 
 | Key | Action |
 |-----|--------|
@@ -120,27 +125,30 @@ but every one is approval-gated and audited.
 
 ## Installation
 
-Not yet on PyPI. Install straight from the repository:
+v0.1.0 is the first PyPI release. The smoke matrix proves clean installs of
+`korvid`, `korvid[agent]`, `korvid[mcp]`, and `korvid[all]`, plus uninstall.
+It does **not** prove a cross-version PyPI upgrade yet because there is no
+older PyPI release to upgrade from. The next tagged release must validate
+upgrading from `0.1.0`.
 
 ```sh
-uv tool install git+https://github.com/hellices/korvid   # or: pipx install ...
-korvid
+python -m pip install 'korvid==0.1.0'             # base TUI only
+python -m pip install 'korvid[agent]==0.1.0'      # :ai / Ctrl-A
+python -m pip install 'korvid[mcp]==0.1.0'        # korvid --mcp
+python -m pip install 'korvid[all]==0.1.0'        # recommended first install
+python -m pip install 'korvid[all,entra]==0.1.0'  # add Entra auth too
 ```
 
-Or run it ad hoc without installing:
+If you already installed a narrower extra set, rerun your package manager with
+the full desired extra set instead of assuming extras expand in place. With
+pip, use:
 
 ```sh
-uvx --from git+https://github.com/hellices/korvid korvid
+python -m pip install --upgrade 'korvid[all]==0.1.0'
 ```
 
-The base install is the TUI alone. The embedded AI agent and the MCP
-server are optional extras — add them when you want those features:
-
-```sh
-uv tool install 'korvid[agent] @ git+https://github.com/hellices/korvid'  # :ai / Ctrl-A
-uv tool install 'korvid[mcp] @ git+https://github.com/hellices/korvid'   # korvid --mcp
-uv tool install 'korvid[all] @ git+https://github.com/hellices/korvid'   # both
-```
+With other installers, use their reinstall/upgrade equivalent or uninstall
+first, then install the exact requirement you want.
 
 Without the `[agent]` extra the agent surface is simply absent — no agent
 panel, and `Ctrl-A` / `:ai` / `:model` are not registered. Without the
@@ -149,33 +157,39 @@ an install hint. Explicitly enabling a feature whose extra is missing
 (`--mcp`, `agent.provider` in config) fails at startup with an actionable
 message. `[entra]` adds Entra ID auth for Azure OpenAI.
 
+`python -m pip uninstall -y korvid` removes the package only. It does **not**
+remove `~/.config/korvid/config.yaml`, the fallback
+`~/.config/korvid/credentials.json`, `~/.local/state/korvid/audit.jsonl`,
+`~/.local/share/korvid/logs`, or `~/.local/share/korvid/agent-payloads`;
+cleanup is explicit and opt-in in the [release runbook](docs/release.md).
+
 ### Releases
 
 Tagged releases (`vX.Y.Z`) publish signed artifacts to PyPI via OIDC
 Trusted Publishing and attach the same files to the GitHub Release:
 wheel, sdist, `SHA256SUMS`, a CycloneDX SBOM covering the full locked
 dependency graph, build-provenance attestations, and offline wheelhouse
-bundles for Linux/Windows x86-64 on Python 3.11–3.13. Once the first
-release lands, install with:
+bundles for Linux/Windows x86-64 on Python 3.11–3.13.
 
 Before enabling the workflow, repository administrators **must** create an
-immutable `v*` tag ruleset: restrict tag creation to trusted release
-maintainers and prohibit tag update and deletion. The protected `release`
-environment must allow protected tags only and require approval; PyPI's
-Trusted Publisher must bind exactly to `hellices/korvid`,
-`.github/workflows/release.yml`, and that environment. The in-workflow
-source check is defense in depth, not a replacement for this external
-trust boundary.
+immutable `v*` tag ruleset for `refs/tags/v*`: restrict tag creation to
+trusted release maintainers and prohibit tag update and deletion. The
+protected `release` environment must allow protected tags only and require
+approval; PyPI's Trusted Publisher must bind exactly to `hellices/korvid`,
+`.github/workflows/release.yml`, and that environment. The in-workflow source
+check is defense in depth, not a replacement for this external trust boundary.
+The operator procedure, irreversible boundaries, and recovery rules for the
+first release are in the [release runbook](docs/release.md).
 
 ```sh
-uv tool install 'korvid[all]==X.Y.Z'   # or: pip install 'korvid[all]==X.Y.Z'
+python -m pip install 'korvid[all]==0.1.0'
 ```
 
 Verify a downloaded artifact against its checksum and provenance:
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify korvid-X.Y.Z-py3-none-any.whl --repo hellices/korvid
+gh attestation verify korvid-0.1.0-py3-none-any.whl --repo hellices/korvid
 ```
 
 Offline installation from the wheelhouse bundles is documented in the
