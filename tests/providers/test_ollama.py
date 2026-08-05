@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from korvid.agent.outbound import OutboundPolicy
-from korvid.agent.provider import LLMProvider
+from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.agent.runtime import AgentRuntime
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.providers.ollama import OllamaOptions, OllamaProvider
@@ -670,3 +670,51 @@ async def test_carried_redaction_records_survive_the_native_dialect_hook() -> No
     assert ("messages[1].content", "control-character") in reported
     assert ("messages[3].content", "control-character") in reported
     assert "thinking" in snapshot.payload_json
+
+
+# --- The transport acknowledges the request it really sent (round 11) -------
+
+
+async def _drain(provider: Any, seen: list[dict[str, Any]]) -> None:
+    """Consume a stream into `seen` so `pytest.raises` wraps one call."""
+    async for event in provider.complete([{"role": "user", "content": "hi"}], []):
+        seen.append(event)
+
+
+async def test_the_first_event_acknowledges_the_transport() -> None:
+    body = _ndjson({"message": {"role": "assistant", "content": "hi"}, "done": False}, _done())
+
+    events = await _events(_provider(body))
+
+    assert events[0] == {"type": REQUEST_SENT}
+
+
+async def test_an_http_error_acknowledges_before_it_raises() -> None:
+    """The bytes were sent — the provider has the payload either way."""
+    provider = _provider("nope", status=500)
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(ProviderError, match="HTTP 500"):
+        await _drain(provider, seen)
+
+    assert seen == [{"type": REQUEST_SENT}]
+
+
+async def test_a_transport_that_never_connects_acknowledges_nothing() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("nodename nor servname provided")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+    provider = OllamaProvider(
+        base_url="http://x:11434",
+        model="m1",
+        credentials=None,
+        client=client,
+        options=OllamaOptions(),
+    )
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(httpx.ConnectError, match="nodename"):
+        await _drain(provider, seen)
+
+    assert seen == []

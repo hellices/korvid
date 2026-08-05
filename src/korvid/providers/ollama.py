@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from korvid.agent.credentials import CredentialSource
-from korvid.agent.provider import LLMProvider
+from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.providers.net import make_client
 from korvid.providers.openai_compat import ProviderError
 
@@ -162,6 +162,9 @@ class OllamaProvider(LLMProvider):
             json=self._payload(messages, tools),
             headers=await self._headers(),
         ) as resp:
+            # The request is on the wire: headers came back, so whatever
+            # the status says, this provider has the payload (PR #197).
+            yield {"type": REQUEST_SENT}
             if resp.status_code >= 300:
                 await resp.aread()
                 raise ProviderError(f"Upstream returned HTTP {resp.status_code}: {resp.text}")

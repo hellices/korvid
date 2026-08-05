@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from korvid.agent.credentials import CredentialSource
-from korvid.agent.provider import LLMProvider
+from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.agent.provider_plugin import (
     PROVIDER_PLUGIN_API_VERSION,
     ProviderPlugin,
@@ -155,6 +155,9 @@ async def test_validated_plugin_provider_normalizes_all_event_shapes() -> None:
     [
         (["done"], "mapping"),
         ({"type": "unknown"}, "unknown provider event type"),
+        # The built-in handoff acknowledgement is not part of API v1:
+        # a plugin is recorded on its first completion event instead.
+        ({"type": REQUEST_SENT}, "unknown provider event type"),
         ({"type": "text_delta", "text": 3}, "text_delta.text"),
         ({"type": "tool_call", "id": "", "name": "get_logs", "arguments": "{}"}, "tool_call.id"),
         ({"type": "tool_call", "id": "c1", "name": "", "arguments": "{}"}, "tool_call.name"),

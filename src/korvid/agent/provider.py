@@ -10,7 +10,26 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Final
+
+REQUEST_SENT: Final = "request_sent"
+"""Event type a built-in adapter yields once its request is on the wire.
+
+`complete` is an async generator, so obtaining it transmits nothing: the
+body only runs on the first `__anext__`. The runtime records the exact
+payload it handed over as the session's latest outbound request, and that
+record must mean *sent*, not *intended* — a missing credential or an
+unresolvable host must leave the previous real handoff on display.
+
+Built-in adapters therefore yield `{"type": REQUEST_SENT}` as soon as the
+transport has accepted the request (response headers received), before
+the status code is judged: an HTTP 500 answer still means the provider
+has the payload. The runtime consumes it as bookkeeping and never renders
+it. It is internal to the built-ins — the plugin contract (API v1) knows
+four event types and rejects anything else, so a plugin's request is
+recorded on its first completion event instead, which is equally proof
+that the request ran.
+"""
 
 
 class LLMProvider(ABC):
@@ -39,6 +58,12 @@ class LLMProvider(ABC):
         which satisfy this AsyncIterator signature under mypy --strict.
         Do NOT write a plain async function returning an iterator—that
         produces a coroutine and fails the override check.
+
+        A built-in adapter yields `{"type": REQUEST_SENT}` once the
+        transport has accepted the request, so the runtime can tell a
+        payload that was really handed over from one whose generator was
+        never started. Adapters that cannot say (including every plugin)
+        simply do not, and are taken at their first completion event.
         """
 
     def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

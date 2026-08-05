@@ -63,10 +63,19 @@ later turn that never reaches the provider does not erase it: a prompt the
 outbound policy blocks, or a turn rolled back mid-flight, sends nothing
 and so has no payload of its own to show. `:ai payload` keeps showing the
 last real handoff — which is precisely the request you want to read after
-something was refused. Only a payload the provider has accepted replaces
-it: preparing a request is not sending it, so a provider that refuses the
-call outright (missing credentials, unusable model) leaves the previous
-handoff on display rather than claiming one that never happened.
+something was refused. Only a payload that reached the transport replaces
+it. Preparing a request is not sending it, and neither is *calling* the
+provider: `complete()` is an async generator, so its body — the HTTP
+request included — does not run until the stream is consumed. korvid's
+built-in adapters acknowledge the moment the transport accepts the request
+(before they judge the response status, because an HTTP 500 answer still
+means the payload arrived), and a provider that fails earlier — no
+credentials, unresolvable host, connection refused — leaves the previous
+handoff on display rather than claiming one that never happened. A
+third-party plugin cannot acknowledge (the plugin event contract knows
+`text_delta`, `tool_call`, `usage` and `done`); its request is recorded on
+the first event it yields, which is equally proof the request ran, and a
+plugin that yields nothing at all records nothing.
 
 Press `e` in the inspector to export the displayed payload to a private
 JSON file — `write_private_text` creates it with `0o600` permissions (see

@@ -3,12 +3,14 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 import pytest
 import yaml
 
 from korvid.agent.events import AgentError, TextDelta, ToolCallFinished, TurnComplete
 from korvid.agent.profiles import build_profile
 from korvid.agent.prompts import NO_WRITE_PROMPT
+from korvid.agent.provider import REQUEST_SENT
 from korvid.agent.runtime import MAX_HISTORY_TURNS, AgentRuntime
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
@@ -1040,6 +1042,9 @@ async def test_latest_snapshot_is_set_before_each_call_and_tracks_last_iteration
         ) -> AsyncIterator[dict[str, Any]]:
             assert self.runtime is not None
             self.calls += 1
+            # A built-in acknowledges the transport before anything else;
+            # only then is the payload a handoff (PR #197 review).
+            yield {"type": REQUEST_SENT}
             self.observed.append(getattr(self.runtime, "latest_outbound_payload", None))
             if self.calls == 1:
                 yield {"type": "tool_call", "id": "c1", "name": "get_logs", "arguments": "{}"}
@@ -2901,8 +2906,8 @@ async def test_a_refused_call_keeps_the_previous_handoff() -> None:
 
 
 async def test_the_snapshot_is_available_before_the_first_event() -> None:
-    """The handoff is the call, not the stream: a provider reading the
-    inspector as it produces its first event must already see it."""
+    """The handoff is the transport, not the call: a provider reading the
+    inspector once it has acknowledged the request must already see it."""
 
     class _ObservingProvider:
         def __init__(self) -> None:
@@ -2921,6 +2926,7 @@ async def test_the_snapshot_is_available_before_the_first_event() -> None:
             stream: bool = True,
         ) -> AsyncIterator[dict[str, Any]]:
             assert self.runtime is not None
+            yield {"type": REQUEST_SENT}
             self.observed.append(getattr(self.runtime, "latest_outbound_payload", None))
             yield {"type": "text_delta", "text": "ok"}
             yield {"type": "done"}
@@ -3332,3 +3338,156 @@ async def test_a_tool_schemas_credential_prose_never_reaches_the_provider() -> N
         "tools[0].function.description",
         "tools[0].function.parameters.properties.host.default",
     }
+
+
+# --- The snapshot is a handoff, not an intention (round 11) ----------------
+
+
+def _mock_ollama(handler: Any) -> Any:
+    """A real OllamaProvider whose transport the test controls."""
+    from korvid.providers.ollama import OllamaOptions, OllamaProvider
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return OllamaProvider(
+        base_url="http://x:11434",
+        model="m1",
+        credentials=None,
+        client=client,
+        options=OllamaOptions(),
+    )
+
+
+def _ollama_reply(text: str = "hi") -> str:
+    return json.dumps({"done": True, "message": {"role": "assistant", "content": text}}) + "\n"
+
+
+async def test_a_request_that_never_left_the_process_is_not_a_handoff() -> None:
+    """`complete()` is an async generator: obtaining it runs nothing. A
+    DNS or connect failure meant no bytes were sent, yet the inspector
+    showed the payload as the latest thing this session sent."""
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("nodename nor servname provided")
+
+    runtime = AgentRuntime(_mock_ollama(refuse), EchoExecutor())
+
+    events = await collect(runtime, "hello")
+
+    assert [type(e).__name__ for e in events] == ["AgentError"]
+    assert runtime.latest_outbound_payload is None
+
+
+async def test_a_failed_request_leaves_the_previous_handoff_on_display() -> None:
+    calls: list[int] = []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) > 1:
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(
+            200, text=_ollama_reply("first"), headers={"content-type": "application/x-ndjson"}
+        )
+
+    runtime = AgentRuntime(_mock_ollama(flaky), EchoExecutor())
+    await collect(runtime, "one")
+    first = runtime.latest_outbound_payload
+    assert first is not None
+
+    await collect(runtime, "two")
+
+    assert runtime.latest_outbound_payload is first
+    assert "two" not in first.payload_json
+
+
+async def test_an_upstream_http_error_still_counts_as_a_handoff() -> None:
+    """The request headers and body were on the wire before the status
+    came back — the provider has the payload whatever it answered."""
+
+    def five_hundred(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    runtime = AgentRuntime(_mock_ollama(five_hundred), EchoExecutor())
+
+    events = await collect(runtime, "hello")
+
+    assert any(isinstance(e, AgentError) for e in events)
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "hello" in snapshot.payload_json
+
+
+async def test_a_successful_request_is_recorded_before_its_first_event() -> None:
+    seen: list[bool] = []
+
+    def ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, text=_ollama_reply("done"), headers={"content-type": "application/x-ndjson"}
+        )
+
+    runtime = AgentRuntime(_mock_ollama(ok), EchoExecutor())
+    async for event in runtime.run_turn("hello", "view=pods ns=default"):
+        if isinstance(event, TextDelta):
+            seen.append(runtime.latest_outbound_payload is not None)
+
+    assert seen == [True]
+
+
+async def test_the_handoff_acknowledgement_is_never_shown_to_the_user() -> None:
+    """It is internal bookkeeping, not model output."""
+
+    def ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, text=_ollama_reply("done"), headers={"content-type": "application/x-ndjson"}
+        )
+
+    runtime = AgentRuntime(_mock_ollama(ok), EchoExecutor())
+
+    events = await collect(runtime, "hello")
+    text = "".join(e.text for e in events if isinstance(e, TextDelta))
+
+    assert text == "done"
+    assert "request_sent" not in text
+
+
+async def test_a_provider_that_yields_nothing_is_not_a_handoff() -> None:
+    """A plugin cannot acknowledge (API v1 knows four event types), so the
+    conservative rule is its first completion event."""
+    runtime = AgentRuntime(ScriptedProvider([[]]), EchoExecutor())
+
+    await collect(runtime, "hello")
+
+    assert runtime.latest_outbound_payload is None
+
+
+async def test_a_plugin_style_provider_is_recorded_on_its_first_event() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]]),
+        EchoExecutor(),
+    )
+
+    await collect(runtime, "hello")
+
+    assert runtime.latest_outbound_payload is not None
+
+
+async def test_a_stream_that_dies_midway_keeps_the_payload_it_sent() -> None:
+    class _Dying:
+        name = "dying"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "text_delta", "text": "par"}
+            raise RuntimeError("stream died")
+
+    runtime = AgentRuntime(_Dying(), EchoExecutor())
+
+    await collect(runtime, "hello")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "hello" in snapshot.payload_json

@@ -314,6 +314,15 @@ Extra keys are discarded. Unknown event types, non-mapping payloads, missing
 fields, overlong strings, or out-of-range token counts raise
 `ProviderPluginContractError`.
 
+These four are the whole contract. korvid's built-in adapters yield one
+extra internal event to tell the runtime their HTTP request has actually
+reached the transport — the `:ai payload` inspector uses it so a request
+that was never sent is not shown as the session's last handoff. It is not
+part of API v1 and a plugin that yields it is rejected like any other
+unknown type. Your request is recorded when you yield your **first** event
+instead, which is equally proof that it ran; a `complete()` that yields
+nothing records nothing.
+
 `tool_call.arguments` is a **string** payload, typically JSON-encoded
 arguments, not a nested mapping.
 

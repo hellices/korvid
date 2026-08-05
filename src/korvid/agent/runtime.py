@@ -492,9 +492,22 @@ class AgentRuntime:
         self,
         stream: AsyncIterator[dict[str, Any]],
         state: _StreamState,
+        snapshot: OutboundSnapshot,
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Iterate provider stream, yield TextDelta events, accumulate state."""
+        """Iterate provider stream, yield TextDelta events, accumulate state.
+
+        The first event of any kind is proof the request ran, and is when
+        `snapshot` becomes the session's latest handoff: a built-in says so
+        explicitly with `REQUEST_SENT` (before it judges the status code, so
+        an HTTP error still counts), and anything else — plugins, scripted
+        adapters — is taken at its first completion event.
+        """
         async for ev in stream:
+            # Recorded here rather than around `complete()`: that call only
+            # builds the generator, so a provider that cannot reach its
+            # endpoint would otherwise show an unsent payload as the last
+            # thing this session handed over (PR #197 review).
+            self._latest_outbound_payload = snapshot
             ev_type = ev.get("type", "")
             if ev_type == "text_delta":
                 text = str(ev.get("text", ""))
@@ -867,15 +880,10 @@ class AgentRuntime:
                 self._live_prompt_estimate = prompt_estimate
                 try:
                     stream = self._provider.complete(prepared.messages, prepared.tools)
-                    # The handoff is the call: recorded once the provider
-                    # has accepted the payload and before the first event
-                    # is consumed, so a provider that refuses synchronously
-                    # (no credentials, unusable model) leaves the previous
-                    # real handoff on display, while a stream that dies
-                    # mid-flight keeps the payload it really sent
-                    # (PR #197 review).
-                    self._latest_outbound_payload = prepared.snapshot
-                    async for event in self._consume_stream(stream, state):
+                    # `complete()` is an async generator: this line transmits
+                    # nothing. The handoff is recorded inside the stream, on
+                    # the first event the provider produces (PR #197 review).
+                    async for event in self._consume_stream(stream, state, prepared.snapshot):
                         yield event
                 except Exception as exc:
                     # Tokens spent in earlier iterations (and the partial stream)

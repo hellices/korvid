@@ -5,7 +5,9 @@ import httpx
 import pytest
 import yaml
 
+from korvid.agent.credentials import CredentialSource
 from korvid.agent.outbound import OutboundPolicy
+from korvid.agent.provider import REQUEST_SENT
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.providers.openai_compat import OpenAICompatProvider, ProviderError
 from korvid.providers.static_creds import StaticHeaderSource
@@ -275,3 +277,49 @@ async def test_prepared_request_keeps_canonical_messages_and_transport_only_auth
     assert MASK_PLACEHOLDER in wire
     assert cap["headers"]["authorization"] == "Bearer sk-test"
     assert "Authorization" not in prepared.snapshot.payload_json
+
+
+# --- The transport acknowledges the request it really sent (round 11) -------
+
+
+async def _drain(provider: Any, seen: list[dict[str, Any]]) -> None:
+    """Consume a stream into `seen` so `pytest.raises` wraps one call."""
+    async for event in provider.complete([{"role": "user", "content": "hi"}], []):
+        seen.append(event)
+
+
+async def test_the_first_event_acknowledges_the_transport() -> None:
+    body = _sse({"choices": [{"delta": {"content": "hi"}}]})
+
+    events = [e async for e in _provider(body).complete([{"role": "user", "content": "hi"}], [])]
+
+    assert events[0] == {"type": REQUEST_SENT}
+
+
+async def test_an_http_error_acknowledges_before_it_raises() -> None:
+    provider = _provider("nope", status=401)
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(ProviderError, match="HTTP 401"):
+        await _drain(provider, seen)
+
+    assert seen == [{"type": REQUEST_SENT}]
+
+
+async def test_a_credential_source_that_refuses_acknowledges_nothing() -> None:
+    """No headers, no request: nothing was handed to anyone."""
+
+    class _Refusing(CredentialSource):
+        async def headers(self) -> dict[str, str]:
+            raise RuntimeError("keyring locked")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    provider = OpenAICompatProvider(
+        base_url="http://x/v1", model="m1", credentials=_Refusing(), client=client
+    )
+
+    seen: list[dict[str, Any]] = []
+    with pytest.raises(RuntimeError, match="keyring locked"):
+        await _drain(provider, seen)
+
+    assert seen == []
