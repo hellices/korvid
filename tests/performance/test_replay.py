@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from tests.performance.profile import FailureInjection, WorkloadProfile
 from tests.performance.replay import ReplayOptions, run_replay
+from tests.performance.workload import apply_events, initial_pods, scheduled_events, summary_digest
 
 
 async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:
@@ -24,11 +25,15 @@ async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:
         failures=(),
     )
     report = await run_replay(profile, ReplayOptions(time_scale=0))
+    events = scheduled_events(profile)
+    oracle = summary_digest(apply_events(initial_pods(profile), events))
     assert report.object_count == 100
-    assert report.final_digest == report.expected_digest
+    assert report.expected_digest == oracle
+    assert report.final_digest == oracle
     assert report.dropped_updates == 0
     assert report.rendered_updates == 110
     assert report.input_latency.count > 0
+    assert report.churn_started_before_input
     assert report.api.operations["list"] == 1
     assert report.api.operations["watch_open"] == 1
     assert report.api.operations.get("get", 0) == 0
@@ -48,8 +53,16 @@ async def test_replay_gone_reconnects_and_digest_matches() -> None:
         failures=(FailureInjection(kind="gone", at_event=5),),
     )
     report = await run_replay(profile, ReplayOptions(time_scale=0))
-    assert report.final_digest == report.expected_digest
+    events = scheduled_events(profile)
+    # The gone failure event itself is not applied as a watch event; filter it
+    # from the apply_events oracle so it matches the actual replay outcome.
+    hard_failure_seqs = {f.at_event for f in profile.failures if f.kind != "slow"}
+    applied = tuple(e for e in events if e.sequence not in hard_failure_seqs)
+    oracle = summary_digest(apply_events(initial_pods(profile), applied))
+    assert report.expected_digest == oracle
+    assert report.final_digest == oracle
     assert report.dropped_updates == 0
+    assert report.churn_started_before_input
     assert report.api.operations["list"] == 2
     assert report.api.operations["watch_open"] == 2
     assert report.api.reconnects == 1

@@ -40,6 +40,7 @@ from tests.performance.metrics import (
 from tests.performance.profile import FailureInjection, WorkloadProfile
 from tests.performance.workload import (
     ScheduledEvent,
+    apply_events,
     initial_pods,
     scheduled_events,
     summary_digest,
@@ -79,6 +80,7 @@ class ReplayReport:
     coalesced_updates: int
     event_to_render: LatencySummary
     input_latency: LatencySummary
+    churn_started_before_input: bool
     process: ProcessSummary
     api: ApiSummary
     manifest: RunManifest
@@ -278,6 +280,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
     )
 
     sampler.start()
+    churn_started_before_input = False
     try:
         async with app.run_test() as pilot:
             table = app.query_one(ResourceTable)
@@ -290,16 +293,17 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                 label="initial pods rendered",
             )
 
-            # Record cursor key latency before churn starts.
+            # Release the source to emit scheduled events, then drive cursor
+            # input while churn is active (not before the source is unblocked).
+            churn_start.set()
+
+            churn_started_before_input = churn_start.is_set()
             t0 = monotonic()
             await pilot.press("down")
             recorder.record_input(monotonic() - t0)
             t0 = monotonic()
             await pilot.press("up")
             recorder.record_input(monotonic() - t0)
-
-            # Release the source to emit scheduled events.
-            churn_start.set()
 
             # Wait for all events to be emitted and all renders to complete.
             await until(
@@ -312,9 +316,18 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
         process_samples = await sampler.stop()
         await watch_manager.stop_all()
 
-    # Compute digests: source tracks expected state; store reflects actual state.
+    # Compute expected digest using the independent apply_events oracle.
+    # Hard failures (gone, throttled, forbidden) raise before yielding the
+    # event, so the corresponding watch events are never applied; filter them
+    # from the oracle to match the actual replay outcome.
+    hard_failure_seqs: frozenset[int] = frozenset(
+        f.at_event for f in profile.failures if f.kind in _HARD_FAILURE_STATUS
+    )
+    oracle_events = tuple(e for e in events if e.sequence not in hard_failure_seqs)
+    expected_digest = summary_digest(apply_events(initial_pods(profile), oracle_events))
+
+    # Compute final digest from the store (actual state).
     final_digest = summary_digest(cast(Iterable[PodSummary], store.get("pods", ALL_NAMESPACES)))
-    expected_digest = source.current_digest()
 
     benchmark = recorder.report(manifest, process_samples, final_digest=final_digest)
 
@@ -328,6 +341,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
         coalesced_updates=benchmark.coalesced_updates,
         event_to_render=benchmark.event_to_render,
         input_latency=benchmark.input_latency,
+        churn_started_before_input=churn_started_before_input,
         process=benchmark.process,
         api=benchmark.api,
         manifest=benchmark.manifest,
