@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import stat
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ import pytest
 import yaml
 
 from korvid.k8s.discovery import PODS_META
+from korvid.k8s.logs import LogLine
 from korvid.mcp.server import (
     KorvidMCPServer,
     MCPController,
@@ -158,6 +160,42 @@ async def test_mcp_results_are_redacted_like_the_agent_path() -> None:
     assert NESTED_SECRET_SENTINEL not in content[0].text
     assert LONG_NAME_ENV_SENTINEL not in content[0].text
     assert yaml.safe_load(content[0].text)["kind"] == "CompositeApp"
+
+
+async def test_mcp_text_results_carry_only_tool_shaping() -> None:
+    """The other half of the boundary `docs/mcp.md` states.
+
+    Producer-side redaction reaches structured manifests, not free-form
+    text: a credential printed into a pod log crosses to the MCP client
+    verbatim, because nothing on this surface parses log lines. Pinned so
+    the documented limitation cannot drift out of date silently.
+    """
+
+    class LoggingKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            return {"spec": {"containers": [{"name": "main"}]}}
+
+        async def stream_logs(
+            self,
+            namespace: str,
+            pod: str,
+            container: str,
+            *,
+            follow: bool,
+            tail_lines: int,
+        ) -> AsyncIterator[LogLine]:
+            yield LogLine(
+                pod=pod,
+                container=container,
+                text="starting with password=log-line-sentinel",
+            )
+
+    executor = ToolExecutor(LoggingKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool("get_logs", {"pod": "api-0", "namespace": "prod"})
+
+    assert "log-line-sentinel" in content[0].text
 
 
 async def test_call_tool_rejects_names_outside_configured_surface() -> None:
