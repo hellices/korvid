@@ -56,6 +56,33 @@ def test_env_entry_masks_the_sibling_of_a_credential_name() -> None:
     assert redacted["env"][0] == {"name": "DB_PASSWORD", "value": MASK_PLACEHOLDER}
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"raw": "hunter2"},
+        ["hunter2"],
+        [{"chunk": "hunter2"}],
+        {"nested": {"deeper": ["hunter2"]}},
+        True,
+        7,
+    ],
+    ids=["mapping", "list", "list-of-mappings", "deep-mapping", "bool", "int"],
+)
+def test_a_credential_name_masks_its_sibling_of_any_type(value: Any) -> None:
+    """`value` is a string in the API; any other shape is malformed or
+    adversarial, and must be masked whole rather than walked into."""
+    document = {"env": [{"name": "DB_PASSWORD", "value": value}]}
+    redacted = redact_manifest(document)
+    assert redacted["env"][0] == {"name": "DB_PASSWORD", "value": MASK_PLACEHOLDER}
+    assert "hunter2" not in str(redacted)
+
+
+def test_a_non_sensitive_name_keeps_its_structured_sibling() -> None:
+    document = {"env": [{"name": "FEATURE_FLAGS", "value": {"beta": ["a", "b"]}}]}
+    redacted = redact_manifest(document)
+    assert redacted["env"][0]["value"] == {"beta": ["a", "b"]}
+
+
 def test_ordinary_values_survive_redaction() -> None:
     document = {
         "kind": "Pod",

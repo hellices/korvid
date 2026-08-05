@@ -468,6 +468,39 @@ def test_structured_env_entry_masks_the_value_named_by_its_sibling(env_name: str
     assert "raw-sensitive-value" not in sanitized
 
 
+@pytest.mark.parametrize(
+    "env_value",
+    [
+        {"raw": "raw-sensitive-value"},
+        ["raw-sensitive-value"],
+        [{"chunk": "raw-sensitive-value"}],
+        {"nested": {"deeper": ["raw-sensitive-value"]}},
+    ],
+    ids=["mapping", "list", "list-of-mappings", "deep-mapping"],
+)
+def test_structured_env_value_is_masked_whatever_shape_it_has(env_value: Any) -> None:
+    """A credential name protects its sibling, not just scalar siblings.
+
+    `value` is a string in the Kubernetes API, so anything else is
+    malformed or adversarial — exactly the shape that must not be walked
+    into and shipped key by key (PR #197 review).
+    """
+    result = yaml.safe_dump(
+        {
+            "kind": "Pod",
+            "spec": {
+                "containers": [
+                    {"name": "api", "env": [{"name": "DB_PASSWORD", "value": env_value}]}
+                ]
+            },
+        }
+    )
+    sanitized = sanitize_tool_result("get_resource", result)
+    assert "raw-sensitive-value" not in sanitized
+    entries = yaml.safe_load(sanitized)["spec"]["containers"][0]["env"]
+    assert entries[0] == {"name": "DB_PASSWORD", "value": MASK_PLACEHOLDER}
+
+
 def test_structured_env_entries_keep_non_sensitive_values_and_references() -> None:
     result = yaml.safe_dump(
         {

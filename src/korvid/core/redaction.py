@@ -207,7 +207,11 @@ def _names_a_secret_sibling(value: Mapping[str, Any]) -> bool:
 
 def _mask_reason(key: str, item: Any, *, secret_sibling: bool) -> str | None:
     """Why this entry must be masked, or None to redact it normally."""
-    if secret_sibling and key == "value" and isinstance(item, str | int | float):
+    if secret_sibling and key == "value":
+        # The name is the classifier, so the whole sibling goes — the API
+        # types `value` as a string, and a mapping or list here is
+        # malformed or hostile: descending into it would ship the parts
+        # under keys that say nothing about what they hold.
         return "sensitive-env-value"
     if normalize_name(key) in _SENSITIVE_NAMES:
         return "sensitive-key"
