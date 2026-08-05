@@ -223,7 +223,13 @@ class AgentRuntime:
 
     @property
     def latest_outbound_payload(self) -> OutboundSnapshot | None:
-        """The exact redacted payload prepared for the latest provider call."""
+        """The exact redacted payload of the latest request handed to the provider.
+
+        It survives a later blocked or rolled-back turn: such a turn sends
+        nothing, so it has no payload of its own, and erasing the previous
+        one would destroy the record of what actually left the machine.
+        Only a newly prepared request replaces it.
+        """
         return self._latest_outbound_payload
 
     def _trim_history(self) -> None:
@@ -474,7 +480,6 @@ class AgentRuntime:
         """Drop a blocked turn while retaining cost from completed iterations."""
         self._turn_active = False
         self._live_state = None
-        self._latest_outbound_payload = None
         del self._messages[self._turn_base :]
         self._total_in += turn_in
         self._total_out += turn_out
@@ -567,7 +572,6 @@ class AgentRuntime:
         screen_context: str,
     ) -> AsyncIterator[AgentEvent]:
         """Async generator: run one conversation turn, yielding events until done."""
-        self._latest_outbound_payload = None
         self._trim_history()
         self._turn_base = len(self._messages)
         turn_in = 0
@@ -635,7 +639,9 @@ class AgentRuntime:
                 state = _StreamState()
                 self._iteration_base = len(self._messages)
                 self._live_state = state
-                self._latest_outbound_payload = None
+                # Replaced only once a request exists to replace it with:
+                # preparation can refuse, and the previous handoff is still
+                # the latest thing this session sent.
                 prepared = self._prepare_request(iteration + 1)
                 self._latest_outbound_payload = prepared.snapshot
                 # Estimate of the prompt this iteration sends — used only when

@@ -58,6 +58,13 @@ same sanitized payload as a hosted one; korvid does not additionally
 authenticate that the configured `base_url` is really the process you
 intend it to be.
 
+The snapshot is the latest request that was actually handed over, and a
+later turn that never reaches the provider does not erase it: a prompt the
+outbound policy blocks, or a turn rolled back mid-flight, sends nothing
+and so has no payload of its own to show. `:ai payload` keeps showing the
+last real handoff — which is precisely the request you want to read after
+something was refused. Only a newly prepared request replaces it.
+
 Press `e` in the inspector to export the displayed payload to a private
 JSON file — `write_private_text` creates it with `0o600` permissions (see
 the platform caveat in [the threat model](threat-model.md)), never

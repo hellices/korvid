@@ -817,7 +817,11 @@ async def test_history_budget_stays_soft_without_strict_mode() -> None:
         isinstance(event, AgentError) and "outbound policy blocked" in event.message
         for event in events
     )
-    assert runtime.latest_outbound_payload is None
+    # The first iteration was prepared and sent; only the follow-up was
+    # blocked, so the sent request stays inspectable.
+    sent = runtime.latest_outbound_payload
+    assert sent is not None
+    assert sent.iteration == 1
 
 
 async def test_strict_trim_drops_an_oversized_sole_previous_turn() -> None:
@@ -987,7 +991,10 @@ async def test_malformed_secret_result_blocks_follow_up_and_rolls_back_turn() ->
     complete = next(event for event in events if isinstance(event, TurnComplete))
     assert (complete.input_tokens, complete.output_tokens, complete.estimated) == (40, 7, False)
     assert runtime.total_tokens == (40, 7)
-    assert getattr(runtime, "latest_outbound_payload", None) is None
+    sent = getattr(runtime, "latest_outbound_payload", None)
+    assert sent is not None
+    assert sent.iteration == 1
+    assert "raw-secret" not in sent.payload_json
     assert "raw-secret" not in json.dumps(provider.calls)
     assert "raw-secret" not in json.dumps(runtime._messages)
 
@@ -1037,7 +1044,14 @@ async def test_latest_snapshot_is_set_before_each_call_and_tracks_last_iteration
     assert runtime.latest_outbound_payload is provider.observed[-1]
 
 
-async def test_latest_snapshot_is_cleared_when_the_next_turn_is_blocked() -> None:
+async def test_latest_snapshot_survives_a_blocked_next_turn() -> None:
+    """The inspector shows the latest request that was actually handed over.
+
+    A blocked turn sends nothing, so it has no payload of its own to show.
+    Clearing on its way out would delete the evidence of the last real
+    request — exactly when a user runs `:ai payload` to find out what
+    left the machine (issue #189).
+    """
     provider = ScriptedProvider([[{"type": "text_delta", "text": "ok"}, {"type": "done"}]])
     runtime = AgentRuntime(
         provider,
@@ -1046,7 +1060,8 @@ async def test_latest_snapshot_is_cleared_when_the_next_turn_is_blocked() -> Non
         max_request_chars=20_000,
     )
     await collect(runtime, "first")
-    assert getattr(runtime, "latest_outbound_payload", None) is not None
+    sent = runtime.latest_outbound_payload
+    assert sent is not None
 
     events = await collect(runtime, "x" * 20_000)
 
@@ -1055,7 +1070,49 @@ async def test_latest_snapshot_is_cleared_when_the_next_turn_is_blocked() -> Non
         isinstance(event, AgentError) and "outbound policy blocked" in event.message
         for event in events
     )
-    assert runtime.latest_outbound_payload is None
+    assert runtime.latest_outbound_payload is sent
+    assert "first" in json.loads(sent.payload_json)["messages"][1]["content"]
+
+
+async def test_latest_snapshot_survives_a_turn_rolled_back_mid_flight() -> None:
+    """A rollback restores history; it must not also erase what was sent.
+
+    Turn two's first iteration really did reach the provider, so that
+    iteration's snapshot is the latest handoff even though the turn it
+    belonged to was dropped.
+    """
+
+    class MalformedSecretExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return json.dumps({"kind": "Secret", "data": "raw-secret"})
+
+    provider = ScriptedProvider(
+        [
+            [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+            [
+                {"type": "tool_call", "id": "c1", "name": "get_resource", "arguments": "{}"},
+                {"type": "done"},
+            ],
+        ]
+    )
+    runtime = AgentRuntime(provider, MalformedSecretExecutor())
+    await collect(runtime, "first")
+    first = runtime.latest_outbound_payload
+    assert first is not None
+
+    events = await collect(runtime, "second")
+
+    assert len(provider.calls) == 2
+    assert any(
+        isinstance(event, AgentError) and "outbound policy blocked" in event.message
+        for event in events
+    )
+    latest = runtime.latest_outbound_payload
+    assert latest is not None
+    assert latest is not first
+    assert latest.iteration == 1
+    assert "second" in json.loads(latest.payload_json)["messages"][-1]["content"]
+    assert "raw-secret" not in latest.payload_json
 
 
 async def test_provider_and_executor_mutation_cannot_change_history_or_snapshot() -> None:

@@ -226,7 +226,9 @@ The `:ai payload` inspector (`PayloadInspectorScreen`) renders
 `tools` JSON that `OutboundPolicy.prepare()` produced for the most recent
 provider call, plus the list of redactions applied. This is the real
 payload — not a re-derived approximation — so what you read is what was
-sent. It does **not** show:
+sent. A turn that was blocked or rolled back sent nothing, so it leaves
+the previous handoff on display rather than clearing the view. It does
+**not** show:
 
 - transport-level HTTP headers (`Authorization`, API keys, tenant headers),
   which are attached separately by each provider's `CredentialSource` and
