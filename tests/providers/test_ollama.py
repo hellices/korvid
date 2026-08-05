@@ -614,3 +614,59 @@ async def test_the_snapshot_labels_the_model_not_the_provider() -> None:
     assert snapshot.model == "qwen3:8b"
     assert not hasattr(snapshot, "provider")
     assert json.loads(snapshot.export_json())["model"] == "qwen3:8b"
+
+
+async def test_carried_redaction_records_survive_the_native_dialect_hook() -> None:
+    """The inventory is keyed by content, and this hook must not rewrite it.
+
+    `prepare_messages` runs before the outbound policy, so a hook that
+    rewrote a user or tool message's `content` would silently drop the
+    records carried for it. The native conversion adds `thinking`,
+    `tool_name` and object arguments and touches nothing else — pinned
+    here, through a real provider, because the guarantee is about this
+    adapter and not about a fake (issue #189).
+    """
+    replies = iter(
+        [
+            _ndjson(
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "thinking": "checking",
+                        "tool_calls": [
+                            {"function": {"name": "get_logs", "arguments": {}}},
+                        ],
+                    },
+                    "done": False,
+                },
+                _done(),
+            ),
+            _ndjson({"message": {"role": "assistant", "content": "ok"}, "done": False}, _done()),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, text=next(replies), headers={"content-type": "application/x-ndjson"}
+        )
+
+    class _Executor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "starting\x07 pod ready"
+
+    provider = OllamaProvider(
+        base_url="http://x:11434",
+        model="qwen3:8b",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    runtime = AgentRuntime(provider, _Executor())
+
+    [event async for event in runtime.run_turn("why?", "view=pods\x07ns=default")]
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    reported = {(r.path, r.reason) for r in snapshot.redactions}
+    assert ("messages[1].content", "control-character") in reported
+    assert ("messages[3].content", "control-character") in reported
+    assert "thinking" in snapshot.payload_json
