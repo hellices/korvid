@@ -215,10 +215,14 @@ def _mask_reason(key: str, item: Any, *, secret_sibling: bool) -> str | None:
         return "sensitive-env-value"
     if normalize_name(key) in _SENSITIVE_NAMES:
         return "sensitive-key"
-    # Compound keys (`dbPassword`, `admin-api-key`) only mask text values:
-    # a flag like `automountServiceAccountToken: true` names a credential
-    # without carrying one, and masking it would lose real information.
-    if isinstance(item, str) and denotes_secret(key):
+    # Compound keys (`dbPassword`, `admin-api-key`) name the credential
+    # their value holds, so the value goes whatever type it arrived as: a
+    # mapping or list would otherwise be descended into and shipped under
+    # inner keys that name nothing, and a number can be a PIN. The one
+    # exception is a bool, which carries a single bit and no secret — a
+    # flag like `automountServiceAccountToken: true` names a credential
+    # without holding one, and masking it would lose real information.
+    if not isinstance(item, bool) and denotes_secret(key):
         return "sensitive-key"
     return None
 

@@ -587,6 +587,36 @@ def test_structured_string_values_under_compound_credential_keys_are_masked() ->
     assert "raw-api-key" not in sanitized
 
 
+def test_structured_values_of_any_shape_under_compound_credential_keys_are_masked() -> None:
+    """A compound key is as strong a classifier as an exact one.
+
+    Only the key names the credential here, so a mapping or list value
+    would be shipped under inner keys that name nothing — masking has to
+    take the whole value whatever shape it arrived in.
+    """
+    result = yaml.safe_dump(
+        {
+            "kind": "MyDatabase",
+            "spec": {
+                "dbPassword": {"raw": "mapping-sentinel"},
+                "adminApiKey": ["list-sentinel", {"nested": "deep-sentinel"}],
+                "rotationTokenPin": 1234567890123456,
+                "automountServiceAccountToken": True,
+                "tokenizerPath": "/models/tokenizer",
+            },
+        }
+    )
+    sanitized = sanitize_tool_result("get_resource", result)
+    spec = yaml.safe_load(sanitized)["spec"]
+    assert spec["dbPassword"] == MASK_PLACEHOLDER
+    assert spec["adminApiKey"] == MASK_PLACEHOLDER
+    assert spec["rotationTokenPin"] == MASK_PLACEHOLDER
+    assert spec["automountServiceAccountToken"] is True
+    assert spec["tokenizerPath"] == "/models/tokenizer"
+    for sentinel in ("mapping-sentinel", "list-sentinel", "deep-sentinel", "1234567890123456"):
+        assert sentinel not in sanitized
+
+
 @pytest.mark.parametrize("profile_name", ["full", "small"])
 def test_derived_ceiling_admits_a_history_budget_worth_of_escaped_content(
     profile_name: str,

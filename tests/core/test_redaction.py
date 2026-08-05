@@ -153,3 +153,72 @@ def test_credential_names_are_recognized(name: str) -> None:
 @pytest.mark.parametrize("name", ["TOKENIZER_PATH", "LOG_LEVEL", "passwordless_mode_note"])
 def test_unrelated_names_are_not_credentials(name: str) -> None:
     assert not denotes_secret(name)
+
+
+@pytest.mark.parametrize(
+    ("value", "label"),
+    [
+        ({"raw": "hunter2-sentinel"}, "mapping"),
+        (["hunter2-sentinel"], "list"),
+        ({"outer": {"inner": ["hunter2-sentinel"]}}, "nested"),
+        ([{"name": "primary", "secret": "hunter2-sentinel"}], "list-of-mappings"),
+    ],
+)
+def test_a_compound_credential_key_masks_a_structured_value(value: Any, label: str) -> None:
+    """`dbPassword: {raw: ...}` is malformed or hostile, never a flag.
+
+    Descending into it ships the credential under keys (`raw`, `0`) that
+    say nothing about what they hold, so nothing downstream can recognize
+    it. The key already said it — the whole value goes.
+    """
+    redacted = redact_manifest({"kind": "MyDatabase", "spec": {"dbPassword": value}})
+    assert redacted["spec"]["dbPassword"] == MASK_PLACEHOLDER, label
+
+
+@pytest.mark.parametrize("value", [1234567890123456, -1, 3.5])
+def test_a_compound_credential_key_masks_a_numeric_value(value: float) -> None:
+    """A numeric PIN or long integer token is a credential like any other."""
+    redacted = redact_manifest({"spec": {"admin-api-key": value}})
+    assert redacted["spec"]["admin-api-key"] == MASK_PLACEHOLDER
+
+
+def test_a_compound_credential_key_masks_an_absent_value() -> None:
+    """Consistent with an exactly-named key: the type never opens a hole."""
+    redacted = redact_manifest({"spec": {"adminApiKey": None}})
+    assert redacted["spec"]["adminApiKey"] == MASK_PLACEHOLDER
+
+
+def test_a_compound_credential_key_keeps_a_boolean_flag() -> None:
+    """A bool carries one bit and no secret; masking it loses real information.
+
+    `automountServiceAccountToken` names a credential without holding one,
+    and whether a pod mounts its token is exactly what a diagnosis needs.
+    """
+    document = {
+        "spec": {
+            "automountServiceAccountToken": True,
+            "enableApiKeyAuth": False,
+            "hostNetwork": True,
+        }
+    }
+    redacted = redact_manifest(document)
+    assert redacted["spec"]["automountServiceAccountToken"] is True
+    assert redacted["spec"]["enableApiKeyAuth"] is False
+    assert redacted["spec"]["hostNetwork"] is True
+
+
+def test_non_credential_keys_keep_their_structured_values() -> None:
+    """The tightened type rule must not swallow ordinary nested config."""
+    document = {
+        "spec": {
+            "tokenizerConfig": {"path": "/models/tok", "layers": [1, 2]},
+            "replicas": 3,
+            "secretName": "db-credentials",
+            "resources": {"limits": {"cpu": "500m"}},
+        }
+    }
+    redacted = redact_manifest(document)
+    assert redacted["spec"]["tokenizerConfig"] == {"path": "/models/tok", "layers": [1, 2]}
+    assert redacted["spec"]["replicas"] == 3
+    assert redacted["spec"]["secretName"] == "db-credentials"
+    assert redacted["spec"]["resources"] == {"limits": {"cpu": "500m"}}
