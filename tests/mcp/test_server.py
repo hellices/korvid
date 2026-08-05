@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import yaml
 
+from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
 from korvid.k8s.logs import LogLine
 from korvid.mcp.server import (
@@ -27,7 +28,10 @@ from tests.platforms import POSIX
 from tests.tools.test_executor import (
     LONG_NAME_ENV_SENTINEL,
     NESTED_SECRET_SENTINEL,
+    PARENT_SECRET,
     FakeBridge,
+    ParentCredentialKube,
+    _diagnose_executor,
     identity_last_crd,
     oversized_crd_with_nested_credentials,
 )
@@ -186,6 +190,27 @@ async def test_mcp_reports_a_manifest_too_deep_to_redact_as_a_safe_error() -> No
     assert content[0].text.startswith("ERROR:")
     assert "too deeply nested" in content[0].text
     assert "cmF3LXNlY3JldA==" not in content[0].text
+
+
+async def test_mcp_compound_diagnoses_are_masked_in_every_section() -> None:
+    """`docs/mcp.md` promises an MCP client the same masked report the
+    model sees. Round 9 redacted the per-pod blocks; the workload's own
+    conditions, Warning events and child-LIST errors were assembled after
+    that pass and crossed to the client verbatim (PR #197 final review)."""
+    kube = ParentCredentialKube(
+        condition_message=f"probe rejected api_key={PARENT_SECRET}",
+        event_message=f"registry auth failed password={PARENT_SECRET}",
+    )
+    server = make_server(_diagnose_executor(kube))
+
+    content = await server.call_tool(
+        "diagnose_workload", {"kind": "deployments", "name": "api", "namespace": "default"}
+    )
+
+    assert PARENT_SECRET not in content[0].text
+    assert MASK_PLACEHOLDER in content[0].text
+    assert "MinimumReplicasUnavailable" in content[0].text
+    assert "FailedCreate (3x" in content[0].text
 
 
 async def test_mcp_text_results_carry_only_tool_shaping() -> None:

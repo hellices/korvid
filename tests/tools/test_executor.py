@@ -2700,6 +2700,199 @@ async def test_the_string_api_reports_the_same_redacted_report() -> None:
     assert MASK_PLACEHOLDER in out
 
 
+# --- The parent sections are redacted too (round 10 final review) ----------
+#
+# Round 9 redacted the per-pod blocks, which is where a log excerpt lands.
+# The rest of the compound report — the workload's own conditions, its
+# Warning events, the owned-ReplicaSet lines, the child-LIST error — is
+# assembled from cluster strings just as attacker-influenced as a log
+# line, and went out unredacted.
+
+PARENT_SECRET = "4d2e6b8a1c0f73951e8a0d2c4b6e8f01"
+
+
+class ParentCredentialKube(FakeDiagnoseKube):
+    """A rollout failure whose *parent* sections carry the credential.
+
+    The pod blocks are clean on purpose: they have been redacted since
+    round 9, so only an assignment in a workload condition, a workload
+    Warning event, or a failed child LIST can show whether the assembled
+    parent report is covered too.
+    """
+
+    def __init__(
+        self,
+        *,
+        condition_message: str = "replicas are unavailable",
+        event_message: str = "failed to create pods",
+        list_error: str = "",
+        pod_log_line: str = "connection refused",
+    ) -> None:
+        super().__init__()
+        self.list_error = list_error
+        self.objects[("deployments", "api")] = {
+            "kind": "Deployment",
+            "metadata": {"name": "api", "namespace": "default", "uid": "deploy-uid"},
+            "spec": {"replicas": 2},
+            "status": {
+                "replicas": 2,
+                "readyReplicas": 1,
+                "conditions": [
+                    {
+                        "type": "Available",
+                        "status": "False",
+                        "reason": "MinimumReplicasUnavailable",
+                        "message": condition_message,
+                    }
+                ],
+            },
+        }
+        replicaset = self.objects[("replicasets", "api-6f")]
+        replicaset["metadata"].update(
+            {
+                "namespace": "default",
+                "uid": "rs-uid",
+                "ownerReferences": [
+                    {"kind": "Deployment", "name": "api", "uid": "deploy-uid", "controller": True}
+                ],
+            }
+        )
+        replicaset["spec"] = {"replicas": 1}
+        replicaset["status"] = {"replicas": 1, "readyReplicas": 0}
+        for key, obj in list(self.objects.items()):
+            if key[0] != "pods":
+                continue
+            obj["metadata"]["ownerReferences"] = [
+                {"kind": "ReplicaSet", "name": "api-6f", "uid": "rs-uid", "controller": True}
+            ]
+            obj["metadata"].setdefault("namespace", "default")
+            obj["status"]["phase"] = "Pending"
+        self.log_lines = [pod_log_line]
+        self.workload_events: list[dict[str, Any]] = [
+            {
+                "type": "Warning",
+                "reason": "FailedCreate",
+                "message": event_message,
+                "count": 3,
+                "lastTimestamp": "2026-07-27T06:30:00Z",
+            }
+        ]
+
+    async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+        if self.list_error and meta.kind == "Pod":
+            raise ApiStatusError(500, self.list_error)
+        return await super().list_objects(meta, namespace)
+
+    async def list_events_for(
+        self, namespace: str, name: str, *, kind: str | None = None, uid: str | None = None
+    ) -> list[dict[str, Any]]:
+        # The workload's own events, not the pod's: this fixture has to be
+        # able to plant a credential in exactly one of the two.
+        return self.workload_events if kind == "Deployment" else self.events
+
+
+_WORKLOAD_ARGS = {"kind": "deployments", "name": "api", "namespace": "default"}
+
+
+async def test_a_workload_condition_credential_never_leaves_the_producer() -> None:
+    """A Deployment condition message is cluster text like any other."""
+    kube = ParentCredentialKube(
+        condition_message=f"probe rejected api_key={PARENT_SECRET} at startup"
+    )
+
+    outcome = await _diagnose_executor(kube).execute_recorded("diagnose_workload", _WORKLOAD_ARGS)
+
+    assert PARENT_SECRET not in outcome.text
+    assert MASK_PLACEHOLDER in outcome.text
+    assert [record.reason for record in outcome.redactions] == ["credential-assignment"]
+    assert "MinimumReplicasUnavailable" in outcome.text
+    assert not outcome.error
+
+
+async def test_a_workload_warning_event_credential_never_leaves_the_producer() -> None:
+    kube = ParentCredentialKube(event_message=f"registry auth failed password={PARENT_SECRET}")
+
+    outcome = await _diagnose_executor(kube).execute_recorded("diagnose_workload", _WORKLOAD_ARGS)
+
+    assert PARENT_SECRET not in outcome.text
+    assert "FailedCreate (3x" in outcome.text
+    assert [record.reason for record in outcome.redactions] == ["credential-assignment"]
+
+
+async def test_a_failed_child_list_credential_never_leaves_the_producer() -> None:
+    """The LIST error is interpolated straight from the API exception."""
+    kube = ParentCredentialKube(list_error=f"denied for AWS_SECRET_ACCESS_KEY={PARENT_SECRET}")
+
+    outcome = await _diagnose_executor(kube).execute_recorded("diagnose_workload", _WORKLOAD_ARGS)
+
+    assert PARENT_SECRET not in outcome.text
+    assert MASK_PLACEHOLDER in outcome.text
+    assert "POD DIAGNOSES" in outcome.text
+    assert outcome.redactions
+
+
+async def test_the_parent_report_is_redacted_exactly_once() -> None:
+    """Two assignments, two records: the parent must not be passed through
+    redaction twice, which would inflate the inventory the inspector shows."""
+    kube = ParentCredentialKube(
+        condition_message=f"probe rejected api_key={PARENT_SECRET}",
+        event_message=f"registry auth failed password={PARENT_SECRET}",
+    )
+
+    outcome = await _diagnose_executor(kube).execute_recorded("diagnose_workload", _WORKLOAD_ARGS)
+
+    assert [record.reason for record in outcome.redactions] == ["credential-assignment"] * 2
+    assert {record.path for record in outcome.redactions} == {"report"}
+
+
+async def test_parent_and_pod_redactions_share_one_record_trail() -> None:
+    kube = ParentCredentialKube(
+        condition_message=f"probe rejected api_key={PARENT_SECRET}",
+        pod_log_line=f"level=error api_key={_LOG_SECRET} retry",
+    )
+
+    outcome = await _diagnose_executor(kube).execute_recorded("diagnose_workload", _WORKLOAD_ARGS)
+
+    assert PARENT_SECRET not in outcome.text
+    assert _LOG_SECRET not in outcome.text
+    # One record from the parent condition, one from the single expanded
+    # pod block: two passes, one trail, nothing counted twice.
+    assert [record.reason for record in outcome.redactions] == ["credential-assignment"] * 2
+
+
+async def test_the_masked_parent_report_keeps_its_sections_and_its_bound() -> None:
+    kube = ParentCredentialKube(
+        condition_message=f"probe rejected api_key={PARENT_SECRET}",
+        event_message=f"registry auth failed password={PARENT_SECRET}",
+    )
+
+    out = await _diagnose_executor(kube).execute("diagnose_workload", _WORKLOAD_ARGS)
+
+    assert PARENT_SECRET not in out
+    for title in (
+        "WORKLOAD — Deployment default/api",
+        "SELECTED NON-READY PODS",
+        "WORKLOAD CONDITIONS (failing first)",
+        "WORKLOAD WARNING EVENTS (newest first)",
+        "OWNED REPLICASETS",
+    ):
+        assert title in out
+    assert out.index("WORKLOAD CONDITIONS") < out.index("WORKLOAD WARNING EVENTS")
+    assert out.index("OWNED REPLICASETS") < out.index("\nPOD DIAGNOSIS — default/api-1\n")
+    assert "MinimumReplicasUnavailable" in out
+    assert len(out) <= MAX_RESULT_CHARS
+
+
+async def test_a_parent_report_without_credentials_is_left_alone() -> None:
+    outcome = await _diagnose_executor(ParentCredentialKube()).execute_recorded(
+        "diagnose_workload", _WORKLOAD_ARGS
+    )
+
+    assert MASK_PLACEHOLDER not in outcome.text
+    assert not outcome.redactions
+    assert "replicas are unavailable" in outcome.text
+
+
 # --- Recursion exhaustion is a refusal, not a result (round 9) -------------
 
 

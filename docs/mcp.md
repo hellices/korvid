@@ -29,11 +29,16 @@ format:
   nesting depth before the document is bounded and returned. An MCP client
   sees the same redacted manifest the model would.
 - **Compound diagnoses** (`diagnose_workload`) are credential-pattern
-  masked where they are shaped, before the per-pod report is compacted to
-  fit. That reduction cuts at a byte offset, so redacting afterwards
-  would let an assignment split across the cut escape both halves;
-  redacting first means the value is gone before there is anything to
-  split. An MCP client sees the same masked report the model would.
+  masked where they are shaped — every section, not only the expanded pod
+  blocks: the workload's own conditions and Warning events, the
+  owned-ReplicaSet lines and the child-LIST error are masked before the
+  line clamp and the section budget shorten them, and each pod block
+  before it is compacted to fit. Order matters in both places: a clamp
+  keeps a line's head and the compaction cuts at a byte offset, so
+  redacting afterwards would let an assignment split across a cut escape
+  both halves; redacting first means the value is gone before there is
+  anything to split. An MCP client sees the same masked report the model
+  would.
 - **Logs, events, lists, single-pod diagnoses, and helm status** get only
   their own tool-specific shaping (scoping, formatting, size caps). They
   are **not** credential-pattern masked: a token printed into a pod's log

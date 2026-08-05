@@ -2633,6 +2633,107 @@ async def test_a_shaped_report_reaches_the_provider_already_redacted() -> None:
     assert any(r.reason == "credential-assignment" for r in snapshot.redactions)
 
 
+def _workload_provider() -> ScriptedProvider:
+    return ScriptedProvider(
+        [
+            [
+                {
+                    "type": "tool_call",
+                    "id": "c1",
+                    "name": "diagnose_workload",
+                    "arguments": '{"kind": "deployments", "name": "api", "namespace": "default"}',
+                },
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+        ]
+    )
+
+
+def _parent_credential_executor(**kwargs: str) -> Any:
+    """A real ToolExecutor whose *parent* report sections carry a credential."""
+    from tests.tools.test_executor import ParentCredentialKube, _diagnose_executor
+
+    return _diagnose_executor(ParentCredentialKube(**kwargs))
+
+
+async def test_a_parent_report_section_reaches_the_provider_already_redacted() -> None:
+    """Round 9 covered the per-pod blocks only. A workload condition or a
+    workload Warning event is assembled outside them, so until the
+    producer redacted the parent too, the only pass that masked them for
+    the model was the boundary's — and an MCP client, which has no
+    boundary, got them raw (PR #197 final review)."""
+    from tests.tools.test_executor import PARENT_SECRET
+
+    provider = _workload_provider()
+    runtime = AgentRuntime(
+        provider,
+        _parent_credential_executor(
+            condition_message=f"probe rejected api_key={PARENT_SECRET}",
+            event_message=f"registry auth failed password={PARENT_SECRET}",
+        ),
+    )
+
+    await collect(runtime, "why?")
+
+    assert len(provider.calls) == 2
+    assert PARENT_SECRET not in json.dumps(provider.calls)
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert PARENT_SECRET not in snapshot.payload_json
+    tool_message = provider.calls[1][-1]
+    assert "MinimumReplicasUnavailable" in tool_message["content"]
+    assert "FailedCreate (3x" in tool_message["content"]
+
+
+async def test_the_model_and_an_mcp_client_see_the_same_masked_report() -> None:
+    """The claim `docs/mcp.md` makes about compound diagnoses, checked
+    against both surfaces at once rather than asserted."""
+    from korvid.mcp.server import KorvidMCPServer
+    from korvid.tools.executor import READ_TOOLS, UI_TOOLS
+    from tests.tools.test_executor import PARENT_SECRET
+
+    messages = {
+        "condition_message": f"probe rejected api_key={PARENT_SECRET}",
+        "event_message": f"registry auth failed password={PARENT_SECRET}",
+    }
+    provider = _workload_provider()
+    runtime = AgentRuntime(provider, _parent_credential_executor(**messages))
+    server = KorvidMCPServer(
+        _parent_credential_executor(**messages), READ_TOOLS + UI_TOOLS, port=0, endpoint_path=None
+    )
+
+    await collect(runtime, "why?")
+    content = await server.call_tool(
+        "diagnose_workload", {"kind": "deployments", "name": "api", "namespace": "default"}
+    )
+
+    assert provider.calls[1][-1]["content"] == content[0].text
+    assert PARENT_SECRET not in content[0].text
+
+
+async def test_a_parent_report_redaction_is_not_counted_twice() -> None:
+    """Three passes now see this mask — the producer's, history ingress,
+    and the boundary's — and the inventory still lists one, at the path
+    the payload spells."""
+    from tests.tools.test_executor import PARENT_SECRET
+
+    runtime = AgentRuntime(
+        _workload_provider(),
+        _parent_credential_executor(condition_message=f"probe rejected api_key={PARENT_SECRET}"),
+    )
+
+    await collect(runtime, "why?")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert [(item.path, item.reason) for item in snapshot.redactions] == [
+        ("messages[3].content", "credential-assignment")
+    ]
+    payload = json.loads(snapshot.payload_json)
+    assert payload["messages"][3]["role"] == "tool"
+
+
 # --- A document too deep to redact stops the turn (round 9) ----------------
 
 

@@ -1194,6 +1194,23 @@ class ToolExecutor(RecordedExecution):
             out.append(line)
         return out
 
+    @classmethod
+    def _redacted_section(cls, lines: list[str], records: list[RedactionRecord]) -> list[str]:
+        """Redact one parent section's lines, then clamp and budget them.
+
+        A workload condition's `message`, a Warning event's `message` and
+        an API error interpolated into a LIST failure are cluster strings
+        as attacker-influenced as a log excerpt, and every one of them is
+        assembled outside the per-pod blocks that redaction already
+        covered. Redacting here — before the clamp shortens a line and
+        before the section budget drops one — keeps the classifier's
+        evidence intact for the pass that needs it, and is the only pass
+        an MCP client's copy of this report ever gets (PR #197 review).
+        """
+        return cls._budget_section(
+            [cls._clamp_line(redact_text(line, "report", records)) for line in lines]
+        )
+
     @staticmethod
     def _trim_front(lines: list[str], budget: int) -> list[str]:
         """Drop leading lines until the joined text fits the budget.
@@ -1412,14 +1429,12 @@ class ToolExecutor(RecordedExecution):
             ),
         ]
         report: list[str] = []
+        records: list[RedactionRecord] = []
         for title, lines in sections:
             report.append(title)
-            report.extend(
-                f"  {line}"
-                for line in self._budget_section([self._clamp_line(line) for line in lines])
-            )
+            report.extend(f"  {line}" for line in self._redacted_section(lines, records))
         if pod_list_error:
-            report.extend(["POD DIAGNOSES", f"  {pod_list_error}"])
+            report.extend(["POD DIAGNOSES", f"  {redact_text(pod_list_error, 'report', records)}"])
 
         omitted_line = (
             f"({len(omitted)} more non-ready pod(s) not expanded: "
@@ -1429,6 +1444,7 @@ class ToolExecutor(RecordedExecution):
             if omitted
             else ""
         )
+        omitted_line = redact_text(omitted_line, "report", records) if omitted_line else ""
         parent_size = len("\n".join(report))
         separator_size = len(selected) + (1 if omitted_line else 0)
         remaining = max(
@@ -1440,7 +1456,6 @@ class ToolExecutor(RecordedExecution):
         )
         share = remaining // max(1, len(selected))
         # The runtime preserves the report tail when applying the smaller profile cap.
-        records: list[RedactionRecord] = []
         for pod in reversed(selected):
             try:
                 diagnosis = await self._diagnose_pod(

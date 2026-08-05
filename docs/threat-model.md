@@ -249,11 +249,13 @@ These are explicit, current limitations — not aspirational future work:
   `OutboundPolicy` or any embedded provider, and it has no way to know or
   constrain what model or data policy the external client applies to the
   tool results it receives. Structured manifests are still redacted
-  producer-side by the shared primitive, and compound workload diagnoses
-  are credential-pattern masked before they are compacted (see
-  [`docs/mcp.md`](mcp.md#mcp-server)), but the remaining text results —
-  logs, events, single-pod diagnoses — carry only their tool-specific
-  shaping.
+  producer-side by the shared primitive, and every section of a compound
+  workload diagnosis — the workload's own conditions and Warning events,
+  the owned-ReplicaSet lines, the child-LIST error, and each expanded pod
+  block — is credential-pattern masked before it is clamped, budgeted or
+  compacted (see [`docs/mcp.md`](mcp.md#mcp-server)), but the remaining
+  text results — logs, events, single-pod diagnoses — carry only their
+  tool-specific shaping.
 - **Raw logs and the audit trail are sensitive on their own terms.** Log
   captures, describe/log exports, and `audit.jsonl` are not sanitized the
   way embedded-provider payloads are — they are not provider payloads at
