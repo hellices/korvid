@@ -39,6 +39,31 @@ async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:
     assert report.api.operations.get("get", 0) == 0
 
 
+async def test_replay_time_scale_1_uses_relative_inter_event_delays() -> None:
+    """time_scale=1 must replay within approximately profile.duration_seconds.
+
+    If the delay computation uses each event's absolute offset_seconds instead
+    of the elapsed time since churn started, total sleep = sum(all offsets) ≈
+    many multiples of the profile duration, causing the until() guard to fire.
+    """
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-ts1",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=20,
+        duration_seconds=3,
+        bursts=(),
+        failures=(),
+    )
+    # With the bug the sum of absolute offsets is ~90 s > the 30 s until()
+    # timeout, causing an AssertionError before any assert below is reached.
+    report = await run_replay(profile, ReplayOptions(time_scale=1))
+    assert report.dropped_updates == 0
+    assert report.object_count == 20
+
+
 async def test_replay_gone_reconnects_and_digest_matches() -> None:
     """gone at event 5 triggers one reconnect/re-LIST; final digest drops stale rows."""
     profile = WorkloadProfile(

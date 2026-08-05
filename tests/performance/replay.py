@@ -136,6 +136,7 @@ class _ReplaySource:
         self._failures = failures
         self._generation = 0
         self._next_event_index = 0
+        self._replay_start: float = 0.0
         self._current: dict[str, PodSummary] = {
             f"{p.namespace}/{p.name}": p for p in initial_pods(profile)
         }
@@ -192,11 +193,16 @@ class _ReplaySource:
             # Pause here until run_replay confirms the table is populated.
             self._churn_ready.set()
             await self._churn_start.wait()
+            # Record the wall-clock instant when churn begins so that
+            # event.offset_seconds (absolute positions within the profile)
+            # can be converted to correct inter-event delays below.
+            self._replay_start = monotonic()
 
         # --- WATCH phase ---
         for i in range(self._next_event_index, len(self._events)):
             event = self._events[i]
-            delay = event.offset_seconds * self._options.time_scale
+            elapsed = monotonic() - self._replay_start
+            delay = event.offset_seconds * self._options.time_scale - elapsed
             if delay > 0:
                 await asyncio.sleep(delay)
 
