@@ -24,6 +24,7 @@ from korvid.mcp.server import (
     default_endpoint_path,
 )
 from korvid.tools.executor import PROPOSAL_TOOLS, READ_TOOLS, UI_TOOLS, ToolExecutor
+from korvid.tools.structured import load_structured_document
 from tests.platforms import POSIX
 from tests.tools.test_executor import (
     LONG_NAME_ENV_SENTINEL,
@@ -31,6 +32,7 @@ from tests.tools.test_executor import (
     PARENT_SECRET,
     FakeBridge,
     ParentCredentialKube,
+    _ambiguous_key_manifest,
     _diagnose_executor,
     identity_last_crd,
     oversized_crd_with_nested_credentials,
@@ -1118,3 +1120,22 @@ async def test_mcp_bounded_manifests_still_name_their_object() -> None:
     manifest = yaml.safe_load(content[0].text)
     assert manifest["kind"] == "CompositeApp"
     assert manifest["metadata"]["name"] == "composite-0"
+
+
+async def test_mcp_manifests_stay_readable_by_the_strict_reader() -> None:
+    """MCP shares the producer, so what it hands a client is the same
+    unambiguous document the model's boundary re-reads (round 13)."""
+
+    class AmbiguousKeyKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            return _ambiguous_key_manifest()
+
+    executor = ToolExecutor(AmbiguousKeyKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_resource", {"kind": "pods", "name": "flags", "namespace": "prod"}
+    )
+    loaded = load_structured_document(content[0].text)
+
+    assert loaded == _ambiguous_key_manifest()

@@ -7,7 +7,14 @@ from typing import Any
 import pytest
 import yaml
 
-from korvid.tools.structured import ELISION, ERROR_PREFIX, dump_bounded_yaml, dump_yaml
+from korvid.tools.structured import (
+    ELISION,
+    ERROR_PREFIX,
+    StructuredParseError,
+    dump_bounded_yaml,
+    dump_yaml,
+    load_structured_document,
+)
 
 
 def test_small_document_is_returned_unmodified() -> None:
@@ -181,3 +188,126 @@ def test_reduction_stays_deterministic() -> None:
     document = _identity_last_crd()
 
     assert dump_bounded_yaml(document, 800) == dump_bounded_yaml(dict(document), 800)
+
+
+# --- One document, one reading (round 13) ---------------------------------
+
+_DUP_SENTINEL = "Y2EtY2VydGlmaWNhdGUtYm9keQ=="
+
+
+def test_a_plain_document_reads_exactly_as_written() -> None:
+    loaded = load_structured_document("kind: Secret\ndata:\n  ca.crt: abc\n")
+
+    assert loaded == {"kind": "Secret", "data": {"ca.crt": "abc"}}
+
+
+def test_a_repeated_top_level_key_is_refused() -> None:
+    """`kind: Secret … kind: ConfigMap` loads as a ConfigMap that still
+    carries the credentials, so the redactor never sees a Secret."""
+    with pytest.raises(StructuredParseError, match="repeat a mapping key"):
+        load_structured_document(
+            f"kind: Secret\ndata:\n  ca.crt: {_DUP_SENTINEL}\nkind: ConfigMap\n"
+        )
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("kind", '"kind"'), ("true", "yes"), ("null", "~"), ("1", "1.0")],
+)
+def test_keys_yaml_reads_as_one_value_are_refused(first: str, second: str) -> None:
+    """Two spellings that resolve to the same key collapse just as
+    silently as two identical ones."""
+    with pytest.raises(StructuredParseError, match="repeat a mapping key"):
+        load_structured_document(f"{first}: a\n{second}: b\n")
+
+
+def test_a_repeated_key_nested_in_a_list_item_is_refused() -> None:
+    """An env entry's second `name` frees its sibling `value`."""
+    with pytest.raises(StructuredParseError, match="repeat a mapping key"):
+        load_structured_document(
+            "kind: Pod\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - name: app\n"
+            "      env:\n"
+            "        - name: DB_PASSWORD\n"
+            "          name: HARMLESS\n"
+            f"          value: {_DUP_SENTINEL}\n"
+        )
+
+
+def test_a_merge_key_that_overrides_an_earlier_entry_is_refused() -> None:
+    """A merge is a second way to write the same key, so it lands in the
+    same entry list and collapses the same way."""
+    with pytest.raises(StructuredParseError, match="repeat a mapping key"):
+        load_structured_document(
+            f"kind: ConfigMap\n<<:\n  kind: Secret\n  data:\n    tls.key: {_DUP_SENTINEL}\n"
+        )
+
+
+def test_a_merge_that_adds_only_new_keys_still_reads() -> None:
+    """Only ambiguity is refused: a merge with nothing to override says
+    one thing, and the classifier it carries survives to the redactor."""
+    loaded = load_structured_document("<<:\n  kind: Secret\ndata:\n  ca.crt: abc\n")
+
+    assert loaded == {"kind": "Secret", "data": {"ca.crt": "abc"}}
+
+
+def test_an_anchor_reference_is_refused() -> None:
+    """An alias puts one node at many paths: the redactor copies each
+    occurrence, so nested aliases expand a few hundred characters into
+    millions of nodes and the request never gets built."""
+    with pytest.raises(StructuredParseError, match="reference an anchor"):
+        load_structured_document(
+            'a: &a ["x","x","x","x","x","x","x","x","x"]\n'
+            "b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]\n"
+            "c: [*b,*b,*b,*b,*b,*b,*b,*b,*b]\n"
+        )
+
+
+def test_an_anchor_nobody_references_is_harmless() -> None:
+    loaded = load_structured_document("kind: &named Secret\ndata:\n  ca.crt: abc\n")
+
+    assert loaded == {"kind": "Secret", "data": {"ca.crt": "abc"}}
+
+
+def test_the_refusal_never_quotes_the_document() -> None:
+    """A refusal that named the offending key would carry the content the
+    reader exists to withhold."""
+    with pytest.raises(StructuredParseError) as caught:
+        load_structured_document(f"tls.key: {_DUP_SENTINEL}\ntls.key: other\n")
+
+    assert _DUP_SENTINEL not in str(caught.value)
+    assert "tls.key" not in str(caught.value)
+
+
+def test_text_that_is_not_one_yaml_document_still_raises_a_yaml_error() -> None:
+    with pytest.raises(yaml.YAMLError):
+        load_structured_document("{invalid: [yaml")
+
+
+def test_what_korvid_serializes_can_always_be_read_back() -> None:
+    """A shared subtree serializes as an anchor by default, which this
+    reader refuses — so the producer never emits one."""
+    shared = {"name": "app", "image": "nginx"}
+    document = {"kind": "Pod", "spec": {"containers": [shared, shared]}}
+
+    loaded = load_structured_document(dump_yaml(document))
+
+    assert loaded == document
+    assert "*id00" not in dump_yaml(document)
+
+
+def test_a_bounded_document_can_always_be_read_back() -> None:
+    shared: dict[str, Any] = {"name": "app", "args": ["z" * 400]}
+    document = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "api-0"},
+        "spec": {"containers": [dict(shared) for _ in range(40)], "extra": shared},
+    }
+
+    loaded = load_structured_document(dump_bounded_yaml(document, 2_000))
+
+    assert isinstance(loaded, dict)
+    assert loaded["kind"] == "Pod"

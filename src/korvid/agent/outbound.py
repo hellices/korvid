@@ -34,7 +34,12 @@ from korvid.core.redaction import (
 )
 from korvid.tools.executor import MAX_RESULT_CHARS, compact_result
 from korvid.tools.registry import ResultFormat, tool_result_format
-from korvid.tools.structured import dump_bounded_yaml, dump_yaml
+from korvid.tools.structured import (
+    StructuredParseError,
+    dump_bounded_yaml,
+    dump_yaml,
+    load_structured_document,
+)
 
 _ALLOWED_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
@@ -257,9 +262,15 @@ def _sanitize_structured_result(
     shrunk — structurally, so what leaves here is still parseable YAML.
     Reducing first (a byte cut) would hand this function wreckage, which
     is fail-closed blocked and takes the whole turn with it.
+
+    The parse itself is the strict reader: a document that YAML would
+    resolve two ways is refused before redaction, because redaction reads
+    the classifiers a second `kind` or `name` silently replaces.
     """
     try:
-        loaded = yaml.safe_load(result)
+        loaded = load_structured_document(result)
+    except StructuredParseError as exc:
+        raise _blocked(str(exc)) from exc
     except (yaml.YAMLError, RecursionError) as exc:
         raise _blocked("structured tool result is invalid YAML") from exc
     if not isinstance(loaded, dict | list):

@@ -184,6 +184,20 @@ flowchart LR
   than guessed at, and a declaration cannot override a registry tool. A
   result the *producer* reports as a failure is text either way, so
   ordinary tool errors stay readable to the model.
+- **One reading per document** — structured results are parsed by
+  `load_structured_document` (`tools/structured.py`), which refuses a
+  mapping key repeated at any depth and any anchor reference. YAML
+  resolves a repeated key to the last one written, so `kind: Secret`
+  followed by `kind: ConfigMap` — or a second `name` inside an env
+  entry — loads as something whose classifier says "ordinary data" while
+  the credentials are still in it. Keys that YAML reads as one value
+  (`yes` and `true`, `null` and `~`) and a `<<` merge that overrides an
+  entry collapse the same way and are refused the same way. An alias is
+  refused from the other end: one node reachable at many paths is copied
+  at each of them, so a few hundred characters of nested aliases expand
+  into millions of nodes before anything is sent. Anchors nobody
+  references are fine, and korvid's own producer never writes an alias,
+  so a document it emits its own boundary can always read back.
 - **Request caps** — structured tool results are bounded while staying
   parsable (`dump_bounded_yaml` in `tools/structured.py`), text results are
   capped (`cap_result`/`compact_result` in `tools/executor.py`), retained

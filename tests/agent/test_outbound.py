@@ -1624,3 +1624,87 @@ def test_the_builtin_tool_schemas_survive_the_boundary_unchanged() -> None:
 
     assert prepared.tools == shipped
     assert prepared.snapshot.redactions == ()
+
+
+# --- A repeated key cannot erase the classifier (round 13) ----------------
+
+_REPEATED_SENTINEL = "Y2EtY2VydGlmaWNhdGUtYm9keQ=="
+
+
+def _structured(result: str) -> str:
+    return sanitize_tool_result("get_resource", result, result_format="structured_yaml")
+
+
+@pytest.mark.parametrize(
+    ("label", "document"),
+    [
+        (
+            "top-level kind",
+            f"kind: Secret\napiVersion: v1\ndata:\n  ca.crt: {_REPEATED_SENTINEL}\nkind: ConfigMap\n",
+        ),
+        (
+            "quoted kind",
+            f'"kind": Secret\ndata:\n  ca.crt: {_REPEATED_SENTINEL}\nkind: ConfigMap\n',
+        ),
+        (
+            "env sibling name",
+            "kind: Pod\nspec:\n  containers:\n    - name: app\n      env:\n"
+            "        - name: DB_PASSWORD\n          name: HARMLESS\n"
+            f"          value: {_REPEATED_SENTINEL}\n",
+        ),
+        (
+            "merge over kind",
+            f"kind: ConfigMap\n<<:\n  kind: Secret\n  data:\n    tls.key: {_REPEATED_SENTINEL}\n",
+        ),
+        (
+            "kind inside a list item",
+            "kind: List\nitems:\n  - kind: Secret\n    data:\n"
+            f"      dockerconfigjson: {_REPEATED_SENTINEL}\n    kind: ConfigMap\n",
+        ),
+        (
+            "stringData after a repeated kind",
+            "kind: Secret\nstringData:\n  a: fine\nmetadata:\n  name: db\n"
+            f"kind: ConfigMap\nstringData:\n  ca.crt: {_REPEATED_SENTINEL}\n",
+        ),
+    ],
+)
+def test_a_repeated_key_cannot_smuggle_a_secret_past_the_redactor(
+    label: str, document: str
+) -> None:
+    """`yaml.safe_load` resolves a repeated key to the last one written, so
+    a second `kind` turned a Secret into a ConfigMap while `data` still
+    held the credentials (PR #197 review)."""
+    with pytest.raises(OutboundPolicyError) as caught:
+        _structured(document)
+
+    assert _REPEATED_SENTINEL not in str(caught.value), label
+
+
+def test_the_block_message_never_quotes_the_document() -> None:
+    with pytest.raises(OutboundPolicyError, match="repeat a mapping key"):
+        _structured(f"kind: Secret\ndata:\n  ca.crt: {_REPEATED_SENTINEL}\nkind: ConfigMap\n")
+
+
+def test_an_anchor_reference_is_blocked_before_it_is_expanded() -> None:
+    """Redaction copies every occurrence, so nested aliases turn a few
+    hundred characters into millions of nodes on the way out."""
+    with pytest.raises(OutboundPolicyError, match="reference an anchor"):
+        _structured(
+            'a: &a ["x","x","x","x","x","x","x","x","x"]\n'
+            "b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]\n"
+            "c: [*b,*b,*b,*b,*b,*b,*b,*b,*b]\n"
+            "kind: ConfigMap\n"
+        )
+
+
+def test_a_document_that_says_one_thing_still_crosses() -> None:
+    """The rule is ambiguity, not repetition of a *word*: the same key
+    name at different depths is one reading and stays allowed."""
+    sanitized = _structured(
+        "kind: Secret\nmetadata:\n  name: db\ndata:\n  ca.crt: abc\nspec:\n  kind: nested\n"
+    )
+    loaded = yaml.safe_load(sanitized)
+
+    assert loaded["kind"] == "Secret"
+    assert loaded["data"]["ca.crt"] == MASK_PLACEHOLDER
+    assert loaded["spec"]["kind"] == "nested"

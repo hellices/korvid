@@ -28,7 +28,7 @@ from korvid.tools.executor import (
     compact_result,
 )
 from korvid.tools.registry import TOOLS_BY_NAME, ToolDef
-from korvid.tools.structured import ERROR_PREFIX
+from korvid.tools.structured import ERROR_PREFIX, load_structured_document
 
 
 class FakeKube:
@@ -3018,3 +3018,57 @@ def test_as_recorded_refuses_something_that_cannot_execute_a_tool() -> None:
 
     with pytest.raises(TypeError, match="async execute"):
         as_recorded(NotAnExecutor())
+
+
+# --- What the producer writes, the boundary can read (round 13) -----------
+
+
+def _ambiguous_key_manifest() -> dict[str, Any]:
+    """Annotation keys that YAML would resolve to bools, nulls and numbers.
+
+    Serialized carelessly they collapse into one another; the boundary
+    refuses a document whose keys collapse, so the producer has to emit
+    them as the distinct strings they are.
+    """
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": "flags",
+            "annotations": {
+                "true": "a",
+                "yes": "b",
+                "null": "c",
+                "~": "d",
+                "1": "e",
+                "1.0": "f",
+                "on": "g",
+            },
+        },
+    }
+
+
+async def test_a_produced_manifest_survives_the_strict_reader() -> None:
+    """The boundary re-reads every structured result, so a document the
+    producer writes must never look ambiguous when it is read back."""
+    executor = ToolExecutor(_DeepKube(_ambiguous_key_manifest()), {"pods": PODS_META})  # type: ignore[arg-type]  # test double for ReadOps
+
+    outcome = await executor.execute_recorded(
+        "get_resource", {"kind": "pods", "name": "flags", "namespace": "prod"}
+    )
+    loaded = load_structured_document(outcome.text)
+
+    assert loaded == _ambiguous_key_manifest()
+    assert len(loaded["metadata"]["annotations"]) == 7
+
+
+async def test_a_bounded_produced_manifest_survives_the_strict_reader() -> None:
+    """Reduction rewrites the document; what it emits has to stay readable."""
+    executor = ToolExecutor(_DeepKube(identity_last_crd()), {"pods": PODS_META})  # type: ignore[arg-type]  # test double for ReadOps
+
+    outcome = await executor.execute_recorded(
+        "get_resource", {"kind": "pods", "name": "composite-0", "namespace": "prod"}
+    )
+    loaded = load_structured_document(outcome.text)
+
+    assert loaded["kind"] == "CompositeApp"

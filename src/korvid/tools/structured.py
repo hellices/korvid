@@ -1,4 +1,4 @@
-"""Size-bounding for structured (YAML) tool results.
+"""Reading and size-bounding structured (YAML) tool results.
 
 A byte-level cut is fine for logs and reports, but it turns a manifest
 into text that is no longer YAML: the model can no longer parse it, and
@@ -14,6 +14,13 @@ A shrunk document still has to say what it is: `apiVersion`, `kind`,
 `metadata` and the `name`/`namespace` that identify an object are kept
 ahead of arbitrary entries at every step, so what survives is a smaller
 view of a nameable object rather than an anonymous pile of fields.
+
+Reading one back has the mirror-image requirement. Redaction decides
+what is secret from what the document *says* — `kind: Secret`, an env
+entry's `name` — so a document that can be read two ways is a document
+whose classifiers can be erased. `load_structured_document` is the one
+reader used wherever a structured result is parsed on its way out, and
+it refuses the constructs that give a document a second reading.
 """
 
 from __future__ import annotations
@@ -57,6 +64,100 @@ _IDENTITY_KEYS: tuple[str, ...] = ("apiVersion", "kind", "metadata", "name", "na
 #: document must never be able to start with it.
 ERROR_PREFIX = "ERROR:"
 
+#: Refusal messages. Constants, and deliberately vague about *which* key
+#: or anchor: a refusal that quoted the document would carry the content
+#: the reader exists to withhold into an error the model gets to see.
+_REPEATED_KEY = "a document must not repeat a mapping key"
+_ANCHOR_REFERENCE = "a document must not reference an anchor"
+
+
+class StructuredParseError(yaml.YAMLError):
+    """A document could not be read as saying exactly one thing.
+
+    A `yaml.YAMLError` so that every existing handler already fails
+    closed on it: a caller that only knows "this text is not a document"
+    treats an ambiguous one the same way, and a caller that wants the
+    distinction catches this type first.
+    """
+
+
+class _UnambiguousLoader(yaml.SafeLoader):
+    """`SafeLoader` that refuses documents with more than one reading."""
+
+    def __init__(self, stream: str) -> None:
+        self._composed: set[yaml.Node] = set()
+        super().__init__(stream)
+
+    def compose_node(self, parent: yaml.Node | None, index: int) -> yaml.Node | None:
+        node = super().compose_node(parent, index)
+        # Every node is composed exactly once; an alias returns a node
+        # that was composed before, which is how the reference shows up
+        # here without reaching into the event stream.
+        if node is not None:
+            if node in self._composed:
+                raise StructuredParseError(_ANCHOR_REFERENCE)
+            self._composed.add(node)
+        return node
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+        mapping = super().construct_mapping(node, deep=deep)
+        # `node.value` holds every entry the document wrote, with `<<`
+        # merges already flattened into it by `SafeConstructor`, so a
+        # shorter mapping means two of them landed on one key.
+        if len(mapping) != len(node.value):
+            raise StructuredParseError(_REPEATED_KEY)
+        return mapping
+
+
+def load_structured_document(text: str) -> Any:
+    """Read one structured document, refusing any second reading of it.
+
+    `yaml.safe_load` resolves a repeated mapping key to the last one
+    written, and an alias to the node it names — both silently. Either
+    erases what redaction reads: `kind: Secret` followed by `kind:
+    ConfigMap` loads as a ConfigMap whose `data` still holds the
+    credentials, and a second `name` in an env entry frees its sibling
+    `value` (PR #197 review). An alias is refused for the same reason
+    from the other end — one node reachable at many paths is copied at
+    each of them, so a few hundred characters of nested aliases expand
+    into millions of nodes before anything is sent.
+
+    Anchors nobody references are fine; it is the reference that makes a
+    document say something other than what is written where it is read.
+
+    Args:
+        text: The document as it arrived.
+
+    Returns:
+        Whatever the document parses to — including `None` for an empty
+        one. Which shapes are acceptable is the caller's rule.
+
+    Raises:
+        StructuredParseError: for a key repeated at any depth (including
+            keys YAML reads as one value, like `yes` and `true`, or a
+            `<<` merge that overrides an entry) or an anchor reference.
+        yaml.YAMLError: for text that is not one valid YAML document.
+    """
+    loader = _UnambiguousLoader(text)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()  # type: ignore[no-untyped-call]  # PyYAML leaves Reader.dispose unannotated
+
+
+class _NoAliasDumper(yaml.SafeDumper):
+    """`SafeDumper` that writes a shared node out at each place it appears.
+
+    Serializing a subtree that appears twice as an anchor and an alias is
+    smaller, but `load_structured_document` refuses an alias — so what
+    korvid produces would be a document korvid's own boundary blocks.
+    Redaction copies every node it walks, so this only ever costs size on
+    a document that was not redacted.
+    """
+
+    def ignore_aliases(self, data: Any) -> bool:
+        return True
+
 
 def dump_yaml(document: Any) -> str:
     """Serialize a document with the canonical structured-result options.
@@ -67,8 +168,9 @@ def dump_yaml(document: Any) -> str:
     structured redaction pipeline. Such a document is emitted with an
     explicit `---` document start: same parse, unambiguous prefix.
     """
-    text = yaml.safe_dump(
+    text = yaml.dump(
         document,
+        Dumper=_NoAliasDumper,
         default_flow_style=False,
         allow_unicode=True,
         sort_keys=True,

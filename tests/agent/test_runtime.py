@@ -3701,3 +3701,82 @@ async def test_a_caller_that_wants_a_duck_composes_the_adapter_itself() -> None:
     await collect(runtime, "why?")
 
     assert any("restarts: 7" in str(m.get("content")) for m in runtime._messages)
+
+
+# --- A repeated key cannot smuggle a Secret through (round 13) ------------
+
+_REPEATED_KEY_SECRET = """kind: Secret
+apiVersion: v1
+metadata:
+  name: tls
+data:
+  ca.crt: Y2EtY2VydGlmaWNhdGUtYm9keQ==
+kind: ConfigMap
+"""
+
+
+class _RepeatedKeyExecutor(RecordedExecution):
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        return _REPEATED_KEY_SECRET
+
+
+async def test_a_custom_structured_tool_cannot_repeat_a_key_to_erase_the_classifier() -> None:
+    """`kind: Secret … kind: ConfigMap` loaded as a ConfigMap that still
+    carried the credentials, so the whole `data` mapping shipped (PR #197
+    review). The turn stops at the result instead, and the last request
+    that really was handed over stands as the latest snapshot."""
+    provider = ScriptedProvider(
+        [
+            [{"type": "text_delta", "text": "hi"}, {"type": "done"}],
+            *_custom_turn(),
+        ]
+    )
+    runtime = AgentRuntime(
+        provider,
+        _RepeatedKeyExecutor(),
+        tools=[_CUSTOM_TOOL],
+        custom_tool_results=[CustomToolResult("fetch_manifest", "structured_yaml")],
+    )
+    await collect(runtime, "hello")
+
+    events = await collect(runtime, "fetch it")
+
+    assert [event for event in events if isinstance(event, AgentError)]
+    # The turn's first request went out; the one that would have carried
+    # the result never did.
+    assert len(provider.calls) == 2
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "Y2EtY2VydGlmaWNhdGUtYm9keQ==" not in snapshot.payload_json
+    assert not [
+        message
+        for message in json.loads(snapshot.payload_json)["messages"]
+        if message["role"] == "tool"
+    ]
+    assert not any("Y2EtY2VydGlmaWNhdGUtYm9keQ==" in json.dumps(call) for call in provider.calls)
+    assert not any(
+        "Y2EtY2VydGlmaWNhdGUtYm9keQ==" in event.message
+        for event in events
+        if isinstance(event, AgentError)
+    )
+
+
+async def test_a_blocked_repeated_key_leaves_the_session_usable() -> None:
+    """A refused document is one bad result, not the end of the session."""
+    provider = ScriptedProvider(
+        [*_custom_turn(), [{"type": "text_delta", "text": "ok"}, {"type": "done"}]]
+    )
+    runtime = AgentRuntime(
+        provider,
+        _RepeatedKeyExecutor(),
+        tools=[_CUSTOM_TOOL],
+        custom_tool_results=[CustomToolResult("fetch_manifest", "structured_yaml")],
+    )
+
+    blocked = await collect(runtime, "fetch it")
+    recovered = await collect(runtime, "just talk")
+
+    assert [event for event in blocked if isinstance(event, AgentError)]
+    assert not [event for event in recovered if isinstance(event, AgentError)]
+    assert runtime.latest_outbound_payload is not None
+    assert "Y2EtY2VydGlmaWNhdGUtYm9keQ==" not in runtime.latest_outbound_payload.payload_json
