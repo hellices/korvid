@@ -80,3 +80,104 @@ def test_a_document_never_serializes_into_the_error_marker() -> None:
     assert not text.startswith(ERROR_PREFIX)
     assert yaml.safe_load(text) == document
     assert yaml.safe_load(dump_bounded_yaml(document, 40)) is not None
+
+
+# --- Identity survives every rung of the ladder (round 10) ----------------
+
+
+def _identity_last_crd() -> dict[str, object]:
+    """A CRD whose identity keys are last in insertion order.
+
+    Nothing requires `apiVersion` to come first — an API server returns
+    what the resource declares, and a converted or patched object can
+    carry extension fields ahead of its own identity.
+    """
+    document: dict[str, object] = {f"extensionField{index:02d}": "y" * 300 for index in range(40)}
+    document["apiVersion"] = "example.com/v1"
+    document["kind"] = "CompositeApp"
+    document["metadata"] = {
+        "labels": {f"team-{index}": "z" * 50 for index in range(30)},
+        "name": "app-0",
+        "namespace": "prod",
+    }
+    return document
+
+
+@pytest.mark.parametrize("limit", [400, 800, 2_000, 6_000])
+def test_a_shrunk_document_still_says_what_it_is(limit: int) -> None:
+    """Reduction keeps whichever entries come first, and the ladder stops
+    at the first rung that fits — so a document whose identity sorts last
+    was returned as an anonymous pile of extension fields, never reaching
+    the identity fallback (PR #197 review)."""
+    text = dump_bounded_yaml(_identity_last_crd(), limit)
+    loaded = yaml.safe_load(text)
+
+    assert len(text) <= limit
+    assert loaded["apiVersion"] == "example.com/v1"
+    assert loaded["kind"] == "CompositeApp"
+
+
+@pytest.mark.parametrize("limit", [400, 800, 2_000, 6_000])
+def test_a_shrunk_document_still_says_which_object_it_is(limit: int) -> None:
+    """`metadata` has the same problem one level down: labels ahead of
+    `name` left a manifest that named its kind but not its object."""
+    text = dump_bounded_yaml(_identity_last_crd(), limit)
+    metadata = yaml.safe_load(text)["metadata"]
+
+    assert metadata["name"] == "app-0"
+    assert metadata["namespace"] == "prod"
+
+
+def test_identity_survives_in_a_nested_object() -> None:
+    """A manifest that embeds another object (a template, an owner) keeps
+    the inner identity too."""
+    document = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "web", "namespace": "prod"},
+        "spec": {
+            "template": {
+                **{f"field{index:02d}": "y" * 200 for index in range(20)},
+                "kind": "PodTemplate",
+                "metadata": {
+                    "labels": {f"l{index}": "z" * 40 for index in range(20)},
+                    "name": "web-template",
+                },
+            }
+        },
+    }
+
+    loaded = yaml.safe_load(dump_bounded_yaml(document, 1_500))
+
+    assert loaded["kind"] == "Deployment"
+    assert loaded["spec"]["template"]["kind"] == "PodTemplate"
+    assert loaded["spec"]["template"]["metadata"]["name"] == "web-template"
+
+
+def test_a_list_entry_keeps_the_name_that_identifies_it() -> None:
+    """Container and env lists identify their entries by `name`; losing it
+    turns evidence into an anonymous blob."""
+    document = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "api-0"},
+        "spec": {
+            "containers": [
+                {
+                    **{f"field{index:02d}": "y" * 150 for index in range(10)},
+                    "name": f"container-{index}",
+                }
+                for index in range(5)
+            ]
+        },
+    }
+
+    loaded = yaml.safe_load(dump_bounded_yaml(document, 3_200))
+
+    assert loaded["spec"]["containers"][0]["name"] == "container-0"
+
+
+def test_reduction_stays_deterministic() -> None:
+    document = _identity_last_crd()
+
+    assert dump_bounded_yaml(document, 800) == dump_bounded_yaml(dict(document), 800)

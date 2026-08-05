@@ -2781,3 +2781,37 @@ async def test_an_unrelated_recursion_failure_stays_an_ordinary_error() -> None:
 
     assert outcome.error
     assert outcome.text.startswith(ERROR_PREFIX)
+
+
+# --- A bounded manifest still says what it is (round 10) ------------------
+
+
+def identity_last_crd() -> dict[str, Any]:
+    """An oversized CRD whose identity keys are last in insertion order."""
+    document: dict[str, Any] = {f"extensionField{index:02d}": "y" * 400 for index in range(60)}
+    document["apiVersion"] = "example.com/v1"
+    document["kind"] = "CompositeApp"
+    document["metadata"] = {
+        "labels": {f"team-{index}": "z" * 60 for index in range(40)},
+        "name": "composite-0",
+        "namespace": "prod",
+    }
+    return document
+
+
+async def test_a_bounded_manifest_still_names_its_object() -> None:
+    """A result the model cannot identify is not evidence, and the
+    reduction used to drop identity whenever the document listed it last
+    (PR #197 review)."""
+    executor = ToolExecutor(_DeepKube(identity_last_crd()), {"pods": PODS_META})  # type: ignore[arg-type]  # test double for ReadOps
+
+    outcome = await executor.execute_recorded(
+        "get_resource", {"kind": "pods", "name": "composite-0", "namespace": "prod"}
+    )
+
+    manifest = yaml.safe_load(outcome.text)
+    assert len(outcome.text) <= MAX_RESULT_CHARS
+    assert manifest["kind"] == "CompositeApp"
+    assert manifest["apiVersion"] == "example.com/v1"
+    assert manifest["metadata"]["name"] == "composite-0"
+    assert manifest["metadata"]["namespace"] == "prod"

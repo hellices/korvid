@@ -9,6 +9,11 @@ Oversized structured results are therefore shrunk *structurally* — long
 scalars clamped, long lists and mappings elided, deep subtrees replaced
 by a marker — so the result is always a smaller but still valid document
 that says where content was dropped.
+
+A shrunk document still has to say what it is: `apiVersion`, `kind`,
+`metadata` and the `name`/`namespace` that identify an object are kept
+ahead of arbitrary entries at every step, so what survives is a smaller
+view of a nameable object rather than an anonymous pile of fields.
 """
 
 from __future__ import annotations
@@ -36,6 +41,16 @@ _REDUCTION_STEPS: tuple[tuple[int, int, int], ...] = (
 )
 
 _TRAILING_ELLIPSIS = "…"
+
+#: Keys that say what an object *is*, kept ahead of arbitrary entries at
+#: every rung of the ladder and in this order. Nothing requires a manifest
+#: to list them first — a converted or patched object can carry extension
+#: fields ahead of its own identity — and a reduction that keeps whichever
+#: entries came first would then return an anonymous pile of fields, at a
+#: size that fits, so the identity fallback never runs (PR #197 review).
+#: `name` and `namespace` cover `metadata` and the list shapes (containers,
+#: env, ports) whose entries are identified the same way.
+_IDENTITY_KEYS: tuple[str, ...] = ("apiVersion", "kind", "metadata", "name", "namespace")
 
 #: Prefix the executor puts in front of a failed tool result. The outbound
 #: boundary uses it to tell an executor error from a document, so a real
@@ -116,6 +131,17 @@ def _shrink(value: Any, *, scalars: int, entries: int, depth: int) -> Any:
     return value
 
 
+def _identity_first(value: Mapping[Any, Any]) -> list[tuple[Any, Any]]:
+    """The mapping's entries, identity first, everything else in order.
+
+    Deterministic: the reserved keys keep their canonical order and the
+    rest keep the document's.
+    """
+    reserved = [(key, value[key]) for key in _IDENTITY_KEYS if key in value]
+    rest = [(key, item) for key, item in value.items() if key not in _IDENTITY_KEYS]
+    return reserved + rest
+
+
 def _shrink_mapping(
     value: Mapping[Any, Any],
     *,
@@ -123,7 +149,7 @@ def _shrink_mapping(
     entries: int,
     depth: int,
 ) -> dict[Any, Any]:
-    items = list(value.items())
+    items = _identity_first(value)
     result: dict[Any, Any] = {
         key: _shrink(item, scalars=scalars, entries=entries, depth=depth - 1)
         for key, item in items[:entries]

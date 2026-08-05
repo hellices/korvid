@@ -28,6 +28,7 @@ from tests.tools.test_executor import (
     LONG_NAME_ENV_SENTINEL,
     NESTED_SECRET_SENTINEL,
     FakeBridge,
+    identity_last_crd,
     oversized_crd_with_nested_credentials,
 )
 
@@ -1072,3 +1073,23 @@ async def test_mcp_gets_a_safe_error_when_redaction_blocks_a_result() -> None:
 
     assert content[0].text.startswith("ERROR:")
     assert "cmF3LXNlY3JldA==" not in content[0].text
+
+
+async def test_mcp_bounded_manifests_still_name_their_object() -> None:
+    """An MCP client gets the same reduced document the model does, and it
+    has to be identifiable there too (PR #197 review)."""
+
+    class IdentityLastKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            return identity_last_crd()
+
+    executor = ToolExecutor(IdentityLastKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_resource", {"kind": "pods", "name": "composite-0", "namespace": "prod"}
+    )
+
+    manifest = yaml.safe_load(content[0].text)
+    assert manifest["kind"] == "CompositeApp"
+    assert manifest["metadata"]["name"] == "composite-0"
