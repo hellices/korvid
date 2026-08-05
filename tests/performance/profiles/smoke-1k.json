@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "smoke-1k",
+  "seed": 186,
+  "object_count": 1000,
+  "namespace_count": 20,
+  "steady_events_per_second": 20,
+  "duration_seconds": 5,
+  "bursts": [
+    {"start_second": 2, "duration_seconds": 1, "events_per_second": 100}
+  ],
+  "failures": []
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "burst-50k",
+  "seed": 186,
+  "object_count": 50000,
+  "namespace_count": 500,
+  "steady_events_per_second": 200,
+  "duration_seconds": 30,
+  "bursts": [
+    {"start_second": 5, "duration_seconds": 1, "events_per_second": 1000},
+    {"start_second": 15, "duration_seconds": 1, "events_per_second": 1000},
+    {"start_second": 25, "duration_seconds": 1, "events_per_second": 1000}
+  ],
+  "failures": []
+}
