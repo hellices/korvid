@@ -30,17 +30,20 @@ _SENSITIVE_NAMES = frozenset(
     }
 )
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_DOUBLE_QUOTED_VALUE = r'"(?:\\.|[^"\\\r\n])*"'
+_SINGLE_QUOTED_VALUE = r"'(?:\\.|[^'\\\r\n])*'"
 _AUTHORIZATION_RE = re.compile(
     r"(?im)(?P<prefix>(?<![A-Za-z0-9])"
     r"(?P<auth_key_quote>[\"']?)authorization(?P=auth_key_quote)\s*[:=]\s*)"
-    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|(?:(?:bearer|basic)\s+)?[^\s,;}\]]+)"
+    rf"(?P<value>{_DOUBLE_QUOTED_VALUE}|{_SINGLE_QUOTED_VALUE}|"
+    r"(?:(?:bearer|basic)\s+)?[^\s,;}\]]+)"
 )
 _CREDENTIAL_RE = re.compile(
     r"(?im)(?P<prefix>(?<![A-Za-z0-9])(?P<credential_key_quote>[\"']?)(?:"
     r"password|api[\s_-]?key|client[\s_-]?secret|access[\s_-]?token|"
     r"refresh[\s_-]?token|credentials|token"
     r")(?P=credential_key_quote)\s*[:=]\s*)"
-    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;}\]]+)"
+    rf"(?P<value>{_DOUBLE_QUOTED_VALUE}|{_SINGLE_QUOTED_VALUE}|[^\s,;}}\]]+)"
 )
 
 

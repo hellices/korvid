@@ -169,6 +169,34 @@ def test_untrusted_json_text_redacts_credentials_and_keeps_diagnostics() -> None
     assert "raw-token" not in sanitized
 
 
+@pytest.mark.parametrize(
+    "credential",
+    [
+        'secret-prefix"secret-suffix',
+        "secret-prefix\\secret-suffix",
+    ],
+    ids=["escaped-double-quote", "escaped-backslash"],
+)
+def test_untrusted_json_text_redacts_complete_escaped_credential(credential: str) -> None:
+    text = json.dumps(
+        {
+            "level": "warning",
+            "token": credential,
+            "message": "pod api is crashlooping",
+        },
+        separators=(",", ":"),
+    )
+    sanitized = sanitize_tool_result("get_events", text)
+    loaded = json.loads(sanitized)
+    assert loaded == {
+        "level": "warning",
+        "token": MASK_PLACEHOLDER,
+        "message": "pod api is crashlooping",
+    }
+    assert "secret-prefix" not in sanitized
+    assert "secret-suffix" not in sanitized
+
+
 def test_screen_context_replaces_controls_and_preserves_prompt_injection_evidence() -> None:
     text = (
         "pod=api\x00 namespace=prod\x85\n"
