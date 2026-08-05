@@ -124,7 +124,7 @@ def test_builtin_names_reserved_over_resource_aliases() -> None:
     def crd_known(head: str) -> str | None:
         return {"model": "models", "agent": "agents", "ai": "ais", "mcp": "mcps"}.get(head)
 
-    for text in ("ai", "agent", "model gpt-4o", "mcp", "mcp on"):
+    for text in ("ai", "ai payload", "agent", "model gpt-4o", "mcp", "mcp on"):
         msg = parse_command(text, crd_known)
         assert isinstance(msg, UnknownCommand)
         assert msg.text == text
@@ -148,6 +148,28 @@ def test_command_help_lists_proposals() -> None:
 
     commands = [cmd for cmd, _ in command_help()]
     assert ":proposals" in commands
+
+
+def test_command_help_pins_ai_payload_usage() -> None:
+    """`follow` takes its own argument, so it needs its own row.
+
+    A flat `:ai [off|follow|payload]` reads as three interchangeable
+    words and hides that `:ai follow` is a toggle taking `on|off` — the
+    same nesting `:mcp follow` already spells out.
+    """
+    from korvid.ui.command import command_help
+
+    ai_rows = [command for command, _ in command_help() if command.startswith(":ai")]
+    assert ai_rows == [":ai [off|payload]", ":ai follow [on|off]"]
+
+
+def test_command_help_keeps_every_ai_subcommand_reachable() -> None:
+    """Splitting the row must not drop a documented subcommand."""
+    from korvid.ui.command import command_help
+
+    ai_help = " ".join(f"{command} {text}" for command, text in command_help() if ":ai" in command)
+    for word in ("off", "payload", "follow", "on", "setup"):
+        assert word in ai_help, f"missing :ai {word}"
 
 
 # ---------------------------------------------------------------------------
@@ -223,3 +245,17 @@ def test_command_help_lists_ctx() -> None:
 
     commands = [cmd for cmd, _ in command_help()]
     assert any("ctx" in cmd for cmd in commands)
+
+
+def test_command_help_describes_every_ai_argument() -> None:
+    """`:ai` is three actions, not one. A description that names only
+    setup leaves `off` and `payload` as bare words in the usage column
+    with nothing saying what they do."""
+    from korvid.ui.command import command_help
+
+    description = next(text for command, text in command_help() if command == ":ai [off|payload]")
+
+    assert "setup" in description.lower()
+    assert "disconnect" in description.lower()
+    assert "payload" in description.lower()
+    assert "(also :agent)" in description

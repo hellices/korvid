@@ -132,6 +132,19 @@ def test_export_same_timestamp_does_not_overwrite(tmp_path: Path) -> None:
     assert second.read_text() == "second\n"
 
 
+def test_export_does_not_overwrite_preexisting_first_collision(tmp_path: Path) -> None:
+    """The shared private-export helper must preserve log collision semantics."""
+    now = datetime(2026, 7, 26, 10, 30, 45, tzinfo=UTC)
+    existing = tmp_path / "korvid-myapp-20260726-103045.log"
+    existing.write_text("existing\n", encoding="utf-8")
+
+    path = export_log_lines([_line("new")], tmp_path, now=now)
+
+    assert path.name == "korvid-myapp-20260726-103045-1.log"
+    assert existing.read_text(encoding="utf-8") == "existing\n"
+    assert path.read_text(encoding="utf-8") == "new\n"
+
+
 def test_export_single_pod_multi_container_uses_pod_stem(tmp_path: Path) -> None:
     """One pod with several containers keeps the pod-name filename."""
     lines = [

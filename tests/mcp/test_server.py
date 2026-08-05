@@ -7,12 +7,16 @@ import json
 import os
 import socket
 import stat
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
+from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
+from korvid.k8s.logs import LogLine
 from korvid.mcp.server import (
     KorvidMCPServer,
     MCPController,
@@ -20,8 +24,19 @@ from korvid.mcp.server import (
     default_endpoint_path,
 )
 from korvid.tools.executor import PROPOSAL_TOOLS, READ_TOOLS, UI_TOOLS, ToolExecutor
+from korvid.tools.structured import load_structured_document
 from tests.platforms import POSIX
-from tests.tools.test_executor import FakeBridge
+from tests.tools.test_executor import (
+    LONG_NAME_ENV_SENTINEL,
+    NESTED_SECRET_SENTINEL,
+    PARENT_SECRET,
+    FakeBridge,
+    ParentCredentialKube,
+    _ambiguous_key_manifest,
+    _diagnose_executor,
+    identity_last_crd,
+    oversized_crd_with_nested_credentials,
+)
 
 
 class RecordingExecutor(ToolExecutor):
@@ -127,6 +142,113 @@ async def test_call_tool_passes_error_text_through() -> None:
     server = make_server(executor)
     content = await server.call_tool("get_resource", {"kind": "pods", "name": "x"})
     assert content[0].text == "ERROR: boom"
+
+
+async def test_mcp_results_are_redacted_like_the_agent_path() -> None:
+    """MCP hosts are outside korvid too (PR #197 review).
+
+    The MCP server dispatches through the same `ToolExecutor`, so a
+    manifest too large to send whole must be redacted before it is
+    shrunk here as well — the reduction removes the nested `kind:
+    Secret` and clamps the credential env name that identify the values.
+    """
+
+    class ManifestKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            return oversized_crd_with_nested_credentials()
+
+    executor = ToolExecutor(ManifestKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_resource", {"kind": "pods", "name": "composite-0", "namespace": "prod"}
+    )
+
+    assert NESTED_SECRET_SENTINEL not in content[0].text
+    assert LONG_NAME_ENV_SENTINEL not in content[0].text
+    assert yaml.safe_load(content[0].text)["kind"] == "CompositeApp"
+
+
+async def test_mcp_reports_a_manifest_too_deep_to_redact_as_a_safe_error() -> None:
+    """An MCP host has no turn to stop, so a document the redactor could
+    not finish walking comes back as the same safe refusal string every
+    other producer error uses — naming the shape, never the document
+    (PR #197 review)."""
+
+    class DeepKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            document: Any = {"kind": "Secret", "data": {"password": "cmF3LXNlY3JldA=="}}
+            for _ in range(1500):
+                document = {"spec": {"nested": document}}
+            return {"apiVersion": "v1", "kind": "CompositeApp", **document}
+
+    executor = ToolExecutor(DeepKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_resource", {"kind": "pods", "name": "composite-0", "namespace": "prod"}
+    )
+
+    assert content[0].text.startswith("ERROR:")
+    assert "too deeply nested" in content[0].text
+    assert "cmF3LXNlY3JldA==" not in content[0].text
+
+
+async def test_mcp_compound_diagnoses_are_masked_in_every_section() -> None:
+    """`docs/mcp.md` promises an MCP client the same masked report the
+    model sees. Round 9 redacted the per-pod blocks; the workload's own
+    conditions, Warning events and child-LIST errors were assembled after
+    that pass and crossed to the client verbatim (PR #197 final review)."""
+    kube = ParentCredentialKube(
+        condition_message=f"probe rejected api_key={PARENT_SECRET}",
+        event_message=f"registry auth failed password={PARENT_SECRET}",
+    )
+    server = make_server(_diagnose_executor(kube))
+
+    content = await server.call_tool(
+        "diagnose_workload", {"kind": "deployments", "name": "api", "namespace": "default"}
+    )
+
+    assert PARENT_SECRET not in content[0].text
+    assert MASK_PLACEHOLDER in content[0].text
+    assert "MinimumReplicasUnavailable" in content[0].text
+    assert "FailedCreate (3x" in content[0].text
+
+
+async def test_mcp_text_results_carry_only_tool_shaping() -> None:
+    """The other half of the boundary `docs/mcp.md` states.
+
+    Producer-side redaction reaches structured manifests, not free-form
+    text: a credential printed into a pod log crosses to the MCP client
+    verbatim, because nothing on this surface parses log lines. Pinned so
+    the documented limitation cannot drift out of date silently.
+    """
+
+    class LoggingKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            return {"spec": {"containers": [{"name": "main"}]}}
+
+        async def stream_logs(
+            self,
+            namespace: str,
+            pod: str,
+            container: str,
+            *,
+            follow: bool,
+            tail_lines: int,
+        ) -> AsyncIterator[LogLine]:
+            yield LogLine(
+                pod=pod,
+                container=container,
+                text="starting with password=log-line-sentinel",
+            )
+
+    executor = ToolExecutor(LoggingKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool("get_logs", {"pod": "api-0", "namespace": "prod"})
+
+    assert "log-line-sentinel" in content[0].text
 
 
 async def test_call_tool_rejects_names_outside_configured_surface() -> None:
@@ -950,3 +1072,70 @@ async def test_refused_mirror_falls_back_to_an_activity_note() -> None:
     await _drain_follow(server)
     assert len(notes) == 1
     assert "list_operators" in notes[0]
+
+
+async def test_mcp_gets_a_safe_error_when_redaction_blocks_a_result() -> None:
+    """A blocked result stops korvid's *turn*; MCP has no turn to stop.
+
+    The string contract holds: the host sees an `ERROR: ...` result
+    naming the shape that failed, never the document behind it, and
+    `call_tool` does not start raising at this boundary (PR #197 review).
+    """
+
+    class UnredactableKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            return {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": "not-a-mapping",
+                "data": {"password": "cmF3LXNlY3JldA=="},
+            }
+
+    executor = ToolExecutor(UnredactableKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_resource", {"kind": "pods", "name": "s", "namespace": "d"}
+    )
+
+    assert content[0].text.startswith("ERROR:")
+    assert "cmF3LXNlY3JldA==" not in content[0].text
+
+
+async def test_mcp_bounded_manifests_still_name_their_object() -> None:
+    """An MCP client gets the same reduced document the model does, and it
+    has to be identifiable there too (PR #197 review)."""
+
+    class IdentityLastKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            return identity_last_crd()
+
+    executor = ToolExecutor(IdentityLastKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_resource", {"kind": "pods", "name": "composite-0", "namespace": "prod"}
+    )
+
+    manifest = yaml.safe_load(content[0].text)
+    assert manifest["kind"] == "CompositeApp"
+    assert manifest["metadata"]["name"] == "composite-0"
+
+
+async def test_mcp_manifests_stay_readable_by_the_strict_reader() -> None:
+    """MCP shares the producer, so what it hands a client is the same
+    unambiguous document the model's boundary re-reads (round 13)."""
+
+    class AmbiguousKeyKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            return _ambiguous_key_manifest()
+
+    executor = ToolExecutor(AmbiguousKeyKube(), {"pods": PODS_META})  # type: ignore[arg-type]  # read-only test double
+    server = make_server(executor)
+
+    content = await server.call_tool(
+        "get_resource", {"kind": "pods", "name": "flags", "namespace": "prod"}
+    )
+    loaded = load_structured_document(content[0].text)
+
+    assert loaded == _ambiguous_key_manifest()

@@ -162,6 +162,7 @@ from korvid.ui.widgets.log_pane import MAX_PANELS, LogPane
 from korvid.ui.widgets.logo import SplashLogo
 from korvid.ui.widgets.namespace_picker import NamespacePicker
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
+from korvid.ui.widgets.payload_inspector import PayloadInspectorScreen
 from korvid.ui.widgets.pick_screen import PickScreen
 from korvid.ui.widgets.port_forward_screen import ForwardListScreen, PortForwardScreen
 from korvid.ui.widgets.resize_prompt import ResizePrompt
@@ -2934,13 +2935,7 @@ class KorvidApp(App[None]):
         parts = message.text.strip().split()
         head = parts[0] if parts else ""
         if head in {"ai", "agent"} and self._agent_available:
-            if len(parts) > 1 and parts[1].lower() == "follow":
-                self._handle_agent_follow_command(parts[2:])
-                return
-            if len(parts) > 1 and parts[1].lower() == "off":
-                self._handle_agent_off()
-                return
-            self._open_agent_setup()
+            self._handle_agent_command(parts[1:])
             return
         if head == "model" and self._agent_available:
             self._handle_model_command(parts[1:])
@@ -2978,6 +2973,37 @@ class KorvidApp(App[None]):
             " — not found in this cluster's API (CRD not installed?)",
             severity="warning",
         )
+
+    def _handle_agent_command(self, args: list[str]) -> None:
+        subcommand = args[0].lower() if args else ""
+        if subcommand == "payload":
+            self._open_payload_inspector()
+            return
+        if subcommand == "follow":
+            self._handle_agent_follow_command(args[1:])
+            return
+        if subcommand == "off":
+            self._handle_agent_off()
+            return
+        self._open_agent_setup()
+
+    def _open_payload_inspector(self) -> None:
+        """Open the latest stable redacted provider payload, if available."""
+        runtime = self._agent_runtime
+        if runtime is None:
+            self.notify("Agent is off", severity="warning")
+            return
+        if self._agent_task is not None and not self._agent_task.done():
+            self.notify(
+                "Agent is busy — wait for the turn to finish before inspecting its payload",
+                severity="warning",
+            )
+            return
+        snapshot = runtime.latest_outbound_payload
+        if snapshot is None:
+            self.notify("No provider payload has been sent", severity="warning")
+            return
+        self.push_screen(PayloadInspectorScreen(snapshot))
 
     def _handle_agent_off(self) -> None:
         """`:ai off` (issue #167): disconnect the runtime for this session.

@@ -12,9 +12,18 @@ If your backend already speaks an OpenAI-compatible `/v1` API, prefer the
 built-in `openai-compat` path instead of a plugin. Reach for a plugin only
 when the wire protocol or auth flow truly differs.
 
-> **Security warning:** provider plugins are trusted Python code loaded into the
-> korvid process. Selected-only loading avoids importing *unused* plugins, but
-> it is **not** a sandbox. Install only plugins you trust.
+> **Security warning:** provider plugins are trusted, in-process Python code
+> loaded into the korvid process. Selected-only loading avoids importing
+> *unused* plugins, but it is **not** a sandbox. Install only plugins you
+> trust. `create()` receives only a `ProviderPluginConfig` and an optional
+> `CredentialSource` — never conversation data. The provider it returns is
+> then called with the same sanitized canonical `messages`/`tools` payload
+> `OutboundPolicy` builds for built-in providers (see
+> [`docs/threat-model.md`](threat-model.md)) — but once your provider's
+> `complete()` receives that payload, it is free to mutate, retain, log,
+> cache, or independently transmit it anywhere; korvid has no further
+> control or visibility past the handoff. See
+> [`SECURITY.md`](../SECURITY.md) to report a vulnerability.
 
 ## When you should not write a plugin
 
@@ -101,7 +110,7 @@ class CredentialSource(ABC):
 
 class LLMProvider(ABC):
     @property
-    def name(self) -> str: ...
+    def name(self) -> str: ...     # the model tag, e.g. "company-llm:v2"
 
     async def complete(
         self,
@@ -155,6 +164,12 @@ Notes:
   Treat it as forward-compatibility metadata for now.
 - `LLMProvider.complete()` must be an **async generator** (`async def` with
   `yield`), not a plain coroutine that returns an iterator.
+- `LLMProvider` also defines `prepare_messages(messages)`, the built-in
+  adapters' hook for dialect conversion ahead of `OutboundPolicy`. korvid
+  does **not** call it on plugin providers — plugins only ever receive the
+  sanitized canonical payload — so overriding it in a plugin has no effect.
+  Adapt the payload inside `complete()` instead, and treat everything you
+  add there as leaving korvid's inspected boundary.
 
 ## Complete minimal adapter
 
@@ -298,6 +313,15 @@ shapes:
 Extra keys are discarded. Unknown event types, non-mapping payloads, missing
 fields, overlong strings, or out-of-range token counts raise
 `ProviderPluginContractError`.
+
+These four are the whole contract. korvid's built-in adapters yield one
+extra internal event to tell the runtime their HTTP request has actually
+reached the transport — the `:ai payload` inspector uses it so a request
+that was never sent is not shown as the session's last handoff. It is not
+part of API v1 and a plugin that yields it is rejected like any other
+unknown type. Your request is recorded when you yield your **first** event
+instead, which is equally proof that it ran; a `complete()` that yields
+nothing records nothing.
 
 `tool_call.arguments` is a **string** payload, typically JSON-encoded
 arguments, not a nested mapping.

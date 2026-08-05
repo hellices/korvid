@@ -95,7 +95,10 @@ def mask_secret_manifest(manifest: dict[str, object]) -> dict[str, object]:
             annotations.pop(_LAST_APPLIED, None)
     for section in ("data", "stringData"):
         entries = result.get(section)
-        if isinstance(entries, dict):
-            for key in entries:
-                entries[key] = MASK_PLACEHOLDER
+        if entries is None:
+            continue
+        if not isinstance(entries, dict):
+            raise ValueError(f"Secret {section} must be a mapping")
+        for key in entries:
+            entries[key] = MASK_PLACEHOLDER
     return result

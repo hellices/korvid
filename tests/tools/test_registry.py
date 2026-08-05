@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from korvid.tools import registry as registry_mod
 from korvid.tools.executor import ToolExecutor, UIBridge
 from korvid.tools.registry import (
     TOOL_DEFS,
@@ -75,6 +76,19 @@ def test_resize_is_capability_gated() -> None:
     assert all(d.capability == "none" for d in others)
 
 
+def test_every_tool_declares_an_outbound_result_format() -> None:
+    assert {d.result_format for d in TOOL_DEFS} <= {
+        "structured_yaml",
+        "untrusted_text",
+    }
+    assert registry_mod.tool_result_format("get_resource") == "structured_yaml"
+    assert all(
+        registry_mod.tool_result_format(d.name) == "untrusted_text"
+        for d in TOOL_DEFS
+        if d.name != "get_resource"
+    )
+
+
 # --- derived surfaces ---------------------------------------------------
 
 
@@ -126,6 +140,7 @@ def _tool(name: str, **overrides: Any) -> ToolDef:
         "effect": "cluster_read",
         "dispatch": "_handler",
         "surfaces": frozenset({"full_agent"}),
+        "result_format": "untrusted_text",
     }
     fields.update(overrides)
     return ToolDef(**fields)
@@ -145,6 +160,12 @@ def test_validate_rejects_schema_name_mismatch() -> None:
 def test_validate_rejects_missing_dispatch() -> None:
     with pytest.raises(ValueError, match="dispatch"):
         validate_tool_defs([_tool("a", dispatch="")])
+
+
+def test_validate_rejects_unknown_result_format() -> None:
+    bad = _tool("a", result_format="opaque")
+    with pytest.raises(ValueError, match="result format"):
+        validate_tool_defs([bad])
 
 
 def test_validate_rejects_write_without_action() -> None:
@@ -473,3 +494,92 @@ def test_propose_write_schema_encodes_action_specific_requirements() -> None:
     assert branches["scale"]["not"] == {"required": ["resources"]}
     assert set(branches["resize"]["required"]) == {"resources", "namespace"}
     assert branches["resize"]["not"] == {"required": ["replicas"]}
+
+
+# --- A custom tool has to say what its results are (round 10) -------------
+
+
+def _schema(name: str) -> dict[str, Any]:
+    return {"type": "function", "function": {"name": name, "description": "d", "parameters": {}}}
+
+
+def test_registry_tools_resolve_without_being_declared() -> None:
+    resolved = registry_mod.resolve_result_formats([_schema("get_resource"), _schema("get_logs")])
+
+    assert resolved == {"get_resource": "structured_yaml", "get_logs": "untrusted_text"}
+
+
+def test_a_custom_tool_must_declare_its_result_format() -> None:
+    """The boundary cannot guess, and guessing "text" let a custom tool
+    return a `Secret` document that took only the text pass
+    (PR #197 review)."""
+    with pytest.raises(ValueError, match="result format"):
+        registry_mod.resolve_result_formats([_schema("fetch_manifest")])
+
+
+def test_a_declared_custom_tool_resolves() -> None:
+    resolved = registry_mod.resolve_result_formats(
+        [_schema("fetch_manifest")],
+        [registry_mod.CustomToolResult("fetch_manifest", "structured_yaml")],
+    )
+
+    assert resolved == {"fetch_manifest": "structured_yaml"}
+
+
+def test_a_declaration_for_a_tool_that_is_not_offered_is_rejected() -> None:
+    with pytest.raises(ValueError, match="not offered"):
+        registry_mod.resolve_result_formats(
+            [_schema("get_logs")],
+            [registry_mod.CustomToolResult("fetch_manifest", "untrusted_text")],
+        )
+
+
+def test_a_declaration_cannot_override_a_registry_tool() -> None:
+    """Otherwise `get_resource` could be downgraded to the text pass by a
+    caller, which is the exact hole this closes."""
+    with pytest.raises(ValueError, match="registry"):
+        registry_mod.resolve_result_formats(
+            [_schema("get_resource")],
+            [registry_mod.CustomToolResult("get_resource", "untrusted_text")],
+        )
+
+
+def test_a_duplicate_declaration_is_rejected() -> None:
+    with pytest.raises(ValueError, match="more than once"):
+        registry_mod.resolve_result_formats(
+            [_schema("fetch_manifest")],
+            [
+                registry_mod.CustomToolResult("fetch_manifest", "structured_yaml"),
+                registry_mod.CustomToolResult("fetch_manifest", "untrusted_text"),
+            ],
+        )
+
+
+def test_an_invalid_result_format_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown result format"):
+        registry_mod.resolve_result_formats(
+            [_schema("fetch_manifest")],
+            [registry_mod.CustomToolResult("fetch_manifest", "yaml")],  # type: ignore[arg-type]  # invalid on purpose
+        )
+
+
+def test_a_duplicate_tool_schema_is_rejected() -> None:
+    with pytest.raises(ValueError, match="offered more than once"):
+        registry_mod.resolve_result_formats([_schema("get_logs"), _schema("get_logs")])
+
+
+def test_a_malformed_tool_schema_is_rejected() -> None:
+    with pytest.raises(ValueError, match="tool schema"):
+        registry_mod.resolve_result_formats([{"type": "function"}])
+
+
+def test_a_non_function_tool_schema_is_rejected() -> None:
+    schema = _schema("get_logs")
+    schema["type"] = "image"
+
+    with pytest.raises(ValueError, match="function schema"):
+        registry_mod.resolve_result_formats([schema])
+
+
+def test_an_unknown_tool_has_no_result_format() -> None:
+    assert registry_mod.tool_result_format("fetch_manifest") is None

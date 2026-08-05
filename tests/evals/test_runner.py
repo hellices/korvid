@@ -11,10 +11,13 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
+
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.runner import ScenarioReport, render_markdown, run_scenario
 from korvid.evals.scenario import ContainerLogs, Evidence, Scenario
 from korvid.evals.scripted import ScriptedProvider
+from korvid.tools.executor import RecordedExecution
 
 
 def _oom_scenario() -> Scenario:
@@ -279,7 +282,7 @@ async def test_runtime_offers_write_tool_schemas_while_executor_stays_unarmed() 
     assert report.runs[0].safety_violations == 0
 
 
-class _PermissiveExecutor:
+class _PermissiveExecutor(RecordedExecution):
     """Returns success for every call — models an executor whose write path
     is armed. Write results must still never count as resolvable calls."""
 
@@ -651,7 +654,7 @@ async def test_evidence_grading_sees_only_the_model_visible_capped_result() -> N
     saw."""
     from korvid.evals.runner import _RecordingExecutor
 
-    class MiddleEvidenceExecutor:
+    class MiddleEvidenceExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "x" * 1_500 + "OOMKilled" + "y" * 1_995
 
@@ -672,7 +675,7 @@ async def test_discard_notice_does_not_retruncate_the_recorded_result() -> None:
     from korvid.agent.runtime import AgentRuntime
     from korvid.evals.runner import _RecordingExecutor
 
-    class TailEvidenceExecutor:
+    class TailEvidenceExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "x" * 3_500 + "\nLOG EXCERPT: exit=137 OOMKilled"
 
@@ -715,3 +718,163 @@ async def test_discard_notice_does_not_retruncate_the_recorded_result() -> None:
     assert "OOMKilled" in recording.records[0].result
     assert "OOMKilled" in tool_msg["content"]
     assert "discarded" in tool_msg["content"]
+
+
+async def test_counting_provider_forwards_the_message_hook() -> None:
+    """Evals must exercise the same request shape production sends: the
+    counting wrapper only counts round-trips, so the wrapped provider's
+    dialect conversion still runs ahead of the outbound policy (issue
+    #189)."""
+    from korvid.evals.runner import _CountingProvider
+
+    class DialectProvider(ScriptedProvider):
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [{**message, "thinking": "recalled"} for message in messages]
+
+    wrapped = _CountingProvider(DialectProvider([[{"type": "done"}]]))
+
+    prepared = wrapped.prepare_messages([{"role": "user", "content": "hi"}])
+
+    assert prepared == [{"role": "user", "content": "hi", "thinking": "recalled"}]
+
+
+async def test_the_eval_recorder_forwards_the_producer_redaction_trail() -> None:
+    """The recorder wraps the real executor, so it is on the path that
+    carries producer records into the runtime. Dropping them there would
+    make an eval run's boundary behaviour differ from a real session's."""
+    from korvid.core.redaction import RedactionRecord
+    from korvid.evals.runner import _RecordingExecutor
+    from korvid.tools.executor import RecordedExecution, ToolOutcome
+
+    trail = (RedactionRecord(path="manifest.data", reason="secret-data"),)
+    rebased = (RedactionRecord(path="tool_result.data", reason="secret-data"),)
+
+    class Recording(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "kind: Pod\n"
+
+        async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            return ToolOutcome(text="kind: Pod\n", redactions=trail)
+
+    recording = _RecordingExecutor(Recording(), max_result_chars=3_000)
+    outcome = await recording.execute_recorded("get_resource", {"kind": "pods"})
+
+    assert outcome.redactions == rebased
+
+
+async def test_the_eval_recorder_propagates_a_blocked_result() -> None:
+    """A result that could not be redacted must stop an eval turn too —
+    the recorder must not turn the block back into gradable text."""
+    from korvid.evals.runner import _RecordingExecutor
+    from korvid.tools.executor import RecordedExecution, ToolResultBlocked
+
+    class Blocking(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ERROR: could not redact the result"
+
+        async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> Any:
+            raise ToolResultBlocked("could not redact the result: bad shape")
+
+    recording = _RecordingExecutor(Blocking(), max_result_chars=3_000)
+
+    with pytest.raises(ToolResultBlocked, match="could not redact the result"):
+        await recording.execute_recorded("get_resource", {"kind": "pods"})
+    assert recording.records == []
+
+
+async def test_the_eval_recorder_keeps_the_records_of_its_own_sanitize_pass() -> None:
+    """The recorder sanitizes before the runtime does, and that pass is
+    idempotent — so whatever it redacted without recording, the runtime's
+    re-run can no longer find. An eval run's inventory would be thinner
+    than production's for the same content."""
+    from korvid.evals.runner import _RecordingExecutor
+
+    class Noisy(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "line one\x07line two"
+
+    recording = _RecordingExecutor(Noisy(), max_result_chars=3_000)
+    outcome = await recording.execute_recorded("get_events", {"namespace": "shop"})
+
+    assert "control-character" in [item.reason for item in outcome.redactions]
+    assert "\x07" not in outcome.text
+
+
+async def test_the_eval_recorder_merges_producer_and_ingress_records() -> None:
+    """Two views of one document, not two redactions: a mask both passes
+    see is reported once, and genuine multiplicity survives."""
+    from korvid.core.redaction import RedactionRecord
+    from korvid.evals.runner import _RecordingExecutor
+    from korvid.tools.executor import RecordedExecution, ToolOutcome
+
+    shared = RedactionRecord(path="tool_result", reason="control-character")
+    producer = (shared, RedactionRecord(path="manifest.data", reason="secret-data"))
+
+    class Producing(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "line one\x07line two"
+
+        async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+            return ToolOutcome(text="line one\x07line two", redactions=producer)
+
+    recording = _RecordingExecutor(Producing(), max_result_chars=3_000)
+    outcome = await recording.execute_recorded("get_events", {"namespace": "shop"})
+
+    reasons = [item.reason for item in outcome.redactions]
+    assert reasons.count("control-character") == 1
+    assert ("tool_result.data", "secret-data") in [
+        (item.path, item.reason) for item in outcome.redactions
+    ]
+
+
+async def test_an_eval_runtime_snapshot_inventories_the_recorder_redaction() -> None:
+    """Production parity end to end: the inspector inventory an eval run
+    would export must name the same redaction a real session's does."""
+    from korvid.agent.runtime import AgentRuntime
+    from korvid.evals.runner import _RecordingExecutor
+
+    class Noisy(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "restarts\x07=7"
+
+    provider = ScriptedProvider(
+        [
+            [_tool_call("get_events", {"namespace": "shop"}), {"type": "done"}],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, _RecordingExecutor(Noisy(), max_result_chars=3_000))
+
+    async for _ in runtime.run_turn("why?", ""):
+        pass
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "control-character" in [item.reason for item in snapshot.redactions]
+
+
+async def test_the_eval_recorder_is_the_composition_point_for_a_plain_executor() -> None:
+    """Scenario packs hand over whatever they built; the recorder adapts it
+    so the runtime never has to accept something structural (round 12)."""
+    from korvid.agent.runtime import AgentRuntime
+    from korvid.evals.runner import _RecordingExecutor
+    from korvid.tools.executor import RecordedExecution
+
+    class StringOnly:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "restarts=7"
+
+    recording = _RecordingExecutor(StringOnly(), max_result_chars=3_000)
+    provider = ScriptedProvider(
+        [
+            [_tool_call("get_events", {"namespace": "shop"}), {"type": "done"}],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, recording)
+
+    async for _ in runtime.run_turn("why?", ""):
+        pass
+
+    assert isinstance(recording, RecordedExecution)
+    assert [r.result for r in recording.records] == ["restarts=7"]

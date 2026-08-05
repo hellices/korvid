@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from korvid.agent.credentials import CredentialSource
-from korvid.agent.provider import LLMProvider
+from korvid.agent.provider import REQUEST_SENT, LLMProvider
 from korvid.providers.net import make_client
 from korvid.providers.openai_compat import ProviderError
 
@@ -124,7 +124,10 @@ class OllamaProvider(LLMProvider):
             request_options["seed"] = opts.seed
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": self._convert_messages(messages),
+            # Already adapted by prepare_messages *before* the outbound
+            # policy ran, so what ships is exactly what was sanitized,
+            # snapshotted and size-checked.
+            "messages": messages,
             "stream": True,
             "think": opts.think,
             "options": request_options,
@@ -159,6 +162,9 @@ class OllamaProvider(LLMProvider):
             json=self._payload(messages, tools),
             headers=await self._headers(),
         ) as resp:
+            # The request is on the wire: headers came back, so whatever
+            # the status says, this provider has the payload (PR #197).
+            yield {"type": REQUEST_SENT}
             if resp.status_code >= 300:
                 await resp.aread()
                 raise ProviderError(f"Upstream returned HTTP {resp.status_code}: {resp.text}")
@@ -228,7 +234,7 @@ class OllamaProvider(LLMProvider):
         while len(self._thinking_by_call_id) > _MAX_THINKING_ENTRIES:
             self._thinking_by_call_id.popitem(last=False)
 
-    def _convert_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Convert runtime history (OpenAI-shaped) for the native API.
 
         - Assistant tool-call arguments are stored as JSON strings by the
@@ -242,7 +248,9 @@ class OllamaProvider(LLMProvider):
           the matching assistant call.
         - Reasoning text recorded for this turn's tool calls is re-attached
           as `thinking` so R1-style models keep their reasoning state across
-          tool iterations.
+          tool iterations. It is model-authored text about tool results, so
+          it is added here — ahead of the outbound policy — and reaches the
+          wire only after redaction.
         """
         converted: list[dict[str, Any]] = []
         call_names: dict[str, str] = {}

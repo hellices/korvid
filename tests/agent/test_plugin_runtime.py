@@ -14,7 +14,9 @@ from korvid.agent.events import (
 )
 from korvid.agent.provider_plugin import ProviderPluginConfig
 from korvid.agent.runtime import AgentRuntime
+from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.providers.plugin_registry import ProviderPluginRegistry
+from korvid.tools.executor import RecordedExecution
 from tests.agent.test_runtime import EchoExecutor, collect
 from tests.fixtures.provider_plugin.site_helpers import (
     FIXTURES_DIR,
@@ -118,6 +120,50 @@ async def test_packaged_plugin_runtime_normalizes_text_usage_tool_and_done(
     assert inner.tools_seen[0] == runtime._tools
     assert inner.calls[1][-1]["role"] == "tool"
     assert inner.calls[1][-1]["content"] == "result-of-get_logs"
+
+
+async def test_packaged_plugin_receives_masked_secret_tool_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sentinel = "plugin-must-not-see-this-secret"
+
+    class SecretExecutor(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return (
+                "apiVersion: v1\n"
+                "kind: Secret\n"
+                "data:\n"
+                f"  token: {sentinel}\n"
+                "nested:\n"
+                f"  password: {sentinel}\n"
+            )
+
+    provider = _create_runtime_provider(
+        monkeypatch,
+        tmp_path,
+        scripted_turns=[
+            [
+                {
+                    "type": "tool_call",
+                    "id": "c1",
+                    "name": "get_resource",
+                    "arguments": "{}",
+                },
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ],
+    )
+    runtime = AgentRuntime(cast("Any", provider), SecretExecutor())
+
+    events = await collect(runtime, "inspect the Secret")
+
+    assert isinstance(events[-1], TurnComplete)
+    inner = cast("Any", provider)._provider
+    outbound = str(inner.calls[1][-1]["content"])
+    assert sentinel not in outbound
+    assert MASK_PLACEHOLDER in outbound
 
 
 @pytest.mark.parametrize(

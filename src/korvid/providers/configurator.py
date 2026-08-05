@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from korvid.agent.outbound import OutboundPolicy, provider_prepared_messages
 from korvid.agent.setup import AgentConfigurator, AgentSettings, DeviceLoginPrompt
 from korvid.providers.github_copilot import (
     COPILOT_CHAT_BASE_URL,
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PROBE_MESSAGE = {"role": "user", "content": "Reply with the single word: ok"}
+_PROBE_MAX_REQUEST_CHARS = 4_096
 
 
 def _default_http_client() -> httpx.AsyncClient:
@@ -56,6 +58,7 @@ class ProviderConfigurator(AgentConfigurator):
         # runtime can never disagree about the CA.
         self._ca_bundle = ca_bundle
         self._plugin_registry = plugin_registry
+        self._outbound = OutboundPolicy(max_request_chars=_PROBE_MAX_REQUEST_CHARS)
         self._flow: GitHubDeviceFlow | None = None
         self._prompt: DeviceCodePrompt | None = None
 
@@ -189,7 +192,13 @@ class ProviderConfigurator(AgentConfigurator):
             raise RuntimeError("configuration incomplete — provider could not be created")
         text = ""
         try:
-            async for ev in provider.complete([_PROBE_MESSAGE], []):
+            prepared = self._outbound.prepare(
+                provider.name,
+                provider_prepared_messages(provider, [_PROBE_MESSAGE]),
+                [],
+                iteration=1,
+            )
+            async for ev in provider.complete(prepared.messages, prepared.tools):
                 if ev.get("type") == "text_delta":
                     text += str(ev.get("text", ""))
         finally:

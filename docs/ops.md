@@ -17,6 +17,14 @@ initiated (keybinding, helm/OLM wizard, or [agent](agent.md) request):
    `~/.local/state/korvid/audit.jsonl`; 0600 permissions, size-rotated).
    If the audit entry cannot be written, the write is blocked.
 
+`audit.jsonl` and any log/describe capture you save are **not** provider
+payloads — they are raw cluster and operator data with no `OutboundPolicy`
+sanitization applied, and stay just as sensitive as the cluster access that
+produced them. Only the sanitized request the agent actually sends is
+redacted and inspectable via `:ai payload` (see
+[`docs/agent.md#inspecting-what-the-agent-sends`](agent.md#inspecting-what-the-agent-sends)
+and [`docs/threat-model.md`](threat-model.md)).
+
 Two further checks run **best-effort** in front of the dialog for
 Kubernetes API writes (delete, scale, restart, resize, cordon, drain,
 edits, …):

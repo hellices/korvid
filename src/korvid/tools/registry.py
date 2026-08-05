@@ -18,17 +18,20 @@ approval policy need their own threat model.
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
 Effect = Literal["cluster_read", "ui_only", "cluster_write", "write_proposal"]
 Approval = Literal["none", "user_confirmation"]
 Capability = Literal["none", "pod_resize"]
+ResultFormat = Literal["structured_yaml", "untrusted_text"]
 Surface = Literal["full_agent", "small_agent", "mcp", "mcp_proposal"]
 
 _EFFECTS = ("cluster_read", "ui_only", "cluster_write", "write_proposal")
 _APPROVALS = ("none", "user_confirmation")
 _CAPABILITIES = ("none", "pod_resize")
+_RESULT_FORMATS = ("structured_yaml", "untrusted_text")
 _SURFACES = ("full_agent", "small_agent", "mcp", "mcp_proposal")
 
 #: The only bridge method allowed to receive a cluster write: the
@@ -63,6 +66,8 @@ class ToolDef:
     dispatch: str
     #: Which derived surfaces offer this tool to callers.
     surfaces: frozenset[Surface]
+    #: How the tool's outward result should be treated by downstream callers.
+    result_format: ResultFormat
     #: Cluster writes always require the user-confirmation approval gate.
     approval: Approval = "none"
     #: Cluster capability the tool depends on; gated at surface derivation.
@@ -106,6 +111,8 @@ def _validate_enums(d: ToolDef) -> None:
         raise ValueError(f"tool {d.name!r}: unknown approval {d.approval!r}")
     if d.capability not in _CAPABILITIES:
         raise ValueError(f"tool {d.name!r}: unknown capability {d.capability!r}")
+    if d.result_format not in _RESULT_FORMATS:
+        raise ValueError(f"tool {d.name!r}: unknown result format {d.result_format!r}")
     unknown = set(d.surfaces) - set(_SURFACES)
     if unknown:
         raise ValueError(f"tool {d.name!r}: unknown surfaces {sorted(unknown)}")
@@ -132,6 +139,111 @@ def _validate_write_policy(d: ToolDef) -> None:
         raise ValueError(
             f"tool {d.name!r}: the mcp_proposal surface is reserved for write proposal tools"
         )
+
+
+def tool_result_format(name: str) -> ResultFormat | None:
+    """The registry's result format for `name`, or None if it defines none.
+
+    None is not a default — it means this registry has nothing to say
+    about the tool, and the caller has to have been told. Returning
+    "untrusted_text" here let an undeclared tool return a `Secret`
+    document that took only the text pass (PR #197 review).
+    """
+    definition = TOOLS_BY_NAME.get(name)
+    return definition.result_format if definition is not None else None
+
+
+@dataclass(frozen=True, slots=True)
+class CustomToolResult:
+    """The result format of a tool this registry does not define.
+
+    A caller that offers the agent its own tool has to say which of the
+    two treatments its results get, because the boundary cannot tell a
+    manifest from a paragraph by looking, and the wrong guess is a leak:
+    a document that only gets the text pass ships every entry that is not
+    spelled like a credential.
+
+    Attributes:
+        name: The tool name, exactly as its schema declares it.
+        result_format: `structured_yaml` for results that are documents —
+            parsed and recursively redacted — or `untrusted_text` for
+            free-form output that gets pattern redaction.
+    """
+
+    name: str
+    result_format: ResultFormat
+
+
+def tool_schema_names(tools: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The tool names an OpenAI-style schema list offers, in order.
+
+    Raises:
+        ValueError: if an entry is not a function schema with a name.
+    """
+    names: list[str] = []
+    for tool in tools:
+        if not isinstance(tool, Mapping):
+            raise ValueError("each tool schema must be a mapping")
+        if tool.get("type") != "function":
+            raise ValueError("each tool schema must be a function schema")
+        function = tool.get("function")
+        name = function.get("name") if isinstance(function, Mapping) else None
+        if not isinstance(name, str) or not name:
+            raise ValueError("each tool schema must name a function")
+        names.append(name)
+    return names
+
+
+def resolve_result_formats(
+    tools: Sequence[Mapping[str, Any]],
+    declared: Sequence[CustomToolResult] = (),
+) -> dict[str, ResultFormat]:
+    """Map every offered tool to the treatment its results get.
+
+    Registry tools resolve from the registry and cannot be redeclared —
+    otherwise a caller could downgrade `get_resource` to the text pass,
+    which is the hole this closes. Every other offered tool must be
+    declared, exactly once, with a valid format.
+
+    Args:
+        tools: Tool schemas as the agent will offer them.
+        declared: Formats for the tools this registry does not define.
+
+    Returns:
+        Tool name to result format, covering every offered tool.
+
+    Raises:
+        ValueError: on an unusable schema, a duplicate or unmatched
+            declaration, an attempt to redeclare a registry tool, an
+            invalid format, or an offered tool nobody declared.
+    """
+    offered = tool_schema_names(tools)
+    duplicates = {name for name in offered if offered.count(name) > 1}
+    if duplicates:
+        raise ValueError(f"tool {sorted(duplicates)[0]!r}: offered more than once")
+
+    resolved: dict[str, ResultFormat] = {}
+    for item in declared:
+        if item.result_format not in _RESULT_FORMATS:
+            raise ValueError(f"tool {item.name!r}: unknown result format {item.result_format!r}")
+        if item.name in resolved:
+            raise ValueError(f"tool {item.name!r}: declared more than once")
+        if item.name in TOOLS_BY_NAME:
+            raise ValueError(f"tool {item.name!r}: the registry already defines its result format")
+        if item.name not in offered:
+            raise ValueError(f"tool {item.name!r}: declared a result format but is not offered")
+        resolved[item.name] = item.result_format
+
+    for name in offered:
+        builtin = tool_result_format(name)
+        if builtin is not None:
+            resolved[name] = builtin
+        elif name not in resolved:
+            raise ValueError(
+                f"tool {name!r}: result format must be declared as "
+                f"structured_yaml or untrusted_text — the boundary cannot guess it"
+            )
+    return resolved
 
 
 def validate_dispatch_targets(defs: list[ToolDef], *, executor_cls: type, bridge_cls: type) -> None:
@@ -240,6 +352,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="cluster_read",
         dispatch="_list_resources",
         surfaces=_ALL_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -271,6 +384,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="cluster_read",
         dispatch="_get_resource",
         surfaces=_ALL_SURFACES,
+        result_format="structured_yaml",
         schema={
             "type": "function",
             "function": {
@@ -304,6 +418,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="cluster_read",
         dispatch="_get_logs",
         surfaces=_ALL_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -339,6 +454,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="cluster_read",
         dispatch="_get_events",
         surfaces=_ALL_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -370,6 +486,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="cluster_read",
         dispatch="_list_operators",
         surfaces=_ALL_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -401,6 +518,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="cluster_read",
         dispatch="_helm_list_releases",
         surfaces=_ALL_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -433,6 +551,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="cluster_read",
         dispatch="_diagnose_pod",
         surfaces=_ALL_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -471,6 +590,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="cluster_read",
         dispatch="_diagnose_workload",
         surfaces=_ALL_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -510,6 +630,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="ui_only",
         dispatch="agent_navigate",
         surfaces=_FULL_AND_MCP,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -546,6 +667,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="ui_only",
         dispatch="agent_set_filter",
         surfaces=_FULL_AND_MCP,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -580,6 +702,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="ui_only",
         dispatch="agent_open_logs",
         surfaces=_ALL_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -610,6 +733,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="ui_only",
         dispatch="agent_open_describe",
         surfaces=_ALL_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -638,6 +762,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="ui_only",
         dispatch="agent_drill_down",
         surfaces=_FULL_AND_MCP,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -668,6 +793,7 @@ TOOL_DEFS: list[ToolDef] = [
         write_action="delete",
         dispatch="agent_request_write",
         surfaces=_AGENT_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -699,6 +825,7 @@ TOOL_DEFS: list[ToolDef] = [
         write_action="scale",
         dispatch="agent_request_write",
         surfaces=_AGENT_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -736,6 +863,7 @@ TOOL_DEFS: list[ToolDef] = [
         write_action="rollout_restart",
         dispatch="agent_request_write",
         surfaces=_AGENT_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -770,6 +898,7 @@ TOOL_DEFS: list[ToolDef] = [
         write_action="resize",
         dispatch="agent_request_write",
         surfaces=_AGENT_SURFACES,
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -806,6 +935,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="write_proposal",
         dispatch="agent_submit_write_proposal",
         surfaces=frozenset({"mcp_proposal"}),
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -920,6 +1050,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="write_proposal",
         dispatch="agent_get_write_proposal",
         surfaces=frozenset({"mcp_proposal"}),
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {
@@ -954,6 +1085,7 @@ TOOL_DEFS: list[ToolDef] = [
         effect="write_proposal",
         dispatch="agent_cancel_write_proposal",
         surfaces=frozenset({"mcp_proposal"}),
+        result_format="untrusted_text",
         schema={
             "type": "function",
             "function": {

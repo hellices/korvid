@@ -14,6 +14,7 @@ from korvid.tools.executor import (
     UI_TOOLS,
     WRITE_TOOL_NAMES,
     WRITE_TOOLS,
+    RecordedExecution,
     ToolExecutor,
     UIBridge,
 )
@@ -156,11 +157,15 @@ async def test_executor_write_without_ui_is_error() -> None:
 
 
 class _NullProvider:
+    @property
+    def name(self) -> str:
+        return "null"
+
     def complete(self, messages: Any, tools: Any, *, stream: bool = True) -> Any:
         raise NotImplementedError
 
 
-class _NullExecutor:
+class _NullExecutor(RecordedExecution):
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         return "ok"
 

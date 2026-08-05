@@ -21,11 +21,19 @@ from korvid.agent.events import (
     ToolCallFinished,
     ToolCallStarted,
 )
+from korvid.agent.outbound import sanitize_recorded_tool_result
 from korvid.agent.profiles import AgentProfile, build_profile
 from korvid.agent.runtime import AgentRuntime
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Scenario
-from korvid.tools.executor import READ_TOOLS, UI_TOOL_NAMES, WRITE_TOOL_NAMES, compact_result
+from korvid.tools.executor import (
+    READ_TOOLS,
+    UI_TOOL_NAMES,
+    WRITE_TOOL_NAMES,
+    RecordedExecution,
+    ToolOutcome,
+    as_recorded,
+)
 
 #: Runs per scenario per configuration (issue #69: report variance, not means).
 DEFAULT_REPETITIONS = 3
@@ -44,29 +52,54 @@ def _eval_tools(profile: AgentProfile) -> list[dict[str, Any]]:
     return [t for t in profile.tools if t["function"]["name"] not in UI_TOOL_NAMES]
 
 
-class _RecordingExecutor:
+class _RecordingExecutor(RecordedExecution):
     """Wraps the real executor to keep full tool results for evidence grading
     (the runtime's ToolCallFinished summary is truncated to 120 chars).
 
-    The profile's per-result cap is applied *before* recording: grading must
-    only credit evidence the model could actually have seen, so the recorded
-    content matches what reaches the conversation. `compact_result` is
-    idempotent, so the runtime re-applying the same cap changes nothing;
-    the runtime's discard notice (excess parallel calls) is appended after
-    its own compaction step, so it never re-truncates the recorded content.
+    The runtime's own sanitize-and-bound step is applied *before*
+    recording: grading must only credit evidence the model could actually
+    have seen, so the recorded content matches what reaches the
+    conversation (and carries the same redactions). That step is
+    idempotent, so the runtime re-applying it changes nothing; the
+    runtime's discard notice (excess parallel calls) is appended after
+    its own bounding step, so it never re-truncates the recorded content.
+
+    It sits between the real executor and the runtime, so it is on the
+    path that carries producer redaction records — and the path a blocked
+    result has to travel to stop the turn. Both pass through: an eval
+    run's boundary behaviour is the behaviour under test, down to the
+    inventory the payload inspector would export.
     """
 
-    def __init__(self, executor: Any, max_result_chars: int | None = None) -> None:
-        self._executor = executor
+    def __init__(self, executor: object, max_result_chars: int | None = None) -> None:
+        # Scenario and journey packs hand over whatever they built; this is
+        # the composition point that turns it into the contract the runtime
+        # requires, so the runtime itself never has to guess (PR #197).
+        self._executor = as_recorded(executor)
         self._max_result_chars = max_result_chars
         self.records: list[ToolRecord] = []
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-        result: str = await self._executor.execute(name, arguments)
-        if self._max_result_chars is not None:
-            result = compact_result(result, self._max_result_chars)
+        return (await self.execute_recorded(name, arguments)).text
+
+    async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        outcome = await self._executor.execute_recorded(name, arguments)
+        # This pass's own redactions are kept, not dropped. It runs before
+        # the runtime's and is idempotent, so a redaction made here is one
+        # the runtime's re-run can no longer find — discarding the records
+        # left an eval run's inventory thinner than production's for the
+        # same content. Merged the way the runtime merges them: the
+        # producer's trail re-rooted onto this result, so a mask both
+        # passes saw is reported once (PR #197 review).
+        result, redactions = sanitize_recorded_tool_result(
+            name,
+            outcome.text,
+            outcome.redactions,
+            max_chars=self._max_result_chars,
+            error=outcome.error,
+        )
         self.records.append(ToolRecord(name=name, arguments=dict(arguments), result=result))
-        return result
+        return ToolOutcome(text=result, redactions=redactions, error=outcome.error)
 
 
 class _CountingProvider:

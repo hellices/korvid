@@ -6,12 +6,17 @@ import copy
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
-import yaml
-
 from korvid.core.portforward import controller_owner
-from korvid.core.secrets import mask_secret_manifest
+from korvid.core.redaction import (
+    RedactionError,
+    RedactionRecord,
+    record,
+    redact_document,
+    redact_text,
+)
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HelmReleaseSummary, HelmRevisionSummary
@@ -40,6 +45,7 @@ from korvid.tools.diagnose import (
     warning_event_lines,
 )
 from korvid.tools.registry import TOOL_DEFS, TOOLS_BY_NAME, ToolDef, validate_dispatch_targets
+from korvid.tools.structured import ERROR_PREFIX, dump_bounded_yaml, dump_yaml
 
 MAX_RESULT_CHARS = 8000
 
@@ -68,6 +74,115 @@ def _reject_slash_name(value: str, field: str) -> str:
             "separately, each in its own field."
         )
     return value
+
+
+class ToolResultBlocked(Exception):
+    """A result could not be redacted, so it must not be used at all.
+
+    Distinct from the `ERROR: ...` strings every other failure produces.
+    Those describe something the *cluster* said and are the model's to
+    reason about; this one says the redactor met a shape it cannot
+    reason about — a `kind: Secret` with non-mapping metadata, a
+    non-string key — and therefore cannot promise the document holds no
+    credentials. Collapsing the two let the agent append the failure and
+    send another request, which is exactly the request that must not
+    happen (PR #197 review).
+
+    The message never quotes the offending document; it names the shape.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOutcome:
+    """One tool result plus the redactions applied while producing it.
+
+    Producer-side redaction runs before the size bound, so it is the only
+    pass that can still see a document's classifiers — and the only one
+    that knows what it *removed*. A deleted last-applied annotation or a
+    stripped control character leaves no mask behind for a later pass to
+    rediscover, so the trail travels with the text instead of being
+    reconstructed from it.
+
+    Returned by value rather than kept on the executor: concurrent tool
+    calls must not share a "records from the last call" slot.
+
+    `error` says which branch produced the text, and only the producer
+    can say it. The boundary used to infer it from an `ERROR:` prefix,
+    which is content: a valid document whose first line said `ERROR:`
+    skipped the structural redaction pass — the only one that can see a
+    nested `kind: Secret` or a credential env sibling (PR #197 review).
+    """
+
+    text: str
+    redactions: tuple[RedactionRecord, ...] = field(default=())
+    error: bool = False
+
+
+class RecordedExecution(ABC):
+    """The tool-execution contract the agent loop depends on.
+
+    Lives here, in the layer that owns tool execution, rather than as a
+    Protocol declared by its consumer: boundary interfaces are `abc.ABC`
+    (AGENTS.md), so the agent loop can depend on this without describing
+    the shape of something it does not own (PR #197 review).
+
+    Two methods because two callers need different things. `execute`
+    returns the model-visible string every non-agent consumer takes — the
+    MCP host, the eval grader. `execute_recorded` adds the redactions
+    applied while producing it, which cannot be recovered downstream: a
+    redaction that *removes* its evidence leaves nothing for a later pass
+    to find.
+
+    Reporting records stays optional. The default `execute_recorded`
+    answers in terms of `execute`, so an implementation that has no
+    producer pass contributes nothing rather than having to say so.
+    """
+
+    @abstractmethod
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        """Dispatch a tool call and return its model-visible result."""
+
+    async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        """Dispatch a tool call, reporting no producer redactions."""
+        return ToolOutcome(text=await self.execute(name, arguments))
+
+
+class _AdaptedExecution(RecordedExecution):
+    """A string-only executor seen through the recorded contract."""
+
+    def __init__(self, execute: Callable[[str, dict[str, Any]], Awaitable[str]]) -> None:
+        self._execute = execute
+
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+        return await self._execute(name, arguments)
+
+
+def as_recorded(executor: object) -> RecordedExecution:
+    """Adapt a string-only executor to `RecordedExecution`.
+
+    The explicit on-ramp for something that is not a `RecordedExecution` —
+    a test fake, a third-party integration — and it is the **caller's** to
+    invoke. `AgentRuntime` used to do it silently, which made a structural
+    shape the real constructor boundary; composing the adapter is a
+    decision, and it belongs where the executor is chosen (PR #197 review).
+
+    Args:
+        executor: A `RecordedExecution`, returned as-is, or any object with
+            an `async execute(name, arguments) -> str`.
+
+    Returns:
+        The executor itself, or an adapter reporting no producer records.
+
+    Raises:
+        TypeError: The object has no callable `execute`, so nothing could
+            dispatch a tool call through it.
+    """
+    if isinstance(executor, RecordedExecution):
+        return executor
+    execute = getattr(executor, "execute", None)
+    if not callable(execute):
+        raise TypeError("a tool executor must define async execute(name, arguments) -> str")
+    return _AdaptedExecution(execute)
 
 
 def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
@@ -215,6 +330,32 @@ def compact_result(result: str, limit: int) -> str:
     head = content * 2 // 5
     tail = content - head
     return result[:head] + _MIDDLE_TRUNCATION_MARKER + result[len(result) - tail :]
+
+
+def redacted_and_compacted(text: str, limit: int, path: str, records: list[RedactionRecord]) -> str:
+    """Redact shaped text, then compact it — in that order, always.
+
+    `compact_result` cuts at a byte offset, so an assignment straddling
+    the cut is split: the head keeps `api_key=` with the value's first
+    characters, and the tail keeps the rest as a bare token with nothing
+    left to classify it. Redaction afterwards sees neither as a
+    credential and the value survives (PR #197 review).
+
+    Redacting first removes the value before there is anything to split,
+    and the records go to the caller because this pass is the only one
+    that sees the text at full length: what it masks, a later pass over
+    the compacted text may no longer be able to find.
+
+    Args:
+        text: The shaped report, at full length.
+        limit: Character budget for the result.
+        path: Record path root for anything redacted here.
+        records: Accumulator for those redactions.
+
+    Returns:
+        The redacted report, compacted to `limit`.
+    """
+    return compact_result(redact_text(text, path, records), limit)
 
 
 #: Derived surfaces (issue #91): the registry in `korvid.tools.registry`
@@ -493,7 +634,7 @@ def _validated_proposal_args(
     return action, kind, name, namespace, replicas, resources
 
 
-class ToolExecutor:
+class ToolExecutor(RecordedExecution):
     """Dispatches OpenAI tool calls to the Kubernetes client or the UI bridge.
 
     `proposal_tools` is fail-closed: the write-proposal tools dispatch only
@@ -523,16 +664,58 @@ class ToolExecutor:
         self._custom_columns = dict(custom_columns or {})
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-        """Dispatch a tool call; never raises — exceptions are returned as 'ERROR: ...'."""
+        """Dispatch a tool call; never raises — exceptions are returned as 'ERROR: ...'.
+
+        The string API every non-agent consumer uses (the MCP server, the
+        eval runner). A blocked result becomes a safe `ERROR: ...` string
+        here: those consumers have no turn to stop, and the string carries
+        the shape that failed, never the document.
+        """
+        try:
+            return (await self.execute_recorded(name, arguments)).text
+        except ToolResultBlocked as exc:
+            return cap_result(f"{ERROR_PREFIX} {exc}")
+
+    async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        """Dispatch a tool call, keeping the redactions applied while producing it.
+
+        The record trail cannot be recovered downstream: redaction runs
+        here, before the size bound, and a redaction that *removes* its
+        evidence (a deleted last-applied annotation, a stripped control
+        character) leaves nothing for a later pass to find. Returning it
+        rather than storing it keeps concurrent calls independent — there
+        is no per-executor "last call" state to race over.
+
+        Raises:
+            ToolResultBlocked: the result could not be redacted. Every
+                other failure is returned as an `ERROR: ...` string,
+                because every other failure is something the cluster or
+                the arguments did and the model can react to it. This one
+                is not answerable by the model and must not travel with
+                the conversation (PR #197 review).
+        """
         try:
             result = await self._dispatch(name, arguments)
+        except ToolResultBlocked:
+            # Already the refusal: a handler that could not vouch for its
+            # own result says so directly, and must not be downgraded to
+            # an ordinary error by the catch-all below.
+            raise
+        except RedactionError as exc:
+            raise ToolResultBlocked(f"could not redact the result: {exc}") from exc
         except Exception as exc:
             # Errors flow through the same cap below: a client error with a
-            # long reason must not bypass the ingest limit.
-            result = f"ERROR: {exc}"
-        return cap_result(result)
+            # long reason must not bypass the ingest limit. Marked as an
+            # error here, where it is known, so the boundary never has to
+            # guess from the text.
+            return ToolOutcome(text=cap_result(f"{ERROR_PREFIX} {exc}"), error=True)
+        if isinstance(result, ToolOutcome):
+            return ToolOutcome(
+                text=cap_result(result.text), redactions=result.redactions, error=result.error
+            )
+        return ToolOutcome(text=cap_result(result))
 
-    async def _dispatch(self, name: str, arguments: dict[str, Any]) -> str:
+    async def _dispatch(self, name: str, arguments: dict[str, Any]) -> str | ToolOutcome:
         # Routing derives from the registry's validated metadata: the
         # effect picks the route and every handler resolves through the
         # validated dispatch key (issue #91) — an unknown or misregistered
@@ -550,7 +733,9 @@ class ToolExecutor:
                     f"tool {tool.name!r} is only available over the MCP proposal surface"
                 )
             return await self._dispatch_proposal(tool, arguments)
-        handler: Callable[[dict[str, Any]], Awaitable[str]] = getattr(self, tool.dispatch)
+        handler: Callable[[dict[str, Any]], Awaitable[str | ToolOutcome]] = getattr(
+            self, tool.dispatch
+        )
         return await handler(arguments)
 
     async def _dispatch_ui(self, tool: ToolDef, args: dict[str, Any]) -> str:
@@ -735,7 +920,7 @@ class ToolExecutor:
             lines.append(f"  ...and {len(packages) - len(shown)} more catalog packages")
         return "\n".join(lines)
 
-    async def _get_resource(self, args: dict[str, Any]) -> str:
+    async def _get_resource(self, args: dict[str, Any]) -> ToolOutcome:
         kind = str(args["kind"]).strip().lower()
         name = _reject_slash_name(str(args["name"]), "name")
         namespace: str | None = args.get("namespace")
@@ -747,8 +932,28 @@ class ToolExecutor:
         if meta.namespaced and not namespace:
             raise ValueError(f"kind {kind!r} is namespaced — provide the 'namespace' argument")
         manifest = await self._kube.get_object(meta, namespace, name)
-        manifest = _mask_manifest(manifest)
-        return yaml.safe_dump(manifest, default_flow_style=False, allow_unicode=True)
+        try:
+            redacted, records = _mask_manifest(manifest)
+            # Bounded here, at the point the document is produced: the
+            # shared `cap_result` byte cut would leave a fragment that is
+            # no longer YAML, which every consumer (the model, the
+            # outbound policy's recursive redaction, an MCP client) needs
+            # it to be.
+            text = dump_yaml(redacted)
+            if len(text) > MAX_RESULT_CHARS:
+                text = dump_bounded_yaml(redacted, MAX_RESULT_CHARS)
+                record(records, "manifest", "size-elision")
+        except RecursionError as exc:
+            # Both walks are recursive, and running out of stack means
+            # neither finished: the redactor never reached the bottom of
+            # the document, so it can promise nothing about it, and a
+            # half-written serialization is not a document at all. Only
+            # this region is normalized — a recursion failure anywhere
+            # else is a bug in that handler and stays an ordinary error
+            # (PR #197 review). The message is a constant: it names the
+            # shape that failed, never the document.
+            raise ToolResultBlocked("the result is too deeply nested to redact") from exc
+        return ToolOutcome(text=text, redactions=tuple(records))
 
     async def _get_logs(self, args: dict[str, Any]) -> str:
         pod = _reject_slash_name(str(args["pod"]), "pod")
@@ -999,6 +1204,23 @@ class ToolExecutor:
             out.append(line)
         return out
 
+    @classmethod
+    def _redacted_section(cls, lines: list[str], records: list[RedactionRecord]) -> list[str]:
+        """Redact one parent section's lines, then clamp and budget them.
+
+        A workload condition's `message`, a Warning event's `message` and
+        an API error interpolated into a LIST failure are cluster strings
+        as attacker-influenced as a log excerpt, and every one of them is
+        assembled outside the per-pod blocks that redaction already
+        covered. Redacting here — before the clamp shortens a line and
+        before the section budget drops one — keeps the classifier's
+        evidence intact for the pass that needs it, and is the only pass
+        an MCP client's copy of this report ever gets (PR #197 review).
+        """
+        return cls._budget_section(
+            [cls._clamp_line(redact_text(line, "report", records)) for line in lines]
+        )
+
     @staticmethod
     def _trim_front(lines: list[str], budget: int) -> list[str]:
         """Drop leading lines until the joined text fits the budget.
@@ -1165,7 +1387,7 @@ class ToolExecutor:
 
     async def _diagnose_deployment(
         self, namespace: str, name: str, workload: dict[str, Any]
-    ) -> str:
+    ) -> ToolOutcome:
         metadata = workload.get("metadata") or {}
         uid = str(metadata.get("uid") or "")
         if not uid:
@@ -1217,14 +1439,12 @@ class ToolExecutor:
             ),
         ]
         report: list[str] = []
+        records: list[RedactionRecord] = []
         for title, lines in sections:
             report.append(title)
-            report.extend(
-                f"  {line}"
-                for line in self._budget_section([self._clamp_line(line) for line in lines])
-            )
+            report.extend(f"  {line}" for line in self._redacted_section(lines, records))
         if pod_list_error:
-            report.extend(["POD DIAGNOSES", f"  {pod_list_error}"])
+            report.extend(["POD DIAGNOSES", f"  {redact_text(pod_list_error, 'report', records)}"])
 
         omitted_line = (
             f"({len(omitted)} more non-ready pod(s) not expanded: "
@@ -1234,6 +1454,7 @@ class ToolExecutor:
             if omitted
             else ""
         )
+        omitted_line = redact_text(omitted_line, "report", records) if omitted_line else ""
         parent_size = len("\n".join(report))
         separator_size = len(selected) + (1 if omitted_line else 0)
         remaining = max(
@@ -1260,10 +1481,13 @@ class ToolExecutor:
                     *(f"  {line}" for line in diagnosis.splitlines()),
                 ]
             )
-            report.append(compact_result(block, share))
+            # Redacted before it is cut, not after: the cut lands on a
+            # byte offset and would split a credential assignment into a
+            # masked head and an unclassifiable tail (PR #197 review).
+            report.append(redacted_and_compacted(block, share, "report", records))
         if omitted_line:
             report.append(omitted_line)
-        return "\n".join(report)
+        return ToolOutcome(text="\n".join(report), redactions=tuple(records))
 
     @staticmethod
     def _deployment_status_line(workload: dict[str, Any]) -> str:
@@ -1299,7 +1523,7 @@ class ToolExecutor:
             pod.name,
         )
 
-    async def _diagnose_workload(self, args: dict[str, Any]) -> str:
+    async def _diagnose_workload(self, args: dict[str, Any]) -> ToolOutcome:
         """One-call rollout diagnosis for supported workload kinds."""
         kind = str(args["kind"]).strip().lower()
         name = _reject_slash_name(str(args["name"]), "name")
@@ -1313,19 +1537,34 @@ class ToolExecutor:
         return await self._diagnose_deployment(namespace, name, workload)
 
 
-def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Strip managedFields for all kinds; mask Secret data.
+def _mask_manifest(manifest: dict[str, Any]) -> tuple[dict[str, Any], list[RedactionRecord]]:
+    """Strip managedFields, then redact the whole document recursively.
 
-    Secret masking delegates to `korvid.core.secrets.mask_secret_manifest`
-    so the leak filter has exactly one implementation across every
-    LLM-facing path (agent tools here, the UI describe path in `app.py`).
+    Redaction runs here, on the full manifest, *before* the size bound:
+    what marks a value secret is structure — a nested `kind: Secret`, an
+    env entry's `name` — and structural shrinking elides mapping entries
+    and clamps long scalars, so a document bounded first can arrive at
+    the outbound policy with its credentials intact and every classifier
+    that would have identified them gone (PR #197 review).
+
+    `korvid.core.redaction` is the single implementation, shared with the
+    outbound policy, so the agent path, the MCP server that dispatches
+    through this executor, and the provider boundary cannot disagree
+    about what counts as a secret.
+
+    The record trail is returned rather than dropped: a redaction that
+    *removes* its evidence here (a deleted last-applied annotation, a
+    stripped control character) leaves nothing for the later passes to
+    rediscover, so without it the payload inspector would show a document
+    that looks untouched.
     """
     meta = manifest.get("metadata")
     if isinstance(meta, dict):
         meta.pop("managedFields", None)
-    if manifest.get("kind") == "Secret":
-        return mask_secret_manifest(manifest)
-    return manifest
+    redacted, records = redact_document(manifest, path="manifest")
+    if not isinstance(redacted, dict):
+        raise RedactionError("a manifest must redact to a mapping")
+    return redacted, records
 
 
 # Fail at import time (startup/tests), not at a live tool call, when a
