@@ -44,13 +44,13 @@ the release workflow has landed on `main`.
 ```sh
 gh workflow run Release --ref main
 RUN_ID=$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId')
-gh run watch RUN_ID --exit-status
+gh run watch "$RUN_ID" --exit-status
 ```
 
-The second command retrieves the run that was just queued; substitute its value
-for `RUN_ID` (`gh run watch "$RUN_ID" --exit-status`). Do not tag anything until
-that dry run succeeds and you have recorded the exact reviewed commit you intend
-to publish as `COMMIT`.
+The second command retrieves the run that was just queued. Confirm it is the
+run you started (`gh run view "$RUN_ID"`) before relying on its result. Do not
+tag anything until that dry run succeeds and you have recorded the exact
+reviewed commit you intend to publish as `COMMIT`.
 
 ### What the dry run proves — and what it cannot
 
@@ -79,7 +79,8 @@ Create the annotated tag from the reviewed commit, then push only that tag:
 ```sh
 git tag -a v0.1.0 COMMIT -m "korvid v0.1.0"
 git push origin refs/tags/v0.1.0
-gh run watch RUN_ID --exit-status
+RUN_ID=$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run watch "$RUN_ID" --exit-status
 ```
 
 The push starts `.github/workflows/release.yml`, which revalidates the tag

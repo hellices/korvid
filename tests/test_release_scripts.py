@@ -1008,7 +1008,7 @@ def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -
     assert "`.github/workflows/release.yml`" in runbook
     assert "`hellices/korvid`" in runbook
     assert "gh workflow run Release --ref main" in runbook
-    assert "gh run watch RUN_ID --exit-status" in runbook
+    assert 'gh run watch "$RUN_ID" --exit-status' in runbook
     assert 'git tag -a v0.1.0 COMMIT -m "korvid v0.1.0"' in runbook
     assert "git push origin refs/tags/v0.1.0" in runbook
     assert "gh release download v0.1.0 --dir dist/v0.1.0" in runbook
