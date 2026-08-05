@@ -40,7 +40,9 @@ flowchart LR
   here first; RBAC on the active kubeconfig context is the only access
   control at this boundary.
 - **TUI / `core`** — in-process, trusted: `ResourceStore`, `WatchManager`,
-  `ActionExecutor`, `AuditLog` hold cluster data and credentials in memory.
+  `AuditLog`, and the write path (`KubeClient`/`WriteOps`, dispatched via
+  `ToolExecutor` for agent-requested writes) hold cluster data and
+  credentials in memory and execute approved mutations.
 - **`OutboundPolicy` (the embedded-provider boundary)** — the single
   fail-closed choke point in `src/korvid/agent/outbound.py` that every
   message, tool result, and tool-call argument must pass through before an
@@ -67,9 +69,14 @@ flowchart LR
   (`docs/mcp.md`) is a *separate* surface bound to `127.0.0.1` with its own
   read/write-proposal contract and capability token. It does not call
   through `OutboundPolicy` or any embedded provider at all.
-- **Filesystem exports** — `:ai payload` → export and private log/text
+- **Filesystem exports** — `:ai payload` → export and private log-text
   exports write owner-restricted (`0600`) files under
-  `$XDG_DATA_HOME/korvid/` or `$XDG_STATE_HOME/korvid/`.
+  `$XDG_DATA_HOME/korvid/` only (`agent-payloads/` and `logs/`
+  respectively; falling back to `~/.local/share/korvid/` when
+  `XDG_DATA_HOME` is unset). `$XDG_STATE_HOME/korvid/` (default
+  `~/.local/state/korvid/`) holds separate audit/state files —
+  `audit.jsonl` and the MCP endpoint registry — which are not private
+  exports and are not sanitized the way provider payloads are.
 
 ## Attackers and abuse scenarios
 
