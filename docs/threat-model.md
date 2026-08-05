@@ -66,10 +66,12 @@ flowchart LR
   must never reshape messages inside `complete()`.
 - **Trusted provider plugins** — third-party `korvid.provider` entry points
   run as **trusted in-process** Python code (see
-  [`docs/provider-plugins.md`](provider-plugins.md)). They receive only the
-  same sanitized canonical `messages`/`tools` the built-in providers
-  receive, plus a `CredentialSource`. Nothing about the plugin's behavior
-  after that handoff is policed by korvid.
+  [`docs/provider-plugins.md`](provider-plugins.md)). A plugin's `create()`
+  receives only a `ProviderPluginConfig` and an optional `CredentialSource`
+  — never conversation data; the `LLMProvider` it returns is then called
+  with the same sanitized canonical `messages`/`tools` the built-in
+  providers receive. Nothing about the provider's behavior after that
+  handoff is policed by korvid.
 - **MCP loopback and capability tokens** — the MCP server
   (`docs/mcp.md`) is a *separate* surface bound to `127.0.0.1` with its own
   read/write-proposal contract and capability token. It does not call
@@ -107,9 +109,17 @@ flowchart LR
 
 ## Mitigations (implemented today)
 
+- **Redaction before reduction** (`korvid.core.redaction`) — one shared
+  recursive redactor, applied to a manifest where it is produced
+  (`ToolExecutor`, and so the MCP server behind it) and again at the
+  outbound boundary. Producer-side is not redundant: what marks a value
+  secret is structure — a nested `kind: Secret`, an env entry's `name` —
+  and the size bound elides mapping entries and clamps long scalars, so a
+  document reduced first can reach the boundary with its credentials
+  intact and every classifier gone.
 - **Secret masking** (`mask_secret_manifest`) — every `Secret` object's
   `data`/`stringData` entries are replaced with `MASK_PLACEHOLDER` before
-  any manifest crosses the outbound boundary.
+  any manifest crosses the outbound boundary, at any nesting depth.
 - **Universal last-applied removal** — the
   `kubectl.kubernetes.io/last-applied-configuration` annotation (which can
   hold an entire prior manifest, including secret material a client-side
@@ -124,9 +134,12 @@ flowchart LR
   denotes a credential (`DB_PASSWORD`, `API_KEY`, `OAUTH_CLIENT_SECRET`,
   `GITHUB_ACCESS_TOKEN`, `REFRESH_TOKEN`, `REGISTRY_CREDENTIALS`,
   `dbPassword`, …) has its sibling `value` masked, because the secret is
-  in the value while only the name says what it is. Non-credential env
-  values (`LOG_LEVEL`, `TOKENIZER_PATH`) and `valueFrom` references are
-  preserved so the model can still reason about configuration.
+  in the value while only the name says what it is. The whole `value` is
+  masked whatever type it has: the API types it as a string, so a mapping
+  or list there is malformed or hostile and is not descended into.
+  Non-credential env values (`LOG_LEVEL`, `TOKENIZER_PATH`) and
+  `valueFrom` references are preserved so the model can still reason
+  about configuration.
 - **Untrusted-text treatment** — all tool results and screen context are
   sanitized as data (control-character stripping, credential-pattern
   masking) rather than parsed as trusted instructions.
@@ -180,11 +193,11 @@ These are explicit, current limitations — not aspirational future work:
   payload to whatever process is actually listening at that address; it
   does not authenticate the remote process's identity beyond the URL you
   configured.
-- **Plugin post-handoff behavior is out of scope.** A trusted provider
-  plugin receives only the sanitized canonical `messages`/`tools`, but
-  once received, trusted in-process plugin code may mutate, retain, log,
-  cache, or independently transmit that data anywhere it chooses — korvid
-  has no further control or visibility after the handoff.
+- **Plugin post-handoff behavior is out of scope.** A plugin-provided
+  `complete()` receives only the sanitized canonical `messages`/`tools`,
+  but once received, trusted in-process plugin code may mutate, retain,
+  log, cache, or independently transmit that data anywhere it chooses —
+  korvid has no further control or visibility after the handoff.
 - **MCP callers own their own AI boundary.** korvid's MCP server exposes
   cluster read/UI-drive tools (and, opt-in, write proposals) directly to
   external MCP clients; it does not route those calls through

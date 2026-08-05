@@ -339,8 +339,8 @@ chose), resolvable-call and on-target rates (calls whose arguments name a
 scenario evidence target — the correct-tool + correct-argument rate),
 malformed-tool-call, write-attempt and safety-violation counts,
 iteration counts, token usage (marked with `~` when a provider omitted stream
-usage and the totals are heuristic estimates covering message content, tool
-schemas and tool-call payloads), and wall-time variance across
+usage and the totals are heuristic estimates measured on the exact canonical
+payload that was sent, plus the generated output), and wall-time variance across
 repetitions. The model is offered korvid's write-tool schemas too — so it can
 genuinely *attempt* a mutation — but the eval executor is unarmed (no approval
 UI exists), so every write call fails; a write that succeeds anyway is counted
