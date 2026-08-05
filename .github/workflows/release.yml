@@ -323,7 +323,7 @@ jobs:
           if-no-files-found: error
 
   attest:
-    needs: collect
+    needs: [collect, smoke]
     # Provenance attestation signs through public Sigstore and records the
     # entry in the public Rekor transparency log. That is irreversible, so it
     # only ever runs for a real tag push — never for a dry run.

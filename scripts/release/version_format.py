@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 
 #: The only supported release version shape, e.g. `0.1.0`.
-RELEASE_VERSION = re.compile(r"\A\d+\.\d+\.\d+\Z")
+RELEASE_VERSION = re.compile(r"\A[0-9]+\.[0-9]+\.[0-9]+\Z")
 
 #: Message used by both gates. It deliberately never echoes the rejected value.
 UNSUPPORTED_VERSION = "project version is not a supported release version (expected X.Y.Z)"

@@ -78,6 +78,7 @@ def test_release_version_format_helper_is_shared_by_both_gates() -> None:
     assert version_format.is_supported_release_version("10.20.30")
     assert not version_format.is_supported_release_version("0.1.0.dev1")
     assert not version_format.is_supported_release_version("1.0")
+    assert not version_format.is_supported_release_version("\u0660.\u0661.\u0660")
 
 
 # --- check_source -----------------------------------------------------------
@@ -1114,11 +1115,13 @@ def test_release_workflow_fetches_the_live_trusted_branch_before_the_source_poli
 
 def test_attestation_is_gated_to_tag_pushes_and_never_runs_on_a_dry_run() -> None:
     workflow = _release_workflow()
+    document = yaml.safe_load(workflow)
     collect = workflow.index("\n  collect:")
     attest = workflow.index("\n  attest:")
     stage = workflow.index("\n  stage-github-release:")
     assert collect < attest < stage
     assert "github.event_name == 'push'" not in workflow[collect:attest]
+    assert document["jobs"]["attest"]["needs"] == ["collect", "smoke"]
     assert "if: github.event_name == 'push'" in workflow[attest:stage]
     assert "actions/attest-build-provenance" in workflow[attest:stage]
 
