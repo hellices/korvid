@@ -151,10 +151,25 @@ def test_command_help_lists_proposals() -> None:
 
 
 def test_command_help_pins_ai_payload_usage() -> None:
+    """`follow` takes its own argument, so it needs its own row.
+
+    A flat `:ai [off|follow|payload]` reads as three interchangeable
+    words and hides that `:ai follow` is a toggle taking `on|off` — the
+    same nesting `:mcp follow` already spells out.
+    """
     from korvid.ui.command import command_help
 
     ai_rows = [command for command, _ in command_help() if command.startswith(":ai")]
-    assert ai_rows == [":ai [off|follow|payload]"]
+    assert ai_rows == [":ai [off|payload]", ":ai follow [on|off]"]
+
+
+def test_command_help_keeps_every_ai_subcommand_reachable() -> None:
+    """Splitting the row must not drop a documented subcommand."""
+    from korvid.ui.command import command_help
+
+    ai_help = " ".join(f"{command} {text}" for command, text in command_help() if ":ai" in command)
+    for word in ("off", "payload", "follow", "on", "setup"):
+        assert word in ai_help, f"missing :ai {word}"
 
 
 # ---------------------------------------------------------------------------
