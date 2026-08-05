@@ -1868,3 +1868,173 @@ async def test_the_ingress_record_map_never_retains_raw_content() -> None:
     )
     assert "hunter2-raw" not in stored
     assert "screen-raw" not in stored
+
+
+# --- The producer's record trail reaches the snapshot (round 4) --------------
+#
+# The real ToolExecutor redacts a manifest where it is produced, before
+# the runtime's ingress pass ever sees it. Redactions that *removed*
+# their evidence there (a deleted last-applied annotation, a stripped
+# control character) leave nothing for either later pass to rediscover,
+# so the inspector showed a clean-looking payload with no record that
+# anything was taken out. These run the real executor, not a fake that
+# hands back an unredacted manifest.
+
+
+def _get_resource_turn() -> list[list[dict[str, Any]]]:
+    return [
+        [
+            {
+                "type": "tool_call",
+                "id": "c1",
+                "name": "get_resource",
+                "arguments": '{"kind": "pods", "name": "web", "namespace": "prod"}',
+            },
+            {"type": "done"},
+        ],
+        [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+    ]
+
+
+async def test_a_last_applied_removed_by_the_real_executor_is_inventoried() -> None:
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "web",
+            "annotations": {"kubectl.kubernetes.io/last-applied-configuration": '{"spec":{"x":1}}'},
+        },
+    }
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), _manifest_executor(manifest))
+
+    await collect(runtime, "why?")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "last-applied-configuration" in _reasons(runtime)
+    assert "last-applied-configuration" not in snapshot.payload_json
+
+
+async def test_control_characters_stripped_by_the_real_executor_are_inventoried() -> None:
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "web", "labels": {"app": "we\x07ird"}},
+    }
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), _manifest_executor(manifest))
+
+    await collect(runtime, "why?")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "control-character" in _reasons(runtime)
+    assert "\x07" not in snapshot.payload_json
+
+
+async def test_a_real_secret_is_masked_and_inventoried_exactly_once() -> None:
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "db"},
+        "data": {"password": "cmF3LXNlY3JldA=="},
+    }
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), _manifest_executor(manifest))
+
+    await collect(runtime, "why?")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "cmF3LXNlY3JldA==" not in snapshot.payload_json
+    assert _records_at(runtime, "messages[3].content.data.password") == [
+        "secret-value",
+        "sensitive-key",
+    ]
+
+
+async def test_a_nested_crd_credential_is_inventoried_at_a_payload_path() -> None:
+    runtime = AgentRuntime(
+        ScriptedProvider(_get_resource_turn()),
+        _manifest_executor(oversized_crd_with_nested_credentials()),
+    )
+
+    await collect(runtime, "why?")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert NESTED_SECRET_SENTINEL not in snapshot.payload_json
+    assert LONG_NAME_ENV_SENTINEL not in snapshot.payload_json
+    assert "size-elision" in _reasons(runtime)
+
+
+async def test_producer_records_survive_into_a_later_turn() -> None:
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "web", "labels": {"app": "we\x07ird"}},
+    }
+    turns = _get_resource_turn()
+    turns.append([{"type": "text_delta", "text": "ok"}, {"type": "done"}])
+    runtime = AgentRuntime(ScriptedProvider(turns), _manifest_executor(manifest))
+
+    await collect(runtime, "first")
+    await collect(runtime, "second")
+
+    assert _records_at(runtime, "messages[3].content.metadata.labels.app") == ["control-character"]
+
+
+async def test_producer_records_are_dropped_when_their_turn_is_trimmed() -> None:
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "web", "labels": {"app": "we\x07ird"}},
+    }
+    turns = _get_resource_turn()
+    turns.extend([[{"type": "text_delta", "text": "ok"}, {"type": "done"}] for _ in range(11)])
+    runtime = AgentRuntime(ScriptedProvider(turns), _manifest_executor(manifest))
+
+    await collect(runtime, "first")
+    for index in range(11):
+        await collect(runtime, f"question {index}")
+
+    assert "control-character" not in _reasons(runtime)
+    assert not runtime._ingress_records
+
+
+async def test_producer_records_do_not_survive_a_rolled_back_turn() -> None:
+    # The tool runs, then the follow-up request carrying its result is
+    # too large: the rollback removes the tool message, so its producer
+    # records would name a path nobody can find.
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "web", "labels": {"app": "we\x07ird", "pad": "p" * 4000}},
+    }
+    runtime = AgentRuntime(
+        ScriptedProvider(_get_resource_turn()),
+        _manifest_executor(manifest),
+        max_request_chars=8_000,
+    )
+
+    await collect(runtime, "first")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "control-character" not in _reasons(runtime)
+    assert not runtime._ingress_records
+
+
+async def test_the_producer_record_map_never_retains_raw_content() -> None:
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "db"},
+        "data": {"password": "cmF3LXNlY3JldA=="},
+    }
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), _manifest_executor(manifest))
+
+    await collect(runtime, "why?")
+
+    stored = json.dumps(
+        {k: [(r.path, r.reason) for r in v] for k, v in runtime._ingress_records.items()}
+    )
+    assert "cmF3LXNlY3JldA==" not in stored

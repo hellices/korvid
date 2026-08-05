@@ -6,7 +6,7 @@ import json
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from korvid.agent.events import (
     AgentError,
@@ -29,9 +29,10 @@ from korvid.agent.outbound import (
     sanitize_tool_result,
 )
 from korvid.agent.prompts import compose_system_prompt
-from korvid.core.redaction import RedactionRecord
+from korvid.core.redaction import RedactionRecord, merge_records, rebase
 from korvid.tools.executor import (
     READ_TOOLS,
+    ToolOutcome,
     cap_result,
 )
 
@@ -66,6 +67,18 @@ class _Provider(Protocol):
 
 class _Executor(Protocol):
     async def execute(self, name: str, arguments: dict[str, Any]) -> str: ...
+
+
+@runtime_checkable
+class _RecordingExecutor(Protocol):
+    """An executor that also reports what it redacted while producing a result.
+
+    Optional: the string `execute` remains the contract every executor
+    must satisfy, so a fake or a third-party executor keeps working and
+    simply contributes no producer records.
+    """
+
+    async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome: ...
 
 
 def _message_chars(message: dict[str, Any]) -> int:
@@ -247,6 +260,32 @@ class AgentRuntime:
         if records:
             self._ingress_records[content] = tuple(records)
 
+    async def _execute_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> tuple[str, tuple[RedactionRecord, ...]]:
+        """Run one tool, taking its producer redaction trail when it offers one.
+
+        Producer-side redaction happens before the size bound, so it is
+        the only pass that can report what it *removed* rather than
+        masked. Executors that satisfy only the string contract simply
+        contribute nothing here.
+        """
+        executor = self._executor
+        if isinstance(executor, _RecordingExecutor):
+            outcome = await executor.execute_recorded(name, arguments)
+            return outcome.text, outcome.redactions
+        return await executor.execute(name, arguments), ()
+
+    def _truncate_history(self, start: int) -> None:
+        """Drop history from `start` on, and the records that described it.
+
+        Every path in the inventory has to resolve against the payload
+        the user is shown, so records outlive their message by exactly
+        nothing.
+        """
+        del self._messages[start:]
+        self._forget_dropped_ingress_records()
+
     def _forget_dropped_ingress_records(self) -> None:
         """Drop records for content no longer in history.
 
@@ -355,6 +394,7 @@ class AgentRuntime:
             name = str(tc["name"])
             arguments = str(tc["arguments"])
             yield ToolCallStarted(call_id=call_id, name=name, arguments=arguments)
+            produced: tuple[RedactionRecord, ...] = ()
             try:
                 parsed = json.loads(arguments or "{}")
             except json.JSONDecodeError:
@@ -366,7 +406,7 @@ class AgentRuntime:
                     result = "ERROR: bad arguments"
                 else:
                     try:
-                        result = await self._executor.execute(name, parsed)
+                        result, produced = await self._execute_tool(name, parsed)
                     except Exception as exc:  # defensive: executor contract is never-raise
                         # Same ingest cap as ToolExecutor — a huge exception
                         # message must not bypass the limit into history.
@@ -401,7 +441,13 @@ class AgentRuntime:
                 summary=result[:120],
             )
             self._messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
-            self._remember_ingress(result, ingress)
+            # The producer's trail and this pass's are two views of one
+            # document, re-rooted onto the same origin so a redaction both
+            # of them saw is not counted twice.
+            self._remember_ingress(
+                result,
+                merge_records(ingress, [rebase(item, "tool_result") for item in produced]),
+            )
         for tc in excess:
             summary = "discarded: too many tool calls in one response"
             yield ToolCallStarted(
@@ -521,7 +567,7 @@ class AgentRuntime:
         """Drop a blocked turn while retaining cost from completed iterations."""
         self._turn_active = False
         self._live_state = None
-        del self._messages[self._turn_base :]
+        self._truncate_history(self._turn_base)
         self._total_in += turn_in
         self._total_out += turn_out
         self._estimated = self._estimated or usage_missing
@@ -575,7 +621,7 @@ class AgentRuntime:
         if not self._turn_active:
             return TurnInterrupted(input_tokens=0, output_tokens=0, estimated=False)
         self._turn_active = False
-        del self._messages[self._iteration_base :]
+        self._truncate_history(self._iteration_base)
         state = self._live_state
         self._live_state = None
         partial = state.text if state is not None else ""
@@ -633,7 +679,7 @@ class AgentRuntime:
             self._remember_ingress(content, ingress)
             if self._strict_preflight_over_budget():
                 # Drop the unfittable prompt so it cannot poison later turns.
-                del self._messages[self._turn_base :]
+                self._truncate_history(self._turn_base)
                 logger.warning(
                     "strict history budget: rejected a prompt that cannot fit by itself "
                     "(budget %d chars)",

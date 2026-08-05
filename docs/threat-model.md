@@ -248,12 +248,18 @@ The `:ai payload` inspector (`PayloadInspectorScreen`) renders
 provider call, the `model` it was addressed to, and the list of redactions
 applied. The label is `model`, not `provider`, because that is what it
 holds — every adapter's `name` returns its model tag. The redaction list
-covers the whole pipeline, not just the final pass: screen text and tool
-results are redacted as they enter history, and redactions that *removed*
-their evidence there (a stripped control character, a deleted
-last-applied annotation) leave nothing for the boundary pass to
-rediscover, so those records are carried forward and reported on the
-payload path they occupy. A redaction both passes can see is listed once.
+covers the whole pipeline, not just the final pass. A structured manifest
+is redacted where it is produced, inside `ToolExecutor`, before it is
+bounded to size; screen text and tool results are redacted again as they
+enter history; the boundary pass redacts the assembled request. Redactions
+that *removed* their evidence at an earlier pass (a stripped control
+character, a deleted last-applied annotation, a mapping elided to fit the
+size bound) leave nothing for a later pass to rediscover, so those records
+are carried forward and reported on the payload path they occupy. A
+redaction more than one pass can see is listed once. Records are dropped
+when the message they describe leaves history — through a trim, a
+rollback, or an interruption — so no path in the list names a message the
+payload does not contain.
 This is the real payload — not a re-derived approximation — so what you
 read is what was sent. A turn that was blocked or rolled back sent
 nothing, so it leaves the previous handoff on display rather than

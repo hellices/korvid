@@ -2420,3 +2420,53 @@ async def test_get_resource_still_returns_a_well_formed_secret() -> None:
     loaded = yaml.safe_load(out)
     assert loaded["metadata"]["annotations"] == {"team": "sre"}
     assert loaded["data"]["password"] == MASK_PLACEHOLDER
+
+
+async def test_execute_still_returns_a_plain_string_for_mcp_and_eval_callers() -> None:
+    """MCP and the eval runner call `execute` and hand the value on as text."""
+    kube = FakeKube()
+    kube.manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "web", "labels": {"app": "we\x07ird"}},
+    }
+
+    result = await make_executor(kube).execute(
+        "get_resource", {"kind": "pods", "name": "web", "namespace": "d"}
+    )
+
+    assert type(result) is str
+    assert "\x07" not in result
+
+
+async def test_execute_recorded_reports_what_the_producer_removed() -> None:
+    kube = FakeKube()
+    kube.manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "web",
+            "annotations": {
+                "kubectl.kubernetes.io/last-applied-configuration": '{"kind":"Secret"}'
+            },
+            "labels": {"app": "we\x07ird"},
+        },
+    }
+    executor = make_executor(kube)
+    args = {"kind": "pods", "name": "web", "namespace": "d"}
+
+    outcome = await executor.execute_recorded("get_resource", args)
+
+    assert outcome.text == await executor.execute("get_resource", args)
+    reasons = {item.reason for item in outcome.redactions}
+    assert "last-applied-configuration" in reasons
+    assert "control-character" in reasons
+
+
+async def test_execute_recorded_reports_nothing_for_a_text_tool() -> None:
+    kube = FakeKube()
+
+    outcome = await make_executor(kube).execute_recorded("get_events", {"namespace": "default"})
+
+    assert outcome.redactions == ()
+    assert isinstance(outcome.text, str)

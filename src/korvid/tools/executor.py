@@ -6,10 +6,11 @@ import copy
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 from korvid.core.portforward import controller_owner
-from korvid.core.redaction import redact_manifest
+from korvid.core.redaction import RedactionError, RedactionRecord, record, redact_document
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HelmReleaseSummary, HelmRevisionSummary
@@ -38,7 +39,7 @@ from korvid.tools.diagnose import (
     warning_event_lines,
 )
 from korvid.tools.registry import TOOL_DEFS, TOOLS_BY_NAME, ToolDef, validate_dispatch_targets
-from korvid.tools.structured import ERROR_PREFIX, dump_bounded_yaml
+from korvid.tools.structured import ERROR_PREFIX, dump_bounded_yaml, dump_yaml
 
 MAX_RESULT_CHARS = 8000
 
@@ -67,6 +68,25 @@ def _reject_slash_name(value: str, field: str) -> str:
             "separately, each in its own field."
         )
     return value
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOutcome:
+    """One tool result plus the redactions applied while producing it.
+
+    Producer-side redaction runs before the size bound, so it is the only
+    pass that can still see a document's classifiers — and the only one
+    that knows what it *removed*. A deleted last-applied annotation or a
+    stripped control character leaves no mask behind for a later pass to
+    rediscover, so the trail travels with the text instead of being
+    reconstructed from it.
+
+    Returned by value rather than kept on the executor: concurrent tool
+    calls must not share a "records from the last call" slot.
+    """
+
+    text: str
+    redactions: tuple[RedactionRecord, ...] = field(default=())
 
 
 def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:
@@ -523,15 +543,32 @@ class ToolExecutor:
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         """Dispatch a tool call; never raises — exceptions are returned as 'ERROR: ...'."""
+        return (await self.execute_recorded(name, arguments)).text
+
+    async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        """Dispatch a tool call, keeping the redactions applied while producing it.
+
+        The record trail cannot be recovered downstream: redaction runs
+        here, before the size bound, and a redaction that *removes* its
+        evidence (a deleted last-applied annotation, a stripped control
+        character) leaves nothing for a later pass to find. Returning it
+        rather than storing it keeps concurrent calls independent — there
+        is no per-executor "last call" state to race over.
+
+        `execute` remains the string API every other consumer (the MCP
+        server, the eval runner) uses.
+        """
         try:
             result = await self._dispatch(name, arguments)
         except Exception as exc:
             # Errors flow through the same cap below: a client error with a
             # long reason must not bypass the ingest limit.
-            result = f"{ERROR_PREFIX} {exc}"
-        return cap_result(result)
+            return ToolOutcome(text=cap_result(f"{ERROR_PREFIX} {exc}"))
+        if isinstance(result, ToolOutcome):
+            return ToolOutcome(text=cap_result(result.text), redactions=result.redactions)
+        return ToolOutcome(text=cap_result(result))
 
-    async def _dispatch(self, name: str, arguments: dict[str, Any]) -> str:
+    async def _dispatch(self, name: str, arguments: dict[str, Any]) -> str | ToolOutcome:
         # Routing derives from the registry's validated metadata: the
         # effect picks the route and every handler resolves through the
         # validated dispatch key (issue #91) — an unknown or misregistered
@@ -549,7 +586,9 @@ class ToolExecutor:
                     f"tool {tool.name!r} is only available over the MCP proposal surface"
                 )
             return await self._dispatch_proposal(tool, arguments)
-        handler: Callable[[dict[str, Any]], Awaitable[str]] = getattr(self, tool.dispatch)
+        handler: Callable[[dict[str, Any]], Awaitable[str | ToolOutcome]] = getattr(
+            self, tool.dispatch
+        )
         return await handler(arguments)
 
     async def _dispatch_ui(self, tool: ToolDef, args: dict[str, Any]) -> str:
@@ -734,7 +773,7 @@ class ToolExecutor:
             lines.append(f"  ...and {len(packages) - len(shown)} more catalog packages")
         return "\n".join(lines)
 
-    async def _get_resource(self, args: dict[str, Any]) -> str:
+    async def _get_resource(self, args: dict[str, Any]) -> ToolOutcome:
         kind = str(args["kind"]).strip().lower()
         name = _reject_slash_name(str(args["name"]), "name")
         namespace: str | None = args.get("namespace")
@@ -746,12 +785,16 @@ class ToolExecutor:
         if meta.namespaced and not namespace:
             raise ValueError(f"kind {kind!r} is namespaced — provide the 'namespace' argument")
         manifest = await self._kube.get_object(meta, namespace, name)
-        manifest = _mask_manifest(manifest)
+        redacted, records = _mask_manifest(manifest)
         # Bounded here, at the point the document is produced: the shared
         # `cap_result` byte cut would leave a fragment that is no longer
         # YAML, which every consumer (the model, the outbound policy's
         # recursive redaction, an MCP client) needs it to be.
-        return dump_bounded_yaml(manifest, MAX_RESULT_CHARS)
+        text = dump_yaml(redacted)
+        if len(text) > MAX_RESULT_CHARS:
+            text = dump_bounded_yaml(redacted, MAX_RESULT_CHARS)
+            record(records, "manifest", "size-elision")
+        return ToolOutcome(text=text, redactions=tuple(records))
 
     async def _get_logs(self, args: dict[str, Any]) -> str:
         pod = _reject_slash_name(str(args["pod"]), "pod")
@@ -1316,7 +1359,7 @@ class ToolExecutor:
         return await self._diagnose_deployment(namespace, name, workload)
 
 
-def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+def _mask_manifest(manifest: dict[str, Any]) -> tuple[dict[str, Any], list[RedactionRecord]]:
     """Strip managedFields, then redact the whole document recursively.
 
     Redaction runs here, on the full manifest, *before* the size bound:
@@ -1330,11 +1373,20 @@ def _mask_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     outbound policy, so the agent path, the MCP server that dispatches
     through this executor, and the provider boundary cannot disagree
     about what counts as a secret.
+
+    The record trail is returned rather than dropped: a redaction that
+    *removes* its evidence here (a deleted last-applied annotation, a
+    stripped control character) leaves nothing for the later passes to
+    rediscover, so without it the payload inspector would show a document
+    that looks untouched.
     """
     meta = manifest.get("metadata")
     if isinstance(meta, dict):
         meta.pop("managedFields", None)
-    return redact_manifest(manifest)
+    redacted, records = redact_document(manifest, path="manifest")
+    if not isinstance(redacted, dict):
+        raise RedactionError("a manifest must redact to a mapping")
+    return redacted, records
 
 
 # Fail at import time (startup/tests), not at a live tool call, when a
