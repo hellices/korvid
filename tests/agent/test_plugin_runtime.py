@@ -16,6 +16,7 @@ from korvid.agent.provider_plugin import ProviderPluginConfig
 from korvid.agent.runtime import AgentRuntime
 from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.providers.plugin_registry import ProviderPluginRegistry
+from korvid.tools.executor import RecordedExecution
 from tests.agent.test_runtime import EchoExecutor, collect
 from tests.fixtures.provider_plugin.site_helpers import (
     FIXTURES_DIR,
@@ -127,7 +128,7 @@ async def test_packaged_plugin_receives_masked_secret_tool_result(
 ) -> None:
     sentinel = "plugin-must-not-see-this-secret"
 
-    class SecretExecutor:
+    class SecretExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return (
                 "apiVersion: v1\n"

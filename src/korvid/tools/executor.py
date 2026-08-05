@@ -7,7 +7,7 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar
 
 from korvid.core.portforward import controller_owner
 from korvid.core.redaction import (
@@ -147,32 +147,42 @@ class RecordedExecution(ABC):
         return ToolOutcome(text=await self.execute(name, arguments))
 
 
-class SupportsToolExecution(Protocol):
-    """Anything with the string `execute` — the on-ramp, not the interface.
-
-    `as_recorded` accepts this so a duck-typed executor (a test fake, a
-    third-party integration) keeps working; what the agent loop depends
-    on is `RecordedExecution`.
-    """
-
-    async def execute(self, name: str, arguments: dict[str, Any]) -> str: ...
-
-
 class _AdaptedExecution(RecordedExecution):
     """A string-only executor seen through the recorded contract."""
 
-    def __init__(self, executor: SupportsToolExecution) -> None:
-        self._executor = executor
+    def __init__(self, execute: Callable[[str, dict[str, Any]], Awaitable[str]]) -> None:
+        self._execute = execute
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-        return await self._executor.execute(name, arguments)
+        return await self._execute(name, arguments)
 
 
-def as_recorded(executor: SupportsToolExecution) -> RecordedExecution:
-    """View any executor through the recorded contract, adapting if needed."""
+def as_recorded(executor: object) -> RecordedExecution:
+    """Adapt a string-only executor to `RecordedExecution`.
+
+    The explicit on-ramp for something that is not a `RecordedExecution` —
+    a test fake, a third-party integration — and it is the **caller's** to
+    invoke. `AgentRuntime` used to do it silently, which made a structural
+    shape the real constructor boundary; composing the adapter is a
+    decision, and it belongs where the executor is chosen (PR #197 review).
+
+    Args:
+        executor: A `RecordedExecution`, returned as-is, or any object with
+            an `async execute(name, arguments) -> str`.
+
+    Returns:
+        The executor itself, or an adapter reporting no producer records.
+
+    Raises:
+        TypeError: The object has no callable `execute`, so nothing could
+            dispatch a tool call through it.
+    """
     if isinstance(executor, RecordedExecution):
         return executor
-    return _AdaptedExecution(executor)
+    execute = getattr(executor, "execute", None)
+    if not callable(execute):
+        raise TypeError("a tool executor must define async execute(name, arguments) -> str")
+    return _AdaptedExecution(execute)
 
 
 def cap_result(result: str, limit: int = MAX_RESULT_CHARS) -> str:

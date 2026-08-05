@@ -3008,3 +3008,13 @@ async def test_a_bounded_manifest_still_names_its_object() -> None:
     assert manifest["apiVersion"] == "example.com/v1"
     assert manifest["metadata"]["name"] == "composite-0"
     assert manifest["metadata"]["namespace"] == "prod"
+
+
+def test_as_recorded_refuses_something_that_cannot_execute_a_tool() -> None:
+    """Fail at composition, not at the first tool call of a live session."""
+
+    class NotAnExecutor:
+        pass
+
+    with pytest.raises(TypeError, match="async execute"):
+        as_recorded(NotAnExecutor())

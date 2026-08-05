@@ -28,6 +28,7 @@ from korvid.tools.executor import (
     READ_TOOLS,
     RecordedExecution,
     ToolExecutor,
+    as_recorded,
 )
 from korvid.tools.registry import CustomToolResult
 from tests.tools.test_executor import (
@@ -59,7 +60,7 @@ class ScriptedProvider:
             yield ev
 
 
-class EchoExecutor:
+class EchoExecutor(RecordedExecution):
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         return f"result-of-{name}"
 
@@ -222,7 +223,7 @@ async def test_usage_accumulates_across_tool_iterations() -> None:
     assert rt.total_tokens == (120, 14)
 
 
-class RaisingExecutor:
+class RaisingExecutor(RecordedExecution):
     async def execute(self, name: str, arguments: dict[str, object]) -> str:
         raise RuntimeError("boom")
 
@@ -378,7 +379,7 @@ async def test_executor_exception_result_is_capped() -> None:
     """A defensive fallback with a huge message must respect the ingest cap."""
     from korvid.tools.executor import MAX_RESULT_CHARS
 
-    class LoudExecutor:
+    class LoudExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             raise RuntimeError("x" * (MAX_RESULT_CHARS * 2))
 
@@ -674,7 +675,7 @@ async def test_runtime_caps_tool_results_at_max_result_chars() -> None:
     small profile (issue #71) sizes it so one full turn of results fits
     inside its retained-history budget."""
 
-    class HugeExecutor:
+    class HugeExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "x" * 5_000
 
@@ -700,7 +701,7 @@ async def test_profile_result_cap_preserves_the_tail_evidence() -> None:
     a prefix-only cap would chop the most diagnostic sections. The profile
     cap must keep both ends of an oversized result."""
 
-    class HeadTailExecutor:
+    class HeadTailExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "IDENTITY line\n" + "x" * 5_000 + "\nLOG EXCERPT: OOMKilled"
 
@@ -728,7 +729,7 @@ async def test_tool_call_limit_per_iteration_is_enforced() -> None:
     iteration cannot blow the per-turn size bound."""
     executed: list[str] = []
 
-    class SpyExecutor:
+    class SpyExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             executed.append(name)
             return "ok"
@@ -763,7 +764,7 @@ async def test_discarded_excess_calls_do_not_grow_history() -> None:
     model emitting many large parallel calls each iteration still exceeds
     the history budget mid-turn (trimming never drops the newest turn)."""
 
-    class SpyExecutor:
+    class SpyExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "ok"
 
@@ -792,7 +793,7 @@ async def test_in_turn_history_budget_ends_the_turn_early() -> None:
     trimming never drops the sole current turn. A follow-up provider call
     must not be sent once the in-turn total exceeds the history budget."""
 
-    class SpyExecutor:
+    class SpyExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "ok"
 
@@ -819,7 +820,7 @@ async def test_history_budget_stays_soft_without_strict_mode() -> None:
     """Soft history mode skips the legacy mid-turn guard, but the final
     provider-boundary policy still rejects an oversized follow-up request."""
 
-    class SpyExecutor:
+    class SpyExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "ok"
 
@@ -853,7 +854,7 @@ async def test_strict_trim_drops_an_oversized_sole_previous_turn() -> None:
     strict trimming must drop the oversized completed turn instead of
     resending it (the default keeps it — most recent turn always retained)."""
 
-    class SpyExecutor:
+    class SpyExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "ok"
 
@@ -882,7 +883,7 @@ async def test_strict_mode_rejects_a_prompt_that_cannot_fit() -> None:
     with the new user message in place, a prompt that cannot fit by itself
     is rejected — and dropped, so it cannot poison later turns."""
 
-    class SpyExecutor:
+    class SpyExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "ok"
 
@@ -926,7 +927,7 @@ async def test_screen_context_is_sanitized_and_delimited_before_history() -> Non
 
 
 async def test_nested_tool_result_is_sanitized_and_final_snapshot_is_exact() -> None:
-    class SecretExecutor:
+    class SecretExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return json.dumps(
                 {
@@ -983,7 +984,7 @@ async def test_nested_tool_result_is_sanitized_and_final_snapshot_is_exact() -> 
 
 
 async def test_malformed_secret_result_blocks_follow_up_and_rolls_back_turn() -> None:
-    class MalformedSecretExecutor:
+    class MalformedSecretExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return json.dumps({"kind": "Secret", "data": "raw-secret"})
 
@@ -1108,7 +1109,7 @@ async def test_latest_snapshot_survives_a_turn_rolled_back_mid_flight() -> None:
     belonged to was dropped.
     """
 
-    class MalformedSecretExecutor:
+    class MalformedSecretExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return json.dumps({"kind": "Secret", "data": "raw-secret"})
 
@@ -1154,7 +1155,7 @@ async def test_provider_and_executor_mutation_cannot_change_history_or_snapshot(
         }
     ]
 
-    class MutatingExecutor:
+    class MutatingExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             arguments["nested"]["value"] = marker
             return "status=ok"
@@ -1412,7 +1413,7 @@ async def test_nested_credentials_never_reach_the_wire_from_an_oversized_manifes
 
 
 def _bulk_text_executor(chars: int) -> Any:
-    class BulkExecutor:
+    class BulkExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "log line evidence. " * (chars // 19)
 
@@ -1672,7 +1673,7 @@ async def test_estimated_prompt_cost_reflects_the_history_actually_sent() -> Non
 # is inventoried, exactly once, at the path it occupies in that payload.
 
 
-class _FixedExecutor:
+class _FixedExecutor(RecordedExecution):
     def __init__(self, result: str) -> None:
         self.result = result
 
@@ -2362,13 +2363,14 @@ async def test_a_blocked_turn_leaves_the_session_usable() -> None:
 
 def test_the_runtime_holds_its_executor_through_the_recorded_contract() -> None:
     """No private Protocol declared in the consuming layer, no isinstance
-    check at each call: the executor is adapted once, at the edge."""
+    check at each call: whatever the caller composed, the runtime holds it
+    as the tools layer's ABC."""
 
     class Duck:
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "ok"
 
-    runtime = AgentRuntime(ScriptedProvider([]), Duck())
+    runtime = AgentRuntime(ScriptedProvider([]), as_recorded(Duck()))
 
     assert isinstance(runtime._executor, RecordedExecution)
 
@@ -2378,7 +2380,7 @@ async def test_a_string_only_executor_still_drives_a_turn() -> None:
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "kind: Pod\nstatus:\n  restarts: 7\n"
 
-    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), Duck())
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), as_recorded(Duck()))
 
     await collect(runtime, "why?")
 
@@ -2421,7 +2423,7 @@ async def test_an_error_shaped_document_from_a_custom_executor_never_reaches_the
             return _ERROR_SHAPED_SECRET
 
     provider = ScriptedProvider(_get_resource_turn())
-    runtime = AgentRuntime(provider, Duck())
+    runtime = AgentRuntime(provider, as_recorded(Duck()))
 
     await collect(runtime, "why?")
 
@@ -2464,7 +2466,7 @@ async def test_a_tool_blocked_at_ingress_is_never_left_running() -> None:
             return "ERROR: cluster said: this: is: not: yaml\n\t- [unclosed"
 
     provider = ScriptedProvider(_get_resource_turn())
-    runtime = AgentRuntime(provider, Duck())
+    runtime = AgentRuntime(provider, as_recorded(Duck()))
 
     events = await collect(runtime, "why?")
 
@@ -2481,7 +2483,7 @@ async def test_a_turn_blocked_at_ingress_leaves_no_history_behind() -> None:
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "ERROR: cluster said: this: is: not: yaml\n\t- [unclosed"
 
-    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), Duck())
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), as_recorded(Duck()))
 
     await collect(runtime, "why?")
 
@@ -2587,7 +2589,7 @@ async def test_an_error_shaped_document_is_still_a_document_at_the_boundary() ->
             return _ERROR_SHAPED_SECRET
 
     provider = ScriptedProvider(_get_resource_turn())
-    runtime = AgentRuntime(provider, Duck())
+    runtime = AgentRuntime(provider, as_recorded(Duck()))
 
     await collect(runtime, "why?")
 
@@ -3052,7 +3054,7 @@ data:
 """
 
 
-class _CustomExecutor:
+class _CustomExecutor(RecordedExecution):
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         return _CUSTOM_SECRET
 
@@ -3097,7 +3099,7 @@ async def test_a_custom_tool_declared_structured_is_redacted_as_a_document() -> 
 
 
 async def test_a_custom_tool_declared_text_keeps_the_text_pass() -> None:
-    class _NotesExecutor:
+    class _NotesExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "restart the deployment at 02:00"
 
@@ -3133,7 +3135,7 @@ async def test_an_undeclared_tool_that_fails_still_tells_the_model_why() -> None
     """A producer-declared failure is text either way — this must not
     become a way to lose ordinary "unknown tool" errors."""
 
-    class _RaisingExecutor:
+    class _RaisingExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             raise RuntimeError("unknown tool 'fetch_manifest'")
 
@@ -3191,7 +3193,7 @@ async def test_a_result_that_only_quotes_an_error_is_not_shown_as_a_failure() ->
     """A pod that logs `ERROR: db connection refused` produced a result,
     and the tool row must not tell the user the call failed."""
 
-    class _QuotingExecutor:
+    class _QuotingExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "ERROR: db connection refused\nERROR: retrying"
 
@@ -3659,3 +3661,43 @@ async def test_an_acknowledged_openai_request_that_fails_is_still_charged() -> N
     snapshot = runtime.latest_outbound_payload
     assert snapshot is not None
     assert runtime.total_tokens[0] == len(snapshot.payload_json) // 4
+
+
+# --- The constructor boundary is the ABC, nothing else (round 12) ----------
+
+
+async def test_the_runtime_takes_an_executor_that_implements_the_contract() -> None:
+    class Real(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "kind: Pod\nstatus:\n  restarts: 7\n"
+
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), Real())
+
+    await collect(runtime, "why?")
+
+    assert runtime._executor.__class__ is Real
+    assert any("restarts: 7" in str(m.get("content")) for m in runtime._messages)
+
+
+def test_the_runtime_refuses_an_executor_that_only_looks_like_one() -> None:
+    """Adapting a duck at the boundary made the boundary structural. The
+    ABC is the contract; composing an adapter is the caller's decision."""
+
+    class Duck:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    with pytest.raises(TypeError, match="RecordedExecution"):
+        AgentRuntime(ScriptedProvider([]), Duck())  # type: ignore[arg-type]  # the point of the test
+
+
+async def test_a_caller_that_wants_a_duck_composes_the_adapter_itself() -> None:
+    class Duck:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "kind: Pod\nstatus:\n  restarts: 7\n"
+
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), as_recorded(Duck()))
+
+    await collect(runtime, "why?")
+
+    assert any("restarts: 7" in str(m.get("content")) for m in runtime._messages)

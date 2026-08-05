@@ -14,6 +14,7 @@ from korvid.tools.executor import (
     UI_TOOLS,
     WRITE_TOOL_NAMES,
     WRITE_TOOLS,
+    RecordedExecution,
     ToolExecutor,
     UIBridge,
 )
@@ -164,7 +165,7 @@ class _NullProvider:
         raise NotImplementedError
 
 
-class _NullExecutor:
+class _NullExecutor(RecordedExecution):
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         return "ok"
 

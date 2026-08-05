@@ -17,6 +17,7 @@ from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.runner import ScenarioReport, render_markdown, run_scenario
 from korvid.evals.scenario import ContainerLogs, Evidence, Scenario
 from korvid.evals.scripted import ScriptedProvider
+from korvid.tools.executor import RecordedExecution
 
 
 def _oom_scenario() -> Scenario:
@@ -281,7 +282,7 @@ async def test_runtime_offers_write_tool_schemas_while_executor_stays_unarmed() 
     assert report.runs[0].safety_violations == 0
 
 
-class _PermissiveExecutor:
+class _PermissiveExecutor(RecordedExecution):
     """Returns success for every call — models an executor whose write path
     is armed. Write results must still never count as resolvable calls."""
 
@@ -653,7 +654,7 @@ async def test_evidence_grading_sees_only_the_model_visible_capped_result() -> N
     saw."""
     from korvid.evals.runner import _RecordingExecutor
 
-    class MiddleEvidenceExecutor:
+    class MiddleEvidenceExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "x" * 1_500 + "OOMKilled" + "y" * 1_995
 
@@ -674,7 +675,7 @@ async def test_discard_notice_does_not_retruncate_the_recorded_result() -> None:
     from korvid.agent.runtime import AgentRuntime
     from korvid.evals.runner import _RecordingExecutor
 
-    class TailEvidenceExecutor:
+    class TailEvidenceExecutor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "x" * 3_500 + "\nLOG EXCERPT: exit=137 OOMKilled"
 
@@ -788,7 +789,7 @@ async def test_the_eval_recorder_keeps_the_records_of_its_own_sanitize_pass() ->
     than production's for the same content."""
     from korvid.evals.runner import _RecordingExecutor
 
-    class Noisy:
+    class Noisy(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "line one\x07line two"
 
@@ -832,7 +833,7 @@ async def test_an_eval_runtime_snapshot_inventories_the_recorder_redaction() -> 
     from korvid.agent.runtime import AgentRuntime
     from korvid.evals.runner import _RecordingExecutor
 
-    class Noisy:
+    class Noisy(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "restarts\x07=7"
 
@@ -850,3 +851,30 @@ async def test_an_eval_runtime_snapshot_inventories_the_recorder_redaction() -> 
     snapshot = runtime.latest_outbound_payload
     assert snapshot is not None
     assert "control-character" in [item.reason for item in snapshot.redactions]
+
+
+async def test_the_eval_recorder_is_the_composition_point_for_a_plain_executor() -> None:
+    """Scenario packs hand over whatever they built; the recorder adapts it
+    so the runtime never has to accept something structural (round 12)."""
+    from korvid.agent.runtime import AgentRuntime
+    from korvid.evals.runner import _RecordingExecutor
+    from korvid.tools.executor import RecordedExecution
+
+    class StringOnly:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "restarts=7"
+
+    recording = _RecordingExecutor(StringOnly(), max_result_chars=3_000)
+    provider = ScriptedProvider(
+        [
+            [_tool_call("get_events", {"namespace": "shop"}), {"type": "done"}],
+            [{"type": "text_delta", "text": "done"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, recording)
+
+    async for _ in runtime.run_turn("why?", ""):
+        pass
+
+    assert isinstance(recording, RecordedExecution)
+    assert [r.result for r in recording.records] == ["restarts=7"]

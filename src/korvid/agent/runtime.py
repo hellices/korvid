@@ -34,9 +34,7 @@ from korvid.core.redaction import RedactionRecord
 from korvid.tools.executor import (
     READ_TOOLS,
     RecordedExecution,
-    SupportsToolExecution,
     ToolResultBlocked,
-    as_recorded,
     cap_result,
 )
 from korvid.tools.registry import (
@@ -154,7 +152,7 @@ class AgentRuntime:
     def __init__(
         self,
         provider: _Provider,
-        executor: SupportsToolExecution,
+        executor: RecordedExecution,
         *,
         tools: list[dict[str, Any]] | None = None,
         max_iterations: int = 15,
@@ -169,7 +167,17 @@ class AgentRuntime:
         custom_tool_results: Sequence[CustomToolResult] = (),
     ) -> None:
         self._provider = provider
-        self._executor: RecordedExecution = as_recorded(executor)
+        # The tools layer's ABC, not something that merely looks like it:
+        # adapting a duck here made a structural shape the real boundary,
+        # and a mistyped executor would only fail at the first tool call.
+        # `as_recorded` is the on-ramp, and composing it is the caller's
+        # decision (AGENTS.md layer rules, PR #197 review).
+        if not isinstance(executor, RecordedExecution):
+            raise TypeError(
+                "executor must implement RecordedExecution "
+                "(korvid.tools.executor.as_recorded adapts a string-only executor)"
+            )
+        self._executor: RecordedExecution = executor
         self._tools = tools if tools is not None else READ_TOOLS
         # How each offered tool's results are treated. A tool this build
         # does not define has to be declared: the boundary cannot tell a

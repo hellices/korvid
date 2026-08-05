@@ -16,6 +16,7 @@ from typing import Any
 
 from korvid.agent.events import TurnComplete, TurnInterrupted
 from korvid.agent.runtime import AgentRuntime
+from korvid.tools.executor import RecordedExecution
 
 from .test_runtime import EchoExecutor, ScriptedProvider
 
@@ -40,7 +41,7 @@ class StalledProvider:
             self.closed.set()  # cancellation must unwind the stream promptly
 
 
-class BlockingExecutor:
+class BlockingExecutor(RecordedExecution):
     """First call blocks until released; records what ran."""
 
     def __init__(self) -> None:

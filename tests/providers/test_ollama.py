@@ -12,6 +12,7 @@ from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.providers.ollama import OllamaOptions, OllamaProvider
 from korvid.providers.openai_compat import ProviderError
 from korvid.providers.static_creds import StaticHeaderSource
+from korvid.tools.executor import RecordedExecution
 
 
 def _ndjson(*chunks: dict[str, Any]) -> str:
@@ -554,7 +555,7 @@ async def test_runtime_sends_exactly_the_snapshot_to_ollama() -> None:
         body = streams[min(len(bodies) - 1, len(streams) - 1)]
         return httpx.Response(200, text=body, headers={"content-type": "application/x-ndjson"})
 
-    class _Executor:
+    class _Executor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return 'api_key: "raw-thinking-secret"'
 
@@ -596,7 +597,7 @@ async def test_the_snapshot_labels_the_model_not_the_provider() -> None:
             headers={"content-type": "application/x-ndjson"},
         )
 
-    class _Executor:
+    class _Executor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "ok"
 
@@ -651,7 +652,7 @@ async def test_carried_redaction_records_survive_the_native_dialect_hook() -> No
             200, text=next(replies), headers={"content-type": "application/x-ndjson"}
         )
 
-    class _Executor:
+    class _Executor(RecordedExecution):
         async def execute(self, name: str, arguments: dict[str, Any]) -> str:
             return "starting\x07 pod ready"
 

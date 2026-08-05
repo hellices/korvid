@@ -31,7 +31,6 @@ from korvid.tools.executor import (
     UI_TOOL_NAMES,
     WRITE_TOOL_NAMES,
     RecordedExecution,
-    SupportsToolExecution,
     ToolOutcome,
     as_recorded,
 )
@@ -72,9 +71,10 @@ class _RecordingExecutor(RecordedExecution):
     inventory the payload inspector would export.
     """
 
-    def __init__(
-        self, executor: SupportsToolExecution, max_result_chars: int | None = None
-    ) -> None:
+    def __init__(self, executor: object, max_result_chars: int | None = None) -> None:
+        # Scenario and journey packs hand over whatever they built; this is
+        # the composition point that turns it into the contract the runtime
+        # requires, so the runtime itself never has to guess (PR #197).
         self._executor = as_recorded(executor)
         self._max_result_chars = max_result_chars
         self.records: list[ToolRecord] = []
