@@ -22,20 +22,33 @@
   "models": [
     {
       "name": "qwen3:1.7b",
-      "digest": "8f68893c685c",
-      "ollama_size": "1.4 GB"
+      "digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+      "ollama_size": "1.4 GB",
+      "quantization": "Q4_K_M",
+      "native_context_length": 40960
     },
     {
       "name": "qwen3:8b",
-      "digest": "500a1f067a9f",
-      "ollama_size": "5.2 GB"
+      "digest": "500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41",
+      "ollama_size": "5.2 GB",
+      "quantization": "Q4_K_M",
+      "native_context_length": 40960
     },
     {
       "name": "qwen3-coder:30b",
-      "digest": "06c1097efce0",
-      "ollama_size": "18 GB"
+      "digest": "06c1097efce0431c2045fe7b2e5108366e43bee1b4603a7aded8f21689e90bca",
+      "ollama_size": "18 GB",
+      "quantization": "Q4_K_M",
+      "native_context_length": 262144
     }
   ],
+  "runtime_context_length": 4096,
+  "warm_up": {
+    "endpoint": "/api/chat",
+    "stream": false,
+    "user_message": "Reply with exactly OK",
+    "timed": false
+  },
   "live_target": {
     "cluster": "aks-korvid-contract-test",
     "namespace": "korvid-agent-eval-124b1aa",
