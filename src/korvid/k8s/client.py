@@ -40,6 +40,7 @@ from korvid.k8s.logs import LogLine
 from korvid.k8s.metrics import PodMetrics, parse_pod_metrics_list
 from korvid.k8s.models import GenericSummary, PodSummary, summary_for
 from korvid.k8s.reads import ReadOps
+from korvid.k8s.telemetry import ReadOperation, ReadTelemetry, ReadTelemetryEvent
 from korvid.k8s.writes import WriteOps
 
 logger = logging.getLogger(__name__)
@@ -149,7 +150,10 @@ class KubeClient(ReadOps, WriteOps):
     """Thin wrapper over kubernetes_asyncio; returns typed summaries."""
 
     def __init__(
-        self, custom_columns: Mapping[str, tuple[CustomColumn, ...]] | None = None
+        self,
+        custom_columns: Mapping[str, tuple[CustomColumn, ...]] | None = None,
+        *,
+        read_telemetry: ReadTelemetry | None = None,
     ) -> None:
         self._api: k8s_client.ApiClient | None = None
         self._core_v1: k8s_client.CoreV1Api | None = None
@@ -166,6 +170,50 @@ class KubeClient(ReadOps, WriteOps):
         self._pod_resize_supported: bool | None = None
         #: cloud provider detection result; None until the first lookup.
         self._provider_info: ProviderInfo | None = None
+        self._read_telemetry = read_telemetry
+
+    @staticmethod
+    def _namespaces_path() -> str:
+        return "/api/v1/namespaces"
+
+    @staticmethod
+    def _pods_path(namespace: str | None) -> str:
+        if namespace is None:
+            return "/api/v1/pods"
+        return f"/api/v1/namespaces/{_path_segment(namespace)}/pods"
+
+    def _observe_read(
+        self,
+        operation: ReadOperation,
+        path: str,
+        *,
+        payload: object | None = None,
+        object_count: int = 0,
+        status: int | None = None,
+    ) -> None:
+        if self._read_telemetry is None:
+            return
+        decoded_bytes = 0
+        if payload is not None:
+            decoded_bytes = len(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+            )
+        self._read_telemetry(
+            ReadTelemetryEvent(
+                operation=operation,
+                path=path,
+                decoded_bytes=decoded_bytes,
+                object_count=object_count,
+                status=status,
+            )
+        )
+
+    def _observe_read_error(
+        self,
+        path: str,
+        exc: ApiStatusError | k8s_client.exceptions.ApiException,
+    ) -> None:
+        self._observe_read("error", path, status=int(getattr(exc, "status", 0) or 0))
 
     def _pod_summary(self, manifest: dict[str, Any]) -> PodSummary:
         """PodSummary + configured custom column values (issue #45)."""
@@ -260,11 +308,18 @@ class KubeClient(ReadOps, WriteOps):
     async def list_namespaces(self) -> list[str]:
         if self._core_v1 is None:
             raise RuntimeError("connect() first")
+        path = self._namespaces_path()
         try:
             resp = await self._core_v1.list_namespace(_preload_content=False)
             data = await _to_dict(resp)
+        except ApiStatusError as exc:
+            self._observe_read_error(path, exc)
+            raise
         except k8s_client.exceptions.ApiException as exc:
+            self._observe_read_error(path, exc)
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+        items = data.get("items", [])
+        self._observe_read("list", path, payload=data, object_count=len(items))
         return [item["metadata"]["name"] for item in data.get("items", [])]
 
     async def detect_cloud_provider(self) -> ProviderInfo:
@@ -343,11 +398,18 @@ class KubeClient(ReadOps, WriteOps):
     async def list_pods(self, namespace: str) -> list[PodSummary]:
         if self._core_v1 is None:
             raise RuntimeError("connect() first")
+        path = self._pods_path(namespace)
         try:
             resp = await self._core_v1.list_namespaced_pod(namespace, _preload_content=False)
             data = await _to_dict(resp)
+        except ApiStatusError as exc:
+            self._observe_read_error(path, exc)
+            raise
         except k8s_client.exceptions.ApiException as exc:
+            self._observe_read_error(path, exc)
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+        items = data.get("items", [])
+        self._observe_read("list", path, payload=data, object_count=len(items))
         return [self._pod_summary(item) for item in data.get("items", [])]
 
     async def watch_pods(self, namespace: str | None) -> AsyncIterator[tuple[str, PodSummary]]:
@@ -363,6 +425,7 @@ class KubeClient(ReadOps, WriteOps):
         """Per-namespace pod watch via CoreV1Api (LIST then stream)."""
         if self._core_v1 is None:
             raise RuntimeError("connect() first")
+        path = self._pods_path(namespace)
 
         # LIST first: yield pre-existing pods as ADDED and anchor the watch at
         # the snapshot's resourceVersion so no events are missed between LIST
@@ -372,11 +435,17 @@ class KubeClient(ReadOps, WriteOps):
         try:
             resp = await self._core_v1.list_namespaced_pod(namespace, _preload_content=False)
             data = await _to_dict(resp)
+        except ApiStatusError as exc:
+            self._observe_read_error(path, exc)
+            raise
         except k8s_client.exceptions.ApiException as exc:
+            self._observe_read_error(path, exc)
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 
+        items = data.get("items", [])
+        self._observe_read("list", path, payload=data, object_count=len(items))
         resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
-        for item in data.get("items", []):
+        for item in items:
             yield ("ADDED", self._pod_summary(item))
 
         watch_kwargs: dict[str, Any] = {}
@@ -384,16 +453,23 @@ class KubeClient(ReadOps, WriteOps):
             watch_kwargs["resource_version"] = resource_version
 
         w = k8s_watch.Watch()
+        self._observe_read("watch_open", path)
         try:
             async with w.stream(
                 self._core_v1.list_namespaced_pod, namespace, **watch_kwargs
             ) as stream:
                 async for event in stream:
+                    raw_object = event["raw_object"]
+                    self._observe_read("watch_event", path, payload=raw_object, object_count=1)
                     yield (
                         str(event["type"]),
-                        self._pod_summary(event["raw_object"]),
+                        self._pod_summary(raw_object),
                     )
+        except ApiStatusError as exc:
+            self._observe_read_error(path, exc)
+            raise
         except k8s_client.exceptions.ApiException as exc:
+            self._observe_read_error(path, exc)
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 
     async def _watch_pods_cluster(self) -> AsyncIterator[tuple[str, PodSummary]]:
@@ -401,11 +477,17 @@ class KubeClient(ReadOps, WriteOps):
         if self._api is None:
             raise RuntimeError("connect() first")
 
-        path = "/api/v1/pods"
-        data = await self._request_json(path)
+        path = self._pods_path(None)
+        try:
+            data = await self._request_json(path)
+        except ApiStatusError as exc:
+            self._observe_read_error(path, exc)
+            raise
 
+        items = data.get("items", [])
+        self._observe_read("list", path, payload=data, object_count=len(items))
         resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
-        for item in data.get("items", []):
+        for item in items:
             yield ("ADDED", self._pod_summary(item))
 
         watch_kwargs: dict[str, Any] = {}
@@ -414,14 +496,21 @@ class KubeClient(ReadOps, WriteOps):
 
         watch_func = self._make_raw_watch_callable(path)
         w = k8s_watch.Watch()
+        self._observe_read("watch_open", path)
         try:
             async with w.stream(watch_func, **watch_kwargs) as stream:
                 async for event in stream:
+                    raw_object = event["raw_object"]
+                    self._observe_read("watch_event", path, payload=raw_object, object_count=1)
                     yield (
                         str(event["type"]),
-                        self._pod_summary(event["raw_object"]),
+                        self._pod_summary(raw_object),
                     )
+        except ApiStatusError as exc:
+            self._observe_read_error(path, exc)
+            raise
         except k8s_client.exceptions.ApiException as exc:
+            self._observe_read_error(path, exc)
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
 
     def _list_path(self, meta: ResourceMeta, namespace: str | None) -> str:
@@ -430,6 +519,39 @@ class KubeClient(ReadOps, WriteOps):
         if namespace is not None and meta.namespaced:
             return f"{meta.api_base}/namespaces/{_path_segment(namespace)}/{meta.plural}"
         return f"{meta.api_base}/{meta.plural}"
+
+    async def _initial_object_snapshot(
+        self, meta: ResourceMeta, namespace: str | None
+    ) -> tuple[str, dict[str, Any], dict[str, GenericSummary]]:
+        list_path = self._list_path(meta, namespace)
+        try:
+            data = await self._request_json(list_path)
+        except ApiStatusError as exc:
+            self._observe_read_error(list_path, exc)
+            raise
+
+        items = data.get("items", [])
+        self._observe_read("list", list_path, payload=data, object_count=len(items))
+        known: dict[str, GenericSummary] = {}
+        for item in items:
+            summary = self._object_summary(meta, item)
+            known[f"{summary.namespace}/{summary.name}"] = summary
+        return list_path, data, known
+
+    def _watch_objects_requires_poll_fallback(
+        self,
+        list_path: str,
+        exc: ApiStatusError | k8s_client.exceptions.ApiException,
+    ) -> bool:
+        status = int(getattr(exc, "status", 0) or 0)
+        self._observe_read_error(list_path, exc)
+        if status == 405:
+            return True
+        raise ApiStatusError(
+            status,
+            str(getattr(exc, "reason", "") or ""),
+            str(getattr(exc, "body", "") or ""),
+        ) from exc
 
     async def watch_objects(
         self, meta: ResourceMeta, namespace: str | None
@@ -450,14 +572,10 @@ class KubeClient(ReadOps, WriteOps):
             raise RuntimeError("connect() first")
 
         # LIST phase --------------------------------------------------------
-        list_path = self._list_path(meta, namespace)
-        data = await self._request_json(list_path)
-
+        list_path, data, known = await self._initial_object_snapshot(meta, namespace)
         resource_version: str | None = (data.get("metadata") or {}).get("resourceVersion")
-        known: dict[str, GenericSummary] = {}
         for item in data.get("items", []):
             summary = self._object_summary(meta, item)
-            known[f"{summary.namespace}/{summary.name}"] = summary
             yield ("ADDED", summary)
 
         if not meta.watchable:
@@ -473,33 +591,28 @@ class KubeClient(ReadOps, WriteOps):
         watch_func = self._make_raw_watch_callable(list_path)
 
         w = k8s_watch.Watch()
+        self._observe_read("watch_open", list_path)
         try:
             async with w.stream(watch_func, **watch_kwargs) as stream:
                 async for event in stream:
+                    raw_object = event["raw_object"]
+                    self._observe_read("watch_event", list_path, payload=raw_object, object_count=1)
                     yield (
                         str(event["type"]),
-                        self._object_summary(meta, event["raw_object"]),
+                        self._object_summary(meta, raw_object),
                     )
         except (k8s_client.exceptions.ApiException, ApiStatusError) as exc:
             # The raw-watch adapter surfaces HTTP errors as ApiStatusError
             # (via _raise_for_status); the kubernetes client's own paths
             # raise ApiException - both carry .status/.reason, and the 405
             # fallback must catch both.
-            status = int(getattr(exc, "status", 0) or 0)
-            if status != 405:
-                # Preserve .body: same-status disambiguation (PDB denial vs
-                # APF throttling) depends on it; ApiException carries one too.
-                raise ApiStatusError(
-                    status,
-                    str(getattr(exc, "reason", "") or ""),
-                    str(getattr(exc, "body", "") or ""),
-                ) from exc
-            # Discovery advertised watch but the server refuses it: as
-            # deterministic as it gets - poll instead of letting the
-            # manager burn retries clearing and re-seeding the store.
-            logger.info("%s rejects watch (405); falling back to LIST polling", meta.plural)
-            async for event in self._poll_objects(meta, list_path, known):
-                yield event
+            if self._watch_objects_requires_poll_fallback(list_path, exc):
+                # Discovery advertised watch but the server refuses it: as
+                # deterministic as it gets - poll instead of letting the
+                # manager burn retries clearing and re-seeding the store.
+                logger.info("%s rejects watch (405); falling back to LIST polling", meta.plural)
+                async for event in self._poll_objects(meta, list_path, known):
+                    yield event
 
     async def _poll_objects(
         self, meta: ResourceMeta, list_path: str, known: dict[str, GenericSummary]
@@ -513,9 +626,15 @@ class KubeClient(ReadOps, WriteOps):
         """
         while True:
             await asyncio.sleep(LIST_POLL_INTERVAL)
-            data = await self._request_json(list_path)
+            try:
+                data = await self._request_json(list_path)
+            except ApiStatusError as exc:
+                self._observe_read_error(list_path, exc)
+                raise
+            items = data.get("items", [])
+            self._observe_read("list", list_path, payload=data, object_count=len(items))
             current: dict[str, GenericSummary] = {}
-            for item in data.get("items", []):
+            for item in items:
                 summary = self._object_summary(meta, item)
                 current[f"{summary.namespace}/{summary.name}"] = summary
                 yield ("ADDED", summary)
@@ -532,14 +651,24 @@ class KubeClient(ReadOps, WriteOps):
         """
         if self._api is None:
             raise RuntimeError("connect() first")
-        data = await self._request_json(self._list_path(meta, namespace))
+        path = self._list_path(meta, namespace)
+        try:
+            data = await self._request_json(path)
+        except ApiStatusError as exc:
+            self._observe_read_error(path, exc)
+            raise
+        items = data.get("items", [])
+        self._observe_read("list", path, payload=data, object_count=len(items))
         return [self._object_summary(meta, item) for item in data.get("items", [])]
 
     async def get_object(
         self, meta: ResourceMeta, namespace: str | None, name: str
     ) -> dict[str, Any]:
         """Fetch the raw manifest for a single object. ApiException → ApiStatusError."""
-        return await self._request_json(self._object_path(meta, namespace, name))
+        path = self._object_path(meta, namespace, name)
+        result = await self._request_json(path)
+        self._observe_read("get", path, payload=result, object_count=1)
+        return result
 
     # Helm release browsing (issue #28) ----------------------------------
     # Releases are Secrets of type helm.sh/release.v1; the synthetic kinds

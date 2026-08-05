@@ -12,6 +12,7 @@ from korvid.k8s.client import KubeClient
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import ReplicaSetSummary
+from korvid.k8s.telemetry import ReadTelemetryEvent
 
 
 def _pod(name: str, ns: str = "default") -> dict[str, Any]:
@@ -85,6 +86,25 @@ class _FakeWatch:
         return _FakeWatchStream(self._events, self.captured_kwargs, self._raise_at, self._raise_exc)
 
 
+async def test_list_namespaces_emits_list_telemetry() -> None:
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    fake_v1 = AsyncMock()
+    fake_v1.list_namespace.return_value = {
+        "items": [{"metadata": {"name": "default"}}, {"metadata": {"name": "kube-system"}}]
+    }
+
+    with patch.object(client, "_core_v1", fake_v1):
+        namespaces = await client.list_namespaces()
+
+    assert namespaces == ["default", "kube-system"]
+    assert [event.operation for event in seen] == ["list"]
+    assert seen[0].path == "/api/v1/namespaces"
+    assert seen[0].object_count == 2
+    assert seen[0].decoded_bytes > 0
+    assert seen[0].status is None
+
+
 async def test_list_pods_parses_summaries() -> None:
     client = KubeClient()
     fake_v1 = AsyncMock()
@@ -93,6 +113,23 @@ async def test_list_pods_parses_summaries() -> None:
         pods = await client.list_pods("default")
     assert [p.name for p in pods] == ["a", "b"]
     fake_v1.list_namespaced_pod.assert_awaited_once_with("default", _preload_content=False)
+
+
+async def test_list_pods_emits_list_telemetry() -> None:
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    fake_v1 = AsyncMock()
+    fake_v1.list_namespaced_pod.return_value = {"items": [_pod("a"), _pod("b")]}
+
+    with patch.object(client, "_core_v1", fake_v1):
+        pods = await client.list_pods("default")
+
+    assert [pod.name for pod in pods] == ["a", "b"]
+    assert [event.operation for event in seen] == ["list"]
+    assert seen[0].path == "/api/v1/namespaces/default/pods"
+    assert seen[0].object_count == 2
+    assert seen[0].decoded_bytes > 0
+    assert seen[0].status is None
 
 
 async def test_watch_pods_yields_list_items_first() -> None:
@@ -117,6 +154,57 @@ async def test_watch_pods_yields_list_items_first() -> None:
     assert collected[0] == ("ADDED", "alpha")
     assert collected[1] == ("ADDED", "beta")
     assert collected[2] == ("MODIFIED", "alpha")
+
+
+async def test_pod_watch_emits_list_open_and_event_telemetry() -> None:
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    fake_v1 = AsyncMock()
+    fake_v1.list_namespaced_pod.return_value = {
+        "metadata": {"resourceVersion": "100"},
+        "items": [_pod("listed")],
+    }
+    fake_watch = _FakeWatch([{"type": "MODIFIED", "raw_object": _pod("watched")}])
+
+    with (
+        patch.object(client, "_core_v1", fake_v1),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        collected = [
+            (event_type, pod.name) async for event_type, pod in client.watch_pods("default")
+        ]
+
+    assert collected == [("ADDED", "listed"), ("MODIFIED", "watched")]
+    assert [event.operation for event in seen] == ["list", "watch_open", "watch_event"]
+    assert {event.path for event in seen} == {"/api/v1/namespaces/default/pods"}
+    assert seen[0].object_count == 1
+    assert seen[0].decoded_bytes > 0
+    assert seen[1].decoded_bytes == 0
+    assert seen[2].object_count == 1
+    assert seen[2].decoded_bytes > 0
+
+
+async def test_no_telemetry_preserves_existing_watch_behavior() -> None:
+    client = KubeClient()
+    fake_v1 = AsyncMock()
+    fake_v1.list_namespaced_pod.return_value = {
+        "metadata": {"resourceVersion": "100"},
+        "items": [_pod("listed")],
+    }
+    fake_watch = _FakeWatch([])
+
+    with (
+        patch.object(client, "_core_v1", fake_v1),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+        patch(
+            "korvid.k8s.client.json.dumps", side_effect=AssertionError("unexpected serialization")
+        ),
+    ):
+        collected = [
+            (event_type, pod.name) async for event_type, pod in client.watch_pods("default")
+        ]
+
+    assert collected == [("ADDED", "listed")]
 
 
 async def test_watch_pods_passes_resource_version_to_watch() -> None:
@@ -153,6 +241,49 @@ async def test_watch_pods_list_api_error_raises_api_status_error() -> None:
     assert exc_info.value.status == 403
 
 
+async def test_watch_pods_list_error_emits_error_telemetry() -> None:
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    fake_v1 = AsyncMock()
+    fake_v1.list_namespaced_pod.side_effect = ApiException(status=403, reason="Forbidden")
+
+    with (
+        patch.object(client, "_core_v1", fake_v1),
+        pytest.raises(ApiStatusError, match="API 403: Forbidden"),
+    ):
+        async for _ in client.watch_pods("default"):
+            pass
+
+    assert [event.operation for event in seen] == ["error"]
+    assert seen[0].path == "/api/v1/namespaces/default/pods"
+    assert seen[0].status == 403
+    assert seen[0].decoded_bytes == 0
+    assert seen[0].object_count == 0
+
+
+async def test_watch_pods_watch_error_emits_error_telemetry() -> None:
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    fake_v1 = AsyncMock()
+    fake_v1.list_namespaced_pod.return_value = {
+        "metadata": {"resourceVersion": "100"},
+        "items": [],
+    }
+    fake_watch = _FakeWatch([], raise_at=0, raise_exc=ApiException(status=410, reason="Gone"))
+
+    with (
+        patch.object(client, "_core_v1", fake_v1),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+        pytest.raises(ApiStatusError, match="API 410: Gone"),
+    ):
+        async for _ in client.watch_pods("default"):
+            pass
+
+    assert [event.operation for event in seen] == ["list", "watch_open", "error"]
+    assert seen[-1].path == "/api/v1/namespaces/default/pods"
+    assert seen[-1].status == 410
+
+
 async def test_watch_pods_all_namespaces_uses_cluster_path() -> None:
     """watch_pods(None) LISTs /api/v1/pods without a /namespaces/ segment."""
     client = KubeClient()
@@ -184,6 +315,25 @@ async def test_list_namespaces_api_error_raises_api_status_error() -> None:
         pytest.raises(ApiStatusError, match="API 403: Forbidden"),
     ):
         await client.list_namespaces()
+
+
+async def test_list_namespaces_error_emits_error_telemetry() -> None:
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    fake_v1 = AsyncMock()
+    fake_v1.list_namespace.side_effect = ApiException(status=403, reason="Forbidden")
+
+    with (
+        patch.object(client, "_core_v1", fake_v1),
+        pytest.raises(ApiStatusError, match="API 403: Forbidden"),
+    ):
+        await client.list_namespaces()
+
+    assert [event.operation for event in seen] == ["error"]
+    assert seen[0].path == "/api/v1/namespaces"
+    assert seen[0].status == 403
+    assert seen[0].decoded_bytes == 0
+    assert seen[0].object_count == 0
 
 
 async def test_list_pods_api_error_raises_api_status_error() -> None:
@@ -235,6 +385,36 @@ async def test_watch_objects_yields_list_items_first() -> None:
     assert collected[0] == ("ADDED", "dep-a")
     assert collected[1] == ("ADDED", "dep-b")
     assert collected[2] == ("MODIFIED", "dep-a")
+
+
+async def test_watch_objects_emits_list_open_and_event_telemetry() -> None:
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    meta = _deploy_meta()
+    list_resp = {
+        "metadata": {"resourceVersion": "200"},
+        "items": [_generic("dep-a")],
+    }
+    watch_events = [{"type": "MODIFIED", "raw_object": _generic("dep-a")}]
+    fake_watch = _FakeWatch(watch_events)
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+    ):
+        collected = [
+            (ev, summary.name) async for ev, summary in client.watch_objects(meta, "default")
+        ]
+
+    assert collected == [("ADDED", "dep-a"), ("MODIFIED", "dep-a")]
+    assert [event.operation for event in seen] == ["list", "watch_open", "watch_event"]
+    assert {event.path for event in seen} == {"/apis/apps/v1/namespaces/default/deployments"}
+    assert seen[0].object_count == 1
+    assert seen[0].decoded_bytes > 0
+    assert seen[1].decoded_bytes == 0
+    assert seen[2].object_count == 1
+    assert seen[2].decoded_bytes > 0
 
 
 async def test_watch_objects_replicaset_yields_rich_summary() -> None:
@@ -455,6 +635,30 @@ async def test_watch_non_405_api_status_error_still_raises() -> None:
     assert excinfo.value.body == '{"kind":"Status"}'
 
 
+async def test_watch_objects_list_error_emits_error_telemetry() -> None:
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    meta = _deploy_meta()
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(
+            client,
+            "_request_json",
+            AsyncMock(side_effect=ApiStatusError(401, "Unauthorized")),
+        ),
+        pytest.raises(ApiStatusError, match="API 401: Unauthorized"),
+    ):
+        async for _ in client.watch_objects(meta, "default"):
+            pass
+
+    assert [event.operation for event in seen] == ["error"]
+    assert seen[0].path == "/apis/apps/v1/namespaces/default/deployments"
+    assert seen[0].status == 401
+    assert seen[0].decoded_bytes == 0
+    assert seen[0].object_count == 0
+
+
 async def test_watch_non_405_api_exception_still_raises() -> None:
     """Only the deterministic 405 falls back to polling: other watch errors
     keep propagating so the WatchManager's retry/report loop stays in charge."""
@@ -473,9 +677,47 @@ async def test_watch_non_405_api_exception_still_raises() -> None:
             pass
 
 
+async def test_watch_objects_watch_error_emits_error_telemetry() -> None:
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    meta = _deploy_meta()
+    list_resp: dict[str, Any] = {"metadata": {"resourceVersion": "9"}, "items": []}
+    fake_watch = _FakeWatch([], raise_at=0, raise_exc=ApiException(status=500, reason="boom"))
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", AsyncMock(return_value=list_resp)),
+        patch("korvid.k8s.client.k8s_watch.Watch", return_value=fake_watch),
+        pytest.raises(ApiStatusError, match="boom"),
+    ):
+        async for _ in client.watch_objects(meta, "default"):
+            pass
+
+    assert [event.operation for event in seen] == ["list", "watch_open", "error"]
+    assert seen[-1].path == "/apis/apps/v1/namespaces/default/deployments"
+    assert seen[-1].status == 500
+
+
 # ---------------------------------------------------------------------------
 # get_object
 # ---------------------------------------------------------------------------
+
+
+async def test_get_object_emits_get_telemetry() -> None:
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    meta = _deploy_meta()
+    request_json_mock = AsyncMock(return_value=_generic("my-dep"))
+
+    with patch.object(client, "_request_json", request_json_mock):
+        obj = await client.get_object(meta, "default", "my-dep")
+
+    assert obj["metadata"]["name"] == "my-dep"
+    assert [event.operation for event in seen] == ["get"]
+    assert seen[0].path == "/apis/apps/v1/namespaces/default/deployments/my-dep"
+    assert seen[0].object_count == 1
+    assert seen[0].decoded_bytes > 0
+    assert seen[0].status is None
 
 
 async def test_get_object_raises_api_status_error() -> None:
@@ -729,6 +971,26 @@ async def test_list_objects_returns_generic_summaries() -> None:
     assert [s.name for s in summaries] == ["dep-a", "dep-b"]
     called_path: str = request_json_mock.call_args[0][0]
     assert "/namespaces/default/deployments" in called_path
+
+
+async def test_list_objects_emits_list_telemetry() -> None:
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    meta = _deploy_meta()
+    request_json_mock = AsyncMock(return_value={"items": [_generic("dep-a"), _generic("dep-b")]})
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+    ):
+        summaries = await client.list_objects(meta, "default")
+
+    assert [summary.name for summary in summaries] == ["dep-a", "dep-b"]
+    assert [event.operation for event in seen] == ["list"]
+    assert seen[0].path == "/apis/apps/v1/namespaces/default/deployments"
+    assert seen[0].object_count == 2
+    assert seen[0].decoded_bytes > 0
+    assert seen[0].status is None
 
 
 async def test_list_objects_all_namespaces_uses_cluster_path() -> None:
