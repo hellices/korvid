@@ -271,7 +271,9 @@ class AgentRuntime:
         It survives a later blocked or rolled-back turn: such a turn sends
         nothing, so it has no payload of its own, and erasing the previous
         one would destroy the record of what actually left the machine.
-        Only a newly prepared request replaces it.
+        It is replaced only once the provider has accepted a new payload —
+        preparing one is not sending it, and a provider that refuses the
+        call outright never received anything to show.
         """
         return self._latest_outbound_payload
 
@@ -807,7 +809,6 @@ class AgentRuntime:
                 # preparation can refuse, and the previous handoff is still
                 # the latest thing this session sent.
                 prepared = self._prepare_request(iteration + 1)
-                self._latest_outbound_payload = prepared.snapshot
                 # Estimate of the prompt this iteration sends — used only when
                 # the provider omits usage, so token totals never read as zero
                 # input for a request that was really transmitted. Measured on
@@ -818,6 +819,14 @@ class AgentRuntime:
                 self._live_prompt_estimate = prompt_estimate
                 try:
                     stream = self._provider.complete(prepared.messages, prepared.tools)
+                    # The handoff is the call: recorded once the provider
+                    # has accepted the payload and before the first event
+                    # is consumed, so a provider that refuses synchronously
+                    # (no credentials, unusable model) leaves the previous
+                    # real handoff on display, while a stream that dies
+                    # mid-flight keeps the payload it really sent
+                    # (PR #197 review).
+                    self._latest_outbound_payload = prepared.snapshot
                     async for event in self._consume_stream(stream, state):
                         yield event
                 except Exception as exc:

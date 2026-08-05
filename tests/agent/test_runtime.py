@@ -2719,3 +2719,137 @@ async def test_the_session_continues_after_a_blocked_deep_manifest() -> None:
 
     assert not [event for event in events if isinstance(event, AgentError)]
     assert len(provider.calls) == 2
+
+
+# --- A snapshot records a handoff that happened (round 10) -----------------
+
+
+class _RefusingProvider:
+    """`complete()` validates eagerly and raises before returning a stream."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        return "refusing"
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        stream: bool = True,
+    ) -> AsyncIterator[dict[str, Any]]:
+        self.calls += 1
+        raise RuntimeError("no credentials configured")
+
+
+async def test_a_provider_that_refuses_the_call_records_no_handoff() -> None:
+    """`:ai payload` answers "what left this machine". A provider that
+    raised before returning a stream sent nothing, so there is nothing to
+    show (PR #197 review)."""
+    provider = _RefusingProvider()
+    runtime = AgentRuntime(provider, EchoExecutor())
+
+    events = await collect(runtime, "hello")
+
+    assert provider.calls == 1
+    assert [event for event in events if isinstance(event, AgentError)]
+    assert runtime.latest_outbound_payload is None
+
+
+async def test_a_refused_call_keeps_the_previous_handoff() -> None:
+    class _FailsOnSecond(_RefusingProvider):
+        def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("no credentials configured")
+
+            async def stream_events() -> AsyncIterator[dict[str, Any]]:
+                yield {"type": "text_delta", "text": "ok"}
+                yield {"type": "done"}
+
+            return stream_events()
+
+    provider = _FailsOnSecond()
+    runtime = AgentRuntime(provider, EchoExecutor())
+
+    await collect(runtime, "first")
+    sent = runtime.latest_outbound_payload
+    assert sent is not None
+
+    await collect(runtime, "second")
+
+    assert provider.calls == 2
+    assert runtime.latest_outbound_payload is sent
+    assert "second" not in sent.payload_json
+
+
+async def test_the_snapshot_is_available_before_the_first_event() -> None:
+    """The handoff is the call, not the stream: a provider reading the
+    inspector as it produces its first event must already see it."""
+
+    class _ObservingProvider:
+        def __init__(self) -> None:
+            self.runtime: AgentRuntime | None = None
+            self.observed: list[Any] = []
+
+        @property
+        def name(self) -> str:
+            return "observing"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            assert self.runtime is not None
+            self.observed.append(getattr(self.runtime, "latest_outbound_payload", None))
+            yield {"type": "text_delta", "text": "ok"}
+            yield {"type": "done"}
+
+    provider = _ObservingProvider()
+    runtime = AgentRuntime(provider, EchoExecutor())
+    provider.runtime = runtime
+
+    await collect(runtime, "hello")
+
+    assert [snapshot.iteration for snapshot in provider.observed] == [1]
+    assert runtime.latest_outbound_payload is provider.observed[0]
+
+
+async def test_a_stream_that_dies_mid_flight_still_recorded_its_handoff() -> None:
+    """The payload did leave — the failure came after. Keeping it is the
+    point of the inspector."""
+
+    class _DyingProvider:
+        @property
+        def name(self) -> str:
+            return "dying"
+
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "text_delta", "text": "partial"}
+            raise RuntimeError("connection reset")
+
+    runtime = AgentRuntime(_DyingProvider(), EchoExecutor())
+
+    await collect(runtime, "hello")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert "hello" in snapshot.payload_json

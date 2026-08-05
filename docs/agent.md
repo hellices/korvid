@@ -63,7 +63,10 @@ later turn that never reaches the provider does not erase it: a prompt the
 outbound policy blocks, or a turn rolled back mid-flight, sends nothing
 and so has no payload of its own to show. `:ai payload` keeps showing the
 last real handoff — which is precisely the request you want to read after
-something was refused. Only a newly prepared request replaces it.
+something was refused. Only a payload the provider has accepted replaces
+it: preparing a request is not sending it, so a provider that refuses the
+call outright (missing credentials, unusable model) leaves the previous
+handoff on display rather than claiming one that never happened.
 
 Press `e` in the inspector to export the displayed payload to a private
 JSON file — `write_private_text` creates it with `0o600` permissions (see
