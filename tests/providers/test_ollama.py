@@ -576,3 +576,41 @@ async def test_runtime_sends_exactly_the_snapshot_to_ollama() -> None:
     assert "raw-thinking-secret" not in json.dumps(bodies, ensure_ascii=False)
     assert "raw-thinking-secret" not in snapshot.payload_json
     assert MASK_PLACEHOLDER in bodies[1]["messages"][2]["thinking"]
+
+
+async def test_the_snapshot_labels_the_model_not_the_provider() -> None:
+    """`LLMProvider.name` is the model, so the snapshot must say `model`.
+
+    Every built-in adapter returns `self._model` from `name`, so a field
+    called `provider` was labelling `qwen3:8b` — a model tag — as if it
+    named the endpoint the request went to. Someone reading an exported
+    payload to answer "where did this data go?" got the wrong answer.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=_ndjson(
+                {"message": {"role": "assistant", "content": "ok"}, "done": False}, _done()
+            ),
+            headers={"content-type": "application/x-ndjson"},
+        )
+
+    class _Executor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ok"
+
+    provider = OllamaProvider(
+        base_url="http://x:11434",
+        model="qwen3:8b",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    runtime = AgentRuntime(provider, _Executor())
+
+    [event async for event in runtime.run_turn("why?", "view=pods")]
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert snapshot.model == "qwen3:8b"
+    assert not hasattr(snapshot, "provider")
+    assert json.loads(snapshot.export_json())["model"] == "qwen3:8b"

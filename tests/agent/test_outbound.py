@@ -288,7 +288,7 @@ def test_prepare_recursively_sanitizes_content_and_builds_exact_snapshot() -> No
         sort_keys=True,
         separators=(",", ":"),
     )
-    assert prepared.snapshot.provider == "ollama"
+    assert prepared.snapshot.model == "ollama"
     assert prepared.snapshot.iteration == 2
     assert prepared.snapshot.redactions
     assert "raw-token" not in prepared.snapshot.payload_json
@@ -310,7 +310,7 @@ def test_snapshot_stays_exact_after_returned_payload_is_mutated() -> None:
     assert prepared.snapshot.payload_json == payload_json
     assert json.loads(payload_json)["messages"][0]["content"] == "status"
     with pytest.raises(dataclasses.FrozenInstanceError, match="cannot assign"):
-        prepared.snapshot.provider = "changed"  # type: ignore[misc]  # frozen dataclass check
+        prepared.snapshot.model = "changed"  # type: ignore[misc]  # frozen dataclass check
 
 
 @pytest.mark.parametrize(
@@ -449,7 +449,7 @@ def test_snapshot_export_contains_the_exact_redacted_payload() -> None:
         iteration=3,
     )
     exported = json.loads(prepared.snapshot.export_json())
-    assert exported["provider"] == "ollama"
+    assert exported["model"] == "ollama"
     assert exported["iteration"] == 3
     assert exported["payload"] == json.loads(prepared.snapshot.payload_json)
     assert exported["redactions"]

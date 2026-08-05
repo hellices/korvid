@@ -17,7 +17,13 @@ class LLMProvider(ABC):
     @property
     @abstractmethod
     def name(self) -> str:
-        """Human-readable provider name shown in the status bar."""
+        """Identifier of the model this adapter talks to.
+
+        Shown in the status bar and recorded as `OutboundSnapshot.model`,
+        so it must name the *model* — every built-in returns its model tag
+        (`qwen3:8b`, `gpt-4o`), and a plugin may qualify it
+        (`company-llm:v2`). It is not the endpoint or the vendor.
+        """
 
     @abstractmethod
     def complete(

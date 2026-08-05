@@ -116,7 +116,7 @@ async def test_payload_inspector_renders_exact_sanitized_export_without_markup()
 
         assert body._render_markup is False
         assert rendered == snapshot.export_json()
-        assert '"provider": "ollama"' in rendered
+        assert '"model": "ollama"' in rendered
         assert '"iteration": 2' in rendered
         assert "messages[1].content" in rendered
         assert "authorization-value" in rendered

@@ -245,7 +245,9 @@ These are explicit, current limitations — not aspirational future work:
 The `:ai payload` inspector (`PayloadInspectorScreen`) renders
 `OutboundSnapshot.export_json()`: the exact canonical `messages` and
 `tools` JSON that `OutboundPolicy.prepare()` produced for the most recent
-provider call, plus the list of redactions applied. This is the real
+provider call, the `model` it was addressed to, and the list of redactions
+applied. The label is `model`, not `provider`, because that is what it
+holds — every adapter's `name` returns its model tag. This is the real
 payload — not a re-derived approximation — so what you read is what was
 sent. A turn that was blocked or rolled back sent nothing, so it leaves
 the previous handoff on display rather than clearing the view. It does

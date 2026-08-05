@@ -110,7 +110,7 @@ class CredentialSource(ABC):
 
 class LLMProvider(ABC):
     @property
-    def name(self) -> str: ...
+    def name(self) -> str: ...     # the model tag, e.g. "company-llm:v2"
 
     async def complete(
         self,

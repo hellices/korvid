@@ -83,7 +83,7 @@ def _panel_text(app: KorvidApp) -> str:
 
 def _snapshot() -> OutboundSnapshot:
     return OutboundSnapshot(
-        provider="ollama",
+        model="ollama",
         iteration=1,
         payload_json='{"messages":[],"tools":[]}',
         redactions=(),

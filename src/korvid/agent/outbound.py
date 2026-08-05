@@ -87,7 +87,11 @@ def request_char_budget(*, max_history_chars: int, tools_chars: int) -> int:
 class OutboundSnapshot:
     """Immutable canonical record of the exact redacted provider payload."""
 
-    provider: str
+    #: The model the request was addressed to. Named for what it holds:
+    #: every adapter's `LLMProvider.name` returns its model identifier,
+    #: so labelling `qwen3:8b` a "provider" told a reader of an exported
+    #: payload the wrong thing about where their data went.
+    model: str
     iteration: int
     payload_json: str
     redactions: tuple[RedactionRecord, ...]
@@ -97,7 +101,7 @@ class OutboundSnapshot:
         return (
             json.dumps(
                 {
-                    "provider": self.provider,
+                    "model": self.model,
                     "iteration": self.iteration,
                     "redactions": [dataclasses.asdict(item) for item in self.redactions],
                     "payload": json.loads(self.payload_json),
@@ -568,7 +572,7 @@ class OutboundPolicy:
 
     def prepare(
         self,
-        provider: str,
+        model: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         *,
@@ -577,20 +581,20 @@ class OutboundPolicy:
         """Validate, redact, bound, and snapshot one provider request."""
         with _fail_closed():
             try:
-                return self._prepare(provider, messages, tools, iteration=iteration)
+                return self._prepare(model, messages, tools, iteration=iteration)
             except RecursionError as exc:
                 raise _blocked("outbound data is too deeply nested") from exc
 
     def _prepare(
         self,
-        provider: str,
+        model: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         *,
         iteration: int,
     ) -> PreparedOutbound:
-        if not isinstance(provider, str) or not provider:
-            raise _blocked("provider name must be non-empty text")
+        if not isinstance(model, str) or not model:
+            raise _blocked("model name must be non-empty text")
         if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
             raise _blocked("iteration must be a non-negative integer")
         if not isinstance(messages, list) or not isinstance(tools, list):
@@ -624,7 +628,7 @@ class OutboundPolicy:
                 f"outbound request exceeds {self._max_request_chars} character limit"
             )
         snapshot = OutboundSnapshot(
-            provider=provider,
+            model=model,
             iteration=iteration,
             payload_json=payload_json,
             redactions=tuple(records),
