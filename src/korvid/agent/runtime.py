@@ -549,7 +549,13 @@ class AgentRuntime:
             yield ToolCallFinished(
                 call_id=call_id,
                 name=name,
-                ok=not result.startswith("ERROR:"),
+                # The producer's verdict, not the text's shape: a log
+                # excerpt, a describe output or a diagnosis that quotes
+                # `ERROR: ...` produced a result, and the row that says a
+                # call failed has to mean the call failed. The same bit
+                # chooses the boundary's sanitization pass, so the UI and
+                # the policy cannot disagree about it (PR #197 review).
+                ok=not errored,
                 summary=result[:120],
             )
             tool_message = {"role": "tool", "tool_call_id": call_id, "content": result}

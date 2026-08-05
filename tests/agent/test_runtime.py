@@ -3145,3 +3145,96 @@ def test_retarget_keeps_the_declarations_the_new_surface_still_offers() -> None:
     runtime.retarget(tools=list(READ_TOOLS), cluster_context=None)
     assert "fetch_manifest" not in runtime._result_formats
     assert runtime._result_formats["get_resource"] == "structured_yaml"
+
+
+# --- The tool row shows the producer's verdict, not a prefix (round 11) ----
+#
+# `ToolCallFinished.ok` was read off the result text starting with
+# `ERROR:`. The producer already states whether its result is a failure —
+# the same verdict the boundary uses to choose a sanitization pass — and
+# a log line, a describe output or a diagnosis that merely *quotes* an
+# error is not one.
+
+
+def _logs_turn() -> list[list[dict[str, Any]]]:
+    return [
+        [
+            {
+                "type": "tool_call",
+                "id": "c1",
+                "name": "get_logs",
+                "arguments": '{"pod": "api-1", "namespace": "default"}',
+            },
+            {"type": "done"},
+        ],
+        [{"type": "text_delta", "text": "ok"}, {"type": "done"}],
+    ]
+
+
+async def test_a_result_that_only_quotes_an_error_is_not_shown_as_a_failure() -> None:
+    """A pod that logs `ERROR: db connection refused` produced a result,
+    and the tool row must not tell the user the call failed."""
+
+    class _QuotingExecutor:
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "ERROR: db connection refused\nERROR: retrying"
+
+    provider = ScriptedProvider(_logs_turn())
+    runtime = AgentRuntime(provider, _QuotingExecutor())
+
+    events = await collect(runtime, "why?")
+
+    finished = next(event for event in events if isinstance(event, ToolCallFinished))
+    assert finished.ok
+    assert finished.summary.startswith("ERROR: db connection refused")
+    # The model still sees exactly what the tool produced.
+    assert provider.calls[1][-1]["content"].startswith("ERROR: db connection refused")
+
+
+async def test_a_producer_declared_failure_is_shown_as_a_failure_without_the_prefix() -> None:
+    """The other direction: a failure the producer declares is a failure
+    even when its text never says `ERROR:`."""
+
+    class _DeclaringExecutor(RecordedExecution):
+        async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+            return "the cluster said no"
+
+        async def execute_recorded(self, name: str, arguments: dict[str, Any]) -> Any:
+            from korvid.tools.executor import ToolOutcome
+
+            return ToolOutcome(text="the cluster said no", error=True)
+
+    runtime = AgentRuntime(ScriptedProvider(_logs_turn()), _DeclaringExecutor())
+
+    events = await collect(runtime, "why?")
+
+    finished = next(event for event in events if isinstance(event, ToolCallFinished))
+    assert not finished.ok
+    assert finished.summary == "the cluster said no"
+
+
+async def test_a_real_cluster_error_is_still_shown_as_a_failure() -> None:
+    class _AngryKube:
+        async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+            raise ApiStatusError(403, "Forbidden")
+
+    runtime = AgentRuntime(
+        ScriptedProvider(_get_resource_turn()),
+        ToolExecutor(_AngryKube(), {"pods": PODS_META}),  # type: ignore[arg-type]  # test double for ReadOps
+    )
+
+    events = await collect(runtime, "show me the pod")
+
+    finished = next(event for event in events if isinstance(event, ToolCallFinished))
+    assert not finished.ok
+    assert "Forbidden" in finished.summary
+
+
+async def test_a_blocked_result_is_still_reported_as_blocked() -> None:
+    runtime = AgentRuntime(ScriptedProvider(_get_resource_turn()), _deep_manifest_executor())
+
+    events = await collect(runtime, "show me the app")
+
+    finished = next(event for event in events if isinstance(event, ToolCallFinished))
+    assert not finished.ok
+    assert finished.summary == "blocked"
