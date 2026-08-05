@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 import pytest
@@ -356,3 +358,166 @@ def test_merge_of_nothing_carried_is_the_derived_inventory() -> None:
     item = RedactionRecord(path="messages[1].content", reason="control-character")
     assert merge_records([item], []) == [item]
     assert merge_records([], [item]) == [item]
+
+
+# --- Malformed Secret metadata is fail-closed (issue #189, review round 4) ---
+
+#: A serialized Secret manifest with unmasked data, as `kubectl apply`
+#: stores it in the last-applied annotation. Must never survive redaction.
+SERIALIZED_SECRET = '{"kind":"Secret","data":{"tls.key":"UkFXLVNFQ1JFVA=="}}'
+SERIALIZED_SECRET_SENTINEL = "UkFXLVNFQ1JFVA=="
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        pytest.param([{"annotations": {LAST_APPLIED: SERIALIZED_SECRET}}], id="list"),
+        pytest.param(f"annotations:\n  {LAST_APPLIED}: '{SERIALIZED_SECRET}'", id="string"),
+        pytest.param(0, id="number"),
+        pytest.param(True, id="bool"),
+    ],
+)
+def test_a_secret_with_non_mapping_metadata_is_rejected(metadata: Any) -> None:
+    manifest = {"kind": "Secret", "metadata": metadata, "data": {"a": "Yg=="}}
+
+    with pytest.raises(RedactionError, match="metadata"):
+        redact_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "annotations",
+    [
+        pytest.param([SERIALIZED_SECRET], id="list"),
+        pytest.param(SERIALIZED_SECRET, id="string"),
+        pytest.param(f"{LAST_APPLIED}: {SERIALIZED_SECRET}", id="string-with-last-applied"),
+        pytest.param(7, id="number"),
+    ],
+)
+def test_a_secret_with_non_mapping_annotations_is_rejected(annotations: Any) -> None:
+    manifest = {
+        "kind": "Secret",
+        "metadata": {"name": "db", "annotations": annotations},
+        "data": {"a": "Yg=="},
+    }
+
+    with pytest.raises(RedactionError, match="annotations"):
+        redact_manifest(manifest)
+
+
+def test_the_rejection_message_never_quotes_the_malformed_value() -> None:
+    manifest = {
+        "kind": "Secret",
+        "metadata": {"annotations": SERIALIZED_SECRET},
+        "data": {"a": "Yg=="},
+    }
+
+    with pytest.raises(RedactionError) as excinfo:
+        redact_manifest(manifest)
+
+    assert SERIALIZED_SECRET_SENTINEL not in str(excinfo.value)
+
+
+def test_a_nested_secret_with_malformed_metadata_is_rejected() -> None:
+    """The rule follows `kind: Secret` wherever it appears, not only at the root."""
+    manifest = {
+        "kind": "CompositeApp",
+        "spec": {
+            "secretTemplate": {
+                "kind": "Secret",
+                "metadata": {"annotations": SERIALIZED_SECRET},
+                "data": {"a": "Yg=="},
+            }
+        },
+    }
+
+    with pytest.raises(RedactionError, match="annotations"):
+        redact_manifest(manifest)
+
+
+def test_a_secret_with_well_formed_metadata_still_redacts() -> None:
+    manifest = {
+        "kind": "Secret",
+        "metadata": {"name": "db", "annotations": {LAST_APPLIED: SERIALIZED_SECRET, "team": "sre"}},
+        "data": {"password": "Yg=="},
+    }
+
+    redacted = redact_manifest(manifest)
+
+    assert redacted["metadata"]["annotations"] == {"team": "sre"}
+    assert redacted["data"]["password"] == MASK_PLACEHOLDER
+    assert SERIALIZED_SECRET_SENTINEL not in str(redacted)
+
+
+def test_a_secret_without_metadata_is_unaffected() -> None:
+    redacted = redact_manifest({"kind": "Secret", "data": {"password": "Yg=="}})
+
+    assert redacted["data"]["password"] == MASK_PLACEHOLDER
+
+
+def test_a_non_secret_with_odd_metadata_is_still_allowed() -> None:
+    """The strict rule is scoped to Secrets; ordinary objects stay readable."""
+    redacted = redact_manifest({"kind": "ConfigMap", "metadata": ["odd", "but", "harmless"]})
+
+    assert redacted["metadata"] == ["odd", "but", "harmless"]
+
+
+# --- Key paths name the sanitized key (issue #189, review round 4) -----------
+
+
+def test_a_control_character_key_records_the_path_that_is_in_the_payload() -> None:
+    """The path names the key the reader will actually see.
+
+    Recording the pre-sanitized spelling pointed the inventory at a key
+    that is not in the payload, and carried the raw key material into a
+    report whose purpose is to show that nothing raw left (PR #197
+    review round 4).
+    """
+    redacted, records = redact_document({"we\x07ird": "value"}, path="doc")
+
+    assert list(redacted) == ["we\ufffdird"]
+    assert [(r.path, r.reason) for r in records] == [('doc["we\ufffdird"]', "control-character")]
+
+
+def test_a_control_character_key_path_never_carries_the_raw_spelling() -> None:
+    _, records = redact_document({"tab\x1b[2Jkey": {"inner": 1}}, path="doc")
+
+    assert records
+    for item in records:
+        assert "\x1b" not in item.path
+        assert "\\u001b" not in item.path
+        assert "\\u0007" not in item.path
+
+
+def test_a_nested_control_character_key_records_a_reachable_path() -> None:
+    redacted, records = redact_document({"outer": {"in\x00ner": "v"}}, path="doc")
+
+    assert redacted == {"outer": {"in\ufffdner": "v"}}
+    assert ('doc.outer["in\ufffdner"]', "control-character") in [
+        (r.path, r.reason) for r in records
+    ]
+
+
+def test_a_masked_value_under_a_control_character_key_uses_one_path() -> None:
+    """Both records name the same place, so the inventory can be joined."""
+    redacted, records = redact_document({"pass\x07word": "raw"}, path="doc")
+
+    assert redacted == {"pass\ufffdword": MASK_PLACEHOLDER}
+    assert {r.path for r in records} == {'doc["pass\ufffdword"]'}
+    assert {r.reason for r in records} == {"control-character", "sensitive-key"}
+
+
+def test_every_record_path_names_a_key_present_in_the_redacted_document() -> None:
+    """The property behind the three tests above, stated directly."""
+    document = {
+        "clean": {"nes\x07ted": {"pass\x01word": "raw"}},
+        "list": [{"ke\x02y": "v"}],
+    }
+
+    redacted, records = redact_document(document, path="doc")
+
+    rendered = json.dumps(redacted, ensure_ascii=False)
+    for item in records:
+        match = re.search(r'\["((?:[^"\\]|\\.)*)"\]$|\.([^.\[\]]+)$', item.path)
+        assert match is not None, item.path
+        key = json.loads(f'"{match.group(1)}"') if match.group(1) is not None else match.group(2)
+        assert key in rendered, f"{item.path} names a key absent from the payload"

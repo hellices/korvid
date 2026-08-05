@@ -872,3 +872,28 @@ def test_preparing_without_an_ingress_map_is_unchanged() -> None:
 
     assert prepared.snapshot.redactions == ()
     assert prepared.messages[1]["content"] == "clean"
+
+
+# --- Malformed Secret metadata on the wire (issue #189, review round 4) ------
+
+_WIRE_SECRET_SENTINEL = "UkFXLVNFQ1JFVA=="
+_WIRE_SERIALIZED = f'{{"kind":"Secret","data":{{"tls.key":"{_WIRE_SECRET_SENTINEL}"}}}}'
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        pytest.param({"annotations": _WIRE_SERIALIZED}, id="annotations-string"),
+        pytest.param({"annotations": [_WIRE_SERIALIZED]}, id="annotations-list"),
+        pytest.param(_WIRE_SERIALIZED, id="metadata-string"),
+    ],
+)
+def test_a_structured_result_with_malformed_secret_metadata_is_blocked(
+    metadata: Any,
+) -> None:
+    result = yaml.safe_dump({"kind": "Secret", "metadata": metadata, "data": {"a": "Yg=="}})
+
+    with pytest.raises(OutboundPolicyError) as excinfo:
+        sanitize_tool_result("get_resource", result)
+
+    assert _WIRE_SECRET_SENTINEL not in str(excinfo.value)

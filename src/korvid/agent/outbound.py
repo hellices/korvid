@@ -180,8 +180,8 @@ def _copy_tool_mapping(
         for key, item in value.items():
             if not isinstance(key, str):
                 raise _blocked("mapping keys must be strings")
-            item_path = key_path(path, key)
-            output_key = sanitize_mapping_key(key, item_path, records)
+            output_key = sanitize_mapping_key(key, path, records)
+            item_path = key_path(path, output_key)
             if output_key in result:
                 raise _blocked("redacted mapping keys must remain unique")
             result[output_key] = _copy_tool_value(item, item_path, records, active)

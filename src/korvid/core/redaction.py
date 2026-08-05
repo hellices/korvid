@@ -173,9 +173,24 @@ def strip_control_characters(text: str, path: str, records: list[RedactionRecord
     return _CONTROL_RE.sub("\N{REPLACEMENT CHARACTER}", text)
 
 
-def sanitize_mapping_key(key: str, path: str, records: list[RedactionRecord]) -> str:
-    """Normalize a mapping key so it cannot smuggle control characters."""
-    return strip_control_characters(key, path, records)
+def sanitize_mapping_key(key: str, parent_path: str, records: list[RedactionRecord]) -> str:
+    """Normalize a mapping key so it cannot smuggle control characters.
+
+    Args:
+        key: The raw key as it arrived.
+        parent_path: Path of the mapping that holds it — the record is
+            built from the *sanitized* key, because the raw spelling is
+            not in the payload. Naming it would point a reader at
+            something they cannot find, and would carry raw key material
+            into a report whose whole purpose is to show that nothing raw
+            left.
+        records: Accumulator for the change, if there was one.
+    """
+    if not _CONTROL_RE.search(key):
+        return key
+    output = _CONTROL_RE.sub("\N{REPLACEMENT CHARACTER}", key)
+    record(records, key_path(parent_path, output), "control-character")
+    return output
 
 
 def _replace_match(
@@ -217,11 +232,33 @@ def redact_text(text: str, path: str, records: list[RedactionRecord]) -> str:
     )
 
 
+def _require_secret_metadata_shape(value: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Reject a Secret whose metadata cannot be searched for last-applied.
+
+    `kubectl apply` stores the entire pre-apply manifest — `data` and all
+    — in the last-applied annotation, and the removal rule can only reach
+    it through mappings. A `metadata` or `annotations` of any other type
+    is a shape this redactor cannot reason about, so it would be walked
+    as ordinary content and a serialized Secret inside it would ship
+    verbatim. Refuse instead of guessing: a malformed Secret is exactly
+    the case where guessing costs the most.
+    """
+    if "metadata" not in value:
+        return None
+    metadata = value["metadata"]
+    if not isinstance(metadata, Mapping):
+        raise RedactionError("a Secret's metadata must be a mapping")
+    if "annotations" in metadata and not isinstance(metadata["annotations"], Mapping):
+        raise RedactionError("a Secret's annotations must be a mapping")
+    return metadata
+
+
 def _secret_redactions(
     value: Mapping[str, Any],
     path: str,
     records: list[RedactionRecord],
 ) -> dict[str, Any]:
+    metadata = _require_secret_metadata_shape(value)
     try:
         masked = mask_secret_manifest(dict(value))
     except ValueError as exc:
@@ -231,8 +268,7 @@ def _secret_redactions(
         if isinstance(entries, Mapping):
             for key in entries:
                 record(records, key_path(key_path(path, section), str(key)), "secret-value")
-    metadata = value.get("metadata")
-    if isinstance(metadata, Mapping):
+    if metadata is not None:
         annotations = metadata.get("annotations")
         if isinstance(annotations, Mapping) and LAST_APPLIED in annotations:
             record(
@@ -294,11 +330,11 @@ def _redact_mapping(
 
     result: dict[str, Any] = {}
     for key, item in source.items():
-        item_path = key_path(path, key)
         if key == LAST_APPLIED:
-            record(records, item_path, "last-applied-configuration")
+            record(records, key_path(path, key), "last-applied-configuration")
             continue
-        output_key = sanitize_mapping_key(key, item_path, records)
+        output_key = sanitize_mapping_key(key, path, records)
+        item_path = key_path(path, output_key)
         if output_key in result:
             raise RedactionError("redacted mapping keys must remain unique")
         reason = _mask_reason(key, item, secret_sibling=secret_sibling)

@@ -2366,3 +2366,57 @@ async def test_proposal_tools_without_a_bridge_return_an_error() -> None:
         "propose_write", {"action": "delete", "kind": "pods", "name": "web"}
     )
     assert result.startswith("ERROR:")
+
+
+# --- Malformed Secret metadata is fail-closed (issue #189, review round 4) ---
+
+#: A serialized Secret with unmasked `data`, as `kubectl apply` stores it.
+MALFORMED_SECRET_SENTINEL = "UkFXLVNFQ1JFVA=="
+_SERIALIZED_SECRET = f'{{"kind":"Secret","data":{{"tls.key":"{MALFORMED_SECRET_SENTINEL}"}}}}'
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        pytest.param({"annotations": _SERIALIZED_SECRET}, id="annotations-string"),
+        pytest.param({"annotations": [_SERIALIZED_SECRET]}, id="annotations-list"),
+        pytest.param(_SERIALIZED_SECRET, id="metadata-string"),
+        pytest.param([{"annotations": {"x": _SERIALIZED_SECRET}}], id="metadata-list"),
+    ],
+)
+async def test_get_resource_refuses_a_secret_with_malformed_metadata(
+    metadata: Any,
+) -> None:
+    """A shape the redactor cannot search is refused, not walked.
+
+    `kubectl apply` puts the whole pre-apply manifest in a metadata
+    annotation. The removal rule reaches it through mappings only, so a
+    non-mapping `metadata`/`annotations` on a Secret shipped a serialized
+    Secret verbatim (PR #197 review round 4).
+    """
+    kube = FakeKube()
+    kube.manifest = {"kind": "Secret", "metadata": metadata, "data": {"a": "Yg=="}}
+
+    out = await make_executor(kube).execute(
+        "get_resource", {"kind": "pods", "name": "db", "namespace": "prod"}
+    )
+
+    assert out.startswith("ERROR:")
+    assert MALFORMED_SECRET_SENTINEL not in out
+
+
+async def test_get_resource_still_returns_a_well_formed_secret() -> None:
+    kube = FakeKube()
+    kube.manifest = {
+        "kind": "Secret",
+        "metadata": {"name": "db", "annotations": {"team": "sre"}},
+        "data": {"password": "Yg=="},
+    }
+
+    out = await make_executor(kube).execute(
+        "get_resource", {"kind": "pods", "name": "db", "namespace": "prod"}
+    )
+
+    loaded = yaml.safe_load(out)
+    assert loaded["metadata"]["annotations"] == {"team": "sre"}
+    assert loaded["data"]["password"] == MASK_PLACEHOLDER
