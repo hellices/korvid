@@ -8,6 +8,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+import yaml
 
 from korvid.k8s.errors import ApiStatusError
 from tests.performance import cli
@@ -259,3 +260,138 @@ def test_cli_does_not_hide_unexpected_replay_errors(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(cli, "run_replay", fake_programmer_error)
     with pytest.raises(TypeError, match="unexpected replay defect"):
         cli.main(["replay", "--profile", "profile.json"])
+
+
+def test_cli_writes_seed_manifests_yaml(tmp_path: Path) -> None:
+    output_path = tmp_path / "seed.yaml"
+
+    result = cli.main(
+        [
+            "seed-manifests",
+            "--run-id",
+            "aks186",
+            "--namespace-count",
+            "2",
+            "--pods-per-namespace",
+            "2",
+            "--node-selector",
+            "korvid.dev/pool=perftest",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert result == 0
+    documents = list(yaml.safe_load_all(output_path.read_text()))
+    assert [document["kind"] for document in documents] == [
+        "Namespace",
+        "Namespace",
+        "Pod",
+        "Pod",
+        "Pod",
+        "Pod",
+    ]
+    assert documents[0]["metadata"]["name"] == "korvid-perf-aks186-0"
+    assert documents[2]["spec"]["nodeSelector"] == {"korvid.dev/pool": "perftest"}
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (
+            [
+                "seed-manifests",
+                "--run-id",
+                "Bad",
+                "--namespace-count",
+                "1",
+                "--pods-per-namespace",
+                "1",
+                "--node-selector",
+                "korvid.dev/pool=perftest",
+                "--output",
+                "seed.yaml",
+            ],
+            "error building manifests: run_id must be 1-48 lowercase letters, digits, or hyphens",
+        ),
+        (
+            [
+                "seed-manifests",
+                "--run-id",
+                "aks186",
+                "--namespace-count",
+                "1",
+                "--pods-per-namespace",
+                "1",
+                "--node-selector",
+                "pool",
+                "--output",
+                "seed.yaml",
+            ],
+            "error building manifests: node_selector must be exactly one non-empty key=value pair",
+        ),
+    ],
+)
+def test_cli_seed_manifests_reports_invalid_inputs(
+    arguments: list[str],
+    message: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main(arguments) == 1
+    assert message in capsys.readouterr().err
+
+
+def test_cli_seed_manifests_reports_file_write_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail_write(self: Path, _text: str, *_args: object, **_kwargs: object) -> int:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_text", fail_write)
+
+    assert (
+        cli.main(
+            [
+                "seed-manifests",
+                "--run-id",
+                "aks186",
+                "--namespace-count",
+                "1",
+                "--pods-per-namespace",
+                "1",
+                "--node-selector",
+                "korvid.dev/pool=perftest",
+                "--output",
+                "seed.yaml",
+            ]
+        )
+        == 1
+    )
+    assert "error writing manifests: disk full" in capsys.readouterr().err
+
+
+def test_cli_seed_manifests_does_not_hide_unexpected_programmer_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_build(*_args: object, **_kwargs: object) -> object:
+        raise TypeError("unexpected manifest defect")
+
+    monkeypatch.setattr(cli, "build_seed_manifests", fail_build, raising=False)
+
+    with pytest.raises(TypeError, match="unexpected manifest defect"):
+        cli.main(
+            [
+                "seed-manifests",
+                "--run-id",
+                "aks186",
+                "--namespace-count",
+                "1",
+                "--pods-per-namespace",
+                "1",
+                "--node-selector",
+                "korvid.dev/pool=perftest",
+                "--output",
+                "seed.yaml",
+            ]
+        )

@@ -4,6 +4,9 @@ Usage:
     uv run python -m tests.performance.cli replay \\
         --profile PATH [--time-scale FLOAT] [--sample-interval FLOAT] \\
         [--json PATH] [--out PATH] [--cpu-profile PATH] [--allocation-snapshot PATH]
+    uv run python -m tests.performance.cli seed-manifests \\
+        --run-id TEXT --namespace-count INT --pods-per-namespace INT \\
+        --node-selector KEY=VALUE --output PATH
 """
 
 from __future__ import annotations
@@ -17,7 +20,10 @@ import tracemalloc
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from korvid.k8s.errors import ApiStatusError
+from tests.performance.manifests import build_seed_manifests
 from tests.performance.metrics import BenchmarkReport, render_markdown, report_payload
 from tests.performance.profile import WorkloadProfile, load_profile
 from tests.performance.replay import ReplayOptions, ReplayReport, run_replay
@@ -87,6 +93,38 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Write top-100 tracemalloc source locations.",
     )
+
+    sp = subparsers.add_parser(
+        "seed-manifests",
+        help="Render deterministic Namespace and Pod manifests for live AKS seeding.",
+    )
+    sp.add_argument("--run-id", required=True, metavar="TEXT", help="Unique run identifier.")
+    sp.add_argument(
+        "--namespace-count",
+        required=True,
+        type=int,
+        metavar="INT",
+        help="Number of namespaces to create.",
+    )
+    sp.add_argument(
+        "--pods-per-namespace",
+        required=True,
+        type=int,
+        metavar="INT",
+        help="Number of Pods to create in each namespace.",
+    )
+    sp.add_argument(
+        "--node-selector",
+        required=True,
+        metavar="KEY=VALUE",
+        help="Exactly one nodeSelector key=value pair.",
+    )
+    sp.add_argument(
+        "--output",
+        required=True,
+        metavar="PATH",
+        help="Destination path for the multi-document YAML output.",
+    )
     return parser
 
 
@@ -125,6 +163,27 @@ def _write_outputs(args: argparse.Namespace, replay: ReplayReport) -> None:
     if args.json_path:
         payload: dict[str, Any] = {"schema_version": 1, **report_payload(benchmark)}
         Path(args.json_path).write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _cmd_seed_manifests(args: argparse.Namespace) -> int:
+    try:
+        manifests = build_seed_manifests(
+            run_id=args.run_id,
+            namespace_count=args.namespace_count,
+            pods_per_namespace=args.pods_per_namespace,
+            node_selector=args.node_selector,
+        )
+    except ValueError as exc:
+        print(f"error building manifests: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        text = yaml.safe_dump_all(manifests, sort_keys=False, explicit_start=True)
+        Path(args.output).write_text(text, encoding="utf-8")
+    except OSError as exc:
+        print(f"error writing manifests: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _cmd_replay(args: argparse.Namespace) -> int:
@@ -177,6 +236,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "replay":
         return _cmd_replay(args)
+    if args.command == "seed-manifests":
+        return _cmd_seed_manifests(args)
     return 1
 
 
