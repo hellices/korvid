@@ -640,13 +640,11 @@ class AgentRuntime:
                 self._latest_outbound_payload = prepared.snapshot
                 # Estimate of the prompt this iteration sends — used only when
                 # the provider omits usage, so token totals never read as zero
-                # input for a request that was really transmitted. Counts what
-                # actually goes over the wire: tool schemas, message content,
-                # and prior assistant tool-call arguments — measured after
-                # preparation, which may have dropped history to fit.
-                prompt_estimate = (
-                    self._tools_chars + sum(_message_chars(message) for message in self._messages)
-                ) // 4
+                # input for a request that was really transmitted. Measured on
+                # the canonical payload that was actually handed over: history
+                # accounting cannot see what preparation dropped to fit, nor
+                # what a provider dialect hook added inside the boundary.
+                prompt_estimate = len(prepared.snapshot.payload_json) // 4
                 self._live_prompt_estimate = prompt_estimate
                 try:
                     stream = self._provider.complete(prepared.messages, prepared.tools)

@@ -530,6 +530,71 @@ async def test_missing_usage_estimates_include_tool_schemas_and_payloads() -> No
     assert runtime.usage_estimated is True
 
 
+async def test_missing_usage_estimates_measure_the_prepared_payload() -> None:
+    """The estimate must measure what was sent, not runtime history.
+
+    A provider dialect hook runs inside the boundary and can add real
+    payload — Ollama re-attaches `thinking`, names the executed tool,
+    expands arguments into objects. Counting `_messages` plus the tool
+    schemas cannot see any of it, so a usage-less request is billed for
+    a payload smaller than the one the provider received (PR #197
+    review).
+    """
+    thinking = "reasoning about the tool result. " * 500
+
+    class DialectProvider(ScriptedProvider):
+        @property
+        def name(self) -> str:
+            return "dialect"
+
+        def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [
+                {**message, "thinking": thinking} if message.get("role") == "assistant" else message
+                for message in messages
+            ]
+
+    provider = DialectProvider(
+        [
+            [{"type": "text_delta", "text": "first"}, {"type": "usage", "in": 5, "out": 5}],
+            [{"type": "text_delta", "text": "second"}, {"type": "done"}],
+        ]
+    )
+    runtime = AgentRuntime(provider, EchoExecutor())
+
+    await collect(runtime, "first question")
+    events = await collect(runtime, "second question")
+
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert thinking in json.loads(snapshot.payload_json)["messages"][2]["thinking"]
+    complete = next(event for event in events if isinstance(event, TurnComplete))
+    assert complete.estimated is True
+    assert complete.input_tokens == len(snapshot.payload_json) // 4
+
+
+async def test_provider_error_estimates_measure_the_prepared_payload() -> None:
+    """The same exact payload backs the estimate when the stream dies."""
+
+    class DyingProvider(ScriptedProvider):
+        async def complete(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+            *,
+            stream: bool = True,
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"type": "text_delta", "text": "partial"}
+            raise RuntimeError("connection dropped")
+
+    runtime = AgentRuntime(DyingProvider([]), EchoExecutor())
+    events = await collect(runtime, "a question")
+
+    assert any(isinstance(event, AgentError) for event in events)
+    snapshot = runtime.latest_outbound_payload
+    assert snapshot is not None
+    assert runtime.total_tokens[0] == len(snapshot.payload_json) // 4
+
+
 async def test_provider_error_after_tool_call_estimates_output() -> None:
     """A stream that dies after emitting only a tool call (no text) still
     generated output — its payload is charged, not recorded as zero."""
