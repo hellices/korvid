@@ -215,6 +215,11 @@ if credential is not None:
 PY
 ```
 
+Stop all korvid processes, including any `korvid --mcp` server, before
+removing retained files. Deleting a live lock file can let running processes
+coordinate against different files, and deleting a live MCP registry entry
+leaves external hosts without a discovery record.
+
 Then remove the retained files:
 
 ```sh
@@ -229,10 +234,6 @@ rm -f ~/.local/state/korvid/mcp-endpoint.json \
 # data honors XDG_DATA_HOME; substitute "${XDG_DATA_HOME:-$HOME/.local/share}"
 rm -rf ~/.local/share/korvid/logs ~/.local/share/korvid/agent-payloads
 ```
-
-Stop korvid (including any `korvid --mcp` server) before removing
-`mcp-endpoint.json`; deleting a live registry entry out from under a running
-server leaves external MCP hosts without a discovery record.
 
 The package uninstall command does not run that cleanup for you.
 

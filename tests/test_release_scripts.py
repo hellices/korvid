@@ -1044,6 +1044,8 @@ def test_release_docs_runbook_requires_protected_tags_and_maintainer_approval() 
 
 def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> None:
     runbook = _release_runbook()
+    stop_processes = runbook.index("Stop all korvid processes")
+    remove_files = runbook.index("Then remove the retained files")
     assert "~/.config/korvid/config.yaml" in runbook
     assert "~/.config/korvid/credentials.json" in runbook
     assert "~/.local/state/korvid/audit.jsonl" in runbook
@@ -1054,6 +1056,7 @@ def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> N
     assert "python -m pip uninstall -y korvid" in runbook
     assert "opt-in cleanup" in runbook
     assert "rerun your package manager with the full desired extra set" in runbook
+    assert stop_processes < remove_files
 
 
 def test_release_docs_runbook_lists_and_cleans_the_os_keyring_credential() -> None:
