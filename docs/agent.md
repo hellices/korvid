@@ -40,6 +40,47 @@ respect the write gate: a pending approval dialog is dismissed without
 executing, while a write the user already approved always runs to completion
 and is audited.
 
+## Inspecting what the agent sends
+
+`:ai payload` opens a read-only view of the exact sanitized request most
+recently sent to the provider (disabled while a turn is running, and only
+available once at least one request has been sent this session). It is the
+literal payload — not a re-derived approximation — because every message,
+tool result, and tool-call argument passes through the same
+`OutboundPolicy` redaction step whether the request goes to a hosted model
+(GitHub Copilot, Azure OpenAI, OpenAI, Anthropic-compatible) or a local
+endpoint (Ollama, a self-hosted OpenAI-compatible server): `Secret` values,
+the `kubectl.kubernetes.io/last-applied-configuration` annotation, and text
+matching known credential key/value patterns are all masked before the
+inspector — or the network — ever sees them. A local endpoint receives the
+same sanitized payload as a hosted one; korvid does not additionally
+authenticate that the configured `base_url` is really the process you
+intend it to be.
+
+Press `e` in the inspector to export the displayed payload to a private
+JSON file — `write_private_text` creates it with `0o600` permissions (see
+the platform caveat in [the threat model](threat-model.md)), never
+overwrites an existing export, and confirms the exact path once written
+(default location: `$XDG_DATA_HOME/korvid/agent-payloads`, falling back to
+`~/.local/share/korvid/agent-payloads`). Exported payloads are not
+automatically cleaned up — they persist on disk exactly like any other
+file you save until you delete them yourself.
+
+**The payload is sanitized, not anonymized.** Resource names, namespaces,
+labels, and other stable cluster identifiers still appear in it — sanitization
+only removes secret material and known credential patterns, not anything that
+identifies your cluster. Treat an exported payload with the same care as any
+other cluster-derived export. See [`docs/threat-model.md`](threat-model.md)
+for the full boundary, what the inspector does not show (transport headers
+and credentials never enter the canonical payload), and the documented
+residual risks — notably that arbitrary secrets embedded in free-form log or
+event text cannot be guaranteed detectable.
+
+`protected_contexts` and `agent.disable_in_protected` (see
+[Protected contexts](ops.md#protected-contexts)) control whether the agent
+runs at all on production-labeled contexts; they do not change what
+`OutboundPolicy` redacts once a request is allowed to be built.
+
 ## Cloud-provider awareness
 
 At startup korvid detects the cluster's cloud provider from
@@ -165,8 +206,13 @@ Third-party provider plugins are for backends whose protocol or auth flow
 truly differs from korvid's built-ins.
 
 Plugins are configured manually in `config.yaml` today — the `:ai` wizard only
-offers the built-ins above.  Plugins also run as trusted Python code inside
-the korvid process, so install only packages you trust.  See
+offers the built-ins above.  Plugins also run as trusted, in-process Python
+code inside the korvid process, so install only packages you trust.  A plugin
+receives only the same sanitized canonical payload
+`OutboundPolicy` builds for a built-in provider — but once received, trusted
+plugin code is free to mutate, retain, log, or independently transmit that
+data; korvid has no visibility or control past the handoff (see
+[`docs/threat-model.md`](threat-model.md)).  See
 [Provider plugins](provider-plugins.md) for the exact API-v1 contract,
 entry-point registration, event limits, option limits, and selected-only
 loading behavior.

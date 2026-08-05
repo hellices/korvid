@@ -106,6 +106,10 @@ Full key reference: [docs/keybindings.md](docs/keybindings.md).
 - **[Air-gapped operation](docs/airgap.md)** — internal LLM/Helm/OLM/image
   endpoints, corporate CA trust (`network.ca_bundle`, Helm `--ca-file`),
   responsibility boundaries, and a readiness checklist.
+- **[Threat model](docs/threat-model.md)** — exactly what crosses the
+  embedded-provider boundary, what is redacted, the MCP and plugin trust
+  boundaries, and the residual risks that are not mitigated. See
+  [`SECURITY.md`](SECURITY.md) to report a vulnerability privately.
 
 ## Status
 

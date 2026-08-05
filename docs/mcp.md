@@ -15,6 +15,18 @@ An opt-in *proposal* flow lets external agents queue writes for your review
 (see [External write proposals](#external-write-proposals)) — even then, a
 proposal never executes without a fresh keystroke in the TUI.
 
+**MCP tool calls never go through korvid's embedded-provider boundary.**
+Results returned by `list_resources`, `get_logs`, `diagnose_pod`, and the
+rest go straight from the Kubernetes API to the external MCP client with
+none of the `OutboundPolicy` redaction the embedded agent applies (see
+[`docs/threat-model.md`](threat-model.md)) — because no korvid-managed model
+call is involved at all. The external MCP client (and whatever model or
+data policy it applies to what it receives) owns its own AI data boundary;
+korvid's guarantee at this surface is limited to what tools are exposed
+(read-only plus opt-in write proposals) and that writes still require your
+keystroke, not what the connected client does with the data those tools
+return.
+
 The live endpoint is also published to
 `$XDG_STATE_HOME/korvid/mcp-endpoint.json` (defaulting to
 `~/.local/state/korvid/mcp-endpoint.json` when `XDG_STATE_HOME` is unset)

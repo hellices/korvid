@@ -12,9 +12,16 @@ If your backend already speaks an OpenAI-compatible `/v1` API, prefer the
 built-in `openai-compat` path instead of a plugin. Reach for a plugin only
 when the wire protocol or auth flow truly differs.
 
-> **Security warning:** provider plugins are trusted Python code loaded into the
-> korvid process. Selected-only loading avoids importing *unused* plugins, but
-> it is **not** a sandbox. Install only plugins you trust.
+> **Security warning:** provider plugins are trusted, in-process Python code
+> loaded into the korvid process. Selected-only loading avoids importing
+> *unused* plugins, but it is **not** a sandbox. Install only plugins you
+> trust. `create()` receives only the same sanitized canonical
+> `messages`/`tools` payload `OutboundPolicy` builds for built-in providers
+> (see [`docs/threat-model.md`](threat-model.md)) — but once your plugin
+> receives that payload, it is free to mutate, retain, log, cache, or
+> independently transmit it anywhere; korvid has no further control or
+> visibility past the handoff. See [`SECURITY.md`](../SECURITY.md) to
+> report a vulnerability.
 
 ## When you should not write a plugin
 
