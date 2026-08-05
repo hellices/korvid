@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from tests.performance.profile import FailureInjection, WorkloadProfile
 from tests.performance.replay import ReplayOptions, run_replay
 from tests.performance.workload import apply_events, initial_pods, scheduled_events, summary_digest
@@ -48,11 +50,9 @@ async def test_replay_time_scale_1_uses_relative_inter_event_delays() -> None:
     `async_sleep` advances that clock then yields via `asyncio.sleep(0)`,
     so the test completes in ~0 s of wall time regardless of profile length.
 
-    Sensitivity: with 60 events at 20 eps over 3 s, sum_of_offsets ~= 91.5 s.
-    Under the absolute-offset bug the accumulated delay totals ~= 91.5 s >> 9 s
-    (= duration_seconds x 3), so the assertion fails immediately without any
-    wall-clock race or timeout dependency.
-    With the correct fix, inter-event delays sum ~= 3 s < 9 s -> GREEN.
+    Sensitivity: with 60 events at 20 eps over 3 s, correct sleeps sum exactly
+    to the final 2.95 s offset. The historical absolute-offset bug sums every
+    offset instead, while omitted sleeps sum to zero; both fail deterministically.
     """
     profile = WorkloadProfile(
         schema_version=1,
@@ -66,13 +66,13 @@ async def test_replay_time_scale_1_uses_relative_inter_event_delays() -> None:
         failures=(),
     )
     virtual_time: list[float] = [0.0]
-    total_sleep: list[float] = [0.0]
+    sleep_delays: list[float] = []
 
     def virtual_monotonic() -> float:
         return virtual_time[0]
 
     async def virtual_sleep(delay: float) -> None:
-        total_sleep[0] += delay
+        sleep_delays.append(delay)
         virtual_time[0] += delay
         await asyncio.sleep(0)  # yield to event loop without real wall time
 
@@ -80,8 +80,7 @@ async def test_replay_time_scale_1_uses_relative_inter_event_delays() -> None:
         profile,
         ReplayOptions(time_scale=1, monotonic_fn=virtual_monotonic, async_sleep=virtual_sleep),
     )
-    # Bug: total_sleep ≈ 91.5 s; fix: total_sleep ≈ 3 s.  Threshold = 9 s.
-    assert total_sleep[0] < profile.duration_seconds * 3
+    assert sum(sleep_delays) == pytest.approx(scheduled_events(profile)[-1].offset_seconds)
     assert report.dropped_updates == 0
     assert report.object_count == 20
     assert report.expected_digest == report.final_digest
@@ -125,11 +124,10 @@ async def test_replay_gone_reconnects_with_time_scale_1() -> None:
     virtual clock is never reset across reconnect generations, so gen=1 events
     correctly see the accumulated elapsed time from gen=0.
 
-    Sensitivity: 95 post-reconnect events (20 eps x 5 s profile minus 5 pre-gone
-    events) have sum_of_offsets ~= 251.75 s.  Under the reconnect-reset bug,
-    gen=1 sees elapsed=0 and accumulates full absolute offsets -> total_sleep >> 15 s
-    (= duration_seconds x 3), failing deterministically without a wall-clock race.
-    With the correct fix, total_sleep ~= 5 s < 15 s -> GREEN.
+    Sensitivity: correct sleeps sum exactly to the final 4.95 s offset, and the
+    first post-410 sleep remains one 0.05 s tick. Resetting the replay origin on
+    reconnect produces a 0.25 s first reconnect sleep and 5.15 s total; omitted
+    sleeps produce zero. Both fail deterministically.
     """
     profile = WorkloadProfile(
         schema_version=1,
@@ -143,13 +141,13 @@ async def test_replay_gone_reconnects_with_time_scale_1() -> None:
         failures=(FailureInjection(kind="gone", at_event=5),),
     )
     virtual_time: list[float] = [0.0]
-    total_sleep: list[float] = [0.0]
+    sleep_delays: list[float] = []
 
     def virtual_monotonic() -> float:
         return virtual_time[0]
 
     async def virtual_sleep(delay: float) -> None:
-        total_sleep[0] += delay
+        sleep_delays.append(delay)
         virtual_time[0] += delay
         await asyncio.sleep(0)  # yield to event loop without real wall time
 
@@ -158,8 +156,13 @@ async def test_replay_gone_reconnects_with_time_scale_1() -> None:
         ReplayOptions(time_scale=1, monotonic_fn=virtual_monotonic, async_sleep=virtual_sleep),
     )
 
-    # Bug: gen=1 alone contributes ≈ 251.75 s; fix: total ≈ 5 s.  Threshold = 15 s.
-    assert total_sleep[0] < profile.duration_seconds * 3
+    events = scheduled_events(profile)
+    failure_sequence = profile.failures[0].at_event
+    first_post_reconnect_delay = (
+        events[failure_sequence].offset_seconds - events[failure_sequence - 1].offset_seconds
+    )
+    assert sum(sleep_delays) == pytest.approx(events[-1].offset_seconds)
+    assert sleep_delays[failure_sequence - 1] == pytest.approx(first_post_reconnect_delay)
     assert report.expected_digest == report.final_digest
     assert report.dropped_updates == 0
     assert report.api.operations["list"] == 2
