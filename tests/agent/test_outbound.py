@@ -335,6 +335,34 @@ def test_unknown_roles_and_invalid_message_field_types_are_blocked(
         )
 
 
+def test_a_refusal_from_the_shared_redactor_is_a_policy_block() -> None:
+    """The redactor lives one layer down and raises its own error type.
+
+    Callers handle exactly one exception here, so a refusal it raises must
+    arrive as an `OutboundPolicyError` — otherwise the runtime's rollback
+    never runs and an unredactable payload ends the turn uncontrolled.
+    """
+    with pytest.raises(OutboundPolicyError, match="blocked"):
+        sanitize_tool_result("get_resource", "1: not-a-string-key\n")
+
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "get_logs", "arguments": {"pod": object()}},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+    ]
+    with pytest.raises(OutboundPolicyError, match="blocked"):
+        OutboundPolicy(max_request_chars=20_000).prepare("ollama", messages, [], iteration=0)
+
+
 def test_tool_messages_must_correlate_to_assistant_tool_calls() -> None:
     messages = [{"role": "tool", "tool_call_id": "missing", "content": "result"}]
     with pytest.raises(OutboundPolicyError, match="blocked"):
