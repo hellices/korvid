@@ -67,7 +67,7 @@ else:
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "korvid 0.1.0\n"
+    assert result.stdout == "korvid 0.1.1\n"
 
 
 def test_console_entrypoint_delegates_to_the_app_composition_root(
@@ -116,4 +116,4 @@ def test_console_entrypoint_takes_the_fast_path_only_for_the_exact_version_call(
     with pytest.raises(SystemExit, match="0"):
         cli.main()
 
-    assert capsys.readouterr().out.strip() == "korvid 0.1.0"
+    assert capsys.readouterr().out.strip() == "korvid 0.1.1"

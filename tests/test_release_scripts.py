@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -1016,6 +1018,49 @@ def _release_workflow() -> str:
     return (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text()
 
 
+def _bash_executable() -> str:
+    if sys.platform != "win32":
+        bash = shutil.which("bash")
+        assert bash is not None
+        return bash
+
+    git = shutil.which("git")
+    assert git is not None
+    git_bash = Path(git).parent.parent / "bin" / "bash.exe"
+    assert git_bash.is_file()
+    return str(git_bash)
+
+
+def _verify_step_run(key: str, value: str) -> str:
+    document = yaml.safe_load(_release_workflow())
+    for step in document["jobs"]["verify"]["steps"]:
+        if step.get(key) == value:
+            run_script = step.get("run")
+            assert isinstance(run_script, str)
+            return run_script
+    raise AssertionError(f"verify step not found: {key}={value}")
+
+
+def _overwritten_annotated_tag_checkout(tmp_path: Path) -> tuple[Path, str]:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = _release_repo(source_root)
+    remote = tmp_path / "remote.git"
+    checkout = tmp_path / "checkout"
+    tag = "v1.2.3"
+
+    _git(tmp_path, "init", "--bare", str(remote))
+    _git(source, "remote", "add", "origin", str(remote))
+    _git(source, "tag", "-a", tag, "-m", "release 1.2.3")
+    _git(source, "push", "origin", "main", tag)
+    _git(tmp_path, "clone", "--branch", "main", str(remote), str(checkout))
+
+    event_commit = _git(checkout, "rev-parse", f"refs/tags/{tag}^{{commit}}")
+    _git(checkout, "update-ref", f"refs/tags/{tag}", event_commit)
+    assert _git(checkout, "cat-file", "-t", f"refs/tags/{tag}") == "commit"
+    return checkout, tag
+
+
 def _readme() -> str:
     return (Path(__file__).parents[1] / "README.md").read_text()
 
@@ -1024,6 +1069,10 @@ def _release_runbook() -> str:
     path = Path(__file__).parents[1] / "docs" / "release.md"
     assert path.is_file(), "docs/release.md is missing"
     return path.read_text()
+
+
+def _security_policy() -> str:
+    return (Path(__file__).parents[1] / "SECURITY.md").read_text()
 
 
 def test_linux_bundle_pins_and_names_the_manylinux_2_28_baseline() -> None:
@@ -1091,7 +1140,8 @@ def test_release_docs_require_immutable_protected_tags() -> None:
 
 def test_release_docs_readme_pins_first_release_install_and_links_the_runbook() -> None:
     readme = _readme()
-    assert "python -m pip install 'korvid[all]==0.1.0'" in readme
+    assert "python -m pip install 'korvid[all]==0.1.1'" in readme
+    assert "v0.1.1 is the first public PyPI release" in readme
     assert "docs/release.md" in readme
 
 
@@ -1103,14 +1153,14 @@ def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -
     assert "`hellices/korvid`" in runbook
     assert "gh workflow run Release --ref main" in runbook
     assert 'gh run watch "$RUN_ID" --exit-status' in runbook
-    assert 'git tag -a v0.1.0 COMMIT -m "korvid v0.1.0"' in runbook
-    assert "git push origin refs/tags/v0.1.0" in runbook
-    assert "gh release download v0.1.0 --dir dist/v0.1.0" in runbook
+    assert 'git tag -a v0.1.1 COMMIT -m "korvid v0.1.1"' in runbook
+    assert "git push origin refs/tags/v0.1.1" in runbook
+    assert "gh release download v0.1.1 --dir dist/v0.1.1" in runbook
     assert (
-        "gh attestation verify dist/v0.1.0/korvid-0.1.0-py3-none-any.whl --repo hellices/korvid"
+        "gh attestation verify dist/v0.1.1/korvid-0.1.1-py3-none-any.whl --repo hellices/korvid"
     ) in runbook
-    assert ("gh attestation verify dist/v0.1.0/SHA256SUMS --repo hellices/korvid") in runbook
-    assert ("cd dist/v0.1.0 && shasum --algorithm 256 --check SHA256SUMS") in runbook
+    assert ("gh attestation verify dist/v0.1.1/SHA256SUMS --repo hellices/korvid") in runbook
+    assert ("cd dist/v0.1.1 && shasum --algorithm 256 --check SHA256SUMS") in runbook
     assert "PyPI publication is irreversible" in runbook
     assert "annotated tag publication is irreversible" in runbook
 
@@ -1131,7 +1181,7 @@ def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> N
     assert "~/.local/state/korvid/audit.jsonl.lock" in runbook
     assert "~/.local/share/korvid/logs" in runbook
     assert "~/.local/share/korvid/agent-payloads" in runbook
-    assert "python -m pip install 'korvid[all]==0.1.0'" in runbook
+    assert "python -m pip install 'korvid[all]==0.1.1'" in runbook
     assert "python -m pip uninstall -y korvid" in runbook
     assert "opt-in cleanup" in runbook
     assert "rerun your package manager with the full desired extra set" in runbook
@@ -1163,7 +1213,21 @@ def test_release_docs_runbook_marks_recovery_boundaries_and_first_release_upgrad
     assert "Deleting or moving a published tag/version is not rollback" in runbook
     assert "resume the idempotent workflow only when the staged assets match" in runbook
     assert "stop and diagnose" in runbook
-    assert "v0.1.0 cannot prove a cross-version PyPI upgrade" in runbook
+    assert "v0.1.1 cannot prove a cross-version PyPI upgrade" in runbook
+    assert "validate upgrading from `0.1.1`" in runbook
+
+
+def test_release_docs_preserve_failed_v0_1_0_as_unpublished_audit_history() -> None:
+    runbook = _release_runbook()
+    assert "`v0.1.0` remains immutable, unpublished audit history" in runbook
+    assert "before build, attestation, staging, PyPI publication, or GitHub Release" in runbook
+    assert "`v0.1.1` is the first public release" in runbook
+
+
+def test_security_policy_starts_supported_releases_at_v0_1_1() -> None:
+    policy = _security_policy()
+    assert "Before the first public `v0.1.1` release" in policy
+    assert "Once `v0.1.1` publishes" in policy
 
 
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:
@@ -1220,19 +1284,109 @@ def test_release_workflow_smokes_the_downloaded_wheel_once_without_rebuilding() 
 # --- the dry-run source policy compares against the live remote -------------
 
 
-def test_release_workflow_fetches_the_live_trusted_branch_before_the_source_policy() -> None:
-    """`actions/checkout` can leave `origin/main` at the dispatched SHA, which
-    would make the dry-run HEAD comparison vacuous."""
+def test_release_workflow_refreshes_live_source_refs_before_source_policy() -> None:
     workflow = _release_workflow()
     verify = workflow.index("\n  verify:")
     build = workflow.index("\n  build:")
     verify_job = workflow[verify:build]
-    fetch = verify_job.index(
-        'git fetch --force --no-tags origin "refs/heads/main:refs/remotes/origin/main"'
-    )
-    assert fetch < verify_job.index("check_dry_run.py origin/main")
-    assert fetch < verify_job.index("check_source.py")
+    branch_fetch = verify_job.index('"refs/heads/main:refs/remotes/origin/main"')
+    tag_fetch = verify_job.index('git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"')
+    dry_run_check = verify_job.index("check_dry_run.py origin/main")
+    source_check = verify_job.index("check_source.py")
+
+    assert branch_fetch < dry_run_check
+    assert tag_fetch < source_check
+    assert (
+        'if [ "$EVENT_NAME" = "push" ]; then\n'
+        '            git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"\n'
+        "          fi"
+    ) in verify_job
+    assert "TAG: ${{ github.ref_name }}" in verify_job
     assert "fetch-depth: 0" in verify_job
+
+
+def test_release_workflow_restores_overwritten_annotated_tag_before_source_policy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    checkout, tag = _overwritten_annotated_tag_checkout(tmp_path)
+    restore = subprocess.run(
+        [
+            _bash_executable(),
+            "-eu",
+            "-o",
+            "pipefail",
+            "-c",
+            _verify_step_run("name", "Fetch the live trusted source refs"),
+        ],
+        cwd=checkout,
+        env={**os.environ, "EVENT_NAME": "push", "TAG": tag},
+        capture_output=True,
+        text=True,
+    )
+
+    assert restore.returncode == 0, restore.stderr
+    assert _git(checkout, "cat-file", "-t", f"refs/tags/{tag}") == "tag"
+    assert check_source.main([tag, "origin/main", str(checkout)]) == 0
+    assert "release source verified" in capsys.readouterr().out
+
+
+def test_release_workflow_rejects_restored_tag_that_differs_from_event_commit(
+    tmp_path: Path,
+) -> None:
+    checkout, tag = _overwritten_annotated_tag_checkout(tmp_path)
+    restore = subprocess.run(
+        [
+            _bash_executable(),
+            "-eu",
+            "-o",
+            "pipefail",
+            "-c",
+            _verify_step_run("name", "Fetch the live trusted source refs"),
+        ],
+        cwd=checkout,
+        env={**os.environ, "EVENT_NAME": "push", "TAG": tag},
+        capture_output=True,
+        text=True,
+    )
+    assert restore.returncode == 0, restore.stderr
+
+    source_check = subprocess.run(
+        [
+            _bash_executable(),
+            "-eu",
+            "-o",
+            "pipefail",
+            "-c",
+            _verify_step_run("id", "source"),
+        ],
+        cwd=checkout,
+        env={
+            **os.environ,
+            "EVENT_NAME": "push",
+            "GITHUB_SHA": "0" * 40,
+            "TAG": tag,
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert source_check.returncode == 1
+    assert source_check.stdout.strip() == "release tag does not match event commit"
+
+
+def test_release_workflow_binds_restored_tag_to_event_commit_before_validation() -> None:
+    workflow = _release_workflow()
+    verify = workflow.index("\n  verify:")
+    build = workflow.index("\n  build:")
+    verify_job = workflow[verify:build]
+    assert (
+        'source_commit=$(git rev-list -n 1 "refs/tags/$TAG")\n'
+        '            if [ "$source_commit" != "$GITHUB_SHA" ]; then\n'
+        '              echo "release tag does not match event commit"\n'
+        "              exit 1\n"
+        "            fi\n"
+        "            uv run --no-project python scripts/release/check_source.py"
+    ) in verify_job
 
 
 # --- provenance attestation is irreversible, so tag pushes only -------------

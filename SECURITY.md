@@ -26,11 +26,12 @@ best-effort basis.
 
 ## Supported versions
 
-Before the first `v0.1.0` tag, there is **no supported release**: `main` is
-development-only and any commit may contain unfixed issues. Once `v0.1.0`
-publishes, the latest `0.1.x` patch release is the supported line; `main`
-remains development-only and is not a supported target for security fixes.
-This policy will be revised as the release cadence matures past `0.1.x`.
+Before the first public `v0.1.1` release, there is **no supported release**:
+`v0.1.0` is immutable, unpublished audit history, and `main` is
+development-only and may contain unfixed issues. Once `v0.1.1` publishes, the
+latest `0.1.x` patch release is the supported line; `main` remains
+development-only and is not a supported target for security fixes. This policy
+will be revised as the release cadence matures past `0.1.x`.
 
 ## Coordinated disclosure
 
