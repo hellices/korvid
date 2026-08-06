@@ -31,17 +31,21 @@ class _TableApp(App[None]):
 
 
 def _pods(names: list[str]) -> list[Summary]:
+    return _pods_with_phase([(name, "Running") for name in names])
+
+
+def _pods_with_phase(rows: list[tuple[str, str]]) -> list[Summary]:
     return [
         PodSummary(
             name=name,
             namespace="default",
-            phase="Running",
+            phase=phase,
             ready="1/1",
             restarts=0,
             node=None,
             qos="-",
         )
-        for name in names
+        for name, phase in rows
     ]
 
 
@@ -151,3 +155,61 @@ async def test_row_appearing_in_place_widens_its_column() -> None:
         await pilot.pause()
         assert table.ordered_columns[0].content_width > narrow
         assert table.ordered_columns[0].content_width >= len(appeared)
+
+
+def _spy_column_rescan(table: DataTable[Any]) -> list[Any]:
+    """Record full-column width rescans.
+
+    `_update_column_widths` reads a whole column back out — and measures every
+    cell in it — only when a queued cell looks *narrower* than the column it
+    sits in. `get_column` is that read, so any call means the O(total rows)
+    rescan this widget exists to avoid has just run.
+    """
+    seen: list[Any] = []
+    original = table.get_column
+
+    def spy(column_key: Any) -> Any:
+        seen.append(column_key)
+        return original(column_key)
+
+    table.get_column = spy  # type: ignore[method-assign]  # test spy
+    return seen
+
+
+async def test_widening_new_row_does_not_trigger_a_full_column_rescan() -> None:
+    """A repaint that both widens a column and changes an existing cell must
+    not make Textual re-measure the whole column.
+
+    Textual drains queued cell updates *before* the dimension pass. If the
+    column has already been widened by then, the queued cell reads as a
+    shrink and every cell in the column is measured again — reintroducing the
+    very cost this widget avoids.
+    """
+    app = _TableApp()
+    async with app.run_test(size=(120, 12)) as pilot:
+        table = app.query_one(ResourceTable)
+        await pilot.pause()
+        table.show(
+            "pods",
+            _pods_with_phase([("alpha", "Running"), ("beta", "Running")]),
+            all_namespaces=False,
+            pattern="",
+        )
+        await pilot.pause()
+        rescans = _spy_column_rescan(table)
+        table.show(
+            "pods",
+            _pods_with_phase(
+                [
+                    ("alpha", "Running"),
+                    ("beta", "CrashLoop"),
+                    ("zeta", "ContainerCreating"),
+                ]
+            ),
+            all_namespaces=False,
+            pattern="",
+        )
+        await pilot.pause()
+        assert rescans == [], f"rescanned {len(rescans)} column(s)"
+        status = table.ordered_columns[2]
+        assert status.content_width >= len("ContainerCreating")

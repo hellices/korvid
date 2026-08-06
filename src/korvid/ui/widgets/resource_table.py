@@ -10,7 +10,7 @@ from rich.cells import cell_len
 from rich.text import Text
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable
-from textual.widgets.data_table import RowDoesNotExist, RowKey
+from textual.widgets.data_table import Column, RowDoesNotExist, RowKey
 
 from korvid.core.config import ViewConfig
 from korvid.core.sorting import SortSpec, sort_rows
@@ -529,11 +529,15 @@ class ResourceTable(DataTable[str | Text]):
         settled by one identity check. `get_row` remains the fallback whenever
         `_emitted` has no record of a row.
 
-        Width updates are requested only for cells wider than their column:
-        `update_width=True` is not grow-only — a narrower replacement rescans
-        and *shrinks* the column, shifting the layout this path must keep
-        still. The trade-off is that a column stays at its widest-seen size
-        until the next rebuild.
+        Width updates are never handed to Textual's queue. `update_width=True`
+        is not grow-only: it defers the cell to `_update_column_widths`, which
+        runs *before* the dimension pass and re-measures every cell in the
+        column the moment the queued value looks narrower than the column —
+        both when the replacement genuinely shrank, and when another row in
+        the same repaint had already widened that column. Widths are absorbed
+        below instead, from the rows that actually changed. The trade-off is
+        unchanged: a column stays at its widest-seen size until the next
+        rebuild.
         """
         plan = self._in_place_plan(pending)
         if plan is None:
@@ -542,25 +546,31 @@ class ResourceTable(DataTable[str | Text]):
         for key in doomed:
             self.remove_row(key)
         columns = self.ordered_columns
-        fresh: list[list[str | Text]] = []
+        touched: list[list[str | Text]] = []
         for key, cells in pending:
             if key not in current_set:
                 self.add_row(*cells, key=key)
-                fresh.append(cells)
-                continue
-            old_cells = self._emitted.get(key)
-            if old_cells is cells:
-                continue  # memo hit: same list object, nothing can have changed
-            if old_cells is None:
-                old_cells = self.get_row(key)
-            for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
-                if not _cells_equal(old_cell, new_cell):
-                    grew = _cell_width(new_cell) > column.content_width
-                    self.update_cell(key, column.key, new_cell, update_width=grew)
+                touched.append(cells)
+            elif self._patch_row(key, cells, columns):
+                touched.append(cells)
         self._emitted = dict(pending)
-        if fresh:
-            self._absorb_widths(fresh)
+        if touched:
+            self._absorb_widths(touched)
         return True
+
+    def _patch_row(self, key: str, cells: list[str | Text], columns: list[Column]) -> bool:
+        """Update an existing row's changed cells; True when any cell moved."""
+        old_cells = self._emitted.get(key)
+        if old_cells is cells:
+            return False  # memo hit: same list object, nothing can have changed
+        if old_cells is None:
+            old_cells = self.get_row(key)
+        changed = False
+        for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
+            if not _cells_equal(old_cell, new_cell):
+                self.update_cell(key, column.key, new_cell, update_width=False)
+                changed = True
+        return changed
 
     def _absorb_widths(self, rows: Iterable[list[str | Text]]) -> None:
         """Grow the column widths from cells this widget is holding anyway.
@@ -593,7 +603,12 @@ class ResourceTable(DataTable[str | Text]):
                 if width > widths[index]:
                     widths[index] = width
         for column, width in zip(columns, widths, strict=True):
-            column.content_width = width
+            if width > column.content_width:
+                column.content_width = width
+                # A wider column means a wider table; the superclass
+                # recomputes the virtual size from the dimension pass, which
+                # `update_cell(update_width=False)` does not schedule.
+                self._require_update_dimensions = True
         self._widths_absorbed = True
 
     def _update_dimensions(self, new_rows: Iterable[RowKey]) -> None:
