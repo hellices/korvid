@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -1016,6 +1017,36 @@ def _release_workflow() -> str:
     return (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text()
 
 
+def _verify_step_run(key: str, value: str) -> str:
+    document = yaml.safe_load(_release_workflow())
+    for step in document["jobs"]["verify"]["steps"]:
+        if step.get(key) == value:
+            run_script = step.get("run")
+            assert isinstance(run_script, str)
+            return run_script
+    raise AssertionError(f"verify step not found: {key}={value}")
+
+
+def _overwritten_annotated_tag_checkout(tmp_path: Path) -> tuple[Path, str]:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = _release_repo(source_root)
+    remote = tmp_path / "remote.git"
+    checkout = tmp_path / "checkout"
+    tag = "v1.2.3"
+
+    _git(tmp_path, "init", "--bare", str(remote))
+    _git(source, "remote", "add", "origin", str(remote))
+    _git(source, "tag", "-a", tag, "-m", "release 1.2.3")
+    _git(source, "push", "origin", "main", tag)
+    _git(tmp_path, "clone", "--branch", "main", str(remote), str(checkout))
+
+    event_commit = _git(checkout, "rev-parse", f"refs/tags/{tag}^{{commit}}")
+    _git(checkout, "update-ref", f"refs/tags/{tag}", event_commit)
+    assert _git(checkout, "cat-file", "-t", f"refs/tags/{tag}") == "commit"
+    return checkout, tag
+
+
 def _readme() -> str:
     return (Path(__file__).parents[1] / "README.md").read_text()
 
@@ -1258,6 +1289,68 @@ def test_release_workflow_refreshes_live_source_refs_before_source_policy() -> N
     ) in verify_job
     assert "TAG: ${{ github.ref_name }}" in verify_job
     assert "fetch-depth: 0" in verify_job
+
+
+def test_release_workflow_restores_overwritten_annotated_tag_before_source_policy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    checkout, tag = _overwritten_annotated_tag_checkout(tmp_path)
+    restore = subprocess.run(
+        [
+            "bash",
+            "-eu",
+            "-o",
+            "pipefail",
+            "-c",
+            _verify_step_run("name", "Fetch the live trusted source refs"),
+        ],
+        cwd=checkout,
+        env={**os.environ, "EVENT_NAME": "push", "TAG": tag},
+        capture_output=True,
+        text=True,
+    )
+
+    assert restore.returncode == 0, restore.stderr
+    assert _git(checkout, "cat-file", "-t", f"refs/tags/{tag}") == "tag"
+    assert check_source.main([tag, "origin/main", str(checkout)]) == 0
+    assert "release source verified" in capsys.readouterr().out
+
+
+def test_release_workflow_rejects_restored_tag_that_differs_from_event_commit(
+    tmp_path: Path,
+) -> None:
+    checkout, tag = _overwritten_annotated_tag_checkout(tmp_path)
+    restore = subprocess.run(
+        [
+            "bash",
+            "-eu",
+            "-o",
+            "pipefail",
+            "-c",
+            _verify_step_run("name", "Fetch the live trusted source refs"),
+        ],
+        cwd=checkout,
+        env={**os.environ, "EVENT_NAME": "push", "TAG": tag},
+        capture_output=True,
+        text=True,
+    )
+    assert restore.returncode == 0, restore.stderr
+
+    source_check = subprocess.run(
+        ["bash", "-eu", "-o", "pipefail", "-c", _verify_step_run("id", "source")],
+        cwd=checkout,
+        env={
+            **os.environ,
+            "EVENT_NAME": "push",
+            "GITHUB_SHA": "0" * 40,
+            "TAG": tag,
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert source_check.returncode == 1
+    assert source_check.stdout.strip() == "release tag does not match event commit"
 
 
 def test_release_workflow_binds_restored_tag_to_event_commit_before_validation() -> None:
