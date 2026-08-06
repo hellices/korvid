@@ -2201,6 +2201,35 @@ def _identity_deps(command_runner: Callable[[Any], Awaitable[CommandResult]]) ->
     )
 
 
+async def test_verify_cluster_identity_uses_fixed_resource_group_and_cluster_name_lookup() -> None:
+    captured_args: list[list[str]] = []
+
+    async def recording_command_runner(args: list[str]) -> CommandResult:
+        captured_args.append(args)
+        return await _ok_command_runner()(args)
+
+    await live._verify_cluster_identity(
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        deps=_identity_deps(recording_command_runner),
+        limits=LiveLimits(),
+    )
+
+    assert captured_args == [
+        [
+            "az",
+            "aks",
+            "show",
+            "--resource-group",
+            RESOURCE_GROUP,
+            "--name",
+            CLUSTER_NAME,
+            "-o",
+            "json",
+        ]
+    ]
+
+
 async def test_run_live_replay_bounds_the_az_aks_show_lookup() -> None:
     """The first external `az aks show` call in the identity gate can hang on a
     stuck credential/exec plugin; it must be bounded by the read/connect timeout,

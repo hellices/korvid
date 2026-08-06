@@ -168,7 +168,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="expected_cluster_id",
         required=True,
         metavar="TEXT",
-        help="Exact AKS cluster ARM resource ID (`az aks show --ids ...`).",
+        help="Exact AKS cluster ARM resource ID (must exactly match the returned `az aks show` id).",
     )
     lp.add_argument(
         "--run-id", dest="run_id", required=True, metavar="TEXT", help="Unique run identifier."

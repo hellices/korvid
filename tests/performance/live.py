@@ -13,7 +13,8 @@ Every mutation is fail-closed:
 
 1. **Cluster identity gate** (`_verify_cluster_identity`): the active
    kubeconfig context, its resolved API server hostname, and an independent
-   `az aks show --ids <id>` lookup must all agree before any client connects.
+   `az aks show` lookup for the fixed dedicated-test resource group/name must
+   all agree before any client connects.
 2. **Ownership gate** (`_verify_ownership`): every expected namespace and
    every expected Pod must already carry both ownership labels
    (`manifests.MANAGED_BY_LABEL`/`manifests.RUN_LABEL`), and no *unexpected*
@@ -554,7 +555,17 @@ async def _verify_cluster_identity(
 
     async with asyncio.timeout(limits.read_connect_timeout_seconds):
         result = await deps.command_runner(
-            ["az", "aks", "show", "--ids", expected_cluster_id, "-o", "json"]
+            [
+                "az",
+                "aks",
+                "show",
+                "--resource-group",
+                _REQUIRED_RESOURCE_GROUP,
+                "--name",
+                _REQUIRED_CLUSTER_NAME,
+                "-o",
+                "json",
+            ]
         )
     if result.exit_code != 0:
         raise ValueError(f"az aks show failed (exit {result.exit_code}): {result.stderr.strip()}")
