@@ -13,7 +13,6 @@ every mutating command behind the approval dialog and the fail-closed audit.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import shutil
@@ -252,11 +251,22 @@ class HelmCLI:
         except (HelmError, OSError):
             return None
         finally:
-            # The untar tree is chart-controlled and can hold many files:
-            # remove it on a worker thread (shielded - an exclusive-worker
-            # cancellation mid-cleanup must still finish the removal).
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(asyncio.to_thread(shutil.rmtree, tmp, ignore_errors=True))
+            # The untar tree is chart-controlled and can hold many files, so
+            # remove it on a worker thread. Every wait is shielded: an
+            # exclusive-worker cancellation mid-cleanup - including a second
+            # one that lands while we are already waiting out the first - must
+            # still finish the removal rather than detach a running rmtree.
+            # The cancellation is remembered and re-raised once cleanup is
+            # done, so a cancelled caller never resumes with a schema result.
+            cleanup = asyncio.create_task(asyncio.to_thread(shutil.rmtree, tmp, ignore_errors=True))
+            cancelled: asyncio.CancelledError | None = None
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+            if cancelled is not None:
+                raise cancelled
 
     @staticmethod
     def _release_args(

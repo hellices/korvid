@@ -7,8 +7,11 @@ plumbing honest.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
@@ -684,7 +687,7 @@ async def test_show_schema_cleanup_runs_off_the_event_loop() -> None:
 
     cli, _ = _cli()
     cleanup_threads: list[bool] = []
-    real_rmtree = mock.DEFAULT
+    real_rmtree = shutil.rmtree
 
     async def fake_execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
         dest = argv[argv.index("--untardir") + 1]
@@ -693,16 +696,109 @@ async def test_show_schema_cleanup_runs_off_the_event_loop() -> None:
 
     main_thread = threading.current_thread()
 
-    def spy_rmtree(path: object, **kwargs: object) -> None:
+    def spy_rmtree(path: str, **kwargs: object) -> None:
         cleanup_threads.append(threading.current_thread() is not main_thread)
+        # Observe the thread, but still remove the tree: the mkdtemp
+        # directory must not outlive the test.
+        real_rmtree(path, ignore_errors=True)
 
     with (
         mock.patch("korvid.k8s.helmcli._execute", side_effect=fake_execute),
         mock.patch("korvid.k8s.helmcli.shutil.rmtree", side_effect=spy_rmtree),
     ):
         await cli.show_schema("repo/chart", "1.2.3")
-    del real_rmtree
     assert cleanup_threads == [True]
+
+
+async def test_show_schema_finishes_cleanup_before_propagating_cancellation() -> None:
+    """Cancelling during shielded cleanup must not turn cancellation into a
+    successful schema result or leave the cleanup running in the background."""
+    cli, _ = _cli()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    returned_before_cleanup: list[bool] = []
+
+    async def fake_execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        dest = argv[argv.index("--untardir") + 1]
+        (Path(dest) / "chart").mkdir(parents=True)
+        return 0, "", ""
+
+    async def fake_to_thread(func: Callable[..., object], *args: object, **kwargs: object) -> None:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        # Still do the real removal: the fake only controls *when* cleanup
+        # runs, so the mkdtemp tree must not survive the test.
+        func(*args, **kwargs)
+        cleanup_finished.set()
+
+    async def release_cleanup(task: asyncio.Task[dict[str, object] | None]) -> None:
+        await asyncio.sleep(0)
+        returned_before_cleanup.append(task.done())
+        allow_cleanup.set()
+
+    with (
+        mock.patch("korvid.k8s.helmcli._execute", side_effect=fake_execute),
+        mock.patch("korvid.k8s.helmcli.asyncio.to_thread", side_effect=fake_to_thread),
+    ):
+        task = asyncio.create_task(cli.show_schema("repo/chart", "1.2.3"))
+        await cleanup_started.wait()
+        task.cancel()
+        release_task = asyncio.create_task(release_cleanup(task))
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await release_task
+
+    assert returned_before_cleanup == [False]
+    assert cleanup_finished.is_set()
+
+
+async def test_show_schema_survives_repeated_cancellation_during_cleanup() -> None:
+    """A worker cancelled again while cleanup is still in flight must still not
+    escape: every wait is shielded, so repeated cancellations can never detach
+    the running rmtree."""
+    cli, _ = _cli()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    done_after_second_cancel: list[bool] = []
+
+    async def fake_execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        dest = argv[argv.index("--untardir") + 1]
+        (Path(dest) / "chart").mkdir(parents=True)
+        return 0, "", ""
+
+    async def fake_to_thread(func: Callable[..., object], *args: object, **kwargs: object) -> None:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        # Still do the real removal: the fake only controls *when* cleanup
+        # runs, so the mkdtemp tree must not survive the test.
+        func(*args, **kwargs)
+        cleanup_finished.set()
+
+    async def cancel_again(task: asyncio.Task[dict[str, object] | None]) -> None:
+        # Let the first cancellation be delivered and handled, then cancel a
+        # second time while the cleanup wait is still pending.
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        done_after_second_cancel.append(task.done())
+        allow_cleanup.set()
+
+    with (
+        mock.patch("korvid.k8s.helmcli._execute", side_effect=fake_execute),
+        mock.patch("korvid.k8s.helmcli.asyncio.to_thread", side_effect=fake_to_thread),
+    ):
+        task = asyncio.create_task(cli.show_schema("repo/chart", "1.2.3"))
+        await cleanup_started.wait()
+        task.cancel()
+        chaser = asyncio.create_task(cancel_again(task))
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await chaser
+
+    assert done_after_second_cancel == [False]
+    assert cleanup_finished.is_set()
 
 
 async def test_repo_add_appends_ca_file_only_when_configured(tmp_path: Path) -> None:
