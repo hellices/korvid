@@ -45,6 +45,8 @@ format:
   denials are surfaced as `gaps[].source == "endpointslices"` rather than
   as an error, so the model can reason about incomplete evidence. The result
   is bounded to the shared 8,000-character cap and is always parseable YAML.
+  Replacement detection considers only core-v1 Service owner references;
+  custom-controller owners do not invalidate manually managed slices.
 - **Logs, events, lists, single-pod diagnoses, and helm status** get only
   their own tool-specific shaping (scoping, formatting, size caps). They
   are **not** credential-pattern masked: a token printed into a pod's log
