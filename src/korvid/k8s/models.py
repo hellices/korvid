@@ -328,6 +328,43 @@ class PackageManifestSummary(GenericSummary):
 
 
 @dataclass(frozen=True)
+class EndpointSliceSummary(GenericSummary):
+    """EndpointSlice summary with service readiness fields."""
+
+    service_name: str = ""
+    address_type: str = ""
+    endpoints: int = 0
+    ready_endpoints: int = 0
+
+    @classmethod
+    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> EndpointSliceSummary:
+        base = GenericSummary.from_manifest(kind, manifest)
+        raw_endpoints = manifest.get("endpoints")
+        endpoints = raw_endpoints if isinstance(raw_endpoints, list) else []
+        ready_endpoints = sum(1 for item in endpoints if _endpoint_is_ready(item))
+        return cls(
+            **vars(base),
+            service_name=str(dict(base.labels).get("kubernetes.io/service-name", "")),
+            address_type=str(manifest.get("addressType") or ""),
+            endpoints=len(endpoints),
+            ready_endpoints=ready_endpoints,
+        )
+
+
+def _endpoint_is_ready(item: Any) -> bool:
+    """True when an EndpointSlice endpoint is ready or omits the ready flag."""
+
+    if not isinstance(item, dict):
+        return False
+    conditions = item.get("conditions")
+    if conditions is None:
+        return True
+    if not isinstance(conditions, dict):
+        return False
+    return conditions.get("ready") is not False
+
+
+@dataclass(frozen=True)
 class OLMSubscriptionSummary(GenericSummary):
     """OLM Subscription (operators.coreos.com) - an installed operator."""
 
@@ -373,6 +410,7 @@ class CSVSummary(GenericSummary):
 
 #: OLM's API group; other groups also define kinds named "Subscription", so
 #: the dispatch below checks the manifest's apiVersion, not just the kind.
+_DISCOVERY_GROUP_PREFIX = "discovery.k8s.io/"
 _OLM_GROUP_PREFIX = "operators.coreos.com/"
 _PACKAGES_GROUP_PREFIX = "packages.operators.coreos.com/"
 
@@ -423,6 +461,8 @@ def summary_for(kind: str, manifest: dict[str, Any]) -> GenericSummary:
     if kind == "ReplicaSet":
         return ReplicaSetSummary.from_manifest(kind, manifest)
     api_version = str(manifest.get("apiVersion") or "")
+    if kind == "EndpointSlice" and api_version.startswith(_DISCOVERY_GROUP_PREFIX):
+        return EndpointSliceSummary.from_manifest(kind, manifest)
     if kind == "PackageManifest" and api_version.startswith(_PACKAGES_GROUP_PREFIX):
         return PackageManifestSummary.from_manifest(kind, manifest)
     if api_version.startswith(_OLM_GROUP_PREFIX):

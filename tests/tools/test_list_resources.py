@@ -9,6 +9,7 @@ from typing import Any
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.models import (
     CSVSummary,
+    EndpointSliceSummary,
     GenericSummary,
     OLMSubscriptionSummary,
     PackageManifestSummary,
@@ -156,6 +157,23 @@ def test_generic_facts_show_desired_when_present() -> None:
     assert "desired=4" in summary_facts(s)
     bare = GenericSummary(name="cm", namespace="prod", kind="ConfigMap", created="")
     assert summary_facts(bare) == ""
+
+
+def test_endpoint_slice_facts_line() -> None:
+    s = EndpointSliceSummary(
+        name="api-x1",
+        namespace="shop",
+        kind="EndpointSlice",
+        created="",
+        service_name="api",
+        address_type="IPv4",
+        endpoints=3,
+        ready_endpoints=2,
+    )
+    line = summary_facts(s)
+    assert "service=api" in line
+    assert "ready=2/3" in line
+    assert "address_type=IPv4" in line
 
 
 def test_every_typed_summary_has_a_facts_renderer() -> None:

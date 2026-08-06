@@ -22,6 +22,7 @@ from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HelmReleaseSummary, HelmRevisionSummary
 from korvid.k8s.models import (
     CSVSummary,
+    EndpointSliceSummary,
     GenericSummary,
     OLMSubscriptionSummary,
     PackageManifestSummary,
@@ -254,6 +255,14 @@ def _package_facts(s: PackageManifestSummary) -> str:
     )
 
 
+def _endpoint_slice_facts(s: EndpointSliceSummary) -> str:
+    return (
+        f"service={_clamp(s.service_name) or '?'}"
+        f" ready={s.ready_endpoints}/{s.endpoints}"
+        f" address_type={_clamp(s.address_type) or '?'}"
+    )
+
+
 def _generic_facts(s: GenericSummary) -> str:
     return f"desired={s.desired}" if s.desired is not None else ""
 
@@ -289,6 +298,7 @@ _SUMMARY_FACTS: dict[type[GenericSummary], Callable[[Any], str]] = {
     OLMSubscriptionSummary: _subscription_facts,
     CSVSummary: _csv_facts,
     PackageManifestSummary: _package_facts,
+    EndpointSliceSummary: _endpoint_slice_facts,
     # Helm's synthetic kinds are not reachable through list_resources today
     # (a follow-up adds a helm listing tool), but the contract keeps their
     # facts registered so that tool renders release status on day one.

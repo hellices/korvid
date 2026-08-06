@@ -5,6 +5,7 @@ import pytest
 
 from korvid.k8s.models import (
     CSVSummary,
+    EndpointSliceSummary,
     GenericSummary,
     OLMSubscriptionSummary,
     PackageManifestSummary,
@@ -242,6 +243,69 @@ def test_generic_summary_tolerates_non_mapping_spec() -> None:
     for spec in (["a", "b"], "raw", 7, True):
         manifest: dict[str, Any] = {"metadata": {"name": "x", "namespace": "ns"}, "spec": spec}
         assert GenericSummary.from_manifest("Widget", manifest).desired is None
+
+
+def test_endpoint_slice_summary_counts_nil_ready_as_ready() -> None:
+    summary = summary_for(
+        "EndpointSlice",
+        {
+            "apiVersion": "discovery.k8s.io/v1",
+            "kind": "EndpointSlice",
+            "metadata": {
+                "name": "api-x1",
+                "namespace": "shop",
+                "labels": {"kubernetes.io/service-name": "api"},
+                "ownerReferences": [{"uid": "svc-1"}],
+            },
+            "addressType": "IPv4",
+            "endpoints": [
+                {"conditions": {"ready": True}},
+                {"conditions": {}},
+                {"conditions": {"ready": False}},
+            ],
+        },
+    )
+    assert isinstance(summary, EndpointSliceSummary)
+    assert summary.service_name == "api"
+    assert summary.address_type == "IPv4"
+    assert summary.endpoints == 3
+    assert summary.ready_endpoints == 2
+
+
+def test_same_named_endpoint_slice_crd_stays_generic() -> None:
+    summary = summary_for(
+        "EndpointSlice",
+        {"apiVersion": "example.io/v1", "metadata": {"name": "custom"}},
+    )
+    assert type(summary) is GenericSummary
+
+
+def test_endpoint_slice_summary_ignores_malformed_endpoints() -> None:
+    summary = summary_for(
+        "EndpointSlice",
+        {
+            "apiVersion": "discovery.k8s.io/v1",
+            "metadata": {"name": "api-x1", "namespace": "shop"},
+            "endpoints": "oops",
+        },
+    )
+    assert isinstance(summary, EndpointSliceSummary)
+    assert summary.endpoints == 0
+    assert summary.ready_endpoints == 0
+
+
+def test_endpoint_slice_summary_treats_non_mapping_conditions_as_not_ready() -> None:
+    summary = summary_for(
+        "EndpointSlice",
+        {
+            "apiVersion": "discovery.k8s.io/v1",
+            "metadata": {"name": "api-x1", "namespace": "shop"},
+            "endpoints": [{"conditions": "oops"}],
+        },
+    )
+    assert isinstance(summary, EndpointSliceSummary)
+    assert summary.endpoints == 1
+    assert summary.ready_endpoints == 0
 
 
 def test_pod_summary_owner_uids() -> None:
