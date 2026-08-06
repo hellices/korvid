@@ -17,6 +17,13 @@ from korvid.core.redaction import (
     redact_document,
     redact_text,
 )
+from korvid.core.service_analysis import (
+    EndpointSliceSnapshot,
+    EvidenceGap,
+    ResourceIdentity,
+    ServiceSnapshot,
+    analyze_service_endpoints,
+)
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HelmReleaseSummary, HelmRevisionSummary
@@ -1045,6 +1052,10 @@ class ToolExecutor(RecordedExecution):
         "PersistentVolumeClaim": ResourceMeta(
             "PersistentVolumeClaim", "persistentvolumeclaims", "", "v1", True
         ),
+        "Service": ResourceMeta("Service", "services", "", "v1", True),
+        "EndpointSlice": ResourceMeta(
+            "EndpointSlice", "endpointslices", "discovery.k8s.io", "v1", True
+        ),
     }
 
     def _meta_for_kind_name(self, kind_name: str) -> ResourceMeta | None:
@@ -1545,6 +1556,80 @@ class ToolExecutor(RecordedExecution):
             raise ValueError("Deployment API was not discovered")
         workload = await self._kube.get_object(meta, namespace, name)
         return await self._diagnose_deployment(namespace, name, workload)
+
+    def _require_diagnose_meta(self, kind_name: str) -> ResourceMeta:
+        """Return discovery metadata for `kind_name`, falling back to built-ins.
+
+        Raises:
+            ValueError: when neither discovery nor the built-in table knows
+                the kind — the diagnostic cannot proceed without an API path.
+        """
+        meta = self._meta_for_kind_name(kind_name)
+        if meta is None:
+            raise ValueError(f"{kind_name} API was not discovered")
+        return meta
+
+    async def _diagnose_service(self, args: dict[str, Any]) -> str:
+        """One-GET/one-LIST service endpoint diagnosis (issue #191)."""
+        name = _reject_slash_name(str(args["service"]), "service")
+        namespace = _reject_slash_name(str(args["namespace"]), "namespace")
+        service_meta = self._require_diagnose_meta("Service")
+        slice_meta = self._require_diagnose_meta("EndpointSlice")
+        manifest = await self._kube.get_object(service_meta, namespace, name)
+        service = _service_snapshot(manifest, namespace, name)
+        try:
+            summaries = await self._kube.list_objects(slice_meta, namespace)
+        except ApiStatusError as exc:
+            report = analyze_service_endpoints(
+                service,
+                (),
+                EvidenceGap("endpointslices", _api_gap_reason(exc)),
+            )
+        else:
+            slices = tuple(
+                _endpoint_slice_snapshot(item)
+                for item in summaries
+                if isinstance(item, EndpointSliceSummary)
+            )
+            report = analyze_service_endpoints(service, slices)
+        return dump_bounded_yaml(report.as_document(), MAX_RESULT_CHARS)
+
+
+def _service_snapshot(manifest: dict[str, Any], namespace: str, name: str) -> ServiceSnapshot:
+    """Build a ``ServiceSnapshot`` from a raw Service manifest."""
+    meta = manifest.get("metadata") or {}
+    uid = str(meta.get("uid") or "")
+    spec = manifest.get("spec") or {}
+    service_type = str(spec.get("type") or "ClusterIP")
+    selector_map = spec.get("selector")
+    if isinstance(selector_map, dict):
+        selector: tuple[tuple[str, str], ...] = tuple(
+            sorted((str(k), str(v)) for k, v in selector_map.items())
+        )
+    else:
+        selector = ()
+    return ServiceSnapshot(
+        identity=ResourceIdentity("Service", namespace, name, uid),
+        service_type=service_type,
+        selector=selector,
+    )
+
+
+def _endpoint_slice_snapshot(item: EndpointSliceSummary) -> EndpointSliceSnapshot:
+    """Build an ``EndpointSliceSnapshot`` from an ``EndpointSliceSummary``."""
+    return EndpointSliceSnapshot(
+        identity=ResourceIdentity("EndpointSlice", item.namespace, item.name, item.uid),
+        service_name=item.service_name,
+        owner_uids=item.owner_uids,
+        address_type=item.address_type,
+        endpoints=item.endpoints,
+        ready_endpoints=item.ready_endpoints,
+    )
+
+
+def _api_gap_reason(exc: ApiStatusError) -> str:
+    """Human-readable gap reason from an API status error."""
+    return f"HTTP {exc.status}: {exc.reason}"
 
 
 def _mask_manifest(manifest: dict[str, Any]) -> tuple[dict[str, Any], list[RedactionRecord]]:

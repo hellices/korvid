@@ -6,10 +6,13 @@ Press `Ctrl-A` to open the agent panel — a chat sidebar that answers questions
 about the cluster you are looking at.  The agent sees your current screen
 context (view, namespace, selected resource, active filter) and inspects the
 cluster through read-only tools: fetching manifests, logs, events, and resource
-listings, plus a compound `diagnose_pod` tool that gathers a broken pod's
+listings, plus compound diagnostic tools — `diagnose_pod` gathers a broken pod's
 container states, owner chain, warning events, and targeted log excerpts in a
-single deterministic call — projected evidence instead of raw YAML dumps, which
-is where small local models otherwise fail.  It can also drive the TUI itself — navigate views, apply filters,
+single deterministic call; `diagnose_service` checks whether a Service has
+current ready EndpointSlice endpoints, reporting structured versioned findings
+with explicit evidence gaps when EndpointSlice data is unavailable (e.g. RBAC
+denial) — projected evidence instead of raw YAML dumps, which is where small
+local models otherwise fail.  It can also drive the TUI itself — navigate views, apply filters,
 drill down, and open the log pane or describe screen — so "show me the crashing
 pod's logs" lands you in the actual log viewer instead of a text dump.
 Tool results are capped at 8,000 characters — manifests are shrunk
@@ -309,8 +312,8 @@ Small models rarely volunteer the screen tools (`open_describe`,
 while the TUI sits idle. Agent follow mode mirrors each successful
 cluster read from a chat turn on screen, using the same mapping as MCP
 follow mode: `list_resources` navigates the view, `get_resource` /
-`get_events` / `diagnose_pod` open the describe view, and `get_logs`
-opens the live log pane.
+`get_events` / `diagnose_pod` / `diagnose_service` open the describe view,
+and `get_logs` opens the live log pane.
 
 Follow is **on by default**. Disable it in `config.yaml`:
 

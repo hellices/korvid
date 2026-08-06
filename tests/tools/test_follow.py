@@ -113,6 +113,7 @@ async def test_every_followable_tool_reaches_the_bridge(tool: str) -> None:
         },
         "list_operators": {},
         "helm_list_releases": {},
+        "diagnose_service": {"service": "x", "namespace": "d"},
     }[tool]
     ui = FakeBridge()
     result = await mirror_read(ui, tool, args)
@@ -150,3 +151,14 @@ async def test_helm_list_releases_mirrors_as_the_helm_view() -> None:
     result = await mirror_read(ui, "helm_list_releases", {"namespace": "prod"})
     assert result is not None
     assert ui.calls == [("navigate", {"view": "helm", "namespace": "prod"})]
+
+
+async def test_diagnose_service_follow_opens_service_describe() -> None:
+    ui = FakeBridge()
+    result = await mirror_read(
+        ui,
+        "diagnose_service",
+        {"service": "api", "namespace": "shop"},
+    )
+    assert result is not None
+    assert ui.calls == [("open_describe", {"kind": "services", "name": "api", "namespace": "shop"})]

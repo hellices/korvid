@@ -14,7 +14,7 @@ from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
-from korvid.k8s.models import summary_for
+from korvid.k8s.models import EndpointSliceSummary, GenericSummary, summary_for
 from korvid.tools.executor import (
     MAX_RESULT_CHARS,
     READ_TOOLS,
@@ -54,6 +54,7 @@ def test_read_tools_schema_names() -> None:
         "helm_list_releases",
         "diagnose_pod",
         "diagnose_workload",
+        "diagnose_service",
     ]
 
 
@@ -3072,3 +3073,147 @@ async def test_a_bounded_produced_manifest_survives_the_strict_reader() -> None:
     loaded = load_structured_document(outcome.text)
 
     assert loaded["kind"] == "CompositeApp"
+
+
+# -- diagnose_service tests (issue #191) ------------------------------------
+
+
+class ServiceDiagnosisKube:
+    """Records cluster calls; returns scripted service manifest and slices."""
+
+    def __init__(
+        self,
+        service: dict[str, Any],
+        slices: list[GenericSummary] | None = None,
+        list_error: ApiStatusError | None = None,
+    ) -> None:
+        self._service = service
+        self._slices: list[GenericSummary] = slices or []
+        self._list_error = list_error
+        self.calls: list[tuple[str, ...]] = []
+
+    async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        self.calls.append(("get", meta.kind, str(namespace), name))
+        return self._service
+
+    async def list_objects(self, meta: Any, namespace: str | None) -> list[GenericSummary]:
+        self.calls.append(("list", meta.kind, str(namespace)))
+        if self._list_error is not None:
+            raise self._list_error
+        return self._slices
+
+
+def _service_manifest(uid: str = "") -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": "api", "namespace": "shop", "uid": uid},
+        "spec": {"type": "ClusterIP", "selector": {"app": "api"}},
+    }
+
+
+def _endpoint_slice_summary(
+    name: str = "api-abc",
+    owner_uids: tuple[str, ...] = (),
+    ready_endpoints: int = 0,
+) -> EndpointSliceSummary:
+    return EndpointSliceSummary(
+        name=name,
+        namespace="shop",
+        kind="EndpointSlice",
+        created="",
+        uid="",
+        owner_uids=owner_uids,
+        labels=(("kubernetes.io/service-name", "api"),),
+        service_name="api",
+        address_type="IPv4",
+        endpoints=1,
+        ready_endpoints=ready_endpoints,
+    )
+
+
+def _svc_executor(kube: Any) -> ToolExecutor:
+    return ToolExecutor(kube, {})
+
+
+def test_diagnose_service_is_a_shared_structured_read_tool() -> None:
+    definition = TOOLS_BY_NAME["diagnose_service"]
+    assert definition.effect == "cluster_read"
+    assert definition.result_format == "structured_yaml"
+    assert definition.surfaces == frozenset({"full_agent", "small_agent", "mcp"})
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_gets_once_and_lists_once() -> None:
+    kube = ServiceDiagnosisKube(
+        service=_service_manifest(uid="svc-1"),
+        slices=[_endpoint_slice_summary(owner_uids=("svc-1",), ready_endpoints=1)],
+    )
+    text = await _svc_executor(kube).execute(
+        "diagnose_service", {"service": "api", "namespace": "shop"}
+    )
+    document = load_structured_document(text)
+    assert document["outcome"] == "healthy"
+    assert kube.calls == [
+        ("get", "Service", "shop", "api"),
+        ("list", "EndpointSlice", "shop"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_projects_rbac_denial_as_gap() -> None:
+    kube = ServiceDiagnosisKube(
+        service=_service_manifest(uid="svc-1"),
+        list_error=ApiStatusError(403, "Forbidden", ""),
+    )
+    document = load_structured_document(
+        await _svc_executor(kube).execute(
+            "diagnose_service", {"service": "api", "namespace": "shop"}
+        )
+    )
+    assert document["outcome"] == "incomplete"
+    assert document["gaps"][0]["source"] == "endpointslices"
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_rejects_composite_name_before_cluster_io() -> None:
+    kube = ServiceDiagnosisKube(service=_service_manifest())
+    text = await _svc_executor(kube).execute(
+        "diagnose_service", {"service": "shop/api", "namespace": "shop"}
+    )
+    assert text.startswith("ERROR:")
+    assert kube.calls == []
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_ignores_untyped_rows() -> None:
+    kube = ServiceDiagnosisKube(
+        service=_service_manifest(uid="svc-1"),
+        slices=[GenericSummary("other", "shop", "Other", "")],
+    )
+    document = load_structured_document(
+        await _svc_executor(kube).execute(
+            "diagnose_service", {"service": "api", "namespace": "shop"}
+        )
+    )
+    assert document["findings"][0]["rule_id"] == "service.no_endpoint_slices"
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_result_remains_bounded_yaml() -> None:
+    kube = ServiceDiagnosisKube(
+        service=_service_manifest(uid="svc-1"),
+        slices=[
+            _endpoint_slice_summary(
+                name=f"api-{index:05d}",
+                owner_uids=("old-uid",),
+                ready_endpoints=1,
+            )
+            for index in range(2_000)
+        ],
+    )
+    text = await _svc_executor(kube).execute(
+        "diagnose_service", {"service": "api", "namespace": "shop"}
+    )
+    assert len(text) <= MAX_RESULT_CHARS
+    assert load_structured_document(text)["outcome"] == "incomplete"
