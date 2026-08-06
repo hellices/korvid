@@ -1505,6 +1505,8 @@ async def test_over_ceiling_request_drops_the_oldest_turn_and_still_reaches_the_
     Trimming the oldest retained turn shrinks the same conversation until
     it fits, so a long session keeps working. The current prompt is never
     the thing that gets dropped (issue #189)."""
+    compact_read_tools_chars = len(json.dumps(READ_TOOLS, separators=(",", ":")))
+    non_tool_request_budget = 7_500
     provider = ScriptedProvider(
         [
             [{"type": "text_delta", "text": "first answer"}, {"type": "done"}],
@@ -1515,7 +1517,7 @@ async def test_over_ceiling_request_drops_the_oldest_turn_and_still_reaches_the_
         provider,
         EchoExecutor(),
         max_history_chars=40_000,
-        max_request_chars=12_000,
+        max_request_chars=compact_read_tools_chars + non_tool_request_budget,
     )
 
     first = await collect(runtime, "a" * 6_000)
