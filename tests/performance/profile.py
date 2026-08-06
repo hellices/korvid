@@ -106,6 +106,14 @@ def _failures(raw: Any) -> tuple[FailureInjection, ...]:
                 at_event=_int(item, "at_event", positive=True),
             )
         )
+    # `run_replay` indexes failures by `at_event`, so a duplicate position
+    # would silently discard all but one while the profile hash and the report
+    # still claim every declared injection was exercised.
+    positions = [failure.at_event for failure in result]
+    duplicates = sorted({position for position in positions if positions.count(position) > 1})
+    if duplicates:
+        repeated = ", ".join(str(position) for position in duplicates)
+        raise ValueError(f"failures must declare distinct at_event positions; repeated: {repeated}")
     return tuple(sorted(result, key=lambda failure: failure.at_event))
 
 

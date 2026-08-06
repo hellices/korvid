@@ -21,9 +21,10 @@ from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio import config as k8s_config
 from multidict import CIMultiDict, CIMultiDictProxy
 
-from korvid.core.store import Summary
+from korvid.core.store import ALL_NAMESPACES, Summary
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
+from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.telemetry import ReadTelemetry, ReadTelemetryEvent
 from tests.performance import live, manifests
@@ -135,6 +136,8 @@ class _FakeKubeClient:
         self.list_pods_calls: list[str] = []
         self.list_objects_calls = 0
         self.watch_pods_calls = 0
+        #: Namespace argument of each watch, in order.
+        self.watch_namespaces: list[str | None] = []
         #: True once the watch generator has been closed (the harness stopped
         #: the WatchManager); lets tests assert *when* a read happened
         #: relative to the application watch still being live.
@@ -144,12 +147,37 @@ class _FakeKubeClient:
         #: Optional watch-open failure (e.g. a 403 the real client would
         #: record as read telemetry before raising).
         self.watch_error: ApiStatusError | None = None
+        #: Read-only provider call logs for the UI-at-scale scenarios.
+        self.get_object_calls: list[tuple[str | None, str]] = []
+        self.stream_logs_calls = 0
 
     async def connect(self, context: str | None = None) -> None:
         self.connect_context = context
 
     async def close(self) -> None:
         self.closed = True
+
+    async def get_object(
+        self, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> dict[str, Any]:
+        """Read-only manifest fetch backing the `describe` UI-at-scale scenario."""
+        self.get_object_calls.append((namespace, name))
+        return {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": name, "namespace": namespace},
+            "status": {"phase": "Running"},
+        }
+
+    async def stream_logs(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        """Read-only log stream backing the `multi_log` UI-at-scale scenario.
+
+        Yields one line and then stays open, exactly like a real follow stream
+        the scenario dismisses with `escape`.
+        """
+        self.stream_logs_calls += 1
+        yield LogLine(pod="bench", container="app", text="benchmark log line")
+        await asyncio.Event().wait()
 
     async def list_objects(self, meta: ResourceMeta, namespace: str | None) -> list[GenericSummary]:
         assert meta.kind == "Namespace"
@@ -167,9 +195,24 @@ class _FakeKubeClient:
             self.read_telemetry(ReadTelemetryEvent("list", f"/api/v1/namespaces/{namespace}/pods"))
         return [pod for (ns, _name), pod in self.pods.items() if ns == namespace]
 
+    def _initial_watch_pods(self, namespace: str | None) -> list[PodSummary]:
+        """Pods the initial LIST of a watch returns: everything for the
+        all-namespaces watch (plus the unowned distractors a real cluster-wide
+        LIST would also return), only the namespace's own Pods when scoped."""
+        if namespace is not None:
+            return [pod for pod in self.pods.values() if pod.namespace == namespace]
+        return [*self.pods.values(), *self.distractor_pods]
+
     async def watch_pods(self, namespace: str | None) -> AsyncIterator[tuple[str, PodSummary]]:
-        assert namespace is None
+        # `namespace is None` is the all-namespaces watch the measured window
+        # runs on; a concrete namespace is the scoped watch the
+        # `namespace_switch` UI-at-scale scenario really triggers.
         self.watch_pods_calls += 1
+        self.watch_namespaces.append(namespace)
+        # Tracks the *currently open* watch: a scope change closes one
+        # generator and opens another, so "some generator finished" would not
+        # mean the application watch has stopped.
+        self.watch_finished = False
         try:
             if self.watch_error is not None:
                 if self.read_telemetry is not None:
@@ -179,9 +222,7 @@ class _FakeKubeClient:
                 raise self.watch_error
             if self.read_telemetry is not None:
                 self.read_telemetry(ReadTelemetryEvent("list", "/api/v1/pods"))
-            for pod in list(self.pods.values()):
-                yield ("ADDED", pod)
-            for pod in self.distractor_pods:
+            for pod in self._initial_watch_pods(namespace):
                 yield ("ADDED", pod)
             if self.read_telemetry is not None:
                 self.read_telemetry(ReadTelemetryEvent("watch_open", "/api/v1/pods"))
@@ -510,6 +551,8 @@ async def test_drive_live_churn_sends_guarded_patches_for_every_event() -> None:
         options=options,
         progress=progress,
         limits=LiveLimits(churn_concurrency=1),
+        profile=_tiny_live_profile(),
+        recorder=BenchmarkRecorder(),
     )
     assert len(mutation_client.calls) == len(events)
     for call, event in zip(mutation_client.calls, events, strict=True):
@@ -569,6 +612,8 @@ async def test_drive_live_churn_aborts_on_guard_failure_and_never_continues() ->
             options=options,
             progress=ChurnProgress(requested_events=len(events)),
             limits=LiveLimits(churn_concurrency=1),
+            profile=_tiny_live_profile(),
+            recorder=BenchmarkRecorder(),
         )
     # Aborted at the 2nd call; a 3rd event must never have been attempted.
     assert len(mutation_client.calls) == 2
@@ -1002,15 +1047,21 @@ async def test_run_live_replay_full_happy_path_matches_cluster_digest() -> None:
     assert app_client.connect_context == CONTEXT
     assert app_client.closed
 
-    # MEDIUM finding: the app-path client's telemetry is the *only* source
-    # of `report.api` - its single "list" comes from `watch_pods`'s own
-    # internal LIST-then-WATCH, not from any harness read.
-    assert app_client.watch_pods_calls == 1
+    # MEDIUM finding: the app-path client's telemetry is the *only* source of
+    # `report.api` - every "list" comes from `watch_pods`'s own internal
+    # LIST-then-WATCH, not from any harness read. Three watches, not one: the
+    # `namespace_switch` UI-at-scale scenario really scopes down to a seeded
+    # namespace and back, and a scope change restarts the application watch.
+    assert app_client.watch_pods_calls == 3
+    # Every watch stays cluster-wide: `make_live_watch_source` pins the read to
+    # the owned namespace set regardless of the UI scope, so scoping the table
+    # to one namespace never re-targets (or widens) the underlying watch.
+    assert app_client.watch_namespaces == [None, None, None]
     # The watch really is stopped by teardown, so `watch_finished` is a
     # meaningful signal for the ground-truth-read ordering assertion.
     assert app_client.watch_finished
-    assert report.api.operations["watch_open"] == 1
-    assert report.api.operations.get("list", 0) == 1
+    assert report.api.operations["watch_open"] == 3
+    assert report.api.operations.get("list", 0) == 3
 
     # The harness client never watches - it is only ever used for the
     # ownership gate and the final independent re-read.
@@ -1400,6 +1451,8 @@ async def test_drive_live_churn_bounds_in_flight_mutations() -> None:
         options=ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep),
         progress=progress,
         limits=LiveLimits(churn_concurrency=4),
+        profile=_tiny_live_profile(),
+        recorder=BenchmarkRecorder(),
     )
 
     assert progress.completed == len(events) == 40
@@ -1444,6 +1497,8 @@ async def test_drive_live_churn_retries_only_429_with_the_identical_guarded_patc
         options=ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep),
         progress=progress,
         limits=LiveLimits(churn_concurrency=1, mutation_throttle_retries=5),
+        profile=_tiny_live_profile(),
+        recorder=BenchmarkRecorder(),
     )
 
     assert len(mutation_client.patch_arguments) == 3
@@ -1633,6 +1688,8 @@ async def test_drive_live_churn_gives_up_after_the_bounded_throttle_retries() ->
             ),
             progress=progress,
             limits=LiveLimits(churn_concurrency=1, mutation_throttle_retries=2),
+            profile=_tiny_live_profile(),
+            recorder=BenchmarkRecorder(),
         )
 
     assert len(mutation_client.calls) == 3
@@ -1670,6 +1727,8 @@ async def test_drive_live_churn_never_retries_a_failed_ownership_guard() -> None
             ),
             progress=progress,
             limits=LiveLimits(churn_concurrency=1, mutation_throttle_retries=5),
+            profile=_tiny_live_profile(),
+            recorder=BenchmarkRecorder(),
         )
 
     assert len(mutation_client.calls) == 1
@@ -1702,6 +1761,8 @@ async def test_drive_live_churn_bounds_every_mutation_attempt() -> None:
             options=ReplayOptions(time_scale=1.0),
             progress=progress,
             limits=LiveLimits(churn_concurrency=1, mutation_timeout_seconds=0.05),
+            profile=_tiny_live_profile(),
+            recorder=BenchmarkRecorder(),
         )
 
     assert len(mutation_client.calls) == 1
@@ -2492,3 +2553,98 @@ async def test_run_live_replay_exercises_ui_at_scale_scenarios_during_churn() ->
     for scenario in report.ui_scenarios:
         assert scenario.ok, f"scenario {scenario.name} did not complete"
         assert scenario.latency_seconds >= 0.0
+
+
+class _InertPilot:
+    """A pilot whose key presses reach an app that never changes state.
+
+    `pilot.press` returning without raising says nothing about whether the
+    binding did anything: in the live wiring `describe` and `multi_log` bail
+    out with an "unavailable" warning when no manifest/log provider is wired,
+    and the namespace toggle is a no-op while `config.namespace` already is
+    `ALL_NAMESPACES`. None of those raise.
+    """
+
+    def __init__(self) -> None:
+        self.pressed: list[str] = []
+
+    async def press(self, key: str) -> None:
+        self.pressed.append(key)
+
+    async def pause(self, delay: float | None = None) -> None:
+        return None
+
+
+class _InertApp:
+    """Live app state frozen at its post-LIST values: nothing a scenario is
+    supposed to change ever changes."""
+
+    def __init__(self) -> None:
+        self.filter_pattern = ""
+        self._sorts: dict[str, object] = {}
+        self.current_scope = ALL_NAMESPACES
+        self.screen = object()
+        self._panes = [object()]
+
+        class _Pane:
+            display = False
+
+        self._log_pane = _Pane()
+
+
+async def test_ui_scenarios_are_not_marked_ok_when_the_app_state_never_changes() -> None:
+    """A scenario must assert the observable state it claims to exercise.
+
+    Without this the live report claims UI-at-scale evidence for scenarios
+    that silently did nothing, and (since the CLI folds scenario outcomes into
+    the exit status) a qualification would "pass" on that empty evidence.
+    """
+    recorder = BenchmarkRecorder()
+    ticks = iter(float(i) for i in range(10_000))
+
+    await live.drive_ui_scenarios(
+        _InertPilot(),
+        recorder,
+        now=lambda: next(ticks),
+        app=_InertApp(),
+        scoped_namespace=f"korvid-perf-{RUN_ID}-0",
+    )
+
+    results = recorder._ui_scenarios
+    assert results, "scenarios must still be recorded, not skipped"
+    assert [scenario.name for scenario in results if scenario.ok] == []
+
+
+async def test_run_live_replay_times_the_post_burst_drain() -> None:
+    """The live churn driver must mark each burst boundary.
+
+    Without it `post_burst_drain_seconds` stays empty and
+    `max_post_burst_drain_seconds` is `None`, so the published <=3-second live
+    burst-drain budget cannot be evaluated at all — the live reports simply
+    print "n/a" where the evidence should be.
+    """
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(namespaces, pods, RUN_ID)
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(
+        time_scale=1.0, sample_interval=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep
+    )
+    profile = dataclasses.replace(
+        _tiny_live_profile(),
+        steady_events_per_second=2,
+        duration_seconds=4,
+        bursts=(Burst(start_second=1, duration_seconds=1, events_per_second=4),),
+    )
+
+    report = await run_live_replay(
+        profile,
+        options,
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    assert report.phases.post_burst_drain_seconds
+    assert report.phases.max_post_burst_drain_seconds is not None
+    assert report.phases.max_post_burst_drain_seconds >= 0.0

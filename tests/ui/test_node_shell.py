@@ -197,6 +197,25 @@ def _node_shell_env(run_fake, call_exit: int = 0, call_error: Exception | None =
         yield call_records
 
 
+async def _await_node_shell_outcome(pilot: Any, audit_path: Path) -> None:
+    """Wait until the node-shell *outcome* entry has been appended.
+
+    Every outcome is written after its user-facing notification, on a separate
+    `asyncio.to_thread` hop. Waiting on the notification alone races the audit
+    write against app teardown, leaving only the `intent` entry behind on a
+    loaded run.
+    """
+
+    def _written() -> bool:
+        if not audit_path.exists():
+            return False
+        records = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+        shells = [e for e in records if e["action"] == "node-shell"]
+        return bool(shells) and shells[-1]["outcome"] != "intent"
+
+    await until(pilot, _written, label="node-shell outcome audited")
+
+
 async def test_s_on_nodes_view_opens_privileged_approval_dialog(tmp_path: Path) -> None:
     rec = DeleteRecorder()
     app = make_app(rec, tmp_path / "audit.jsonl")
@@ -283,17 +302,7 @@ async def test_node_shell_cleanup_failure_warns_and_audits(tmp_path: Path) -> No
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
             await pilot.press("y")
 
-            def _audited() -> bool:
-                # The outcome entry is appended after the failure notification
-                # (a separate `asyncio.to_thread` hop), so waiting on the
-                # notification alone races the audit write at teardown.
-                if not audit_path.exists():
-                    return False
-                records = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
-                shells = [e for e in records if e["action"] == "node-shell"]
-                return bool(shells) and "cleanup failed for" in shells[-1]["outcome"]
-
-            await until(pilot, _audited, label="cleanup failure audited")
+            await _await_node_shell_outcome(pilot, audit_path)
             assert any(DBG_POD in n.message for n in app._notifications)
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     last = [e for e in entries if e["action"] == "node-shell"][-1]
@@ -378,10 +387,8 @@ async def test_node_shell_create_failure_warns_about_policy(tmp_path: Path) -> N
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
             await pilot.press("y")
 
-            def _warned() -> bool:
-                return any("PodSecurity" in n.message for n in app._notifications)
-
-            await until(pilot, _warned, label="policy hint notification")
+            await _await_node_shell_outcome(pilot, audit_path)
+            assert any("PodSecurity" in n.message for n in app._notifications)
     assert call_records == []
     assert rec.deletes == []
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
@@ -407,10 +414,8 @@ async def test_node_shell_unidentifiable_create_output_aborts(tmp_path: Path) ->
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
             await pilot.press("y")
 
-            def _warned() -> bool:
-                return any("did not report" in n.message for n in app._notifications)
-
-            await until(pilot, _warned, label="unidentifiable-pod warning")
+            await _await_node_shell_outcome(pilot, audit_path)
+            assert any("did not report" in n.message for n in app._notifications)
     assert call_records == []
     assert rec.deletes == []
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
@@ -575,6 +580,7 @@ async def test_node_shell_nonzero_attach_exit_has_no_policy_hint(tmp_path: Path)
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
             await pilot.press("y")
             await until(pilot, lambda: rec.deletes, label="debug pod cleanup")
+            await _await_node_shell_outcome(pilot, audit_path)
     assert call_records != []
     assert not any("PodSecurity" in n.message for n in app._notifications)
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
@@ -625,7 +631,8 @@ async def test_node_shell_create_without_uid_aborts(tmp_path: Path) -> None:
     without it the cleanup delete would lose its uid precondition and could
     remove a same-name replacement pod."""
     rec = DeleteRecorder()
-    app = make_app(rec, tmp_path / "audit.jsonl")
+    audit_path = tmp_path / "audit.jsonl"
+    app = make_app(rec, audit_path)
     run_fake, _ = _kubectl_run(
         get_result=SimpleNamespace(
             returncode=0,
@@ -641,10 +648,8 @@ async def test_node_shell_create_without_uid_aborts(tmp_path: Path) -> None:
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
             await pilot.press("y")
 
-            def _warned() -> bool:
-                return any("uid" in n.message for n in app._notifications)
-
-            await until(pilot, _warned, label="missing-uid warning")
+            await _await_node_shell_outcome(pilot, audit_path)
+            assert any("uid" in n.message for n in app._notifications)
     assert call_records == []
     assert rec.deletes == []
 

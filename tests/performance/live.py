@@ -84,6 +84,7 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.telemetry import ReadTelemetry
+from korvid.ui.widgets.describe_screen import DescribeScreen
 from korvid.ui.widgets.resource_table import ResourceTable
 from tests.performance import manifests
 from tests.performance.metrics import (
@@ -92,7 +93,7 @@ from tests.performance.metrics import (
     NodePoolInfo,
     ProcessSampler,
 )
-from tests.performance.profile import WorkloadProfile, validate_profile
+from tests.performance.profile import WorkloadProfile, burst_end_offsets, validate_profile
 from tests.performance.replay import (
     MeasuredKorvidApp,
     ReplayOptions,
@@ -106,6 +107,9 @@ from tests.performance.workload import ScheduledEvent, scheduled_events, summary
 #: Namespace-scoped read for the ownership gate; not exposed via `PODS_META`
 #: because Namespaces are cluster-scoped (`namespaced=False`).
 _NAMESPACES_META = ResourceMeta("Namespace", "namespaces", "", "v1", False)
+
+#: Pods, for the read-only `describe` provider the UI-at-scale scenarios need.
+_PODS_META = ResourceMeta("Pod", "pods", "", "v1", True)
 
 #: Live topology is pinned to the aks-1k profile shape (issue #186 Task 8):
 #: exactly 20 namespaces of 50 Pods each, matching `seed-manifests`'s output.
@@ -259,6 +263,12 @@ class KubeReadClient(Protocol):
     async def list_pods(self, namespace: str) -> list[PodSummary]: ...
 
     def watch_pods(self, namespace: str | None) -> AsyncIterator[tuple[str, PodSummary]]: ...
+
+    async def get_object(
+        self, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> dict[str, Any]: ...
+
+    def stream_logs(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]: ...
 
 
 class MutationClient(Protocol):
@@ -999,6 +1009,8 @@ async def drive_live_churn(
     options: ReplayOptions,
     progress: ChurnProgress,
     limits: LiveLimits,
+    profile: WorkloadProfile,
+    recorder: BenchmarkRecorder,
 ) -> None:
     """Drive guarded churn at wall-clock time with explicit bounded concurrency.
 
@@ -1040,11 +1052,25 @@ async def drive_live_churn(
 
     try:
         async with asyncio.TaskGroup() as group:
+            # Burst-end offsets (absolute seconds) mark the moment each burst's
+            # window closes, so the post-burst backlog drain can be timed on the
+            # same real-clock axis the render pass records on — exactly as the
+            # deterministic replay driver does. Without this the live report
+            # leaves `post_burst_drain_seconds` empty and the published
+            # burst-drain budget cannot be evaluated.
+            burst_ends = burst_end_offsets(profile)
+            next_burst = 0
             for event in events:
                 elapsed = now() - start
                 delay = event.offset_seconds * options.time_scale - elapsed
                 if delay > 0:
                     await sleep(delay)
+
+                while (
+                    next_burst < len(burst_ends) and event.offset_seconds >= burst_ends[next_burst]
+                ):
+                    recorder.mark_burst_end(monotonic())
+                    next_burst += 1
 
                 namespace, name = live_object_identity(run_id, namespace_count, event.object_index)
                 current = live_state.get((namespace, name))
@@ -1094,23 +1120,134 @@ def _store_digest(store: ResourceStore) -> str:
 #: pilot key sequence driven during active churn. Sequences are self-restoring:
 #: they return the workspace to a single pane showing all owned rows so the
 #: post-churn row-count and digest-convergence checks still see 1,000 rows.
-_UI_SCENARIOS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    # Filter to a substring present in every seeded Pod name ("bench-*"), so the
-    # filter exercises the real path without dropping any rows.
-    ("filter", ("slash", "b", "e", "n", "c", "h", "enter")),
-    # Sort by age (a metrics-free column) and back is unnecessary; sorting keeps
-    # every row visible.
-    ("sort", ("A",)),
-    # Namespace switch: scope to the highlighted row's namespace, then back to
-    # all namespaces so the full 1,000-row topology is restored.
-    ("namespace_switch", ("0", "0")),
-    # Split the workspace into two panes, then close the new pane.
-    ("split_pane", ("ctrl+w", "v", "ctrl+w", "q")),
-    # Describe the highlighted resource, then dismiss.
-    ("describe", ("d", "escape")),
-    # Multi-log the highlighted resource, then dismiss.
-    ("multi_log", ("L", "escape")),
-)
+#:
+#: Every step declares the observable state it must reach. `pilot.press`
+#: returning is not evidence: `describe` and `multi_log` bail out with an
+#: "unavailable" warning when no manifest/log provider is wired, and the
+#: all-namespaces toggle is a no-op while the configured namespace already is
+#: `ALL_NAMESPACES` — none of which raises. Without the state check a run would
+#: report UI-at-scale evidence it never gathered.
+
+
+@dataclass(frozen=True)
+class _UIStep:
+    """One key sequence plus the observable app state it must reach."""
+
+    keys: tuple[str, ...]
+    label: str
+    reached: Callable[[Any], bool]
+
+
+@dataclass(frozen=True)
+class _UIScenario:
+    """One named UI-at-scale scenario as an ordered list of verified steps."""
+
+    name: str
+    steps: tuple[_UIStep, ...]
+
+
+#: Bound on one step reaching its target state. Generous on purpose: the step
+#: competes with full-rate churn on the same event loop.
+_UI_STEP_TIMEOUT = 30.0
+
+
+def _ui_scenarios(scoped_namespace: str) -> tuple[_UIScenario, ...]:
+    """Build the scenario table; the namespace scenario needs a real seeded
+    namespace to scope down to (and back out of)."""
+    return (
+        # Filter to a substring present in every seeded Pod name ("bench-*"), so
+        # the filter exercises the real path without dropping any rows, then
+        # clear it so the bar releases focus and the workspace is restored.
+        _UIScenario(
+            "filter",
+            (
+                _UIStep(
+                    ("slash", "b", "e", "n", "c", "h"),
+                    "filter applied",
+                    lambda app: app.filter_pattern == "bench",
+                ),
+                _UIStep(
+                    ("escape",),
+                    "filter cleared",
+                    lambda app: app.filter_pattern == "",
+                ),
+            ),
+        ),
+        # Sorting by age (a metrics-free column) keeps every row visible.
+        _UIScenario(
+            "sort",
+            (
+                _UIStep(
+                    ("A",),
+                    "age sort active",
+                    lambda app: app._sorts.get("pods") is not None,
+                ),
+            ),
+        ),
+        # Scope to one seeded namespace (favorite key 1), then back to all
+        # namespaces so the full 1,000-row topology is restored.
+        _UIScenario(
+            "namespace_switch",
+            (
+                _UIStep(
+                    ("1",),
+                    "scoped to one namespace",
+                    lambda app: app.current_scope == scoped_namespace,
+                ),
+                _UIStep(
+                    ("0",),
+                    "restored to all namespaces",
+                    lambda app: app.current_scope == ALL_NAMESPACES,
+                ),
+            ),
+        ),
+        _UIScenario(
+            "split_pane",
+            (
+                _UIStep(("ctrl+w", "v"), "second pane open", lambda app: len(app._panes) == 2),
+                _UIStep(("ctrl+w", "q"), "back to one pane", lambda app: len(app._panes) == 1),
+            ),
+        ),
+        _UIScenario(
+            "describe",
+            (
+                _UIStep(
+                    ("d",),
+                    "describe screen open",
+                    lambda app: isinstance(app.screen, DescribeScreen),
+                ),
+                _UIStep(
+                    ("escape",),
+                    "describe dismissed",
+                    lambda app: not isinstance(app.screen, DescribeScreen),
+                ),
+            ),
+        ),
+        _UIScenario(
+            "multi_log",
+            (
+                _UIStep(("L",), "log pane open", lambda app: bool(app._log_pane.display)),
+                _UIStep(("escape",), "log pane closed", lambda app: not app._log_pane.display),
+            ),
+        ),
+    )
+
+
+def _describe_provider(
+    kube: KubeReadClient,
+) -> Callable[[str, str | None, str], Awaitable[dict[str, Any]]]:
+    """Read-only manifest fetcher for the `describe` UI-at-scale scenario.
+
+    Only Pods are reachable in the live workspace, so anything else is a
+    programmer error rather than a cluster read.
+    """
+
+    async def get_manifest(kind: str, namespace: str | None, name: str) -> dict[str, Any]:
+        if kind != _PODS_META.plural:
+            raise ValueError(f"live qualification only describes pods, not {kind!r}")
+        return await kube.get_object(_PODS_META, namespace, name)
+
+    return get_manifest
 
 
 async def drive_ui_scenarios(
@@ -1118,26 +1255,37 @@ async def drive_ui_scenarios(
     recorder: BenchmarkRecorder,
     *,
     now: Callable[[], float],
+    app: Any,
+    scoped_namespace: str,
 ) -> None:
     """Drive the scoped UI-at-scale scenarios through the real Textual pilot.
 
     Each scenario is a real key sequence issued against the running app during
-    active churn; its latency and completion outcome are recorded. Every
-    scenario is read-only navigation - no scenario writes, deletes, or drains -
-    so this never weakens live safety. A scenario that raises is recorded as
-    `ok=False` and never aborts the safety-critical run; the sequences restore
-    a single-pane, all-rows workspace so later convergence checks are intact.
+    active churn; after every step the app must reach the observable state the
+    step names, or the scenario is recorded `ok=False`. Every scenario is
+    read-only navigation - no scenario writes, deletes, or drains - so this
+    never weakens live safety. A scenario that raises or that fails to reach a
+    target state is recorded as `ok=False` and never aborts the safety-critical
+    run; the remaining steps still run so the sequences restore a single-pane,
+    all-rows workspace and later convergence checks stay intact.
     """
-    for name, keys in _UI_SCENARIOS:
+    for scenario in _ui_scenarios(scoped_namespace):
         started = now()
         ok = True
-        try:
-            for key in keys:
-                await pilot.press(key)
-            await pilot.pause()
-        except Exception:
-            ok = False
-        recorder.record_scenario(name, now() - started, ok)
+        for step in scenario.steps:
+            try:
+                for key in step.keys:
+                    await pilot.press(key)
+                await wait_for(
+                    pilot,
+                    lambda step=step: step.reached(app),  # type: ignore[misc]  # bind per step
+                    timeout=_UI_STEP_TIMEOUT,
+                    label=f"{scenario.name}: {step.label}",
+                    recorder=recorder,
+                )
+            except Exception:
+                ok = False
+        recorder.record_scenario(scenario.name, now() - started, ok)
 
 
 def _check_row_count(row_count: int, expected: int) -> None:
@@ -1212,6 +1360,8 @@ async def _run_measured_window(
                 options=options,
                 progress=state.progress,
                 limits=limits,
+                profile=profile,
+                recorder=recorder,
             )
         )
         try:
@@ -1238,7 +1388,13 @@ async def _run_measured_window(
             # UI-at-scale evidence: drive the scoped scenarios (filter, sort,
             # namespace switch, split pane, describe, multi-log) through the
             # real pilot while churn is still active. Read-only navigation only.
-            await drive_ui_scenarios(pilot, recorder, now=now)
+            await drive_ui_scenarios(
+                pilot,
+                recorder,
+                now=now,
+                app=app,
+                scoped_namespace=manifests.namespace_name(run_id, 0),
+            )
 
             churn_timeout = (
                 profile.duration_seconds * options.time_scale + limits.churn_grace_seconds
@@ -1375,10 +1531,25 @@ async def run_live_replay(
                 )
 
                 app = MeasuredKorvidApp(
-                    config=KorvidConfig(namespace=ALL_NAMESPACES),
+                    config=KorvidConfig(
+                        namespace=ALL_NAMESPACES,
+                        # Key 1 scopes to a real seeded namespace; key 0 returns
+                        # to all namespaces. Without a favorite the toggle is a
+                        # no-op (the configured namespace already is
+                        # ALL_NAMESPACES) and the scenario proves nothing.
+                        favorite_namespaces=(manifests.namespace_name(run_id, 0),),
+                    ),
                     store=store,
                     watch_manager=watch_manager,
                     recorder=recorder,
+                    # Read-only providers: `describe` and `multi_log` bail out
+                    # with an "unavailable" warning when these are None, so the
+                    # scenarios would report success having done nothing. The
+                    # harness connection is used so these reads stay out of the
+                    # measured application read path.
+                    aliases={"pods": _PODS_META},
+                    get_manifest=_describe_provider(harness_kube),
+                    stream_logs=harness_kube.stream_logs,
                 )
 
                 sampler.start()

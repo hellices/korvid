@@ -155,3 +155,19 @@ def test_load_profile_accepts_every_versioned_failure_kind(tmp_path: Path, kind:
 def test_load_profile_rejects_unknown_failure_kind(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="kind must be one of"):
         load_profile(_write(tmp_path, failures=[{"kind": "meltdown", "at_event": 10}]))
+
+
+def test_load_profile_rejects_duplicate_failure_event_positions(tmp_path: Path) -> None:
+    """`run_replay` indexes failures by `at_event`, so a duplicate position
+    silently drops every failure but one — while the profile hash and the
+    report still claim both were injected."""
+    with pytest.raises(ValueError, match="at_event"):
+        load_profile(
+            _write(
+                tmp_path,
+                failures=[
+                    {"kind": "gone", "at_event": 10},
+                    {"kind": "throttled", "at_event": 10},
+                ],
+            )
+        )
