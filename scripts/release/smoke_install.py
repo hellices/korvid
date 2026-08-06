@@ -180,6 +180,23 @@ def _state_roots(workspace: Path) -> _StateRoots:
     )
 
 
+def _tooling_roots(workspace: Path) -> _StateRoots:
+    """Disposable user-state roots for package-management tools (pip) only.
+
+    These roots are intentionally separate from the runtime user-state roots so
+    that installer side-effects (e.g. .rustup/settings.toml) never pollute the
+    Korvid runtime roots inspected by _assert_no_user_state.
+    """
+    return _StateRoots(
+        home=workspace / "tool-home",
+        config=workspace / "tool-xdg" / "config",
+        data=workspace / "tool-xdg" / "data",
+        state=workspace / "tool-xdg" / "state",
+        appdata=workspace / "tool-appdata",
+        localappdata=workspace / "tool-localappdata",
+    )
+
+
 def _command_env(roots: _StateRoots) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
@@ -341,13 +358,14 @@ def _run_phase(
     variant: str,
     workspace: Path,
     env: dict[str, str],
+    tool_env: dict[str, str],
 ) -> None:
     env_dir = workspace / phase.env_dir_name
     venv.create(env_dir, with_pip=True)
     python = _venv_python(env_dir)
 
     for index, requirement in enumerate(phase.requirements):
-        _pip_install(python, requirement, env=env, cwd=workspace, upgrade=index > 0)
+        _pip_install(python, requirement, env=tool_env, cwd=workspace, upgrade=index > 0)
 
     launcher = _resolve_launcher(env_dir)
     if launcher is None:
@@ -358,17 +376,21 @@ def _run_phase(
     _assert_module_imports(python, required_korvid_modules(variant), env=env, cwd=workspace)
     _assert_modules_absent(python, forbidden_modules(variant), env=env, cwd=workspace)
     _assert_help_and_version(launcher, version, env=env, cwd=workspace)
-    _pip_uninstall(python, "korvid", env=env, cwd=workspace)
+    _pip_uninstall(python, "korvid", env=tool_env, cwd=workspace)
     _assert_korvid_removed(python, env_dir, env=env, cwd=workspace)
 
 
 def _smoke_install(wheel: Path, version: str, variant: str, workspace: Path) -> None:
     validate_wheel_version(wheel, version)
     roots = _state_roots(workspace)
+    tool_roots = _tooling_roots(workspace)
     env = _command_env(roots)
+    tool_env = _command_env(tool_roots)
 
     for phase in install_plan(wheel, variant):
-        _run_phase(phase, version=version, variant=variant, workspace=workspace, env=env)
+        _run_phase(
+            phase, version=version, variant=variant, workspace=workspace, env=env, tool_env=tool_env
+        )
 
     _assert_no_user_state(roots)
 

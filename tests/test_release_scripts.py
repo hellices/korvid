@@ -551,6 +551,24 @@ def test_smoke_install_rejects_unknown_variants(tmp_path: Path) -> None:
         smoke_install.install_plan(wheel, "nope")
 
 
+def _create_fake_smoke_venv(env_dir: Path, *, with_pip: bool = False) -> None:
+    launcher_dir = env_dir / ("Scripts" if smoke_install.os.name == "nt" else "bin")
+    launcher_dir.mkdir(parents=True)
+    for name in ("python", "korvid"):
+        binary = launcher_dir / (f"{name}.exe" if smoke_install.os.name == "nt" else name)
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+
+
+def _complete_fake_smoke_command(args: list[str]) -> subprocess.CompletedProcess[str]:
+    if "uninstall" in args:
+        launcher = smoke_install._resolve_launcher(Path(args[0]).parent.parent)
+        if launcher is not None:
+            launcher.unlink()
+    stdout = "usage: korvid" if args[1:] == ["--help"] else "korvid 1.2.3"
+    return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+
 def test_smoke_install_runs_a_fresh_install_then_a_separate_expansion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -567,23 +585,13 @@ def test_smoke_install_runs_a_fresh_install_then_a_separate_expansion(
 
     def _fake_venv(env_dir: Path, *, with_pip: bool = False) -> None:
         created.append(env_dir)
-        launcher_dir = env_dir / ("Scripts" if smoke_install.os.name == "nt" else "bin")
-        launcher_dir.mkdir(parents=True)
-        for name in ("python", "korvid"):
-            binary = launcher_dir / (f"{name}.exe" if smoke_install.os.name == "nt" else name)
-            binary.write_text("#!/bin/sh\n")
-            binary.chmod(0o755)
+        _create_fake_smoke_venv(env_dir, with_pip=with_pip)
 
     def _fake_run(
         args: list[str], *, env: dict[str, str], cwd: Path
     ) -> subprocess.CompletedProcess[str]:
         commands.append(args)
-        if "uninstall" in args:
-            launcher = smoke_install._resolve_launcher(Path(args[0]).parent.parent)
-            if launcher is not None:
-                launcher.unlink()
-        stdout = "usage: korvid" if args[1:] == ["--help"] else "korvid 1.2.3"
-        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+        return _complete_fake_smoke_command(args)
 
     monkeypatch.setattr(smoke_install.venv, "create", _fake_venv)
     monkeypatch.setattr(smoke_install, "_run", _fake_run)
@@ -674,6 +682,77 @@ def test_smoke_install_rejects_a_wheel_with_the_wrong_version(tmp_path: Path) ->
     wheel.write_bytes(b"wheel")
     with pytest.raises(ValueError, match=r"1\.2\.3"):
         smoke_install.validate_wheel_version(wheel, "1.2.3")
+
+
+def test_pip_install_tooling_state_does_not_pollute_runtime_user_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #201: pip side-effects (e.g. .rustup/settings.toml)
+    must not land in the runtime user-state roots checked by _assert_no_user_state.
+    RED before the fix (pip and runtime share one HOME → assertion fires),
+    GREEN after env separation (pip gets its own disposable HOME)."""
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    commands: list[tuple[list[str], Path]] = []
+
+    def _fake_run(
+        args: list[str], *, env: dict[str, str], cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append((args, Path(env["HOME"])))
+        if "pip" in args and "install" in args and "uninstall" not in args:
+            # Simulate pip writing toolchain state (reproduces the real failure)
+            rustup_dir = Path(env["HOME"]) / ".rustup"
+            rustup_dir.mkdir(parents=True, exist_ok=True)
+            (rustup_dir / "settings.toml").write_text("[toolchain]\n")
+        return _complete_fake_smoke_command(args)
+
+    monkeypatch.setattr(smoke_install.venv, "create", _create_fake_smoke_venv)
+    monkeypatch.setattr(smoke_install, "_run", _fake_run)
+
+    smoke_install._smoke_install(wheel, "1.2.3", "base", workspace)
+    tool_roots = smoke_install._tooling_roots(workspace)
+    runtime_roots = smoke_install._state_roots(workspace)
+    assert (tool_roots.home / ".rustup" / "settings.toml").is_file()
+    assert tool_roots.home.is_relative_to(workspace)
+    assert smoke_install._unexpected_files(runtime_roots.home) == []
+    tooling_commands = [(args, home) for args, home in commands if args[1:3] == ["-m", "pip"]]
+    runtime_commands = [(args, home) for args, home in commands if args[1:3] != ["-m", "pip"]]
+    assert any("install" in args for args, _home in tooling_commands)
+    assert any("uninstall" in args for args, _home in tooling_commands)
+    assert all(home == tool_roots.home for _args, home in tooling_commands)
+    assert any(args[1:] == ["--help"] for args, _home in runtime_commands)
+    assert any(args[1:] == ["--version"] for args, _home in runtime_commands)
+    assert any("import korvid;" in " ".join(args) for args, _home in runtime_commands)
+    assert any("import korvid.__main__" in " ".join(args) for args, _home in runtime_commands)
+    assert any("find_spec('mcp')" in " ".join(args) for args, _home in runtime_commands)
+    assert all(home == runtime_roots.home for _args, home in runtime_commands)
+
+
+def test_smoke_install_catches_runtime_probe_user_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Runtime probes must use the roots checked by the fail-closed assertion."""
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    def _fake_run(
+        args: list[str], *, env: dict[str, str], cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        if args[1:] == ["--help"]:
+            home = Path(env["HOME"])
+            home.mkdir(parents=True, exist_ok=True)
+            (home / ".korvid_state").write_text("runtime-probe-artifact\n")
+        return _complete_fake_smoke_command(args)
+
+    monkeypatch.setattr(smoke_install.venv, "create", _create_fake_smoke_venv)
+    monkeypatch.setattr(smoke_install, "_run", _fake_run)
+
+    with pytest.raises(RuntimeError, match="noninteractive smoke created user-state files"):
+        smoke_install._smoke_install(wheel, "1.2.3", "base", workspace)
 
 
 def test_pick_removable_wheel_never_picks_korvid(tmp_path: Path) -> None:
