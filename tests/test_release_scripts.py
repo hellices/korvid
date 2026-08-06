@@ -676,6 +676,59 @@ def test_smoke_install_rejects_a_wheel_with_the_wrong_version(tmp_path: Path) ->
         smoke_install.validate_wheel_version(wheel, "1.2.3")
 
 
+def test_pip_install_tooling_state_does_not_pollute_runtime_user_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #201: pip side-effects (e.g. .rustup/settings.toml)
+    must not land in the runtime user-state roots checked by _assert_no_user_state.
+    RED before the fix (pip and runtime share one HOME → assertion fires),
+    GREEN after env separation (pip gets its own disposable HOME)."""
+    wheel = tmp_path / "korvid-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    def _fake_venv(env_dir: Path, *, with_pip: bool = False) -> None:
+        launcher_dir = env_dir / ("Scripts" if smoke_install.os.name == "nt" else "bin")
+        launcher_dir.mkdir(parents=True)
+        for name in ("python", "korvid"):
+            binary = launcher_dir / (f"{name}.exe" if smoke_install.os.name == "nt" else name)
+            binary.write_text("#!/bin/sh\n")
+            binary.chmod(0o755)
+
+    def _fake_run(
+        args: list[str], *, env: dict[str, str], cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        if "pip" in args and "install" in args and "uninstall" not in args:
+            # Simulate pip writing toolchain state (reproduces the real failure)
+            rustup_dir = Path(env["HOME"]) / ".rustup"
+            rustup_dir.mkdir(parents=True, exist_ok=True)
+            (rustup_dir / "settings.toml").write_text("[toolchain]\n")
+        if "uninstall" in args:
+            launcher = smoke_install._resolve_launcher(Path(args[0]).parent.parent)
+            if launcher is not None:
+                launcher.unlink()
+        stdout = "usage: korvid" if args[1:] == ["--help"] else "korvid 1.2.3"
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(smoke_install.venv, "create", _fake_venv)
+    monkeypatch.setattr(smoke_install, "_run", _fake_run)
+
+    smoke_install._smoke_install(wheel, "1.2.3", "base", workspace)
+
+
+def test_assert_no_user_state_catches_runtime_probe_files(tmp_path: Path) -> None:
+    """A file written into any runtime user-state root (e.g. by a Korvid probe)
+    must still trigger the fail-closed assertion after env separation."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    roots = smoke_install._state_roots(workspace)
+    roots.home.mkdir(parents=True)
+    (roots.home / ".korvid_state").write_text("runtime-probe-artifact\n")
+    with pytest.raises(RuntimeError, match="noninteractive smoke created user-state files"):
+        smoke_install._assert_no_user_state(roots)
+
+
 def test_pick_removable_wheel_never_picks_korvid(tmp_path: Path) -> None:
     wheels = _fake_wheelhouse(tmp_path)
     victim = offline_verify.pick_removable_wheel(wheels)
