@@ -283,10 +283,18 @@ async def test_node_shell_cleanup_failure_warns_and_audits(tmp_path: Path) -> No
             await until(pilot, lambda: isinstance(app.screen, ConfirmScreen), label="dialog")
             await pilot.press("y")
 
-            def _warned() -> bool:
-                return any(DBG_POD in n.message for n in app._notifications)
+            def _audited() -> bool:
+                # The outcome entry is appended after the failure notification
+                # (a separate `asyncio.to_thread` hop), so waiting on the
+                # notification alone races the audit write at teardown.
+                if not audit_path.exists():
+                    return False
+                records = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
+                shells = [e for e in records if e["action"] == "node-shell"]
+                return bool(shells) and "cleanup failed for" in shells[-1]["outcome"]
 
-            await until(pilot, _warned, label="cleanup failure notification")
+            await until(pilot, _audited, label="cleanup failure audited")
+            assert any(DBG_POD in n.message for n in app._notifications)
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     last = [e for e in entries if e["action"] == "node-shell"][-1]
     assert f"cleanup failed for: {DBG_POD}" in last["outcome"]
