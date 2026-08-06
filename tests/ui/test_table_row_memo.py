@@ -10,16 +10,30 @@ DataTable what it already holds.
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest import mock
 
 from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.store import Summary
 from korvid.k8s.columns import CustomColumn
 from korvid.k8s.metrics import PodMetrics
+from korvid.k8s.models import PodSummary
+from korvid.ui.widgets import resource_table
 from korvid.ui.widgets.resource_table import ResourceTable
 
 from .test_app import _pod, make_app
 from .waits import until
+
+
+class _FrozenClock:
+    """Stand-in for `datetime` so a repaint can be aged at a chosen instant."""
+
+    def __init__(self, instant: datetime) -> None:
+        self._instant = instant
+
+    def now(self, tz: Any = None) -> datetime:
+        return self._instant
 
 
 def _spy_emit(table: ResourceTable) -> list[str]:
@@ -160,6 +174,34 @@ async def test_age_uses_one_clock_reading_per_repaint() -> None:
         assert len(seen) >= 3, seen
         assert all(now is not None for now in seen), seen
         assert len(set(seen)) == 1, seen
+
+
+async def test_age_refreshes_for_an_unchanged_summary_as_time_passes() -> None:
+    """The memo must not freeze AGE: a pod nobody touches still ages, so the
+    stamp has to carry the age string and re-render the row when it rolls over."""
+    created = (datetime.now(UTC) - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    pod = PodSummary(
+        name="alpha",
+        namespace="default",
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node=None,
+        created=created,
+    )
+    app = make_app([pod])
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pod loaded")
+        rows: list[Summary] = [pod]
+        table.show("pods", rows, all_namespaces=False, pattern="")
+        assert str(table.get_row("default/alpha")[-2]) == "5m"
+        # Same summary object, clock advanced past the next minute boundary.
+        with mock.patch.object(
+            resource_table, "datetime", _FrozenClock(datetime.now(UTC) + timedelta(minutes=1))
+        ):
+            table.show("pods", rows, all_namespaces=False, pattern="")
+        assert str(table.get_row("default/alpha")[-2]) == "6m"
 
 
 async def test_replace_view_rows_ignore_hidden_volatile_cells() -> None:
