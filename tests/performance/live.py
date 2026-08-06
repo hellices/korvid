@@ -741,7 +741,7 @@ def _mutation_retry_delay_seconds(
     server_hint = exc.retry_after_seconds or 0.0
     return float(
         min(
-            max(server_hint, jittered_backoff),
+            server_hint + jittered_backoff,
             limits.mutation_retry_max_delay_seconds,
         )
     )
@@ -764,6 +764,8 @@ async def _mutate_once(
     The retry re-issues the *identical* guarded patch, so it is still atomic
     and still fail-closed: a Pod that lost its identity or labels between
     attempts fails the `test` ops exactly as it would on the first attempt.
+    A server-provided delay is treated as a floor, then target-specific jitter
+    is added without exceeding the configured retry-delay ceiling.
     Every other status - including a failed `test` (422) - propagates
     immediately and aborts the whole run.
     """

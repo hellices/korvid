@@ -1489,7 +1489,7 @@ async def test_mutation_retry_respects_server_hint_with_an_explicit_delay_bound(
     assert sleeps == [3.0]
 
 
-async def test_mutation_retry_jitter_avoids_lockstep_workers() -> None:
+async def test_mutation_retry_jitter_avoids_lockstep_workers_when_server_hint_dominates() -> None:
     class _ThrottleOnce:
         def __init__(self) -> None:
             self.calls = 0
@@ -1502,7 +1502,11 @@ async def test_mutation_retry_jitter_avoids_lockstep_workers() -> None:
         ) -> None:
             self.calls += 1
             if self.calls == 1:
-                raise ApiStatusError(429, "Too Many Requests")
+                raise ApiStatusError(
+                    429,
+                    "Too Many Requests",
+                    retry_after_seconds=1.0,
+                )
 
         async def close(self) -> None:
             pass
@@ -1522,15 +1526,15 @@ async def test_mutation_retry_jitter_avoids_lockstep_workers() -> None:
             progress=ChurnProgress(),
             limits=LiveLimits(
                 mutation_throttle_retries=1,
-                mutation_retry_base_delay_seconds=2.0,
+                mutation_retry_base_delay_seconds=0.5,
                 mutation_retry_max_delay_seconds=3.0,
             ),
             sleep=_sleep,
             now=lambda: 0.0,
         )
 
-    assert 0.0 <= sleeps[0][0] <= 2.0
-    assert 0.0 <= sleeps[1][0] <= 2.0
+    assert 1.0 < sleeps[0][0] <= 1.5
+    assert 1.0 < sleeps[1][0] <= 1.5
     assert sleeps[0] != sleeps[1]
 
 
