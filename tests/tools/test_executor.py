@@ -11,7 +11,7 @@ import yaml
 
 import korvid.tools.executor as executor_module
 from korvid.core.secrets import MASK_PLACEHOLDER
-from korvid.k8s.discovery import PODS_META
+from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
 from korvid.k8s.models import EndpointSliceSummary, GenericSummary, summary_for
@@ -1188,7 +1188,7 @@ class FakeDiagnoseKube:
             metadata = obj.get("metadata") or {}
             if meta.namespaced and namespace is not None and metadata.get("namespace") != namespace:
                 continue
-            summaries.append(summary_for(meta.kind, obj))
+            summaries.append(summary_for(meta.kind, obj, group=meta.group))
         return summaries
 
     async def list_events_for(
@@ -3206,7 +3206,7 @@ async def test_diagnose_service_result_remains_bounded_yaml() -> None:
         slices=[
             _endpoint_slice_summary(
                 name=f"api-{index:05d}",
-                owner_uids=("old-uid",),
+                owner_uids=("svc-1",),
                 ready_endpoints=1,
             )
             for index in range(2_000)
@@ -3216,4 +3216,72 @@ async def test_diagnose_service_result_remains_bounded_yaml() -> None:
         "diagnose_service", {"service": "api", "namespace": "shop"}
     )
     assert len(text) <= MAX_RESULT_CHARS
-    assert load_structured_document(text)["outcome"] == "incomplete"
+    document = load_structured_document(text)
+    assert document["outcome"] == "healthy"
+    assert "elided" in text
+
+
+# ---------------------------------------------------------------------------
+# _meta_for_kind_name: CRD from wrong group must not shadow the builtin
+# ---------------------------------------------------------------------------
+
+
+def test_meta_for_kind_name_ignores_crd_endpointslice_with_wrong_group() -> None:
+    """A same-kind CRD alias inserted before the real EndpointSlice must not
+    be selected; _meta_for_kind_name must return the discovery.k8s.io builtin."""
+    crd_alias = ResourceMeta("EndpointSlice", "endpointslices", "example.io", "v1alpha1", True)
+    executor = ToolExecutor(FakeKube(), {"endpointslices": crd_alias})  # type: ignore[arg-type]  # minimal fake
+    meta = executor._meta_for_kind_name("EndpointSlice")
+    assert meta is not None
+    assert meta.group == "discovery.k8s.io"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: raw TypeMeta-less list items produce healthy diagnosis
+# ---------------------------------------------------------------------------
+
+
+class _RawManifestKube:
+    """Fake kube that holds raw manifests and dispatches summary_for with group."""
+
+    def __init__(
+        self,
+        service: dict[str, Any],
+        slice_manifests: list[dict[str, Any]],
+    ) -> None:
+        self._service = service
+        self._slice_manifests = slice_manifests
+
+    async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        return self._service
+
+    async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+        return [summary_for(meta.kind, m, group=meta.group) for m in self._slice_manifests]
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_typemeta_less_slices_return_healthy() -> None:
+    """Raw LIST items that omit apiVersion/TypeMeta must produce EndpointSliceSummary
+    (via the group kwarg path) so diagnose_service reports healthy, not no_endpoint_slices."""
+    raw_slice: dict[str, Any] = {
+        # Intentionally omits apiVersion and kind, mirroring real Kubernetes LIST responses.
+        "metadata": {
+            "name": "api-abc",
+            "namespace": "shop",
+            "uid": "slice-1",
+            "labels": {"kubernetes.io/service-name": "api"},
+            "ownerReferences": [{"uid": "svc-1"}],
+        },
+        "addressType": "IPv4",
+        "endpoints": [{"conditions": {"ready": True}}],
+    }
+    kube = _RawManifestKube(
+        service=_service_manifest(uid="svc-1"),
+        slice_manifests=[raw_slice],
+    )
+    document = load_structured_document(
+        await _svc_executor(kube).execute(
+            "diagnose_service", {"service": "api", "namespace": "shop"}
+        )
+    )
+    assert document["outcome"] == "healthy"

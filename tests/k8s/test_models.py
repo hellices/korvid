@@ -380,6 +380,44 @@ def test_summary_for_falls_back_to_generic() -> None:
     assert not isinstance(summary, ReplicaSetSummary)
 
 
+# ---------------------------------------------------------------------------
+# summary_for: authoritative group kwarg (issue #191 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_summary_for_endpointslice_without_api_version_dispatched_by_group() -> None:
+    """A LIST item that omits apiVersion becomes EndpointSliceSummary when the
+    authoritative group is provided by the caller (e.g. KubeClient._object_summary)."""
+    manifest: dict[str, Any] = {
+        "metadata": {
+            "name": "api-x1",
+            "namespace": "shop",
+            "labels": {"kubernetes.io/service-name": "api"},
+            "ownerReferences": [{"uid": "svc-1"}],
+        },
+        "addressType": "IPv4",
+        "endpoints": [
+            {"conditions": {"ready": True}},
+            {"conditions": {}},
+        ],
+    }
+    summary = summary_for("EndpointSlice", manifest, group="discovery.k8s.io")
+    assert isinstance(summary, EndpointSliceSummary)
+    assert summary.service_name == "api"
+    assert summary.ready_endpoints == 2
+
+
+def test_summary_for_endpointslice_explicit_non_discovery_group_stays_generic() -> None:
+    """When an authoritative non-discovery group is provided, even a manifest that
+    claims apiVersion='discovery.k8s.io/v1' must remain GenericSummary."""
+    manifest: dict[str, Any] = {
+        "apiVersion": "discovery.k8s.io/v1",
+        "metadata": {"name": "custom"},
+    }
+    summary = summary_for("EndpointSlice", manifest, group="example.io")
+    assert type(summary) is GenericSummary
+
+
 def test_age_5m() -> None:
     gs = GenericSummary(name="x", namespace="ns", kind="Pod", created="2024-01-01T12:00:00Z")
     now = datetime(2024, 1, 1, 12, 5, 0, tzinfo=UTC)

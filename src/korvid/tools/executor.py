@@ -1060,12 +1060,26 @@ class ToolExecutor(RecordedExecution):
 
     def _meta_for_kind_name(self, kind_name: str) -> ResourceMeta | None:
         """Discovery metadata for an API kind name (e.g. ``"ReplicaSet"``),
-        falling back to fixed metadata for the stable built-in kinds."""
+        falling back to fixed metadata for the stable built-in kinds.
+
+        For kinds tracked in `_DIAGNOSE_BUILTIN_METAS` only discovered metadata
+        whose group matches the builtin's group is considered authoritative; a
+        same-kind CRD from a different group is skipped so it cannot shadow the
+        stable builtin (e.g. a CRD named ``EndpointSlice`` in ``example.io``
+        must not displace ``discovery.k8s.io`` EndpointSlice lookups).
+        """
+        builtin = self._DIAGNOSE_BUILTIN_METAS.get(kind_name)
         discovered = next(
-            (m for m in self._aliases.values() if m.kind == kind_name and not m.synthetic),
+            (
+                m
+                for m in self._aliases.values()
+                if m.kind == kind_name
+                and not m.synthetic
+                and (builtin is None or m.group == builtin.group)
+            ),
             None,
         )
-        return discovered or self._DIAGNOSE_BUILTIN_METAS.get(kind_name)
+        return discovered or builtin
 
     async def _diagnose_owner_chain(self, namespace: str, pod: dict[str, Any]) -> str:
         """``Deployment api (via ReplicaSet api-6f)`` — best-effort, never raises."""

@@ -454,15 +454,34 @@ class PodListSummary(GenericSummary):
         )
 
 
-def summary_for(kind: str, manifest: dict[str, Any]) -> GenericSummary:
-    """Build the richest summary available for *kind* (ReplicaSet gets history fields)."""
+def summary_for(kind: str, manifest: dict[str, Any], *, group: str | None = None) -> GenericSummary:
+    """Build the richest summary available for *kind* (ReplicaSet gets history fields).
+
+    Args:
+        kind: The Kubernetes kind name.
+        manifest: The raw object manifest.
+        group: Authoritative API group from the resource discovery metadata.
+            When provided, it takes precedence over the manifest's `apiVersion`
+            for group-sensitive dispatch (e.g. EndpointSlice). When absent the
+            existing `apiVersion`-prefix fallback is used so direct callers and
+            tests that do not have ResourceMeta continue to work unchanged.
+    """
     if kind == "Pod":
         return PodListSummary.from_pod_manifest(kind, manifest)
     if kind == "ReplicaSet":
         return ReplicaSetSummary.from_manifest(kind, manifest)
+    if kind == "EndpointSlice":
+        # Use the authoritative group when available to avoid misclassifying
+        # LIST items that omit apiVersion/TypeMeta (native K8s behaviour).
+        is_discovery = (
+            group == "discovery.k8s.io"
+            if group is not None
+            else str(manifest.get("apiVersion") or "").startswith(_DISCOVERY_GROUP_PREFIX)
+        )
+        if is_discovery:
+            return EndpointSliceSummary.from_manifest(kind, manifest)
+        return GenericSummary.from_manifest(kind, manifest)
     api_version = str(manifest.get("apiVersion") or "")
-    if kind == "EndpointSlice" and api_version.startswith(_DISCOVERY_GROUP_PREFIX):
-        return EndpointSliceSummary.from_manifest(kind, manifest)
     if kind == "PackageManifest" and api_version.startswith(_PACKAGES_GROUP_PREFIX):
         return PackageManifestSummary.from_manifest(kind, manifest)
     if api_version.startswith(_OLM_GROUP_PREFIX):
