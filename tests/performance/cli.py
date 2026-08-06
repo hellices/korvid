@@ -41,7 +41,7 @@ from tests.performance.live import run_live_replay
 from tests.performance.manifests import build_seed_manifests
 from tests.performance.metrics import BenchmarkReport, render_markdown, report_payload
 from tests.performance.profile import WorkloadProfile, load_profile, validate_profile
-from tests.performance.replay import ReplayOptions, ReplayReport, run_replay
+from tests.performance.replay import ReplayAborted, ReplayOptions, ReplayReport, run_replay
 from tests.ui.waits import WaitTimeout
 
 
@@ -332,7 +332,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             replay = _run_with_cpu_profile(profile, options, args.cpu_profile)
         else:
             replay = asyncio.run(run_replay(profile, options))
-    except (ApiStatusError, WaitTimeout, OSError) as exc:
+    except (ReplayAborted, ApiStatusError, WaitTimeout, OSError) as exc:
         print(f"error during replay: {exc}", file=sys.stderr)
         return 1
     finally:

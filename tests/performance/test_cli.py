@@ -19,7 +19,7 @@ from tests.performance.metrics import (
     ProcessSummary,
     RunManifest,
 )
-from tests.performance.profile import WorkloadProfile
+from tests.performance.profile import FailureInjection, WorkloadProfile
 from tests.performance.replay import ReplayOptions, ReplayReport
 
 # ---------------------------------------------------------------------------
@@ -315,6 +315,23 @@ def test_cli_reports_expected_replay_errors(
     monkeypatch.setattr(cli, "run_replay", fake_api_failure)
     assert cli.main(["replay", "--profile", "profile.json"]) == 1
     assert "error during replay: API 503: unavailable" in capsys.readouterr().err
+
+
+def test_cli_reports_terminal_replay_abort_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    profile = replace(
+        _make_minimal_profile(),
+        steady_events_per_second=2,
+        failures=(FailureInjection(kind="forbidden", at_event=1),),
+    )
+    monkeypatch.setattr(cli, "load_profile", lambda _path: profile)
+
+    assert cli.main(["replay", "--profile", "profile.json", "--time-scale", "0"]) == 1
+    stderr = capsys.readouterr().err
+    assert "error during replay: replay aborted:" in stderr
+    assert "Traceback" not in stderr
 
 
 def test_cli_does_not_hide_unexpected_profile_errors(monkeypatch: pytest.MonkeyPatch) -> None:
