@@ -179,6 +179,14 @@ class ApiSummary:
         authorization_failures = 0
         relists = 0
         relist_candidates: set[str] = set()
+        reconnects = 0
+        #: Paths whose stream errored and has not been re-opened yet. A
+        #: reconnect is recovery from a dropped watch, so it must be counted
+        #: from that recovery - not inferred from the number of `watch_open`s.
+        #: A deliberate stop/start (the live `namespace_switch` scenario scopes
+        #: the table down and back) re-opens the same path with no error in
+        #: between and is not a reconnect.
+        dropped_paths: set[str] = set()
         for event in events:
             operations[event.operation] += 1
             paths.setdefault(event.path, Counter())[event.operation] += 1
@@ -193,9 +201,13 @@ class ApiSummary:
             if event.operation == "list" and event.path in relist_candidates:
                 relists += 1
                 relist_candidates.remove(event.path)
+            if event.operation == "watch_open" and event.path in dropped_paths:
+                reconnects += 1
+                dropped_paths.remove(event.path)
+            if event.operation == "error":
+                dropped_paths.add(event.path)
             if event.status == 410:
                 relist_candidates.add(event.path)
-        reconnects = sum(max(counts.get("watch_open", 0) - 1, 0) for counts in paths.values())
         return cls(
             operations=MappingProxyType(dict(sorted(operations.items()))),
             paths=MappingProxyType(
@@ -450,9 +462,16 @@ class BenchmarkRecorder:
     def mark_burst_end(self, at: float) -> None:
         """Record the end of a churn burst so post-burst drain can be timed.
 
-        The drain is resolved by `record_render` the next time the pending
-        backlog empties at or after this instant.
+        With events still pending the drain is resolved by `record_render` the
+        next time the backlog empties at or after this instant. With an already
+        empty backlog there is nothing to drain, so the sample is `0.0` right
+        away: leaving the marker pending would let the next unrelated
+        steady-state render report its own latency as a drain, or drop the
+        sample entirely if no later render arrives.
         """
+        if not self._pending_events:
+            self._post_burst_drains.append(0.0)
+            return
         self._burst_end_pending.append(at)
 
     def pending_count(self) -> int:

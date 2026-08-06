@@ -262,14 +262,28 @@ def _run_live_with_cpu_profile(
         pr.dump_stats(cpu_profile_path)
 
 
-def _flush_allocation_snapshot(path: str) -> None:
-    """Take a tracemalloc snapshot and write the top 100 lines to *path*."""
+def _flush_allocation_snapshot(path: str) -> int:
+    """Take a tracemalloc snapshot and write the top 100 lines to *path*.
+
+    Runs from a `finally`, so a write failure must not replace whatever
+    exception is already propagating (or bury a long run's real failure under a
+    traceback). Tracing is always stopped.
+
+    Returns:
+        0 on success, 1 when the snapshot could not be written.
+    """
     if not tracemalloc.is_tracing():
-        return
-    snapshot = tracemalloc.take_snapshot()
-    stats = snapshot.statistics("lineno")[:100]
-    Path(path).write_text("\n".join(str(stat) for stat in stats))
-    tracemalloc.stop()
+        return 0
+    try:
+        snapshot = tracemalloc.take_snapshot()
+        stats = snapshot.statistics("lineno")[:100]
+        Path(path).write_text("\n".join(str(stat) for stat in stats))
+    except OSError as exc:
+        print(f"error writing allocation snapshot: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        tracemalloc.stop()
+    return 0
 
 
 def _write_outputs(args: argparse.Namespace, replay: ReplayReport) -> int:
@@ -332,6 +346,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 
     options = ReplayOptions(time_scale=args.time_scale, sample_interval=args.sample_interval)
 
+    snapshot_failed = 0
     if args.allocation_snapshot:
         tracemalloc.start()
 
@@ -345,8 +360,18 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         return 1
     finally:
         if args.allocation_snapshot:
-            _flush_allocation_snapshot(args.allocation_snapshot)
+            snapshot_failed = _flush_allocation_snapshot(args.allocation_snapshot)
 
+    return _replay_exit_status(args, replay, snapshot_failed=snapshot_failed)
+
+
+def _replay_exit_status(
+    args: argparse.Namespace, replay: ReplayReport, *, snapshot_failed: int
+) -> int:
+    """Exit status shared by both replay commands: artifacts first, then the
+    correctness criteria (no dropped updates, digest parity)."""
+    if snapshot_failed:
+        return 1
     if _write_outputs(args, replay):
         return 1
     if replay.dropped_updates > 0 or replay.expected_digest != replay.final_digest:
@@ -450,6 +475,7 @@ def _cmd_replay_live(args: argparse.Namespace) -> int:
 def _execute_live_replay(
     args: argparse.Namespace, profile: WorkloadProfile, options: ReplayOptions
 ) -> int:
+    snapshot_failed = 0
     if args.allocation_snapshot:
         tracemalloc.start()
 
@@ -478,23 +504,24 @@ def _execute_live_replay(
         return 1
     finally:
         if args.allocation_snapshot:
-            _flush_allocation_snapshot(args.allocation_snapshot)
+            snapshot_failed = _flush_allocation_snapshot(args.allocation_snapshot)
 
-    if _write_outputs(args, replay):
+    if snapshot_failed:
         return 1
     failed_scenarios = [scenario.name for scenario in replay.ui_scenarios if not scenario.ok]
     if failed_scenarios:
         # `drive_ui_scenarios` records a key sequence that never reached its
         # target state as `ok=False` instead of raising, so without this the
-        # run would "pass" with no UI-at-scale evidence behind it.
+        # run would "pass" with no UI-at-scale evidence behind it. Reported
+        # before the artifacts are written so the reason is not buried under
+        # the Markdown report.
         print(
             "error: UI-at-scale scenarios did not pass: " + ", ".join(failed_scenarios),
             file=sys.stderr,
         )
+        _write_outputs(args, replay)
         return 1
-    if replay.dropped_updates > 0 or replay.expected_digest != replay.final_digest:
-        return 1
-    return 0
+    return _replay_exit_status(args, replay, snapshot_failed=snapshot_failed)
 
 
 def main(argv: list[str] | None = None) -> int:

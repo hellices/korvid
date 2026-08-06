@@ -13,6 +13,7 @@ import json
 import re
 from collections import Counter
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -2648,3 +2649,79 @@ async def test_run_live_replay_times_the_post_burst_drain() -> None:
     assert report.phases.post_burst_drain_seconds
     assert report.phases.max_post_burst_drain_seconds is not None
     assert report.phases.max_post_burst_drain_seconds >= 0.0
+
+
+def _pod_summary(namespace: str, name: str, **kwargs: Any) -> PodSummary:
+    defaults: dict[str, Any] = {
+        "namespace": namespace,
+        "name": name,
+        "ready": "1/1",
+        "phase": "Running",
+        "restarts": 0,
+        "node": "node-a",
+        "created": "",
+        "uid": "uid-1",
+        "labels": {},
+    }
+    defaults.update(kwargs)
+    return PodSummary(**{k: v for k, v in defaults.items() if k in _POD_SUMMARY_FIELDS})
+
+
+_POD_SUMMARY_FIELDS = {field.name for field in dataclasses.fields(PodSummary)}
+
+
+class _StubRow:
+    def __init__(self, value: str) -> None:
+        self.key = SimpleNamespace(value=value)
+
+
+class _StubTable:
+    """Minimal stand-in exposing exactly what the rendered-row check reads."""
+
+    def __init__(self, rows: dict[str, list[object]]) -> None:
+        self._rows = rows
+        self.row_count = len(rows)
+        self.ordered_rows = [_StubRow(key) for key in rows]
+
+    def get_row(self, row_key: object) -> list[object]:
+        key = row_key.value if hasattr(row_key, "value") else row_key
+        return self._rows[str(key)]
+
+
+def test_rendered_rows_check_rejects_a_stale_cell() -> None:
+    """The published digest criterion compares a store digest with a store
+    digest, so 1,000 stale cells satisfy it. The rendered table must be checked
+    against the store independently — especially now that the in-place diff
+    updates cells from its own cached record of what it last wrote.
+    """
+    pods = [
+        _pod_summary("ns-a", "bench-0", phase="Running"),
+        _pod_summary("ns-a", "bench-1", phase="CrashLoopBackOff"),
+    ]
+    table = _StubTable(
+        {
+            "ns-a/bench-0": ["ns-a", "bench-0", "1/1", "Running", "0", "node-a"],
+            # Stale: the store says CrashLoopBackOff, the table still shows Running.
+            "ns-a/bench-1": ["ns-a", "bench-1", "1/1", "Running", "0", "node-a"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="ns-a/bench-1"):
+        live.check_rendered_rows(table, pods)
+
+
+def test_rendered_rows_check_accepts_a_table_that_matches_the_store() -> None:
+    pods = [
+        _pod_summary("ns-a", "bench-0", phase="Running"),
+        _pod_summary("ns-a", "bench-1", phase="CrashLoopBackOff", ready="0/1", restarts=7),
+    ]
+    table = _StubTable(
+        {
+            "ns-a/bench-0": ["ns-a", "bench-0", "1/1", "Running", "0", "node-a"],
+            "ns-a/bench-1": ["ns-a", "bench-1", "0/1", "CrashLoopBackOff", "7", "node-a"],
+        }
+    )
+
+    live.check_rendered_rows(table, pods)
+
+    assert table.row_count == 2

@@ -82,8 +82,15 @@ uv run python -m tests.performance.cli replay-live \
   --profile tests/performance/profiles/aks-live-1k.json \
   --context aks-korvid-contract-test \
   --expected-cluster-id <ARM resource id> --run-id <run> \
-  --json live.json --out live.md
+  --json <run>-live.json --out <run>-live.md \
+  --cpu-profile <run>-live.pstats \
+  --allocation-snapshot <run>-live-alloc.txt
 ```
+
+All four artifacts are mandatory and every filename must contain the run id:
+a live run whose evidence is missing or untraceable is rejected before the
+cluster is touched, and two destinations that resolve to the same file are
+rejected as well.
 
 `aks-1k` keeps the short (30-second) schedule shared with `burst-50k`, so a
 live run can be compared against the deterministic 1k/10k/50k baselines on the
@@ -91,9 +98,12 @@ same event schedule. `--duration` shortens a live smoke run; every burst and
 failure point is re-validated against the shortened duration before the
 cluster identity and ownership gates run.
 
-The deterministic generator emits stable names, namespaces, UIDs, resource
-versions, and event order from the profile seed. Repeating a profile with the
-same seed must produce the same object and event hashes.
+The deterministic generator emits stable names, namespaces, and event order
+from the profile seed. Repeating a profile with the same seed must produce the
+same object and event hashes. Uids and resource versions are deliberately *not*
+part of the deterministic workload: the synthetic generator does not assign
+them, and on a live run they are whatever the cluster issued (the live path
+reads each seeded Pod's real uid and pins it as the guard precondition).
 
 ### Runtime path
 

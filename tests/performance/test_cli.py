@@ -976,3 +976,23 @@ def test_cli_replay_live_rejects_artifact_paths_that_alias_one_file(
     assert exit_code == 1
     assert "distinct destinations" in capsys.readouterr().err
     assert calls == []
+
+
+def test_cli_replay_live_reports_an_unwritable_allocation_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The snapshot is flushed from a `finally`, so an unwritable destination
+    would raise straight out of the command - producing a traceback after a
+    30-minute run and masking whatever actually failed inside the run."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay(calls))
+    artifacts = _live_artifacts(tmp_path)
+    unwritable = tmp_path / "missing-dir" / "aks186-live.alloc.txt"
+    artifacts[artifacts.index("--allocation-snapshot") + 1] = str(unwritable)
+
+    exit_code = cli.main(
+        ["replay-live", "--profile", str(profile_path(tmp_path)), *_LIVE_IDENTITY_ARGS, *artifacts]
+    )
+
+    assert exit_code == 1
+    assert "allocation snapshot" in capsys.readouterr().err

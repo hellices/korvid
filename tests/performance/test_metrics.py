@@ -9,6 +9,7 @@ import pytest
 
 from korvid.k8s.telemetry import ReadTelemetryEvent
 from tests.performance.metrics import (
+    ApiSummary,
     BenchmarkRecorder,
     ChurnSummary,
     LatencySummary,
@@ -691,3 +692,65 @@ def test_render_markdown_reports_phase_measurements() -> None:
     assert "- LIST to populated table: `1.000s`" in markdown
     assert "- Max backlog depth: `1`" in markdown
     assert "- Max post-burst drain: `0.400s`" in markdown
+
+
+def test_mark_burst_end_records_zero_when_the_backlog_is_already_empty() -> None:
+    """Nothing to drain is a 0.0 sample, not a pending marker.
+
+    Left pending, the marker is resolved by the next unrelated steady-state
+    render and reported as that render's full latency, or lost entirely when no
+    later render arrives - either way the burst-drain budget is measured against
+    something that is not a drain.
+    """
+    recorder = BenchmarkRecorder()
+
+    recorder.mark_burst_end(10.0)
+
+    report = recorder.report(run_manifest(), (), final_digest="d")
+    assert report.phases.post_burst_drain_seconds == (0.0,)
+    assert report.phases.max_post_burst_drain_seconds == 0.0
+
+
+def test_mark_burst_end_still_times_a_real_drain() -> None:
+    recorder = BenchmarkRecorder()
+    recorder.record_event(1, 5.0)
+
+    recorder.mark_burst_end(10.0)
+    recorder.record_render(12.0)
+
+    report = recorder.report(run_manifest(), (), final_digest="d")
+    assert report.phases.post_burst_drain_seconds == pytest.approx((2.0,))
+
+
+def test_reconnects_count_only_watch_reopens_after_an_error() -> None:
+    """A deliberate stop/start is not a reconnect.
+
+    The live `namespace_switch` scenario scopes the table down and back, which
+    restarts the application watch twice on the same path; inferring reconnects
+    from `watch_open` counts alone reports a perfectly healthy run as having
+    two reconnects.
+    """
+    summary = ApiSummary.from_events(
+        [
+            ReadTelemetryEvent("watch_open", "/api/v1/pods"),
+            ReadTelemetryEvent("watch_open", "/api/v1/pods"),
+            ReadTelemetryEvent("watch_open", "/api/v1/pods"),
+        ]
+    )
+
+    assert summary.reconnects == 0
+    assert summary.operations["watch_open"] == 3
+
+
+def test_reconnects_count_a_watch_reopened_after_a_dropped_stream() -> None:
+    summary = ApiSummary.from_events(
+        [
+            ReadTelemetryEvent("watch_open", "/api/v1/pods"),
+            ReadTelemetryEvent("error", "/api/v1/pods", status=410),
+            ReadTelemetryEvent("watch_open", "/api/v1/pods"),
+            ReadTelemetryEvent("error", "/api/v1/pods", status=500),
+            ReadTelemetryEvent("watch_open", "/api/v1/pods"),
+        ]
+    )
+
+    assert summary.reconnects == 2

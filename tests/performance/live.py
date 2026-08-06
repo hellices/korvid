@@ -1288,6 +1288,41 @@ async def drive_ui_scenarios(
         recorder.record_scenario(scenario.name, now() - started, ok)
 
 
+def check_rendered_rows(table: Any, pods: Iterable[PodSummary]) -> None:
+    """Verify the rendered table against the store, independently of the widget.
+
+    The published digest criterion compares a store digest with a store digest:
+    a table showing 1,000 stale rows satisfies it. This projects each owned Pod
+    onto the strings its row must display and checks them against the cells the
+    `DataTable` actually holds, so a cell the in-place diff skipped - it now
+    diffs against its own record of what it last wrote - is caught rather than
+    reported as a clean run.
+
+    Deliberately column-order agnostic and written from the Pod summary rather
+    than by calling the widget's row builder: reusing the builder would only
+    prove the widget agrees with itself.
+
+    Raises:
+        ValueError: a Pod is missing from the table, or a rendered row does not
+            carry every value the store says it must show.
+    """
+    rendered = {
+        str(row.key.value): [str(cell) for cell in table.get_row(row.key)]
+        for row in table.ordered_rows
+    }
+    for pod in pods:
+        key = f"{pod.namespace}/{pod.name}"
+        cells = rendered.get(key)
+        if cells is None:
+            raise ValueError(f"rendered table is missing owned pod {key}")
+        expected = (pod.name, pod.ready, pod.phase, str(pod.restarts))
+        missing = [value for value in expected if value not in cells]
+        if missing:
+            raise ValueError(
+                f"rendered row for {key} is stale: expected cells {missing} not among {cells}"
+            )
+
+
 def _check_row_count(row_count: int, expected: int) -> None:
     """Re-assert the exact rendered row count before teardown.
 
@@ -1423,6 +1458,9 @@ async def _run_measured_window(
                 recorder=recorder,
             )
             _check_row_count(table.row_count, profile.object_count)
+            # Independent of the digest above, which compares a store digest
+            # with a store digest and would accept a table full of stale cells.
+            check_rendered_rows(table, final_pods)
             state.final_digest = _store_digest(store)
         finally:
             await _cancel_and_drain(churn_task)
