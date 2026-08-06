@@ -62,7 +62,9 @@ them may contact Azure, a real kubeconfig, or a real cluster.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from time import monotonic
@@ -136,6 +138,8 @@ class LiveLimits:
             patch after HTTP 429, and only after 429.
         mutation_retry_base_delay_seconds: First backoff delay; doubles per
             retry.
+        mutation_retry_max_delay_seconds: Hard ceiling for exponential backoff,
+            deterministic jitter, and a server-provided `Retry-After` hint.
         mutation_connect_timeout_seconds: Ceiling for connecting the mutation
             client (a kubeconfig exec credential plugin can block).
         initial_render_timeout_seconds: Ceiling for the initial 1,000-row
@@ -150,6 +154,7 @@ class LiveLimits:
     mutation_timeout_seconds: float = 30.0
     mutation_throttle_retries: int = 5
     mutation_retry_base_delay_seconds: float = 0.5
+    mutation_retry_max_delay_seconds: float = 30.0
     mutation_connect_timeout_seconds: float = 60.0
     initial_render_timeout_seconds: float = 60.0
     churn_grace_seconds: float = 300.0
@@ -394,7 +399,18 @@ class _KubeMutationClient:
                 _content_type="application/json-patch+json",  # type: ignore[call-arg]  # kubernetes_asyncio's .pyi stub omits _content_type; accepted via **kwargs at runtime
             )
         except k8s_client.exceptions.ApiException as exc:
-            raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
+            raw_body = getattr(exc, "body", "") or ""
+            body = (
+                raw_body.decode("utf-8", errors="replace")
+                if isinstance(raw_body, bytes)
+                else str(raw_body)
+            )
+            raise ApiStatusError(
+                int(exc.status or 0),
+                str(exc.reason or ""),
+                body=body,
+                retry_after_seconds=_api_retry_after_seconds(exc, body),
+            ) from exc
 
     async def close(self) -> None:
         if self._api is not None:
@@ -677,6 +693,60 @@ def _first_error(group: BaseExceptionGroup[BaseException]) -> BaseException:
     return leaves[0] if leaves else group
 
 
+def _parse_retry_seconds(value: object) -> float | None:
+    try:
+        seconds = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
+
+
+def _api_retry_after_seconds(exc: BaseException, body: str) -> float | None:
+    headers = getattr(exc, "headers", None)
+    if isinstance(headers, Mapping):
+        for key, value in headers.items():
+            if str(key).lower() == "retry-after":
+                parsed = _parse_retry_seconds(value)
+                if parsed is not None:
+                    return parsed
+
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    details = payload.get("details")
+    if not isinstance(details, dict):
+        return None
+    return _parse_retry_seconds(details.get("retryAfterSeconds"))
+
+
+def _mutation_retry_delay_seconds(
+    exc: ApiStatusError,
+    *,
+    namespace: str,
+    name: str,
+    uid: str,
+    tick: str,
+    attempt: int,
+    limits: LiveLimits,
+) -> float:
+    backoff = limits.mutation_retry_base_delay_seconds * (2 ** (attempt - 1))
+    digest = hashlib.sha256(f"{namespace}\0{name}\0{uid}\0{tick}\0{attempt}".encode()).digest()
+    jitter_fraction = int.from_bytes(digest[:8], "big") / (1 << 64)
+    jittered_backoff = backoff * jitter_fraction
+    server_hint = exc.retry_after_seconds or 0.0
+    return float(
+        min(
+            max(server_hint, jittered_backoff),
+            limits.mutation_retry_max_delay_seconds,
+        )
+    )
+
+
 async def _mutate_once(
     mutation_client: MutationClient,
     *,
@@ -711,7 +781,17 @@ async def _mutate_once(
                 raise
             progress.mutation_throttles += 1
             attempt += 1
-            await sleep(limits.mutation_retry_base_delay_seconds * (2 ** (attempt - 1)))
+            await sleep(
+                _mutation_retry_delay_seconds(
+                    exc,
+                    namespace=namespace,
+                    name=name,
+                    uid=uid,
+                    tick=tick,
+                    attempt=attempt,
+                    limits=limits,
+                )
+            )
             continue
         progress.record_completed(now())
         return

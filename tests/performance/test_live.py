@@ -16,6 +16,8 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import pytest
+from kubernetes_asyncio import client as k8s_client
+from multidict import CIMultiDict, CIMultiDictProxy
 
 from korvid.core.store import Summary
 from korvid.k8s.discovery import ResourceMeta
@@ -1405,6 +1407,131 @@ async def test_drive_live_churn_retries_only_429_with_the_identical_guarded_patc
     assert len(set(mutation_client.patch_arguments)) == 1
     assert progress.mutation_throttles == 2
     assert progress.completed == 1
+
+
+@pytest.mark.parametrize(
+    ("headers", "body", "expected"),
+    [
+        ({"Retry-After": "7"}, '{"details": {"retryAfterSeconds": 5}}', 7.0),
+        ({}, '{"details": {"retryAfterSeconds": 5}}', 5.0),
+    ],
+)
+async def test_mutation_client_preserves_server_retry_after_hint(
+    headers: dict[str, str], body: str, expected: float
+) -> None:
+    class _ThrottledCoreV1:
+        async def patch_namespaced_pod(self, *_args: object, **_kwargs: object) -> None:
+            exc = k8s_client.exceptions.ApiException(status=429, reason="Too Many Requests")
+            object.__setattr__(exc, "headers", CIMultiDictProxy(CIMultiDict(headers)))
+            object.__setattr__(exc, "body", body.encode())
+            raise exc
+
+    client = live._KubeMutationClient(CONTEXT, RUN_ID)
+    client._core_v1 = _ThrottledCoreV1()  # type: ignore[assignment]  # focused adapter fake
+
+    with pytest.raises(ApiStatusError, match="API 429") as caught:
+        await client.patch_pod_labels_guarded(
+            "korvid-perf-aks186-0",
+            "bench-0",
+            uid="pod-uid-0",
+            tick="1",
+        )
+
+    assert caught.value.body == body
+    assert caught.value.retry_after_seconds == expected
+
+
+async def test_mutation_retry_respects_server_hint_with_an_explicit_delay_bound() -> None:
+    class _ThrottleOnce:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def connect(self) -> None:
+            pass
+
+        async def patch_pod_labels_guarded(
+            self, namespace: str, name: str, *, uid: str, tick: str
+        ) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise ApiStatusError(
+                    429,
+                    "Too Many Requests",
+                    retry_after_seconds=10.0,
+                )
+
+        async def close(self) -> None:
+            pass
+
+    client = _ThrottleOnce()
+    sleeps: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    await live._mutate_once(
+        client,
+        namespace="korvid-perf-run1-0",
+        name="bench-0",
+        uid="pod-uid-0",
+        tick="1",
+        progress=ChurnProgress(),
+        limits=LiveLimits(
+            mutation_throttle_retries=1,
+            mutation_retry_base_delay_seconds=0.5,
+            mutation_retry_max_delay_seconds=3.0,
+        ),
+        sleep=_sleep,
+        now=lambda: 0.0,
+    )
+
+    assert client.calls == 2
+    assert sleeps == [3.0]
+
+
+async def test_mutation_retry_jitter_avoids_lockstep_workers() -> None:
+    class _ThrottleOnce:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def connect(self) -> None:
+            pass
+
+        async def patch_pod_labels_guarded(
+            self, namespace: str, name: str, *, uid: str, tick: str
+        ) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise ApiStatusError(429, "Too Many Requests")
+
+        async def close(self) -> None:
+            pass
+
+    sleeps: list[list[float]] = [[], []]
+    for index, name in enumerate(("bench-0", "bench-1")):
+
+        async def _sleep(delay: float, target: list[float] = sleeps[index]) -> None:
+            target.append(delay)
+
+        await live._mutate_once(
+            _ThrottleOnce(),
+            namespace="korvid-perf-run1-0",
+            name=name,
+            uid=f"pod-uid-{index}",
+            tick="1",
+            progress=ChurnProgress(),
+            limits=LiveLimits(
+                mutation_throttle_retries=1,
+                mutation_retry_base_delay_seconds=2.0,
+                mutation_retry_max_delay_seconds=3.0,
+            ),
+            sleep=_sleep,
+            now=lambda: 0.0,
+        )
+
+    assert 0.0 <= sleeps[0][0] <= 2.0
+    assert 0.0 <= sleeps[1][0] <= 2.0
+    assert sleeps[0] != sleeps[1]
 
 
 async def test_drive_live_churn_gives_up_after_the_bounded_throttle_retries() -> None:

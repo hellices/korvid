@@ -220,8 +220,9 @@ separately from application read-path throttles.
 Live churn is driven with explicit bounded concurrency and a bounded per-patch
 timeout: a serial driver is capped at one round trip per event and cannot
 approach the scheduled rate, which would silently understate the load the
-report claims to have applied. Only HTTP 429 is retried, with a bounded policy
-that re-issues the identical guarded patch.
+report claims to have applied. Only HTTP 429 is retried, with bounded
+target-specific jitter that honors the API server's `Retry-After` hint up to an
+explicit delay ceiling and re-issues the identical guarded patch.
 
 ### Guardrails
 
