@@ -9,9 +9,12 @@ DataTable what it already holds.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
+from korvid.core.config import KorvidConfig, ViewConfig
 from korvid.core.store import Summary
+from korvid.k8s.columns import CustomColumn
 from korvid.k8s.metrics import PodMetrics
 from korvid.ui.widgets.resource_table import ResourceTable
 
@@ -157,3 +160,32 @@ async def test_age_uses_one_clock_reading_per_repaint() -> None:
         assert len(seen) >= 3, seen
         assert all(now is not None for now in seen), seen
         assert len(set(seen)) == 1, seen
+
+
+async def test_replace_view_rows_ignore_hidden_volatile_cells() -> None:
+    """A `replace: true` custom view keeps only NAME plus the configured
+    values — all carried by the frozen summary. Nothing volatile survives into
+    the row, so a metrics poll must not rebuild cells the view discards."""
+    samples: dict[tuple[str, str], PodMetrics] = {}
+
+    def lookup(namespace: str, name: str) -> PodMetrics | None:
+        return samples.get((namespace, name))
+
+    config = KorvidConfig(
+        namespace="default",
+        views={"pods": ViewConfig(columns=(CustomColumn("TEAM", "label", "team"),), replace=True)},
+    )
+    app = make_app([replace(_pod("alpha"), custom=("payments",))], config=config)
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+        await until(pilot, lambda: table.row_count == 1, label="pods loaded")
+        view = config.views["pods"]
+        rows = app.store.get("pods", "default")
+        table.show("pods", rows, all_namespaces=False, pattern="", metrics=lookup, view=view)
+        built = _spy_emit(table)
+        samples[("default", "alpha")] = PodMetrics(
+            name="alpha", namespace="default", cpu_cores=0.5, memory_bytes=1024 * 1024
+        )
+        table.show("pods", rows, all_namespaces=False, pattern="", metrics=lookup, view=view)
+        assert built == []
+        assert [str(cell) for cell in table.get_row("default/alpha")] == ["alpha", "payments"]

@@ -633,6 +633,20 @@ class ResourceTable(DataTable[str | Text]):
         self._pending_rows.append(entry[2])
         return True
 
+    def _stamp(self, volatile: object) -> object:
+        """The volatile inputs that actually reach the emitted row.
+
+        A `replace: true` custom view (issue #45) keeps only NAME plus the
+        configured custom values, all of which come from the frozen summary —
+        so the AGE and metrics cells it discards must not be allowed to
+        invalidate the memo, or a minute rollover or metrics poll would rebuild
+        cells nobody can see.
+        """
+        view = self._active_view
+        if view is not None and view.replace:
+            return None
+        return volatile
+
     def _render_rows(
         self,
         kind: str,
@@ -711,7 +725,7 @@ class ResourceTable(DataTable[str | Text]):
             age = pod.age(now)
             # Everything else on this row is derived from the frozen summary,
             # so the live metrics sample and the age are the whole stamp.
-            stamp = (age, usage)
+            stamp = self._stamp((age, usage))
             if self._reuse_row(pod, stamp):
                 continue
             cells: list[str | Text] = [
@@ -754,7 +768,8 @@ class ResourceTable(DataTable[str | Text]):
                 continue
             if isinstance(obj, ReplicaSetSummary):
                 age = obj.age(self._render_now)
-                if self._reuse_row(obj, age):
+                stamp = self._stamp(age)
+                if self._reuse_row(obj, stamp):
                     continue
                 cells: list[str | Text] = [
                     obj.name,
@@ -766,10 +781,11 @@ class ResourceTable(DataTable[str | Text]):
                 ]
             else:
                 age = obj.age(self._render_now) if isinstance(obj, GenericSummary) else ""
-                if self._reuse_row(obj, age):
+                stamp = self._stamp(age)
+                if self._reuse_row(obj, stamp):
                     continue
                 cells = [obj.name, "", "", "", "", age]
-            self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=age)
+            self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_helm_release_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
@@ -781,7 +797,8 @@ class ResourceTable(DataTable[str | Text]):
             if pattern and pattern.lower() not in rel.name.lower():
                 continue
             age = rel.age(self._render_now)
-            if self._reuse_row(rel, age):
+            stamp = self._stamp(age)
+            if self._reuse_row(rel, stamp):
                 continue
             cells: list[str | Text] = [
                 rel.name,
@@ -791,7 +808,7 @@ class ResourceTable(DataTable[str | Text]):
                 rel.app_version,
                 age,
             ]
-            self._emit_row(rel, cells, all_namespaces=all_namespaces, stamp=age)
+            self._emit_row(rel, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_helm_revision_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
@@ -804,7 +821,8 @@ class ResourceTable(DataTable[str | Text]):
             if pattern and pattern.lower() not in rev.name.lower():
                 continue
             age = rev.age(self._render_now)
-            if self._reuse_row(rev, age):
+            stamp = self._stamp(age)
+            if self._reuse_row(rev, stamp):
                 continue
             cells: list[str | Text] = [
                 rev.name,
@@ -815,7 +833,7 @@ class ResourceTable(DataTable[str | Text]):
                 rev.description,
                 age,
             ]
-            self._emit_row(rev, cells, all_namespaces=all_namespaces, stamp=age)
+            self._emit_row(rev, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_fallback_rows(
         self,
@@ -835,10 +853,11 @@ class ResourceTable(DataTable[str | Text]):
             if pattern and pattern.lower() not in obj.name.lower():
                 continue
             age = obj.age(self._render_now) if isinstance(obj, GenericSummary) else ""
-            if self._reuse_row(obj, age):
+            stamp = self._stamp(age)
+            if self._reuse_row(obj, stamp):
                 continue
             cells: list[str | Text] = [obj.name, *[""] * (width - 2), age]
-            self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=age)
+            self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_package_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
@@ -850,7 +869,8 @@ class ResourceTable(DataTable[str | Text]):
             if pattern and pattern.lower() not in pkg.name.lower():
                 continue
             age = pkg.age(self._render_now)
-            if self._reuse_row(pkg, age):
+            stamp = self._stamp(age)
+            if self._reuse_row(pkg, stamp):
                 continue
             cells: list[str | Text] = [
                 pkg.name,
@@ -860,7 +880,7 @@ class ResourceTable(DataTable[str | Text]):
                 pkg.description or "-",
                 age,
             ]
-            self._emit_row(pkg, cells, all_namespaces=all_namespaces, stamp=age)
+            self._emit_row(pkg, cells, all_namespaces=all_namespaces, stamp=stamp)
         fallbacks = [r for r in rows if not isinstance(r, PackageManifestSummary)]
         self._add_fallback_rows(
             fallbacks,
@@ -880,7 +900,8 @@ class ResourceTable(DataTable[str | Text]):
             if pattern and pattern.lower() not in sub.name.lower():
                 continue
             age = sub.age(self._render_now)
-            if self._reuse_row(sub, age):
+            stamp = self._stamp(age)
+            if self._reuse_row(sub, stamp):
                 continue
             cells: list[str | Text] = [
                 sub.name,
@@ -890,7 +911,7 @@ class ResourceTable(DataTable[str | Text]):
                 sub.state or "-",
                 age,
             ]
-            self._emit_row(sub, cells, all_namespaces=all_namespaces, stamp=age)
+            self._emit_row(sub, cells, all_namespaces=all_namespaces, stamp=stamp)
         fallbacks = [r for r in rows if not isinstance(r, OLMSubscriptionSummary)]
         self._add_fallback_rows(
             fallbacks,
@@ -910,7 +931,8 @@ class ResourceTable(DataTable[str | Text]):
             if pattern and pattern.lower() not in csv.name.lower():
                 continue
             age = csv.age(self._render_now)
-            if self._reuse_row(csv, age):
+            stamp = self._stamp(age)
+            if self._reuse_row(csv, stamp):
                 continue
             cells: list[str | Text] = [
                 csv.name,
@@ -919,7 +941,7 @@ class ResourceTable(DataTable[str | Text]):
                 _csv_phase_cell(csv.phase),
                 age,
             ]
-            self._emit_row(csv, cells, all_namespaces=all_namespaces, stamp=age)
+            self._emit_row(csv, cells, all_namespaces=all_namespaces, stamp=stamp)
         fallbacks = [r for r in rows if not isinstance(r, CSVSummary)]
         self._add_fallback_rows(
             fallbacks,
@@ -939,7 +961,8 @@ class ResourceTable(DataTable[str | Text]):
             if pattern and pattern.lower() not in obj.name.lower():
                 continue
             age = obj.age(self._render_now)
-            if self._reuse_row(obj, age):
+            stamp = self._stamp(age)
+            if self._reuse_row(obj, stamp):
                 continue
             cells: list[str | Text] = [obj.name, age]
-            self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=age)
+            self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=stamp)
