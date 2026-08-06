@@ -13,7 +13,6 @@ every mutating command behind the approval dialog and the fail-closed audit.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import shutil
@@ -255,8 +254,12 @@ class HelmCLI:
             # The untar tree is chart-controlled and can hold many files:
             # remove it on a worker thread (shielded - an exclusive-worker
             # cancellation mid-cleanup must still finish the removal).
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(asyncio.to_thread(shutil.rmtree, tmp, ignore_errors=True))
+            cleanup = asyncio.create_task(asyncio.to_thread(shutil.rmtree, tmp, ignore_errors=True))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                raise
 
     @staticmethod
     def _release_args(

@@ -7,6 +7,7 @@ plumbing honest.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -703,6 +704,46 @@ async def test_show_schema_cleanup_runs_off_the_event_loop() -> None:
         await cli.show_schema("repo/chart", "1.2.3")
     del real_rmtree
     assert cleanup_threads == [True]
+
+
+async def test_show_schema_finishes_cleanup_before_propagating_cancellation() -> None:
+    """Cancelling during shielded cleanup must not turn cancellation into a
+    successful schema result or leave the cleanup running in the background."""
+    cli, _ = _cli()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    returned_before_cleanup: list[bool] = []
+
+    async def fake_execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        dest = argv[argv.index("--untardir") + 1]
+        (Path(dest) / "chart").mkdir(parents=True)
+        return 0, "", ""
+
+    async def fake_to_thread(func: object, *args: object, **kwargs: object) -> None:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        cleanup_finished.set()
+
+    async def release_cleanup(task: asyncio.Task[dict[str, object] | None]) -> None:
+        await asyncio.sleep(0)
+        returned_before_cleanup.append(task.done())
+        allow_cleanup.set()
+
+    with (
+        mock.patch("korvid.k8s.helmcli._execute", side_effect=fake_execute),
+        mock.patch("korvid.k8s.helmcli.asyncio.to_thread", side_effect=fake_to_thread),
+    ):
+        task = asyncio.create_task(cli.show_schema("repo/chart", "1.2.3"))
+        await cleanup_started.wait()
+        task.cancel()
+        release_task = asyncio.create_task(release_cleanup(task))
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await release_task
+
+    assert returned_before_cleanup == [False]
+    assert cleanup_finished.is_set()
 
 
 async def test_repo_add_appends_ca_file_only_when_configured(tmp_path: Path) -> None:
