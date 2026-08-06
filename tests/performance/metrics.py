@@ -376,11 +376,16 @@ class ProcessSampler:
         task = self._task
         self._task = None
         task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        if self._uses_managed_tracing:
-            self._release_tracemalloc()
-        self._uses_managed_tracing = False
+        try:
+            with suppress(asyncio.CancelledError):
+                await task
+        finally:
+            # A sampling failure must still release managed tracing: raising
+            # past this point would leak the tracemalloc lease *and* skip the
+            # caller's own teardown (watch manager, benchmark tasks).
+            if self._uses_managed_tracing:
+                self._release_tracemalloc()
+            self._uses_managed_tracing = False
         return tuple(self._samples)
 
     @classmethod

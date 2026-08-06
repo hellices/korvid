@@ -250,6 +250,9 @@ class _ReplaySource:
         self._failures = failures
         self._generation = 0
         self._next_event_index = 0
+        #: Index of the next burst whose end has not been marked yet. Persisted
+        #: across watch generations (see the WATCH phase below).
+        self._next_burst = 0
         #: Number of scheduled churn events actually yielded to the watch
         #: manager so far; the real signal behind
         #: `ReplayReport.churn_started_before_input`.
@@ -356,9 +359,11 @@ class _ReplaySource:
 
         # Burst-end offsets (absolute seconds) mark the moment each burst's
         # window closes, so post-burst backlog drain can be timed on the same
-        # real-clock axis the render pass records on.
+        # real-clock axis the render pass records on. The cursor lives on the
+        # source, not this generation: a 410/429 reconnect resumes later in the
+        # schedule, and a per-generation cursor would re-mark every burst that
+        # already ended, producing duplicate and time-shifted drain samples.
         burst_ends = burst_end_offsets(self._profile)
-        next_burst = 0
 
         # --- WATCH phase ---
         for i in range(self._next_event_index, len(self._events)):
@@ -368,9 +373,12 @@ class _ReplaySource:
             if delay > 0:
                 await self._sleep(delay)
 
-            while next_burst < len(burst_ends) and event.offset_seconds >= burst_ends[next_burst]:
+            while (
+                self._next_burst < len(burst_ends)
+                and event.offset_seconds >= burst_ends[self._next_burst]
+            ):
                 self._recorder.mark_burst_end(monotonic())
-                next_burst += 1
+                self._next_burst += 1
 
             await self._handle_failure_if_any(event, i)
 
@@ -435,6 +443,41 @@ def build_manifest(
         kubernetes_version=kubernetes_version,
         node_pools=node_pools,
     )
+
+
+def check_rendered_rows(table: Any, pods: Iterable[PodSummary]) -> None:
+    """Verify the rendered table against the store, independently of the widget.
+
+    The published digest criterion compares a store digest with a store digest:
+    a table showing 1,000 stale rows satisfies it. This projects each owned Pod
+    onto the strings its row must display and checks them against the cells the
+    `DataTable` actually holds, so a cell the in-place diff skipped - it now
+    diffs against its own record of what it last wrote - is caught rather than
+    reported as a clean run.
+
+    Deliberately column-order agnostic and written from the Pod summary rather
+    than by calling the widget's row builder: reusing the builder would only
+    prove the widget agrees with itself.
+
+    Raises:
+        ValueError: a Pod is missing from the table, or a rendered row does not
+            carry every value the store says it must show.
+    """
+    rendered = {
+        str(row.key.value): [str(cell) for cell in table.get_row(row.key)]
+        for row in table.ordered_rows
+    }
+    for pod in pods:
+        key = f"{pod.namespace}/{pod.name}"
+        cells = rendered.get(key)
+        if cells is None:
+            raise ValueError(f"rendered table is missing owned pod {key}")
+        expected = (pod.name, pod.ready, pod.phase, str(pod.restarts))
+        missing = [value for value in expected if value not in cells]
+        if missing:
+            raise ValueError(
+                f"rendered row for {key} is stale: expected cells {missing} not among {cells}"
+            )
 
 
 async def wait_for(
@@ -569,6 +612,13 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                 label="churn complete and all events rendered",
                 recorder=recorder,
             )
+            if source.terminal_failure is None:
+                # The digests below are both computed from data, never from the
+                # rendering: a table full of stale cells would satisfy them.
+                # Checked here because the table only exists inside this block.
+                check_rendered_rows(
+                    table, cast(Iterable[PodSummary], store.get("pods", ALL_NAMESPACES))
+                )
     finally:
         process_samples = await sampler.stop()
         await watch_manager.stop_all()

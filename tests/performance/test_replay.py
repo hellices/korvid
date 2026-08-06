@@ -500,3 +500,31 @@ async def test_replay_slow_logs_do_not_block_resource_progress() -> None:
     assert report.failures_injected["slow_logs"] == 1
     # A slow log stream adds no extra sleep to the resource schedule.
     assert sum(sleep_delays) == pytest.approx(events[-1].offset_seconds)
+
+
+async def test_replay_does_not_re_mark_bursts_after_a_watch_reconnect() -> None:
+    """A reconnect must not replay burst boundaries that already passed.
+
+    `_ReplaySource` restarts at `_next_event_index` on a new generation. With
+    the burst cursor reset to zero, the first event after a 410 re-marks every
+    burst that already ended, producing duplicate and time-shifted drain
+    samples for a run that had exactly one burst.
+    """
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="burst-reconnect",
+        seed=186,
+        object_count=50,
+        namespace_count=5,
+        steady_events_per_second=5,
+        duration_seconds=4,
+        bursts=(Burst(start_second=1, duration_seconds=1, events_per_second=40),),
+        # A 410 forces the watch manager to drop and re-list mid-schedule,
+        # after the burst window has already closed.
+        failures=(FailureInjection(kind="gone", at_event=50),),
+    )
+
+    report = await run_replay(profile, ReplayOptions(time_scale=0))
+
+    assert report.api.reconnects == 1  # the schedule really was interrupted
+    assert len(report.phases.post_burst_drain_seconds) == len(profile.bursts)

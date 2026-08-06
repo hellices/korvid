@@ -29,6 +29,7 @@ from korvid.k8s.logs import LogLine
 from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.telemetry import ReadTelemetry, ReadTelemetryEvent
 from tests.performance import live, manifests
+from tests.performance import replay as replay_mod
 from tests.performance.live import (
     ChurnProgress,
     CommandResult,
@@ -2707,7 +2708,7 @@ def test_rendered_rows_check_rejects_a_stale_cell() -> None:
     )
 
     with pytest.raises(ValueError, match="ns-a/bench-1"):
-        live.check_rendered_rows(table, pods)
+        replay_mod.check_rendered_rows(table, pods)
 
 
 def test_rendered_rows_check_accepts_a_table_that_matches_the_store() -> None:
@@ -2722,6 +2723,6 @@ def test_rendered_rows_check_accepts_a_table_that_matches_the_store() -> None:
         }
     )
 
-    live.check_rendered_rows(table, pods)
+    replay_mod.check_rendered_rows(table, pods)
 
     assert table.row_count == 2

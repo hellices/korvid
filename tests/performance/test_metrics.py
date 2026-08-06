@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import json
 from typing import Any, cast
@@ -754,3 +755,29 @@ def test_reconnects_count_a_watch_reopened_after_a_dropped_stream() -> None:
     )
 
     assert summary.reconnects == 2
+
+
+async def test_sampler_stop_releases_tracing_even_when_the_task_failed() -> None:
+    """A sampling failure must not leak managed tracing state.
+
+    `stop()` awaits the sampler task; if that raises, the release below never
+    runs and the caller's own cleanup (watch manager teardown) is skipped too.
+    """
+    sampler = ProcessSampler(interval_seconds=0.001)
+    sampler.start()
+
+    async def _boom() -> None:
+        raise RuntimeError("psutil exploded")
+
+    running = sampler._task
+    assert running is not None
+    running.cancel()
+    with contextlib.suppress(asyncio.CancelledError, BaseException):
+        await running
+    sampler._task = asyncio.get_running_loop().create_task(_boom())
+    await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="psutil exploded"):
+        await sampler.stop()
+
+    assert sampler._uses_managed_tracing is False
