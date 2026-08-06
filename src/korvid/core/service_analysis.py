@@ -72,7 +72,7 @@ class EndpointSliceSnapshot:
 
     identity: ResourceIdentity
     service_name: str
-    owner_uids: tuple[str, ...]
+    service_owner_uids: tuple[str, ...]
     address_type: str
     endpoints: int
     ready_endpoints: int
@@ -155,7 +155,9 @@ def _partition_current(
     current: list[EndpointSliceSnapshot] = []
     stale: list[EndpointSliceSnapshot] = []
     for item in slices:
-        if item.owner_uids and (not service_uid or service_uid not in item.owner_uids):
+        if item.service_owner_uids and (
+            not service_uid or service_uid not in item.service_owner_uids
+        ):
             stale.append(item)
         else:
             current.append(item)
@@ -177,8 +179,14 @@ def _current_evidence(slices: Sequence[EndpointSliceSnapshot]) -> tuple[Evidence
         items.append(Evidence(item.identity, "endpoints.ready", str(item.ready_endpoints)))
         items.append(Evidence(item.identity, "endpoints.total", str(item.endpoints)))
         items.append(Evidence(item.identity, "endpoints.address_type", item.address_type))
-        if item.owner_uids:
-            items.append(Evidence(item.identity, "endpoints.owner_uids", ",".join(item.owner_uids)))
+        if item.service_owner_uids:
+            items.append(
+                Evidence(
+                    item.identity,
+                    "endpoints.service_owner_uids",
+                    ",".join(item.service_owner_uids),
+                )
+            )
     return tuple(items)
 
 
@@ -187,7 +195,11 @@ def _confidence_for_healthy(
 ) -> Confidence:
     if not service.identity.uid:
         return "medium"
-    if any(service.identity.uid in item.owner_uids for item in slices if item.owner_uids):
+    if any(
+        service.identity.uid in item.service_owner_uids
+        for item in slices
+        if item.service_owner_uids
+    ):
         return "high"
     return "medium"
 

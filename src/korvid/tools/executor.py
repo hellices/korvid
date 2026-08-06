@@ -1634,7 +1634,7 @@ def _endpoint_slice_snapshot(item: EndpointSliceSummary) -> EndpointSliceSnapsho
     return EndpointSliceSnapshot(
         identity=ResourceIdentity("EndpointSlice", item.namespace, item.name, item.uid),
         service_name=item.service_name,
-        owner_uids=item.owner_uids,
+        service_owner_uids=item.service_owner_uids,
         address_type=item.address_type,
         endpoints=item.endpoints,
         ready_endpoints=item.ready_endpoints,

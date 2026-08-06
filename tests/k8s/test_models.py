@@ -1333,3 +1333,72 @@ def test_summaries_default_to_no_labels() -> None:
     pod = PodSummary.from_manifest({"metadata": {"name": "p"}, "spec": {}, "status": {}})
     assert gs.labels == ()
     assert pod.labels == ()
+
+
+# -- EndpointSliceSummary.service_owner_uids projection (PR #212) ------------
+
+
+def test_endpoint_slice_summary_service_owner_uids_filters_to_core_service() -> None:
+    """Mixed ownerReferences: generic owner_uids contains all UIDs, but
+    service_owner_uids contains only refs whose kind=='Service' and apiVersion=='v1'."""
+    manifest: dict[str, Any] = {
+        "apiVersion": "discovery.k8s.io/v1",
+        "kind": "EndpointSlice",
+        "metadata": {
+            "name": "api-x1",
+            "namespace": "shop",
+            "labels": {"kubernetes.io/service-name": "api"},
+            "ownerReferences": [
+                # core/v1 Service — should appear in service_owner_uids
+                {"kind": "Service", "apiVersion": "v1", "uid": "svc-uid-1"},
+                # custom CRD controller — must NOT appear in service_owner_uids
+                {"kind": "MeshController", "apiVersion": "mesh.example.io/v1", "uid": "crd-uid-2"},
+            ],
+        },
+        "addressType": "IPv4",
+        "endpoints": [{"conditions": {"ready": True}}],
+    }
+    summary = summary_for("EndpointSlice", manifest)
+    assert isinstance(summary, EndpointSliceSummary)
+    # Generic owner_uids carries all UIDs (unchanged relation behaviour)
+    assert set(summary.owner_uids) == {"svc-uid-1", "crd-uid-2"}
+    # service_owner_uids carries only the core/v1 Service UID
+    assert summary.service_owner_uids == ("svc-uid-1",)
+
+
+def test_endpoint_slice_summary_wrong_api_version_service_excluded() -> None:
+    """A 'Service' ownerRef with a non-core apiVersion must be excluded from
+    service_owner_uids (it might be a CRD impersonating the name 'Service')."""
+    manifest: dict[str, Any] = {
+        "apiVersion": "discovery.k8s.io/v1",
+        "kind": "EndpointSlice",
+        "metadata": {
+            "name": "api-x2",
+            "namespace": "shop",
+            "ownerReferences": [
+                {"kind": "Service", "apiVersion": "custom.io/v1", "uid": "fake-svc-uid"},
+            ],
+        },
+        "addressType": "IPv4",
+        "endpoints": [],
+    }
+    summary = summary_for("EndpointSlice", manifest)
+    assert isinstance(summary, EndpointSliceSummary)
+    # Generic owner_uids still carries the UID
+    assert "fake-svc-uid" in summary.owner_uids
+    # service_owner_uids must exclude the malformed/wrong-apiVersion ref
+    assert summary.service_owner_uids == ()
+
+
+def test_endpoint_slice_summary_no_owner_refs_gives_empty_service_owner_uids() -> None:
+    """EndpointSlice without ownerReferences has empty service_owner_uids."""
+    manifest: dict[str, Any] = {
+        "apiVersion": "discovery.k8s.io/v1",
+        "kind": "EndpointSlice",
+        "metadata": {"name": "manual-slice", "namespace": "shop"},
+        "addressType": "IPv4",
+        "endpoints": [{"conditions": {"ready": True}}],
+    }
+    summary = summary_for("EndpointSlice", manifest)
+    assert isinstance(summary, EndpointSliceSummary)
+    assert summary.service_owner_uids == ()

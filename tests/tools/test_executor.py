@@ -3115,8 +3115,12 @@ def _service_manifest(uid: str = "") -> dict[str, Any]:
 def _endpoint_slice_summary(
     name: str = "api-abc",
     owner_uids: tuple[str, ...] = (),
+    service_owner_uids: tuple[str, ...] | None = None,
     ready_endpoints: int = 0,
 ) -> EndpointSliceSummary:
+    # When service_owner_uids is not given, mirror owner_uids for backwards compat
+    # in existing tests (those tests use a single same-kind Service UID).
+    resolved_service_owner_uids = owner_uids if service_owner_uids is None else service_owner_uids
     return EndpointSliceSummary(
         name=name,
         namespace="shop",
@@ -3129,6 +3133,7 @@ def _endpoint_slice_summary(
         address_type="IPv4",
         endpoints=1,
         ready_endpoints=ready_endpoints,
+        service_owner_uids=resolved_service_owner_uids,
     )
 
 
@@ -3277,6 +3282,38 @@ async def test_diagnose_service_typemeta_less_slices_return_healthy() -> None:
     }
     kube = _RawManifestKube(
         service=_service_manifest(uid="svc-1"),
+        slice_manifests=[raw_slice],
+    )
+    document = load_structured_document(
+        await _svc_executor(kube).execute(
+            "diagnose_service", {"service": "api", "namespace": "shop"}
+        )
+    )
+    assert document["outcome"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_unrelated_custom_owner_only_is_healthy() -> None:
+    """An EndpointSlice owned only by an unrelated CRD controller (no core/v1 Service
+    ownerRef) must not be flagged stale.  Only Service refs are used for stale checks."""
+    raw_slice: dict[str, Any] = {
+        "apiVersion": "discovery.k8s.io/v1",
+        "kind": "EndpointSlice",
+        "metadata": {
+            "name": "api-abc",
+            "namespace": "shop",
+            "uid": "slice-crd",
+            "labels": {"kubernetes.io/service-name": "api"},
+            # Only a custom CRD controller ownerRef — no Service ref
+            "ownerReferences": [
+                {"kind": "MeshController", "apiVersion": "mesh.example.io/v1", "uid": "crd-uid-99"},
+            ],
+        },
+        "addressType": "IPv4",
+        "endpoints": [{"conditions": {"ready": True}}],
+    }
+    kube = _RawManifestKube(
+        service=_service_manifest(uid="svc-real"),
         slice_manifests=[raw_slice],
     )
     document = load_structured_document(

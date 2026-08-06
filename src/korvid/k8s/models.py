@@ -214,6 +214,15 @@ def _owner_uids(meta: dict[str, Any]) -> tuple[str, ...]:
     return tuple(str(ref["uid"]) for ref in (meta.get("ownerReferences") or []) if ref.get("uid"))
 
 
+def _service_owner_uids(meta: dict[str, Any]) -> tuple[str, ...]:
+    """UIDs from ownerReferences where kind=='Service' and apiVersion=='v1' (core Service only)."""
+    return tuple(
+        str(ref["uid"])
+        for ref in (meta.get("ownerReferences") or [])
+        if ref.get("uid") and ref.get("kind") == "Service" and ref.get("apiVersion") == "v1"
+    )
+
+
 def _labels(meta: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     """`metadata.labels` as a hashable tuple for frozen summaries (issue #44)."""
     labels = meta.get("labels")
@@ -335,10 +344,14 @@ class EndpointSliceSummary(GenericSummary):
     address_type: str = ""
     endpoints: int = 0
     ready_endpoints: int = 0
+    #: UIDs from ownerReferences with kind=='Service' and apiVersion=='v1' only.
+    #: Used for service-replacement / stale-owner checks (PR #212).
+    service_owner_uids: tuple[str, ...] = ()
 
     @classmethod
     def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> EndpointSliceSummary:
         base = GenericSummary.from_manifest(kind, manifest)
+        meta = manifest.get("metadata") or {}
         raw_endpoints = manifest.get("endpoints")
         endpoints = raw_endpoints if isinstance(raw_endpoints, list) else []
         ready_endpoints = sum(1 for item in endpoints if _endpoint_is_ready(item))
@@ -348,6 +361,7 @@ class EndpointSliceSummary(GenericSummary):
             address_type=str(manifest.get("addressType") or ""),
             endpoints=len(endpoints),
             ready_endpoints=ready_endpoints,
+            service_owner_uids=_service_owner_uids(meta),
         )
 
 
