@@ -81,6 +81,49 @@ def test_replaced_service_slice_is_stale_not_healthy() -> None:
     assert report.outcome == "incomplete"
     assert report.findings == ()
     assert report.gaps[0].source == "endpointslices/stale-owner"
+    assert (
+        report.gaps[0].reason
+        == "1 EndpointSlice is owned by a different Service UID than 'new-uid'."
+    )
+
+
+def test_owned_slice_with_missing_service_uid_is_stale() -> None:
+    report = analyze_service_endpoints(
+        _service(),
+        (_slice(owner_uids=("other",), endpoints=1, ready_endpoints=1),),
+    )
+    assert report.outcome == "incomplete"
+    assert report.findings == ()
+    assert report.gaps[0].source == "endpointslices/stale-owner"
+    assert (
+        report.gaps[0].reason
+        == "1 EndpointSlice is owned by a Service, but the Service UID is absent."
+    )
+
+
+def test_stale_owner_reason_uses_plural_grammar() -> None:
+    report = analyze_service_endpoints(
+        _service(uid="new-uid"),
+        (
+            _slice(name="web-1", uid="slice-1", owner_uids=("old-uid",)),
+            _slice(name="web-2", uid="slice-2", owner_uids=("old-uid",)),
+        ),
+    )
+    assert report.outcome == "incomplete"
+    assert report.gaps[0].reason
+    assert (
+        report.gaps[0].reason
+        == "2 EndpointSlices are owned by a different Service UID than 'new-uid'."
+    )
+
+
+def test_matching_requires_namespace_and_service_name() -> None:
+    report = analyze_service_endpoints(
+        _service(uid="svc-1", namespace="default"),
+        (_slice(namespace="other", owner_uids=("svc-1",), endpoints=1, ready_endpoints=1),),
+    )
+    assert report.outcome == "findings"
+    assert report.findings[0].rule_id == "service.no_endpoint_slices"
 
 
 def test_current_slices_without_ready_endpoints_warn() -> None:

@@ -118,7 +118,12 @@ def analyze_service_endpoints(
 
     matching = tuple(
         sorted(
-            (item for item in slices if item.service_name == service.identity.name),
+            (
+                item
+                for item in slices
+                if item.service_name == service.identity.name
+                and item.identity.namespace == service.identity.namespace
+            ),
             key=_slice_sort_key,
         )
     )
@@ -150,7 +155,7 @@ def _partition_current(
     current: list[EndpointSliceSnapshot] = []
     stale: list[EndpointSliceSnapshot] = []
     for item in slices:
-        if service_uid and item.owner_uids and service_uid not in item.owner_uids:
+        if item.owner_uids and (not service_uid or service_uid not in item.owner_uids):
             stale.append(item)
         else:
             current.append(item)
@@ -264,8 +269,13 @@ def _not_applicable_report(primary: ResourceIdentity) -> AnalysisReport:
 
 def _stale_reason(service: ServiceSnapshot, stale: Sequence[EndpointSliceSnapshot]) -> str:
     count = len(stale)
-    noun = "slice" if count == 1 else "slices"
-    return f"{count} EndpointSlice {noun} are owned by a different Service UID than {service.identity.uid!r}."
+    verb = "is" if count == 1 else "are"
+    if service.identity.uid:
+        return (
+            f"{count} EndpointSlice{'' if count == 1 else 's'} {verb} owned by a "
+            f"different Service UID than {service.identity.uid!r}."
+        )
+    return f"{count} EndpointSlice{'' if count == 1 else 's'} {verb} owned by a Service, but the Service UID is absent."
 
 
 def _resource_document(resource: ResourceIdentity) -> dict[str, str]:
