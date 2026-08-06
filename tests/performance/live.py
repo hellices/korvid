@@ -79,7 +79,7 @@ from kubernetes_asyncio import config as k8s_config
 from korvid.core.config import KorvidConfig
 from korvid.core.store import ALL_NAMESPACES, ResourceStore
 from korvid.core.watch import WatchManager, WatchSource
-from korvid.k8s.client import KubeClient, resolve_context_name
+from korvid.k8s.client import KubeClient, load_refreshable_kube_config, resolve_context_name
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import GenericSummary, PodSummary
@@ -418,8 +418,10 @@ class _KubeMutationClient:
         if self._core_v1 is not None:
             return
         configuration = k8s_client.Configuration()
-        await k8s_config.load_kube_config(
-            context=self._context, client_configuration=configuration, persist_config=False
+        await load_refreshable_kube_config(
+            context=self._context,
+            client_configuration=configuration,
+            persist_config=False,
         )
         self._api = k8s_client.ApiClient(configuration)
         self._core_v1 = k8s_client.CoreV1Api(self._api)

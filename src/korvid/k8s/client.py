@@ -10,7 +10,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast
 from urllib.parse import quote, urlencode
 
@@ -144,6 +144,54 @@ def list_context_names(config_file: str | None = None) -> tuple[list[str], str |
 #: Bound on the `:ctx` auth probe round trip (issue #36): a wedged target
 #: cluster must fail the switch quickly instead of hanging the flow.
 _PROBE_TIMEOUT = 10.0
+_EXEC_CREDENTIAL_REFRESH_SKEW = timedelta(minutes=5)
+_EXEC_CREDENTIAL_GENERATION_ATTR = "_korvid_exec_credential_generation"
+
+
+def _exec_credential_expires_soon(loader: object) -> bool:
+    expiry = getattr(loader, "exec_plugin_expiry", None)
+    if not isinstance(expiry, datetime):
+        return False
+    return expiry - _EXEC_CREDENTIAL_REFRESH_SKEW <= datetime.now(tz=expiry.tzinfo)
+
+
+async def load_refreshable_kube_config(
+    *,
+    context: str | None,
+    client_configuration: k8s_client.Configuration,
+    persist_config: bool,
+) -> None:
+    """Load kubeconfig and refresh expiring exec credentials before API calls."""
+    loader = await k8s_config.load_kube_config(
+        context=context,
+        client_configuration=client_configuration,
+        persist_config=persist_config,
+    )
+    if not isinstance(getattr(loader, "exec_plugin_expiry", None), datetime):
+        return
+
+    refresh_lock = asyncio.Lock()
+    refresh_generation = 0
+    setattr(client_configuration, _EXEC_CREDENTIAL_GENERATION_ATTR, refresh_generation)
+
+    async def _refresh(configuration: k8s_client.Configuration) -> None:
+        nonlocal refresh_generation
+        configuration_generation = getattr(configuration, _EXEC_CREDENTIAL_GENERATION_ATTR, 0)
+        if configuration_generation == refresh_generation and not _exec_credential_expires_soon(
+            loader
+        ):
+            return
+        async with refresh_lock:
+            configuration_generation = getattr(configuration, _EXEC_CREDENTIAL_GENERATION_ATTR, 0)
+            if configuration_generation < refresh_generation:
+                await asyncio.wait_for(loader.load_and_set(configuration), _PROBE_TIMEOUT)
+                setattr(configuration, _EXEC_CREDENTIAL_GENERATION_ATTR, refresh_generation)
+            elif _exec_credential_expires_soon(loader):
+                await asyncio.wait_for(loader.load_and_set(configuration), _PROBE_TIMEOUT)
+                refresh_generation += 1
+                setattr(configuration, _EXEC_CREDENTIAL_GENERATION_ATTR, refresh_generation)
+
+    client_configuration.refresh_api_key_hook = _refresh
 
 
 class KubeClient(ReadOps, WriteOps):
@@ -244,8 +292,14 @@ class KubeClient(ReadOps, WriteOps):
         return dataclasses.replace(summary, custom=evaluate_all(columns, manifest))
 
     async def connect(self, context: str | None = None) -> None:
-        await k8s_config.load_kube_config(context=context)
-        self._api = k8s_client.ApiClient()
+        configuration = k8s_client.Configuration()
+        await load_refreshable_kube_config(
+            context=context,
+            client_configuration=configuration,
+            persist_config=True,
+        )
+        k8s_client.Configuration.set_default(configuration)
+        self._api = k8s_client.ApiClient(configuration)
         self._core_v1 = k8s_client.CoreV1Api(self._api)
         # A new connection may target a different cluster; discard any
         # capability discovered against the previous one.
@@ -308,8 +362,17 @@ class KubeClient(ReadOps, WriteOps):
         already-torn-down session forever.
         """
         old_api = self._api
-        await asyncio.wait_for(k8s_config.load_kube_config(context=context), _PROBE_TIMEOUT)
-        self._api = k8s_client.ApiClient()
+        configuration = k8s_client.Configuration()
+        await asyncio.wait_for(
+            load_refreshable_kube_config(
+                context=context,
+                client_configuration=configuration,
+                persist_config=True,
+            ),
+            _PROBE_TIMEOUT,
+        )
+        k8s_client.Configuration.set_default(configuration)
+        self._api = k8s_client.ApiClient(configuration)
         self._core_v1 = k8s_client.CoreV1Api(self._api)
         # Per-connection caches describe the previous cluster.
         self._pod_resize_supported = None
@@ -375,12 +438,13 @@ class KubeClient(ReadOps, WriteOps):
         dedicated ``WsApiClient`` is created per session — it shares the
         kubeconfig ``connect()`` loaded — and closed with the session.
         """
-        if self._core_v1 is None:
+        if self._core_v1 is None or self._api is None:
             raise RuntimeError("connect() first")
+        configuration = self._api.configuration
 
         @asynccontextmanager
         async def _session() -> AsyncIterator[Any]:
-            ws_api = WsApiClient()
+            ws_api = WsApiClient(configuration)
             try:
                 core = k8s_client.CoreV1Api(ws_api)
                 kwargs: dict[str, Any] = {

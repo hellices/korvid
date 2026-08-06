@@ -14,9 +14,11 @@ import re
 from collections import Counter
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from kubernetes_asyncio import client as k8s_client
+from kubernetes_asyncio import config as k8s_config
 from multidict import CIMultiDict, CIMultiDictProxy
 
 from korvid.core.store import Summary
@@ -1480,6 +1482,31 @@ async def test_mutation_client_preserves_server_retry_after_hint(
 
     assert caught.value.body == body
     assert caught.value.retry_after_seconds == expected
+
+
+async def test_mutation_client_connect_uses_refreshable_kube_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    load_refreshable = AsyncMock()
+    api = MagicMock()
+    api_factory = MagicMock(return_value=api)
+    core_v1_factory = MagicMock()
+    monkeypatch.setattr(live, "load_refreshable_kube_config", load_refreshable, raising=False)
+    monkeypatch.setattr(k8s_config, "load_kube_config", AsyncMock())
+    monkeypatch.setattr(k8s_client, "ApiClient", api_factory)
+    monkeypatch.setattr(k8s_client, "CoreV1Api", core_v1_factory)
+
+    client = live._KubeMutationClient(CONTEXT, RUN_ID)
+    await client.connect()
+
+    load_refreshable.assert_awaited_once()
+    call = load_refreshable.await_args
+    assert call is not None
+    assert call.kwargs["context"] == CONTEXT
+    assert call.kwargs["persist_config"] is False
+    configuration = call.kwargs["client_configuration"]
+    api_factory.assert_called_once_with(configuration)
+    core_v1_factory.assert_called_once_with(api)
 
 
 async def test_mutation_retry_respects_server_hint_with_an_explicit_delay_bound() -> None:

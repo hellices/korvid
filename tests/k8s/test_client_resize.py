@@ -5,6 +5,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from kubernetes_asyncio import client as k8s_client
 
 from korvid.k8s.client import KubeClient
 
@@ -155,8 +156,12 @@ async def test_connect_resets_resize_discovery_cache(
     async def fake_load(*args: object, **kwargs: object) -> None:
         return None
 
+    def fake_api(configuration: k8s_client.Configuration) -> object:
+        assert isinstance(configuration, k8s_client.Configuration)
+        return object()
+
     monkeypatch.setattr("korvid.k8s.client.k8s_config.load_kube_config", fake_load)
-    monkeypatch.setattr("korvid.k8s.client.k8s_client.ApiClient", lambda: object())
+    monkeypatch.setattr("korvid.k8s.client.k8s_client.ApiClient", fake_api)
     monkeypatch.setattr("korvid.k8s.client.k8s_client.CoreV1Api", lambda api: object())
     client = KubeClient()
     client._pod_resize_supported = True

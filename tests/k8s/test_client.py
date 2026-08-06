@@ -1,3 +1,6 @@
+import asyncio
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,6 +16,195 @@ from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import ReplicaSetSummary
 from korvid.k8s.telemetry import ReadTelemetryEvent
+
+
+async def test_load_refreshable_kube_config_refreshes_expired_exec_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configuration = k8s_client.Configuration()
+    configuration.api_key["BearerToken"] = "stale-token"
+    loader = MagicMock()
+    loader.exec_plugin_expiry = datetime.now(UTC) - timedelta(seconds=1)
+
+    async def _refresh(target: k8s_client.Configuration) -> None:
+        target.api_key["BearerToken"] = "fresh-token"
+        loader.exec_plugin_expiry = datetime.now(UTC) + timedelta(hours=1)
+
+    loader.load_and_set = AsyncMock(side_effect=_refresh)
+    load_kube_config = AsyncMock(return_value=loader)
+    monkeypatch.setattr(k8s_config, "load_kube_config", load_kube_config)
+
+    await client_mod.load_refreshable_kube_config(
+        context="aks",
+        client_configuration=configuration,
+        persist_config=False,
+    )
+
+    assert await configuration.get_api_key_with_prefix("BearerToken") == "fresh-token"
+    loader.load_and_set.assert_awaited_once_with(configuration)
+
+
+async def test_load_refreshable_kube_config_serializes_concurrent_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configuration = k8s_client.Configuration()
+    configuration.api_key["BearerToken"] = "stale-token"
+    loader = MagicMock()
+    loader.exec_plugin_expiry = datetime.now(UTC) - timedelta(seconds=1)
+    in_flight = 0
+    max_in_flight = 0
+
+    async def _refresh(target: k8s_client.Configuration) -> None:
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        try:
+            await asyncio.sleep(0)
+            target.api_key["BearerToken"] = "fresh-token"
+            loader.exec_plugin_expiry = datetime.now(UTC) + timedelta(hours=1)
+        finally:
+            in_flight -= 1
+
+    loader.load_and_set = AsyncMock(side_effect=_refresh)
+    monkeypatch.setattr(
+        k8s_config,
+        "load_kube_config",
+        AsyncMock(return_value=loader),
+    )
+    await client_mod.load_refreshable_kube_config(
+        context="aks",
+        client_configuration=configuration,
+        persist_config=False,
+    )
+
+    tokens = await asyncio.gather(
+        configuration.get_api_key_with_prefix("BearerToken"),
+        configuration.get_api_key_with_prefix("BearerToken"),
+    )
+
+    assert len(tokens) == 2
+    assert all(token == "fresh-token" for token in tokens)
+    assert max_in_flight == 1
+    loader.load_and_set.assert_awaited_once_with(configuration)
+
+
+async def test_load_refreshable_kube_config_updates_stale_configuration_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configuration = k8s_client.Configuration()
+    configuration.api_key["BearerToken"] = "stale-token"
+    loader = MagicMock()
+    loader.exec_plugin_expiry = datetime.now(UTC) - timedelta(seconds=1)
+
+    async def _refresh(target: k8s_client.Configuration) -> None:
+        target.api_key["BearerToken"] = "fresh-token"
+        loader.exec_plugin_expiry = datetime.now(UTC) + timedelta(hours=1)
+
+    loader.load_and_set = AsyncMock(side_effect=_refresh)
+    monkeypatch.setattr(
+        k8s_config,
+        "load_kube_config",
+        AsyncMock(return_value=loader),
+    )
+    await client_mod.load_refreshable_kube_config(
+        context="aks",
+        client_configuration=configuration,
+        persist_config=False,
+    )
+    first_copy = deepcopy(configuration)
+    waiting_copy = deepcopy(configuration)
+
+    assert await first_copy.get_api_key_with_prefix("BearerToken") == "fresh-token"
+    assert await waiting_copy.get_api_key_with_prefix("BearerToken") == "fresh-token"
+    assert loader.load_and_set.await_count == 2
+
+
+async def test_load_refreshable_kube_config_leaves_static_tokens_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configuration = k8s_client.Configuration()
+    configuration.api_key["BearerToken"] = "static-token"
+    loader = MagicMock(spec=["load_and_set"])
+    loader.load_and_set = AsyncMock()
+    monkeypatch.setattr(
+        k8s_config,
+        "load_kube_config",
+        AsyncMock(return_value=loader),
+    )
+
+    await client_mod.load_refreshable_kube_config(
+        context="static",
+        client_configuration=configuration,
+        persist_config=False,
+    )
+
+    assert configuration.refresh_api_key_hook is None
+    assert await configuration.get_api_key_with_prefix("BearerToken") == "static-token"
+    loader.load_and_set.assert_not_awaited()
+
+
+async def test_load_refreshable_kube_config_keeps_generation_when_refresh_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed refresh must not mark other configuration copies as current."""
+    configuration = k8s_client.Configuration()
+    configuration.api_key["BearerToken"] = "stale-token"
+    loader = MagicMock()
+    loader.exec_plugin_expiry = datetime.now(UTC) - timedelta(seconds=1)
+    attempts: list[k8s_client.Configuration] = []
+
+    async def _refresh(target: k8s_client.Configuration) -> None:
+        attempts.append(target)
+        if len(attempts) == 1:
+            raise ConnectionError("kubelogin unavailable")
+        target.api_key["BearerToken"] = "fresh-token"
+        loader.exec_plugin_expiry = datetime.now(UTC) + timedelta(hours=1)
+
+    loader.load_and_set = AsyncMock(side_effect=_refresh)
+    monkeypatch.setattr(
+        k8s_config,
+        "load_kube_config",
+        AsyncMock(return_value=loader),
+    )
+    await client_mod.load_refreshable_kube_config(
+        context="aks",
+        client_configuration=configuration,
+        persist_config=False,
+    )
+    failing_copy = deepcopy(configuration)
+    other_copy = deepcopy(configuration)
+
+    with pytest.raises(ConnectionError, match="kubelogin unavailable"):
+        await failing_copy.get_api_key_with_prefix("BearerToken")
+
+    assert await other_copy.get_api_key_with_prefix("BearerToken") == "fresh-token"
+    assert await failing_copy.get_api_key_with_prefix("BearerToken") == "fresh-token"
+
+
+async def test_connect_uses_refreshable_kube_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    load_refreshable = AsyncMock()
+    api = MagicMock()
+    api_factory = MagicMock(return_value=api)
+    core_v1_factory = MagicMock()
+    set_default = MagicMock()
+    monkeypatch.setattr(client_mod, "load_refreshable_kube_config", load_refreshable)
+    monkeypatch.setattr(k8s_config, "load_kube_config", AsyncMock())
+    monkeypatch.setattr(k8s_client, "ApiClient", api_factory)
+    monkeypatch.setattr(k8s_client, "CoreV1Api", core_v1_factory)
+    monkeypatch.setattr(k8s_client.Configuration, "set_default", set_default)
+
+    client = KubeClient()
+    await client.connect("aks")
+
+    load_refreshable.assert_awaited_once()
+    call = load_refreshable.await_args
+    assert call is not None
+    assert call.kwargs["context"] == "aks"
+    assert call.kwargs["persist_config"] is True
+    configuration = call.kwargs["client_configuration"]
+    set_default.assert_called_once_with(configuration)
+    api_factory.assert_called_once_with(configuration)
+    core_v1_factory.assert_called_once_with(api)
 
 
 def _pod(name: str, ns: str = "default") -> dict[str, Any]:
@@ -1499,10 +1691,14 @@ class TestOpenPodExec:
 
     async def test_opens_ws_with_exec_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sentinel_ws = object()
+        sentinel_configuration = object()
         closed: list[bool] = []
         captured: dict[str, object] = {}
 
         class FakeWsApi:
+            def __init__(self, configuration: object) -> None:
+                captured["configuration"] = configuration
+
             async def close(self) -> None:
                 closed.append(True)
 
@@ -1528,12 +1724,15 @@ class TestOpenPodExec:
         monkeypatch.setattr(client_mod, "WsApiClient", FakeWsApi)
         monkeypatch.setattr(k8s_client, "CoreV1Api", FakeCoreWs)
         kube = client_mod.KubeClient()
+        kube._api = MagicMock()
+        kube._api.configuration = sentinel_configuration
         kube._core_v1 = object()  # type: ignore[assignment]  # connected marker
 
         async with kube.open_pod_exec(
             "prod", "api-0", "app", ["tar", "cf", "-"], stdin=False
         ) as ws:
             assert ws is sentinel_ws
+        assert captured["configuration"] is sentinel_configuration
         assert captured["name"] == "api-0"
         assert captured["namespace"] == "prod"
         assert captured["command"] == ["tar", "cf", "-"]
@@ -1549,6 +1748,9 @@ class TestOpenPodExec:
         captured: dict[str, object] = {}
 
         class FakeWsApi:
+            def __init__(self, configuration: object) -> None:
+                pass
+
             async def close(self) -> None:
                 return None
 
@@ -1572,6 +1774,7 @@ class TestOpenPodExec:
         monkeypatch.setattr(client_mod, "WsApiClient", FakeWsApi)
         monkeypatch.setattr(k8s_client, "CoreV1Api", FakeCoreWs)
         kube = client_mod.KubeClient()
+        kube._api = MagicMock()
         kube._core_v1 = object()  # type: ignore[assignment]  # connected marker
 
         async with kube.open_pod_exec("ns", "p", None, ["tar"], stdin=True):
@@ -1583,6 +1786,9 @@ class TestOpenPodExec:
         closed: list[bool] = []
 
         class FakeWsApi:
+            def __init__(self, configuration: object) -> None:
+                pass
+
             async def close(self) -> None:
                 closed.append(True)
 
@@ -1596,6 +1802,7 @@ class TestOpenPodExec:
         monkeypatch.setattr(client_mod, "WsApiClient", FakeWsApi)
         monkeypatch.setattr(k8s_client, "CoreV1Api", FakeCoreWs)
         kube = client_mod.KubeClient()
+        kube._api = MagicMock()
         kube._core_v1 = object()  # type: ignore[assignment]  # connected marker
 
         with pytest.raises(OSError, match="boom"):
@@ -1918,6 +2125,31 @@ class TestProbeContext:
 
 
 class TestSwitchContext:
+    async def test_uses_refreshable_kube_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        load_refreshable = AsyncMock()
+        api = MagicMock()
+        api_factory = MagicMock(return_value=api)
+        core_v1_factory = MagicMock()
+        set_default = MagicMock()
+        monkeypatch.setattr(client_mod, "load_refreshable_kube_config", load_refreshable)
+        monkeypatch.setattr(k8s_config, "load_kube_config", AsyncMock())
+        monkeypatch.setattr(k8s_client, "ApiClient", api_factory)
+        monkeypatch.setattr(k8s_client, "CoreV1Api", core_v1_factory)
+        monkeypatch.setattr(k8s_client.Configuration, "set_default", set_default)
+
+        kube = KubeClient()
+        await kube.switch_context("ctx-b")
+
+        load_refreshable.assert_awaited_once()
+        call = load_refreshable.await_args
+        assert call is not None
+        assert call.kwargs["context"] == "ctx-b"
+        assert call.kwargs["persist_config"] is True
+        configuration = call.kwargs["client_configuration"]
+        set_default.assert_called_once_with(configuration)
+        api_factory.assert_called_once_with(configuration)
+        core_v1_factory.assert_called_once_with(api)
+
     async def test_swaps_connection_and_closes_old(self, monkeypatch: pytest.MonkeyPatch) -> None:
 
         load_calls: list[dict[str, Any]] = []
