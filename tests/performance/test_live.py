@@ -2201,6 +2201,29 @@ def _identity_deps(command_runner: Callable[[Any], Awaitable[CommandResult]]) ->
     )
 
 
+async def test_run_live_replay_bounds_the_az_aks_show_lookup() -> None:
+    """The first external `az aks show` call in the identity gate can hang on a
+    stuck credential/exec plugin; it must be bounded by the read/connect timeout,
+    not block the fail-closed gate forever."""
+
+    async def hanging_command_runner(_args: Any) -> CommandResult:
+        await asyncio.sleep(30)
+        return CommandResult(0, "{}", "")
+
+    deps = _identity_deps(hanging_command_runner)
+
+    with pytest.raises(TimeoutError):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+            limits=LiveLimits(read_connect_timeout_seconds=0.05),
+        )
+
+
 async def test_run_live_replay_rejects_wrong_resource_group_before_mutation() -> None:
     deps = _identity_deps(_ok_command_runner(resource_group="rg-production"))
     with pytest.raises(ValueError, match="resource group"):

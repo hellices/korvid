@@ -552,9 +552,10 @@ async def _verify_cluster_identity(
     async with asyncio.timeout(limits.read_connect_timeout_seconds):
         hostname = await deps.context_host(context)
 
-    result = await deps.command_runner(
-        ["az", "aks", "show", "--ids", expected_cluster_id, "-o", "json"]
-    )
+    async with asyncio.timeout(limits.read_connect_timeout_seconds):
+        result = await deps.command_runner(
+            ["az", "aks", "show", "--ids", expected_cluster_id, "-o", "json"]
+        )
     if result.exit_code != 0:
         raise ValueError(f"az aks show failed (exit {result.exit_code}): {result.stderr.strip()}")
     try:
