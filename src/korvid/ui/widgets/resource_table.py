@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import cast
+from datetime import UTC, datetime
+from typing import Final, cast
 
 from rich.cells import cell_len
 from rich.text import Text
@@ -33,6 +34,10 @@ from korvid.ui.theme import phase_style, ready_style, restarts_style, usage_styl
 
 #: Looks up live metrics for (namespace, name); None disables the join.
 MetricsLookup = Callable[[str, str], PodMetrics | None]
+
+#: `_emit_row(stamp=...)` sentinel: this row opts out of the memo. Distinct
+#: from `None`, which is a legitimate stamp (a row with no volatile inputs).
+_NO_STAMP: Final = object()
 
 _POD_COLS = (
     "NAME",
@@ -350,6 +355,16 @@ class ResourceTable(DataTable[str | Text]):
         self._last_sort = None
         self._active_view = None
         self._pending_rows: list[tuple[str, list[str | Text]]] = []
+        #: Per-row cell memo (issue #208): row key -> (summary, stamp, row).
+        #: Keeps a repaint proportional to the rows that actually changed.
+        self._row_memo: dict[str, tuple[Summary, object, tuple[str, list[str | Text]]]] = {}
+        #: Cell-set shape the memo was built for; a change invalidates it.
+        self._memo_signature: tuple[str, bool, ViewConfig | None] | None = None
+        #: Cells currently in the table, so the diff never has to read them
+        #: back out of the DataTable one `get_row` at a time.
+        self._emitted: dict[str, list[str | Text]] = {}
+        #: Single clock reading per repaint; see `show()`.
+        self._render_now: datetime = datetime.now(UTC)
 
     def show(
         self,
@@ -380,6 +395,17 @@ class ResourceTable(DataTable[str | Text]):
             self._active_view,
         )
         restore = self._cursor_snapshot() if same_view else None
+        # One clock reading per repaint: every AGE cell is derived from the
+        # same instant, and the memo below can compare age strings without
+        # each row racing its own `datetime.now()`.
+        self._render_now = datetime.now(UTC)
+        # The memo holds finished cell lists, so it is only valid while the
+        # cell set has the same shape. Sort is deliberately absent: it
+        # reorders rows and decorates headers, it does not change any cell.
+        signature = (kind, all_namespaces, view)
+        if signature != self._memo_signature:
+            self._row_memo.clear()
+            self._memo_signature = signature
         # Build the desired rows first (the builders only fill
         # `_pending_rows`), so a pure data refresh can be diffed against the
         # current table instead of clearing and rebuilding it.
@@ -389,6 +415,7 @@ class ResourceTable(DataTable[str | Text]):
             kind, rows, all_namespaces=all_namespaces, pattern=pattern, metrics=metrics, sort=sort
         )
         pending, self._pending_rows = self._pending_rows, []
+        self._prune_memo(pending)
         if same_view and sort == self._last_sort and self._apply_in_place(pending):
             # Nothing was cleared, so the scroll offset never moved; only
             # the cursor may have slid when rows above it were removed —
@@ -431,6 +458,7 @@ class ResourceTable(DataTable[str | Text]):
             self.clear()
         for key, cells in pending:
             self.add_row(*cells, key=key)
+        self._emitted = dict(pending)
         if restore is not None:
             # A background refresh must not scroll the cursor back into
             # view — the viewport restore below keeps the user's position.
@@ -488,6 +516,14 @@ class ResourceTable(DataTable[str | Text]):
         place; returns False when the update needs the rebuild path (see
         `_in_place_plan` for the eligibility rules).
 
+        The comparison runs against `_emitted` — the cells this widget last
+        put into the table — rather than `DataTable.get_row()`, which re-derives
+        `ordered_columns` on every call and would make an untouched repaint
+        cost one lookup plus a full cell comparison per row (issue #208).
+        A memo hit re-emits the *same* cell list, so an unchanged row is
+        settled by one identity check. `get_row` remains the fallback whenever
+        `_emitted` has no record of a row.
+
         Width updates are requested only for cells wider than their column:
         `update_width=True` is not grow-only — a narrower replacement rescans
         and *shrinks* the column, shifting the layout this path must keep
@@ -502,15 +538,32 @@ class ResourceTable(DataTable[str | Text]):
             self.remove_row(key)
         columns = self.ordered_columns
         for key, cells in pending:
-            if key in current_set:
-                old_cells = self.get_row(key)
-                for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
-                    if not _cells_equal(old_cell, new_cell):
-                        grew = _cell_width(new_cell) > column.content_width
-                        self.update_cell(key, column.key, new_cell, update_width=grew)
-            else:
+            if key not in current_set:
                 self.add_row(*cells, key=key)
+                continue
+            old_cells = self._emitted.get(key)
+            if old_cells is cells:
+                continue  # memo hit: same list object, nothing can have changed
+            if old_cells is None:
+                old_cells = self.get_row(key)
+            for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
+                if not _cells_equal(old_cell, new_cell):
+                    grew = _cell_width(new_cell) > column.content_width
+                    self.update_cell(key, column.key, new_cell, update_width=grew)
+        self._emitted = dict(pending)
         return True
+
+    def _prune_memo(self, pending: list[tuple[str, list[str | Text]]]) -> None:
+        """Drop memo entries for rows no longer rendered.
+
+        Left alone the memo would grow for the lifetime of the session as pod
+        names churn. Pruning is amortised: it only runs once the memo has
+        drifted well past the rendered set, so the common repaint stays free.
+        """
+        if len(self._row_memo) <= 4 * len(pending) + 1024:
+            return
+        live = {key for key, _ in pending}
+        self._row_memo = {key: entry for key, entry in self._row_memo.items() if key in live}
 
     def _cursor_snapshot(self) -> tuple[str, int] | None:
         """(row key, row index) under the cursor, or None on an empty table."""
@@ -531,7 +584,14 @@ class ResourceTable(DataTable[str | Text]):
             row = min(index, self.row_count - 1)
         self.move_cursor(row=row, animate=False, scroll=scroll)
 
-    def _emit_row(self, obj: Summary, cells: list[str | Text], *, all_namespaces: bool) -> None:
+    def _emit_row(
+        self,
+        obj: Summary,
+        cells: list[str | Text],
+        *,
+        all_namespaces: bool,
+        stamp: object = _NO_STAMP,
+    ) -> None:
         """Finish one row: apply the custom view (issue #45), prepend the
         namespace in all-namespaces mode, and buffer it keyed by ns/name for
         `show()` to diff or add.
@@ -539,6 +599,12 @@ class ResourceTable(DataTable[str | Text]):
         *cells* is the kind's default cell list without the namespace. Rows
         whose summaries carry fewer custom values than configured (e.g.
         seeded before the config existed) pad with `<none>`.
+
+        *stamp* is everything the cells depend on that is *not* carried by the
+        frozen summary itself (the age string, plus the metrics sample on the
+        pods view). It is memoised with the row so `_reuse_row` can prove the
+        cells would come out identical; `_NO_STAMP` opts a caller out of the
+        memo entirely.
         """
         view = self._active_view
         if view is not None:
@@ -549,7 +615,23 @@ class ResourceTable(DataTable[str | Text]):
             cells = [cells[0], *extras] if view.replace else [*cells, *extras]
         if all_namespaces:
             cells.insert(0, obj.namespace)
-        self._pending_rows.append((f"{obj.namespace}/{obj.name}", cells))
+        row = (f"{obj.namespace}/{obj.name}", cells)
+        self._pending_rows.append(row)
+        if stamp is not _NO_STAMP:
+            self._row_memo[row[0]] = (obj, stamp, row)
+
+    def _reuse_row(self, obj: Summary, stamp: object) -> bool:
+        """Re-emit *obj*'s memoised row when nothing feeding its cells changed.
+
+        Watch events replace the whole frozen summary, so an identity hit
+        proves every summary-derived cell is unchanged; *stamp* covers the
+        rest. Returns False when the row must be rebuilt.
+        """
+        entry = self._row_memo.get(f"{obj.namespace}/{obj.name}")
+        if entry is None or entry[0] is not obj or entry[1] != stamp:
+            return False
+        self._pending_rows.append(entry[2])
+        return True
 
     def _render_rows(
         self,
@@ -621,10 +703,17 @@ class ResourceTable(DataTable[str | Text]):
         pods = cast(list[PodSummary], rows)
         if not presorted:
             pods = sorted(pods, key=_pod_sort_key)
+        now = self._render_now
         for pod in pods:
             if pattern and pattern.lower() not in pod.name.lower():
                 continue
             usage = metrics(pod.namespace, pod.name) if metrics is not None else None
+            age = pod.age(now)
+            # Everything else on this row is derived from the frozen summary,
+            # so the live metrics sample and the age are the whole stamp.
+            stamp = (age, usage)
+            if self._reuse_row(pod, stamp):
+                continue
             cells: list[str | Text] = [
                 pod.name,
                 _ready_cell(pod.ready),
@@ -634,10 +723,10 @@ class ResourceTable(DataTable[str | Text]):
                 f"{pod.cpu_request}/{pod.cpu_limit}",
                 f"{pod.mem_request}/{pod.mem_limit}",
                 Text(pod.qos, style=_QOS_STYLE.get(pod.qos, "dim")),
-                pod.age(),
+                age,
                 pod.node or "-",
             ]
-            self._emit_row(pod, cells, all_namespaces=all_namespaces)
+            self._emit_row(pod, cells, all_namespaces=all_namespaces, stamp=stamp)
 
     def _add_replicaset_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
@@ -664,18 +753,23 @@ class ResourceTable(DataTable[str | Text]):
             if pattern and pattern.lower() not in obj.name.lower():
                 continue
             if isinstance(obj, ReplicaSetSummary):
+                age = obj.age(self._render_now)
+                if self._reuse_row(obj, age):
+                    continue
                 cells: list[str | Text] = [
                     obj.name,
                     obj.revision,
                     str(obj.desired),
                     str(obj.current),
                     _ready_cell(obj.ready),
-                    obj.age(),
+                    age,
                 ]
             else:
-                age = obj.age() if isinstance(obj, GenericSummary) else ""
+                age = obj.age(self._render_now) if isinstance(obj, GenericSummary) else ""
+                if self._reuse_row(obj, age):
+                    continue
                 cells = [obj.name, "", "", "", "", age]
-            self._emit_row(obj, cells, all_namespaces=all_namespaces)
+            self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=age)
 
     def _add_helm_release_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
@@ -686,15 +780,18 @@ class ResourceTable(DataTable[str | Text]):
         for rel in releases:
             if pattern and pattern.lower() not in rel.name.lower():
                 continue
+            age = rel.age(self._render_now)
+            if self._reuse_row(rel, age):
+                continue
             cells: list[str | Text] = [
                 rel.name,
                 str(rel.revision),
                 _helm_status_cell(rel.status),
                 rel.chart,
                 rel.app_version,
-                rel.age(),
+                age,
             ]
-            self._emit_row(rel, cells, all_namespaces=all_namespaces)
+            self._emit_row(rel, cells, all_namespaces=all_namespaces, stamp=age)
 
     def _add_helm_revision_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
@@ -706,6 +803,9 @@ class ResourceTable(DataTable[str | Text]):
         for rev in revisions:
             if pattern and pattern.lower() not in rev.name.lower():
                 continue
+            age = rev.age(self._render_now)
+            if self._reuse_row(rev, age):
+                continue
             cells: list[str | Text] = [
                 rev.name,
                 str(rev.revision),
@@ -713,9 +813,9 @@ class ResourceTable(DataTable[str | Text]):
                 rev.chart,
                 rev.app_version,
                 rev.description,
-                rev.age(),
+                age,
             ]
-            self._emit_row(rev, cells, all_namespaces=all_namespaces)
+            self._emit_row(rev, cells, all_namespaces=all_namespaces, stamp=age)
 
     def _add_fallback_rows(
         self,
@@ -734,9 +834,11 @@ class ResourceTable(DataTable[str | Text]):
         for obj in rows:
             if pattern and pattern.lower() not in obj.name.lower():
                 continue
-            age = obj.age() if isinstance(obj, GenericSummary) else ""
+            age = obj.age(self._render_now) if isinstance(obj, GenericSummary) else ""
+            if self._reuse_row(obj, age):
+                continue
             cells: list[str | Text] = [obj.name, *[""] * (width - 2), age]
-            self._emit_row(obj, cells, all_namespaces=all_namespaces)
+            self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=age)
 
     def _add_package_rows(
         self, rows: list[Summary], *, all_namespaces: bool, pattern: str, presorted: bool = False
@@ -747,15 +849,18 @@ class ResourceTable(DataTable[str | Text]):
         for pkg in packages:
             if pattern and pattern.lower() not in pkg.name.lower():
                 continue
+            age = pkg.age(self._render_now)
+            if self._reuse_row(pkg, age):
+                continue
             cells: list[str | Text] = [
                 pkg.name,
                 pkg.catalog or "-",
                 pkg.default_channel or "-",
                 ",".join(pkg.channels) or "-",
                 pkg.description or "-",
-                pkg.age(),
+                age,
             ]
-            self._emit_row(pkg, cells, all_namespaces=all_namespaces)
+            self._emit_row(pkg, cells, all_namespaces=all_namespaces, stamp=age)
         fallbacks = [r for r in rows if not isinstance(r, PackageManifestSummary)]
         self._add_fallback_rows(
             fallbacks,
@@ -774,15 +879,18 @@ class ResourceTable(DataTable[str | Text]):
         for sub in subs:
             if pattern and pattern.lower() not in sub.name.lower():
                 continue
+            age = sub.age(self._render_now)
+            if self._reuse_row(sub, age):
+                continue
             cells: list[str | Text] = [
                 sub.name,
                 sub.channel or "-",
                 sub.source or "-",
                 sub.installed_csv or "-",
                 sub.state or "-",
-                sub.age(),
+                age,
             ]
-            self._emit_row(sub, cells, all_namespaces=all_namespaces)
+            self._emit_row(sub, cells, all_namespaces=all_namespaces, stamp=age)
         fallbacks = [r for r in rows if not isinstance(r, OLMSubscriptionSummary)]
         self._add_fallback_rows(
             fallbacks,
@@ -801,14 +909,17 @@ class ResourceTable(DataTable[str | Text]):
         for csv in csvs:
             if pattern and pattern.lower() not in csv.name.lower():
                 continue
+            age = csv.age(self._render_now)
+            if self._reuse_row(csv, age):
+                continue
             cells: list[str | Text] = [
                 csv.name,
                 csv.display_name or "-",
                 csv.version or "-",
                 _csv_phase_cell(csv.phase),
-                csv.age(),
+                age,
             ]
-            self._emit_row(csv, cells, all_namespaces=all_namespaces)
+            self._emit_row(csv, cells, all_namespaces=all_namespaces, stamp=age)
         fallbacks = [r for r in rows if not isinstance(r, CSVSummary)]
         self._add_fallback_rows(
             fallbacks,
@@ -827,5 +938,8 @@ class ResourceTable(DataTable[str | Text]):
         for obj in generics:
             if pattern and pattern.lower() not in obj.name.lower():
                 continue
-            cells: list[str | Text] = [obj.name, obj.age()]
-            self._emit_row(obj, cells, all_namespaces=all_namespaces)
+            age = obj.age(self._render_now)
+            if self._reuse_row(obj, age):
+                continue
+            cells: list[str | Text] = [obj.name, age]
+            self._emit_row(obj, cells, all_namespaces=all_namespaces, stamp=age)
