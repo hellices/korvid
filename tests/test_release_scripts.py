@@ -1220,18 +1220,20 @@ def test_release_workflow_smokes_the_downloaded_wheel_once_without_rebuilding() 
 # --- the dry-run source policy compares against the live remote -------------
 
 
-def test_release_workflow_fetches_the_live_trusted_branch_before_the_source_policy() -> None:
-    """`actions/checkout` can leave `origin/main` at the dispatched SHA, which
-    would make the dry-run HEAD comparison vacuous."""
+def test_release_workflow_refreshes_live_source_refs_before_source_policy() -> None:
     workflow = _release_workflow()
     verify = workflow.index("\n  verify:")
     build = workflow.index("\n  build:")
     verify_job = workflow[verify:build]
-    fetch = verify_job.index(
-        'git fetch --force --no-tags origin "refs/heads/main:refs/remotes/origin/main"'
-    )
-    assert fetch < verify_job.index("check_dry_run.py origin/main")
-    assert fetch < verify_job.index("check_source.py")
+    branch_fetch = verify_job.index('"refs/heads/main:refs/remotes/origin/main"')
+    tag_fetch = verify_job.index('git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"')
+    dry_run_check = verify_job.index("check_dry_run.py origin/main")
+    source_check = verify_job.index("check_source.py")
+
+    assert branch_fetch < dry_run_check
+    assert tag_fetch < source_check
+    assert verify_job.index('if [ "$EVENT_NAME" = "push" ]', branch_fetch) < tag_fetch
+    assert "TAG: ${{ github.ref_name }}" in verify_job
     assert "fetch-depth: 0" in verify_job
 
 

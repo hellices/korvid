@@ -37,12 +37,20 @@ jobs:
           version: "0.10.9"
           # Publishing workflow: caching is a poisoning vector (zizmor).
           enable-cache: false
-      - name: Fetch the live trusted branch head
+      - name: Fetch the live trusted source refs
         # actions/checkout can leave refs/remotes/origin/main pointing at the
         # ref this run was dispatched from, which would make the dry run's
         # HEAD == origin/main comparison vacuous. Refresh it from the remote
         # before any source policy reads it.
-        run: git fetch --force --no-tags origin "refs/heads/main:refs/remotes/origin/main"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --force --no-tags origin \
+            "refs/heads/main:refs/remotes/origin/main"
+          if [ "$EVENT_NAME" = "push" ]; then
+            git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"
+          fi
       - id: version
         env:
           EVENT_NAME: ${{ github.event_name }}
