@@ -142,3 +142,16 @@ def test_aks_live_1k_profile_matches_the_published_live_plan() -> None:
     )
     assert profile.failures == ()
     assert planned_event_count(profile) == 43200
+
+
+@pytest.mark.parametrize(
+    "kind", ["gone", "throttled", "forbidden", "slow", "metrics_unavailable", "slow_logs"]
+)
+def test_load_profile_accepts_every_versioned_failure_kind(tmp_path: Path, kind: str) -> None:
+    profile = load_profile(_write(tmp_path, failures=[{"kind": kind, "at_event": 10}]))
+    assert profile.failures[0].kind == kind
+
+
+def test_load_profile_rejects_unknown_failure_kind(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="kind must be one of"):
+        load_profile(_write(tmp_path, failures=[{"kind": "meltdown", "at_event": 10}]))

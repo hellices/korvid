@@ -18,12 +18,13 @@ from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
 from korvid.core.watch import WatchManager
 from korvid.ui.messages import ResourcesUpdated
 from tests.performance.metrics import BenchmarkRecorder, RunManifest
-from tests.performance.profile import FailureInjection, WorkloadProfile
+from tests.performance.profile import Burst, FailureInjection, WorkloadProfile
 from tests.performance.replay import (
     MeasuredKorvidApp,
     ReplayAborted,
     ReplayOptions,
     build_manifest,
+    resolve_korvid_sha,
     run_replay,
 )
 from tests.performance.workload import apply_events, initial_pods, scheduled_events, summary_digest
@@ -75,7 +76,7 @@ async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:
     assert report.expected_digest == oracle
     assert report.final_digest == oracle
     assert report.dropped_updates == 0
-    assert report.rendered_updates == 110
+    assert report.rendered_updates == 10
     assert report.input_latency.count > 0
     assert report.churn_started_before_input
     assert report.api.operations["list"] == 1
@@ -354,3 +355,148 @@ async def test_measured_app_counts_only_resource_update_renders() -> None:
     report = recorder.report(_manifest_for_test(), (), final_digest="d")
     assert report.render_passes == 1
     assert report.rendered_updates == 1
+
+
+async def test_replay_measures_list_phase_separately_from_watch_events() -> None:
+    """Initial LIST rows must not be counted as event-to-render samples; they
+    are timed as a separate LIST-to-populated-table startup phase, so replay
+    p95 is comparable with the live watch-only event-to-render metric."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="list-sep",
+        seed=186,
+        object_count=100,
+        namespace_count=10,
+        steady_events_per_second=10,
+        duration_seconds=1,
+        bursts=(),
+        failures=(),
+    )
+    report = await run_replay(profile, ReplayOptions(time_scale=0))
+
+    # 10 scheduled watch events, and *only* those, are event-to-render samples.
+    assert len(scheduled_events(profile)) == 10
+    assert report.event_to_render.count == 10
+    assert report.rendered_updates == 10
+
+    # The LIST-to-populated-table and startup phases are measured explicitly.
+    assert report.phases.list_to_populated_table_seconds is not None
+    assert report.phases.list_to_populated_table_seconds >= 0.0
+    assert report.phases.process_start_to_interactive_seconds is not None
+    assert report.phases.process_start_to_interactive_seconds >= 0.0
+
+
+async def test_replay_records_post_burst_drain_and_backlog_depth() -> None:
+    """A burst produces a measurable backlog and a post-burst drain sample."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="burst-drain",
+        seed=186,
+        object_count=50,
+        namespace_count=5,
+        steady_events_per_second=5,
+        duration_seconds=3,
+        bursts=(Burst(start_second=1, duration_seconds=1, events_per_second=40),),
+        failures=(),
+    )
+    report = await run_replay(profile, ReplayOptions(time_scale=0))
+
+    assert report.phases.max_backlog_depth >= 1
+    assert report.phases.post_burst_drain_seconds != ()
+    assert report.phases.max_post_burst_drain_seconds is not None
+
+
+def test_resolve_korvid_sha_prefers_github_sha_then_git_head() -> None:
+    sha = "a" * 40
+    other = "b" * 40
+    assert resolve_korvid_sha(env={"GITHUB_SHA": sha}, git_head=lambda: other) == sha
+    assert resolve_korvid_sha(env={}, git_head=lambda: other) == other
+    # A non-immutable / missing value resolves to None rather than a fake SHA.
+    assert resolve_korvid_sha(env={"GITHUB_SHA": "dev"}, git_head=lambda: None) is None
+
+
+def test_build_manifest_records_resolved_sha() -> None:
+    sha = "c" * 40
+    manifest = build_manifest(_manifest_profile(), korvid_sha=sha)
+    assert manifest.korvid_sha == sha
+
+
+def test_build_manifest_marks_unresolved_offline_sha_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.performance.replay as replay_module
+
+    monkeypatch.setattr(replay_module, "resolve_korvid_sha", lambda: None)
+    manifest = build_manifest(_manifest_profile())
+    assert manifest.korvid_sha == "unknown"
+
+
+async def test_replay_metrics_unavailable_keeps_resource_navigation_healthy() -> None:
+    """`metrics_unavailable` records evidence on the metrics read path while the
+    resource watch/render reaches the oracle digest with zero drops - proving
+    navigation is independent of the metrics poller."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="metrics-unavail",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=20,
+        duration_seconds=2,
+        bursts=(),
+        failures=(FailureInjection(kind="metrics_unavailable", at_event=5),),
+    )
+    report = await run_replay(profile, ReplayOptions(time_scale=0))
+    events = scheduled_events(profile)
+    oracle = summary_digest(apply_events(initial_pods(profile), events))
+
+    # The failing event is still delivered (not a hard fault), so no filtering.
+    assert report.expected_digest == oracle
+    assert report.final_digest == oracle
+    assert report.dropped_updates == 0
+    assert report.api.reconnects == 0
+    assert report.failures_injected["metrics_unavailable"] == 1
+    # Evidence lands on the metrics read path, never the pods path.
+    assert "/apis/metrics.k8s.io/v1beta1/pods" in report.api.paths
+
+
+async def test_replay_slow_logs_do_not_block_resource_progress() -> None:
+    """`slow_logs` records evidence on the log read path and adds no delay to
+    the resource schedule - resource watch/render progress is independent of log
+    consumption."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="slow-logs",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=20,
+        duration_seconds=2,
+        bursts=(),
+        failures=(FailureInjection(kind="slow_logs", at_event=40),),
+    )
+    virtual_time: list[float] = [0.0]
+    sleep_delays: list[float] = []
+
+    def virtual_monotonic() -> float:
+        return virtual_time[0]
+
+    async def virtual_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+        virtual_time[0] += delay
+        await asyncio.sleep(0)
+
+    report = await run_replay(
+        profile,
+        ReplayOptions(time_scale=1, monotonic_fn=virtual_monotonic, async_sleep=virtual_sleep),
+    )
+    events = scheduled_events(profile)
+    oracle = summary_digest(apply_events(initial_pods(profile), events))
+
+    assert report.expected_digest == oracle
+    assert report.final_digest == oracle
+    assert report.dropped_updates == 0
+    assert report.api.reconnects == 0
+    assert report.failures_injected["slow_logs"] == 1
+    # A slow log stream adds no extra sleep to the resource schedule.
+    assert sum(sleep_delays) == pytest.approx(events[-1].offset_seconds)

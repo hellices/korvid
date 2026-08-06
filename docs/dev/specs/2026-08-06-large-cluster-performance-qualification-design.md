@@ -179,7 +179,7 @@ of memory while remaining well inside the verified quota.
 ### Workload
 
 The workload generator creates 20 labelled namespaces named
-`korvid-performance-<run>-00` through `korvid-performance-<run>-19`, with 50
+`korvid-perf-<run>-0` through `korvid-perf-<run>-19`, with 50
 Pods in each. Pods use `registry.k8s.io/pause:3.10`, select the `perftest` pool,
 tolerate only the performance taint, and request 5 millicores and 16 MiB. Every
 namespace and Pod has:

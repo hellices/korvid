@@ -6,7 +6,7 @@ import tracemalloc
 from collections import Counter
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import monotonic
 from types import MappingProxyType
 
@@ -79,6 +79,19 @@ class ProcessSample:
 
 
 @dataclass(frozen=True)
+class NodePoolInfo:
+    """One AKS node pool's identity, Kubernetes version, and node count.
+
+    Part of the live run manifest so retained evidence records exactly which
+    node-pool topology was qualified (issue #186 / design "Fixed target").
+    """
+
+    name: str
+    kubernetes_version: str
+    node_count: int
+
+
+@dataclass(frozen=True)
 class RunManifest:
     profile_id: str
     profile_hash: str
@@ -88,6 +101,13 @@ class RunManifest:
     os: str
     cpu_count: int
     memory_bytes: int
+    #: Live-only cluster-matrix fields. Absent for deterministic replay, which
+    #: does not run against a real cluster; present for a live evidence run so
+    #: the retained report establishes which cluster was actually qualified.
+    context: str | None = None
+    cluster_id: str | None = None
+    kubernetes_version: str | None = None
+    node_pools: tuple[NodePoolInfo, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -97,9 +117,21 @@ class ProcessSummary:
     rss_bytes_max: int | None
     python_bytes_max: int | None
     rss_slope_mib_per_minute: float | None
+    #: Elapsed-seconds boundary below which samples are treated as warm-up
+    #: (process start plus initial table population) and excluded from the
+    #: steady-state RSS slope fit. The published budget is explicitly a
+    #: *post-warm-up* slope, so startup allocation must not contaminate it.
+    rss_slope_warmup_boundary_seconds: float
+    #: Number of post-warm-up samples the slope was actually fitted over.
+    rss_slope_sample_count: int
 
     @classmethod
-    def from_samples(cls, samples: Sequence[ProcessSample]) -> ProcessSummary:
+    def from_samples(
+        cls,
+        samples: Sequence[ProcessSample],
+        *,
+        warmup_boundary_seconds: float = 0.0,
+    ) -> ProcessSummary:
         if not samples:
             return cls(
                 sample_count=0,
@@ -107,13 +139,20 @@ class ProcessSummary:
                 rss_bytes_max=None,
                 python_bytes_max=None,
                 rss_slope_mib_per_minute=None,
+                rss_slope_warmup_boundary_seconds=warmup_boundary_seconds,
+                rss_slope_sample_count=0,
             )
+        steady_state = [
+            sample for sample in samples if sample.elapsed_seconds >= warmup_boundary_seconds
+        ]
         return cls(
             sample_count=len(samples),
             cpu_percent_max=max(sample.cpu_percent for sample in samples),
             rss_bytes_max=max(sample.rss_bytes for sample in samples),
             python_bytes_max=max(sample.python_bytes for sample in samples),
-            rss_slope_mib_per_minute=_least_squares_slope(samples),
+            rss_slope_mib_per_minute=_least_squares_slope(steady_state),
+            rss_slope_warmup_boundary_seconds=warmup_boundary_seconds,
+            rss_slope_sample_count=len(steady_state),
         )
 
 
@@ -225,17 +264,62 @@ class ChurnSummary:
 
 
 @dataclass(frozen=True)
+class ScenarioResult:
+    """Outcome and latency of one scoped UI-at-scale scenario driven through
+    the real Textual pilot during live churn (issue #186: filter, sort,
+    namespace switch, split pane, describe, multi-log)."""
+
+    name: str
+    latency_seconds: float
+    ok: bool
+
+
+@dataclass(frozen=True)
+class PhaseSummary:
+    """Explicit phase measurements the numeric budgets are stated against.
+
+    These are recorded from named lifecycle marks the harness emits, rather
+    than inferred from aggregate update counts, so each budget in the design
+    doc (process start to interactive table, LIST completion to populated
+    table, backlog depth, and post-burst drain time) has a machine-readable
+    counterpart in every report.
+    """
+
+    process_start_to_interactive_seconds: float | None
+    list_to_populated_table_seconds: float | None
+    max_backlog_depth: int
+    post_burst_drain_seconds: tuple[float, ...]
+    max_post_burst_drain_seconds: float | None
+
+
+@dataclass(frozen=True)
 class BenchmarkReport:
     manifest: RunManifest
     event_to_render: LatencySummary
     input_latency: LatencySummary
     process: ProcessSummary
     api: ApiSummary
+    phases: PhaseSummary
     rendered_updates: int
     render_passes: int
     coalesced_updates: int
     dropped_updates: int
     final_digest: str
+    #: The workload digest the run is expected to converge to. Persisting it
+    #: (and `digest_match`) means a report can demonstrate digest correctness
+    #: after the process exits and name which side differed. `None` only for
+    #: partial reports built without an oracle digest.
+    expected_digest: str | None = None
+    #: `True` only when an expected digest was supplied and equals the final
+    #: digest; pass/fail depends on this, so it is serialized explicitly.
+    digest_match: bool = False
+    #: How many of each injected failure kind (gone/throttled/forbidden/slow/
+    #: metrics_unavailable/slow_logs) were actually exercised, so a report is
+    #: self-describing evidence that a failure profile ran rather than a bare
+    #: schema literal.
+    failures_injected: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
+    #: Scoped UI-at-scale scenarios driven during live churn (empty offline).
+    ui_scenarios: tuple[ScenarioResult, ...] = ()
     #: Present only for runs that drive real mutations (live replay).
     churn: ChurnSummary | None = None
 
@@ -326,9 +410,50 @@ class BenchmarkRecorder:
         self._rendered_updates = 0
         self._render_passes = 0
         self._coalesced_updates = 0
+        self._max_backlog_depth = 0
+        self._process_start_at: float | None = None
+        self._list_complete_at: float | None = None
+        self._interactive_at: float | None = None
+        self._burst_end_pending: list[float] = []
+        self._post_burst_drains: list[float] = []
+        self._failures_injected: Counter[str] = Counter()
+        self._ui_scenarios: list[ScenarioResult] = []
 
     def record_event(self, sequence: int, received_at: float) -> None:
         self._pending_events.append((sequence, received_at))
+        self._max_backlog_depth = max(self._max_backlog_depth, len(self._pending_events))
+
+    def mark_process_start(self, at: float) -> None:
+        """Record the instant the benchmarked process/app began starting up.
+
+        Paired with `mark_interactive` to measure process-start-to-interactive
+        and to derive the steady-state RSS-slope warm-up boundary. First mark
+        wins so a later, redundant call cannot move the origin.
+        """
+        if self._process_start_at is None:
+            self._process_start_at = at
+
+    def mark_list_complete(self, at: float) -> None:
+        """Record when the initial LIST finished streaming its rows.
+
+        First mark wins: reconnect re-LISTs must not overwrite the initial
+        LIST-to-populated-table measurement.
+        """
+        if self._list_complete_at is None:
+            self._list_complete_at = at
+
+    def mark_interactive(self, at: float) -> None:
+        """Record when the table first became fully populated/interactive."""
+        if self._interactive_at is None:
+            self._interactive_at = at
+
+    def mark_burst_end(self, at: float) -> None:
+        """Record the end of a churn burst so post-burst drain can be timed.
+
+        The drain is resolved by `record_render` the next time the pending
+        backlog empties at or after this instant.
+        """
+        self._burst_end_pending.append(at)
 
     def pending_count(self) -> int:
         """Number of recorded events not yet flushed by a render pass.
@@ -356,12 +481,61 @@ class BenchmarkRecorder:
         self._coalesced_updates += max(len(pending) - 1, 0)
         for _, received_at in pending:
             self._event_to_render.append(rendered_at - received_at)
+        # The backlog is empty again: resolve every burst whose end has already
+        # passed into a drain measurement (end -> backlog-clear interval).
+        if self._burst_end_pending:
+            resolved = [end for end in self._burst_end_pending if end <= rendered_at]
+            for end in resolved:
+                self._post_burst_drains.append(rendered_at - end)
+            self._burst_end_pending = [end for end in self._burst_end_pending if end > rendered_at]
 
     def record_input(self, latency_seconds: float) -> None:
         self._input_latency.append(latency_seconds)
 
     def record_api(self, event: ReadTelemetryEvent) -> None:
         self._api_events.append(event)
+        # The first WATCH open follows the initial LIST completing on both the
+        # replay and live paths, so it is a uniform, telemetry-driven signal
+        # for the LIST-to-populated-table boundary (first mark wins).
+        if event.operation == "watch_open":
+            self.mark_list_complete(monotonic())
+
+    def record_failure(self, kind: str) -> None:
+        """Record that one injected failure of *kind* was actually exercised.
+
+        Report evidence that a failure profile ran - distinct from the profile
+        merely declaring it - covering every versioned kind, including
+        `metrics_unavailable` and `slow_logs` which do not raise on the
+        resource watch path.
+        """
+        self._failures_injected[kind] += 1
+
+    def record_scenario(self, name: str, latency_seconds: float, ok: bool) -> None:
+        """Record one scoped UI-at-scale scenario outcome and latency."""
+        self._ui_scenarios.append(ScenarioResult(name=name, latency_seconds=latency_seconds, ok=ok))
+
+    def phases(self) -> PhaseSummary:
+        """The explicit phase measurements derived from the lifecycle marks."""
+        startup: float | None = None
+        if self._process_start_at is not None and self._interactive_at is not None:
+            startup = self._interactive_at - self._process_start_at
+        list_to_table: float | None = None
+        if self._list_complete_at is not None and self._interactive_at is not None:
+            list_to_table = self._interactive_at - self._list_complete_at
+        return PhaseSummary(
+            process_start_to_interactive_seconds=startup,
+            list_to_populated_table_seconds=list_to_table,
+            max_backlog_depth=self._max_backlog_depth,
+            post_burst_drain_seconds=tuple(self._post_burst_drains),
+            max_post_burst_drain_seconds=(
+                max(self._post_burst_drains) if self._post_burst_drains else None
+            ),
+        )
+
+    def _warmup_boundary_seconds(self) -> float:
+        if self._process_start_at is None or self._interactive_at is None:
+            return 0.0
+        return max(self._interactive_at - self._process_start_at, 0.0)
 
     def report(
         self,
@@ -369,19 +543,28 @@ class BenchmarkRecorder:
         process_samples: Sequence[ProcessSample],
         *,
         final_digest: str,
+        expected_digest: str | None = None,
         churn: ChurnSummary | None = None,
     ) -> BenchmarkReport:
         return BenchmarkReport(
             manifest=manifest,
             event_to_render=LatencySummary.from_samples(self._event_to_render),
             input_latency=LatencySummary.from_samples(self._input_latency),
-            process=ProcessSummary.from_samples(process_samples),
+            process=ProcessSummary.from_samples(
+                process_samples,
+                warmup_boundary_seconds=self._warmup_boundary_seconds(),
+            ),
             api=ApiSummary.from_events(self._api_events),
+            phases=self.phases(),
             rendered_updates=self._rendered_updates,
             render_passes=self._render_passes,
             coalesced_updates=self._coalesced_updates,
             dropped_updates=len(self._pending_events),
             final_digest=final_digest,
+            expected_digest=expected_digest,
+            digest_match=expected_digest is not None and expected_digest == final_digest,
+            failures_injected=MappingProxyType(dict(sorted(self._failures_injected.items()))),
+            ui_scenarios=tuple(self._ui_scenarios),
             churn=churn,
         )
 
@@ -399,6 +582,17 @@ def report_payload(report: BenchmarkReport) -> dict[str, object]:
             "os": report.manifest.os,
             "cpu_count": report.manifest.cpu_count,
             "memory_bytes": report.manifest.memory_bytes,
+            "context": report.manifest.context,
+            "cluster_id": report.manifest.cluster_id,
+            "kubernetes_version": report.manifest.kubernetes_version,
+            "node_pools": [
+                {
+                    "name": pool.name,
+                    "kubernetes_version": pool.kubernetes_version,
+                    "node_count": pool.node_count,
+                }
+                for pool in report.manifest.node_pools
+            ],
         },
         "latency": {
             "event_to_render": {
@@ -422,6 +616,17 @@ def report_payload(report: BenchmarkReport) -> dict[str, object]:
             "rss_bytes_max": report.process.rss_bytes_max,
             "python_bytes_max": report.process.python_bytes_max,
             "rss_slope_mib_per_minute": report.process.rss_slope_mib_per_minute,
+            "rss_slope_warmup_boundary_seconds": (report.process.rss_slope_warmup_boundary_seconds),
+            "rss_slope_sample_count": report.process.rss_slope_sample_count,
+        },
+        "phases": {
+            "process_start_to_interactive_seconds": (
+                report.phases.process_start_to_interactive_seconds
+            ),
+            "list_to_populated_table_seconds": (report.phases.list_to_populated_table_seconds),
+            "max_backlog_depth": report.phases.max_backlog_depth,
+            "post_burst_drain_seconds": list(report.phases.post_burst_drain_seconds),
+            "max_post_burst_drain_seconds": report.phases.max_post_burst_drain_seconds,
         },
         "api": {
             "operations": api_operations,
@@ -441,7 +646,20 @@ def report_payload(report: BenchmarkReport) -> dict[str, object]:
             "dropped_updates": report.dropped_updates,
         },
         "churn": _churn_payload(report.churn),
-        "digests": {"final": report.final_digest},
+        "failures_injected": dict(report.failures_injected),
+        "ui_scenarios": [
+            {
+                "name": scenario.name,
+                "latency_seconds": scenario.latency_seconds,
+                "ok": scenario.ok,
+            }
+            for scenario in report.ui_scenarios
+        ],
+        "digests": {
+            "expected": report.expected_digest,
+            "final": report.final_digest,
+            "match": report.digest_match,
+        },
     }
 
 
@@ -463,13 +681,34 @@ def render_markdown(report: BenchmarkReport) -> str:
     operation_lines = [
         f"- {operation}: `{count}`" for operation, count in report.api.operations.items()
     ]
+    failure_lines = [
+        f"- {kind}: `{count}`" for kind, count in report.failures_injected.items()
+    ] or ["- none: `0`"]
+    scenario_lines = [
+        f"- {scenario.name}: `{_format_seconds(scenario.latency_seconds)}` "
+        f"(ok={str(scenario.ok).lower()})"
+        for scenario in report.ui_scenarios
+    ] or ["- none"]
+    manifest_lines = [
+        f"- Profile ID: `{report.manifest.profile_id}`",
+        f"- Profile hash: `{report.manifest.profile_hash}`",
+        f"- Korvid SHA: `{report.manifest.korvid_sha}`",
+    ]
+    if report.manifest.context is not None:
+        manifest_lines.append(f"- Context: `{report.manifest.context}`")
+    if report.manifest.cluster_id is not None:
+        manifest_lines.append(f"- Cluster ARM id: `{report.manifest.cluster_id}`")
+    if report.manifest.kubernetes_version is not None:
+        manifest_lines.append(f"- Kubernetes version: `{report.manifest.kubernetes_version}`")
+    for pool in report.manifest.node_pools:
+        manifest_lines.append(
+            f"- Node pool `{pool.name}`: {pool.node_count} node(s) at `{pool.kubernetes_version}`"
+        )
     lines = [
         "# Large-cluster benchmark report",
         "",
         "## Run manifest",
-        f"- Profile ID: `{report.manifest.profile_id}`",
-        f"- Profile hash: `{report.manifest.profile_hash}`",
-        f"- Korvid SHA: `{report.manifest.korvid_sha}`",
+        *manifest_lines,
         "",
         "## Latency",
         f"- Event to render p95: `{_format_seconds(report.event_to_render.p95_seconds)}`",
@@ -481,6 +720,17 @@ def render_markdown(report: BenchmarkReport) -> str:
         f"- CPU max: `{_format_float(report.process.cpu_percent_max)}`",
         f"- RSS max: `{_format_int(report.process.rss_bytes_max)}`",
         f"- RSS slope: `{_format_slope(report.process.rss_slope_mib_per_minute)}`",
+        f"- RSS slope warm-up boundary: "
+        f"`{_format_seconds(report.process.rss_slope_warmup_boundary_seconds)}`",
+        f"- RSS slope samples: `{report.process.rss_slope_sample_count}`",
+        "",
+        "## Phases",
+        f"- Process start to interactive: "
+        f"`{_format_seconds(report.phases.process_start_to_interactive_seconds)}`",
+        f"- LIST to populated table: "
+        f"`{_format_seconds(report.phases.list_to_populated_table_seconds)}`",
+        f"- Max backlog depth: `{report.phases.max_backlog_depth}`",
+        f"- Max post-burst drain: `{_format_seconds(report.phases.max_post_burst_drain_seconds)}`",
         "",
         "## Churn",
         f"- Requested events: `{_format_int(churn.requested_events if churn else None)}`",
@@ -498,8 +748,16 @@ def render_markdown(report: BenchmarkReport) -> str:
         "## API operations",
         *operation_lines,
         "",
+        "## Failures injected",
+        *failure_lines,
+        "",
+        "## UI-at-scale scenarios",
+        *scenario_lines,
+        "",
         "## Digests",
+        f"- Expected digest: `{report.expected_digest or 'n/a'}`",
         f"- Final digest: `{report.final_digest}`",
+        f"- Digest match: `{str(report.digest_match).lower()}`",
     ]
     return "\n".join(lines) + "\n"
 

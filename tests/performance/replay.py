@@ -12,10 +12,14 @@ import hashlib
 import json
 import os
 import platform
+import re
+import subprocess
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from time import monotonic
+from types import MappingProxyType
 from typing import Any, cast
 
 import psutil  # type: ignore[import-untyped]  # no inline stubs shipped
@@ -35,11 +39,14 @@ from tests.performance.metrics import (
     BenchmarkRecorder,
     ChurnSummary,
     LatencySummary,
+    NodePoolInfo,
+    PhaseSummary,
     ProcessSampler,
     ProcessSummary,
     RunManifest,
+    ScenarioResult,
 )
-from tests.performance.profile import FailureInjection, WorkloadProfile
+from tests.performance.profile import FailureInjection, WorkloadProfile, burst_end_offsets
 from tests.performance.workload import (
     ScheduledEvent,
     apply_events,
@@ -48,6 +55,57 @@ from tests.performance.workload import (
     summary_digest,
 )
 from tests.ui.waits import WaitTimeout, until
+
+#: A resolved korvid revision must be an immutable 40-character git object name.
+#: Anything else (e.g. the historical literal ``dev``) is not traceable to a
+#: commit and is rejected by `resolve_korvid_sha`.
+_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _git_head() -> str | None:
+    """Resolve the current repository HEAD commit, or `None` if unavailable.
+
+    Isolated behind a seam so `resolve_korvid_sha` stays deterministic under
+    test: production reads the real git tree, tests inject a fixed value.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def resolve_korvid_sha(
+    *,
+    env: Mapping[str, str] | None = None,
+    git_head: Callable[[], str | None] | None = None,
+) -> str | None:
+    """Resolve the immutable korvid commit under test from trusted sources.
+
+    Prefers the CI-provided `GITHUB_SHA` (GitHub Actions sets it to the exact
+    commit being built), then falls back to the local repository HEAD. Returns
+    `None` when neither yields an immutable 40-hex object name, so callers can
+    decide how to react: offline reports mark it `unknown` (still traceable -
+    the report states the SHA could not be resolved), while a live evidence
+    run fails closed rather than publish an untraceable artifact.
+    """
+    environ: Mapping[str, str] = os.environ if env is None else env
+    candidate = environ.get("GITHUB_SHA", "").strip().lower()
+    if _SHA_PATTERN.fullmatch(candidate):
+        return candidate
+    resolver = git_head if git_head is not None else _git_head
+    head = (resolver() or "").strip().lower()
+    if _SHA_PATTERN.fullmatch(head):
+        return head
+    return None
 
 
 async def _sleep_default(delay: float) -> None:
@@ -115,10 +173,18 @@ class ReplayReport:
     churn_started_before_input: bool
     process: ProcessSummary
     api: ApiSummary
+    #: Explicit phase measurements (startup, LIST-to-populated table, backlog
+    #: depth, post-burst drain) the numeric budgets are stated against.
+    phases: PhaseSummary
     manifest: RunManifest
     #: Requested-versus-achieved churn accounting; `None` for deterministic
     #: replay, which drives its own source rather than a real API server.
     churn: ChurnSummary | None = None
+    #: Per-kind count of injected failures actually exercised (report evidence
+    #: that a failure profile ran, including `metrics_unavailable`/`slow_logs`).
+    failures_injected: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
+    #: Scoped UI-at-scale scenarios driven during live churn (empty offline).
+    ui_scenarios: tuple[ScenarioResult, ...] = ()
 
 
 class MeasuredKorvidApp(KorvidApp):
@@ -206,17 +272,37 @@ class _ReplaySource:
     async def _handle_failure_if_any(self, event: ScheduledEvent, index: int) -> None:
         """Apply failure injection for *event*; raises `ApiStatusError` for hard faults.
 
-        `slow` delays the tick without dropping the event.  Hard faults (gone,
-        throttled, forbidden) record an error telemetry entry, advance the
-        next-event cursor, and raise so `WatchManager` triggers a reconnect.
+        `slow` delays the tick without dropping the event. `metrics_unavailable`
+        and `slow_logs` record read telemetry on the metrics / log paths but
+        never disturb the resource watch: their whole point is proving resource
+        navigation and render progress are independent of the metrics poller and
+        of log consumption, so the resource event is still delivered on time.
+        Hard faults (gone, throttled, forbidden) record an error telemetry
+        entry, advance the next-event cursor, and raise so `WatchManager`
+        triggers a reconnect.
         """
         failure = self._failures.get(event.sequence)
         if failure is None:
             return
+        self._recorder.record_failure(failure.kind)
         if failure.kind == "slow":
             tick = 1.0 / max(self._profile.steady_events_per_second, 1)
             if tick * self._options.time_scale > 0:
                 await self._sleep(tick * self._options.time_scale)
+            return
+        if failure.kind == "metrics_unavailable":
+            # The metrics poller fails (503) while the resource watch continues:
+            # evidence lands on the metrics read path, not the pods path.
+            self._recorder.record_api(
+                ReadTelemetryEvent("error", "/apis/metrics.k8s.io/v1beta1/pods", status=503)
+            )
+            return
+        if failure.kind == "slow_logs":
+            # A slow log stream: evidence lands on the log read path, and the
+            # resource event is delivered without any added delay.
+            self._recorder.record_api(
+                ReadTelemetryEvent("error", "/api/v1/namespaces/_/pods/_/log", status=504)
+            )
             return
         status = _HARD_FAILURE_STATUS[failure.kind]
         self._recorder.record_api(ReadTelemetryEvent("error", "/api/v1/pods", status=status))
@@ -247,10 +333,16 @@ class _ReplaySource:
                 decoded_bytes=len(list_pods) * 200,
             )
         )
+        # LIST rows populate the initial table; they are NOT event-to-render
+        # samples. Recording them here would let the initial LIST dominate the
+        # replay p95 and make it incomparable with the live path, which only
+        # records owned watch events. The LIST is timed separately below as the
+        # LIST-to-populated-table startup phase.
         for pod in list_pods:
-            self._recorder.record_event(0, monotonic())
             yield ("ADDED", pod)
 
+        # The first WATCH open marks the LIST-to-populated boundary (via the
+        # recorder's telemetry hook), uniformly with the live path.
         self._recorder.record_api(ReadTelemetryEvent("watch_open", "/api/v1/pods"))
 
         if gen == 0:
@@ -262,6 +354,12 @@ class _ReplaySource:
             # can be converted to correct inter-event delays below.
             self._replay_start = self._now()
 
+        # Burst-end offsets (absolute seconds) mark the moment each burst's
+        # window closes, so post-burst backlog drain can be timed on the same
+        # real-clock axis the render pass records on.
+        burst_ends = burst_end_offsets(self._profile)
+        next_burst = 0
+
         # --- WATCH phase ---
         for i in range(self._next_event_index, len(self._events)):
             event = self._events[i]
@@ -269,6 +367,10 @@ class _ReplaySource:
             delay = event.offset_seconds * self._options.time_scale - elapsed
             if delay > 0:
                 await self._sleep(delay)
+
+            while next_burst < len(burst_ends) and event.offset_seconds >= burst_ends[next_burst]:
+                self._recorder.mark_burst_end(monotonic())
+                next_burst += 1
 
             await self._handle_failure_if_any(event, i)
 
@@ -289,24 +391,49 @@ class _ReplaySource:
             await asyncio.sleep(3600.0)
 
 
-def build_manifest(profile: WorkloadProfile) -> RunManifest:
+def build_manifest(
+    profile: WorkloadProfile,
+    *,
+    korvid_sha: str | None = None,
+    context: str | None = None,
+    cluster_id: str | None = None,
+    kubernetes_version: str | None = None,
+    node_pools: tuple[NodePoolInfo, ...] = (),
+) -> RunManifest:
     """Resolved run manifest for *profile* (profile hash plus environment).
 
     Public because both replay harnesses (`replay.py` and `live.py`) build the
     identical manifest for their reports.
+
+    Args:
+        korvid_sha: The immutable commit to record. When `None`, it is resolved
+            from `resolve_korvid_sha`; an offline run that cannot resolve one
+            records `unknown` (still traceable - the report states it is
+            unresolved) rather than a fake literal. A live evidence run resolves
+            and fails closed *before* calling this, so it never records
+            `unknown`.
+        context: Live kube context that was verified (live runs only).
+        cluster_id: Verified AKS ARM resource id (live runs only).
+        kubernetes_version: Kubernetes server version (live runs only).
+        node_pools: Node-pool topology metadata (live runs only).
     """
     profile_hash = hashlib.sha256(
         json.dumps(asdict(profile), sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()
+    resolved_sha = korvid_sha if korvid_sha is not None else (resolve_korvid_sha() or "unknown")
     return RunManifest(
         profile_id=profile.id,
         profile_hash=profile_hash,
-        korvid_sha="dev",
+        korvid_sha=resolved_sha,
         python=sys.version,
         textual=_textual_version,
         os=platform.platform(),
         cpu_count=os.cpu_count() or 1,
         memory_bytes=psutil.virtual_memory().total,
+        context=context,
+        cluster_id=cluster_id,
+        kubernetes_version=kubernetes_version,
+        node_pools=node_pools,
     )
 
 
@@ -386,6 +513,9 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
         recorder=recorder,
     )
 
+    # Process/app start reference for the process-start-to-interactive phase
+    # and the steady-state RSS-slope warm-up boundary.
+    recorder.mark_process_start(monotonic())
     sampler.start()
     churn_started_before_input = False
     try:
@@ -400,6 +530,9 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
                 label="initial pods rendered",
                 recorder=recorder,
             )
+            # The table is fully populated: mark the interactive boundary that
+            # closes both the startup and LIST-to-populated-table phases.
+            recorder.mark_interactive(monotonic())
 
             # Release the source to emit scheduled events, then drive cursor
             # input while churn is active (not before the source is unblocked).
@@ -462,7 +595,9 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
     # Compute final digest from the store (actual state).
     final_digest = summary_digest(cast(Iterable[PodSummary], store.get("pods", ALL_NAMESPACES)))
 
-    benchmark = recorder.report(manifest, process_samples, final_digest=final_digest)
+    benchmark = recorder.report(
+        manifest, process_samples, final_digest=final_digest, expected_digest=expected_digest
+    )
 
     return ReplayReport(
         object_count=profile.object_count,
@@ -477,5 +612,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
         churn_started_before_input=churn_started_before_input,
         process=benchmark.process,
         api=benchmark.api,
+        phases=benchmark.phases,
         manifest=benchmark.manifest,
+        failures_injected=benchmark.failures_injected,
     )

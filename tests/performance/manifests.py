@@ -122,9 +122,9 @@ def build_seed_manifests(
                     "nodeSelector": dict(selector),
                     "tolerations": [
                         {
-                            "key": "purpose",
+                            "key": "korvid.dev/performance",
                             "operator": "Equal",
-                            "value": "perftest",
+                            "value": "true",
                             "effect": "NoSchedule",
                         }
                     ],

@@ -262,6 +262,10 @@ def test_report_payload_is_json_serializable_and_stable() -> None:
             "os": "Darwin",
             "cpu_count": 8,
             "memory_bytes": 17179869184,
+            "context": None,
+            "cluster_id": None,
+            "kubernetes_version": None,
+            "node_pools": [],
         },
         "latency": {
             "event_to_render": {
@@ -285,6 +289,15 @@ def test_report_payload_is_json_serializable_and_stable() -> None:
             "rss_bytes_max": 106954752,
             "python_bytes_max": 7340032,
             "rss_slope_mib_per_minute": 1.0,
+            "rss_slope_warmup_boundary_seconds": 0.0,
+            "rss_slope_sample_count": 3,
+        },
+        "phases": {
+            "process_start_to_interactive_seconds": None,
+            "list_to_populated_table_seconds": None,
+            "max_backlog_depth": 1,
+            "post_burst_drain_seconds": [],
+            "max_post_burst_drain_seconds": None,
         },
         "api": {
             "operations": {"error": 1},
@@ -304,7 +317,9 @@ def test_report_payload_is_json_serializable_and_stable() -> None:
             "dropped_updates": 0,
         },
         "churn": None,
-        "digests": {"final": "digest-123"},
+        "failures_injected": {},
+        "ui_scenarios": [],
+        "digests": {"expected": None, "final": "digest-123", "match": False},
     }
     assert '"rss_slope_mib_per_minute": 1.0' in encoded
 
@@ -574,3 +589,105 @@ def test_churn_summary_reports_no_achieved_rate_without_elapsed_time() -> None:
 
     assert churn.achieved_events_per_second is None
     assert churn.requested_events_per_second is None
+
+
+def test_process_summary_fits_slope_only_over_post_warmup_samples() -> None:
+    """A steep startup allocation ramp followed by a flat steady state must
+    report a ~0 slope: only samples at/after the warm-up boundary count."""
+    mib = 1024 * 1024
+    samples = (
+        # Warm-up: 100 -> 400 MiB while the initial table populates.
+        ProcessSample(elapsed_seconds=0.0, cpu_percent=1.0, rss_bytes=100 * mib, python_bytes=0),
+        ProcessSample(elapsed_seconds=2.0, cpu_percent=1.0, rss_bytes=250 * mib, python_bytes=0),
+        ProcessSample(elapsed_seconds=4.0, cpu_percent=1.0, rss_bytes=400 * mib, python_bytes=0),
+        # Steady state: flat at 400 MiB.
+        ProcessSample(elapsed_seconds=64.0, cpu_percent=1.0, rss_bytes=400 * mib, python_bytes=0),
+        ProcessSample(elapsed_seconds=124.0, cpu_percent=1.0, rss_bytes=400 * mib, python_bytes=0),
+    )
+
+    contaminated = _metrics_module().ProcessSummary.from_samples(samples)
+    steady = _metrics_module().ProcessSummary.from_samples(samples, warmup_boundary_seconds=4.0)
+
+    assert contaminated.rss_slope_mib_per_minute is not None
+    assert contaminated.rss_slope_mib_per_minute > 10.0  # startup contaminates the fit
+    assert steady.rss_slope_mib_per_minute == pytest.approx(0.0)
+    assert steady.rss_slope_warmup_boundary_seconds == 4.0
+    assert steady.rss_slope_sample_count == 3
+    # The max/peak counters still consider every sample, not just steady state.
+    assert steady.rss_bytes_max == 400 * mib
+
+
+def test_recorder_derives_warmup_boundary_from_lifecycle_marks() -> None:
+    """The slope warm-up boundary equals process-start-to-interactive, so a
+    single set of lifecycle marks drives both the phase summary and the slope
+    exclusion consistently."""
+    mib = 1024 * 1024
+    recorder = BenchmarkRecorder()
+    recorder.mark_process_start(1000.0)
+    recorder.mark_list_complete(1002.0)
+    recorder.mark_interactive(1005.0)  # interactive 5s after start
+    samples = (
+        ProcessSample(elapsed_seconds=0.0, cpu_percent=1.0, rss_bytes=100 * mib, python_bytes=0),
+        ProcessSample(elapsed_seconds=5.0, cpu_percent=1.0, rss_bytes=200 * mib, python_bytes=0),
+        ProcessSample(elapsed_seconds=65.0, cpu_percent=1.0, rss_bytes=200 * mib, python_bytes=0),
+    )
+
+    report = recorder.report(run_manifest(), samples, final_digest="d")
+
+    assert report.process.rss_slope_warmup_boundary_seconds == 5.0
+    assert report.process.rss_slope_sample_count == 2
+    assert report.phases.process_start_to_interactive_seconds == 5.0
+    assert report.phases.list_to_populated_table_seconds == 3.0
+
+
+def test_recorder_tracks_max_backlog_depth_and_post_burst_drain() -> None:
+    recorder = BenchmarkRecorder()
+    recorder.record_event(1, 10.0)
+    recorder.record_event(2, 10.1)
+    recorder.record_event(3, 10.2)
+    assert recorder.pending_count() == 3
+    # A burst ends at t=10.3 while three events are still pending.
+    recorder.mark_burst_end(10.3)
+    recorder.record_render(11.0)  # backlog drains to 0 at t=11.0
+
+    report = recorder.report(run_manifest(), (), final_digest="d")
+
+    assert report.phases.max_backlog_depth == 3
+    assert len(report.phases.post_burst_drain_seconds) == 1
+    assert report.phases.post_burst_drain_seconds[0] == pytest.approx(0.7)
+    assert report.phases.max_post_burst_drain_seconds == pytest.approx(0.7)
+
+
+def test_report_persists_expected_and_final_digest_with_match_flag() -> None:
+    recorder = BenchmarkRecorder()
+    match_report = recorder.report(run_manifest(), (), final_digest="abc", expected_digest="abc")
+    mismatch_report = recorder.report(run_manifest(), (), final_digest="abc", expected_digest="xyz")
+
+    assert match_report.digest_match is True
+    assert mismatch_report.digest_match is False
+
+    payload = cast(dict[str, object], report_payload(mismatch_report)["digests"])
+    assert payload == {"expected": "xyz", "final": "abc", "match": False}
+
+    markdown = render_markdown(mismatch_report)
+    assert "- Expected digest: `xyz`" in markdown
+    assert "- Final digest: `abc`" in markdown
+    assert "- Digest match: `false`" in markdown
+
+
+def test_render_markdown_reports_phase_measurements() -> None:
+    recorder = BenchmarkRecorder()
+    recorder.mark_process_start(100.0)
+    recorder.mark_list_complete(101.0)
+    recorder.mark_interactive(102.0)
+    recorder.record_event(1, 200.0)
+    recorder.mark_burst_end(200.1)
+    recorder.record_render(200.5)
+
+    markdown = render_markdown(recorder.report(run_manifest(), (), final_digest="d"))
+
+    assert "## Phases" in markdown
+    assert "- Process start to interactive: `2.000s`" in markdown
+    assert "- LIST to populated table: `1.000s`" in markdown
+    assert "- Max backlog depth: `1`" in markdown
+    assert "- Max post-burst drain: `0.400s`" in markdown

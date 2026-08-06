@@ -16,6 +16,7 @@ from tests.performance import cli
 from tests.performance.metrics import (
     ApiSummary,
     LatencySummary,
+    PhaseSummary,
     ProcessSummary,
     RunManifest,
 )
@@ -57,6 +58,18 @@ def _make_process() -> ProcessSummary:
         rss_bytes_max=None,
         python_bytes_max=None,
         rss_slope_mib_per_minute=None,
+        rss_slope_warmup_boundary_seconds=0.0,
+        rss_slope_sample_count=0,
+    )
+
+
+def _make_phases() -> PhaseSummary:
+    return PhaseSummary(
+        process_start_to_interactive_seconds=None,
+        list_to_populated_table_seconds=None,
+        max_backlog_depth=0,
+        post_burst_drain_seconds=(),
+        max_post_burst_drain_seconds=None,
     )
 
 
@@ -132,6 +145,7 @@ async def fake_run_replay(
         churn_started_before_input=True,
         process=_make_process(),
         api=_make_api(),
+        phases=_make_phases(),
         manifest=_make_manifest(),
     )
 
@@ -154,6 +168,7 @@ async def fake_failed_report(
         churn_started_before_input=True,
         process=_make_process(),
         api=_make_api(),
+        phases=_make_phases(),
         manifest=_make_manifest(),
     )
 
@@ -499,11 +514,66 @@ _LIVE_IDENTITY_ARGS = [
 ]
 
 
+def _live_artifacts(tmp_path: Path, run_id: str = "aks186") -> list[str]:
+    """The four run-labelled live artifact destinations a successful live
+    qualification must write; every filename carries the run id."""
+    return [
+        "--json",
+        str(tmp_path / f"{run_id}-live.json"),
+        "--out",
+        str(tmp_path / f"{run_id}-live.md"),
+        "--cpu-profile",
+        str(tmp_path / f"{run_id}-live.pstats"),
+        "--allocation-snapshot",
+        str(tmp_path / f"{run_id}-live.alloc.txt"),
+    ]
+
+
+@pytest.mark.parametrize("drop", ["--json", "--out", "--cpu-profile", "--allocation-snapshot"])
+def test_cli_replay_live_requires_all_four_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], drop: str
+) -> None:
+    """A successful live qualification must produce all four externally-retained
+    artifacts; dropping any one fails before the run is attempted."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay(calls))
+    artifacts = _live_artifacts(tmp_path)
+    index = artifacts.index(drop)
+    del artifacts[index : index + 2]
+
+    exit_code = cli.main(
+        ["replay-live", "--profile", str(profile_path(tmp_path)), *_LIVE_IDENTITY_ARGS, *artifacts]
+    )
+
+    assert exit_code == 1
+    assert "all four artifacts" in capsys.readouterr().err
+    assert calls == []
+
+
+def test_cli_replay_live_rejects_artifact_not_named_for_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Each live artifact filename must carry the run id, or it cannot be traced
+    back to the run that produced it."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay(calls))
+    artifacts = _live_artifacts(tmp_path)
+    artifacts[1] = str(tmp_path / "result.json")  # no run id in the filename
+
+    exit_code = cli.main(
+        ["replay-live", "--profile", str(profile_path(tmp_path)), *_LIVE_IDENTITY_ARGS, *artifacts]
+    )
+
+    assert exit_code == 1
+    assert "must include the run id" in capsys.readouterr().err
+    assert calls == []
+
+
 def test_cli_replay_live_writes_json_and_markdown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    json_path = tmp_path / "result.json"
-    markdown_path = tmp_path / "result.md"
+    json_path = tmp_path / "aks186-live.json"
+    markdown_path = tmp_path / "aks186-live.md"
     calls: list[dict[str, object]] = []
     monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay(calls))
     result = cli.main(
@@ -512,10 +582,7 @@ def test_cli_replay_live_writes_json_and_markdown(
             "--profile",
             str(profile_path(tmp_path)),
             *_LIVE_IDENTITY_ARGS,
-            "--json",
-            str(json_path),
-            "--out",
-            str(markdown_path),
+            *_live_artifacts(tmp_path),
         ]
     )
     assert result == 0
@@ -605,6 +672,7 @@ def test_cli_replay_live_duration_overrides_profile_duration_only(
             *_LIVE_IDENTITY_ARGS,
             "--duration",
             "5",
+            *_live_artifacts(tmp_path),
         ]
     )
     assert result == 0
@@ -653,6 +721,7 @@ def test_cli_replay_live_returns_nonzero_for_digest_failure(
                 "--profile",
                 str(profile_path(tmp_path)),
                 *_LIVE_IDENTITY_ARGS,
+                *_live_artifacts(tmp_path),
             ]
         )
         == 1
@@ -672,6 +741,7 @@ def test_cli_replay_live_reports_expected_operational_errors(
                 "--profile",
                 str(profile_path(tmp_path)),
                 *_LIVE_IDENTITY_ARGS,
+                *_live_artifacts(tmp_path),
             ]
         )
         == 1
@@ -690,6 +760,7 @@ def test_cli_replay_live_does_not_hide_unexpected_programmer_errors(
                 "--profile",
                 str(profile_path(tmp_path)),
                 *_LIVE_IDENTITY_ARGS,
+                *_live_artifacts(tmp_path),
             ]
         )
 
@@ -770,6 +841,7 @@ def test_cli_replay_live_rejects_duration_that_orphans_a_burst(
 
 
 def test_cli_replay_live_accepts_duration_that_still_contains_every_burst(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[dict[str, object]] = []
@@ -783,6 +855,7 @@ def test_cli_replay_live_accepts_duration_that_still_contains_every_burst(
             *_LIVE_IDENTITY_ARGS,
             "--duration",
             "26",
+            *_live_artifacts(tmp_path),
         ]
     )
 

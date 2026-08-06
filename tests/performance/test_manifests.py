@@ -79,9 +79,9 @@ def test_build_seed_manifests_returns_namespaces_then_pods_in_stable_order() -> 
     assert _pod_spec(pods[0])["nodeSelector"] == {"korvid.dev/pool": "perftest"}
     assert _pod_spec(pods[0])["tolerations"] == [
         {
-            "key": "purpose",
+            "key": "korvid.dev/performance",
             "operator": "Equal",
-            "value": "perftest",
+            "value": "true",
             "effect": "NoSchedule",
         }
     ]

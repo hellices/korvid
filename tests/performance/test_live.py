@@ -45,13 +45,16 @@ from tests.performance.workload import scheduled_events, summary_digest
 from tests.ui.waits import WaitTimeout
 
 RUN_ID = "aks186"
-CONTEXT = "aks-korvid-perf"
+CONTEXT = "aks-korvid-contract-test"
 SUBSCRIPTION = "00000000-0000-0000-0000-000000000000"
+RESOURCE_GROUP = "rg-korvid-contract-test"
+CLUSTER_NAME = "aks-korvid-contract-test"
 CLUSTER_ID = (
-    f"/subscriptions/{SUBSCRIPTION}/resourceGroups/rg"
-    "/providers/Microsoft.ContainerService/managedClusters/aks-korvid-perf"
+    f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{RESOURCE_GROUP}"
+    f"/providers/Microsoft.ContainerService/managedClusters/{CLUSTER_NAME}"
 )
-FQDN = "aks-korvid-perf-dns-abc123.hcp.eastus.azmk8s.io"
+FQDN = "aks-korvid-contract-test-dns-abc123.hcp.eastus.azmk8s.io"
+REQUIRED_TAGS = {"purpose": "korvid-contract-testing", "production-use": "prohibited"}
 
 # ---------------------------------------------------------------------------
 # Fixtures / fakes
@@ -248,6 +251,16 @@ class _FakeMutationClient:
         self.closed = True
 
 
+async def _context_host_ok(_context: str) -> str:
+    return FQDN
+
+
+def _report_as_benchmark(report: Any) -> Any:
+    from tests.performance.cli import _to_benchmark_report
+
+    return _to_benchmark_report(report)
+
+
 def _never_called(label: str) -> Callable[..., Any]:
     def _fail(*_args: object, **_kwargs: object) -> Any:
         raise AssertionError(f"{label} must not be called")
@@ -256,13 +269,40 @@ def _never_called(label: str) -> Callable[..., Any]:
 
 
 def _ok_command_runner(
-    *, cluster_id: str = CLUSTER_ID, fqdn: str = FQDN, private_fqdn: str = ""
+    *,
+    cluster_id: str = CLUSTER_ID,
+    fqdn: str = FQDN,
+    private_fqdn: str = "",
+    resource_group: str = RESOURCE_GROUP,
+    name: str = CLUSTER_NAME,
+    tags: dict[str, str] | None = None,
+    kubernetes_version: str = "1.30.4",
+    agent_pool_profiles: list[dict[str, Any]] | None = None,
 ) -> Callable[[Any], Awaitable[CommandResult]]:
     async def _run(_args: Any) -> CommandResult:
-        payload = {"id": cluster_id, "fqdn": fqdn, "privateFqdn": private_fqdn}
+        payload = {
+            "id": cluster_id,
+            "fqdn": fqdn,
+            "privateFqdn": private_fqdn,
+            "resourceGroup": resource_group,
+            "name": name,
+            "tags": REQUIRED_TAGS if tags is None else tags,
+            "currentKubernetesVersion": kubernetes_version,
+            "agentPoolProfiles": (
+                [
+                    {"name": "perftest", "count": 5, "currentOrchestratorVersion": "1.30.4"},
+                    {"name": "system", "count": 1, "currentOrchestratorVersion": "1.30.4"},
+                ]
+                if agent_pool_profiles is None
+                else agent_pool_profiles
+            ),
+        }
         return CommandResult(0, json.dumps(payload), "")
 
     return _run
+
+
+_FIXED_SHA = "1234567890abcdef1234567890abcdef12345678"
 
 
 def _happy_deps(
@@ -321,6 +361,7 @@ def _happy_deps(
         kube_client_factory=kube_factory,
         harness_kube_client_factory=harness_factory,
         mutation_client_factory=mutation_client_factory or default_mutation_factory,
+        resolve_sha=lambda: _FIXED_SHA,
     )
 
 
@@ -2045,3 +2086,330 @@ async def test_run_live_replay_rejects_a_profile_whose_bursts_escape_its_duratio
             run_id=RUN_ID,
             deps=deps,
         )
+
+
+async def test_run_live_replay_bounds_the_context_host_lookup() -> None:
+    """A kubeconfig exec plugin invoked while resolving the API hostname can
+    hang; the identity gate must bound that lookup, not block forever."""
+
+    async def hanging_context_host(_context: str) -> str:
+        await asyncio.sleep(30)
+        return FQDN
+
+    deps = LiveDependencies(
+        command_runner=_ok_command_runner(),
+        active_context=lambda: CONTEXT,
+        context_host=hanging_context_host,
+        kube_client_factory=_never_called("kube_client_factory"),
+        harness_kube_client_factory=_never_called("harness_kube_client_factory"),
+        mutation_client_factory=_never_called("mutation_client_factory"),
+    )
+
+    with pytest.raises(TimeoutError):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+            limits=LiveLimits(read_connect_timeout_seconds=0.05),
+        )
+
+
+async def test_run_live_replay_bounds_the_harness_client_connect() -> None:
+    """A stuck harness-client connect (exec credential plugin) must be bounded
+    before the ownership gate can run."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+
+    class _HangingConnectKube(_FakeKubeClient):
+        async def connect(self, context: str | None = None) -> None:
+            await asyncio.sleep(30)
+
+    created: list[_HangingConnectKube] = []
+
+    def harness_factory() -> _HangingConnectKube:
+        client = _HangingConnectKube(namespaces, pods)
+        created.append(client)
+        return client
+
+    deps = dataclasses.replace(
+        _happy_deps(namespaces, pods, RUN_ID),
+        harness_kube_client_factory=harness_factory,
+    )
+
+    with pytest.raises(TimeoutError):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+            limits=LiveLimits(read_connect_timeout_seconds=0.05),
+        )
+
+    assert created[0].closed
+
+
+async def test_run_live_replay_bounds_the_app_client_connect() -> None:
+    """A stuck application-path client connect must be bounded too."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+
+    class _HangingConnectKube(_FakeKubeClient):
+        async def connect(self, context: str | None = None) -> None:
+            await asyncio.sleep(30)
+
+    created: list[_HangingConnectKube] = []
+
+    def app_factory(read_telemetry: ReadTelemetry) -> _HangingConnectKube:
+        client = _HangingConnectKube(namespaces, pods)
+        client.read_telemetry = read_telemetry
+        created.append(client)
+        return client
+
+    deps = dataclasses.replace(
+        _happy_deps(namespaces, pods, RUN_ID),
+        kube_client_factory=app_factory,
+    )
+
+    with pytest.raises(TimeoutError):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+            limits=LiveLimits(read_connect_timeout_seconds=0.05),
+        )
+
+    assert created[0].closed
+
+
+def _identity_deps(command_runner: Callable[[Any], Awaitable[CommandResult]]) -> LiveDependencies:
+    async def context_host(_context: str) -> str:
+        return FQDN
+
+    return LiveDependencies(
+        command_runner=command_runner,
+        active_context=lambda: CONTEXT,
+        context_host=context_host,
+        kube_client_factory=_never_called("kube_client_factory"),
+        harness_kube_client_factory=_never_called("harness_kube_client_factory"),
+        mutation_client_factory=_never_called("mutation_client_factory"),
+    )
+
+
+async def test_run_live_replay_rejects_wrong_resource_group_before_mutation() -> None:
+    deps = _identity_deps(_ok_command_runner(resource_group="rg-production"))
+    with pytest.raises(ValueError, match="resource group"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
+async def test_run_live_replay_rejects_wrong_cluster_name_before_mutation() -> None:
+    deps = _identity_deps(_ok_command_runner(name="aks-production"))
+    with pytest.raises(ValueError, match="cluster name"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
+async def test_run_live_replay_rejects_missing_required_tag_before_mutation() -> None:
+    deps = _identity_deps(_ok_command_runner(tags={"purpose": "korvid-contract-testing"}))
+    with pytest.raises(ValueError, match="required tag"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
+async def test_run_live_replay_rejects_wrong_required_tag_value_before_mutation() -> None:
+    deps = _identity_deps(
+        _ok_command_runner(tags={"purpose": "korvid-contract-testing", "production-use": "allowed"})
+    )
+    with pytest.raises(ValueError, match="required tag"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
+async def test_run_live_replay_rejects_non_running_pod_before_churn() -> None:
+    """The ownership/preflight gate requires exactly 1,000 Running, Ready owned
+    Pods: a labelled but non-Running Pod must be reported and reject the run
+    before any mutation, since the later check only counts table rows."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    victim = (manifests.namespace_name(RUN_ID, 0), manifests.pod_name(20, 0))
+    pods[victim] = dataclasses.replace(pods[victim], phase="Pending")
+
+    deps = LiveDependencies(
+        command_runner=_ok_command_runner(),
+        active_context=lambda: CONTEXT,
+        context_host=_context_host_ok,
+        kube_client_factory=_never_called("kube_client_factory"),
+        harness_kube_client_factory=lambda: _FakeKubeClient(namespaces, pods),
+        mutation_client_factory=_never_called("mutation_client_factory"),
+    )
+
+    with pytest.raises(ValueError, match="not Running or not Ready"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
+async def test_run_live_replay_rejects_not_ready_pod_before_churn() -> None:
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    victim = (manifests.namespace_name(RUN_ID, 1), manifests.pod_name(20, 1))
+    pods[victim] = dataclasses.replace(pods[victim], ready="0/1")
+
+    deps = LiveDependencies(
+        command_runner=_ok_command_runner(),
+        active_context=lambda: CONTEXT,
+        context_host=_context_host_ok,
+        kube_client_factory=_never_called("kube_client_factory"),
+        harness_kube_client_factory=lambda: _FakeKubeClient(namespaces, pods),
+        mutation_client_factory=_never_called("mutation_client_factory"),
+    )
+
+    with pytest.raises(ValueError, match="not Running or not Ready"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
+async def test_run_live_replay_fails_closed_when_sha_cannot_be_resolved() -> None:
+    """A live evidence run must not publish an untraceable artifact: if no
+    immutable korvid SHA can be resolved, the run fails closed before any
+    client is constructed."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = dataclasses.replace(
+        _happy_deps(namespaces, pods, RUN_ID),
+        resolve_sha=lambda: None,
+        harness_kube_client_factory=_never_called("harness_kube_client_factory"),
+        kube_client_factory=_never_called("kube_client_factory"),
+        mutation_client_factory=_never_called("mutation_client_factory"),
+    )
+
+    with pytest.raises(ValueError, match="immutable korvid SHA"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
+async def test_run_live_replay_builds_a_live_specific_manifest() -> None:
+    """Retained live evidence must record which cluster matrix was qualified:
+    the verified context/ARM id plus Kubernetes server version and node-pool
+    metadata, resolved through bounded seams and persisted in the manifest."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(namespaces, pods, RUN_ID)
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(
+        time_scale=1.0, sample_interval=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep
+    )
+
+    report = await run_live_replay(
+        _tiny_live_profile(),
+        options,
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    manifest = report.manifest
+    assert manifest.korvid_sha == _FIXED_SHA
+    assert manifest.context == CONTEXT
+    assert manifest.cluster_id == CLUSTER_ID
+    assert manifest.kubernetes_version == "1.30.4"
+    pool_names = {pool.name for pool in manifest.node_pools}
+    assert "perftest" in pool_names
+    perftest = next(pool for pool in manifest.node_pools if pool.name == "perftest")
+    assert perftest.node_count == 5
+    assert perftest.kubernetes_version == "1.30.4"
+
+    # Persisted in both machine-readable and human-readable output.
+    from tests.performance.metrics import render_markdown, report_payload
+
+    payload = report_payload(_report_as_benchmark(report))
+    manifest_payload = payload["manifest"]
+    assert isinstance(manifest_payload, dict)
+    assert manifest_payload["context"] == CONTEXT
+    assert manifest_payload["cluster_id"] == CLUSTER_ID
+    assert manifest_payload["kubernetes_version"] == "1.30.4"
+    assert manifest_payload["node_pools"] == [
+        {"name": "perftest", "kubernetes_version": "1.30.4", "node_count": 5},
+        {"name": "system", "kubernetes_version": "1.30.4", "node_count": 1},
+    ]
+
+    markdown = render_markdown(_report_as_benchmark(report))
+    assert f"- Context: `{CONTEXT}`" in markdown
+    assert "- Kubernetes version: `1.30.4`" in markdown
+    assert "perftest" in markdown
+
+
+async def test_run_live_replay_exercises_ui_at_scale_scenarios_during_churn() -> None:
+    """A passing live run must provide UI-at-scale evidence: filter, sort,
+    namespace switch, split pane, describe, and multi-log are driven through the
+    real Textual pilot during active churn and their outcomes/latencies are
+    recorded, without weakening the digest/ownership safety guarantees."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(namespaces, pods, RUN_ID)
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(
+        time_scale=1.0, sample_interval=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep
+    )
+
+    report = await run_live_replay(
+        _tiny_live_profile(),
+        options,
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    # Safety invariants still hold.
+    assert report.expected_digest == report.final_digest
+    assert report.dropped_updates == 0
+
+    recorded = {scenario.name for scenario in report.ui_scenarios}
+    assert recorded == {"filter", "sort", "namespace_switch", "split_pane", "describe", "multi_log"}
+    for scenario in report.ui_scenarios:
+        assert scenario.ok, f"scenario {scenario.name} did not complete"
+        assert scenario.latency_seconds >= 0.0

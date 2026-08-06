@@ -6,8 +6,10 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal, cast
 
-FailureKind = Literal["gone", "throttled", "forbidden", "slow"]
-_FAILURE_KINDS = frozenset({"gone", "throttled", "forbidden", "slow"})
+FailureKind = Literal["gone", "throttled", "forbidden", "slow", "metrics_unavailable", "slow_logs"]
+_FAILURE_KINDS = frozenset(
+    {"gone", "throttled", "forbidden", "slow", "metrics_unavailable", "slow_logs"}
+)
 _PROFILE_KEYS = frozenset(
     {
         "schema_version",
@@ -180,3 +182,14 @@ def planned_event_count(profile: WorkloadProfile) -> int:
         total -= round(burst.duration_seconds * profile.steady_events_per_second)
         total += round(burst.duration_seconds * burst.events_per_second)
     return total
+
+
+def burst_end_offsets(profile: WorkloadProfile) -> tuple[float, ...]:
+    """Absolute second offsets at which each burst's window closes.
+
+    Ordered ascending so a driver can mark post-burst backlog drain the moment
+    the schedule leaves a burst, on the same time axis event offsets use.
+    """
+    return tuple(
+        sorted(float(burst.start_second + burst.duration_seconds) for burst in profile.bursts)
+    )

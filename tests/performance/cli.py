@@ -52,11 +52,16 @@ def _to_benchmark_report(replay: ReplayReport) -> BenchmarkReport:
         input_latency=replay.input_latency,
         process=replay.process,
         api=replay.api,
+        phases=replay.phases,
         rendered_updates=replay.rendered_updates,
         render_passes=replay.render_passes,
         coalesced_updates=replay.coalesced_updates,
         dropped_updates=replay.dropped_updates,
         final_digest=replay.final_digest,
+        expected_digest=replay.expected_digest,
+        digest_match=replay.expected_digest == replay.final_digest,
+        failures_injected=replay.failures_injected,
+        ui_scenarios=replay.ui_scenarios,
         churn=replay.churn,
     )
 
@@ -188,26 +193,29 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="json_path",
         default=None,
         metavar="PATH",
-        help="Write machine-readable JSON report.",
+        help="Required live artifact: machine-readable JSON report (filename must "
+        "include the run id).",
     )
     lp.add_argument(
         "--out",
         dest="out_path",
         default=None,
         metavar="PATH",
-        help="Write Markdown report to file (also printed to stdout).",
+        help="Required live artifact: Markdown report (also printed to stdout; "
+        "filename must include the run id).",
     )
     lp.add_argument(
         "--cpu-profile",
         default=None,
         metavar="PATH",
-        help="Write cProfile pstats file.",
+        help="Required live artifact: cProfile pstats file (filename must include the run id).",
     )
     lp.add_argument(
         "--allocation-snapshot",
         default=None,
         metavar="PATH",
-        help="Write top-100 tracemalloc source locations.",
+        help="Required live artifact: top-100 tracemalloc source locations "
+        "(filename must include the run id).",
     )
     return parser
 
@@ -374,6 +382,45 @@ def _load_live_profile(args: argparse.Namespace) -> WorkloadProfile | None:
     return overridden
 
 
+#: The four externally-retained artifacts a *successful* live qualification
+#: must produce (design "Results and documentation": raw JSON samples, process
+#: traces, allocation snapshots, plus the human-readable summary). Unlike an
+#: ordinary offline `replay`, every live run must write all four to a
+#: run-labelled destination so the evidence is retained and traceable.
+_LIVE_ARTIFACT_FLAGS: dict[str, str] = {
+    "json_path": "--json",
+    "out_path": "--out",
+    "cpu_profile": "--cpu-profile",
+    "allocation_snapshot": "--allocation-snapshot",
+}
+
+
+def _validate_live_artifacts(args: argparse.Namespace, *, run_id: str) -> str | None:
+    """Require exactly the four run-labelled live artifact destinations.
+
+    Returns an error message when any of the four is missing, when two point at
+    the same destination, or when a destination's filename does not carry the
+    run id (so a retained artifact can always be traced back to its run).
+    Returns `None` when all four are present, distinct, and run-labelled.
+    """
+    missing = [flag for attr, flag in _LIVE_ARTIFACT_FLAGS.items() if not getattr(args, attr)]
+    if missing:
+        return (
+            "a successful live qualification must write all four artifacts "
+            f"({', '.join(_LIVE_ARTIFACT_FLAGS.values())}); missing: {', '.join(missing)}"
+        )
+    paths = {attr: Path(getattr(args, attr)) for attr in _LIVE_ARTIFACT_FLAGS}
+    if len({str(path) for path in paths.values()}) != len(paths):
+        return "the four live artifacts must be four distinct destinations"
+    for attr, path in paths.items():
+        if run_id not in path.name:
+            return (
+                f"live artifact {_LIVE_ARTIFACT_FLAGS[attr]} filename {path.name!r} "
+                f"must include the run id {run_id!r}"
+            )
+    return None
+
+
 def _cmd_replay_live(args: argparse.Namespace) -> int:
     if args.duration is not None and args.duration <= 0:
         print("error: --duration must be positive", file=sys.stderr)
@@ -386,10 +433,20 @@ def _cmd_replay_live(args: argparse.Namespace) -> int:
     if profile is None:
         return 1
 
+    artifact_error = _validate_live_artifacts(args, run_id=args.run_id)
+    if artifact_error:
+        print(f"error: {artifact_error}", file=sys.stderr)
+        return 1
+
     # No --time-scale option: live churn always replays at real wall-clock
     # time (ReplayOptions.time_scale defaults to 1.0).
     options = ReplayOptions(sample_interval=args.sample_interval)
+    return _execute_live_replay(args, profile, options)
 
+
+def _execute_live_replay(
+    args: argparse.Namespace, profile: WorkloadProfile, options: ReplayOptions
+) -> int:
     if args.allocation_snapshot:
         tracemalloc.start()
 

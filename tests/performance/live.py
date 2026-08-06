@@ -68,6 +68,7 @@ import math
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from time import monotonic
+from types import MappingProxyType
 from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
@@ -84,13 +85,19 @@ from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.telemetry import ReadTelemetry
 from korvid.ui.widgets.resource_table import ResourceTable
 from tests.performance import manifests
-from tests.performance.metrics import BenchmarkRecorder, ChurnSummary, ProcessSampler
+from tests.performance.metrics import (
+    BenchmarkRecorder,
+    ChurnSummary,
+    NodePoolInfo,
+    ProcessSampler,
+)
 from tests.performance.profile import WorkloadProfile, validate_profile
 from tests.performance.replay import (
     MeasuredKorvidApp,
     ReplayOptions,
     ReplayReport,
     build_manifest,
+    resolve_korvid_sha,
     wait_for,
 )
 from tests.performance.workload import ScheduledEvent, scheduled_events, summary_digest
@@ -103,6 +110,17 @@ _NAMESPACES_META = ResourceMeta("Namespace", "namespaces", "", "v1", False)
 #: exactly 20 namespaces of 50 Pods each, matching `seed-manifests`'s output.
 _REQUIRED_OBJECT_COUNT = 1000
 _REQUIRED_NAMESPACE_COUNT = 20
+
+#: The immutable dedicated-test target contract (design doc "Fixed target and
+#: capacity"). The identity gate fails closed unless `az aks show` reports
+#: exactly this resource group, cluster name, and both required tags, so a
+#: production cluster (or its ARM id) can never satisfy the gate even if the
+#: operator supplies a matching, valid ARM id and kubeconfig context.
+_REQUIRED_RESOURCE_GROUP = "rg-korvid-contract-test"
+_REQUIRED_CLUSTER_NAME = "aks-korvid-contract-test"
+_REQUIRED_TAGS: Mapping[str, str] = MappingProxyType(
+    {"purpose": "korvid-contract-testing", "production-use": "prohibited"}
+)
 
 #: HTTP status the mutation path may retry. 429 (API Priority and Fairness)
 #: is the only one: it is a "come back later" answer to a well-formed,
@@ -142,6 +160,10 @@ class LiveLimits:
             deterministic jitter, and a server-provided `Retry-After` hint.
         mutation_connect_timeout_seconds: Ceiling for connecting the mutation
             client (a kubeconfig exec credential plugin can block).
+        read_connect_timeout_seconds: Ceiling for external read-path setup that
+            a kubeconfig exec credential plugin can block indefinitely - the
+            identity/context-host lookup, the harness read client connect, and
+            the application read client connect.
         initial_render_timeout_seconds: Ceiling for the initial 1,000-row
             render.
         churn_grace_seconds: Allowance added to the profile's own scheduled
@@ -156,6 +178,7 @@ class LiveLimits:
     mutation_retry_base_delay_seconds: float = 0.5
     mutation_retry_max_delay_seconds: float = 30.0
     mutation_connect_timeout_seconds: float = 60.0
+    read_connect_timeout_seconds: float = 60.0
     initial_render_timeout_seconds: float = 60.0
     churn_grace_seconds: float = 300.0
     convergence_timeout_seconds: float = 120.0
@@ -278,6 +301,23 @@ class LiveDependencies:
     kube_client_factory: Callable[[ReadTelemetry], KubeReadClient]
     harness_kube_client_factory: Callable[[], KubeReadClient]
     mutation_client_factory: Callable[[str], MutationClient]
+    #: Resolves the immutable korvid commit for the run manifest. A live
+    #: evidence run fails closed when this returns `None` rather than publish
+    #: an untraceable artifact. Injected in tests for determinism.
+    resolve_sha: Callable[[], str | None] = resolve_korvid_sha
+
+
+@dataclass(frozen=True)
+class LiveClusterFacts:
+    """Verified, immutable facts about the live target, extracted from the
+    identity gate's `az aks show` payload and recorded in the live manifest so
+    retained evidence establishes exactly which cluster matrix was qualified.
+    """
+
+    context: str
+    cluster_id: str
+    kubernetes_version: str | None
+    node_pools: tuple[NodePoolInfo, ...]
 
 
 async def _default_command_runner(args: list[str]) -> CommandResult:
@@ -453,6 +493,25 @@ def _owns(labels: Iterable[tuple[str, str]], run_id: str) -> bool:
     )
 
 
+def _is_running_ready(pod: PodSummary) -> bool:
+    """Whether *pod* is phase `Running` with every container ready.
+
+    The published live protocol requires exactly 1,000 Running, Ready Pods
+    before measuring. `ready` is the kubectl-style `<ready>/<total>` string, so
+    a Pod is ready only when both counts are equal and non-zero (e.g. `1/1`).
+    """
+    if pod.phase != "Running":
+        return False
+    parts = pod.ready.split("/")
+    if len(parts) != 2:
+        return False
+    try:
+        ready, total = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+    return total > 0 and ready == total
+
+
 def _validate_time_scale(options: ReplayOptions) -> None:
     if options.time_scale != 1.0:
         raise ValueError(
@@ -475,10 +534,14 @@ def _validate_topology(profile: WorkloadProfile) -> None:
 
 
 async def _verify_cluster_identity(
-    *, context: str, expected_cluster_id: str, deps: LiveDependencies
-) -> None:
+    *, context: str, expected_cluster_id: str, deps: LiveDependencies, limits: LiveLimits
+) -> LiveClusterFacts:
     """Fail-closed 5-step cluster identity gate; every failure raises
     `ValueError` before any client is constructed or any mutation attempted.
+
+    Returns the verified, immutable cluster facts (context, ARM id, Kubernetes
+    version, node-pool topology) so the caller can record them in the live
+    manifest without a second, unbounded metadata lookup.
     """
     active = deps.active_context()
     if active != context:
@@ -486,7 +549,8 @@ async def _verify_cluster_identity(
             f"active kubeconfig context {active!r} does not match required context {context!r}"
         )
 
-    hostname = await deps.context_host(context)
+    async with asyncio.timeout(limits.read_connect_timeout_seconds):
+        hostname = await deps.context_host(context)
 
     result = await deps.command_runner(
         ["az", "aks", "show", "--ids", expected_cluster_id, "-o", "json"]
@@ -506,6 +570,8 @@ async def _verify_cluster_identity(
             f"az aks show returned id {resource_id!r}, expected {expected_cluster_id!r}"
         )
 
+    _verify_immutable_target(payload)
+
     fqdn = payload.get("fqdn") or ""
     private_fqdn = payload.get("privateFqdn") or ""
     expected_hostname = fqdn or private_fqdn
@@ -517,6 +583,82 @@ async def _verify_cluster_identity(
             f"cluster hostname {expected_hostname!r}"
         )
 
+    return LiveClusterFacts(
+        context=context,
+        cluster_id=expected_cluster_id,
+        kubernetes_version=_kubernetes_version(payload),
+        node_pools=_node_pools(payload),
+    )
+
+
+def _kubernetes_version(payload: dict[str, Any]) -> str | None:
+    """The control-plane Kubernetes version AKS reports for the cluster."""
+    for key in ("currentKubernetesVersion", "kubernetesVersion"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _node_pools(payload: dict[str, Any]) -> tuple[NodePoolInfo, ...]:
+    """Node-pool name/version/count topology from the `az aks show` payload."""
+    profiles = payload.get("agentPoolProfiles")
+    if not isinstance(profiles, list):
+        return ()
+    pools: list[NodePoolInfo] = []
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        name = profile.get("name")
+        if not isinstance(name, str):
+            continue
+        version = (
+            profile.get("currentOrchestratorVersion") or profile.get("orchestratorVersion") or ""
+        )
+        count = profile.get("count")
+        pools.append(
+            NodePoolInfo(
+                name=name,
+                kubernetes_version=str(version),
+                node_count=int(count) if isinstance(count, int) else 0,
+            )
+        )
+    return tuple(pools)
+
+
+def _verify_immutable_target(payload: dict[str, Any]) -> None:
+    """Fail closed unless *payload* describes the fixed dedicated-test target.
+
+    Validating only that `az` and the kubeconfig agree on the operator-supplied
+    ARM id is not enough: a production cluster plus its own matching production
+    id would pass. The dedicated-test contract is immutable - a fixed resource
+    group, cluster name, and both required test-only tags - so those attributes
+    are checked directly from the `az aks show` payload before any client is
+    constructed or any mutation is attempted.
+    """
+    resource_group = payload.get("resourceGroup")
+    if resource_group != _REQUIRED_RESOURCE_GROUP:
+        raise ValueError(
+            f"az aks show resource group {resource_group!r} is not the required "
+            f"dedicated-test resource group {_REQUIRED_RESOURCE_GROUP!r}"
+        )
+    name = payload.get("name")
+    if name != _REQUIRED_CLUSTER_NAME:
+        raise ValueError(
+            f"az aks show cluster name {name!r} is not the required dedicated-test "
+            f"cluster name {_REQUIRED_CLUSTER_NAME!r}"
+        )
+    tags = payload.get("tags")
+    if not isinstance(tags, dict):
+        raise ValueError("az aks show returned no tags; required test-only tags are missing")
+    for key, expected_value in _REQUIRED_TAGS.items():
+        if tags.get(key) != expected_value:
+            raise ValueError(
+                f"az aks show is missing required tag {key}={expected_value!r} "
+                f"(got {tags.get(key)!r}); refusing to target a cluster not marked "
+                f"as korvid contract-testing"
+            )
+
 
 def _expected_pod_names(namespace_count: int, object_count: int) -> tuple[str, ...]:
     """The exact Pod names `seed-manifests` creates in *every* namespace."""
@@ -527,16 +669,59 @@ def _expected_pod_names(namespace_count: int, object_count: int) -> tuple[str, .
     )
 
 
+@dataclass
+class _PodOwnershipProblems:
+    """Accumulated ownership-gate failures across all namespaces/Pods."""
+
+    missing: list[str] = field(default_factory=list)
+    mismatched: list[str] = field(default_factory=list)
+    unexpected: list[str] = field(default_factory=list)
+    not_ready: list[str] = field(default_factory=list)
+
+
+async def _collect_owned_pods(
+    kube: KubeReadClient,
+    *,
+    run_id: str,
+    expected_namespaces: list[str],
+    wanted: tuple[str, ...],
+) -> tuple[dict[tuple[str, str], PodSummary], _PodOwnershipProblems]:
+    """List every expected namespace and classify its Pods against the contract."""
+    problems = _PodOwnershipProblems()
+    validated: dict[tuple[str, str], PodSummary] = {}
+    for namespace in expected_namespaces:
+        pods_by_name = {pod.name: pod for pod in await kube.list_pods(namespace)}
+        problems.unexpected.extend(
+            f"{namespace}/{name}" for name in sorted(set(pods_by_name) - set(wanted))
+        )
+        for name in wanted:
+            pod = pods_by_name.get(name)
+            if pod is None:
+                problems.missing.append(f"{namespace}/{name}")
+            elif not _owns(pod.labels, run_id):
+                problems.mismatched.append(f"{namespace}/{name}")
+            elif not _is_running_ready(pod):
+                problems.not_ready.append(
+                    f"{namespace}/{name} (phase={pod.phase}, ready={pod.ready})"
+                )
+            else:
+                validated[(namespace, name)] = pod
+    return validated, problems
+
+
 async def _verify_ownership(
     kube: KubeReadClient, *, run_id: str, namespace_count: int, object_count: int
 ) -> dict[tuple[str, str], PodSummary]:
     """Ownership gate: *exactly* the expected namespaces and Pods must exist,
-    each with both ownership labels, checked before any churn.
+    each with both ownership labels *and* phase Running/Ready, before any churn.
 
     An unexpected Pod inside an owned namespace is rejected too: the
     application watch filters by namespace, so a foreign Pod would enter the
     benchmark store and turn a precise ownership violation into a generic
-    "1,000 rows never rendered" timeout minutes later.
+    "1,000 rows never rendered" timeout minutes later. A labelled but
+    non-Running/non-Ready Pod is rejected as well, since the published protocol
+    requires exactly `object_count` Running, Ready owned Pods before measuring
+    and the later table-row check cannot distinguish a Pending Pod's row.
 
     Collects every mismatch across all namespaces/Pods before raising, so a
     single failed run surfaces the full blast radius at once instead of
@@ -562,29 +747,20 @@ async def _verify_ownership(
         )
 
     wanted = _expected_pod_names(namespace_count, object_count)
-    missing_pods: list[str] = []
-    mismatched_pods: list[str] = []
-    unexpected_pods: list[str] = []
-    validated_pods: dict[tuple[str, str], PodSummary] = {}
-    for namespace in expected_namespaces:
-        pods_by_name = {pod.name: pod for pod in await kube.list_pods(namespace)}
-        unexpected_pods.extend(
-            f"{namespace}/{name}" for name in sorted(set(pods_by_name) - set(wanted))
+    validated_pods, problems = await _collect_owned_pods(
+        kube, run_id=run_id, expected_namespaces=expected_namespaces, wanted=wanted
+    )
+    if problems.missing:
+        raise ValueError(f"missing expected pods: {', '.join(problems.missing)}")
+    if problems.mismatched:
+        raise ValueError(f"pods with mismatched ownership labels: {', '.join(problems.mismatched)}")
+    if problems.unexpected:
+        raise ValueError(f"unexpected pods in owned namespaces: {', '.join(problems.unexpected)}")
+    if problems.not_ready:
+        raise ValueError(
+            f"owned pods not Running or not Ready: {', '.join(problems.not_ready)}; "
+            f"the live run requires exactly {object_count} Running, Ready owned pods"
         )
-        for name in wanted:
-            pod = pods_by_name.get(name)
-            if pod is None:
-                missing_pods.append(f"{namespace}/{name}")
-            elif not _owns(pod.labels, run_id):
-                mismatched_pods.append(f"{namespace}/{name}")
-            else:
-                validated_pods[(namespace, name)] = pod
-    if missing_pods:
-        raise ValueError(f"missing expected pods: {', '.join(missing_pods)}")
-    if mismatched_pods:
-        raise ValueError(f"pods with mismatched ownership labels: {', '.join(mismatched_pods)}")
-    if unexpected_pods:
-        raise ValueError(f"unexpected pods in owned namespaces: {', '.join(unexpected_pods)}")
     return validated_pods
 
 
@@ -900,6 +1076,56 @@ def _store_digest(store: ResourceStore) -> str:
     return summary_digest(cast(Iterable[PodSummary], store.get("pods", ALL_NAMESPACES)))
 
 
+#: The scoped UI-at-scale scenarios issue #186 requires, each a real Textual
+#: pilot key sequence driven during active churn. Sequences are self-restoring:
+#: they return the workspace to a single pane showing all owned rows so the
+#: post-churn row-count and digest-convergence checks still see 1,000 rows.
+_UI_SCENARIOS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # Filter to a substring present in every seeded Pod name ("bench-*"), so the
+    # filter exercises the real path without dropping any rows.
+    ("filter", ("slash", "b", "e", "n", "c", "h", "enter")),
+    # Sort by age (a metrics-free column) and back is unnecessary; sorting keeps
+    # every row visible.
+    ("sort", ("A",)),
+    # Namespace switch: scope to the highlighted row's namespace, then back to
+    # all namespaces so the full 1,000-row topology is restored.
+    ("namespace_switch", ("0", "0")),
+    # Split the workspace into two panes, then close the new pane.
+    ("split_pane", ("ctrl+w", "v", "ctrl+w", "q")),
+    # Describe the highlighted resource, then dismiss.
+    ("describe", ("d", "escape")),
+    # Multi-log the highlighted resource, then dismiss.
+    ("multi_log", ("L", "escape")),
+)
+
+
+async def drive_ui_scenarios(
+    pilot: Any,
+    recorder: BenchmarkRecorder,
+    *,
+    now: Callable[[], float],
+) -> None:
+    """Drive the scoped UI-at-scale scenarios through the real Textual pilot.
+
+    Each scenario is a real key sequence issued against the running app during
+    active churn; its latency and completion outcome are recorded. Every
+    scenario is read-only navigation - no scenario writes, deletes, or drains -
+    so this never weakens live safety. A scenario that raises is recorded as
+    `ok=False` and never aborts the safety-critical run; the sequences restore
+    a single-pane, all-rows workspace so later convergence checks are intact.
+    """
+    for name, keys in _UI_SCENARIOS:
+        started = now()
+        ok = True
+        try:
+            for key in keys:
+                await pilot.press(key)
+            await pilot.pause()
+        except Exception:
+            ok = False
+        recorder.record_scenario(name, now() - started, ok)
+
+
 def _check_row_count(row_count: int, expected: int) -> None:
     """Re-assert the exact rendered row count before teardown.
 
@@ -956,6 +1182,9 @@ async def _run_measured_window(
             label="initial owned pods rendered",
             recorder=recorder,
         )
+        # The table is fully populated: mark the interactive boundary that
+        # closes the startup and LIST-to-populated-table phases.
+        recorder.mark_interactive(monotonic())
 
         events = scheduled_events(profile)
         state.progress.requested_events = len(events)
@@ -991,6 +1220,11 @@ async def _run_measured_window(
             t0 = now()
             await pilot.press("up")
             recorder.record_input(now() - t0)
+
+            # UI-at-scale evidence: drive the scoped scenarios (filter, sort,
+            # namespace switch, split pane, describe, multi-log) through the
+            # real pilot while churn is still active. Read-only navigation only.
+            await drive_ui_scenarios(pilot, recorder, now=now)
 
             churn_timeout = (
                 profile.duration_seconds * options.time_scale + limits.churn_grace_seconds
@@ -1060,9 +1294,21 @@ async def run_live_replay(
 
     active_limits = limits if limits is not None else LiveLimits()
     active_deps = deps if deps is not None else _default_dependencies(context)
-    await _verify_cluster_identity(
-        context=context, expected_cluster_id=expected_cluster_id, deps=active_deps
+    facts = await _verify_cluster_identity(
+        context=context,
+        expected_cluster_id=expected_cluster_id,
+        deps=active_deps,
+        limits=active_limits,
     )
+
+    # Fail closed on an untraceable evidence run: a live report must be tied to
+    # an immutable korvid commit, resolved *before* any client is constructed.
+    korvid_sha = active_deps.resolve_sha()
+    if korvid_sha is None:
+        raise ValueError(
+            "cannot resolve an immutable korvid SHA for the live evidence run; "
+            "set GITHUB_SHA in CI or run from a git checkout with a resolvable HEAD"
+        )
 
     store = ResourceStore()
     recorder = BenchmarkRecorder()
@@ -1070,8 +1316,9 @@ async def run_live_replay(
     state = _LiveRunState()
 
     harness_kube = active_deps.harness_kube_client_factory()
-    await harness_kube.connect(context)
     try:
+        async with asyncio.timeout(active_limits.read_connect_timeout_seconds):
+            await harness_kube.connect(context)
         # Reused directly as the pre-churn uid snapshot below - no second,
         # redundant listing pass over the same Pods.
         live_state = await _verify_ownership(
@@ -1094,8 +1341,9 @@ async def run_live_replay(
                 await mutation_client.connect()
 
             kube = active_deps.kube_client_factory(recorder.record_api)
-            await kube.connect(context)
             try:
+                async with asyncio.timeout(active_limits.read_connect_timeout_seconds):
+                    await kube.connect(context)
                 source = make_live_watch_source(
                     kube,
                     expected_namespaces,
@@ -1103,7 +1351,14 @@ async def run_live_replay(
                     recorder=recorder,
                 )
                 watch_manager = WatchManager(store, source, retry_delay=0.0)
-                manifest = build_manifest(profile)
+                manifest = build_manifest(
+                    profile,
+                    korvid_sha=korvid_sha,
+                    context=facts.context,
+                    cluster_id=facts.cluster_id,
+                    kubernetes_version=facts.kubernetes_version,
+                    node_pools=facts.node_pools,
+                )
 
                 app = MeasuredKorvidApp(
                     config=KorvidConfig(namespace=ALL_NAMESPACES),
@@ -1113,6 +1368,7 @@ async def run_live_replay(
                 )
 
                 sampler.start()
+                recorder.mark_process_start(monotonic())
                 try:
                     await _run_measured_window(
                         app=app,
@@ -1139,7 +1395,11 @@ async def run_live_replay(
 
     churn = state.progress.summary(requested_duration_seconds=profile.duration_seconds)
     benchmark = recorder.report(
-        manifest, process_samples, final_digest=state.final_digest, churn=churn
+        manifest,
+        process_samples,
+        final_digest=state.final_digest,
+        expected_digest=state.expected_digest,
+        churn=churn,
     )
 
     return ReplayReport(
@@ -1155,6 +1415,9 @@ async def run_live_replay(
         churn_started_before_input=state.churn_started_before_input,
         process=benchmark.process,
         api=benchmark.api,
+        phases=benchmark.phases,
         manifest=benchmark.manifest,
+        failures_injected=benchmark.failures_injected,
+        ui_scenarios=benchmark.ui_scenarios,
         churn=churn,
     )
