@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
@@ -685,7 +687,7 @@ async def test_show_schema_cleanup_runs_off_the_event_loop() -> None:
 
     cli, _ = _cli()
     cleanup_threads: list[bool] = []
-    real_rmtree = mock.DEFAULT
+    real_rmtree = shutil.rmtree
 
     async def fake_execute(argv: list[str], timeout: float) -> tuple[int, str, str]:
         dest = argv[argv.index("--untardir") + 1]
@@ -694,15 +696,17 @@ async def test_show_schema_cleanup_runs_off_the_event_loop() -> None:
 
     main_thread = threading.current_thread()
 
-    def spy_rmtree(path: object, **kwargs: object) -> None:
+    def spy_rmtree(path: str, **kwargs: object) -> None:
         cleanup_threads.append(threading.current_thread() is not main_thread)
+        # Observe the thread, but still remove the tree: the mkdtemp
+        # directory must not outlive the test.
+        real_rmtree(path, ignore_errors=True)
 
     with (
         mock.patch("korvid.k8s.helmcli._execute", side_effect=fake_execute),
         mock.patch("korvid.k8s.helmcli.shutil.rmtree", side_effect=spy_rmtree),
     ):
         await cli.show_schema("repo/chart", "1.2.3")
-    del real_rmtree
     assert cleanup_threads == [True]
 
 
@@ -720,9 +724,12 @@ async def test_show_schema_finishes_cleanup_before_propagating_cancellation() ->
         (Path(dest) / "chart").mkdir(parents=True)
         return 0, "", ""
 
-    async def fake_to_thread(func: object, *args: object, **kwargs: object) -> None:
+    async def fake_to_thread(func: Callable[..., object], *args: object, **kwargs: object) -> None:
         cleanup_started.set()
         await allow_cleanup.wait()
+        # Still do the real removal: the fake only controls *when* cleanup
+        # runs, so the mkdtemp tree must not survive the test.
+        func(*args, **kwargs)
         cleanup_finished.set()
 
     async def release_cleanup(task: asyncio.Task[dict[str, object] | None]) -> None:
@@ -761,9 +768,12 @@ async def test_show_schema_survives_repeated_cancellation_during_cleanup() -> No
         (Path(dest) / "chart").mkdir(parents=True)
         return 0, "", ""
 
-    async def fake_to_thread(func: object, *args: object, **kwargs: object) -> None:
+    async def fake_to_thread(func: Callable[..., object], *args: object, **kwargs: object) -> None:
         cleanup_started.set()
         await allow_cleanup.wait()
+        # Still do the real removal: the fake only controls *when* cleanup
+        # runs, so the mkdtemp tree must not survive the test.
+        func(*args, **kwargs)
         cleanup_finished.set()
 
     async def cancel_again(task: asyncio.Task[dict[str, object] | None]) -> None:
