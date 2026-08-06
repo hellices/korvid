@@ -1232,9 +1232,28 @@ def test_release_workflow_refreshes_live_source_refs_before_source_policy() -> N
 
     assert branch_fetch < dry_run_check
     assert tag_fetch < source_check
-    assert verify_job.index('if [ "$EVENT_NAME" = "push" ]', branch_fetch) < tag_fetch
+    assert (
+        'if [ "$EVENT_NAME" = "push" ]; then\n'
+        '            git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"\n'
+        "          fi"
+    ) in verify_job
     assert "TAG: ${{ github.ref_name }}" in verify_job
     assert "fetch-depth: 0" in verify_job
+
+
+def test_release_workflow_binds_restored_tag_to_event_commit_before_validation() -> None:
+    workflow = _release_workflow()
+    verify = workflow.index("\n  verify:")
+    build = workflow.index("\n  build:")
+    verify_job = workflow[verify:build]
+    assert (
+        'source_commit=$(git rev-list -n 1 "refs/tags/$TAG")\n'
+        '            if [ "$source_commit" != "$GITHUB_SHA" ]; then\n'
+        '              echo "release tag does not match event commit"\n'
+        "              exit 1\n"
+        "            fi\n"
+        "            uv run --no-project python scripts/release/check_source.py"
+    ) in verify_job
 
 
 # --- provenance attestation is irreversible, so tag pushes only -------------

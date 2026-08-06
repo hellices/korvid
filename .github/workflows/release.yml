@@ -77,11 +77,15 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           if [ "$EVENT_NAME" = "push" ]; then
+            source_commit=$(git rev-list -n 1 "refs/tags/$TAG")
+            if [ "$source_commit" != "$GITHUB_SHA" ]; then
+              echo "release tag does not match event commit"
+              exit 1
+            fi
             uv run --no-project python scripts/release/check_source.py \
               "$TAG" origin/main
             # check_source deliberately logs no hashes (CodeQL). Export the
             # verified commit directly through GitHub's output channel.
-            source_commit=$(git rev-list -n 1 "refs/tags/$TAG")
           elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             source_commit=$(git rev-parse HEAD)
           else
