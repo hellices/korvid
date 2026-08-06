@@ -410,7 +410,10 @@ def _validate_live_artifacts(args: argparse.Namespace, *, run_id: str) -> str | 
             f"({', '.join(_LIVE_ARTIFACT_FLAGS.values())}); missing: {', '.join(missing)}"
         )
     paths = {attr: Path(getattr(args, attr)) for attr in _LIVE_ARTIFACT_FLAGS}
-    if len({str(path) for path in paths.values()}) != len(paths):
+    # Distinctness is decided on resolved paths: `sub/../run.json` and
+    # `run.json` are different strings but the same file, and the second write
+    # would silently destroy the first artifact.
+    if len({path.resolve() for path in paths.values()}) != len(paths):
         return "the four live artifacts must be four distinct destinations"
     for attr, path in paths.items():
         if run_id not in path.name:
@@ -478,6 +481,16 @@ def _execute_live_replay(
             _flush_allocation_snapshot(args.allocation_snapshot)
 
     if _write_outputs(args, replay):
+        return 1
+    failed_scenarios = [scenario.name for scenario in replay.ui_scenarios if not scenario.ok]
+    if failed_scenarios:
+        # `drive_ui_scenarios` records a key sequence that never reached its
+        # target state as `ok=False` instead of raising, so without this the
+        # run would "pass" with no UI-at-scale evidence behind it.
+        print(
+            "error: UI-at-scale scenarios did not pass: " + ", ".join(failed_scenarios),
+            file=sys.stderr,
+        )
         return 1
     if replay.dropped_updates > 0 or replay.expected_digest != replay.final_digest:
         return 1

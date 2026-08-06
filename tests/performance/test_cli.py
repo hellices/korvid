@@ -19,6 +19,7 @@ from tests.performance.metrics import (
     PhaseSummary,
     ProcessSummary,
     RunManifest,
+    ScenarioResult,
 )
 from tests.performance.profile import FailureInjection, WorkloadProfile
 from tests.performance.replay import ReplayOptions, ReplayReport
@@ -912,3 +913,66 @@ def test_cli_replay_live_help_points_at_the_live_qualification_profile(
     help_text = capsys.readouterr().out
     assert "tests/performance/profiles/aks-live-1k.json" in help_text
     assert Path("tests/performance/profiles/aks-live-1k.json").exists()
+
+
+async def fake_live_failed_ui_scenario(
+    profile: WorkloadProfile,
+    options: ReplayOptions,
+    *,
+    context: str,
+    expected_cluster_id: str,
+    run_id: str,
+) -> ReplayReport:
+    """Live replay whose churn and digests are clean but whose UI-at-scale
+    evidence is not: the split-pane scenario did not reach its target state."""
+    report = await fake_run_replay(profile, options)
+    return replace(
+        report,
+        ui_scenarios=(
+            ScenarioResult(name="filter", latency_seconds=0.4, ok=True),
+            ScenarioResult(name="split_pane", latency_seconds=9.9, ok=False),
+        ),
+    )
+
+
+def test_cli_replay_live_fails_when_a_ui_scenario_did_not_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`drive_ui_scenarios` records a failed key sequence as `ok=False` instead
+    of raising, so the live command must fold those outcomes into its exit
+    status — otherwise a qualification "passes" with no UI-at-scale evidence."""
+    monkeypatch.setattr(cli, "run_live_replay", fake_live_failed_ui_scenario)
+
+    exit_code = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(profile_path(tmp_path)),
+            *_LIVE_IDENTITY_ARGS,
+            *_live_artifacts(tmp_path),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "split_pane" in capsys.readouterr().err
+
+
+def test_cli_replay_live_rejects_artifact_paths_that_alias_one_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Distinctness must be decided on resolved paths: `sub/../aks186-live.json`
+    and `aks186-live.json` are different strings but the same file, so the
+    second artifact write would silently destroy the first."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay(calls))
+    (tmp_path / "sub").mkdir()
+    artifacts = _live_artifacts(tmp_path)
+    artifacts[3] = str(tmp_path / "sub" / ".." / "aks186-live.json")
+
+    exit_code = cli.main(
+        ["replay-live", "--profile", str(profile_path(tmp_path)), *_LIVE_IDENTITY_ARGS, *artifacts]
+    )
+
+    assert exit_code == 1
+    assert "distinct destinations" in capsys.readouterr().err
+    assert calls == []

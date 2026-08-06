@@ -299,6 +299,12 @@ These budgets define usable behavior for the live 1,000-Pod profile:
 | Backlog drain after a 100 events/s burst | <= 3 seconds |
 | Post-warm-up RSS slope over 30 minutes | <= 1 MiB/minute |
 | Peak RSS at 1,000 Pods | <= 512 MiB |
+| Failed UI-at-scale scenarios | 0 |
+
+`drive_ui_scenarios` records a key sequence that never reached its target state
+as `ScenarioResult(ok=False)` rather than raising, so `replay-live` folds those
+outcomes into its exit status: a run that produced no UI-at-scale evidence fails
+instead of reporting success.
 
 The final document records both observed values and budgets. A budget may be
 changed only with measured rationale in review; baseline updates never silently
