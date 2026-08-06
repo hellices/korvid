@@ -1026,6 +1026,10 @@ def _release_runbook() -> str:
     return path.read_text()
 
 
+def _security_policy() -> str:
+    return (Path(__file__).parents[1] / "SECURITY.md").read_text()
+
+
 def test_linux_bundle_pins_and_names_the_manylinux_2_28_baseline() -> None:
     workflow = _release_workflow()
     assert "manylinux_2_28_x86_64@sha256:" in workflow
@@ -1091,7 +1095,8 @@ def test_release_docs_require_immutable_protected_tags() -> None:
 
 def test_release_docs_readme_pins_first_release_install_and_links_the_runbook() -> None:
     readme = _readme()
-    assert "python -m pip install 'korvid[all]==0.1.0'" in readme
+    assert "python -m pip install 'korvid[all]==0.1.1'" in readme
+    assert "v0.1.1 is the first public PyPI release" in readme
     assert "docs/release.md" in readme
 
 
@@ -1103,14 +1108,14 @@ def test_release_docs_runbook_names_bindings_commands_and_irreversible_steps() -
     assert "`hellices/korvid`" in runbook
     assert "gh workflow run Release --ref main" in runbook
     assert 'gh run watch "$RUN_ID" --exit-status' in runbook
-    assert 'git tag -a v0.1.0 COMMIT -m "korvid v0.1.0"' in runbook
-    assert "git push origin refs/tags/v0.1.0" in runbook
-    assert "gh release download v0.1.0 --dir dist/v0.1.0" in runbook
+    assert 'git tag -a v0.1.1 COMMIT -m "korvid v0.1.1"' in runbook
+    assert "git push origin refs/tags/v0.1.1" in runbook
+    assert "gh release download v0.1.1 --dir dist/v0.1.1" in runbook
     assert (
-        "gh attestation verify dist/v0.1.0/korvid-0.1.0-py3-none-any.whl --repo hellices/korvid"
+        "gh attestation verify dist/v0.1.1/korvid-0.1.1-py3-none-any.whl --repo hellices/korvid"
     ) in runbook
-    assert ("gh attestation verify dist/v0.1.0/SHA256SUMS --repo hellices/korvid") in runbook
-    assert ("cd dist/v0.1.0 && shasum --algorithm 256 --check SHA256SUMS") in runbook
+    assert ("gh attestation verify dist/v0.1.1/SHA256SUMS --repo hellices/korvid") in runbook
+    assert ("cd dist/v0.1.1 && shasum --algorithm 256 --check SHA256SUMS") in runbook
     assert "PyPI publication is irreversible" in runbook
     assert "annotated tag publication is irreversible" in runbook
 
@@ -1131,7 +1136,7 @@ def test_release_docs_runbook_lists_retained_user_data_and_opt_in_cleanup() -> N
     assert "~/.local/state/korvid/audit.jsonl.lock" in runbook
     assert "~/.local/share/korvid/logs" in runbook
     assert "~/.local/share/korvid/agent-payloads" in runbook
-    assert "python -m pip install 'korvid[all]==0.1.0'" in runbook
+    assert "python -m pip install 'korvid[all]==0.1.1'" in runbook
     assert "python -m pip uninstall -y korvid" in runbook
     assert "opt-in cleanup" in runbook
     assert "rerun your package manager with the full desired extra set" in runbook
@@ -1163,7 +1168,21 @@ def test_release_docs_runbook_marks_recovery_boundaries_and_first_release_upgrad
     assert "Deleting or moving a published tag/version is not rollback" in runbook
     assert "resume the idempotent workflow only when the staged assets match" in runbook
     assert "stop and diagnose" in runbook
-    assert "v0.1.0 cannot prove a cross-version PyPI upgrade" in runbook
+    assert "v0.1.1 cannot prove a cross-version PyPI upgrade" in runbook
+    assert "validate upgrading from `0.1.1`" in runbook
+
+
+def test_release_docs_preserve_failed_v0_1_0_as_unpublished_audit_history() -> None:
+    runbook = _release_runbook()
+    assert "`v0.1.0` remains immutable, unpublished audit history" in runbook
+    assert "before build, attestation, staging, PyPI publication, or GitHub Release" in runbook
+    assert "`v0.1.1` is the first public release" in runbook
+
+
+def test_security_policy_starts_supported_releases_at_v0_1_1() -> None:
+    policy = _security_policy()
+    assert "Before the first public `v0.1.1` release" in policy
+    assert "Once `v0.1.1` publishes" in policy
 
 
 def test_workflow_exports_source_commit_without_logging_it_from_python() -> None:

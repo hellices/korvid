@@ -1022,7 +1022,7 @@ def test_main_module_version_exits_before_startup(
     with pytest.raises(SystemExit, match="0"):
         main_mod.main()
 
-    assert capsys.readouterr().out.strip() == "korvid 0.1.0"
+    assert capsys.readouterr().out.strip() == "korvid 0.1.1"
 
 
 def test_protected_context_name_glob_match(monkeypatch: pytest.MonkeyPatch) -> None:
