@@ -72,7 +72,7 @@ def _int(raw: dict[str, Any], key: str, *, positive: bool = False) -> int:
     return value
 
 
-def _bursts(raw: Any, duration: int) -> tuple[Burst, ...]:
+def _bursts(raw: Any) -> tuple[Burst, ...]:
     if not isinstance(raw, list):
         raise ValueError("bursts must be a list")
     result: list[Burst] = []
@@ -84,14 +84,8 @@ def _bursts(raw: Any, duration: int) -> tuple[Burst, ...]:
             duration_seconds=_int(item, "duration_seconds", positive=True),
             events_per_second=_int(item, "events_per_second", positive=True),
         )
-        if burst.start_second < 0 or burst.start_second + burst.duration_seconds > duration:
-            raise ValueError(f"burst {index} falls outside duration_seconds")
         result.append(burst)
-    ordered = sorted(result, key=lambda burst: burst.start_second)
-    for previous, current in pairwise(ordered):
-        if previous.start_second + previous.duration_seconds > current.start_second:
-            raise ValueError("bursts must not overlap")
-    return tuple(ordered)
+    return tuple(sorted(result, key=lambda burst: burst.start_second))
 
 
 def _failures(raw: Any) -> tuple[FailureInjection, ...]:
@@ -138,13 +132,46 @@ def load_profile(path: Path) -> WorkloadProfile:
         namespace_count=namespace_count,
         steady_events_per_second=steady,
         duration_seconds=duration,
-        bursts=_bursts(raw.get("bursts"), duration),
+        bursts=_bursts(raw.get("bursts")),
         failures=_failures(raw.get("failures")),
     )
+    validate_profile(profile)
+    return profile
+
+
+def validate_profile(profile: WorkloadProfile) -> None:
+    """Re-check every duration-dependent invariant of an assembled profile.
+
+    `load_profile` calls this on load, and any caller that rewrites a loaded
+    profile - notably the CLI's `--duration` override, which uses
+    `dataclasses.replace` and therefore skips the loader entirely - must call
+    it again. Without it a shortened duration can leave a burst hanging past
+    the end of the run or a failure injection past the last planned event,
+    which only surfaces much later as an opaque generator assertion.
+
+    Raises:
+        ValueError: a burst falls outside `duration_seconds`, two bursts
+            overlap, or a failure injection is scheduled past the last
+            planned event.
+    """
+    for burst in profile.bursts:
+        if burst.start_second < 0 or burst.start_second + burst.duration_seconds > (
+            profile.duration_seconds
+        ):
+            raise ValueError(
+                f"burst at second {burst.start_second} lasting {burst.duration_seconds}s "
+                f"falls outside duration_seconds={profile.duration_seconds}"
+            )
+    ordered = sorted(profile.bursts, key=lambda burst: burst.start_second)
+    for previous, current in pairwise(ordered):
+        if previous.start_second + previous.duration_seconds > current.start_second:
+            raise ValueError("bursts must not overlap")
     total = planned_event_count(profile)
     if any(failure.at_event > total for failure in profile.failures):
-        raise ValueError("failure at_event exceeds planned event count")
-    return profile
+        raise ValueError(
+            f"failure at_event exceeds planned event count ({total}) for "
+            f"duration_seconds={profile.duration_seconds}"
+        )
 
 
 def planned_event_count(profile: WorkloadProfile) -> int:

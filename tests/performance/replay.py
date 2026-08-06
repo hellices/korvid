@@ -27,11 +27,13 @@ from korvid.core.watch import WatchManager
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.models import PodSummary
 from korvid.k8s.telemetry import ReadTelemetryEvent
-from korvid.ui.app import KorvidApp, PaneState
+from korvid.ui.app import KorvidApp
+from korvid.ui.messages import ResourcesUpdated
 from korvid.ui.widgets.resource_table import ResourceTable
 from tests.performance.metrics import (
     ApiSummary,
     BenchmarkRecorder,
+    ChurnSummary,
     LatencySummary,
     ProcessSampler,
     ProcessSummary,
@@ -45,12 +47,24 @@ from tests.performance.workload import (
     scheduled_events,
     summary_digest,
 )
-from tests.ui.waits import until
+from tests.ui.waits import WaitTimeout, until
 
 
 async def _sleep_default(delay: float) -> None:
     """Thin wrapper around asyncio.sleep used as the default async sleeper."""
     await asyncio.sleep(delay)
+
+
+class ReplayAborted(Exception):
+    """A replay ended before its schedule completed and can never complete.
+
+    Raised for failure kinds the production `WatchManager` deliberately does
+    not retry (403 Forbidden is an authorization boundary, not a transient
+    fault): the stream is gone, the store has been cleared, and no further
+    event or render can arrive. Surfacing that immediately is strictly better
+    than letting the caller wait out a wall-clock timeout on a backlog that
+    will never drain.
+    """
 
 
 @dataclass(frozen=True)
@@ -96,21 +110,34 @@ class ReplayReport:
     coalesced_updates: int
     event_to_render: LatencySummary
     input_latency: LatencySummary
+    #: Whether at least one churn event had actually been emitted (replay) or
+    #: dispatched (live) when input latency was first measured.
     churn_started_before_input: bool
     process: ProcessSummary
     api: ApiSummary
     manifest: RunManifest
+    #: Requested-versus-achieved churn accounting; `None` for deterministic
+    #: replay, which drives its own source rather than a real API server.
+    churn: ChurnSummary | None = None
 
 
 class MeasuredKorvidApp(KorvidApp):
-    """KorvidApp subclass that hooks `_render_table` to record render timing."""
+    """KorvidApp subclass that records the timing of *resource-update* renders.
+
+    The hook is deliberately `on_resources_updated` rather than
+    `_render_table`: the latter is also the choke point for cursor, filter,
+    sort, namespace-switch, and split-pane repaints (~10 call sites in
+    `ui/app.py`). Counting those would inflate `render_passes` and - worse -
+    let an unrelated repaint flush the pending-event backlog, attributing a
+    watch event's latency to a keypress that happened to repaint first.
+    """
 
     def __init__(self, *args: Any, recorder: BenchmarkRecorder, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._benchmark_recorder = recorder
 
-    def _render_table(self, kind: str, *, only: PaneState | None = None) -> None:
-        super()._render_table(kind, only=only)
+    def on_resources_updated(self, message: ResourcesUpdated) -> None:
+        super().on_resources_updated(message)
         self._benchmark_recorder.record_render(monotonic())
 
 
@@ -120,6 +147,11 @@ _HARD_FAILURE_STATUS: dict[str, int] = {
     "throttled": 429,
     "forbidden": 403,
 }
+
+#: Statuses `WatchManager._watch_loop` refuses to retry: the stream ends for
+#: good and the store is cleared, so the replay is over the moment one is
+#: injected (see `ReplayAborted`).
+_TERMINAL_FAILURE_STATUS: frozenset[int] = frozenset({403})
 
 
 class _ReplaySource:
@@ -152,6 +184,13 @@ class _ReplaySource:
         self._failures = failures
         self._generation = 0
         self._next_event_index = 0
+        #: Number of scheduled churn events actually yielded to the watch
+        #: manager so far; the real signal behind
+        #: `ReplayReport.churn_started_before_input`.
+        self.emitted_events = 0
+        #: Set to the injected failure whose status the watch manager will not
+        #: retry, so `run_replay` can abort with a named cause.
+        self.terminal_failure: FailureInjection | None = None
         self._replay_start: float = 0.0
         self._current: dict[str, PodSummary] = {
             f"{p.namespace}/{p.name}": p for p in initial_pods(profile)
@@ -163,10 +202,6 @@ class _ReplaySource:
         self._sleep: Callable[[float], Awaitable[None]] = (
             options.async_sleep if options.async_sleep is not None else _sleep_default
         )
-
-    def current_digest(self) -> str:
-        """Digest of the source's tracked expected state."""
-        return summary_digest(self._current.values())
 
     async def _handle_failure_if_any(self, event: ScheduledEvent, index: int) -> None:
         """Apply failure injection for *event*; raises `ApiStatusError` for hard faults.
@@ -186,6 +221,12 @@ class _ReplaySource:
         status = _HARD_FAILURE_STATUS[failure.kind]
         self._recorder.record_api(ReadTelemetryEvent("error", "/api/v1/pods", status=status))
         self._next_event_index = index + 1
+        if status in _TERMINAL_FAILURE_STATUS:
+            # The watch manager will not reconnect after this: record the cause
+            # now so `run_replay` aborts with it instead of waiting out a
+            # timeout on a backlog that can never drain.
+            self.terminal_failure = failure
+            self._churn_done.set()
         raise ApiStatusError(status, failure.kind)
 
     async def __call__(self, kind: str, scope: str) -> AsyncIterator[tuple[str, Summary]]:
@@ -239,6 +280,7 @@ class _ReplaySource:
 
             self._recorder.record_event(event.sequence, monotonic())
             yield (event.event_type, event.summary)
+            self.emitted_events += 1
             self._next_event_index = i + 1
 
         self._churn_done.set()
@@ -247,7 +289,12 @@ class _ReplaySource:
             await asyncio.sleep(3600.0)
 
 
-def _build_manifest(profile: WorkloadProfile) -> RunManifest:
+def build_manifest(profile: WorkloadProfile) -> RunManifest:
+    """Resolved run manifest for *profile* (profile hash plus environment).
+
+    Public because both replay harnesses (`replay.py` and `live.py`) build the
+    identical manifest for their reports.
+    """
     profile_hash = hashlib.sha256(
         json.dumps(asdict(profile), sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()
@@ -261,6 +308,37 @@ def _build_manifest(profile: WorkloadProfile) -> RunManifest:
         cpu_count=os.cpu_count() or 1,
         memory_bytes=psutil.virtual_memory().total,
     )
+
+
+async def wait_for(
+    pilot: Any,
+    condition: Callable[[], object],
+    *,
+    timeout: float,
+    label: str,
+    recorder: BenchmarkRecorder,
+) -> None:
+    """`until`, but a timeout names the API errors that likely caused it.
+
+    `KorvidApp.on_mount` replaces `WatchManager.on_error` with its own TUI
+    notification, so a 403/410/429 that killed the watch is otherwise invisible
+    to the harness: the operator would see only "not met within 60.0s" after
+    paying for a full cluster setup (or a full replay). The read telemetry has
+    already recorded those statuses, so they are appended to the message.
+
+    Shared by both harnesses so a deterministic replay and a live run explain a
+    stalled wait the same way.
+    """
+    try:
+        await until(pilot, condition, timeout=timeout, label=label)
+    except WaitTimeout as exc:
+        errors = recorder.api_errors()
+        if not errors:
+            raise
+        detail = ", ".join(
+            f"{event.operation} {event.path} status={event.status}" for event in errors
+        )
+        raise WaitTimeout(f"{exc}; application read path reported API errors: {detail}") from exc
 
 
 async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> ReplayReport:
@@ -299,7 +377,7 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
         failures,
     )
     watch_manager = WatchManager(store, source, retry_delay=0.0)
-    manifest = _build_manifest(profile)
+    manifest = build_manifest(profile)
 
     app = MeasuredKorvidApp(
         config=KorvidConfig(namespace=ALL_NAMESPACES),
@@ -315,18 +393,31 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
             table = app.query_one(ResourceTable)
 
             # Wait for the initial LIST to populate the table.
-            await until(
+            await wait_for(
                 pilot,
                 lambda: table.row_count == profile.object_count,
                 timeout=30.0,
                 label="initial pods rendered",
+                recorder=recorder,
             )
 
             # Release the source to emit scheduled events, then drive cursor
             # input while churn is active (not before the source is unblocked).
             churn_start.set()
 
-            churn_started_before_input = churn_start.is_set()
+            # Real ordering signal: wait for the source to actually put at
+            # least one churn event on the wire before measuring input latency,
+            # so the reported flag reflects observed emission rather than the
+            # fact that `churn_start.set()` was called on the previous line.
+            if events:
+                await wait_for(
+                    pilot,
+                    lambda: source.emitted_events > 0 or source.terminal_failure is not None,
+                    timeout=30.0,
+                    label="first churn event emitted",
+                    recorder=recorder,
+                )
+            churn_started_before_input = source.emitted_events > 0
             t0 = monotonic()
             await pilot.press("down")
             recorder.record_input(monotonic() - t0)
@@ -335,15 +426,28 @@ async def run_replay(profile: WorkloadProfile, options: ReplayOptions) -> Replay
             recorder.record_input(monotonic() - t0)
 
             # Wait for all events to be emitted and all renders to complete.
-            await until(
+            await wait_for(
                 pilot,
-                lambda: churn_done.is_set() and not recorder._pending_events,
+                lambda: (
+                    source.terminal_failure is not None
+                    or (churn_done.is_set() and recorder.pending_count() == 0)
+                ),
                 timeout=30.0,
                 label="churn complete and all events rendered",
+                recorder=recorder,
             )
     finally:
         process_samples = await sampler.stop()
         await watch_manager.stop_all()
+
+    if source.terminal_failure is not None:
+        failure = source.terminal_failure
+        status = _HARD_FAILURE_STATUS[failure.kind]
+        raise ReplayAborted(
+            f"replay aborted: injected {failure.kind!r} failure at event "
+            f"{failure.at_event} returned HTTP {status}, which the watch "
+            f"manager never retries; the stream ended and the store was cleared"
+        )
 
     # Compute expected digest using the independent apply_events oracle.
     # Hard failures (gone, throttled, forbidden) raise before yielding the

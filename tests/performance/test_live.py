@@ -24,19 +24,23 @@ from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.telemetry import ReadTelemetry, ReadTelemetryEvent
 from tests.performance import live, manifests
 from tests.performance.live import (
+    ChurnProgress,
     CommandResult,
     LiveDependencies,
-    build_guarded_status_patch,
+    LiveLimits,
+    build_guarded_label_patch,
     drive_live_churn,
     live_object_identity,
     make_live_watch_source,
+    read_and_validate_owned_pods,
     run_live_replay,
 )
 from tests.performance.manifests import build_seed_manifests
 from tests.performance.metrics import BenchmarkRecorder
-from tests.performance.profile import WorkloadProfile
+from tests.performance.profile import Burst, WorkloadProfile
 from tests.performance.replay import ReplayOptions
 from tests.performance.workload import scheduled_events, summary_digest
+from tests.ui.waits import WaitTimeout
 
 RUN_ID = "aks186"
 CONTEXT = "aks-korvid-perf"
@@ -124,6 +128,15 @@ class _FakeKubeClient:
         self.list_pods_calls: list[str] = []
         self.list_objects_calls = 0
         self.watch_pods_calls = 0
+        #: True once the watch generator has been closed (the harness stopped
+        #: the WatchManager); lets tests assert *when* a read happened
+        #: relative to the application watch still being live.
+        self.watch_finished = False
+        #: Optional per-call spy invoked with the namespace being listed.
+        self.on_list_pods: Callable[[str], None] | None = None
+        #: Optional watch-open failure (e.g. a 403 the real client would
+        #: record as read telemetry before raising).
+        self.watch_error: ApiStatusError | None = None
 
     async def connect(self, context: str | None = None) -> None:
         self.connect_context = context
@@ -141,6 +154,8 @@ class _FakeKubeClient:
 
     async def list_pods(self, namespace: str) -> list[PodSummary]:
         self.list_pods_calls.append(namespace)
+        if self.on_list_pods is not None:
+            self.on_list_pods(namespace)
         if self.read_telemetry is not None:
             self.read_telemetry(ReadTelemetryEvent("list", f"/api/v1/namespaces/{namespace}/pods"))
         return [pod for (ns, _name), pod in self.pods.items() if ns == namespace]
@@ -148,38 +163,71 @@ class _FakeKubeClient:
     async def watch_pods(self, namespace: str | None) -> AsyncIterator[tuple[str, PodSummary]]:
         assert namespace is None
         self.watch_pods_calls += 1
-        if self.read_telemetry is not None:
-            self.read_telemetry(ReadTelemetryEvent("list", "/api/v1/pods"))
-        for pod in self.pods.values():
-            yield ("ADDED", pod)
-        for pod in self.distractor_pods:
-            yield ("ADDED", pod)
-        if self.read_telemetry is not None:
-            self.read_telemetry(ReadTelemetryEvent("watch_open", "/api/v1/pods"))
-        while True:
-            event = await self.events.get()
+        try:
+            if self.watch_error is not None:
+                if self.read_telemetry is not None:
+                    self.read_telemetry(
+                        ReadTelemetryEvent("error", "/api/v1/pods", status=self.watch_error.status)
+                    )
+                raise self.watch_error
             if self.read_telemetry is not None:
-                self.read_telemetry(ReadTelemetryEvent("watch_event", "/api/v1/pods"))
-            yield event
+                self.read_telemetry(ReadTelemetryEvent("list", "/api/v1/pods"))
+            for pod in list(self.pods.values()):
+                yield ("ADDED", pod)
+            for pod in self.distractor_pods:
+                yield ("ADDED", pod)
+            if self.read_telemetry is not None:
+                self.read_telemetry(ReadTelemetryEvent("watch_open", "/api/v1/pods"))
+            while True:
+                event = await self.events.get()
+                if self.read_telemetry is not None:
+                    self.read_telemetry(ReadTelemetryEvent("watch_event", "/api/v1/pods"))
+                yield event
+        finally:
+            self.watch_finished = True
 
 
 class _FakeMutationClient:
     """Fake `MutationClient`: applies the guard checks a real JSON-Patch
-    `test` op would enforce, then mutates the shared fake cluster and wakes
-    the fake watch - so a guard failure here is exactly as fatal as a real
-    412/422 from the API server."""
+    `test` op would enforce, then writes the dedicated tick label on the
+    shared fake cluster and wakes the fake watch - so a guard failure here is
+    exactly as fatal as a real 422 from the API server."""
 
-    def __init__(self, kube: _FakeKubeClient, run_id: str) -> None:
-        self._kube = kube
+    def __init__(
+        self,
+        kube: _FakeKubeClient | Callable[[], _FakeKubeClient],
+        run_id: str,
+    ) -> None:
+        # `run_live_replay` constructs (and eagerly connects) the mutation
+        # client *before* the application-path watch client, so tests that
+        # need the watch client resolve it lazily via a callable.
+        self._resolve_kube: Callable[[], _FakeKubeClient] = (
+            kube if callable(kube) else (lambda: kube)
+        )
         self._run_id = run_id
         self.calls: list[tuple[str, str, str]] = []
         self.closed = False
+        self.connect_calls = 0
+        self.in_flight = 0
+        self.max_in_flight = 0
 
-    async def patch_pod_status_guarded(
-        self, namespace: str, name: str, *, uid: str, phase: str
+    async def connect(self) -> None:
+        self.connect_calls += 1
+
+    async def patch_pod_labels_guarded(
+        self, namespace: str, name: str, *, uid: str, tick: str
     ) -> None:
-        self.calls.append((namespace, name, phase))
-        current = self._kube.pods.get((namespace, name))
+        self.calls.append((namespace, name, tick))
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await self._apply(namespace, name, uid=uid, tick=tick)
+        finally:
+            self.in_flight -= 1
+
+    async def _apply(self, namespace: str, name: str, *, uid: str, tick: str) -> None:
+        kube = self._resolve_kube()
+        current = kube.pods.get((namespace, name))
         labels = dict(current.labels) if current is not None else {}
         guard_ok = (
             current is not None
@@ -189,9 +237,10 @@ class _FakeMutationClient:
         )
         if not guard_ok or current is None:
             raise ApiStatusError(422, "test operation failed for guarded patch")
-        updated = dataclasses.replace(current, phase=phase)
-        self._kube.pods[(namespace, name)] = updated
-        self._kube.events.put_nowait(("MODIFIED", updated))
+        labels[manifests.TICK_LABEL] = tick
+        updated = dataclasses.replace(current, labels=tuple(sorted(labels.items())))
+        kube.pods[(namespace, name)] = updated
+        kube.events.put_nowait(("MODIFIED", updated))
 
     async def close(self) -> None:
         self.closed = True
@@ -244,7 +293,7 @@ def _happy_deps(
     app_holder: list[_FakeKubeClient] = []
 
     def default_mutation_factory(run_id_arg: str) -> _FakeMutationClient:
-        client = _FakeMutationClient(app_holder[-1], run_id_arg)
+        client = _FakeMutationClient(lambda: app_holder[-1], run_id_arg)
         if mutation_clients is not None:
             mutation_clients.append(client)
         return client
@@ -340,8 +389,8 @@ def test_live_object_identity_examples() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_guarded_status_patch_tests_uid_and_both_ownership_labels() -> None:
-    ops = build_guarded_status_patch(uid="uid-1", run_id="run1", phase="Pending")
+def test_build_guarded_label_patch_tests_uid_and_both_ownership_labels() -> None:
+    ops = build_guarded_label_patch(uid="uid-1", run_id="run1", tick="7")
     assert ops == [
         {"op": "test", "path": "/metadata/uid", "value": "uid-1"},
         {
@@ -354,8 +403,28 @@ def test_build_guarded_status_patch_tests_uid_and_both_ownership_labels() -> Non
             "path": "/metadata/labels/korvid.dev~1performance-run",
             "value": "run1",
         },
-        {"op": "replace", "path": "/status/phase", "value": "Pending"},
+        {"op": "add", "path": "/metadata/labels/korvid.dev~1performance-tick", "value": "7"},
     ]
+
+
+def test_build_guarded_label_patch_never_writes_status_spec_or_ownership() -> None:
+    """Churn must stay metadata-only on a *non-ownership* label: `status` is
+    kubelet-owned (a patched `status.phase` is reverted on the next node sync,
+    breaking digest parity) and the design doc requires metadata-only updates.
+    The two ownership labels are only ever `test` operands, never written."""
+    ops = build_guarded_label_patch(uid="uid-1", run_id="run1", tick="7")
+    writes = [op for op in ops if op["op"] != "test"]
+
+    assert len(writes) == 1
+    assert writes[0]["path"] == "/metadata/labels/korvid.dev~1performance-tick"
+    assert not any(op["path"].startswith("/status") for op in ops)
+    assert not any(op["path"].startswith("/spec") for op in ops)
+    ownership_paths = {
+        "/metadata/labels/app.kubernetes.io~1managed-by",
+        "/metadata/labels/korvid.dev~1performance-run",
+    }
+    assert all(op["op"] == "test" for op in ops if op["path"] in ownership_paths)
+    assert manifests.TICK_LABEL not in {manifests.MANAGED_BY_LABEL, manifests.RUN_LABEL}
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +454,7 @@ async def test_drive_live_churn_sends_guarded_patches_for_every_event() -> None:
     options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
 
     recorder = BenchmarkRecorder()
+    progress = ChurnProgress(requested_events=len(events))
     live_state = dict(pods)
     await drive_live_churn(
         events,
@@ -392,17 +462,21 @@ async def test_drive_live_churn_sends_guarded_patches_for_every_event() -> None:
         namespace_count=namespace_count,
         live_state=live_state,
         mutation_client=mutation_client,
-        recorder=recorder,
         options=options,
+        progress=progress,
+        limits=LiveLimits(churn_concurrency=1),
     )
     assert len(mutation_client.calls) == len(events)
     for call, event in zip(mutation_client.calls, events, strict=True):
-        namespace, name, phase = call
+        namespace, name, tick = call
         expected_namespace, expected_name = live_object_identity(
-            run_id, namespace_count, int(event.summary.name.removeprefix("pod-"))
+            run_id, namespace_count, event.object_index
         )
         assert (namespace, name) == (expected_namespace, expected_name)
-        assert phase == event.summary.phase
+        assert tick == str(event.sequence)
+    assert progress.completed == len(events)
+    # Event timing is recorded at watch receipt, never by the write path.
+    assert recorder.pending_count() == 0
 
 
 async def test_drive_live_churn_aborts_on_guard_failure_and_never_continues() -> None:
@@ -428,7 +502,6 @@ async def test_drive_live_churn_aborts_on_guard_failure_and_never_continues() ->
     monotonic_fn, async_sleep = _virtual_clock()
     options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
 
-    recorder = BenchmarkRecorder()
     # Snapshot the driver's cached state *before* the target pod is replaced
     # (a fresh uid) - exactly like `run_live_replay` caching uids once during
     # the ownership gate, then churning without re-reading them each time.
@@ -437,7 +510,7 @@ async def test_drive_live_churn_aborts_on_guard_failure_and_never_continues() ->
     # Simulate the target pod being replaced right before the second
     # scheduled mutation - a real API server would fail the JSON-Patch
     # `test` op the same way.
-    second_index = int(events[1].summary.name.removeprefix("pod-"))
+    second_index = events[1].object_index
     second_key = live_object_identity(run_id, namespace_count, second_index)
     kube.pods[second_key] = dataclasses.replace(kube.pods[second_key], uid="replaced-uid")
 
@@ -448,8 +521,9 @@ async def test_drive_live_churn_aborts_on_guard_failure_and_never_continues() ->
             namespace_count=namespace_count,
             live_state=live_state,
             mutation_client=mutation_client,
-            recorder=recorder,
             options=options,
+            progress=ChurnProgress(requested_events=len(events)),
+            limits=LiveLimits(churn_concurrency=1),
         )
     # Aborted at the 2nd call; a 3rd event must never have been attempted.
     assert len(mutation_client.calls) == 2
@@ -473,7 +547,9 @@ async def test_make_live_watch_source_filters_to_expected_namespaces() -> None:
     )
     kube = _FakeKubeClient({}, pods, distractor_pods=(distractor,))
     expected_namespaces = frozenset(namespace for namespace, _name in pods)
-    source = make_live_watch_source(kube, expected_namespaces)
+    source = make_live_watch_source(
+        kube, expected_namespaces, run_id=run_id, recorder=BenchmarkRecorder()
+    )
 
     seen: list[tuple[str, Summary]] = []
     agen = source("pods", "*")
@@ -493,7 +569,7 @@ async def test_make_live_watch_source_filters_to_expected_namespaces() -> None:
 
 async def test_make_live_watch_source_rejects_non_pod_kind() -> None:
     kube = _FakeKubeClient({}, {})
-    source = make_live_watch_source(kube, frozenset())
+    source = make_live_watch_source(kube, frozenset(), run_id="run1", recorder=BenchmarkRecorder())
     with pytest.raises(ValueError, match="only watches pods"):
         await source("deployments", "*").__anext__()
 
@@ -885,6 +961,9 @@ async def test_run_live_replay_full_happy_path_matches_cluster_digest() -> None:
     # of `report.api` - its single "list" comes from `watch_pods`'s own
     # internal LIST-then-WATCH, not from any harness read.
     assert app_client.watch_pods_calls == 1
+    # The watch really is stopped by teardown, so `watch_finished` is a
+    # meaningful signal for the ground-truth-read ordering assertion.
+    assert app_client.watch_finished
     assert report.api.operations["watch_open"] == 1
     assert report.api.operations.get("list", 0) == 1
 
@@ -912,9 +991,13 @@ async def test_run_live_replay_aborts_and_still_closes_clients_on_guard_failure(
     class _AlwaysFailingMutationClient:
         def __init__(self) -> None:
             self.closed = False
+            self.connect_calls = 0
 
-        async def patch_pod_status_guarded(
-            self, namespace: str, name: str, *, uid: str, phase: str
+        async def connect(self) -> None:
+            self.connect_calls += 1
+
+        async def patch_pod_labels_guarded(
+            self, namespace: str, name: str, *, uid: str, tick: str
         ) -> None:
             raise ApiStatusError(422, "test operation failed for guarded patch")
 
@@ -979,11 +1062,15 @@ async def test_run_live_replay_propagates_cancelled_error_and_still_closes_clien
     )
 
     async def cancelling_sleep(_delay: float) -> None:
+        # Yield first so the already-dispatched first mutation task runs to
+        # completion, then cancel exactly like a real `Task.cancel()` landing
+        # in the scheduler's sleep.
+        await asyncio.sleep(0)
         raise asyncio.CancelledError
 
     # duration_seconds=1, steady_events_per_second=2 schedules events at
-    # offsets 0.0 and 0.5: the first mutates without sleeping (delay <= 0),
-    # the second's positive delay drives the cancelling sleep.
+    # offsets 0.0 and 0.5: the first is dispatched without sleeping
+    # (delay <= 0), the second's positive delay drives the cancelling sleep.
     options = ReplayOptions(time_scale=1.0, monotonic_fn=lambda: 0.0, async_sleep=cancelling_sleep)
 
     with pytest.raises(asyncio.CancelledError):
@@ -1003,3 +1090,827 @@ async def test_run_live_replay_propagates_cancelled_error_and_still_closes_clien
     # Cancellation must abort before the second churn mutation - no broad
     # cleanup, no continuing past the point of cancellation.
     assert len(created_clients[0].calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# C1: event timing is recorded at watch receipt, never at patch ack
+# ---------------------------------------------------------------------------
+
+
+async def test_make_live_watch_source_records_owned_modified_events_at_receipt() -> None:
+    """Latency measurement must start where the *application* first sees the
+    event, exactly like the deterministic `_ReplaySource`. Initial `ADDED`
+    rows from the LIST phase and events from foreign namespaces are not churn
+    events and must not be recorded."""
+    run_id = "run1"
+    _, pods = _build_fake_topology(run_id, 2, 4)
+    kube = _FakeKubeClient({}, pods)
+    recorder = BenchmarkRecorder()
+    expected_namespaces = frozenset(namespace for namespace, _name in pods)
+    source = make_live_watch_source(kube, expected_namespaces, run_id=run_id, recorder=recorder)
+
+    agen = source("pods", "*")
+    try:
+        for _ in range(len(pods)):
+            await agen.__anext__()
+        # Four ADDED rows from the LIST phase are not churn events.
+        assert recorder.pending_count() == 0
+
+        owned = next(iter(pods.values()))
+        kube.events.put_nowait(("MODIFIED", owned))
+        await agen.__anext__()
+        assert recorder.pending_count() == 1
+
+        foreign = PodSummary(
+            name="stray",
+            namespace="default",
+            phase="Running",
+            ready="1/1",
+            restarts=0,
+            node="node-x",
+        )
+        unowned = dataclasses.replace(owned, labels=())
+        kube.events.put_nowait(("MODIFIED", foreign))
+        kube.events.put_nowait(("MODIFIED", unowned))
+        await agen.__anext__()
+        assert recorder.pending_count() == 1
+    finally:
+        assert isinstance(agen, AsyncGenerator)
+        await agen.aclose()
+
+
+async def test_run_live_replay_records_at_receipt_when_the_patch_ack_lags() -> None:
+    """Reproduces the ack-race the review found: a real API server delivers the
+    watch event over a different connection than the patch response, so the
+    event can be rendered *before* the patch call returns. Recording at ack
+    then appended a pending entry after its own render, which the final wait
+    could never drain (a 60 s timeout) and which the CLI reported as a dropped
+    update."""
+
+    class _AckLagsMutationClient(_FakeMutationClient):
+        async def _apply(self, namespace: str, name: str, *, uid: str, tick: str) -> None:
+            await super()._apply(namespace, name, uid=uid, tick=tick)
+            # Let the watch deliver and render before the caller resumes.
+            for _ in range(20):
+                await asyncio.sleep(0.005)
+
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    app_clients: list[_FakeKubeClient] = []
+    deps = _happy_deps(namespaces, pods, RUN_ID, app_clients=app_clients)
+    deps = dataclasses.replace(
+        deps,
+        mutation_client_factory=lambda run_id: _AckLagsMutationClient(
+            lambda: app_clients[-1], run_id
+        ),
+    )
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+
+    report = await run_live_replay(
+        _tiny_live_profile(),
+        options,
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    assert report.dropped_updates == 0
+    assert report.event_to_render.count == 2
+    assert report.expected_digest == report.final_digest
+
+
+# ---------------------------------------------------------------------------
+# C2: metadata-only, ownership-preserving churn and digest convergence
+# ---------------------------------------------------------------------------
+
+
+async def test_run_live_replay_churns_the_tick_label_and_preserves_everything_else() -> None:
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    mutation_clients: list[_FakeMutationClient] = []
+    deps = _happy_deps(namespaces, pods, RUN_ID, mutation_clients=mutation_clients)
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+
+    report = await run_live_replay(
+        _tiny_live_profile(),
+        options,
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    mutated = {(namespace, name) for namespace, name, _tick in mutation_clients[0].calls}
+    assert mutated
+    for key, pod in pods.items():
+        labels = dict(pod.labels)
+        assert labels[manifests.MANAGED_BY_LABEL] == manifests.MANAGED_BY_VALUE
+        assert labels[manifests.RUN_LABEL] == RUN_ID
+        # Kubelet-owned status is never touched by churn.
+        assert pod.phase == "Running"
+        assert (manifests.TICK_LABEL in labels) is (key in mutated)
+    assert report.expected_digest == report.final_digest
+
+
+async def test_run_live_replay_reads_ground_truth_while_the_watch_is_live() -> None:
+    """The ground-truth read and the convergence wait must both happen inside
+    the measured window: reading after `watch_manager.stop_all()` compares a
+    frozen store against a cluster that was still changing."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    harness_clients: list[_FakeKubeClient] = []
+    app_clients: list[_FakeKubeClient] = []
+    deps = _happy_deps(
+        namespaces, pods, RUN_ID, harness_clients=harness_clients, app_clients=app_clients
+    )
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+
+    watch_live_during_reads: list[bool] = []
+
+    def spy(_namespace: str) -> None:
+        if len(harness_clients[0].list_pods_calls) > 20:  # the post-churn re-read
+            watch_live_during_reads.append(not app_clients[0].watch_finished)
+
+    async def run() -> None:
+        await run_live_replay(
+            _tiny_live_profile(),
+            options,
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+    original_factory = deps.harness_kube_client_factory
+
+    def harness_factory() -> _FakeKubeClient:
+        client = original_factory()
+        assert isinstance(client, _FakeKubeClient)
+        client.on_list_pods = spy
+        return client
+
+    deps = dataclasses.replace(deps, harness_kube_client_factory=harness_factory)
+    await run()
+
+    assert len(watch_live_during_reads) == 20
+    assert all(watch_live_during_reads)
+
+
+async def test_run_live_replay_waits_for_the_store_digest_to_converge() -> None:
+    """Watch propagation lags the patch acknowledgement. Without an explicit
+    convergence wait the store digest is read while the last events are still
+    in flight, producing a false digest mismatch (CLI exit 1)."""
+
+    class _LaggingWatchMutationClient(_FakeMutationClient):
+        async def _apply(self, namespace: str, name: str, *, uid: str, tick: str) -> None:
+            kube = self._resolve_kube()
+            before = kube.events.qsize()
+            await super()._apply(namespace, name, uid=uid, tick=tick)
+            # Pull the just-queued event back out and re-deliver it later, so
+            # the cluster is already mutated while the watch has not caught up.
+            assert kube.events.qsize() == before + 1
+            delayed = kube.events.get_nowait()
+            asyncio.get_running_loop().call_later(1.0, kube.events.put_nowait, delayed)
+
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    app_clients: list[_FakeKubeClient] = []
+    deps = _happy_deps(namespaces, pods, RUN_ID, app_clients=app_clients)
+    deps = dataclasses.replace(
+        deps,
+        mutation_client_factory=lambda run_id: _LaggingWatchMutationClient(
+            lambda: app_clients[-1], run_id
+        ),
+    )
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+
+    report = await run_live_replay(
+        _tiny_live_profile(),
+        options,
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    assert report.expected_digest == report.final_digest
+    assert report.expected_digest == summary_digest(pods.values())
+    assert report.dropped_updates == 0
+
+
+def test_check_row_count_rejects_a_regressed_render() -> None:
+    """A late watch reconnect clears and re-seeds the store, so a digest that
+    matched a moment ago can be recomputed over a partial store; the rendered
+    row count is re-asserted at the same instant."""
+    live._check_row_count(1000, 1000)
+
+    with pytest.raises(ValueError, match="rendered row count regressed"):
+        live._check_row_count(999, 1000)
+
+
+# ---------------------------------------------------------------------------
+# C3: bounded concurrency, bounded operation time, guarded 429-only retry
+# ---------------------------------------------------------------------------
+
+
+def _churn_profile(*, events_per_second: int, duration_seconds: int = 1) -> WorkloadProfile:
+    return WorkloadProfile(
+        schema_version=1,
+        id="churn-test",
+        seed=7,
+        object_count=4,
+        namespace_count=2,
+        steady_events_per_second=events_per_second,
+        duration_seconds=duration_seconds,
+        bursts=(),
+        failures=(),
+    )
+
+
+async def test_drive_live_churn_bounds_in_flight_mutations() -> None:
+    """Serial patching cannot approach the scheduled rate (one round trip per
+    event), so churn dispatches concurrently - but never without a ceiling."""
+
+    class _YieldingMutationClient(_FakeMutationClient):
+        async def _apply(self, namespace: str, name: str, *, uid: str, tick: str) -> None:
+            for _ in range(3):
+                await asyncio.sleep(0)
+            await super()._apply(namespace, name, uid=uid, tick=tick)
+
+    run_id = "run1"
+    _, pods = _build_fake_topology(run_id, 2, 4)
+    kube = _FakeKubeClient({}, pods)
+    mutation_client = _YieldingMutationClient(kube, run_id)
+    events = scheduled_events(_churn_profile(events_per_second=40))
+    monotonic_fn, async_sleep = _virtual_clock()
+    progress = ChurnProgress(requested_events=len(events))
+
+    await drive_live_churn(
+        events,
+        run_id=run_id,
+        namespace_count=2,
+        live_state=dict(pods),
+        mutation_client=mutation_client,
+        options=ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep),
+        progress=progress,
+        limits=LiveLimits(churn_concurrency=4),
+    )
+
+    assert progress.completed == len(events) == 40
+    assert mutation_client.max_in_flight > 1, "churn must not be effectively serial"
+    assert mutation_client.max_in_flight <= 4
+
+
+async def test_drive_live_churn_retries_only_429_with_the_identical_guarded_patch() -> None:
+    """A single API Priority and Fairness throttle must not kill a 30-minute
+    run, but the retry re-issues the *identical* guarded patch (same uid, same
+    ownership tests) - it is never a relaxed or unguarded retry."""
+
+    class _ThrottlingMutationClient(_FakeMutationClient):
+        def __init__(self, kube: _FakeKubeClient, run_id: str, throttles: int) -> None:
+            super().__init__(kube, run_id)
+            self.remaining_throttles = throttles
+            self.patch_arguments: list[tuple[str, str, str, str]] = []
+
+        async def patch_pod_labels_guarded(
+            self, namespace: str, name: str, *, uid: str, tick: str
+        ) -> None:
+            self.patch_arguments.append((namespace, name, uid, tick))
+            if self.remaining_throttles > 0:
+                self.remaining_throttles -= 1
+                raise ApiStatusError(429, "Too Many Requests")
+            await super().patch_pod_labels_guarded(namespace, name, uid=uid, tick=tick)
+
+    run_id = "run1"
+    _, pods = _build_fake_topology(run_id, 2, 4)
+    kube = _FakeKubeClient({}, pods)
+    mutation_client = _ThrottlingMutationClient(kube, run_id, throttles=2)
+    events = scheduled_events(_churn_profile(events_per_second=1))
+    monotonic_fn, async_sleep = _virtual_clock()
+    progress = ChurnProgress(requested_events=len(events))
+
+    await drive_live_churn(
+        events,
+        run_id=run_id,
+        namespace_count=2,
+        live_state=dict(pods),
+        mutation_client=mutation_client,
+        options=ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep),
+        progress=progress,
+        limits=LiveLimits(churn_concurrency=1, mutation_throttle_retries=5),
+    )
+
+    assert len(mutation_client.patch_arguments) == 3
+    assert len(set(mutation_client.patch_arguments)) == 1
+    assert progress.mutation_throttles == 2
+    assert progress.completed == 1
+
+
+async def test_drive_live_churn_gives_up_after_the_bounded_throttle_retries() -> None:
+    class _AlwaysThrottling(_FakeMutationClient):
+        async def patch_pod_labels_guarded(
+            self, namespace: str, name: str, *, uid: str, tick: str
+        ) -> None:
+            self.calls.append((namespace, name, tick))
+            raise ApiStatusError(429, "Too Many Requests")
+
+    run_id = "run1"
+    _, pods = _build_fake_topology(run_id, 2, 4)
+    mutation_client = _AlwaysThrottling(_FakeKubeClient({}, pods), run_id)
+    events = scheduled_events(_churn_profile(events_per_second=1))
+    monotonic_fn, async_sleep = _virtual_clock()
+    progress = ChurnProgress(requested_events=len(events))
+
+    with pytest.raises(ApiStatusError, match="API 429"):
+        await drive_live_churn(
+            events,
+            run_id=run_id,
+            namespace_count=2,
+            live_state=dict(pods),
+            mutation_client=mutation_client,
+            options=ReplayOptions(
+                time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep
+            ),
+            progress=progress,
+            limits=LiveLimits(churn_concurrency=1, mutation_throttle_retries=2),
+        )
+
+    assert len(mutation_client.calls) == 3
+    assert progress.mutation_throttles == 2
+
+
+async def test_drive_live_churn_never_retries_a_failed_ownership_guard() -> None:
+    """422 is a failed JSON-Patch `test` op: the target is not what the run
+    validated. Retrying it - guarded or not - is exactly the behaviour the
+    safety contract forbids."""
+
+    class _GuardFailingMutationClient(_FakeMutationClient):
+        async def patch_pod_labels_guarded(
+            self, namespace: str, name: str, *, uid: str, tick: str
+        ) -> None:
+            self.calls.append((namespace, name, tick))
+            raise ApiStatusError(422, "test operation failed for guarded patch")
+
+    run_id = "run1"
+    _, pods = _build_fake_topology(run_id, 2, 4)
+    mutation_client = _GuardFailingMutationClient(_FakeKubeClient({}, pods), run_id)
+    events = scheduled_events(_churn_profile(events_per_second=1))
+    monotonic_fn, async_sleep = _virtual_clock()
+    progress = ChurnProgress(requested_events=len(events))
+
+    with pytest.raises(ApiStatusError, match="test operation failed"):
+        await drive_live_churn(
+            events,
+            run_id=run_id,
+            namespace_count=2,
+            live_state=dict(pods),
+            mutation_client=mutation_client,
+            options=ReplayOptions(
+                time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep
+            ),
+            progress=progress,
+            limits=LiveLimits(churn_concurrency=1, mutation_throttle_retries=5),
+        )
+
+    assert len(mutation_client.calls) == 1
+    assert progress.mutation_throttles == 0
+
+
+async def test_drive_live_churn_bounds_every_mutation_attempt() -> None:
+    """A stalled patch must not hang the run: every attempt is bounded."""
+
+    class _HangingMutationClient(_FakeMutationClient):
+        async def patch_pod_labels_guarded(
+            self, namespace: str, name: str, *, uid: str, tick: str
+        ) -> None:
+            self.calls.append((namespace, name, tick))
+            await asyncio.sleep(30)
+
+    run_id = "run1"
+    _, pods = _build_fake_topology(run_id, 2, 4)
+    mutation_client = _HangingMutationClient(_FakeKubeClient({}, pods), run_id)
+    events = scheduled_events(_churn_profile(events_per_second=1))
+    progress = ChurnProgress(requested_events=len(events))
+
+    with pytest.raises(TimeoutError):
+        await drive_live_churn(
+            events,
+            run_id=run_id,
+            namespace_count=2,
+            live_state=dict(pods),
+            mutation_client=mutation_client,
+            options=ReplayOptions(time_scale=1.0),
+            progress=progress,
+            limits=LiveLimits(churn_concurrency=1, mutation_timeout_seconds=0.05),
+        )
+
+    assert len(mutation_client.calls) == 1
+    assert progress.completed == 0
+
+
+async def test_run_live_replay_reports_requested_and_achieved_churn_rate() -> None:
+    """The design doc forbids presenting a requested rate as an achieved one:
+    both must be reported, and they must be allowed to differ."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(namespaces, pods, RUN_ID)
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+
+    profile = dataclasses.replace(_tiny_live_profile(), duration_seconds=2)
+    report = await run_live_replay(
+        profile,
+        options,
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    assert report.churn is not None
+    # 4 events requested over 2 seconds (2 events/s requested); the driver
+    # observed all 4 within a 1.0 s window, i.e. a different achieved rate.
+    assert report.churn.requested_events == 4
+    assert report.churn.requested_events_per_second == 2.0
+    assert report.churn.observed_events == 4
+    assert report.churn.wall_seconds == 1.0
+    assert report.churn.achieved_events_per_second == 4.0
+    assert report.churn.requested_events_per_second != report.churn.achieved_events_per_second
+    assert report.churn.mutation_throttles == 0
+
+
+async def test_run_live_replay_counts_mutation_throttles_outside_read_telemetry() -> None:
+    """Harness write traffic must never be reported as application read-path
+    API telemetry."""
+
+    class _ThrottleOnceMutationClient(_FakeMutationClient):
+        def __init__(
+            self, kube: Callable[[], _FakeKubeClient] | _FakeKubeClient, run_id: str
+        ) -> None:
+            super().__init__(kube, run_id)
+            self.throttled = False
+
+        async def patch_pod_labels_guarded(
+            self, namespace: str, name: str, *, uid: str, tick: str
+        ) -> None:
+            if not self.throttled:
+                self.throttled = True
+                raise ApiStatusError(429, "Too Many Requests")
+            await super().patch_pod_labels_guarded(namespace, name, uid=uid, tick=tick)
+
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    app_clients: list[_FakeKubeClient] = []
+    deps = _happy_deps(namespaces, pods, RUN_ID, app_clients=app_clients)
+    deps = dataclasses.replace(
+        deps,
+        mutation_client_factory=lambda run_id: _ThrottleOnceMutationClient(
+            lambda: app_clients[-1], run_id
+        ),
+    )
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+
+    report = await run_live_replay(
+        _tiny_live_profile(),
+        options,
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    assert report.churn is not None
+    assert report.churn.mutation_throttles == 1
+    assert report.api.throttles == 0
+    assert report.api.operations.get("error", 0) == 0
+    assert report.expected_digest == report.final_digest
+
+
+# ---------------------------------------------------------------------------
+# I2: cancellation cancels and drains every mutation task before teardown
+# ---------------------------------------------------------------------------
+
+
+async def test_run_live_replay_stops_mutating_when_the_outer_task_is_cancelled() -> None:
+    """Real `Task.cancel()` on the whole run: the churn task (and every patch
+    inside its task group) must be cancelled and awaited *before* the clients
+    are closed, so no mutation outlives teardown."""
+
+    class _PacedMutationClient(_FakeMutationClient):
+        async def _apply(self, namespace: str, name: str, *, uid: str, tick: str) -> None:
+            await asyncio.sleep(0.01)
+            await super()._apply(namespace, name, uid=uid, tick=tick)
+
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    app_clients: list[_FakeKubeClient] = []
+    harness_clients: list[_FakeKubeClient] = []
+    created: list[_PacedMutationClient] = []
+
+    def mutation_factory(run_id: str) -> _PacedMutationClient:
+        client = _PacedMutationClient(lambda: app_clients[-1], run_id)
+        created.append(client)
+        return client
+
+    deps = _happy_deps(
+        namespaces,
+        pods,
+        RUN_ID,
+        app_clients=app_clients,
+        harness_clients=harness_clients,
+        mutation_client_factory=mutation_factory,
+    )
+    # 300 events over 30 s of real wall time: the run is still churning when
+    # the cancellation lands.
+    profile = dataclasses.replace(
+        _tiny_live_profile(), steady_events_per_second=10, duration_seconds=30
+    )
+
+    task = asyncio.create_task(
+        run_live_replay(
+            profile,
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+    )
+    for _ in range(2000):
+        if created and len(created[0].calls) >= 2:
+            break
+        await asyncio.sleep(0.005)
+    assert created, "the mutation client was never constructed"
+    assert len(created[0].calls) >= 2, "churn never started"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    calls_at_cancellation = len(created[0].calls)
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+    assert len(created[0].calls) == calls_at_cancellation
+    assert created[0].closed
+    assert harness_clients[0].closed
+    assert app_clients[0].closed
+
+
+# ---------------------------------------------------------------------------
+# I3/I4: exact identity and ownership, before *and* after churn
+# ---------------------------------------------------------------------------
+
+
+async def test_verify_ownership_rejects_unexpected_pod_in_an_owned_namespace() -> None:
+    """The application watch filters by namespace, so a foreign Pod in an owned
+    namespace enters the benchmark store; the gate must name it instead of
+    letting the initial-render wait time out with a generic message."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    stray_namespace = manifests.namespace_name(RUN_ID, 3)
+    pods[(stray_namespace, "intruder")] = PodSummary(
+        name="intruder",
+        namespace=stray_namespace,
+        phase="Running",
+        ready="1/1",
+        restarts=0,
+        node="node-9",
+        labels=_labels(RUN_ID),
+    )
+    kube = _FakeKubeClient(namespaces, pods)
+
+    with pytest.raises(
+        ValueError, match=f"unexpected pods in owned namespaces: {stray_namespace}/intruder"
+    ):
+        await live._verify_ownership(kube, run_id=RUN_ID, namespace_count=20, object_count=1000)
+
+
+async def test_read_and_validate_owned_pods_returns_the_validated_snapshot() -> None:
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    kube = _FakeKubeClient(namespaces, pods)
+
+    validated = await read_and_validate_owned_pods(kube, run_id=RUN_ID, expected=pods)
+
+    assert sorted((pod.namespace, pod.name) for pod in validated) == sorted(pods)
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "message"),
+    [
+        ("labels", "lost ownership labels"),
+        ("uid", "uid changed"),
+        ("missing", "missing"),
+        ("extra", "unexpected pod"),
+    ],
+)
+async def test_read_and_validate_owned_pods_rejects_identity_or_ownership_loss(
+    corrupt: str, message: str
+) -> None:
+    """The ground-truth digest may only be computed from Pods that still are
+    what the ownership gate validated."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    expected = dict(pods)
+    key = live_object_identity(RUN_ID, 20, 42)
+    if corrupt == "labels":
+        pods[key] = dataclasses.replace(pods[key], labels=_labels("some-other-run"))
+    elif corrupt == "uid":
+        pods[key] = dataclasses.replace(pods[key], uid="recreated-uid")
+    elif corrupt == "missing":
+        del pods[key]
+    else:
+        namespace = key[0]
+        pods[(namespace, "intruder")] = dataclasses.replace(
+            pods[key], name="intruder", uid="intruder-uid"
+        )
+    kube = _FakeKubeClient(namespaces, pods)
+
+    with pytest.raises(ValueError, match=f"post-churn ownership revalidation failed.*{message}"):
+        await read_and_validate_owned_pods(kube, run_id=RUN_ID, expected=expected)
+
+
+async def test_run_live_replay_rejects_a_pod_that_lost_ownership_during_churn() -> None:
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    harness_clients: list[_FakeKubeClient] = []
+    deps = _happy_deps(namespaces, pods, RUN_ID, harness_clients=harness_clients)
+    victim = live_object_identity(RUN_ID, 20, 7)
+
+    def strip_ownership_before_the_final_read(_namespace: str) -> None:
+        if len(harness_clients[0].list_pods_calls) > 20:
+            pods[victim] = dataclasses.replace(pods[victim], labels=())
+
+    original_factory = deps.harness_kube_client_factory
+
+    def harness_factory() -> _FakeKubeClient:
+        client = original_factory()
+        assert isinstance(client, _FakeKubeClient)
+        client.on_list_pods = strip_ownership_before_the_final_read
+        return client
+
+    deps = dataclasses.replace(deps, harness_kube_client_factory=harness_factory)
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+
+    with pytest.raises(ValueError, match="post-churn ownership revalidation failed"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            options,
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )
+
+
+# ---------------------------------------------------------------------------
+# I7 / M12 / M7 / profile revalidation
+# ---------------------------------------------------------------------------
+
+
+async def test_run_live_replay_names_watch_api_errors_in_a_wait_timeout() -> None:
+    """`KorvidApp.on_mount` overwrites `WatchManager.on_error` with its own TUI
+    notification, so a 403 that killed the watch is otherwise invisible: the
+    operator would see only "not met within Ns" after paying for cluster setup."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    app_clients: list[_FakeKubeClient] = []
+    deps = _happy_deps(namespaces, pods, RUN_ID, app_clients=app_clients)
+    original_factory = deps.kube_client_factory
+
+    def failing_kube_factory(read_telemetry: ReadTelemetry) -> _FakeKubeClient:
+        client = original_factory(read_telemetry)
+        assert isinstance(client, _FakeKubeClient)
+        client.watch_error = ApiStatusError(403, "Forbidden")
+        return client
+
+    deps = dataclasses.replace(deps, kube_client_factory=failing_kube_factory)
+
+    with pytest.raises(WaitTimeout, match="status=403"):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+            limits=LiveLimits(initial_render_timeout_seconds=0.3),
+        )
+
+
+async def test_run_live_replay_connects_the_mutation_client_before_the_app_starts() -> None:
+    """`load_kube_config` can invoke an exec credential plugin; that latency is
+    paid once, up front, under an explicit bound - not inside the first
+    measured mutation."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    mutation_clients: list[_FakeMutationClient] = []
+    app_clients: list[_FakeKubeClient] = []
+    connect_order: list[str] = []
+
+    def mutation_factory(run_id: str) -> _FakeMutationClient:
+        client = _FakeMutationClient(lambda: app_clients[-1], run_id)
+        mutation_clients.append(client)
+        return client
+
+    deps = _happy_deps(
+        namespaces,
+        pods,
+        RUN_ID,
+        app_clients=app_clients,
+        mutation_client_factory=mutation_factory,
+    )
+    original_kube_factory = deps.kube_client_factory
+
+    def recording_kube_factory(read_telemetry: ReadTelemetry) -> _FakeKubeClient:
+        connect_order.append("app-client")
+        return original_kube_factory(read_telemetry)  # type: ignore[return-value]
+
+    deps = dataclasses.replace(deps, kube_client_factory=recording_kube_factory)
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+
+    await run_live_replay(
+        _tiny_live_profile(),
+        options,
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    assert mutation_clients[0].connect_calls == 1
+    assert connect_order == ["app-client"]
+
+
+async def test_run_live_replay_bounds_the_mutation_client_connect() -> None:
+    class _HangingConnectMutationClient(_FakeMutationClient):
+        async def connect(self) -> None:
+            await asyncio.sleep(30)
+
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    created: list[_HangingConnectMutationClient] = []
+
+    def mutation_factory(run_id: str) -> _HangingConnectMutationClient:
+        client = _HangingConnectMutationClient(_FakeKubeClient(namespaces, pods), run_id)
+        created.append(client)
+        return client
+
+    deps = _happy_deps(namespaces, pods, RUN_ID, mutation_client_factory=mutation_factory)
+
+    with pytest.raises(TimeoutError):
+        await run_live_replay(
+            _tiny_live_profile(),
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+            limits=LiveLimits(mutation_connect_timeout_seconds=0.05),
+        )
+
+    assert created[0].closed
+
+
+async def test_run_live_replay_measures_input_latency_with_the_injected_clock() -> None:
+    """Churn uses the injected clock; input latency must use the same one, or a
+    virtual-clock latency assertion measures nothing."""
+    namespaces, pods = _build_fake_topology(RUN_ID, 20, 1000)
+    deps = _happy_deps(namespaces, pods, RUN_ID)
+    monotonic_fn, async_sleep = _virtual_clock()
+    options = ReplayOptions(time_scale=1.0, monotonic_fn=monotonic_fn, async_sleep=async_sleep)
+
+    report = await run_live_replay(
+        _tiny_live_profile(),
+        options,
+        context=CONTEXT,
+        expected_cluster_id=CLUSTER_ID,
+        run_id=RUN_ID,
+        deps=deps,
+    )
+
+    assert report.input_latency.count == 2
+    assert report.input_latency.maximum_seconds == 0.0
+
+
+async def test_run_live_replay_rejects_a_profile_whose_bursts_escape_its_duration() -> None:
+    """A profile rewritten with `dataclasses.replace` (the CLI's `--duration`)
+    never passes through `load_profile`; the invariants are re-checked here,
+    before any cluster identity or ownership work."""
+    profile = dataclasses.replace(
+        _tiny_live_profile(),
+        duration_seconds=2,
+        bursts=(Burst(start_second=1, duration_seconds=30, events_per_second=100),),
+    )
+    deps = LiveDependencies(
+        command_runner=_never_called("command_runner"),
+        active_context=_never_called("active_context"),
+        context_host=_never_called("context_host"),
+        kube_client_factory=_never_called("kube_client_factory"),
+        harness_kube_client_factory=_never_called("harness_kube_client_factory"),
+        mutation_client_factory=_never_called("mutation_client_factory"),
+    )
+
+    with pytest.raises(ValueError, match="falls outside duration_seconds"):
+        await run_live_replay(
+            profile,
+            ReplayOptions(time_scale=1.0),
+            context=CONTEXT,
+            expected_cluster_id=CLUSTER_ID,
+            run_id=RUN_ID,
+            deps=deps,
+        )

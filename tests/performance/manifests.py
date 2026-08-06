@@ -14,6 +14,12 @@ MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 MANAGED_BY_VALUE = _MANAGED_BY
 RUN_LABEL = "korvid.dev/performance-run"
 
+#: Dedicated, *non-ownership* label the live harness rewrites to generate watch
+#: traffic. It is never part of the ownership contract (nothing gates on its
+#: value), it is user-owned so no controller reconciles it back, and churning it
+#: keeps live mutations metadata-only exactly as the design doc requires.
+TICK_LABEL = "korvid.dev/performance-tick"
+
 
 def _validate_positive(value: int, label: str) -> int:
     if value < 1:

@@ -176,6 +176,55 @@ class ApiSummary:
 
 
 @dataclass(frozen=True)
+class ChurnSummary:
+    """What the churn generator was *asked* to do versus what it observably did.
+
+    The design doc is explicit that "the generator rate and observed API
+    throttling are both recorded; requested rate is never reported as achieved
+    rate", so the requested schedule and the measured outcome are separate,
+    separately labelled fields. `mutation_throttles` counts 429 responses to
+    the harness's own write traffic and is deliberately *not* merged into
+    `ApiSummary.throttles`, which reports only the application read path.
+    """
+
+    requested_events: int
+    requested_events_per_second: float | None
+    observed_events: int
+    wall_seconds: float | None
+    achieved_events_per_second: float | None
+    mutation_throttles: int
+
+    @classmethod
+    def from_observations(
+        cls,
+        *,
+        requested_events: int,
+        requested_duration_seconds: int,
+        observed_events: int,
+        wall_seconds: float | None,
+        mutation_throttles: int,
+    ) -> ChurnSummary:
+        requested_rate = (
+            requested_events / requested_duration_seconds
+            if requested_duration_seconds > 0
+            else None
+        )
+        achieved_rate = (
+            observed_events / wall_seconds
+            if wall_seconds is not None and wall_seconds > 0
+            else None
+        )
+        return cls(
+            requested_events=requested_events,
+            requested_events_per_second=requested_rate,
+            observed_events=observed_events,
+            wall_seconds=wall_seconds,
+            achieved_events_per_second=achieved_rate,
+            mutation_throttles=mutation_throttles,
+        )
+
+
+@dataclass(frozen=True)
 class BenchmarkReport:
     manifest: RunManifest
     event_to_render: LatencySummary
@@ -187,6 +236,8 @@ class BenchmarkReport:
     coalesced_updates: int
     dropped_updates: int
     final_digest: str
+    #: Present only for runs that drive real mutations (live replay).
+    churn: ChurnSummary | None = None
 
 
 class ProcessSampler:
@@ -279,6 +330,22 @@ class BenchmarkRecorder:
     def record_event(self, sequence: int, received_at: float) -> None:
         self._pending_events.append((sequence, received_at))
 
+    def pending_count(self) -> int:
+        """Number of recorded events not yet flushed by a render pass.
+
+        Public so replay/live harnesses can wait for the backlog to drain
+        without reaching into the recorder's internals.
+        """
+        return len(self._pending_events)
+
+    def api_errors(self) -> tuple[ReadTelemetryEvent, ...]:
+        """Every recorded `error` read-telemetry event, in arrival order.
+
+        Public so a harness can turn an opaque wait timeout into a message
+        naming the underlying API status (403/410/429) that caused it.
+        """
+        return tuple(event for event in self._api_events if event.operation == "error")
+
     def record_render(self, rendered_at: float) -> None:
         if not self._pending_events:
             return
@@ -302,6 +369,7 @@ class BenchmarkRecorder:
         process_samples: Sequence[ProcessSample],
         *,
         final_digest: str,
+        churn: ChurnSummary | None = None,
     ) -> BenchmarkReport:
         return BenchmarkReport(
             manifest=manifest,
@@ -314,6 +382,7 @@ class BenchmarkRecorder:
             coalesced_updates=self._coalesced_updates,
             dropped_updates=len(self._pending_events),
             final_digest=final_digest,
+            churn=churn,
         )
 
 
@@ -371,11 +440,26 @@ def report_payload(report: BenchmarkReport) -> dict[str, object]:
             "coalesced_updates": report.coalesced_updates,
             "dropped_updates": report.dropped_updates,
         },
+        "churn": _churn_payload(report.churn),
         "digests": {"final": report.final_digest},
     }
 
 
+def _churn_payload(churn: ChurnSummary | None) -> dict[str, object] | None:
+    if churn is None:
+        return None
+    return {
+        "requested_events": churn.requested_events,
+        "requested_events_per_second": churn.requested_events_per_second,
+        "observed_events": churn.observed_events,
+        "wall_seconds": churn.wall_seconds,
+        "achieved_events_per_second": churn.achieved_events_per_second,
+        "mutation_throttles": churn.mutation_throttles,
+    }
+
+
 def render_markdown(report: BenchmarkReport) -> str:
+    churn = report.churn
     operation_lines = [
         f"- {operation}: `{count}`" for operation, count in report.api.operations.items()
     ]
@@ -397,6 +481,14 @@ def render_markdown(report: BenchmarkReport) -> str:
         f"- CPU max: `{_format_float(report.process.cpu_percent_max)}`",
         f"- RSS max: `{_format_int(report.process.rss_bytes_max)}`",
         f"- RSS slope: `{_format_slope(report.process.rss_slope_mib_per_minute)}`",
+        "",
+        "## Churn",
+        f"- Requested events: `{_format_int(churn.requested_events if churn else None)}`",
+        f"- Requested churn rate: `{_format_rate(churn.requested_events_per_second if churn else None)}`",
+        f"- Observed events: `{_format_int(churn.observed_events if churn else None)}`",
+        f"- Churn wall time: `{_format_seconds(churn.wall_seconds if churn else None)}`",
+        f"- Achieved churn rate: `{_format_rate(churn.achieved_events_per_second if churn else None)}`",
+        f"- Mutation throttles (429): `{_format_int(churn.mutation_throttles if churn else None)}`",
         "",
         "## Updates",
         f"- Rendered updates: `{report.rendered_updates}`",
@@ -428,6 +520,12 @@ def _format_int(value: int | None) -> str:
     if value is None:
         return "n/a"
     return str(value)
+
+
+def _format_rate(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2f} events/s"
 
 
 def _format_slope(value: float | None) -> str:

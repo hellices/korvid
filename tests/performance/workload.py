@@ -16,6 +16,10 @@ class ScheduledEvent:
     offset_seconds: float
     event_type: str
     summary: PodSummary
+    #: Index of the object the generator selected, in `initial_pods` order.
+    #: Carried explicitly so live replay can map the event onto its seeded
+    #: `(namespace, name)` identity without parsing the synthetic Pod name.
+    object_index: int
 
 
 def initial_pods(profile: WorkloadProfile) -> tuple[PodSummary, ...]:
@@ -65,6 +69,7 @@ def scheduled_events(profile: WorkloadProfile) -> tuple[ScheduledEvent, ...]:
                     offset_seconds=second + tick / rate,
                     event_type="MODIFIED",
                     summary=updated,
+                    object_index=index,
                 )
             )
     assert len(result) == planned_event_count(profile)

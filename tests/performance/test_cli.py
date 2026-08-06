@@ -721,3 +721,104 @@ def test_replay_and_seed_manifests_commands_still_work(
         )
         == 0
     )
+
+
+def test_cli_replay_live_rejects_duration_that_orphans_a_burst(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--duration` rewrites the profile with `dataclasses.replace`, skipping
+    `load_profile`'s burst containment check. A shortened duration that leaves a
+    burst hanging past the end of the run must be rejected with an explicit
+    operational message *before* any cluster identity/ownership work, instead of
+    tripping the generator's internal assertion mid-run (which printed an empty
+    "error during replay: ")."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay(calls))
+    live_profile = Path("tests/performance/profiles/aks-1k.json")
+
+    exit_code = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            str(live_profile),
+            *_LIVE_IDENTITY_ARGS,
+            "--duration",
+            "10",
+        ]
+    )
+
+    assert exit_code == 1
+    assert "falls outside duration_seconds" in capsys.readouterr().err
+    assert calls == []
+
+
+def test_cli_replay_live_accepts_duration_that_still_contains_every_burst(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "run_live_replay", _make_recording_live_replay(calls))
+
+    exit_code = cli.main(
+        [
+            "replay-live",
+            "--profile",
+            "tests/performance/profiles/aks-1k.json",
+            *_LIVE_IDENTITY_ARGS,
+            "--duration",
+            "26",
+        ]
+    )
+
+    assert exit_code == 0
+    used_profile = calls[0]["profile"]
+    assert isinstance(used_profile, WorkloadProfile)
+    assert used_profile.duration_seconds == 26
+
+
+@pytest.mark.parametrize("output_option", ["--out", "--json"])
+def test_cli_reports_output_write_errors_instead_of_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    output_option: str,
+) -> None:
+    """A bad `--out`/`--json` destination is an operational error, exactly like
+    `seed-manifests`' `--output`; it must return 1 with a message rather than
+    dumping a traceback after a completed (possibly very expensive) run."""
+
+    def fail_write(self: Path, _text: str, *_args: object, **_kwargs: object) -> int:
+        raise OSError("disk full")
+
+    written_profile = profile_path(tmp_path)
+    monkeypatch.setattr(cli, "run_replay", fake_run_replay)
+    monkeypatch.setattr(Path, "write_text", fail_write)
+
+    exit_code = cli.main(
+        [
+            "replay",
+            "--profile",
+            str(written_profile),
+            "--time-scale",
+            "0",
+            output_option,
+            str(tmp_path / "report.out"),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "error writing report: disk full" in capsys.readouterr().err
+
+
+def test_cli_replay_live_help_points_at_the_live_qualification_profile(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The published live plan (30 minutes at 20 events/s with three 30-second
+    100 events/s bursts) lives in `aks-live-1k.json`; the command an operator
+    reaches for must name it, so the deterministic comparison profile is not
+    used by accident for a qualification run."""
+    with pytest.raises(SystemExit):
+        cli.main(["replay-live", "--help"])
+
+    help_text = capsys.readouterr().out
+    assert "tests/performance/profiles/aks-live-1k.json" in help_text
+    assert Path("tests/performance/profiles/aks-live-1k.json").exists()

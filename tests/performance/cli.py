@@ -7,6 +7,19 @@ Usage:
     uv run python -m tests.performance.cli seed-manifests \\
         --run-id TEXT --namespace-count INT --pods-per-namespace INT \\
         --node-selector KEY=VALUE --output PATH
+    uv run python -m tests.performance.cli replay-live \\
+        --profile tests/performance/profiles/aks-live-1k.json \\
+        --context TEXT --expected-cluster-id TEXT --run-id TEXT \\
+        [--duration INT] [--sample-interval FLOAT] \\
+        [--json PATH] [--out PATH] [--cpu-profile PATH] [--allocation-snapshot PATH]
+
+`aks-live-1k` is the live qualification profile: it encodes the published live
+plan (1,000 Pods across 20 namespaces, 30 minutes at 20 events/s with three
+30-second bursts at 100 events/s), so the design doc's event-to-render,
+backlog-drain, and RSS-slope budgets are measurable. `aks-1k` keeps the short
+deterministic schedule used to compare a live run against the synthetic
+1k/10k/50k baselines; use `--duration` to shorten a live smoke run (bursts and
+failure points are re-validated against the shortened duration).
 """
 
 from __future__ import annotations
@@ -27,8 +40,9 @@ from korvid.k8s.errors import ApiStatusError
 from tests.performance.live import run_live_replay
 from tests.performance.manifests import build_seed_manifests
 from tests.performance.metrics import BenchmarkReport, render_markdown, report_payload
-from tests.performance.profile import WorkloadProfile, load_profile
+from tests.performance.profile import WorkloadProfile, load_profile, validate_profile
 from tests.performance.replay import ReplayOptions, ReplayReport, run_replay
+from tests.ui.waits import WaitTimeout
 
 
 def _to_benchmark_report(replay: ReplayReport) -> BenchmarkReport:
@@ -43,6 +57,7 @@ def _to_benchmark_report(replay: ReplayReport) -> BenchmarkReport:
         coalesced_updates=replay.coalesced_updates,
         dropped_updates=replay.dropped_updates,
         final_digest=replay.final_digest,
+        churn=replay.churn,
     )
 
 
@@ -132,7 +147,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "replay-live",
         help="Replay churn against an already-seeded, owned real AKS cluster.",
     )
-    lp.add_argument("--profile", required=True, metavar="PATH", help="Workload profile JSON.")
+    lp.add_argument(
+        "--profile",
+        required=True,
+        metavar="PATH",
+        help="Workload profile JSON. Use tests/performance/profiles/aks-live-1k.json "
+        "for a qualification run (the published 30-minute live plan); aks-1k is the "
+        "short deterministic comparison schedule.",
+    )
     lp.add_argument(
         "--context", required=True, metavar="TEXT", help="Exact active kubeconfig context."
     )
@@ -242,16 +264,27 @@ def _flush_allocation_snapshot(path: str) -> None:
     tracemalloc.stop()
 
 
-def _write_outputs(args: argparse.Namespace, replay: ReplayReport) -> None:
-    """Print Markdown to stdout and write optional --out / --json outputs."""
+def _write_outputs(args: argparse.Namespace, replay: ReplayReport) -> int:
+    """Print Markdown to stdout and write optional --out / --json outputs.
+
+    Returns:
+        0 on success, or 1 when a destination path cannot be written - a bad
+        `--out`/`--json` path is an operational error (as it already is for
+        `seed-manifests --output`), not a traceback after a long run.
+    """
     benchmark = _to_benchmark_report(replay)
     markdown = render_markdown(benchmark)
     sys.stdout.write(markdown)
-    if args.out_path:
-        Path(args.out_path).write_text(markdown)
-    if args.json_path:
-        payload: dict[str, Any] = {"schema_version": 1, **report_payload(benchmark)}
-        Path(args.json_path).write_text(json.dumps(payload, indent=2, sort_keys=True))
+    try:
+        if args.out_path:
+            Path(args.out_path).write_text(markdown)
+        if args.json_path:
+            payload: dict[str, Any] = {"schema_version": 1, **report_payload(benchmark)}
+            Path(args.json_path).write_text(json.dumps(payload, indent=2, sort_keys=True))
+    except OSError as exc:
+        print(f"error writing report: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _cmd_seed_manifests(args: argparse.Namespace) -> int:
@@ -299,17 +332,46 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             replay = _run_with_cpu_profile(profile, options, args.cpu_profile)
         else:
             replay = asyncio.run(run_replay(profile, options))
-    except (ApiStatusError, AssertionError, OSError) as exc:
+    except (ApiStatusError, WaitTimeout, OSError) as exc:
         print(f"error during replay: {exc}", file=sys.stderr)
         return 1
     finally:
         if args.allocation_snapshot:
             _flush_allocation_snapshot(args.allocation_snapshot)
 
-    _write_outputs(args, replay)
+    if _write_outputs(args, replay):
+        return 1
     if replay.dropped_updates > 0 or replay.expected_digest != replay.final_digest:
         return 1
     return 0
+
+
+def _load_live_profile(args: argparse.Namespace) -> WorkloadProfile | None:
+    """Load `--profile` and apply `--duration`, or report why it cannot apply.
+
+    `dataclasses.replace` bypasses `load_profile`, so every duration-dependent
+    invariant (burst containment/overlap, failure-injection bounds) is
+    re-checked here - before any cluster identity, ownership, or mutation work
+    is attempted.
+
+    Returns:
+        The profile to replay, or `None` when it cannot be used (the reason is
+        already printed to stderr).
+    """
+    try:
+        profile = load_profile(Path(args.profile))
+    except (OSError, UnicodeError, ValueError) as exc:
+        print(f"error loading profile: {exc}", file=sys.stderr)
+        return None
+    if args.duration is None:
+        return profile
+    overridden = dataclasses.replace(profile, duration_seconds=args.duration)
+    try:
+        validate_profile(overridden)
+    except ValueError as exc:
+        print(f"error: --duration {args.duration} invalidates the profile: {exc}", file=sys.stderr)
+        return None
+    return overridden
 
 
 def _cmd_replay_live(args: argparse.Namespace) -> int:
@@ -320,14 +382,9 @@ def _cmd_replay_live(args: argparse.Namespace) -> int:
         print("error: --sample-interval must be positive", file=sys.stderr)
         return 1
 
-    try:
-        profile = load_profile(Path(args.profile))
-    except (OSError, UnicodeError, ValueError) as exc:
-        print(f"error loading profile: {exc}", file=sys.stderr)
+    profile = _load_live_profile(args)
+    if profile is None:
         return 1
-
-    if args.duration is not None:
-        profile = dataclasses.replace(profile, duration_seconds=args.duration)
 
     # No --time-scale option: live churn always replays at real wall-clock
     # time (ReplayOptions.time_scale defaults to 1.0).
@@ -356,14 +413,15 @@ def _cmd_replay_live(args: argparse.Namespace) -> int:
                     run_id=args.run_id,
                 )
             )
-    except (ValueError, ApiStatusError, AssertionError, OSError) as exc:
+    except (ValueError, ApiStatusError, WaitTimeout, OSError) as exc:
         print(f"error during replay: {exc}", file=sys.stderr)
         return 1
     finally:
         if args.allocation_snapshot:
             _flush_allocation_snapshot(args.allocation_snapshot)
 
-    _write_outputs(args, replay)
+    if _write_outputs(args, replay):
+        return 1
     if replay.dropped_updates > 0 or replay.expected_digest != replay.final_digest:
         return 1
     return 0

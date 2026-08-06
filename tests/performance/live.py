@@ -16,21 +16,44 @@ Every mutation is fail-closed:
    `az aks show --ids <id>` lookup must all agree before any client connects.
 2. **Ownership gate** (`_verify_ownership`): every expected namespace and
    every expected Pod must already carry both ownership labels
-   (`manifests.MANAGED_BY_LABEL`/`manifests.RUN_LABEL`) before any churn is
-   attempted.
+   (`manifests.MANAGED_BY_LABEL`/`manifests.RUN_LABEL`), and no *unexpected*
+   Pod may exist in an owned namespace, before any churn is attempted.
 3. **Guarded churn** (`drive_live_churn`): each mutation is a JSON-Patch that
-   `test`s the target Pod's UID and both ownership labels before `replace`ing
-   `status.phase`. A failed `test` op aborts the *entire* run - there is no
-   unguarded fallback.
+   `test`s the target Pod's UID and both ownership labels before writing a
+   dedicated, non-ownership `manifests.TICK_LABEL` on the Pod's *own*
+   metadata. A failed `test` op aborts the *entire* run - there is no
+   unguarded fallback, and no ownership label, `status`, or spec field is ever
+   written.
+4. **Post-churn revalidation** (`read_and_validate_owned_pods`): the
+   ground-truth cluster read re-checks the exact identity set, every UID, and
+   both ownership labels before its digest is trusted.
+
+Churn is metadata-only by design. The seeded Pods are real
+`registry.k8s.io/pause:3.10` Pods whose `status` subresource is owned by the
+kubelet: patching `status.phase` would be reverted on the next node sync and
+would contradict the design doc's "metadata-only updates create real watch
+traffic without restarting containers or changing the workload's resource
+demand". `TICK_LABEL` is user-owned, is part of `PodSummary.labels` (so it
+really does change the store digest and produce a watch event), and no
+controller reconciles it away.
+
+Event-to-render latency is recorded where the *application* first sees an
+event - `make_live_watch_source` records at watch receipt, exactly like the
+deterministic `_ReplaySource` - never at patch acknowledgement. The watch
+event and the patch response race over independent connections, so recording
+at ack both misreports the interval (it would include the write round-trip)
+and can append an event *after* its own render.
 
 Two separate `KubeReadClient` connections are used deliberately: a
 non-instrumented *harness* client (`LiveDependencies.harness_kube_client_factory`)
-performs the ownership gate, the post-churn independent re-read, and nothing
-else, while a single telemetry-wired *application-path* client
+performs the ownership gate, the ground-truth re-read, and nothing else, while
+a single telemetry-wired *application-path* client
 (`LiveDependencies.kube_client_factory`) is only ever handed to
 `make_live_watch_source`. This keeps `ReplayReport.api` reporting exactly the
 production application read path (the real `KubeClient.watch_pods` LIST+WATCH
 telemetry) instead of being diluted by the harness's own bookkeeping reads.
+Mutation traffic is likewise never reported as application read telemetry: its
+throttles are counted separately in `ChurnSummary.mutation_throttles`.
 
 Unit tests substitute every external boundary via `LiveDependencies`; none of
 them may contact Azure, a real kubeconfig, or a real cluster.
@@ -40,8 +63,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
-from dataclasses import dataclass, replace
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, Protocol, cast
 from urllib.parse import urlparse
@@ -59,11 +82,16 @@ from korvid.k8s.models import GenericSummary, PodSummary
 from korvid.k8s.telemetry import ReadTelemetry
 from korvid.ui.widgets.resource_table import ResourceTable
 from tests.performance import manifests
-from tests.performance.metrics import BenchmarkRecorder, ProcessSampler
-from tests.performance.profile import WorkloadProfile
-from tests.performance.replay import MeasuredKorvidApp, ReplayOptions, ReplayReport, _build_manifest
+from tests.performance.metrics import BenchmarkRecorder, ChurnSummary, ProcessSampler
+from tests.performance.profile import WorkloadProfile, validate_profile
+from tests.performance.replay import (
+    MeasuredKorvidApp,
+    ReplayOptions,
+    ReplayReport,
+    build_manifest,
+    wait_for,
+)
 from tests.performance.workload import ScheduledEvent, scheduled_events, summary_digest
-from tests.ui.waits import until
 
 #: Namespace-scoped read for the ownership gate; not exposed via `PODS_META`
 #: because Namespaces are cluster-scoped (`namespaced=False`).
@@ -74,9 +102,98 @@ _NAMESPACES_META = ResourceMeta("Namespace", "namespaces", "", "v1", False)
 _REQUIRED_OBJECT_COUNT = 1000
 _REQUIRED_NAMESPACE_COUNT = 20
 
+#: HTTP status the mutation path may retry. 429 (API Priority and Fairness)
+#: is the only one: it is a "come back later" answer to a well-formed,
+#: fully guarded request, and the retry re-issues the *identical* guarded
+#: patch. Every other status - including a failed `test` op - aborts the run.
+_RETRYABLE_MUTATION_STATUS = 429
+
+#: How many times teardown re-attempts draining the churn task when its own
+#: await is interrupted by a cancellation aimed at the caller.
+_CANCEL_DRAIN_ATTEMPTS = 3
+
 
 async def _sleep_default(delay: float) -> None:
     await asyncio.sleep(delay)
+
+
+@dataclass(frozen=True)
+class LiveLimits:
+    """Every explicit bound the live run enforces.
+
+    Nothing in a live run may be unbounded: an in-flight patch, the number of
+    concurrent patches, the wait for churn to finish, the wait for the store to
+    converge, and even the initial kubeconfig/credential-plugin connection all
+    have a stated ceiling. Tests inject small values; production uses defaults
+    sized for the published 30-minute live profile.
+
+    Args:
+        churn_concurrency: Maximum simultaneously in-flight guarded patches.
+            Serial patching cannot approach the scheduled rate (one round trip
+            per event), so concurrency is explicit rather than implicit.
+        mutation_timeout_seconds: Ceiling for one guarded patch attempt.
+        mutation_throttle_retries: Bounded retries of the *identical* guarded
+            patch after HTTP 429, and only after 429.
+        mutation_retry_base_delay_seconds: First backoff delay; doubles per
+            retry.
+        mutation_connect_timeout_seconds: Ceiling for connecting the mutation
+            client (a kubeconfig exec credential plugin can block).
+        initial_render_timeout_seconds: Ceiling for the initial 1,000-row
+            render.
+        churn_grace_seconds: Allowance added to the profile's own scheduled
+            duration when bounding the churn wait.
+        convergence_timeout_seconds: Ceiling for the store digest to converge
+            with the independently read cluster digest.
+    """
+
+    churn_concurrency: int = 32
+    mutation_timeout_seconds: float = 30.0
+    mutation_throttle_retries: int = 5
+    mutation_retry_base_delay_seconds: float = 0.5
+    mutation_connect_timeout_seconds: float = 60.0
+    initial_render_timeout_seconds: float = 60.0
+    churn_grace_seconds: float = 300.0
+    convergence_timeout_seconds: float = 120.0
+
+
+@dataclass
+class ChurnProgress:
+    """Live counters for the churn phase, observable while it runs.
+
+    Kept separate from `ChurnSummary` (the frozen report value) because
+    `run_live_replay` reads `started` *during* the run to decide whether churn
+    was really under way when input latency was measured.
+    """
+
+    requested_events: int = 0
+    started: int = 0
+    completed: int = 0
+    mutation_throttles: int = 0
+    first_started_at: float | None = None
+    last_completed_at: float | None = None
+
+    def record_started(self, at: float) -> None:
+        if self.first_started_at is None:
+            self.first_started_at = at
+        self.started += 1
+
+    def record_completed(self, at: float) -> None:
+        self.completed += 1
+        self.last_completed_at = at
+
+    def wall_seconds(self) -> float | None:
+        if self.first_started_at is None or self.last_completed_at is None:
+            return None
+        return self.last_completed_at - self.first_started_at
+
+    def summary(self, *, requested_duration_seconds: int) -> ChurnSummary:
+        return ChurnSummary.from_observations(
+            requested_events=self.requested_events,
+            requested_duration_seconds=requested_duration_seconds,
+            observed_events=self.completed,
+            wall_seconds=self.wall_seconds(),
+            mutation_throttles=self.mutation_throttles,
+        )
 
 
 @dataclass(frozen=True)
@@ -116,11 +233,17 @@ class KubeReadClient(Protocol):
 
 
 class MutationClient(Protocol):
-    """Issues one guarded status mutation; production talks JSON-Patch to a
-    real API server, tests mutate an in-memory fake cluster the same way."""
+    """Issues one guarded, metadata-only mutation; production talks JSON-Patch
+    to a real API server, tests mutate an in-memory fake cluster the same way.
 
-    async def patch_pod_status_guarded(
-        self, namespace: str, name: str, *, uid: str, phase: str
+    There is deliberately no method that can write `status`, `spec`, an
+    ownership label, or delete anything.
+    """
+
+    async def connect(self) -> None: ...
+
+    async def patch_pod_labels_guarded(
+        self, namespace: str, name: str, *, uid: str, tick: str
     ) -> None: ...
 
     async def close(self) -> None: ...
@@ -140,8 +263,8 @@ class LiveDependencies:
     (`make_live_watch_source`'s `watch_pods`), so `ReplayReport.api` reports
     exactly the production LIST+WATCH telemetry an operator would see. The
     latter is never wired to telemetry and is used *only* for the harness's
-    own bookkeeping reads (the ownership gate and the post-churn independent
-    re-read) - those reads must never dilute the application-path signal.
+    own bookkeeping reads (the ownership gate and the ground-truth re-read) -
+    those reads must never dilute the application-path signal.
     """
 
     command_runner: CommandRunner
@@ -202,26 +325,34 @@ def _json_pointer_escape(segment: str) -> str:
     return segment.replace("~", "~0").replace("/", "~1")
 
 
-def build_guarded_status_patch(*, uid: str, run_id: str, phase: str) -> list[dict[str, Any]]:
-    """The exact JSON-Patch op list a guarded status mutation issues.
+def build_guarded_label_patch(*, uid: str, run_id: str, tick: str) -> list[dict[str, Any]]:
+    """The exact JSON-Patch op list a guarded churn mutation issues.
 
-    `test`s the target Pod's UID and both ownership labels before
-    `replace`-ing `status.phase`, so a stale, foreign, or replaced Pod aborts
-    the whole patch server-side - there is no unguarded fallback.
+    `test`s the target Pod's UID and *both* ownership labels, then `add`s the
+    dedicated non-ownership `manifests.TICK_LABEL`, so a stale, foreign, or
+    replaced Pod aborts the whole patch server-side - there is no unguarded
+    fallback. `add` (not `replace`) is used for the tick because RFC 6902
+    `replace` requires the member to exist already, while `add` on an object
+    member creates or overwrites it; the seeded Pods start without it.
+
+    Nothing outside `metadata.labels` is written: no `status`, no `spec`, and
+    neither ownership label is ever a target of a write op.
     """
     managed_by_path = f"/metadata/labels/{_json_pointer_escape(manifests.MANAGED_BY_LABEL)}"
     run_path = f"/metadata/labels/{_json_pointer_escape(manifests.RUN_LABEL)}"
+    tick_path = f"/metadata/labels/{_json_pointer_escape(manifests.TICK_LABEL)}"
     return [
         {"op": "test", "path": "/metadata/uid", "value": uid},
         {"op": "test", "path": managed_by_path, "value": manifests.MANAGED_BY_VALUE},
         {"op": "test", "path": run_path, "value": run_id},
-        {"op": "replace", "path": "/status/phase", "value": phase},
+        {"op": "add", "path": tick_path, "value": tick},
     ]
 
 
 class _KubeMutationClient:
-    """Production `MutationClient`: issues a guarded JSON-Patch against the
-    real `pods/status` subresource of *context*."""
+    """Production `MutationClient`: issues a guarded, metadata-only JSON-Patch
+    against the Pod resource itself (never the `pods/status` subresource) of
+    *context*."""
 
     def __init__(self, context: str, run_id: str) -> None:
         self._context = context
@@ -229,23 +360,34 @@ class _KubeMutationClient:
         self._api: k8s_client.ApiClient | None = None
         self._core_v1: k8s_client.CoreV1Api | None = None
 
-    async def _ensure_connected(self) -> k8s_client.CoreV1Api:
-        if self._core_v1 is None:
-            configuration = k8s_client.Configuration()
-            await k8s_config.load_kube_config(
-                context=self._context, client_configuration=configuration, persist_config=False
-            )
-            self._api = k8s_client.ApiClient(configuration)
-            self._core_v1 = k8s_client.CoreV1Api(self._api)
-        return self._core_v1
+    async def connect(self) -> None:
+        """Load the kubeconfig and build the API client.
 
-    async def patch_pod_status_guarded(
-        self, namespace: str, name: str, *, uid: str, phase: str
+        Called eagerly (under `LiveLimits.mutation_connect_timeout_seconds`)
+        before the measured window opens: `load_kube_config` can invoke an
+        exec credential plugin, and that latency must not be charged to the
+        first churn mutation - `KubeClient.probe_context` bounds exactly the
+        same call for exactly the same reason.
+        """
+        if self._core_v1 is not None:
+            return
+        configuration = k8s_client.Configuration()
+        await k8s_config.load_kube_config(
+            context=self._context, client_configuration=configuration, persist_config=False
+        )
+        self._api = k8s_client.ApiClient(configuration)
+        self._core_v1 = k8s_client.CoreV1Api(self._api)
+
+    async def patch_pod_labels_guarded(
+        self, namespace: str, name: str, *, uid: str, tick: str
     ) -> None:
-        core_v1 = await self._ensure_connected()
-        ops = build_guarded_status_patch(uid=uid, run_id=self._run_id, phase=phase)
+        await self.connect()
+        core_v1 = self._core_v1
+        if core_v1 is None:  # pragma: no cover - connect() always sets it
+            raise RuntimeError("mutation client is not connected")
+        ops = build_guarded_label_patch(uid=uid, run_id=self._run_id, tick=tick)
         try:
-            await core_v1.patch_namespaced_pod_status(
+            await core_v1.patch_namespaced_pod(
                 name,
                 namespace,
                 ops,
@@ -266,7 +408,7 @@ def _default_dependencies(context: str) -> LiveDependencies:
     telemetry-wired one `run_live_replay` hands to `make_live_watch_source`,
     and a plain, non-instrumented one (`read_telemetry=None`, so
     `KubeClient._observe_read` is a no-op) for the harness's own ownership
-    and post-churn reads.
+    and ground-truth reads.
     """
     return LiveDependencies(
         command_runner=_default_command_runner,
@@ -360,11 +502,25 @@ async def _verify_cluster_identity(
         )
 
 
+def _expected_pod_names(namespace_count: int, object_count: int) -> tuple[str, ...]:
+    """The exact Pod names `seed-manifests` creates in *every* namespace."""
+    pods_per_namespace = object_count // namespace_count
+    return tuple(
+        manifests.pod_name(namespace_count, local_index * namespace_count)
+        for local_index in range(pods_per_namespace)
+    )
+
+
 async def _verify_ownership(
     kube: KubeReadClient, *, run_id: str, namespace_count: int, object_count: int
 ) -> dict[tuple[str, str], PodSummary]:
-    """Ownership gate: every expected namespace and every expected Pod must
-    already exist with both ownership labels, checked before any churn.
+    """Ownership gate: *exactly* the expected namespaces and Pods must exist,
+    each with both ownership labels, checked before any churn.
+
+    An unexpected Pod inside an owned namespace is rejected too: the
+    application watch filters by namespace, so a foreign Pod would enter the
+    benchmark store and turn a precise ownership violation into a generic
+    "1,000 rows never rendered" timeout minutes later.
 
     Collects every mismatch across all namespaces/Pods before raising, so a
     single failed run surfaces the full blast radius at once instead of
@@ -389,17 +545,17 @@ async def _verify_ownership(
             f"namespaces missing/mismatched ownership labels: {', '.join(mismatched_namespaces)}"
         )
 
-    pods_per_namespace = object_count // namespace_count
-    expected_pod_names = [
-        manifests.pod_name(namespace_count, local_index * namespace_count)
-        for local_index in range(pods_per_namespace)
-    ]
+    wanted = _expected_pod_names(namespace_count, object_count)
     missing_pods: list[str] = []
     mismatched_pods: list[str] = []
+    unexpected_pods: list[str] = []
     validated_pods: dict[tuple[str, str], PodSummary] = {}
     for namespace in expected_namespaces:
         pods_by_name = {pod.name: pod for pod in await kube.list_pods(namespace)}
-        for name in expected_pod_names:
+        unexpected_pods.extend(
+            f"{namespace}/{name}" for name in sorted(set(pods_by_name) - set(wanted))
+        )
+        for name in wanted:
             pod = pods_by_name.get(name)
             if pod is None:
                 missing_pods.append(f"{namespace}/{name}")
@@ -411,24 +567,154 @@ async def _verify_ownership(
         raise ValueError(f"missing expected pods: {', '.join(missing_pods)}")
     if mismatched_pods:
         raise ValueError(f"pods with mismatched ownership labels: {', '.join(mismatched_pods)}")
+    if unexpected_pods:
+        raise ValueError(f"unexpected pods in owned namespaces: {', '.join(unexpected_pods)}")
     return validated_pods
 
 
+async def read_and_validate_owned_pods(
+    kube: KubeReadClient,
+    *,
+    run_id: str,
+    expected: Mapping[tuple[str, str], PodSummary],
+) -> list[PodSummary]:
+    """Independently re-read the owned Pods and revalidate them before use.
+
+    The ground-truth digest may only be computed from Pods that still are what
+    the ownership gate validated: same `(namespace, name)` identity set, same
+    UID (a delete/recreate produces a new one), and both ownership labels
+    intact. A Pod that lost either label, was replaced, disappeared, or a Pod
+    that appeared unexpectedly, is named in the raised error instead of being
+    silently folded into the digest.
+    """
+    namespaces = sorted({namespace for namespace, _name in expected})
+    found: dict[tuple[str, str], PodSummary] = {}
+    seen: set[tuple[str, str]] = set()
+    problems: list[str] = []
+    for namespace in namespaces:
+        for pod in await kube.list_pods(namespace):
+            key = (namespace, pod.name)
+            baseline = expected.get(key)
+            if baseline is None:
+                problems.append(f"{namespace}/{pod.name} (unexpected pod)")
+                continue
+            seen.add(key)
+            if pod.uid != baseline.uid:
+                problems.append(
+                    f"{namespace}/{pod.name} (uid changed {baseline.uid!r} -> {pod.uid!r})"
+                )
+            elif not _owns(pod.labels, run_id):
+                problems.append(f"{namespace}/{pod.name} (lost ownership labels)")
+            else:
+                found[key] = pod
+    problems.extend(
+        f"{namespace}/{name} (missing)"
+        for namespace, name in expected
+        if (namespace, name) not in seen
+    )
+    if problems:
+        raise ValueError(f"post-churn ownership revalidation failed: {', '.join(sorted(problems))}")
+    return list(found.values())
+
+
 def make_live_watch_source(
-    kube: KubeReadClient, expected_namespaces: frozenset[str]
+    kube: KubeReadClient,
+    expected_namespaces: frozenset[str],
+    *,
+    run_id: str,
+    recorder: BenchmarkRecorder,
+    now: Callable[[], float] = monotonic,
 ) -> WatchSource:
-    """Filter the real cluster-wide Pod watch to exactly the expected,
-    seeded namespaces - unrelated cluster Pods (or namespaces sharing the
-    cluster with this run) must never enter the benchmark store."""
+    """Filter the real cluster-wide Pod watch to exactly the expected, seeded
+    namespaces - unrelated cluster Pods (or namespaces sharing the cluster with
+    this run) must never enter the benchmark store.
+
+    Event-to-render measurement starts *here*, at watch receipt of an owned
+    `MODIFIED` event, exactly where the deterministic `_ReplaySource` starts
+    it. Recording at patch acknowledgement instead would race the watch event
+    it is meant to measure (the two arrive over independent connections) and
+    would silently fold the write round-trip into a read-path latency metric.
+
+    The event counter is shared across reconnects, so a re-LIST after a dropped
+    watch continues the same sequence.
+    """
+    sequence = 0
 
     async def _source(kind: str, _scope: str) -> AsyncIterator[tuple[str, PodSummary]]:
+        nonlocal sequence
         if kind != "pods":
             raise ValueError(f"run_live_replay only watches pods, got kind={kind!r}")
         async for event_type, pod in kube.watch_pods(None):
-            if pod.namespace in expected_namespaces:
-                yield (event_type, pod)
+            if pod.namespace not in expected_namespaces:
+                continue
+            if event_type == "MODIFIED" and _owns(pod.labels, run_id):
+                sequence += 1
+                recorder.record_event(sequence, now())
+            yield (event_type, pod)
 
     return _source
+
+
+def _first_error(group: BaseExceptionGroup[BaseException]) -> BaseException:
+    """The most informative leaf of a `TaskGroup` failure.
+
+    A guard failure that aborts the run is reported to the caller as the
+    `ApiStatusError` it really is, not as an `ExceptionGroup` wrapper. Sibling
+    tasks cancelled *because* of that failure contribute `CancelledError`
+    leaves, which are only returned when there is nothing else.
+    """
+    leaves: list[BaseException] = []
+    pending: list[BaseException] = list(group.exceptions)
+    while pending:
+        exc = pending.pop(0)
+        if isinstance(exc, BaseExceptionGroup):
+            pending.extend(exc.exceptions)
+        else:
+            leaves.append(exc)
+    for exc in leaves:
+        if not isinstance(exc, asyncio.CancelledError):
+            return exc
+    return leaves[0] if leaves else group
+
+
+async def _mutate_once(
+    mutation_client: MutationClient,
+    *,
+    namespace: str,
+    name: str,
+    uid: str,
+    tick: str,
+    progress: ChurnProgress,
+    limits: LiveLimits,
+    sleep: Callable[[float], Awaitable[None]],
+    now: Callable[[], float],
+) -> None:
+    """One guarded patch, bounded in time and retried only on HTTP 429.
+
+    The retry re-issues the *identical* guarded patch, so it is still atomic
+    and still fail-closed: a Pod that lost its identity or labels between
+    attempts fails the `test` ops exactly as it would on the first attempt.
+    Every other status - including a failed `test` (422) - propagates
+    immediately and aborts the whole run.
+    """
+    progress.record_started(now())
+    attempt = 0
+    while True:
+        try:
+            async with asyncio.timeout(limits.mutation_timeout_seconds):
+                await mutation_client.patch_pod_labels_guarded(namespace, name, uid=uid, tick=tick)
+        except ApiStatusError as exc:
+            if (
+                exc.status != _RETRYABLE_MUTATION_STATUS
+                or attempt >= limits.mutation_throttle_retries
+            ):
+                raise
+            progress.mutation_throttles += 1
+            attempt += 1
+            await sleep(limits.mutation_retry_base_delay_seconds * (2 ** (attempt - 1)))
+            continue
+        progress.record_completed(now())
+        return
 
 
 async def drive_live_churn(
@@ -436,36 +722,224 @@ async def drive_live_churn(
     *,
     run_id: str,
     namespace_count: int,
-    live_state: dict[tuple[str, str], PodSummary],
+    live_state: Mapping[tuple[str, str], PodSummary],
     mutation_client: MutationClient,
-    recorder: BenchmarkRecorder,
     options: ReplayOptions,
+    progress: ChurnProgress,
+    limits: LiveLimits,
 ) -> None:
-    """Drive guarded churn at wall-clock time (matching `_ReplaySource`'s
-    inter-event delay math). Any guard failure (`ApiStatusError`) propagates
-    immediately and unconditionally aborts the run - there is no unguarded
-    fallback and no attempt to continue past a failed `test` op.
+    """Drive guarded churn at wall-clock time with explicit bounded concurrency.
+
+    The schedule is followed exactly as `_ReplaySource` follows it (absolute
+    offsets converted to inter-event delays), but each mutation is dispatched
+    to a task instead of being awaited inline: one round trip per event caps a
+    serial driver far below the profile's scheduled rate, which would silently
+    understate the load the report claims to have applied.
+
+    Concurrency is bounded by `LiveLimits.churn_concurrency` and every single
+    attempt by `LiveLimits.mutation_timeout_seconds`; nothing here is
+    unbounded. Any guard failure (`ApiStatusError`) cancels every sibling task
+    and propagates unchanged - there is no unguarded fallback and no attempt to
+    continue past a failed `test` op.
+
+    This function never records event timing: event-to-render measurement
+    starts at watch receipt (`make_live_watch_source`), not at patch ack.
     """
     now = options.monotonic_fn if options.monotonic_fn is not None else monotonic
     sleep = options.async_sleep if options.async_sleep is not None else _sleep_default
+    semaphore = asyncio.Semaphore(limits.churn_concurrency)
     start = now()
-    for event in events:
-        elapsed = now() - start
-        delay = event.offset_seconds * options.time_scale - elapsed
-        if delay > 0:
-            await sleep(delay)
 
-        index = int(event.summary.name.removeprefix("pod-"))
-        namespace, name = live_object_identity(run_id, namespace_count, index)
-        current = live_state.get((namespace, name))
-        if current is None:
-            raise ValueError(f"live churn target {namespace}/{name} is not in the seeded state")
+    async def _run(namespace: str, name: str, uid: str, tick: str) -> None:
+        try:
+            await _mutate_once(
+                mutation_client,
+                namespace=namespace,
+                name=name,
+                uid=uid,
+                tick=tick,
+                progress=progress,
+                limits=limits,
+                sleep=sleep,
+                now=now,
+            )
+        finally:
+            semaphore.release()
 
-        await mutation_client.patch_pod_status_guarded(
-            namespace, name, uid=current.uid, phase=event.summary.phase
+    try:
+        async with asyncio.TaskGroup() as group:
+            for event in events:
+                elapsed = now() - start
+                delay = event.offset_seconds * options.time_scale - elapsed
+                if delay > 0:
+                    await sleep(delay)
+
+                namespace, name = live_object_identity(run_id, namespace_count, event.object_index)
+                current = live_state.get((namespace, name))
+                if current is None:
+                    raise ValueError(
+                        f"live churn target {namespace}/{name} is not in the seeded state"
+                    )
+                # Bound in-flight work *before* creating the task, so a slow
+                # API server throttles the driver instead of accumulating an
+                # unbounded backlog of pending patches.
+                await semaphore.acquire()
+                group.create_task(_run(namespace, name, current.uid, str(event.sequence)))
+    except BaseExceptionGroup as group_error:
+        raise _first_error(group_error) from None
+
+
+async def _cancel_and_drain(task: asyncio.Task[None]) -> None:
+    """Cancel *task* and wait for it to finish before any client is closed.
+
+    Every in-flight mutation lives inside the churn task's `TaskGroup`, so
+    awaiting the churn task is exactly what guarantees no patch is still in
+    flight when `mutation_client.close()` runs - and that no mutation outlives
+    teardown. A cancellation delivered to *this* coroutine while it drains is
+    absorbed and retried a bounded number of times: the caller's own
+    `CancelledError` is already propagating out of the enclosing `try`, and
+    skipping the drain is precisely the failure mode this exists to prevent.
+    """
+    task.cancel()
+    for _ in range(_CANCEL_DRAIN_ATTEMPTS):
+        if task.done():
+            break
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError:
+            continue
+    if task.done() and not task.cancelled():
+        # Retrieve any exception so it is never reported as "never retrieved";
+        # the error that triggered teardown is the one the caller sees.
+        task.exception()
+
+
+def _store_digest(store: ResourceStore) -> str:
+    return summary_digest(cast(Iterable[PodSummary], store.get("pods", ALL_NAMESPACES)))
+
+
+def _check_row_count(row_count: int, expected: int) -> None:
+    """Re-assert the exact rendered row count before teardown.
+
+    A late `WatchManager` reconnect clears and re-seeds the store, so a digest
+    that matched a moment ago can be recomputed over a partially re-listed
+    store. Checking the rendered row count at the same instant turns that into
+    an explicit, named failure instead of a plausible-looking report.
+    """
+    if row_count != expected:
+        raise ValueError(
+            f"rendered row count regressed before teardown: expected {expected}, got {row_count}"
         )
-        live_state[(namespace, name)] = replace(current, phase=event.summary.phase)
-        recorder.record_event(event.sequence, now())
+
+
+@dataclass
+class _LiveRunState:
+    """Values produced inside the measured window and consumed after it."""
+
+    expected_digest: str = ""
+    final_digest: str = ""
+    churn_started_before_input: bool = False
+    progress: ChurnProgress = field(default_factory=ChurnProgress)
+
+
+async def _run_measured_window(
+    *,
+    app: MeasuredKorvidApp,
+    store: ResourceStore,
+    harness_kube: KubeReadClient,
+    mutation_client: MutationClient,
+    recorder: BenchmarkRecorder,
+    profile: WorkloadProfile,
+    options: ReplayOptions,
+    limits: LiveLimits,
+    run_id: str,
+    live_state: dict[tuple[str, str], PodSummary],
+    state: _LiveRunState,
+) -> None:
+    """Drive the app: initial render, churn, ground-truth read, convergence.
+
+    Everything that must observe a *live* watch happens inside this function,
+    including the independent cluster read and the digest convergence wait.
+    Reading ground truth after the watch had already been stopped would compare
+    a frozen store against a cluster that was still changing.
+    """
+    now = options.monotonic_fn if options.monotonic_fn is not None else monotonic
+    async with app.run_test() as pilot:
+        table = app.query_one(ResourceTable)
+
+        await wait_for(
+            pilot,
+            lambda: table.row_count == profile.object_count,
+            timeout=limits.initial_render_timeout_seconds,
+            label="initial owned pods rendered",
+            recorder=recorder,
+        )
+
+        events = scheduled_events(profile)
+        state.progress.requested_events = len(events)
+        churn_task = asyncio.create_task(
+            drive_live_churn(
+                events,
+                run_id=run_id,
+                namespace_count=profile.namespace_count,
+                live_state=live_state,
+                mutation_client=mutation_client,
+                options=options,
+                progress=state.progress,
+                limits=limits,
+            )
+        )
+        try:
+            if events:
+                # Real ordering signal: input latency is only meaningful if
+                # churn was actually under way, so wait for the first mutation
+                # to be dispatched (or for churn to fail) before measuring.
+                await wait_for(
+                    pilot,
+                    lambda: state.progress.started > 0 or churn_task.done(),
+                    timeout=limits.initial_render_timeout_seconds,
+                    label="first churn mutation started",
+                    recorder=recorder,
+                )
+            state.churn_started_before_input = state.progress.started > 0
+
+            t0 = now()
+            await pilot.press("down")
+            recorder.record_input(now() - t0)
+            t0 = now()
+            await pilot.press("up")
+            recorder.record_input(now() - t0)
+
+            churn_timeout = (
+                profile.duration_seconds * options.time_scale + limits.churn_grace_seconds
+            )
+            async with asyncio.timeout(churn_timeout):
+                await churn_task
+
+            # Ground truth, read independently *while the watch is still live*
+            # via the non-instrumented harness client (never polluting the
+            # application-path telemetry), and revalidated for ownership.
+            final_pods = await read_and_validate_owned_pods(
+                harness_kube, run_id=run_id, expected=live_state
+            )
+            state.expected_digest = summary_digest(final_pods)
+
+            await wait_for(
+                pilot,
+                lambda: (
+                    recorder.pending_count() == 0 and _store_digest(store) == state.expected_digest
+                ),
+                timeout=limits.convergence_timeout_seconds,
+                label=(
+                    "store digest converged with the independently read cluster digest "
+                    f"({state.expected_digest})"
+                ),
+                recorder=recorder,
+            )
+            _check_row_count(table.row_count, profile.object_count)
+            state.final_digest = _store_digest(store)
+        finally:
+            await _cancel_and_drain(churn_task)
 
 
 async def run_live_replay(
@@ -476,18 +950,20 @@ async def run_live_replay(
     expected_cluster_id: str,
     run_id: str,
     deps: LiveDependencies | None = None,
+    limits: LiveLimits | None = None,
 ) -> ReplayReport:
     """Replay churn against an already-seeded real AKS cluster and return metrics.
 
-    Fail-closed order: `time_scale`/`run_id`/topology validation, the cluster
-    identity gate, the ownership gate - all *before* any mutation - then the
-    real application-path wiring (`KubeClient` -> `WatchManager` ->
-    `ResourceStore` -> `MeasuredKorvidApp`), guarded churn, and digest parity
-    against an independent post-churn re-read of the cluster.
+    Fail-closed order: `time_scale`/`run_id`/topology/profile validation, the
+    cluster identity gate, the ownership gate - all *before* any mutation
+    client is constructed - then the real application-path wiring
+    (`KubeClient` -> `WatchManager` -> `ResourceStore` -> `MeasuredKorvidApp`),
+    guarded metadata-only churn, and digest parity against an independent,
+    revalidated re-read of the cluster taken while the watch is still live.
 
     Two `KubeReadClient` connections are used: `harness_kube` (never wired to
-    telemetry) performs the ownership gate and the post-churn independent
-    re-read; `kube` (wired to `recorder.record_api`) is only ever handed to
+    telemetry) performs the ownership gate and the ground-truth re-read;
+    `kube` (wired to `recorder.record_api`) is only ever handed to
     `make_live_watch_source`, so `ReplayReport.api` reports exactly the
     production application read path. The ownership gate's validated Pod
     snapshot is reused as the pre-churn uid snapshot - it is never re-listed.
@@ -495,7 +971,12 @@ async def run_live_replay(
     _validate_time_scale(options)
     manifests.validate_run_id(run_id)
     _validate_topology(profile)
+    # Re-check duration-dependent invariants: a caller may hand us a profile
+    # rewritten with `dataclasses.replace` (the CLI's `--duration`), which
+    # bypasses `load_profile` entirely.
+    validate_profile(profile)
 
+    active_limits = limits if limits is not None else LiveLimits()
     active_deps = deps if deps is not None else _default_dependencies(context)
     await _verify_cluster_identity(
         context=context, expected_cluster_id=expected_cluster_id, deps=active_deps
@@ -504,6 +985,7 @@ async def run_live_replay(
     store = ResourceStore()
     recorder = BenchmarkRecorder()
     sampler = ProcessSampler(options.sample_interval)
+    state = _LiveRunState()
 
     harness_kube = active_deps.harness_kube_client_factory()
     await harness_kube.connect(context)
@@ -521,98 +1003,76 @@ async def run_live_replay(
             manifests.namespace_name(run_id, i) for i in range(profile.namespace_count)
         )
 
-        kube = active_deps.kube_client_factory(recorder.record_api)
-        await kube.connect(context)
+        # Constructed only after the ownership gate passes, then connected
+        # eagerly under an explicit bound so credential-plugin latency is paid
+        # before the measured window rather than inside the first mutation.
+        mutation_client = active_deps.mutation_client_factory(run_id)
         try:
-            source = make_live_watch_source(kube, expected_namespaces)
-            watch_manager = WatchManager(store, source, retry_delay=0.0)
-            manifest = _build_manifest(profile)
-            mutation_client = active_deps.mutation_client_factory(run_id)
+            async with asyncio.timeout(active_limits.mutation_connect_timeout_seconds):
+                await mutation_client.connect()
 
-            app = MeasuredKorvidApp(
-                config=KorvidConfig(namespace=ALL_NAMESPACES),
-                store=store,
-                watch_manager=watch_manager,
-                recorder=recorder,
-            )
-
-            sampler.start()
-            churn_started_before_input = False
+            kube = active_deps.kube_client_factory(recorder.record_api)
+            await kube.connect(context)
             try:
-                async with app.run_test() as pilot:
-                    table = app.query_one(ResourceTable)
+                source = make_live_watch_source(
+                    kube,
+                    expected_namespaces,
+                    run_id=run_id,
+                    recorder=recorder,
+                )
+                watch_manager = WatchManager(store, source, retry_delay=0.0)
+                manifest = build_manifest(profile)
 
-                    await until(
-                        pilot,
-                        lambda: table.row_count == profile.object_count,
-                        timeout=60.0,
-                        label="initial owned pods rendered",
+                app = MeasuredKorvidApp(
+                    config=KorvidConfig(namespace=ALL_NAMESPACES),
+                    store=store,
+                    watch_manager=watch_manager,
+                    recorder=recorder,
+                )
+
+                sampler.start()
+                try:
+                    await _run_measured_window(
+                        app=app,
+                        store=store,
+                        harness_kube=harness_kube,
+                        mutation_client=mutation_client,
+                        recorder=recorder,
+                        profile=profile,
+                        options=options,
+                        limits=active_limits,
+                        run_id=run_id,
+                        live_state=live_state,
+                        state=state,
                     )
-
-                    events = scheduled_events(profile)
-                    churn_task = asyncio.create_task(
-                        drive_live_churn(
-                            events,
-                            run_id=run_id,
-                            namespace_count=profile.namespace_count,
-                            live_state=live_state,
-                            mutation_client=mutation_client,
-                            recorder=recorder,
-                            options=options,
-                        )
-                    )
-                    churn_started_before_input = True
-
-                    t0 = monotonic()
-                    await pilot.press("down")
-                    recorder.record_input(monotonic() - t0)
-                    t0 = monotonic()
-                    await pilot.press("up")
-                    recorder.record_input(monotonic() - t0)
-
-                    await churn_task
-
-                    await until(
-                        pilot,
-                        lambda: not recorder._pending_events,
-                        timeout=60.0,
-                        label="churn complete and all events rendered",
-                    )
+                finally:
+                    process_samples = await sampler.stop()
+                    await watch_manager.stop_all()
             finally:
-                process_samples = await sampler.stop()
-                await watch_manager.stop_all()
-                await mutation_client.close()
-
-            # Independently re-read the cluster's actual Pods for ground-truth
-            # digest parity via the non-instrumented harness client, rather
-            # than trusting the driver's own bookkeeping or polluting the
-            # application-path telemetry with this harness-only read.
-            final_pods: list[PodSummary] = []
-            for namespace in expected_namespaces:
-                final_pods.extend(await harness_kube.list_pods(namespace))
-            expected_digest = summary_digest(final_pods)
-            final_digest = summary_digest(
-                cast(Iterable[PodSummary], store.get("pods", ALL_NAMESPACES))
-            )
+                await kube.close()
         finally:
-            await kube.close()
+            await mutation_client.close()
     finally:
         await harness_kube.close()
 
-    benchmark = recorder.report(manifest, process_samples, final_digest=final_digest)
+    churn = state.progress.summary(requested_duration_seconds=profile.duration_seconds)
+    benchmark = recorder.report(
+        manifest, process_samples, final_digest=state.final_digest, churn=churn
+    )
 
     return ReplayReport(
         object_count=profile.object_count,
-        expected_digest=expected_digest,
-        final_digest=final_digest,
+        expected_digest=state.expected_digest,
+        final_digest=state.final_digest,
         dropped_updates=benchmark.dropped_updates,
         rendered_updates=benchmark.rendered_updates,
         render_passes=benchmark.render_passes,
         coalesced_updates=benchmark.coalesced_updates,
         event_to_render=benchmark.event_to_render,
         input_latency=benchmark.input_latency,
-        churn_started_before_input=churn_started_before_input,
+        churn_started_before_input=state.churn_started_before_input,
         process=benchmark.process,
         api=benchmark.api,
         manifest=benchmark.manifest,
+        churn=churn,
     )

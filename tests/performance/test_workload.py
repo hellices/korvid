@@ -47,3 +47,17 @@ def test_events_are_stably_scheduled_and_change_final_digest() -> None:
     assert [event.sequence for event in events] == list(range(1, 21))
     assert all(left.offset_seconds <= right.offset_seconds for left, right in pairwise(events))
     assert summary_digest(apply_events(initial, events)) != summary_digest(initial)
+
+
+def test_scheduled_events_carry_the_selected_object_index() -> None:
+    """The live harness maps each churn event onto a real cluster Pod. Carrying
+    the generator's own object index removes the need to parse it back out of
+    the synthetic Pod name (`int(name.removeprefix("pod-"))`), which would
+    become a mid-churn `ValueError` if the naming scheme ever changed."""
+    profile = _profile()
+    events = scheduled_events(profile)
+
+    assert events
+    for event in events:
+        assert 0 <= event.object_index < profile.object_count
+        assert event.summary.name == f"pod-{event.object_index:06d}"

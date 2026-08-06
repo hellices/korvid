@@ -69,7 +69,27 @@ The initial profiles are:
 | `smoke-1k` | 1,000 | Fast deterministic correctness and report smoke | Normal CI, no wall-clock assertion |
 | `steady-10k` | 10,000 | Store/render scaling and sustained churn | Manual or scheduled |
 | `burst-50k` | 50,000 | Upper-envelope and burst-backlog measurement | Manual or scheduled |
-| `live-aks-1k` | 1,000 Pods | Real API, network, LIST/WATCH, and UI qualification | Protected manual run |
+| `aks-1k` | 1,000 | Deterministic comparison schedule for the live topology | Manual or scheduled |
+| `aks-live-1k` | 1,000 Pods | Real API, network, LIST/WATCH, and UI qualification | Protected manual run |
+
+`aks-live-1k` (`tests/performance/profiles/aks-live-1k.json`) encodes the live
+sequence below exactly - 1,800 seconds at 20 events/s with three 30-second
+bursts at 100 events/s - so the event-to-render, backlog-drain, and RSS-slope
+budgets in this document are measurable by a single protected run:
+
+```bash
+uv run python -m tests.performance.cli replay-live \
+  --profile tests/performance/profiles/aks-live-1k.json \
+  --context aks-korvid-contract-test \
+  --expected-cluster-id <ARM resource id> --run-id <run> \
+  --json live.json --out live.md
+```
+
+`aks-1k` keeps the short (30-second) schedule shared with `burst-50k`, so a
+live run can be compared against the deterministic 1k/10k/50k baselines on the
+same event schedule. `--duration` shortens a live smoke run; every burst and
+failure point is re-validated against the shortened duration before the
+cluster identity and ownership gates run.
 
 The deterministic generator emits stable names, namespaces, UIDs, resource
 versions, and event order from the profile seed. Repeating a profile with the
@@ -184,8 +204,24 @@ The live sequence is:
     path that runs even after benchmark failure or timeout.
 
 Metadata-only updates create real watch traffic without restarting containers
-or changing the workload's resource demand. The generator rate and observed API
-throttling are both recorded; requested rate is never reported as achieved rate.
+or changing the workload's resource demand. Churn writes one dedicated,
+non-ownership label (`korvid.dev/performance-tick`) on the Pod's own metadata
+under a JSON Patch that first `test`s the Pod UID and both ownership labels.
+The kubelet-owned `status` subresource is never written: an externally patched
+`status.phase` is reconciled back on the next node sync, which would both
+corrupt digest parity and violate the metadata-only rule above.
+
+The generator rate and observed API throttling are both recorded; requested
+rate is never reported as achieved rate. Reports carry the requested event
+count and rate next to the observed event count, churn wall time, achieved
+rate, and the count of mutation-side 429 retries, which is accounted
+separately from application read-path throttles.
+
+Live churn is driven with explicit bounded concurrency and a bounded per-patch
+timeout: a serial driver is capped at one round trip per event and cannot
+approach the scheduled rate, which would silently understate the load the
+report claims to have applied. Only HTTP 429 is retried, with a bounded policy
+that re-issues the identical guarded patch.
 
 ### Guardrails
 

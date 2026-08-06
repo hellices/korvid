@@ -744,6 +744,42 @@ async def test_get_object_emits_get_telemetry() -> None:
     assert seen[0].status is None
 
 
+async def test_get_object_emits_error_telemetry_and_reraises() -> None:
+    """Every other read path records an `error` event before propagating; a
+    silent GET failure leaves a telemetry gap exactly where a benchmark or an
+    operator is trying to explain a stalled view."""
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    meta = _deploy_meta()
+    request_json_mock = AsyncMock(side_effect=ApiStatusError(404, "Not Found"))
+
+    with (
+        patch.object(client, "_request_json", request_json_mock),
+        pytest.raises(ApiStatusError, match="API 404: Not Found"),
+    ):
+        await client.get_object(meta, "default", "my-dep")
+
+    assert [event.operation for event in seen] == ["error"]
+    assert seen[0].path == "/apis/apps/v1/namespaces/default/deployments/my-dep"
+    assert seen[0].status == 404
+
+
+async def test_list_pods_reports_the_same_items_it_counted() -> None:
+    """The telemetry count and the returned summaries must come from one bound
+    payload read, not two independent `data.get("items", [])` lookups."""
+    seen: list[ReadTelemetryEvent] = []
+    client = KubeClient(read_telemetry=seen.append)
+    mock_api = MagicMock()
+    mock_api.list_namespaced_pod = AsyncMock(return_value={"items": [_pod("a"), _pod("b")]})
+
+    with patch.object(client, "_core_v1", mock_api):
+        pods = await client.list_pods("default")
+
+    assert [pod.name for pod in pods] == ["a", "b"]
+    assert [event.operation for event in seen] == ["list"]
+    assert seen[0].object_count == len(pods)
+
+
 async def test_get_object_raises_api_status_error() -> None:
     """ApiException from the raw GET is wrapped as ApiStatusError."""
     client = KubeClient()

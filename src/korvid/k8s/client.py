@@ -191,6 +191,18 @@ class KubeClient(ReadOps, WriteOps):
         object_count: int = 0,
         status: int | None = None,
     ) -> None:
+        """Report one read to the optional telemetry seam (issue #186).
+
+        `decoded_bytes` is an exact canonical-JSON byte count, not an estimate:
+        the benchmark's API-load accounting is compared across runs and
+        profiles, so an approximation (e.g. `len(str(payload))`, which counts
+        Python `repr` characters and misencodes non-ASCII, `True`, and `None`)
+        would silently change the reported number without removing the work.
+        The whole method is inert unless a caller opted into telemetry, and the
+        measured cost of the exact count is ~8.8 ms for a 1,000-Pod
+        cluster-wide LIST (0.4% of the 2 s LIST-to-render budget) and ~9 us per
+        watch event (0.004% of the 250 ms event-to-render budget).
+        """
         if self._read_telemetry is None:
             return
         decoded_bytes = 0
@@ -410,7 +422,7 @@ class KubeClient(ReadOps, WriteOps):
             raise ApiStatusError(int(exc.status or 0), str(exc.reason or "")) from exc
         items = data.get("items", [])
         self._observe_read("list", path, payload=data, object_count=len(items))
-        return [self._pod_summary(item) for item in data.get("items", [])]
+        return [self._pod_summary(item) for item in items]
 
     async def watch_pods(self, namespace: str | None) -> AsyncIterator[tuple[str, PodSummary]]:
         """LIST then watch pods; namespace=None watches cluster-wide."""
@@ -669,7 +681,13 @@ class KubeClient(ReadOps, WriteOps):
     ) -> dict[str, Any]:
         """Fetch the raw manifest for a single object. ApiException → ApiStatusError."""
         path = self._object_path(meta, namespace, name)
-        result = await self._request_json(path)
+        try:
+            result = await self._request_json(path)
+        except ApiStatusError as exc:
+            # Every other read path records the failure before propagating;
+            # without this a denied or throttled GET is a hole in the telemetry.
+            self._observe_read_error(path, exc)
+            raise
         self._observe_read("get", path, payload=result, object_count=1)
         return result
 

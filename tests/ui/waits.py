@@ -10,6 +10,16 @@ from collections.abc import Callable
 from typing import Any
 
 
+class WaitTimeout(Exception):
+    """Raised when `until` gives up waiting for a condition.
+
+    Deliberately *not* an `AssertionError`: a wait timeout is an operational
+    outcome a caller may catch and report (e.g. the benchmark CLI turns it
+    into exit 1), while a genuine `assert` inside production code must keep
+    propagating as the programmer error it is.
+    """
+
+
 async def until(
     pilot: Any,
     cond: Callable[[], object],
@@ -23,6 +33,9 @@ async def until(
     condition is re-checked once after the final pause so it cannot fail on
     an outcome that arrived during the last tick, and `label` names the
     awaited outcome in the failure message for easier CI diagnosis.
+
+    Raises:
+        WaitTimeout: `cond()` was still falsy after `timeout` seconds.
     """
     remaining = timeout
     while remaining > 0:
@@ -33,4 +46,4 @@ async def until(
         remaining -= step
     if cond():
         return
-    raise AssertionError(f"{label} not met within {timeout}s")
+    raise WaitTimeout(f"{label} not met within {timeout}s")

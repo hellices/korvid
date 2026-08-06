@@ -10,6 +10,7 @@ import pytest
 from korvid.k8s.telemetry import ReadTelemetryEvent
 from tests.performance.metrics import (
     BenchmarkRecorder,
+    ChurnSummary,
     LatencySummary,
     ProcessSample,
     ProcessSampler,
@@ -302,6 +303,7 @@ def test_report_payload_is_json_serializable_and_stable() -> None:
             "coalesced_updates": 0,
             "dropped_updates": 0,
         },
+        "churn": None,
         "digests": {"final": "digest-123"},
     }
     assert '"rss_slope_mib_per_minute": 1.0' in encoded
@@ -491,3 +493,84 @@ async def test_process_sampler_skips_warmup_sample(
             python_bytes=1000,
         ),
     )
+
+
+def test_recorder_exposes_public_pending_count_and_api_errors() -> None:
+    """Replay/live harnesses must observe the backlog and API errors through
+    a public accessor instead of reaching into `_pending_events`/`_api_events`
+    across module boundaries."""
+    recorder = BenchmarkRecorder()
+    assert recorder.pending_count() == 0
+    assert recorder.api_errors() == ()
+
+    recorder.record_event(1, 10.0)
+    recorder.record_event(2, 11.0)
+    assert recorder.pending_count() == 2
+
+    recorder.record_api(ReadTelemetryEvent("list", "/api/v1/pods"))
+    recorder.record_api(ReadTelemetryEvent("error", "/api/v1/pods", status=403))
+    recorder.record_api(ReadTelemetryEvent("error", "/api/v1/pods", status=410))
+
+    assert [event.status for event in recorder.api_errors()] == [403, 410]
+
+    recorder.record_render(12.0)
+    assert recorder.pending_count() == 0
+
+
+def test_report_separates_requested_churn_rate_from_achieved_rate() -> None:
+    """The design doc forbids reporting a requested rate as an achieved rate.
+    Both must be present, distinctly labelled, alongside the observed event
+    count, wall time, and the mutation-side throttle count (which is *not* the
+    application read path's `api.throttles`)."""
+    recorder = BenchmarkRecorder()
+    recorder.record_api(ReadTelemetryEvent("list", "/api/v1/pods"))
+    churn = ChurnSummary.from_observations(
+        requested_events=8400,
+        requested_duration_seconds=30,
+        observed_events=900,
+        wall_seconds=30.0,
+        mutation_throttles=7,
+    )
+
+    report = recorder.report(run_manifest(), (), final_digest="abc", churn=churn)
+    payload = cast(dict[str, object], report_payload(report)["churn"])
+    markdown = render_markdown(report)
+
+    assert report.churn is churn
+    assert churn.requested_events_per_second == 280.0
+    assert churn.achieved_events_per_second == 30.0
+    assert payload == {
+        "requested_events": 8400,
+        "requested_events_per_second": 280.0,
+        "observed_events": 900,
+        "wall_seconds": 30.0,
+        "achieved_events_per_second": 30.0,
+        "mutation_throttles": 7,
+    }
+    assert "Requested churn rate: `280.00 events/s`" in markdown
+    assert "Achieved churn rate: `30.00 events/s`" in markdown
+    assert "Mutation throttles (429): `7`" in markdown
+    # The application read path's throttle counter stays independent.
+    assert report.api.throttles == 0
+
+
+def test_report_payload_keeps_a_stable_churn_key_when_no_churn_was_driven() -> None:
+    recorder = BenchmarkRecorder()
+    report = recorder.report(run_manifest(), (), final_digest="abc")
+
+    assert report.churn is None
+    assert report_payload(report)["churn"] is None
+    assert "Achieved churn rate: `n/a`" in render_markdown(report)
+
+
+def test_churn_summary_reports_no_achieved_rate_without_elapsed_time() -> None:
+    churn = ChurnSummary.from_observations(
+        requested_events=10,
+        requested_duration_seconds=0,
+        observed_events=0,
+        wall_seconds=None,
+        mutation_throttles=0,
+    )
+
+    assert churn.achieved_events_per_second is None
+    assert churn.requested_events_per_second is None

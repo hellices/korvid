@@ -8,12 +8,52 @@ update accounting, and API telemetry.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from time import monotonic
 
 import pytest
 
+from korvid.core.config import KorvidConfig
+from korvid.core.store import ALL_NAMESPACES, ResourceStore, Summary
+from korvid.core.watch import WatchManager
+from korvid.ui.messages import ResourcesUpdated
+from tests.performance.metrics import BenchmarkRecorder, RunManifest
 from tests.performance.profile import FailureInjection, WorkloadProfile
-from tests.performance.replay import ReplayOptions, run_replay
+from tests.performance.replay import (
+    MeasuredKorvidApp,
+    ReplayAborted,
+    ReplayOptions,
+    build_manifest,
+    run_replay,
+)
 from tests.performance.workload import apply_events, initial_pods, scheduled_events, summary_digest
+
+
+async def _never_watch(_kind: str, _scope: str) -> AsyncIterator[tuple[str, Summary]]:
+    """A watch source that never yields: the render-accounting test drives the
+    app directly and must not race a background stream."""
+    await asyncio.Event().wait()
+    # Unreachable; present so the function is an async *generator*, which is
+    # what `WatchSource` requires.
+    yield ("ADDED", initial_pods(_manifest_profile())[0])
+
+
+def _manifest_profile() -> WorkloadProfile:
+    return WorkloadProfile(
+        schema_version=1,
+        id="render-accounting",
+        seed=1,
+        object_count=1,
+        namespace_count=1,
+        steady_events_per_second=0,
+        duration_seconds=1,
+        bursts=(),
+        failures=(),
+    )
+
+
+def _manifest_for_test() -> RunManifest:
+    return build_manifest(_manifest_profile())
 
 
 async def test_replay_uses_real_app_and_reaches_expected_digest() -> None:
@@ -169,3 +209,148 @@ async def test_replay_gone_reconnects_with_time_scale_1() -> None:
     assert report.api.operations["watch_open"] == 2
     assert report.api.reconnects == 1
     assert report.api.relists == 1
+
+
+async def test_replay_throttled_reconnects_and_digest_matches() -> None:
+    """A 429 ends one watch connection; `WatchManager` retries, the source
+    re-LISTs from its tracked state, and the run still reaches the oracle
+    digest with zero drops. The throttled event itself is never delivered."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-throttled",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=20,
+        duration_seconds=2,
+        bursts=(),
+        failures=(FailureInjection(kind="throttled", at_event=5),),
+    )
+    report = await run_replay(profile, ReplayOptions(time_scale=0))
+    events = scheduled_events(profile)
+    applied = tuple(e for e in events if e.sequence != 5)
+    oracle = summary_digest(apply_events(initial_pods(profile), applied))
+
+    assert report.expected_digest == oracle
+    assert report.final_digest == oracle
+    assert report.dropped_updates == 0
+    assert report.api.operations["list"] == 2
+    assert report.api.operations["watch_open"] == 2
+    assert report.api.reconnects == 1
+    assert report.api.throttles == 1
+    # A 429 is not a 410: it must not be counted as a re-LIST recovery.
+    assert report.api.relists == 0
+
+
+async def test_replay_slow_delays_without_dropping_or_reconnecting() -> None:
+    """`slow` delays one event by one steady-rate tick and still delivers it:
+    no reconnect, no drop, and the stall is real extra time.
+
+    The stall is injected at the *last* scheduled event on purpose. Mid-run the
+    absolute-offset schedule silently absorbs a one-tick stall (the following
+    event's delay simply shrinks by the same tick), so only a stall with no
+    remaining schedule to catch up in is observable as extra virtual time:
+    correct behaviour totals `last offset + one tick`, while ignoring or
+    dropping the `slow` injection totals exactly `last offset`.
+    """
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-slow",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=20,
+        duration_seconds=2,
+        bursts=(),
+        failures=(FailureInjection(kind="slow", at_event=40),),
+    )
+    virtual_time: list[float] = [0.0]
+    sleep_delays: list[float] = []
+
+    def virtual_monotonic() -> float:
+        return virtual_time[0]
+
+    async def virtual_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+        virtual_time[0] += delay
+        await asyncio.sleep(0)
+
+    report = await run_replay(
+        profile,
+        ReplayOptions(time_scale=1, monotonic_fn=virtual_monotonic, async_sleep=virtual_sleep),
+    )
+    events = scheduled_events(profile)
+    oracle = summary_digest(apply_events(initial_pods(profile), events))
+
+    assert report.expected_digest == oracle
+    assert report.final_digest == oracle
+    assert report.dropped_updates == 0
+    assert report.api.operations["watch_open"] == 1
+    assert report.api.reconnects == 0
+    # The injected 1/20s stall is an *extra* sleep on top of the schedule.
+    assert sum(sleep_delays) == pytest.approx(events[-1].offset_seconds + 1 / 20)
+
+
+async def test_replay_forbidden_aborts_with_an_explicit_terminal_error() -> None:
+    """403 is an authorization boundary: `WatchManager` never reconnects and
+    clears the store, so the run can never complete. That must surface at once
+    as a named terminal failure instead of a 30-second `until` timeout on a
+    permanently empty backlog."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-forbidden",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=20,
+        duration_seconds=2,
+        bursts=(),
+        failures=(FailureInjection(kind="forbidden", at_event=5),),
+    )
+    with pytest.raises(ReplayAborted, match="403"):
+        await run_replay(profile, ReplayOptions(time_scale=0))
+
+
+async def test_replay_churn_started_before_input_is_false_without_any_events() -> None:
+    """The flag must be a real emitted-event signal: a profile that schedules
+    no churn at all cannot claim churn was active during input measurement."""
+    profile = WorkloadProfile(
+        schema_version=1,
+        id="test-no-churn",
+        seed=186,
+        object_count=20,
+        namespace_count=4,
+        steady_events_per_second=0,
+        duration_seconds=1,
+        bursts=(),
+        failures=(),
+    )
+    report = await run_replay(profile, ReplayOptions(time_scale=0))
+
+    assert scheduled_events(profile) == ()
+    assert not report.churn_started_before_input
+    assert report.input_latency.count > 0
+
+
+async def test_measured_app_counts_only_resource_update_renders() -> None:
+    """`_render_table` is also called by cursor/filter/sort/split-pane paths.
+    Counting those inflates `render_passes` and lets an unrelated repaint flush
+    the pending-event backlog, so only store-driven renders may be recorded."""
+    recorder = BenchmarkRecorder()
+    app = MeasuredKorvidApp(
+        config=KorvidConfig(namespace=ALL_NAMESPACES),
+        store=ResourceStore(),
+        watch_manager=WatchManager(ResourceStore(), _never_watch, retry_delay=0.0),
+        recorder=recorder,
+    )
+    async with app.run_test():
+        recorder.record_event(1, monotonic())
+        app._render_table("pods")
+        assert recorder.pending_count() == 1
+
+        app.on_resources_updated(ResourcesUpdated("pods"))
+        assert recorder.pending_count() == 0
+
+    report = recorder.report(_manifest_for_test(), (), final_digest="d")
+    assert report.render_passes == 1
+    assert report.rendered_updates == 1
