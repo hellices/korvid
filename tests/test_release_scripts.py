@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -1017,6 +1018,19 @@ def _release_workflow() -> str:
     return (Path(__file__).parents[1] / ".github" / "workflows" / "release.yml").read_text()
 
 
+def _bash_executable() -> str:
+    if sys.platform != "win32":
+        bash = shutil.which("bash")
+        assert bash is not None
+        return bash
+
+    git = shutil.which("git")
+    assert git is not None
+    git_bash = Path(git).parent.parent / "bin" / "bash.exe"
+    assert git_bash.is_file()
+    return str(git_bash)
+
+
 def _verify_step_run(key: str, value: str) -> str:
     document = yaml.safe_load(_release_workflow())
     for step in document["jobs"]["verify"]["steps"]:
@@ -1297,7 +1311,7 @@ def test_release_workflow_restores_overwritten_annotated_tag_before_source_polic
     checkout, tag = _overwritten_annotated_tag_checkout(tmp_path)
     restore = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-eu",
             "-o",
             "pipefail",
@@ -1322,7 +1336,7 @@ def test_release_workflow_rejects_restored_tag_that_differs_from_event_commit(
     checkout, tag = _overwritten_annotated_tag_checkout(tmp_path)
     restore = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-eu",
             "-o",
             "pipefail",
@@ -1337,7 +1351,14 @@ def test_release_workflow_rejects_restored_tag_that_differs_from_event_commit(
     assert restore.returncode == 0, restore.stderr
 
     source_check = subprocess.run(
-        ["bash", "-eu", "-o", "pipefail", "-c", _verify_step_run("id", "source")],
+        [
+            _bash_executable(),
+            "-eu",
+            "-o",
+            "pipefail",
+            "-c",
+            _verify_step_run("id", "source"),
+        ],
         cwd=checkout,
         env={
             **os.environ,
