@@ -695,10 +695,12 @@ def test_pip_install_tooling_state_does_not_pollute_runtime_user_state(
     wheel.write_bytes(b"wheel")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    commands: list[tuple[list[str], Path]] = []
 
     def _fake_run(
         args: list[str], *, env: dict[str, str], cwd: Path
     ) -> subprocess.CompletedProcess[str]:
+        commands.append((args, Path(env["HOME"])))
         if "pip" in args and "install" in args and "uninstall" not in args:
             # Simulate pip writing toolchain state (reproduces the real failure)
             rustup_dir = Path(env["HOME"]) / ".rustup"
@@ -715,6 +717,17 @@ def test_pip_install_tooling_state_does_not_pollute_runtime_user_state(
     assert (tool_roots.home / ".rustup" / "settings.toml").is_file()
     assert tool_roots.home.is_relative_to(workspace)
     assert smoke_install._unexpected_files(runtime_roots.home) == []
+    tooling_commands = [(args, home) for args, home in commands if args[1:3] == ["-m", "pip"]]
+    runtime_commands = [(args, home) for args, home in commands if args[1:3] != ["-m", "pip"]]
+    assert any("install" in args for args, _home in tooling_commands)
+    assert any("uninstall" in args for args, _home in tooling_commands)
+    assert all(home == tool_roots.home for _args, home in tooling_commands)
+    assert any(args[1:] == ["--help"] for args, _home in runtime_commands)
+    assert any(args[1:] == ["--version"] for args, _home in runtime_commands)
+    assert any("import korvid;" in " ".join(args) for args, _home in runtime_commands)
+    assert any("import korvid.__main__" in " ".join(args) for args, _home in runtime_commands)
+    assert any("find_spec('mcp')" in " ".join(args) for args, _home in runtime_commands)
+    assert all(home == runtime_roots.home for _args, home in runtime_commands)
 
 
 def test_smoke_install_catches_runtime_probe_user_state(
