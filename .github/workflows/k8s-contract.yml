@@ -96,32 +96,51 @@ jobs:
       - name: Guard — a schedulable disposable node must exist
         run: |
           set -euo pipefail
-          # The node-ops and resize contracts only touch nodes labelled
+          # The suite needs one node that satisfies both of its requirements at
+          # once: the node-operation contracts only touch
           # korvid.dev/disposable=true and fail closed rather than fall back to
-          # a system node. With no such node they produce six failures across
-          # four files — "no disposable workload node found" and pod-scheduling
-          # timeouts — none of which names the cause. The suite stayed red for
-          # eight commits that way.
+          # a system node, while every test pod carries a
+          # korvid.dev/pool=workload nodeSelector. Those labels riding the same
+          # node is a convention of the pool setup, not something enforced
+          # here, so both are required together — a node with only one of them
+          # would let this guard pass and leave pods Pending.
+          #
+          # With no such node the suite produces six failures across four files
+          # — "no disposable workload node found" and pod-scheduling timeouts —
+          # none of which names the cause. It stayed red for eight commits.
           #
           # Asked of the cluster rather than of Azure: a stopped or
           # still-starting cluster reports agentPools[].count as 0 even when
           # the pool is populated, so the control-plane number is not evidence.
-          # This asks for exactly what the tests need, and waits, because
-          # `az aks start` returns before nodes finish registering.
           #
           # Checked, not repaired: the workflow identity holds a deliberately
           # minimal role with agentPools/read and no write, and widening it so
           # this job could scale the pool would also let it reshape the system
           # pool that every other guard here exists to protect.
-          for _ in $(seq 1 30); do
-            if kubectl wait --for=condition=Ready node \
-              -l korvid.dev/disposable=true --timeout=10s >/dev/null 2>&1; then
-              kubectl get nodes -l korvid.dev/disposable=true
+          SELECTOR=korvid.dev/disposable=true,korvid.dev/pool=workload
+
+          # Prove the node list is reachable first. Otherwise an expired token,
+          # an RBAC denial, or an unreachable API server spends the whole
+          # deadline and then blames an empty pool, sending the reader after a
+          # scale command that cannot help.
+          if ! nodes=$(kubectl get nodes -o name 2>&1); then
+            echo "::error title=Cannot query nodes::Listing nodes on $AKS_CLUSTER_NAME failed, so the disposable-node check could not run: $nodes"
+            exit 1
+          fi
+
+          # Wall-clock deadline, not an iteration count: a registered but
+          # NotReady node makes each attempt cost its own timeout as well as
+          # the sleep, which would silently double a loop-counted budget.
+          deadline=$(( SECONDS + 300 ))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if kubectl wait --for=condition=Ready node -l "$SELECTOR" \
+              --timeout=10s >/dev/null 2>&1; then
+              kubectl get nodes -l "$SELECTOR"
               exit 0
             fi
-            sleep 10
+            sleep 5
           done
-          echo "::error title=No schedulable disposable node::$AKS_CLUSTER_NAME has no Ready node labelled korvid.dev/disposable=true after 5 minutes, so the node-operation and resize contracts have nowhere to schedule. If the $WORKLOAD_NODEPOOL pool is empty, restore it with: az aks nodepool scale -g $AKS_RESOURCE_GROUP --cluster-name $AKS_CLUSTER_NAME -n $WORKLOAD_NODEPOOL --node-count 1"
+          echo "::error title=No schedulable disposable node::$AKS_CLUSTER_NAME has no Ready node matching $SELECTOR after 5 minutes, so the node-operation and resize contracts have nowhere to schedule. If the $WORKLOAD_NODEPOOL pool is empty, restore it with: az aks nodepool scale -g $AKS_RESOURCE_GROUP --cluster-name $AKS_CLUSTER_NAME -n $WORKLOAD_NODEPOOL --node-count 1"
           kubectl get nodes --show-labels || true
           exit 1
 

@@ -43,8 +43,13 @@ Node pools:
   tests fail rather than fall back to a system node.
 
 Because that pool is the suite's single point of failure, the workflow waits
-for a Ready node carrying `korvid.dev/disposable=true` before installing
-anything, and fails with a named cause and the repair command if none appears.
+for a Ready node carrying **both** `korvid.dev/disposable=true` and
+`korvid.dev/pool=workload` before installing anything, and fails with a named
+cause and the repair command if none appears within five minutes. Both labels
+are required together: the node-operation tests select on the first and every
+test pod's `nodeSelector` uses the second, so a node with only one of them
+would pass a looser check and still leave pods Pending.
+
 It asks the cluster rather than Azure: a stopped or still-starting cluster
 reports `agentPools[].count` as 0 even when the pool is populated, so the
 control-plane number is not evidence.
