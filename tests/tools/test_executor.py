@@ -3600,3 +3600,37 @@ async def test_events_non_api_status_error_becomes_tool_error() -> None:
     )
     text = await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
     assert text.startswith(ERROR_PREFIX)
+
+
+@pytest.mark.asyncio
+async def test_series_count_and_last_observed_time_reach_finding() -> None:
+    """series.count and series.lastObservedTime must be projected into the finding.
+
+    The executor must use the canonical _event_count / _event_last_seen helpers from
+    korvid.tools.diagnose so that events.k8s.io/v1 repeating-event fields are honoured.
+    """
+    series_event = {
+        "type": "Warning",
+        "reason": "ProvisioningFailed",
+        "message": "series event hit",
+        # series sub-object carries count and lastObservedTime for events.k8s.io/v1
+        "series": {
+            "count": 42,
+            "lastObservedTime": "2025-05-01T08:00:00Z",
+        },
+        # Legacy fields intentionally absent to ensure the series path is exercised
+    }
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        events=[series_event],
+        storage_classes=[_storage_class("managed")],
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["findings"][0]["rule_id"] == "pvc.provisioning_failed"
+    evidence = {e["field"]: e["value"] for e in document["findings"][0]["evidence"]}
+    assert evidence["event.count"] == "42", "series.count must be projected into event.count"
+    assert evidence["event.last_seen"] == "2025-05-01T08:00:00Z", (
+        "series.lastObservedTime must be projected into event.last_seen"
+    )

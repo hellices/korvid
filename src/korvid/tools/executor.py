@@ -48,6 +48,8 @@ from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
 from korvid.k8s.reads import ReadOps
 from korvid.k8s.relations import owned_by
 from korvid.tools.diagnose import (
+    _event_count,
+    _event_last_seen,
     condition_lines,
     container_state_lines,
     current_health_line,
@@ -1648,8 +1650,8 @@ class ToolExecutor(RecordedExecution):
                 WarningEventSnapshot(
                     reason=str(ev.get("reason") or ""),
                     message=self._clamp_line(str(ev.get("message") or "")),
-                    count=int(ev.get("count") or 1),
-                    last_seen=str(ev.get("lastTimestamp") or ""),
+                    count=_event_count(ev),
+                    last_seen=_event_last_seen(ev),
                 )
                 for ev in raw_events
                 if str(ev.get("type") or "") == "Warning"

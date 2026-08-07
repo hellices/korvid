@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from korvid.core.findings import (
     AnalysisReport,
@@ -29,6 +30,8 @@ _ANALYZER = "pvc.binding"
 _VERSION = "1"
 _RULE_VERSION = "1"
 _PROVISIONING_FAILURE_REASONS = frozenset({"ProvisioningFailed", "FailedBinding", "VolumeMismatch"})
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_UTC = UTC
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,9 +77,9 @@ def analyze_pvc_binding(
     Rules are evaluated in strict priority order:
     1. Bound/Lost and internally inconsistent Bound.
     2. Any provisioning-failure Warning event (ProvisioningFailed, FailedBinding, VolumeMismatch).
-    3. Explicit empty class (static binding).
-    4. Pre-bound claim: spec.volumeName non-empty and phase not Bound/Lost — emit
+    3. Pre-bound claim: spec.volumeName non-empty and phase not Bound/Lost — emit
        pvc.awaiting_prebound_volume; class/default resolution does not run.
+    4. Explicit empty class (static binding).
     5. storageclasses gap blocks class-resolution rules (returns incomplete).
     6. Named/default StorageClass resolution.
     7. WaitForFirstConsumer.
@@ -93,11 +96,11 @@ def analyze_pvc_binding(
     if result is not None:
         return result
 
-    result = _check_static_binding(pvc, pvc_id, gaps_tuple)
+    result = _check_prebound(pvc, pvc_id, gaps_tuple)
     if result is not None:
         return result
 
-    result = _check_prebound(pvc, pvc_id, gaps_tuple)
+    result = _check_static_binding(pvc, pvc_id, gaps_tuple)
     if result is not None:
         return result
 
@@ -168,10 +171,10 @@ def _check_failure_events(
     failure_events = [e for e in warning_events if e.reason in _PROVISIONING_FAILURE_REASONS]
     if not failure_events:
         return None
-    # Sort: newest last_seen descending, count descending, reason/message ascending for determinism.
-    # Events without last_seen sort last (empty string < any ISO timestamp).
+    # Sort: newest instant (chronological) descending, count descending, reason/message ascending.
+    # Events with unparsable last_seen fall back to epoch (sort last).
     failure_events.sort(key=lambda e: (-e.count, e.reason, e.message))
-    failure_events.sort(key=lambda e: e.last_seen, reverse=True)
+    failure_events.sort(key=_event_instant_from_snapshot, reverse=True)
     ev = failure_events[0]
     evidence: list[Evidence] = [
         _evidence(pvc_id, "status.phase", pvc.phase),
@@ -418,6 +421,21 @@ def _incomplete_report(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _event_instant_from_snapshot(ev: WarningEventSnapshot) -> datetime:
+    """Parse a WarningEventSnapshot.last_seen string into a UTC datetime for chronological sort.
+
+    Invalid or empty values fall back to epoch so they sort last.
+    """
+    raw = ev.last_seen
+    if not raw:
+        return _EPOCH
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return _EPOCH
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=_UTC)
 
 
 def _evidence(resource: ResourceIdentity, field: str, value: str) -> Evidence:

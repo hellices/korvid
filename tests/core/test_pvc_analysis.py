@@ -253,3 +253,76 @@ def test_failure_event_last_seen_omitted_when_empty() -> None:
     report = analyze_pvc_binding(_pvc(), (), [ev])
     evidence_fields = [e.field for e in report.findings[0].evidence]
     assert "event.last_seen" not in evidence_fields
+
+
+# ---------------------------------------------------------------------------
+# Regression: pre-bound + explicit-empty storageClassName (canonical order)
+# ---------------------------------------------------------------------------
+
+
+def test_prebound_with_empty_storage_class_emits_awaiting_prebound_volume() -> None:
+    """volume_name='my-pv' + storage_class_name='' must emit pvc.awaiting_prebound_volume.
+
+    Pre-bound check must precede explicit-empty-static binding so spec.volumeName wins.
+    """
+    report = analyze_pvc_binding(_pvc(phase="Pending", volume_name="my-pv", storage_class_name=""))
+    assert report.findings[0].rule_id == "pvc.awaiting_prebound_volume"
+
+
+def test_prebound_with_empty_storage_class_evidence_has_volume_name() -> None:
+    """Evidence for the pre-bound+empty-class case must include spec.volumeName='my-pv'."""
+    report = analyze_pvc_binding(_pvc(phase="Pending", volume_name="my-pv", storage_class_name=""))
+    fields = {e.field: e.value for e in report.findings[0].evidence}
+    assert fields.get("spec.volumeName") == "my-pv"
+
+
+def test_prebound_with_empty_storage_class_next_checks_name_pv() -> None:
+    """next_checks must reference the named PV for pre-bound+empty-class."""
+    report = analyze_pvc_binding(_pvc(phase="Pending", volume_name="my-pv", storage_class_name=""))
+    assert any("my-pv" in chk for chk in report.findings[0].next_checks)
+
+
+# ---------------------------------------------------------------------------
+# Event selection — chronological (not lexicographic) newest wins
+# ---------------------------------------------------------------------------
+
+
+def test_chronologically_newer_event_wins_over_lexicographically_larger_timestamp() -> None:
+    """RFC3339 offset timestamps must be compared chronologically, not as strings.
+
+    "2024-01-01T10:00:00+05:30" is lexicographically larger but chronologically
+    earlier (04:30 UTC) than "2024-01-01T05:00:00Z" (05:00 UTC).
+    """
+    events = [
+        # Lexicographically larger, but earlier in UTC (04:30 UTC)
+        _event("FailedBinding", "earlier-utc", count=1, last_seen="2024-01-01T10:00:00+05:30"),
+        # Lexicographically smaller, but chronologically newer (05:00 UTC)
+        _event("ProvisioningFailed", "newer-utc", count=1, last_seen="2024-01-01T05:00:00Z"),
+    ]
+    report = analyze_pvc_binding(_pvc(), (), events)
+    ev_messages = [e.value for e in report.findings[0].evidence if e.field == "event.message"]
+    assert ev_messages == ["newer-utc"]
+
+
+def test_fractional_seconds_are_handled_chronologically() -> None:
+    """Fractional-second RFC3339 timestamps must not break chronological comparison."""
+    events = [
+        _event("FailedBinding", "low-frac", count=1, last_seen="2024-06-01T12:00:00.100Z"),
+        _event("ProvisioningFailed", "high-frac", count=1, last_seen="2024-06-01T12:00:00.900Z"),
+    ]
+    report = analyze_pvc_binding(_pvc(), (), events)
+    ev_messages = [e.value for e in report.findings[0].evidence if e.field == "event.message"]
+    assert ev_messages == ["high-frac"]
+
+
+def test_invalid_timestamp_sorts_last() -> None:
+    """Events with unparsable last_seen must sort after valid timestamps."""
+    events = [
+        WarningEventSnapshot(
+            reason="ProvisioningFailed", message="invalid-ts", count=99, last_seen="not-a-date"
+        ),
+        _event("FailedBinding", "valid-ts", count=1, last_seen="2024-01-01T00:00:00Z"),
+    ]
+    report = analyze_pvc_binding(_pvc(), (), events)
+    ev_messages = [e.value for e in report.findings[0].evidence if e.field == "event.message"]
+    assert ev_messages == ["valid-ts"]
