@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "steady-10k",
+  "seed": 186,
+  "object_count": 10000,
+  "namespace_count": 100,
+  "steady_events_per_second": 100,
+  "duration_seconds": 30,
+  "bursts": [
+    {"start_second": 10, "duration_seconds": 4, "events_per_second": 500}
+  ],
+  "failures": []
+}

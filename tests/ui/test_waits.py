@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from .waits import until
+from .waits import WaitTimeout, until
 
 
 class _FakePilot:
@@ -36,7 +36,7 @@ async def test_until_pauses_cover_the_full_requested_timeout() -> None:
     """`int(timeout / 0.05)` truncation must not shorten the wait: the pauses
     add up to the advertised timeout, with a shorter final step."""
     pilot = _FakePilot()
-    with pytest.raises(AssertionError, match=r"condition not met within 0\.12s"):
+    with pytest.raises(WaitTimeout, match=r"condition not met within 0\.12s"):
         await until(pilot, lambda: False, timeout=0.12)
     assert sum(pilot.pauses) == pytest.approx(0.12)
 
@@ -44,12 +44,22 @@ async def test_until_pauses_cover_the_full_requested_timeout() -> None:
 async def test_until_sub_interval_timeout_still_pauses_once() -> None:
     """A timeout below one 50ms tick still yields to the app once."""
     pilot = _FakePilot()
-    with pytest.raises(AssertionError, match=r"condition not met within 0\.03s"):
+    with pytest.raises(WaitTimeout, match=r"condition not met within 0\.03s"):
         await until(pilot, lambda: False, timeout=0.03)
     assert pilot.pauses == [pytest.approx(0.03)]
 
 
 async def test_until_raises_with_label_on_timeout() -> None:
     pilot = _FakePilot()
-    with pytest.raises(AssertionError, match=r"dialog visible not met within 0\.1s"):
+    with pytest.raises(WaitTimeout, match=r"dialog visible not met within 0\.1s"):
         await until(pilot, lambda: False, timeout=0.1, label="dialog visible")
+
+
+async def test_until_timeout_is_not_an_assertion_error() -> None:
+    """A wait timeout is an operational outcome, not a programmer `assert`:
+    callers (e.g. the benchmark CLI) must be able to catch it without also
+    swallowing genuine `AssertionError`s raised by production code."""
+    pilot = _FakePilot()
+    with pytest.raises(WaitTimeout) as caught:
+        await until(pilot, lambda: False, timeout=0.05, label="never")
+    assert not isinstance(caught.value, AssertionError)

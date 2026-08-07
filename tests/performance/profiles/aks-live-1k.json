@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "aks-live-1k",
+  "seed": 186,
+  "object_count": 1000,
+  "namespace_count": 20,
+  "steady_events_per_second": 20,
+  "duration_seconds": 1800,
+  "bursts": [
+    {"start_second": 300, "duration_seconds": 30, "events_per_second": 100},
+    {"start_second": 900, "duration_seconds": 30, "events_per_second": 100},
+    {"start_second": 1500, "duration_seconds": 30, "events_per_second": 100}
+  ],
+  "failures": []
+}
