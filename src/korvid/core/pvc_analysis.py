@@ -35,6 +35,7 @@ _ANALYZER = "pvc.binding"
 _VERSION = "1"
 _RULE_VERSION = "1"
 _PROVISIONING_FAILURE_REASONS = frozenset({"ProvisioningFailed", "FailedBinding", "VolumeMismatch"})
+_NO_PROVISIONER = "kubernetes.io/no-provisioner"
 _STORAGE_CLASS_DEFAULT_ANNOTATION_ERROR = (
     "StorageClassSnapshot(is_default=True) requires default_annotation_key to be non-empty "
     "and default_annotation_value='true'."
@@ -362,10 +363,9 @@ def _resolve_default_class(
             related=tuple(sc.identity for sc in defaults),
             next_checks=("remove the extra default annotation",),
         )
-        has_events_gap = any(g.source == "events" for g in gaps)
-        if effective.volume_binding_mode != "WaitForFirstConsumer" and has_events_gap:
+        if not _binding_mode_is_conclusive(effective, gaps):
             return _incomplete_findings_report(pvc_id, gaps, multi_finding)
-        effective_finding = _resolve_binding_mode_finding(pvc, pvc_id, gaps, effective)
+        effective_finding = _dispatch_binding_finding(pvc, pvc_id, gaps, effective)
         return _findings_report(pvc_id, gaps, multi_finding, effective_finding)
     if not defaults:
         return _findings_report(
@@ -396,21 +396,91 @@ def _resolve_binding_mode(
     gaps: tuple[EvidenceGap, ...],
     resolved_sc: StorageClassSnapshot,
 ) -> AnalysisReport:
-    """Emit WaitForFirstConsumer or generic provisioning-pending finding.
+    """Emit no-provisioner, WaitForFirstConsumer, or generic provisioning-pending finding.
 
-    For Immediate-mode classes, the generic finding asserts that no specific
-    failure was reported — but that claim is false when events are unavailable.
-    Return incomplete instead so a false negative is never serialised.
-    WaitForFirstConsumer is deterministic (no event evidence required) and is
-    always emitted regardless of an events gap.
+    Evaluation order:
+    1. `kubernetes.io/no-provisioner` — always deterministic, never needs events.
+    2. WaitForFirstConsumer — deterministic (no event evidence required).
+    3. Immediate — conclusive only when events are readable; returns incomplete otherwise.
     """
-    if resolved_sc.volume_binding_mode != "WaitForFirstConsumer" and any(
-        g.source == "events" for g in gaps
-    ):
+    if resolved_sc.provisioner == _NO_PROVISIONER:
+        return _findings_report(pvc_id, gaps, _no_provisioner_finding(pvc_id, resolved_sc))
+    if not _binding_mode_is_conclusive(resolved_sc, gaps):
         return _incomplete_report(pvc_id, gaps)
     return _findings_report(
         pvc_id, gaps, _resolve_binding_mode_finding(pvc, pvc_id, gaps, resolved_sc)
     )
+
+
+def _binding_mode_is_conclusive(sc: StorageClassSnapshot, gaps: tuple[EvidenceGap, ...]) -> bool:
+    """Return True if the binding-mode finding can be emitted without events evidence.
+
+    - `kubernetes.io/no-provisioner` is always deterministic (no provisioner logs exist).
+    - WaitForFirstConsumer is always deterministic (no provisioning attempt yet).
+    - Immediate is conclusive only when no events gap is present.
+    """
+    if sc.provisioner == _NO_PROVISIONER:
+        return True
+    if sc.volume_binding_mode == "WaitForFirstConsumer":
+        return True
+    return not any(g.source == "events" for g in gaps)
+
+
+def _no_provisioner_finding(
+    pvc_id: ResourceIdentity,
+    sc: StorageClassSnapshot,
+) -> Finding:
+    """Return ``pvc.awaiting_static_volume`` for a ``kubernetes.io/no-provisioner`` StorageClass.
+
+    Immediate mode: a matching static PV is required immediately.
+    WaitForFirstConsumer mode: scheduling and topology detail is retained; a static PV is still
+    required.
+    """
+    if sc.volume_binding_mode == "WaitForFirstConsumer":
+        explanation = (
+            f"StorageClass '{sc.identity.name}' uses provisioner "
+            f"{_NO_PROVISIONER} with volumeBindingMode=WaitForFirstConsumer; "
+            "no dynamic provisioner will create a volume. "
+            "The PVC will bind when a consuming Pod is scheduled "
+            "and a matching static PersistentVolume must already exist."
+        )
+        next_checks: tuple[str, ...] = (
+            "schedule a Pod that uses this PVC",
+            "ensure a matching static PersistentVolume exists",
+        )
+    else:
+        explanation = (
+            f"StorageClass '{sc.identity.name}' uses provisioner "
+            f"{_NO_PROVISIONER} (volumeBindingMode={sc.volume_binding_mode}); "
+            "no dynamic provisioner will create a volume. "
+            "A matching static PersistentVolume with compatible accessModes "
+            "and storage capacity is required."
+        )
+        next_checks = ("create a matching PersistentVolume",)
+    return _finding(
+        "pvc.awaiting_static_volume",
+        "info",
+        "high",
+        pvc_id,
+        explanation=explanation,
+        evidence=(
+            _evidence(sc.identity, "provisioner", sc.provisioner),
+            _evidence(sc.identity, "volumeBindingMode", sc.volume_binding_mode),
+        ),
+        next_checks=next_checks,
+    )
+
+
+def _dispatch_binding_finding(
+    pvc: PVCBindingSnapshot,
+    pvc_id: ResourceIdentity,
+    gaps: tuple[EvidenceGap, ...],
+    sc: StorageClassSnapshot,
+) -> Finding:
+    """Route to the no-provisioner or standard binding-mode finding."""
+    if sc.provisioner == _NO_PROVISIONER:
+        return _no_provisioner_finding(pvc_id, sc)
+    return _resolve_binding_mode_finding(pvc, pvc_id, gaps, sc)
 
 
 def _resolve_binding_mode_finding(
@@ -466,14 +536,7 @@ def _incomplete_report(
     primary: ResourceIdentity,
     gaps: tuple[EvidenceGap, ...],
 ) -> AnalysisReport:
-    return AnalysisReport(
-        analyzer=_ANALYZER,
-        version=_VERSION,
-        outcome="incomplete",
-        primary=primary,
-        findings=(),
-        gaps=gaps,
-    )
+    return _incomplete_findings_report(primary, gaps)
 
 
 def _incomplete_findings_report(

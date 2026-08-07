@@ -39,7 +39,7 @@ def _pvc(
 
 def _class(
     name: str,
-    provisioner: str = "kubernetes.io/no-provisioner",
+    provisioner: str = "ebs.csi.aws.com",
     volume_binding_mode: str = "Immediate",
     is_default: bool = False,
     default_annotation_key: str = "",
@@ -694,3 +694,173 @@ def test_events_gap_with_multiple_defaults_wffc_keeps_both_findings() -> None:
     assert "pvc.multiple_default_storage_classes" in rule_ids
     assert "pvc.waiting_for_first_consumer" in rule_ids
     assert gap in report.gaps
+
+
+# ============================================================
+# PR #216 round-6 findings
+# ============================================================
+
+# --- Issue 1: kubernetes.io/no-provisioner correctness ---
+
+
+_SC_NO_PROV_IDENTITY = ResourceIdentity(kind="StorageClass", namespace="", name="local-sc")
+
+
+def _no_prov_class(volume_binding_mode: str = "Immediate") -> StorageClassSnapshot:
+    return StorageClassSnapshot(
+        identity=_SC_NO_PROV_IDENTITY,
+        provisioner="kubernetes.io/no-provisioner",
+        volume_binding_mode=volume_binding_mode,
+        is_default=False,
+    )
+
+
+def test_no_provisioner_immediate_emits_awaiting_static_volume() -> None:
+    """Immediate-mode no-provisioner SC must emit pvc.awaiting_static_volume, not provisioning_pending."""
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name="local-sc"),
+        (_no_prov_class("Immediate"),),
+    )
+    assert report.outcome == "findings"
+    assert report.findings[0].rule_id == "pvc.awaiting_static_volume"
+
+
+def test_no_provisioner_wffc_emits_awaiting_static_volume() -> None:
+    """WaitForFirstConsumer no-provisioner SC must emit pvc.awaiting_static_volume."""
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name="local-sc"),
+        (_no_prov_class("WaitForFirstConsumer"),),
+    )
+    assert report.outcome == "findings"
+    assert report.findings[0].rule_id == "pvc.awaiting_static_volume"
+
+
+def test_no_provisioner_evidence_cites_sc_provisioner_and_binding_mode() -> None:
+    """Evidence for no-provisioner finding must include SC provisioner and volumeBindingMode fields."""
+    for mode in ("Immediate", "WaitForFirstConsumer"):
+        report = analyze_pvc_binding(
+            _pvc(storage_class_name="local-sc"),
+            (_no_prov_class(mode),),
+        )
+        evidence_fields = {e.field for e in report.findings[0].evidence}
+        assert "provisioner" in evidence_fields, f"mode={mode}: missing provisioner in evidence"
+        assert "volumeBindingMode" in evidence_fields, f"mode={mode}: missing volumeBindingMode"
+
+
+def test_no_provisioner_immediate_does_not_suggest_provisioner_logs() -> None:
+    """Immediate no-provisioner next_checks must not suggest provisioner logs."""
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name="local-sc"),
+        (_no_prov_class("Immediate"),),
+    )
+    next_checks_text = " ".join(report.findings[0].next_checks).lower()
+    assert "provisioner" not in next_checks_text or "static" in next_checks_text, (
+        f"Should not suggest provisioner logs: {report.findings[0].next_checks}"
+    )
+
+
+def test_no_provisioner_wffc_explanation_mentions_static_pv_and_scheduling() -> None:
+    """WFFC no-provisioner explanation must mention both static PV requirement and scheduling."""
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name="local-sc"),
+        (_no_prov_class("WaitForFirstConsumer"),),
+    )
+    explanation = report.findings[0].explanation.lower()
+    assert "static" in explanation, "WFFC no-provisioner explanation must mention static PV"
+    assert "pod" in explanation or "consumer" in explanation or "schedule" in explanation, (
+        "WFFC no-provisioner explanation must retain scheduling/consumer detail"
+    )
+
+
+def test_no_provisioner_with_events_gap_still_emits_finding() -> None:
+    """No-provisioner finding is independent of events evidence; events gap must not suppress it."""
+    gap = EvidenceGap("events", "forbidden (HTTP 403)")
+    for mode in ("Immediate", "WaitForFirstConsumer"):
+        report = analyze_pvc_binding(
+            _pvc(storage_class_name="local-sc"),
+            (_no_prov_class(mode),),
+            gaps=(gap,),
+        )
+        assert report.outcome == "findings", f"mode={mode}: expected findings, got {report.outcome}"
+        assert report.findings[0].rule_id == "pvc.awaiting_static_volume", f"mode={mode}"
+        assert gap in report.gaps, f"mode={mode}: gap must be forwarded"
+
+
+# --- Issue 2: _binding_mode_is_conclusive consolidation ---
+
+
+def test_binding_mode_conclusive_is_used_consistently_single_vs_multiple_defaults() -> None:
+    """Both single-default and multiple-default paths must treat no-provisioner as conclusive."""
+    gap = EvidenceGap("events", "forbidden (HTTP 403)")
+
+    # Single default, no-provisioner Immediate — must be conclusive (emit finding)
+    single = analyze_pvc_binding(
+        _pvc(storage_class_name=None),
+        (
+            StorageClassSnapshot(
+                identity=ResourceIdentity(kind="StorageClass", namespace="", name="local-sc"),
+                provisioner="kubernetes.io/no-provisioner",
+                volume_binding_mode="Immediate",
+                is_default=True,
+                default_annotation_key="storageclass.kubernetes.io/is-default-class",
+                default_annotation_value="true",
+            ),
+        ),
+        gaps=(gap,),
+    )
+    assert single.outcome == "findings", (
+        f"no-provisioner single-default Immediate must be conclusive; got {single.outcome}"
+    )
+    assert single.findings[0].rule_id == "pvc.awaiting_static_volume"
+
+    # Multiple defaults, one no-provisioner Immediate — effective is no-provisioner, must be conclusive
+    multi = analyze_pvc_binding(
+        _pvc(storage_class_name=None),
+        (
+            StorageClassSnapshot(
+                identity=ResourceIdentity(kind="StorageClass", namespace="", name="local-a"),
+                provisioner="kubernetes.io/no-provisioner",
+                volume_binding_mode="Immediate",
+                is_default=True,
+                default_annotation_key="storageclass.kubernetes.io/is-default-class",
+                default_annotation_value="true",
+                created="2024-06-01T00:00:00Z",
+            ),
+            StorageClassSnapshot(
+                identity=ResourceIdentity(kind="StorageClass", namespace="", name="local-b"),
+                provisioner="kubernetes.io/no-provisioner",
+                volume_binding_mode="Immediate",
+                is_default=True,
+                default_annotation_key="storageclass.kubernetes.io/is-default-class",
+                default_annotation_value="true",
+                created="2024-01-01T00:00:00Z",
+            ),
+        ),
+        gaps=(gap,),
+    )
+    rule_ids = [f.rule_id for f in multi.findings]
+    assert "pvc.multiple_default_storage_classes" in rule_ids
+    assert "pvc.awaiting_static_volume" in rule_ids
+    assert multi.outcome == "findings"
+
+
+# --- Issue 3: _incomplete_report delegates to _incomplete_findings_report ---
+# (Behavioral coverage — no-arg call must still produce outcome=="incomplete" and findings==())
+
+
+def test_incomplete_report_has_empty_findings_and_incomplete_outcome() -> None:
+    """_incomplete_report must produce outcome=incomplete with no findings (delegation check)."""
+    gap = EvidenceGap("storageclasses", "forbidden (HTTP 403)")
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name=None),
+        gaps=(gap,),
+    )
+    assert report.outcome == "incomplete"
+    assert report.findings == ()
+    assert gap in report.gaps
+
+
+# --- Issue 4: _pvc_event_evidence UID deduplication ---
+# (Pure-unit; tested via executor integration in test_executor.py)
+# Behavioral contract: call with missing UID returns ERROR before any event fetch.
+# Already covered by test_pending_pvc_missing_uid_returns_error in test_executor.py.
