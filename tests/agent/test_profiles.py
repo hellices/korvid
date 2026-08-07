@@ -71,7 +71,11 @@ def test_small_profile_trims_verbose_descriptions() -> None:
     full_diagnose = next(
         t["function"]["description"] for t in READ_TOOLS if t["function"]["name"] == "diagnose_pod"
     )
+    full_pvc = next(
+        t["function"]["description"] for t in READ_TOOLS if t["function"]["name"] == "diagnose_pvc"
+    )
     assert len(by_name["diagnose_pod"]) < len(full_diagnose)
+    assert len(by_name["diagnose_pvc"]) < len(full_pvc)
     assert all(len(desc) <= 250 for desc in by_name.values())
 
 
