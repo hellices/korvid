@@ -144,10 +144,10 @@ SMALL_TOOL_DESCRIPTIONS: dict[str, str] = {
         "context, and log excerpts. Prefer this first when a pod is failing."
     ),
     "diagnose_pvc": (
-        "Deterministic PVC binding diagnosis: checks Bound/Lost PVCs directly, "
-        "and for Pending claims pulls Warning events plus StorageClass "
-        "evidence (skips an empty storageClassName). Prefer first for a "
-        "Pending or stuck PVC."
+        "Deterministic PVC binding check: one GET for Bound/Lost; fetches "
+        "Warning events for unresolved claims; lists StorageClasses only when "
+        "no failure event, pre-bound volume, or empty storageClassName applies. "
+        "Prefer first for stuck PVCs."
     ),
     "diagnose_workload": (
         "One-call diagnosis of a stuck Deployment rollout: conditions and "

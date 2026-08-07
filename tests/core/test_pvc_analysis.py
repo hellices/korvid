@@ -40,12 +40,14 @@ def _class(
     provisioner: str = "kubernetes.io/no-provisioner",
     volume_binding_mode: str = "Immediate",
     is_default: bool = False,
+    created: str = "",
 ) -> StorageClassSnapshot:
     return StorageClassSnapshot(
         identity=ResourceIdentity(kind="StorageClass", namespace="", name=name),
         provisioner=provisioner,
         volume_binding_mode=volume_binding_mode,
         is_default=is_default,
+        created=created,
     )
 
 
@@ -425,3 +427,93 @@ def test_multiple_default_evidence_uses_actual_annotation_key_beta() -> None:
         assert "beta" in ev.field, (
             f"Beta annotation key must be reflected in evidence field, got: {ev.field!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Item 1: Multiple defaults — effective class selection and dual findings
+# ---------------------------------------------------------------------------
+
+
+def test_multiple_defaults_newer_wffc_gives_both_findings() -> None:
+    """Newer WaitForFirstConsumer default: report both rule IDs in the same AnalysisReport."""
+    older_immediate = _class(
+        "immediate-sc",
+        volume_binding_mode="Immediate",
+        is_default=True,
+        created="2024-01-01T00:00:00Z",
+    )
+    newer_wffc = _class(
+        "wffc-sc",
+        volume_binding_mode="WaitForFirstConsumer",
+        is_default=True,
+        created="2024-06-01T00:00:00Z",
+    )
+    report = analyze_pvc_binding(_pvc(storage_class_name=None), (older_immediate, newer_wffc))
+    assert report.outcome == "findings"
+    rule_ids = [f.rule_id for f in report.findings]
+    assert "pvc.multiple_default_storage_classes" in rule_ids
+    assert "pvc.waiting_for_first_consumer" in rule_ids
+
+
+def test_multiple_defaults_effective_class_is_newest_by_timestamp() -> None:
+    """Kubernetes selects the most recently created default; effective class is newest."""
+    older = _class(
+        "old-sc", volume_binding_mode="Immediate", is_default=True, created="2023-01-01T00:00:00Z"
+    )
+    newer = _class(
+        "new-sc",
+        volume_binding_mode="WaitForFirstConsumer",
+        is_default=True,
+        created="2024-01-01T00:00:00Z",
+    )
+    report = analyze_pvc_binding(_pvc(storage_class_name=None), (older, newer))
+    wffc_finding = next(f for f in report.findings if f.rule_id == "pvc.waiting_for_first_consumer")
+    assert any(ev.value == "WaitForFirstConsumer" for ev in wffc_finding.evidence)
+
+
+def test_multiple_defaults_older_wffc_gives_immediate_effective_finding() -> None:
+    """Older WaitForFirstConsumer default: newer Immediate is effective."""
+    older_wffc = _class(
+        "wffc-sc",
+        volume_binding_mode="WaitForFirstConsumer",
+        is_default=True,
+        created="2023-01-01T00:00:00Z",
+    )
+    newer_immediate = _class(
+        "imm-sc", volume_binding_mode="Immediate", is_default=True, created="2024-06-01T00:00:00Z"
+    )
+    report = analyze_pvc_binding(_pvc(storage_class_name=None), (older_wffc, newer_immediate))
+    rule_ids = [f.rule_id for f in report.findings]
+    assert "pvc.multiple_default_storage_classes" in rule_ids
+    assert "pvc.provisioning_pending" in rule_ids
+    assert "pvc.waiting_for_first_consumer" not in rule_ids
+
+
+def test_multiple_defaults_name_tiebreak_is_deterministic() -> None:
+    """Equal timestamps: name tie-break selects max-name consistently."""
+    sc_a = _class(
+        "alpha-sc", volume_binding_mode="Immediate", is_default=True, created="2024-01-01T00:00:00Z"
+    )
+    sc_z = _class(
+        "zeta-sc",
+        volume_binding_mode="WaitForFirstConsumer",
+        is_default=True,
+        created="2024-01-01T00:00:00Z",
+    )
+    report1 = analyze_pvc_binding(_pvc(storage_class_name=None), (sc_a, sc_z))
+    report2 = analyze_pvc_binding(_pvc(storage_class_name=None), (sc_z, sc_a))
+    rule_ids_1 = [f.rule_id for f in report1.findings]
+    rule_ids_2 = [f.rule_id for f in report2.findings]
+    # Both orderings should produce the same effective rule (max-name = "zeta-sc" → WFFC)
+    assert rule_ids_1 == rule_ids_2
+    assert "pvc.waiting_for_first_consumer" in rule_ids_1
+
+
+def test_multiple_defaults_retain_evidence_and_related() -> None:
+    """Multiple-default finding retains evidence for all defaults and related identities."""
+    sc_a = _class("a", is_default=True, created="2024-01-01T00:00:00Z")
+    sc_b = _class("b", is_default=True, created="2024-06-01T00:00:00Z")
+    report = analyze_pvc_binding(_pvc(storage_class_name=None), (sc_a, sc_b))
+    multi = next(f for f in report.findings if f.rule_id == "pvc.multiple_default_storage_classes")
+    assert {item.name for item in multi.related} == {"a", "b"}
+    assert len(multi.evidence) == 2

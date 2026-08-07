@@ -8,19 +8,23 @@ from datetime import UTC, datetime
 
 from korvid.core.findings import (
     AnalysisReport,
+    Confidence,
     Evidence,
     EvidenceGap,
     Finding,
     ResourceIdentity,
+    Severity,
 )
 
 __all__ = [
     "AnalysisReport",
+    "Confidence",
     "Evidence",
     "EvidenceGap",
     "Finding",
     "PVCBindingSnapshot",
     "ResourceIdentity",
+    "Severity",
     "StorageClassSnapshot",
     "WarningEventSnapshot",
     "analyze_pvc_binding",
@@ -57,6 +61,7 @@ class StorageClassSnapshot:
     is_default: bool
     default_annotation_key: str = ""
     default_annotation_value: str = ""
+    created: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,29 +326,30 @@ def _resolve_default_class(
     """Handle PVCs that require a default StorageClass."""
     defaults = [sc for sc in sorted_classes if sc.is_default]
     if len(defaults) > 1:
-        return _findings_report(
+        # Kubernetes selects the most recently created default; name is a tie-break.
+        effective = max(defaults, key=lambda sc: (_sc_creation_instant(sc), sc.identity.name))
+        multi_finding = _finding(
+            "pvc.multiple_default_storage_classes",
+            "warning",
+            "high",
             pvc_id,
-            gaps,
-            _finding(
-                "pvc.multiple_default_storage_classes",
-                "warning",
-                "high",
-                pvc_id,
-                explanation=(
-                    "Multiple StorageClasses are marked as default; only one should be default."
-                ),
-                evidence=tuple(
-                    _evidence(
-                        sc.identity,
-                        f"metadata.annotations.{sc.default_annotation_key}",
-                        sc.default_annotation_value,
-                    )
-                    for sc in defaults
-                ),
-                related=tuple(sc.identity for sc in defaults),
-                next_checks=("remove the extra default annotation",),
+            explanation=(
+                "Multiple StorageClasses are marked as default; only one should be default. "
+                f"Kubernetes will use '{effective.identity.name}' (most recently created)."
             ),
+            evidence=tuple(
+                _evidence(
+                    sc.identity,
+                    f"metadata.annotations.{sc.default_annotation_key}",
+                    sc.default_annotation_value,
+                )
+                for sc in defaults
+            ),
+            related=tuple(sc.identity for sc in defaults),
+            next_checks=("remove the extra default annotation",),
         )
+        effective_finding = _resolve_binding_mode_finding(pvc, pvc_id, gaps, effective)
+        return _findings_report(pvc_id, gaps, multi_finding, effective_finding)
     if not defaults:
         return _findings_report(
             pvc_id,
@@ -374,53 +380,57 @@ def _resolve_binding_mode(
     resolved_sc: StorageClassSnapshot,
 ) -> AnalysisReport:
     """Emit WaitForFirstConsumer or generic provisioning-pending finding."""
-    if resolved_sc.volume_binding_mode == "WaitForFirstConsumer":
-        return _findings_report(
-            pvc_id,
-            gaps,
-            _finding(
-                "pvc.waiting_for_first_consumer",
-                "info",
-                "high",
-                pvc_id,
-                explanation=(
-                    f"StorageClass '{resolved_sc.identity.name}' uses "
-                    "volumeBindingMode=WaitForFirstConsumer; "
-                    "the PVC will bind when a Pod consumes it."
-                ),
-                evidence=(
-                    _evidence(
-                        resolved_sc.identity,
-                        "volumeBindingMode",
-                        "WaitForFirstConsumer",
-                    ),
-                ),
-                next_checks=("schedule a Pod that uses this PVC",),
-            ),
-        )
     return _findings_report(
-        pvc_id,
-        gaps,
-        _finding(
-            "pvc.provisioning_pending",
+        pvc_id, gaps, _resolve_binding_mode_finding(pvc, pvc_id, gaps, resolved_sc)
+    )
+
+
+def _resolve_binding_mode_finding(
+    pvc: PVCBindingSnapshot,
+    pvc_id: ResourceIdentity,
+    gaps: tuple[EvidenceGap, ...],
+    resolved_sc: StorageClassSnapshot,
+) -> Finding:
+    """Return the WaitForFirstConsumer or provisioning-pending Finding for `resolved_sc`."""
+    if resolved_sc.volume_binding_mode == "WaitForFirstConsumer":
+        return _finding(
+            "pvc.waiting_for_first_consumer",
             "info",
-            "medium",
+            "high",
             pvc_id,
             explanation=(
-                f"PVC is not yet Bound with StorageClass '{resolved_sc.identity.name}' "
-                "(volumeBindingMode=Immediate); provisioning has not reported a "
-                "specific failure."
+                f"StorageClass '{resolved_sc.identity.name}' uses "
+                "volumeBindingMode=WaitForFirstConsumer; "
+                "the PVC will bind when a Pod consumes it."
             ),
             evidence=(
-                _evidence(pvc_id, "status.phase", pvc.phase),
                 _evidence(
                     resolved_sc.identity,
                     "volumeBindingMode",
-                    resolved_sc.volume_binding_mode,
+                    "WaitForFirstConsumer",
                 ),
             ),
-            next_checks=("check provisioner pod logs", "describe PVC for events"),
+            next_checks=("schedule a Pod that uses this PVC",),
+        )
+    return _finding(
+        "pvc.provisioning_pending",
+        "info",
+        "medium",
+        pvc_id,
+        explanation=(
+            f"PVC is not yet Bound with StorageClass '{resolved_sc.identity.name}' "
+            "(volumeBindingMode=Immediate); provisioning has not reported a "
+            "specific failure."
         ),
+        evidence=(
+            _evidence(pvc_id, "status.phase", pvc.phase),
+            _evidence(
+                resolved_sc.identity,
+                "volumeBindingMode",
+                resolved_sc.volume_binding_mode,
+            ),
+        ),
+        next_checks=("check provisioner pod logs", "describe PVC for events"),
     )
 
 
@@ -458,14 +468,29 @@ def _event_instant_from_snapshot(ev: WarningEventSnapshot) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=_UTC)
 
 
+def _sc_creation_instant(sc: StorageClassSnapshot) -> datetime:
+    """Parse a StorageClassSnapshot.created string into a UTC datetime for chronological sort.
+
+    Invalid or empty values fall back to epoch so they sort last (oldest).
+    """
+    raw = sc.created
+    if not raw:
+        return _EPOCH
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return _EPOCH
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=_UTC)
+
+
 def _evidence(resource: ResourceIdentity, field: str, value: str) -> Evidence:
     return Evidence(resource=resource, field=field, value=value)
 
 
 def _finding(
     rule_id: str,
-    severity: str,
-    confidence: str,
+    severity: Severity,
+    confidence: Confidence,
     primary: ResourceIdentity,
     *,
     explanation: str,
@@ -476,8 +501,8 @@ def _finding(
     return Finding(
         rule_id=rule_id,
         rule_version=_RULE_VERSION,
-        severity=severity,  # type: ignore[arg-type]  # literal checked by tests
-        confidence=confidence,  # type: ignore[arg-type]
+        severity=severity,
+        confidence=confidence,
         primary=primary,
         related=related,
         evidence=evidence,

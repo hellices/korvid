@@ -666,10 +666,12 @@ TOOL_DEFS: list[ToolDef] = [
                 "name": "diagnose_pvc",
                 "description": (
                     "Deterministically check why a PersistentVolumeClaim is not Bound. "
-                    "One GET for Bound/Lost claims; fetches Warning events and StorageClass "
-                    "evidence for Pending claims (skips StorageClass LIST when "
-                    "storageClassName is explicitly empty). Returns versioned findings with "
-                    "explicit evidence gaps when reads are denied. "
+                    "One GET resolves Bound/Lost claims immediately. "
+                    "For unresolved (Pending) claims, Warning events are fetched first; "
+                    "StorageClasses are listed only when no decisive failure event, "
+                    "pre-bound volume (spec.volumeName set), or explicit-empty/static-binding "
+                    "evidence already determines the result. "
+                    "Returns versioned findings with explicit evidence gaps when reads are denied. "
                     "Follow opens persistentvolumeclaims describe. "
                     "Prefer this over get_resource/get_events when a PVC is stuck."
                 ),

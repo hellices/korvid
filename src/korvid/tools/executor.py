@@ -1682,6 +1682,7 @@ class ToolExecutor(RecordedExecution):
                 is_default=s.is_default,
                 default_annotation_key=s.default_annotation_key,
                 default_annotation_value=s.default_annotation_value,
+                created=s.created,
             )
             for s in summaries
             if isinstance(s, StorageClassSummary)

@@ -12,8 +12,10 @@ single deterministic call; `diagnose_service` checks whether a Service has
 current ready EndpointSlice endpoints, reporting structured versioned findings
 with explicit evidence gaps when EndpointSlice data is unavailable (e.g. RBAC
 denial); `diagnose_pvc` checks why a PersistentVolumeClaim is not Bound (one
-GET for Bound/Lost, plus Warning events and StorageClass evidence for Pending,
-with RBAC denials surfaced as evidence gaps) — projected evidence instead of
+GET for Bound/Lost; for unresolved claims Warning events are read, and
+StorageClasses are listed only when no decisive failure event, pre-bound
+volume, or explicit-empty/static-binding evidence already determines the
+result — RBAC denials become explicit evidence gaps) — projected evidence instead of
 raw YAML dumps, which is where small local models otherwise fail.  It can also drive the TUI itself — navigate views, apply filters,
 drill down, and open the log pane or describe screen — so "show me the crashing
 pod's logs" lands you in the actual log viewer instead of a text dump.
