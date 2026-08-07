@@ -7,6 +7,7 @@ from typing import ClassVar
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 
@@ -62,7 +63,19 @@ class PickScreen(ModalScreen[str | None]):
             yield OptionList(*self._options)
 
     def on_mount(self) -> None:
-        option_list = self.query_one(OptionList)
+        self._focus_options()
+
+    def _focus_options(self, *, retry: bool = True) -> None:
+        try:
+            option_list = self.query_one(OptionList)
+        except NoMatches:
+            # `on_mount` can fire before compose children are queryable; try
+            # again once the screen has refreshed rather than taking the app
+            # down. Only once, so a screen that somehow never composes an
+            # option list fails quietly instead of looping forever.
+            if retry:
+                self.call_after_refresh(self._focus_options, retry=False)
+            return
         option_list.highlighted = 0
         option_list.focus()
 
