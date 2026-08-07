@@ -38,9 +38,8 @@ jobs:
     env:
       AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
       AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
-      # The only pool the suite may schedule onto; its nodes carry
-      # korvid.dev/disposable=true. Fixed rather than a variable so a drifting
-      # setting cannot point the scale-up at the system pool.
+      # Named only in the guard's repair hint. Fixed rather than a variable so
+      # a drifting setting cannot send someone to scale the system pool.
       WORKLOAD_NODEPOOL: workload
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -79,28 +78,6 @@ jobs:
             az aks start -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME"
           fi
 
-      - name: Guard — the disposable workload pool must have a node
-        run: |
-          # The node-ops and resize contracts need a node labelled
-          # korvid.dev/disposable=true; they refuse to touch system nodes. When
-          # the pool is empty they fail with "no disposable workload node
-          # found" or time out waiting for a pod to schedule — six failures
-          # spread over four files, none of which name the actual cause. The
-          # suite stayed red for eight commits that way.
-          #
-          # Checked, not repaired: the workflow identity holds a deliberately
-          # minimal role with agentPools/read and no write, so it cannot scale
-          # the pool, and widening that role to auto-heal would let this
-          # workflow reshape the system pool too. Cost at rest is handled by
-          # stopping the cluster, so an empty pool is drift, not a setting.
-          count=$(az aks nodepool show -g "$AKS_RESOURCE_GROUP" \
-            --cluster-name "$AKS_CLUSTER_NAME" -n "$WORKLOAD_NODEPOOL" \
-            --query count -o tsv)
-          if [ "$count" -lt 1 ]; then
-            echo "::error title=Workload pool is empty::$WORKLOAD_NODEPOOL has $count nodes, so the node-operation and resize contracts have nowhere to schedule. Restore it with: az aks nodepool scale -g $AKS_RESOURCE_GROUP --cluster-name $AKS_CLUSTER_NAME -n $WORKLOAD_NODEPOOL --node-count 1"
-            exit 1
-          fi
-
       - uses: azure/use-kubelogin@0ce7c36141aa27d4934872cf00b0120804c98a29 # v1.3
         with:
           kubelogin-version: v0.2.15
@@ -115,6 +92,38 @@ jobs:
           kubelogin convert-kubeconfig -l azurecli --kubeconfig "$KUBECONFIG"
           chmod 600 "$KUBECONFIG"
           echo "KUBECONFIG=$KUBECONFIG" >> "$GITHUB_ENV"
+
+      - name: Guard — a schedulable disposable node must exist
+        run: |
+          set -euo pipefail
+          # The node-ops and resize contracts only touch nodes labelled
+          # korvid.dev/disposable=true and fail closed rather than fall back to
+          # a system node. With no such node they produce six failures across
+          # four files — "no disposable workload node found" and pod-scheduling
+          # timeouts — none of which names the cause. The suite stayed red for
+          # eight commits that way.
+          #
+          # Asked of the cluster rather than of Azure: a stopped or
+          # still-starting cluster reports agentPools[].count as 0 even when
+          # the pool is populated, so the control-plane number is not evidence.
+          # This asks for exactly what the tests need, and waits, because
+          # `az aks start` returns before nodes finish registering.
+          #
+          # Checked, not repaired: the workflow identity holds a deliberately
+          # minimal role with agentPools/read and no write, and widening it so
+          # this job could scale the pool would also let it reshape the system
+          # pool that every other guard here exists to protect.
+          for _ in $(seq 1 30); do
+            if kubectl wait --for=condition=Ready node \
+              -l korvid.dev/disposable=true --timeout=10s >/dev/null 2>&1; then
+              kubectl get nodes -l korvid.dev/disposable=true
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error title=No schedulable disposable node::$AKS_CLUSTER_NAME has no Ready node labelled korvid.dev/disposable=true after 5 minutes, so the node-operation and resize contracts have nowhere to schedule. If the $WORKLOAD_NODEPOOL pool is empty, restore it with: az aks nodepool scale -g $AKS_RESOURCE_GROUP --cluster-name $AKS_CLUSTER_NAME -n $WORKLOAD_NODEPOOL --node-count 1"
+          kubectl get nodes --show-labels || true
+          exit 1
 
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:

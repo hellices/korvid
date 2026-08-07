@@ -42,20 +42,24 @@ Node pools:
   the only node the node-operation tests (cordon/drain/evict) will touch;
   tests fail rather than fall back to a system node.
 
-Because that pool is the suite's single point of failure, the workflow checks
-it before doing anything expensive and fails with a named cause and the exact
-repair command. It does not scale the pool itself: the workflow identity holds
-`agentPools/read` and no write, and granting write so the job could self-heal
-would also let it reshape the system pool. Cost at rest is handled by stopping
-the cluster, so a pool sitting at zero is drift to be repaired, not a setting
-to be respected:
+Because that pool is the suite's single point of failure, the workflow waits
+for a Ready node carrying `korvid.dev/disposable=true` before installing
+anything, and fails with a named cause and the repair command if none appears.
+It asks the cluster rather than Azure: a stopped or still-starting cluster
+reports `agentPools[].count` as 0 even when the pool is populated, so the
+control-plane number is not evidence.
+
+It checks but does not repair. The workflow identity holds `agentPools/read`
+and no write, and granting write so the job could scale the pool would also
+let it reshape the system pool. Cost at rest is handled by stopping the
+cluster, so a pool sitting at zero is drift to be repaired by hand:
 
 ```sh
 az aks nodepool scale -g rg-korvid-contract-test \
   --cluster-name aks-korvid-contract-test -n workload --node-count 1
 ```
 
-Without the check, an empty pool surfaces as six failures across four test
+Without the check, a missing node surfaces as six failures across four test
 files — `no disposable workload node found` and pod-scheduling timeouts — none
 of which name the pool.
 
