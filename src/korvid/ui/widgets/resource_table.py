@@ -625,7 +625,23 @@ class ResourceTable(DataTable[str | Text]):
             return
         self._widths_absorbed = False
         absorbed = self._emitted
-        super()._update_dimensions([key for key in new_rows if key.value not in absorbed])
+        super()._update_dimensions(
+            [key for key in new_rows if not self._is_absorbed(key, absorbed)]
+        )
+
+    def _is_absorbed(self, key: RowKey, absorbed: dict[str, list[str | Text]]) -> bool:
+        """Whether `_absorb_widths` fully accounted for the row behind *key*.
+
+        Absorption only folds in cell *widths*. The superclass pass also sizes
+        the row-label column and computes auto-height rows, so a row carrying
+        either must still reach it — today this widget emits neither, but the
+        fast path must fail safe rather than silently drop them if that
+        changes.
+        """
+        if key.value not in absorbed:
+            return False
+        row = self.rows.get(key)
+        return row is not None and row.label is None and not row.auto_height
 
     def _prune_memo(self, pending: list[tuple[str, list[str | Text]]]) -> None:
         """Drop memo entries for rows no longer rendered.

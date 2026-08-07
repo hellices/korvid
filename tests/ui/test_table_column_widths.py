@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable
 
@@ -213,3 +214,36 @@ async def test_widening_new_row_does_not_trigger_a_full_column_rescan() -> None:
         assert rescans == [], f"rescanned {len(rescans)} column(s)"
         status = table.ordered_columns[2]
         assert status.content_width >= len("ContainerCreating")
+
+
+async def test_absorption_never_skips_a_labelled_or_auto_height_row() -> None:
+    """Width absorption must not swallow the rest of the dimension pass.
+
+    Textual's `_update_dimensions` also assigns auto-height rows their height
+    and widens the row-label column. Absorption only accounts for cell
+    *widths*, so a row carrying either of those must still reach the
+    superclass — otherwise a future `height=None` row would render zero rows
+    tall and a labelled row would never size its label column.
+    """
+    app = _TableApp()
+    async with app.run_test(size=(120, 12)) as pilot:
+        table = app.query_one(ResourceTable)
+        await pilot.pause()
+        table.show(
+            "pods",
+            _pods(["alpha", "beta"]),
+            all_namespaces=False,
+            pattern="",
+        )
+        await pilot.pause()
+
+        first, second = table.ordered_rows
+        first.auto_height = True
+        first.height = 0
+        second.label = Text("a-very-long-row-label")
+
+        table._widths_absorbed = True
+        table._update_dimensions([first.key, second.key])
+
+        assert first.height > 0, "auto-height row was skipped and stayed 0 tall"
+        assert table._label_column.content_width >= len("a-very-long-row-label")
