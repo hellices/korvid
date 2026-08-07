@@ -214,6 +214,15 @@ def _owner_uids(meta: dict[str, Any]) -> tuple[str, ...]:
     return tuple(str(ref["uid"]) for ref in (meta.get("ownerReferences") or []) if ref.get("uid"))
 
 
+def _service_owner_uids(meta: dict[str, Any]) -> tuple[str, ...]:
+    """UIDs from ownerReferences where kind=='Service' and apiVersion=='v1' (core Service only)."""
+    return tuple(
+        str(ref["uid"])
+        for ref in (meta.get("ownerReferences") or [])
+        if ref.get("uid") and ref.get("kind") == "Service" and ref.get("apiVersion") == "v1"
+    )
+
+
 def _labels(meta: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     """`metadata.labels` as a hashable tuple for frozen summaries (issue #44)."""
     labels = meta.get("labels")
@@ -328,6 +337,48 @@ class PackageManifestSummary(GenericSummary):
 
 
 @dataclass(frozen=True)
+class EndpointSliceSummary(GenericSummary):
+    """EndpointSlice summary with service readiness fields."""
+
+    service_name: str = ""
+    address_type: str = ""
+    endpoints: int = 0
+    ready_endpoints: int = 0
+    #: UIDs from ownerReferences with kind=='Service' and apiVersion=='v1' only.
+    #: Used for service-replacement / stale-owner checks (PR #212).
+    service_owner_uids: tuple[str, ...] = ()
+
+    @classmethod
+    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> EndpointSliceSummary:
+        base = GenericSummary.from_manifest(kind, manifest)
+        meta = manifest.get("metadata") or {}
+        raw_endpoints = manifest.get("endpoints")
+        endpoints = raw_endpoints if isinstance(raw_endpoints, list) else []
+        ready_endpoints = sum(1 for item in endpoints if _endpoint_is_ready(item))
+        return cls(
+            **vars(base),
+            service_name=str(dict(base.labels).get("kubernetes.io/service-name", "")),
+            address_type=str(manifest.get("addressType") or ""),
+            endpoints=len(endpoints),
+            ready_endpoints=ready_endpoints,
+            service_owner_uids=_service_owner_uids(meta),
+        )
+
+
+def _endpoint_is_ready(item: Any) -> bool:
+    """True when an EndpointSlice endpoint is ready or omits the ready flag."""
+
+    if not isinstance(item, dict):
+        return False
+    conditions = item.get("conditions")
+    if conditions is None:
+        return True
+    if not isinstance(conditions, dict):
+        return False
+    return conditions.get("ready") is not False
+
+
+@dataclass(frozen=True)
 class OLMSubscriptionSummary(GenericSummary):
     """OLM Subscription (operators.coreos.com) - an installed operator."""
 
@@ -373,6 +424,7 @@ class CSVSummary(GenericSummary):
 
 #: OLM's API group; other groups also define kinds named "Subscription", so
 #: the dispatch below checks the manifest's apiVersion, not just the kind.
+_DISCOVERY_GROUP_PREFIX = "discovery.k8s.io/"
 _OLM_GROUP_PREFIX = "operators.coreos.com/"
 _PACKAGES_GROUP_PREFIX = "packages.operators.coreos.com/"
 
@@ -416,12 +468,33 @@ class PodListSummary(GenericSummary):
         )
 
 
-def summary_for(kind: str, manifest: dict[str, Any]) -> GenericSummary:
-    """Build the richest summary available for *kind* (ReplicaSet gets history fields)."""
+def summary_for(kind: str, manifest: dict[str, Any], *, group: str | None = None) -> GenericSummary:
+    """Build the richest summary available for *kind* (ReplicaSet gets history fields).
+
+    Args:
+        kind: The Kubernetes kind name.
+        manifest: The raw object manifest.
+        group: Authoritative API group from the resource discovery metadata.
+            When provided, it takes precedence over the manifest's `apiVersion`
+            for group-sensitive dispatch (e.g. EndpointSlice). When absent the
+            existing `apiVersion`-prefix fallback is used so direct callers and
+            tests that do not have ResourceMeta continue to work unchanged.
+    """
     if kind == "Pod":
         return PodListSummary.from_pod_manifest(kind, manifest)
     if kind == "ReplicaSet":
         return ReplicaSetSummary.from_manifest(kind, manifest)
+    if kind == "EndpointSlice":
+        # Use the authoritative group when available to avoid misclassifying
+        # LIST items that omit apiVersion/TypeMeta (native K8s behaviour).
+        is_discovery = (
+            group == "discovery.k8s.io"
+            if group is not None
+            else str(manifest.get("apiVersion") or "").startswith(_DISCOVERY_GROUP_PREFIX)
+        )
+        if is_discovery:
+            return EndpointSliceSummary.from_manifest(kind, manifest)
+        return GenericSummary.from_manifest(kind, manifest)
     api_version = str(manifest.get("apiVersion") or "")
     if kind == "PackageManifest" and api_version.startswith(_PACKAGES_GROUP_PREFIX):
         return PackageManifestSummary.from_manifest(kind, manifest)

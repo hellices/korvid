@@ -626,6 +626,35 @@ TOOL_DEFS: list[ToolDef] = [
         },
     ),
     ToolDef(
+        name="diagnose_service",
+        effect="cluster_read",
+        dispatch="_diagnose_service",
+        surfaces=_ALL_SURFACES,
+        result_format="structured_yaml",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "diagnose_service",
+                "description": (
+                    "Deterministically check whether a Service has current ready "
+                    "EndpointSlice endpoints. Returns versioned findings and explicit "
+                    "evidence gaps; prefer this when traffic cannot reach a Service."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "service": {"type": "string", "description": "Service name."},
+                        "namespace": {
+                            "type": "string",
+                            "description": "Kubernetes namespace containing the Service.",
+                        },
+                    },
+                    "required": ["service", "namespace"],
+                },
+            },
+        },
+    ),
+    ToolDef(
         name="navigate",
         effect="ui_only",
         dispatch="agent_navigate",

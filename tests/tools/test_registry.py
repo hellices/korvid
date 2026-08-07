@@ -82,10 +82,11 @@ def test_every_tool_declares_an_outbound_result_format() -> None:
         "untrusted_text",
     }
     assert registry_mod.tool_result_format("get_resource") == "structured_yaml"
+    assert registry_mod.tool_result_format("diagnose_service") == "structured_yaml"
     assert all(
         registry_mod.tool_result_format(d.name) == "untrusted_text"
         for d in TOOL_DEFS
-        if d.name != "get_resource"
+        if d.name not in ("get_resource", "diagnose_service")
     )
 
 
@@ -255,6 +256,7 @@ _READ_ORDER = [
     "helm_list_releases",
     "diagnose_pod",
     "diagnose_workload",
+    "diagnose_service",
 ]
 _UI_ORDER = ["navigate", "set_filter", "open_logs", "open_describe", "drill_down"]
 _WRITE_ORDER = ["delete_resource", "scale_resource", "rollout_restart"]
@@ -583,3 +585,9 @@ def test_a_non_function_tool_schema_is_rejected() -> None:
 
 def test_an_unknown_tool_has_no_result_format() -> None:
     assert registry_mod.tool_result_format("fetch_manifest") is None
+
+
+def test_registry_dispatches_diagnose_service() -> None:
+    validate_dispatch_targets(TOOL_DEFS, executor_cls=ToolExecutor, bridge_cls=UIBridge)
+    names = {schema["function"]["name"] for schema in mcp_tool_schemas()}
+    assert "diagnose_service" in names

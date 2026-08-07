@@ -73,6 +73,10 @@ async def collect(
     return [e async for e in runtime.run_turn(text, screen_context)]
 
 
+def _read_tools_request_ceiling(non_tool_request_budget: int) -> int:
+    return len(json.dumps(READ_TOOLS, separators=(",", ":"))) + non_tool_request_budget
+
+
 async def test_text_only_turn() -> None:
     p = ScriptedProvider([[{"type": "text_delta", "text": "hi"}, {"type": "done"}]])
     events = await collect(AgentRuntime(p, EchoExecutor()), "hello")
@@ -1515,7 +1519,7 @@ async def test_over_ceiling_request_drops_the_oldest_turn_and_still_reaches_the_
         provider,
         EchoExecutor(),
         max_history_chars=40_000,
-        max_request_chars=12_000,
+        max_request_chars=_read_tools_request_ceiling(10_000),
     )
 
     first = await collect(runtime, "a" * 6_000)
@@ -1647,12 +1651,14 @@ async def test_estimated_prompt_cost_reflects_the_history_actually_sent() -> Non
         provider,
         EchoExecutor(),
         max_history_chars=40_000,
-        max_request_chars=12_000,
+        max_request_chars=_read_tools_request_ceiling(10_000),
     )
 
-    await collect(runtime, "a" * 6_000)
+    first = await collect(runtime, "a" * 6_000)
+    assert not [event for event in first if isinstance(event, AgentError)]
     first_total_in = runtime.total_tokens[0]
-    await collect(runtime, "b" * 6_000)
+    second = await collect(runtime, "b" * 6_000)
+    assert not [event for event in second if isinstance(event, AgentError)]
 
     sent_chars = len(json.dumps(provider.calls[1], ensure_ascii=False))
     second_turn_in = runtime.total_tokens[0] - first_total_in

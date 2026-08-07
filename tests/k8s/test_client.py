@@ -1277,6 +1277,45 @@ async def test_list_objects_raises_api_status_error() -> None:
         await client.list_objects(meta, "default")
 
 
+async def test_list_objects_endpointslice_without_api_version_returns_typed_summary() -> None:
+    """Native LIST items often omit apiVersion/TypeMeta. When the ResourceMeta
+    group is 'discovery.k8s.io', _object_summary must still produce
+    EndpointSliceSummary with correct ready counts (issue #191 fix)."""
+    from korvid.k8s.models import EndpointSliceSummary
+
+    client = KubeClient()
+    meta = ResourceMeta("EndpointSlice", "endpointslices", "discovery.k8s.io", "v1", True)
+    raw_item: dict[str, Any] = {
+        # No apiVersion / kind — this is how the Kubernetes API server returns LIST items.
+        "metadata": {
+            "name": "api-x1",
+            "namespace": "shop",
+            "labels": {"kubernetes.io/service-name": "api"},
+            "ownerReferences": [{"uid": "svc-1"}],
+        },
+        "addressType": "IPv4",
+        "endpoints": [
+            {"conditions": {"ready": True}},
+            {"conditions": {}},
+            {"conditions": {"ready": False}},
+        ],
+    }
+    list_resp = {"items": [raw_item]}
+    request_json_mock = AsyncMock(return_value=list_resp)
+
+    with (
+        patch.object(client, "_api", MagicMock()),
+        patch.object(client, "_request_json", request_json_mock),
+    ):
+        summaries = await client.list_objects(meta, "shop")
+
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert isinstance(summary, EndpointSliceSummary)
+    assert summary.ready_endpoints == 2
+    assert summary.endpoints == 3
+
+
 # Write operations (issue #16) -------------------------------------------------
 
 

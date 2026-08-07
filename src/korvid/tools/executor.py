@@ -17,11 +17,19 @@ from korvid.core.redaction import (
     redact_document,
     redact_text,
 )
+from korvid.core.service_analysis import (
+    EndpointSliceSnapshot,
+    EvidenceGap,
+    ResourceIdentity,
+    ServiceSnapshot,
+    analyze_service_endpoints,
+)
 from korvid.k8s.discovery import ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.helm import HelmReleaseSummary, HelmRevisionSummary
 from korvid.k8s.models import (
     CSVSummary,
+    EndpointSliceSummary,
     GenericSummary,
     OLMSubscriptionSummary,
     PackageManifestSummary,
@@ -254,6 +262,14 @@ def _package_facts(s: PackageManifestSummary) -> str:
     )
 
 
+def _endpoint_slice_facts(s: EndpointSliceSummary) -> str:
+    return (
+        f"service={_clamp(s.service_name) or '?'}"
+        f" ready={s.ready_endpoints}/{s.endpoints}"
+        f" address_type={_clamp(s.address_type) or '?'}"
+    )
+
+
 def _generic_facts(s: GenericSummary) -> str:
     return f"desired={s.desired}" if s.desired is not None else ""
 
@@ -289,6 +305,7 @@ _SUMMARY_FACTS: dict[type[GenericSummary], Callable[[Any], str]] = {
     OLMSubscriptionSummary: _subscription_facts,
     CSVSummary: _csv_facts,
     PackageManifestSummary: _package_facts,
+    EndpointSliceSummary: _endpoint_slice_facts,
     # Helm's synthetic kinds are not reachable through list_resources today
     # (a follow-up adds a helm listing tool), but the contract keeps their
     # facts registered so that tool renders release status on day one.
@@ -1035,16 +1052,34 @@ class ToolExecutor(RecordedExecution):
         "PersistentVolumeClaim": ResourceMeta(
             "PersistentVolumeClaim", "persistentvolumeclaims", "", "v1", True
         ),
+        "Service": ResourceMeta("Service", "services", "", "v1", True),
+        "EndpointSlice": ResourceMeta(
+            "EndpointSlice", "endpointslices", "discovery.k8s.io", "v1", True
+        ),
     }
 
     def _meta_for_kind_name(self, kind_name: str) -> ResourceMeta | None:
         """Discovery metadata for an API kind name (e.g. ``"ReplicaSet"``),
-        falling back to fixed metadata for the stable built-in kinds."""
+        falling back to fixed metadata for the stable built-in kinds.
+
+        For kinds tracked in `_DIAGNOSE_BUILTIN_METAS` only discovered metadata
+        whose group matches the builtin's group is considered authoritative; a
+        same-kind CRD from a different group is skipped so it cannot shadow the
+        stable builtin (e.g. a CRD named ``EndpointSlice`` in ``example.io``
+        must not displace ``discovery.k8s.io`` EndpointSlice lookups).
+        """
+        builtin = self._DIAGNOSE_BUILTIN_METAS.get(kind_name)
         discovered = next(
-            (m for m in self._aliases.values() if m.kind == kind_name and not m.synthetic),
+            (
+                m
+                for m in self._aliases.values()
+                if m.kind == kind_name
+                and not m.synthetic
+                and (builtin is None or m.group == builtin.group)
+            ),
             None,
         )
-        return discovered or self._DIAGNOSE_BUILTIN_METAS.get(kind_name)
+        return discovered or builtin
 
     async def _diagnose_owner_chain(self, namespace: str, pod: dict[str, Any]) -> str:
         """``Deployment api (via ReplicaSet api-6f)`` — best-effort, never raises."""
@@ -1535,6 +1570,80 @@ class ToolExecutor(RecordedExecution):
             raise ValueError("Deployment API was not discovered")
         workload = await self._kube.get_object(meta, namespace, name)
         return await self._diagnose_deployment(namespace, name, workload)
+
+    def _require_diagnose_meta(self, kind_name: str) -> ResourceMeta:
+        """Return discovery metadata for `kind_name`, falling back to built-ins.
+
+        Raises:
+            ValueError: when neither discovery nor the built-in table knows
+                the kind — the diagnostic cannot proceed without an API path.
+        """
+        meta = self._meta_for_kind_name(kind_name)
+        if meta is None:
+            raise ValueError(f"{kind_name} API was not discovered")
+        return meta
+
+    async def _diagnose_service(self, args: dict[str, Any]) -> str:
+        """One-GET/one-LIST service endpoint diagnosis (issue #191)."""
+        name = _reject_slash_name(str(args["service"]), "service")
+        namespace = _reject_slash_name(str(args["namespace"]), "namespace")
+        service_meta = self._require_diagnose_meta("Service")
+        slice_meta = self._require_diagnose_meta("EndpointSlice")
+        manifest = await self._kube.get_object(service_meta, namespace, name)
+        service = _service_snapshot(manifest, namespace, name)
+        try:
+            summaries = await self._kube.list_objects(slice_meta, namespace)
+        except ApiStatusError as exc:
+            report = analyze_service_endpoints(
+                service,
+                (),
+                EvidenceGap("endpointslices", _api_gap_reason(exc)),
+            )
+        else:
+            slices = tuple(
+                _endpoint_slice_snapshot(item)
+                for item in summaries
+                if isinstance(item, EndpointSliceSummary)
+            )
+            report = analyze_service_endpoints(service, slices)
+        return dump_bounded_yaml(report.as_document(), MAX_RESULT_CHARS)
+
+
+def _service_snapshot(manifest: dict[str, Any], namespace: str, name: str) -> ServiceSnapshot:
+    """Build a ``ServiceSnapshot`` from a raw Service manifest."""
+    meta = manifest.get("metadata") or {}
+    uid = str(meta.get("uid") or "")
+    spec = manifest.get("spec") or {}
+    service_type = str(spec.get("type") or "ClusterIP")
+    selector_map = spec.get("selector")
+    if isinstance(selector_map, dict):
+        selector: tuple[tuple[str, str], ...] = tuple(
+            sorted((str(k), str(v)) for k, v in selector_map.items())
+        )
+    else:
+        selector = ()
+    return ServiceSnapshot(
+        identity=ResourceIdentity("Service", namespace, name, uid),
+        service_type=service_type,
+        selector=selector,
+    )
+
+
+def _endpoint_slice_snapshot(item: EndpointSliceSummary) -> EndpointSliceSnapshot:
+    """Build an ``EndpointSliceSnapshot`` from an ``EndpointSliceSummary``."""
+    return EndpointSliceSnapshot(
+        identity=ResourceIdentity("EndpointSlice", item.namespace, item.name, item.uid),
+        service_name=item.service_name,
+        service_owner_uids=item.service_owner_uids,
+        address_type=item.address_type,
+        endpoints=item.endpoints,
+        ready_endpoints=item.ready_endpoints,
+    )
+
+
+def _api_gap_reason(exc: ApiStatusError) -> str:
+    """Human-readable gap reason from an API status error."""
+    return f"HTTP {exc.status}: {exc.reason}"
 
 
 def _mask_manifest(manifest: dict[str, Any]) -> tuple[dict[str, Any], list[RedactionRecord]]:

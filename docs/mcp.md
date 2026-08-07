@@ -39,6 +39,14 @@ format:
   both halves; redacting first means the value is gone before there is
   anything to split. An MCP client sees the same masked report the model
   would.
+- **Service endpoint diagnosis** (`diagnose_service`) is deterministic
+  structured YAML: one Service GET and one EndpointSlice LIST, projected
+  into versioned findings with explicit evidence gaps. EndpointSlice RBAC
+  denials are surfaced as `gaps[].source == "endpointslices"` rather than
+  as an error, so the model can reason about incomplete evidence. The result
+  is bounded to the shared 8,000-character cap and is always parseable YAML.
+  Replacement detection considers only core-v1 Service owner references;
+  custom-controller owners do not invalidate manually managed slices.
 - **Logs, events, lists, single-pod diagnoses, and helm status** get only
   their own tool-specific shaping (scoping, formatting, size caps). They
   are **not** credential-pattern masked: a token printed into a pod's log
@@ -99,6 +107,7 @@ mirrors those reads in the TUI so you can watch the assistant work:
 | `get_resource`, `get_events` | describe pane on that object |
 | `get_logs` | log pane on that pod/container |
 | `diagnose_pod` | describe pane on the pod |
+| `diagnose_service` | Service describe pane |
 | `list_operators` | navigate to subscriptions |
 | `helm_list_releases` | navigate to the helm release browser |
 

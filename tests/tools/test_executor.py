@@ -11,10 +11,10 @@ import yaml
 
 import korvid.tools.executor as executor_module
 from korvid.core.secrets import MASK_PLACEHOLDER
-from korvid.k8s.discovery import PODS_META
+from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
-from korvid.k8s.models import summary_for
+from korvid.k8s.models import EndpointSliceSummary, GenericSummary, summary_for
 from korvid.tools.executor import (
     MAX_RESULT_CHARS,
     READ_TOOLS,
@@ -54,6 +54,7 @@ def test_read_tools_schema_names() -> None:
         "helm_list_releases",
         "diagnose_pod",
         "diagnose_workload",
+        "diagnose_service",
     ]
 
 
@@ -1187,7 +1188,7 @@ class FakeDiagnoseKube:
             metadata = obj.get("metadata") or {}
             if meta.namespaced and namespace is not None and metadata.get("namespace") != namespace:
                 continue
-            summaries.append(summary_for(meta.kind, obj))
+            summaries.append(summary_for(meta.kind, obj, group=meta.group))
         return summaries
 
     async def list_events_for(
@@ -3072,3 +3073,252 @@ async def test_a_bounded_produced_manifest_survives_the_strict_reader() -> None:
     loaded = load_structured_document(outcome.text)
 
     assert loaded["kind"] == "CompositeApp"
+
+
+# -- diagnose_service tests (issue #191) ------------------------------------
+
+
+class ServiceDiagnosisKube:
+    """Records cluster calls; returns scripted service manifest and slices."""
+
+    def __init__(
+        self,
+        service: dict[str, Any],
+        slices: list[GenericSummary] | None = None,
+        list_error: ApiStatusError | None = None,
+    ) -> None:
+        self._service = service
+        self._slices: list[GenericSummary] = slices or []
+        self._list_error = list_error
+        self.calls: list[tuple[str, ...]] = []
+
+    async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        self.calls.append(("get", meta.kind, str(namespace), name))
+        return self._service
+
+    async def list_objects(self, meta: Any, namespace: str | None) -> list[GenericSummary]:
+        self.calls.append(("list", meta.kind, str(namespace)))
+        if self._list_error is not None:
+            raise self._list_error
+        return self._slices
+
+
+def _service_manifest(uid: str = "") -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": "api", "namespace": "shop", "uid": uid},
+        "spec": {"type": "ClusterIP", "selector": {"app": "api"}},
+    }
+
+
+def _endpoint_slice_summary(
+    name: str = "api-abc",
+    owner_uids: tuple[str, ...] = (),
+    service_owner_uids: tuple[str, ...] | None = None,
+    ready_endpoints: int = 0,
+) -> EndpointSliceSummary:
+    # When service_owner_uids is not given, mirror owner_uids for backwards compat
+    # in existing tests (those tests use a single same-kind Service UID).
+    resolved_service_owner_uids = owner_uids if service_owner_uids is None else service_owner_uids
+    return EndpointSliceSummary(
+        name=name,
+        namespace="shop",
+        kind="EndpointSlice",
+        created="",
+        uid="",
+        owner_uids=owner_uids,
+        labels=(("kubernetes.io/service-name", "api"),),
+        service_name="api",
+        address_type="IPv4",
+        endpoints=1,
+        ready_endpoints=ready_endpoints,
+        service_owner_uids=resolved_service_owner_uids,
+    )
+
+
+def _svc_executor(kube: Any) -> ToolExecutor:
+    return ToolExecutor(kube, {})
+
+
+def test_diagnose_service_is_a_shared_structured_read_tool() -> None:
+    definition = TOOLS_BY_NAME["diagnose_service"]
+    assert definition.effect == "cluster_read"
+    assert definition.result_format == "structured_yaml"
+    assert definition.surfaces == frozenset({"full_agent", "small_agent", "mcp"})
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_gets_once_and_lists_once() -> None:
+    kube = ServiceDiagnosisKube(
+        service=_service_manifest(uid="svc-1"),
+        slices=[_endpoint_slice_summary(owner_uids=("svc-1",), ready_endpoints=1)],
+    )
+    text = await _svc_executor(kube).execute(
+        "diagnose_service", {"service": "api", "namespace": "shop"}
+    )
+    document = load_structured_document(text)
+    assert document["outcome"] == "healthy"
+    assert kube.calls == [
+        ("get", "Service", "shop", "api"),
+        ("list", "EndpointSlice", "shop"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_projects_rbac_denial_as_gap() -> None:
+    kube = ServiceDiagnosisKube(
+        service=_service_manifest(uid="svc-1"),
+        list_error=ApiStatusError(403, "Forbidden", ""),
+    )
+    document = load_structured_document(
+        await _svc_executor(kube).execute(
+            "diagnose_service", {"service": "api", "namespace": "shop"}
+        )
+    )
+    assert document["outcome"] == "incomplete"
+    assert document["gaps"][0]["source"] == "endpointslices"
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_rejects_composite_name_before_cluster_io() -> None:
+    kube = ServiceDiagnosisKube(service=_service_manifest())
+    text = await _svc_executor(kube).execute(
+        "diagnose_service", {"service": "shop/api", "namespace": "shop"}
+    )
+    assert text.startswith("ERROR:")
+    assert kube.calls == []
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_ignores_untyped_rows() -> None:
+    kube = ServiceDiagnosisKube(
+        service=_service_manifest(uid="svc-1"),
+        slices=[GenericSummary("other", "shop", "Other", "")],
+    )
+    document = load_structured_document(
+        await _svc_executor(kube).execute(
+            "diagnose_service", {"service": "api", "namespace": "shop"}
+        )
+    )
+    assert document["findings"][0]["rule_id"] == "service.no_endpoint_slices"
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_result_remains_bounded_yaml() -> None:
+    kube = ServiceDiagnosisKube(
+        service=_service_manifest(uid="svc-1"),
+        slices=[
+            _endpoint_slice_summary(
+                name=f"api-{index:05d}",
+                owner_uids=("svc-1",),
+                ready_endpoints=1,
+            )
+            for index in range(2_000)
+        ],
+    )
+    text = await _svc_executor(kube).execute(
+        "diagnose_service", {"service": "api", "namespace": "shop"}
+    )
+    assert len(text) <= MAX_RESULT_CHARS
+    document = load_structured_document(text)
+    assert document["outcome"] == "healthy"
+    assert "elided" in text
+
+
+# ---------------------------------------------------------------------------
+# _meta_for_kind_name: CRD from wrong group must not shadow the builtin
+# ---------------------------------------------------------------------------
+
+
+def test_meta_for_kind_name_ignores_crd_endpointslice_with_wrong_group() -> None:
+    """A same-kind CRD alias inserted before the real EndpointSlice must not
+    be selected; _meta_for_kind_name must return the discovery.k8s.io builtin."""
+    crd_alias = ResourceMeta("EndpointSlice", "endpointslices", "example.io", "v1alpha1", True)
+    executor = ToolExecutor(FakeKube(), {"endpointslices": crd_alias})  # type: ignore[arg-type]  # minimal fake
+    meta = executor._meta_for_kind_name("EndpointSlice")
+    assert meta is not None
+    assert meta.group == "discovery.k8s.io"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: raw TypeMeta-less list items produce healthy diagnosis
+# ---------------------------------------------------------------------------
+
+
+class _RawManifestKube:
+    """Fake kube that holds raw manifests and dispatches summary_for with group."""
+
+    def __init__(
+        self,
+        service: dict[str, Any],
+        slice_manifests: list[dict[str, Any]],
+    ) -> None:
+        self._service = service
+        self._slice_manifests = slice_manifests
+
+    async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        return self._service
+
+    async def list_objects(self, meta: Any, namespace: str | None) -> list[Any]:
+        return [summary_for(meta.kind, m, group=meta.group) for m in self._slice_manifests]
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_typemeta_less_slices_return_healthy() -> None:
+    """Raw LIST items that omit apiVersion/TypeMeta must produce EndpointSliceSummary
+    (via the group kwarg path) so diagnose_service reports healthy, not no_endpoint_slices."""
+    raw_slice: dict[str, Any] = {
+        # Intentionally omits apiVersion and kind, mirroring real Kubernetes LIST responses.
+        "metadata": {
+            "name": "api-abc",
+            "namespace": "shop",
+            "uid": "slice-1",
+            "labels": {"kubernetes.io/service-name": "api"},
+            "ownerReferences": [{"uid": "svc-1"}],
+        },
+        "addressType": "IPv4",
+        "endpoints": [{"conditions": {"ready": True}}],
+    }
+    kube = _RawManifestKube(
+        service=_service_manifest(uid="svc-1"),
+        slice_manifests=[raw_slice],
+    )
+    document = load_structured_document(
+        await _svc_executor(kube).execute(
+            "diagnose_service", {"service": "api", "namespace": "shop"}
+        )
+    )
+    assert document["outcome"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_diagnose_service_unrelated_custom_owner_only_is_healthy() -> None:
+    """An EndpointSlice owned only by an unrelated CRD controller (no core/v1 Service
+    ownerRef) must not be flagged stale.  Only Service refs are used for stale checks."""
+    raw_slice: dict[str, Any] = {
+        "apiVersion": "discovery.k8s.io/v1",
+        "kind": "EndpointSlice",
+        "metadata": {
+            "name": "api-abc",
+            "namespace": "shop",
+            "uid": "slice-crd",
+            "labels": {"kubernetes.io/service-name": "api"},
+            # Only a custom CRD controller ownerRef — no Service ref
+            "ownerReferences": [
+                {"kind": "MeshController", "apiVersion": "mesh.example.io/v1", "uid": "crd-uid-99"},
+            ],
+        },
+        "addressType": "IPv4",
+        "endpoints": [{"conditions": {"ready": True}}],
+    }
+    kube = _RawManifestKube(
+        service=_service_manifest(uid="svc-real"),
+        slice_manifests=[raw_slice],
+    )
+    document = load_structured_document(
+        await _svc_executor(kube).execute(
+            "diagnose_service", {"service": "api", "namespace": "shop"}
+        )
+    )
+    assert document["outcome"] == "healthy"

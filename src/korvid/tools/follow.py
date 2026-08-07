@@ -34,6 +34,7 @@ FOLLOWABLE_TOOLS: frozenset[str] = frozenset(
         "helm_list_releases",
         "diagnose_pod",
         "diagnose_workload",
+        "diagnose_service",
     }
 )
 
@@ -136,10 +137,22 @@ async def _mirror(ui: UIBridge, tool: str, args: Mapping[str, Any]) -> str | Non
         # the first-container resolution, and the fuller pane is the more
         # useful thing to watch.
         return await ui.agent_open_logs(pod, namespace, _str_or_none(args.get("container")))
+    return await _mirror_diagnose(ui, tool, args, namespace)
+
+
+async def _mirror_diagnose(
+    ui: UIBridge, tool: str, args: Mapping[str, Any], namespace: str | None
+) -> str | None:
+    """Mirror a diagnose_* cluster read to the appropriate describe pane."""
     if tool == "diagnose_pod":
         # The registry schema names the target 'pod' (matching get_logs).
         pod = _str_or_none(args.get("pod"))
         if pod is None:
             return None
         return await ui.agent_open_describe("pods", pod, namespace)
+    if tool == "diagnose_service":
+        service = _str_or_none(args.get("service"))
+        if service is None:
+            return None
+        return await ui.agent_open_describe("services", service, namespace)
     return None
