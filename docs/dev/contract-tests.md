@@ -43,12 +43,12 @@ Node pools:
   tests fail rather than fall back to a system node.
 
 Because that pool is the suite's single point of failure, the workflow waits
-for a Ready node carrying **both** `korvid.dev/disposable=true` and
-`korvid.dev/pool=workload` before installing anything, and fails with a named
-cause and the repair command if none appears within five minutes. Both labels
-are required together: the node-operation tests select on the first and every
-test pod's `nodeSelector` uses the second, so a node with only one of them
-would pass a looser check and still leave pods Pending.
+for **at least one** Ready node carrying **both** `korvid.dev/disposable=true`
+and `korvid.dev/pool=workload` before installing anything, and fails with a
+named cause and the repair sequence if none appears within five minutes. Both
+labels are required together: the node-operation tests select on the first and
+every test pod's `nodeSelector` uses the second, so a node with only one of
+them would pass a looser check and still leave pods Pending.
 
 It asks the cluster rather than Azure: a stopped or still-starting cluster
 reports `agentPools[].count` as 0 even when the pool is populated, so the
@@ -57,11 +57,15 @@ control-plane number is not evidence.
 It checks but does not repair. The workflow identity holds `agentPools/read`
 and no write, and granting write so the job could scale the pool would also
 let it reshape the system pool. Cost at rest is handled by stopping the
-cluster, so a pool sitting at zero is drift to be repaired by hand:
+cluster, so a pool sitting at zero is drift to be repaired by hand. Start the
+cluster first — the cleanup job stops it even when the guard fails, and Azure
+rejects every operation except `start` on a stopped cluster:
 
 ```sh
+az aks start -g rg-korvid-contract-test -n aks-korvid-contract-test
 az aks nodepool scale -g rg-korvid-contract-test \
   --cluster-name aks-korvid-contract-test -n workload --node-count 1
+az aks stop -g rg-korvid-contract-test -n aks-korvid-contract-test
 ```
 
 Without the check, a missing node surfaces as six failures across four test
