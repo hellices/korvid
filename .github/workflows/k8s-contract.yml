@@ -38,6 +38,9 @@ jobs:
     env:
       AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
       AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+      # Named only in the guard's repair hint. Fixed rather than a variable so
+      # a drifting setting cannot send someone to scale the system pool.
+      WORKLOAD_NODEPOOL: workload
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -106,6 +109,67 @@ jobs:
 
       - name: Janitor — remove stale fixtures from interrupted runs
         run: uv run python -m tests.contract.janitor
+
+      - name: Guard — a schedulable disposable node must exist
+        run: |
+          set -euo pipefail
+          # The suite needs one node that satisfies both of its requirements at
+          # once: the node-operation contracts only touch
+          # korvid.dev/disposable=true and fail closed rather than fall back to
+          # a system node, while every test pod carries a
+          # korvid.dev/pool=workload nodeSelector. Those labels riding the same
+          # node is a convention of the pool setup, not something enforced
+          # here, so both are required together — a node with only one of them
+          # would let this guard pass and leave pods Pending.
+          #
+          # With no such node the suite produces six failures across four files
+          # — "no disposable workload node found" and pod-scheduling timeouts —
+          # none of which names the cause. It stayed red for eight commits.
+          #
+          # Asked of the cluster rather than of Azure: a stopped or
+          # still-starting cluster reports agentPools[].count as 0 even when
+          # the pool is populated, so the control-plane number is not evidence.
+          #
+          # Checked, not repaired: the workflow identity holds a deliberately
+          # minimal role with agentPools/read and no write, and widening it so
+          # this job could scale the pool would also let it reshape the system
+          # pool that every other guard here exists to protect.
+          SELECTOR=korvid.dev/disposable=true,korvid.dev/pool=workload
+
+          # Prove the node list is reachable first. Otherwise an expired token,
+          # an RBAC denial, or an unreachable API server spends the whole
+          # deadline and then blames an empty pool, sending the reader after a
+          # scale command that cannot help.
+          if ! nodes=$(kubectl get nodes -o name 2>&1); then
+            echo "::error title=Cannot query nodes::Listing nodes on $AKS_CLUSTER_NAME failed, so the disposable-node check could not run: $nodes"
+            exit 1
+          fi
+
+          # `kubectl wait` requires *every* node matching the selector to
+          # satisfy the condition, but this guard needs only one somewhere to
+          # schedule. A second pool node, or one cycling through an image
+          # upgrade, would otherwise burn the whole deadline and report "no
+          # schedulable node" while a perfectly good one was sitting there.
+          #
+          # Ready alone is not enough: a crashed node-ops test leaves the node
+          # cordoned, and a cordoned node would pass a Ready-only check and
+          # leave every test pod Pending. This runs after the janitor, which
+          # uncordons disposable nodes, so anything still cordoned here is
+          # something the janitor could not fix and a human has to look at.
+          deadline=$(( SECONDS + 300 ))
+          while :; do
+            if kubectl get nodes -l "$SELECTOR" \
+              -o jsonpath='{range .items[*]}{.metadata.name}{"=ready:"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{" unschedulable:"}{.spec.unschedulable}{"\n"}{end}' \
+              2>/dev/null | grep -q '=ready:True unschedulable:$'; then
+              kubectl get nodes -l "$SELECTOR"
+              exit 0
+            fi
+            [ "$SECONDS" -lt "$deadline" ] || break
+            sleep 5
+          done
+          echo "::error title=No schedulable disposable node::$AKS_CLUSTER_NAME has no Ready, uncordoned node matching $SELECTOR after 5 minutes, so the node-operation and resize contracts have nowhere to schedule. If a previous run left the node cordoned, uncordon it. If the $WORKLOAD_NODEPOOL pool is empty, restore it by starting the cluster first — this run's cleanup job stops it, and Azure rejects every operation except start on a stopped cluster: az aks start -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME && az aks nodepool scale -g $AKS_RESOURCE_GROUP --cluster-name $AKS_CLUSTER_NAME -n $WORKLOAD_NODEPOOL --node-count 1 && az aks stop -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME"
+          kubectl get nodes -o wide --show-labels || true
+          exit 1
 
       - name: Run contract suite
         timeout-minutes: 30
