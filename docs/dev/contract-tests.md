@@ -50,8 +50,9 @@ within five minutes. Both labels are required together: the node-operation
 tests select on the first and every test pod's `nodeSelector` uses the second,
 so a node with only one of them would pass a looser check and still leave pods
 Pending. `unschedulable` is checked because a crashed node-operation test
-leaves the node cordoned — that is what the janitor's cordon sweep is for, and
-the janitor runs *after* this guard.
+leaves the node cordoned. The guard runs *after* the janitor's cordon sweep,
+so that case still heals itself; anything still cordoned at the guard is
+something the janitor could not fix.
 
 It asks the cluster rather than Azure: a stopped or still-starting cluster
 reports `agentPools[].count` as 0 even when the pool is populated, so the
