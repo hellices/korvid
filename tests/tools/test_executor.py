@@ -3634,3 +3634,97 @@ async def test_series_count_and_last_observed_time_reach_finding() -> None:
     assert evidence["event.last_seen"] == "2025-05-01T08:00:00Z", (
         "series.lastObservedTime must be projected into event.last_seen"
     )
+
+
+# ============================================================
+# PR #216 review findings — RED tests
+# ============================================================
+
+# --- Item 1: non-403 ApiStatusError must re-raise, not become gap ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 404, 429, 500, 503])
+async def test_pvc_event_non_403_api_status_reraises(status_code: int) -> None:
+    """Non-403 ApiStatusError on events must not be silenced as a gap."""
+
+    class NonForbiddenEventKube(PVCDiagnosisKube):
+        async def list_events_for(
+            self, namespace: str, name: str, *, kind: str | None = None, uid: str | None = None
+        ) -> list[dict[str, Any]]:
+            self.calls.append(("events", kind or "?", str(namespace), name, uid or ""))
+            raise ApiStatusError(status_code, f"HTTP {status_code}", "")
+
+    kube = NonForbiddenEventKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        storage_classes=[_storage_class("managed")],
+    )
+    text = await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    assert text.startswith(ERROR_PREFIX), (
+        f"Expected ERROR for status {status_code} but got: {text[:80]}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 404, 429, 500, 503])
+async def test_pvc_storage_class_non_403_api_status_reraises(status_code: int) -> None:
+    """Non-403 ApiStatusError on StorageClass LIST must not be silenced as a gap."""
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        class_error=ApiStatusError(status_code, f"HTTP {status_code}", ""),
+    )
+    text = await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    assert text.startswith(ERROR_PREFIX), (
+        f"Expected ERROR for status {status_code} but got: {text[:80]}"
+    )
+
+
+# --- Item 2: decisive failure event skips StorageClass LIST ---
+
+
+@pytest.mark.asyncio
+async def test_failure_event_skips_storage_class_list() -> None:
+    """A decisive failure event must cause GET+events only; no StorageClass LIST."""
+    failure_event = {
+        "type": "Warning",
+        "reason": "ProvisioningFailed",
+        "message": "quota exceeded",
+        "count": 1,
+        "lastTimestamp": "2024-06-01T00:00:00Z",
+    }
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        events=[failure_event],
+        storage_classes=[_storage_class("managed")],
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["findings"][0]["rule_id"] == "pvc.provisioning_failed"
+    list_calls = [c for c in kube.calls if c[0] == "list"]
+    assert list_calls == [], (
+        f"Expected no StorageClass LIST when failure event present: {list_calls}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_storage_class_transport_error_cannot_mask_failure_event() -> None:
+    """Even if StorageClass LIST would fail, a failure event must produce the correct finding."""
+    failure_event = {
+        "type": "Warning",
+        "reason": "FailedBinding",
+        "message": "no available volumes",
+        "count": 2,
+        "lastTimestamp": "2024-06-01T00:00:00Z",
+    }
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        events=[failure_event],
+        class_error=RuntimeError("connection reset"),
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["findings"][0]["rule_id"] == "pvc.provisioning_failed"
+    list_calls = [c for c in kube.calls if c[0] == "list"]
+    assert list_calls == [], "StorageClass LIST must not be attempted when failure event exists"

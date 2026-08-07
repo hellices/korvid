@@ -24,6 +24,7 @@ __all__ = [
     "StorageClassSnapshot",
     "WarningEventSnapshot",
     "analyze_pvc_binding",
+    "has_provisioning_failure_event",
 ]
 
 _ANALYZER = "pvc.binding"
@@ -54,6 +55,8 @@ class StorageClassSnapshot:
     provisioner: str
     volume_binding_mode: str
     is_default: bool
+    default_annotation_key: str = ""
+    default_annotation_value: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +67,15 @@ class WarningEventSnapshot:
     message: str
     count: int
     last_seen: str
+
+
+def has_provisioning_failure_event(events: Sequence[WarningEventSnapshot]) -> bool:
+    """Return True if any event reason indicates a decisive provisioning failure.
+
+    Uses the same `_PROVISIONING_FAILURE_REASONS` constant as the analyzer
+    rule so there is no duplication of the reason list.
+    """
+    return any(e.reason in _PROVISIONING_FAILURE_REASONS for e in events)
 
 
 def analyze_pvc_binding(
@@ -321,7 +333,12 @@ def _resolve_default_class(
                     "Multiple StorageClasses are marked as default; only one should be default."
                 ),
                 evidence=tuple(
-                    _evidence(sc.identity, "metadata.annotations", "is-default") for sc in defaults
+                    _evidence(
+                        sc.identity,
+                        f"metadata.annotations.{sc.default_annotation_key}",
+                        sc.default_annotation_value,
+                    )
+                    for sc in defaults
                 ),
                 related=tuple(sc.identity for sc in defaults),
                 next_checks=("remove the extra default annotation",),
@@ -374,7 +391,7 @@ def _resolve_binding_mode(
                 evidence=(
                     _evidence(
                         resolved_sc.identity,
-                        "spec.volumeBindingMode",
+                        "volumeBindingMode",
                         "WaitForFirstConsumer",
                     ),
                 ),
@@ -398,7 +415,7 @@ def _resolve_binding_mode(
                 _evidence(pvc_id, "status.phase", pvc.phase),
                 _evidence(
                     resolved_sc.identity,
-                    "spec.volumeBindingMode",
+                    "volumeBindingMode",
                     resolved_sc.volume_binding_mode,
                 ),
             ),

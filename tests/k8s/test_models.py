@@ -1470,3 +1470,82 @@ def test_endpoint_slice_summary_no_owner_refs_gives_empty_service_owner_uids() -
     summary = summary_for("EndpointSlice", manifest)
     assert isinstance(summary, EndpointSliceSummary)
     assert summary.service_owner_uids == ()
+
+
+# ============================================================
+# PR #216 review findings — Item 4: annotation key/value preservation
+# ============================================================
+
+
+def test_storage_class_stable_annotation_key_is_preserved() -> None:
+    """Stable annotation key must be captured in default_annotation_key."""
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass",
+        {
+            "metadata": {
+                "name": "managed",
+                "annotations": {"storageclass.kubernetes.io/is-default-class": "true"},
+            }
+        },
+    )
+    assert summary.is_default
+    assert summary.default_annotation_key == "storageclass.kubernetes.io/is-default-class"
+    assert summary.default_annotation_value == "true"
+
+
+def test_storage_class_beta_annotation_key_is_preserved() -> None:
+    """Beta annotation key must be captured in default_annotation_key."""
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass",
+        {
+            "metadata": {
+                "name": "managed",
+                "annotations": {"storageclass.beta.kubernetes.io/is-default-class": "true"},
+            }
+        },
+    )
+    assert summary.is_default
+    assert summary.default_annotation_key == "storageclass.beta.kubernetes.io/is-default-class"
+    assert summary.default_annotation_value == "true"
+
+
+def test_storage_class_stable_takes_priority_when_both_set() -> None:
+    """When both stable and beta keys are set to 'true', stable wins."""
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass",
+        {
+            "metadata": {
+                "name": "managed",
+                "annotations": {
+                    "storageclass.kubernetes.io/is-default-class": "true",
+                    "storageclass.beta.kubernetes.io/is-default-class": "true",
+                },
+            }
+        },
+    )
+    assert summary.is_default
+    assert summary.default_annotation_key == "storageclass.kubernetes.io/is-default-class"
+
+
+def test_storage_class_non_default_has_empty_annotation_fields() -> None:
+    """Non-default StorageClass must have empty annotation key/value fields."""
+    summary = StorageClassSummary.from_manifest("StorageClass", {"metadata": {"name": "managed"}})
+    assert not summary.is_default
+    assert summary.default_annotation_key == ""
+    assert summary.default_annotation_value == ""
+
+
+def test_storage_class_non_true_value_produces_empty_fields() -> None:
+    """Non-'true' annotation value must produce is_default=False and empty key/value."""
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass",
+        {
+            "metadata": {
+                "name": "managed",
+                "annotations": {"storageclass.kubernetes.io/is-default-class": "True"},
+            }
+        },
+    )
+    assert not summary.is_default
+    assert summary.default_annotation_key == ""
+    assert summary.default_annotation_value == ""

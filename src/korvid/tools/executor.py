@@ -15,6 +15,7 @@ from korvid.core.pvc_analysis import (
     StorageClassSnapshot,
     WarningEventSnapshot,
     analyze_pvc_binding,
+    has_provisioning_failure_event,
 )
 from korvid.core.redaction import (
     RedactionError,
@@ -1643,6 +1644,8 @@ class ToolExecutor(RecordedExecution):
                 uid=pvc.identity.uid or None,
             )
         except ApiStatusError as exc:
+            if exc.status != 403:
+                raise
             gaps.append(EvidenceGap("events", _api_gap_reason(exc)))
             return [], gaps
         warning_events = sorted(
@@ -1663,11 +1666,13 @@ class ToolExecutor(RecordedExecution):
     async def _pvc_storage_classes(
         self,
     ) -> tuple[tuple[StorageClassSnapshot, ...], EvidenceGap | None]:
-        """Fetch cluster StorageClasses, catching only ApiStatusError."""
+        """Fetch cluster StorageClasses, converting only 403 to an EvidenceGap."""
         sc_meta = self._require_diagnose_meta("StorageClass")
         try:
             summaries = await self._kube.list_objects(sc_meta, None)
         except ApiStatusError as exc:
+            if exc.status != 403:
+                raise
             return (), EvidenceGap("storageclasses", _api_gap_reason(exc))
         classes = tuple(
             StorageClassSnapshot(
@@ -1675,6 +1680,8 @@ class ToolExecutor(RecordedExecution):
                 provisioner=s.provisioner,
                 volume_binding_mode=s.volume_binding_mode,
                 is_default=s.is_default,
+                default_annotation_key=s.default_annotation_key,
+                default_annotation_value=s.default_annotation_value,
             )
             for s in summaries
             if isinstance(s, StorageClassSummary)
@@ -1692,10 +1699,11 @@ class ToolExecutor(RecordedExecution):
             return dump_bounded_yaml(analyze_pvc_binding(pvc).as_document(), MAX_RESULT_CHARS)
         events, gaps = await self._pvc_event_evidence(pvc)
         classes: tuple[StorageClassSnapshot, ...] = ()
-        # Pre-bound claims (spec.volumeName set) skip StorageClass resolution;
-        # also skip when storageClassName is explicitly empty (static binding).
+        # Pre-bound claims (spec.volumeName set) and explicit empty class skip StorageClass
+        # resolution. Decisive failure events also skip it — the finding is already determined.
         is_prebound = bool(pvc.volume_name)
-        if not is_prebound and pvc.storage_class_name != "":
+        has_failure = has_provisioning_failure_event(events)
+        if not is_prebound and not has_failure and pvc.storage_class_name != "":
             classes, class_gap = await self._pvc_storage_classes()
             if class_gap is not None:
                 gaps.append(class_gap)

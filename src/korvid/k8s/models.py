@@ -314,15 +314,30 @@ def _str_map(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _storage_class_is_default(annotations: dict[str, Any]) -> bool:
-    for key in (
-        "storageclass.kubernetes.io/is-default-class",
-        "storageclass.beta.kubernetes.io/is-default-class",
-    ):
+_DEFAULT_CLASS_KEYS = (
+    "storageclass.kubernetes.io/is-default-class",
+    "storageclass.beta.kubernetes.io/is-default-class",
+)
+
+
+def _storage_class_default_annotation(
+    annotations: dict[str, Any],
+) -> tuple[bool, str, str]:
+    """Return (is_default, annotation_key, annotation_value).
+
+    Stable key takes priority. Only the literal string `"true"` qualifies.
+    Returns (False, "", "") when no qualifying annotation is present.
+    """
+    for key in _DEFAULT_CLASS_KEYS:
         value = annotations.get(key)
         if isinstance(value, str) and value == "true":
-            return True
-    return False
+            return True, key, value
+    return False, "", ""
+
+
+def _storage_class_is_default(annotations: dict[str, Any]) -> bool:
+    is_default, _, _ = _storage_class_default_annotation(annotations)
+    return is_default
 
 
 @dataclass(frozen=True)
@@ -333,6 +348,8 @@ class StorageClassSummary(GenericSummary):
     volume_binding_mode: str = "Immediate"
     allow_volume_expansion: bool = False
     is_default: bool = False
+    default_annotation_key: str = ""
+    default_annotation_value: str = ""
 
     @classmethod
     def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> StorageClassSummary:
@@ -342,6 +359,7 @@ class StorageClassSummary(GenericSummary):
         provisioner = manifest.get("provisioner")
         volume_binding_mode = manifest.get("volumeBindingMode")
         allow_volume_expansion = manifest.get("allowVolumeExpansion")
+        is_default, ann_key, ann_value = _storage_class_default_annotation(annotations)
         return cls(
             **vars(base),
             provisioner=provisioner if isinstance(provisioner, str) else "",
@@ -351,7 +369,9 @@ class StorageClassSummary(GenericSummary):
             allow_volume_expansion=allow_volume_expansion
             if isinstance(allow_volume_expansion, bool)
             else False,
-            is_default=_storage_class_is_default(annotations),
+            is_default=is_default,
+            default_annotation_key=ann_key,
+            default_annotation_value=ann_value,
         )
 
 

@@ -335,3 +335,93 @@ def test_invalid_timestamp_sorts_last() -> None:
     report = analyze_pvc_binding(_pvc(), (), events)
     ev_messages = [e.value for e in report.findings[0].evidence if e.field == "event.message"]
     assert ev_messages == ["valid-ts"]
+
+
+# ============================================================
+# PR #216 review findings — RED tests
+# ============================================================
+
+# --- Item 3: exact StorageClass evidence paths (top-level volumeBindingMode) ---
+
+
+def test_wait_for_first_consumer_evidence_uses_top_level_path() -> None:
+    """WaitForFirstConsumer evidence path must be 'volumeBindingMode', not 'spec.volumeBindingMode'."""
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name="managed"),
+        (_class("managed", volume_binding_mode="WaitForFirstConsumer"),),
+    )
+    assert report.findings[0].rule_id == "pvc.waiting_for_first_consumer"
+    paths = [e.field for e in report.findings[0].evidence]
+    assert "volumeBindingMode" in paths, f"Expected 'volumeBindingMode' in {paths}"
+    assert "spec.volumeBindingMode" not in paths, (
+        f"'spec.volumeBindingMode' must not appear in {paths}"
+    )
+
+
+def test_provisioning_pending_evidence_uses_top_level_path() -> None:
+    """Generic pending evidence path must be 'volumeBindingMode', not 'spec.volumeBindingMode'."""
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name="managed"),
+        (_class("managed", volume_binding_mode="Immediate"),),
+    )
+    assert report.findings[0].rule_id == "pvc.provisioning_pending"
+    paths = [e.field for e in report.findings[0].evidence]
+    assert "volumeBindingMode" in paths, f"Expected 'volumeBindingMode' in {paths}"
+    assert "spec.volumeBindingMode" not in paths, (
+        f"'spec.volumeBindingMode' must not appear in {paths}"
+    )
+
+
+# --- Item 4: exact default annotation identity ---
+
+
+def test_multiple_default_evidence_uses_actual_annotation_key_stable() -> None:
+    """Multiple-default evidence must use the actual annotation key, not a synthetic one."""
+    sc_a = StorageClassSnapshot(
+        identity=ResourceIdentity(kind="StorageClass", namespace="", name="a"),
+        provisioner="p",
+        volume_binding_mode="Immediate",
+        is_default=True,
+        default_annotation_key="storageclass.kubernetes.io/is-default-class",
+        default_annotation_value="true",
+    )
+    sc_b = StorageClassSnapshot(
+        identity=ResourceIdentity(kind="StorageClass", namespace="", name="b"),
+        provisioner="p",
+        volume_binding_mode="Immediate",
+        is_default=True,
+        default_annotation_key="storageclass.kubernetes.io/is-default-class",
+        default_annotation_value="true",
+    )
+    report = analyze_pvc_binding(_pvc(storage_class_name=None), (sc_a, sc_b))
+    assert report.findings[0].rule_id == "pvc.multiple_default_storage_classes"
+    for ev in report.findings[0].evidence:
+        assert ev.field.startswith("metadata.annotations."), (
+            f"Evidence field must start with 'metadata.annotations.' but got: {ev.field!r}"
+        )
+        assert ev.value == "true", f"Evidence value must be 'true' but got: {ev.value!r}"
+
+
+def test_multiple_default_evidence_uses_actual_annotation_key_beta() -> None:
+    """Multiple-default evidence must preserve beta annotation key when that was set."""
+    sc_a = StorageClassSnapshot(
+        identity=ResourceIdentity(kind="StorageClass", namespace="", name="a"),
+        provisioner="p",
+        volume_binding_mode="Immediate",
+        is_default=True,
+        default_annotation_key="storageclass.beta.kubernetes.io/is-default-class",
+        default_annotation_value="true",
+    )
+    sc_b = StorageClassSnapshot(
+        identity=ResourceIdentity(kind="StorageClass", namespace="", name="b"),
+        provisioner="p",
+        volume_binding_mode="Immediate",
+        is_default=True,
+        default_annotation_key="storageclass.beta.kubernetes.io/is-default-class",
+        default_annotation_value="true",
+    )
+    report = analyze_pvc_binding(_pvc(storage_class_name=None), (sc_a, sc_b))
+    for ev in report.findings[0].evidence:
+        assert "beta" in ev.field, (
+            f"Beta annotation key must be reflected in evidence field, got: {ev.field!r}"
+        )
