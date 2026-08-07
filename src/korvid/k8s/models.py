@@ -314,6 +314,47 @@ def _str_map(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _storage_class_is_default(annotations: dict[str, Any]) -> bool:
+    for key in (
+        "storageclass.kubernetes.io/is-default-class",
+        "storageclass.beta.kubernetes.io/is-default-class",
+    ):
+        value = annotations.get(key)
+        if isinstance(value, str) and value.lower() == "true":
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class StorageClassSummary(GenericSummary):
+    """StorageClass summary with provisioner and default-class flags."""
+
+    provisioner: str = ""
+    volume_binding_mode: str = "Immediate"
+    allow_volume_expansion: bool = False
+    is_default: bool = False
+
+    @classmethod
+    def from_manifest(cls, kind: str, manifest: dict[str, Any]) -> StorageClassSummary:
+        base = GenericSummary.from_manifest(kind, manifest)
+        meta = _str_map(manifest.get("metadata"))
+        annotations = _str_map(meta.get("annotations"))
+        provisioner = manifest.get("provisioner")
+        volume_binding_mode = manifest.get("volumeBindingMode")
+        allow_volume_expansion = manifest.get("allowVolumeExpansion")
+        return cls(
+            **vars(base),
+            provisioner=provisioner if isinstance(provisioner, str) else "",
+            volume_binding_mode=(
+                volume_binding_mode if isinstance(volume_binding_mode, str) else "Immediate"
+            ),
+            allow_volume_expansion=allow_volume_expansion
+            if isinstance(allow_volume_expansion, bool)
+            else False,
+            is_default=_storage_class_is_default(annotations),
+        )
+
+
 @dataclass(frozen=True)
 class PackageManifestSummary(GenericSummary):
     """OLM catalog entry (packages.operators.coreos.com, issue #29)."""
@@ -425,6 +466,7 @@ class CSVSummary(GenericSummary):
 #: OLM's API group; other groups also define kinds named "Subscription", so
 #: the dispatch below checks the manifest's apiVersion, not just the kind.
 _DISCOVERY_GROUP_PREFIX = "discovery.k8s.io/"
+_STORAGE_CLASS_GROUP_PREFIX = "storage.k8s.io/"
 _OLM_GROUP_PREFIX = "operators.coreos.com/"
 _PACKAGES_GROUP_PREFIX = "packages.operators.coreos.com/"
 
@@ -495,14 +537,25 @@ def summary_for(kind: str, manifest: dict[str, Any], *, group: str | None = None
         if is_discovery:
             return EndpointSliceSummary.from_manifest(kind, manifest)
         return GenericSummary.from_manifest(kind, manifest)
+    if kind == "StorageClass":
+        is_storage_class = (
+            group == "storage.k8s.io"
+            if group is not None
+            else str(manifest.get("apiVersion") or "").startswith(_STORAGE_CLASS_GROUP_PREFIX)
+        )
+        if is_storage_class:
+            return StorageClassSummary.from_manifest(kind, manifest)
+        return GenericSummary.from_manifest(kind, manifest)
     api_version = str(manifest.get("apiVersion") or "")
     if kind == "PackageManifest" and api_version.startswith(_PACKAGES_GROUP_PREFIX):
         return PackageManifestSummary.from_manifest(kind, manifest)
     if api_version.startswith(_OLM_GROUP_PREFIX):
-        if kind == "Subscription":
-            return OLMSubscriptionSummary.from_manifest(kind, manifest)
-        if kind == "ClusterServiceVersion":
-            return CSVSummary.from_manifest(kind, manifest)
+        renderer: type[GenericSummary] | None = {
+            "Subscription": OLMSubscriptionSummary,
+            "ClusterServiceVersion": CSVSummary,
+        }.get(kind)
+        if renderer is not None:
+            return renderer.from_manifest(kind, manifest)
     return GenericSummary.from_manifest(kind, manifest)
 
 

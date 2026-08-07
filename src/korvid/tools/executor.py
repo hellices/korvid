@@ -35,6 +35,7 @@ from korvid.k8s.models import (
     PackageManifestSummary,
     PodListSummary,
     ReplicaSetSummary,
+    StorageClassSummary,
     parse_quantity,
 )
 from korvid.k8s.olm import OPERATORS_GROUP, PACKAGES_GROUP, resolve_olm_meta
@@ -270,6 +271,15 @@ def _endpoint_slice_facts(s: EndpointSliceSummary) -> str:
     )
 
 
+def _storage_class_facts(s: StorageClassSummary) -> str:
+    return (
+        f"provisioner={_clamp(s.provisioner) or '?'}"
+        f" binding={_clamp(s.volume_binding_mode) or '?'}"
+        f" default={str(s.is_default).lower()}"
+        f" expand={str(s.allow_volume_expansion).lower()}"
+    )
+
+
 def _generic_facts(s: GenericSummary) -> str:
     return f"desired={s.desired}" if s.desired is not None else ""
 
@@ -306,6 +316,7 @@ _SUMMARY_FACTS: dict[type[GenericSummary], Callable[[Any], str]] = {
     CSVSummary: _csv_facts,
     PackageManifestSummary: _package_facts,
     EndpointSliceSummary: _endpoint_slice_facts,
+    StorageClassSummary: _storage_class_facts,
     # Helm's synthetic kinds are not reachable through list_resources today
     # (a follow-up adds a helm listing tool), but the contract keeps their
     # facts registered so that tool renders release status on day one.

@@ -11,6 +11,7 @@ from korvid.k8s.models import (
     PackageManifestSummary,
     PodSummary,
     ReplicaSetSummary,
+    StorageClassSummary,
     summary_for,
 )
 
@@ -416,6 +417,58 @@ def test_summary_for_endpointslice_explicit_non_discovery_group_stays_generic() 
     }
     summary = summary_for("EndpointSlice", manifest, group="example.io")
     assert type(summary) is GenericSummary
+
+
+def test_summary_for_storage_class_without_api_version_dispatched_by_group() -> None:
+    manifest: dict[str, Any] = {
+        "metadata": {
+            "name": "managed",
+            "annotations": {"storageclass.kubernetes.io/is-default-class": "true"},
+        },
+        "provisioner": "disk.csi.azure.com",
+        "volumeBindingMode": "WaitForFirstConsumer",
+        "allowVolumeExpansion": True,
+    }
+    summary = summary_for("StorageClass", manifest, group="storage.k8s.io")
+    assert isinstance(summary, StorageClassSummary)
+    assert summary.is_default
+    assert summary.provisioner == "disk.csi.azure.com"
+    assert summary.volume_binding_mode == "WaitForFirstConsumer"
+    assert summary.allow_volume_expansion is True
+
+
+def test_summary_for_same_named_storage_class_crd_stays_generic() -> None:
+    summary = summary_for("StorageClass", {"metadata": {"name": "custom"}}, group="example.io")
+    assert type(summary) is GenericSummary
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "storageclass.kubernetes.io/is-default-class",
+        "storageclass.beta.kubernetes.io/is-default-class",
+    ],
+)
+def test_storage_class_default_annotations_are_case_insensitive(key: str) -> None:
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass", {"metadata": {"name": "managed", "annotations": {key: "TRUE"}}}
+    )
+    assert summary.is_default
+
+
+def test_storage_class_malformed_values_fall_back_safely() -> None:
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass",
+        {
+            "metadata": {"name": "managed"},
+            "provisioner": ["bad"],
+            "volumeBindingMode": {"bad": True},
+            "allowVolumeExpansion": "yes",
+        },
+    )
+    assert summary.provisioner == ""
+    assert summary.volume_binding_mode == "Immediate"
+    assert summary.allow_volume_expansion is False
 
 
 def test_age_5m() -> None:
