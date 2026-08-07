@@ -14,7 +14,7 @@ from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
-from korvid.k8s.models import EndpointSliceSummary, GenericSummary, summary_for
+from korvid.k8s.models import EndpointSliceSummary, GenericSummary, StorageClassSummary, summary_for
 from korvid.tools.executor import (
     MAX_RESULT_CHARS,
     READ_TOOLS,
@@ -55,6 +55,7 @@ def test_read_tools_schema_names() -> None:
         "diagnose_pod",
         "diagnose_workload",
         "diagnose_service",
+        "diagnose_pvc",
     ]
 
 
@@ -3322,3 +3323,155 @@ async def test_diagnose_service_unrelated_custom_owner_only_is_healthy() -> None
         )
     )
     assert document["outcome"] == "healthy"
+
+
+# -- diagnose_pvc tests (PVC Phase 2 Task 4) ------------------------------------
+
+
+class PVCDiagnosisKube:
+    """Records cluster calls; returns scripted PVC manifest, events, and StorageClasses."""
+
+    def __init__(
+        self,
+        pvc: dict[str, Any],
+        storage_classes: list[GenericSummary] | None = None,
+        class_error: Exception | None = None,
+        events: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self._pvc = pvc
+        self._storage_classes: list[GenericSummary] = storage_classes or []
+        self._class_error = class_error
+        self._events: list[dict[str, Any]] = events or []
+        self.calls: list[tuple[str, ...]] = []
+
+    async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        self.calls.append(("get", meta.kind, str(namespace), name))
+        return self._pvc
+
+    async def list_objects(self, meta: Any, namespace: str | None) -> list[GenericSummary]:
+        self.calls.append(("list", meta.kind, namespace))  # type: ignore[arg-type]  # None is intentional per test assertion
+        if self._class_error is not None:
+            raise self._class_error
+        return self._storage_classes
+
+    async def list_events_for(
+        self,
+        namespace: str,
+        name: str,
+        *,
+        kind: str | None = None,
+        uid: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.calls.append(("events", kind or "?", str(namespace), name))
+        return self._events
+
+
+def _pvc_manifest(
+    phase: str = "Pending",
+    volume_name: str = "",
+    storage_class_name: str = "managed",
+) -> dict[str, Any]:
+    spec: dict[str, Any] = {
+        "accessModes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+        "storageClassName": storage_class_name,
+    }
+    if volume_name:
+        spec["volumeName"] = volume_name
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "data", "namespace": "shop", "uid": "pvc-uid-1"},
+        "spec": spec,
+        "status": {"phase": phase},
+    }
+
+
+def _storage_class(name: str) -> StorageClassSummary:
+    return StorageClassSummary(
+        name=name,
+        namespace="",
+        kind="StorageClass",
+        created="",
+        uid="sc-uid-1",
+        owner_uids=(),
+        labels=(),
+        provisioner="kubernetes.io/aws-ebs",
+        volume_binding_mode="Immediate",
+        allow_volume_expansion=False,
+        is_default=False,
+    )
+
+
+def _pvc_executor(kube: Any) -> ToolExecutor:
+    return ToolExecutor(kube, {})
+
+
+def test_diagnose_pvc_is_shared_structured_read() -> None:
+    definition = TOOLS_BY_NAME["diagnose_pvc"]
+    assert definition.effect == "cluster_read"
+    assert definition.result_format == "structured_yaml"
+    assert definition.surfaces == frozenset({"full_agent", "small_agent", "mcp"})
+
+
+@pytest.mark.asyncio
+async def test_bound_pvc_performs_only_one_get() -> None:
+    kube = PVCDiagnosisKube(pvc=_pvc_manifest(phase="Bound", volume_name="pv-1"))
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["outcome"] == "healthy"
+    assert kube.calls == [("get", "PersistentVolumeClaim", "shop", "data")]
+
+
+@pytest.mark.asyncio
+async def test_pending_pvc_lists_events_and_storage_classes_once() -> None:
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        storage_classes=[_storage_class("managed")],
+    )
+    await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    assert kube.calls == [
+        ("get", "PersistentVolumeClaim", "shop", "data"),
+        ("events", "PersistentVolumeClaim", "shop", "data"),
+        ("list", "StorageClass", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_diagnose_pvc_rejects_composite_name_before_io() -> None:
+    kube = PVCDiagnosisKube(pvc=_pvc_manifest())
+    text = await _pvc_executor(kube).execute(
+        "diagnose_pvc", {"pvc": "shop/data", "namespace": "shop"}
+    )
+    assert text.startswith("ERROR:")
+    assert kube.calls == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_empty_class_skips_storage_class_list() -> None:
+    kube = PVCDiagnosisKube(pvc=_pvc_manifest(phase="Pending", storage_class_name=""))
+    await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    assert not [call for call in kube.calls if call[0] == "list"]
+
+
+@pytest.mark.asyncio
+async def test_storage_class_api_error_becomes_gap() -> None:
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        class_error=ApiStatusError(403, "Forbidden", ""),
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["gaps"][0]["source"] == "storageclasses"
+
+
+@pytest.mark.asyncio
+async def test_transport_error_remains_tool_error() -> None:
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        class_error=RuntimeError("connection reset"),
+    )
+    text = await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    assert text.startswith("ERROR:")

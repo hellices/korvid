@@ -655,6 +655,39 @@ TOOL_DEFS: list[ToolDef] = [
         },
     ),
     ToolDef(
+        name="diagnose_pvc",
+        effect="cluster_read",
+        dispatch="_diagnose_pvc",
+        surfaces=_ALL_SURFACES,
+        result_format="structured_yaml",
+        schema={
+            "type": "function",
+            "function": {
+                "name": "diagnose_pvc",
+                "description": (
+                    "Deterministically check why a PersistentVolumeClaim is not Bound. "
+                    "One GET for Bound/Lost claims; fetches Warning events and StorageClass "
+                    "evidence for Pending claims (skips StorageClass LIST when "
+                    "storageClassName is explicitly empty). Returns versioned findings with "
+                    "explicit evidence gaps when reads are denied. "
+                    "Follow opens persistentvolumeclaims describe. "
+                    "Prefer this over get_resource/get_events when a PVC is stuck."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pvc": {"type": "string", "description": "PVC name."},
+                        "namespace": {
+                            "type": "string",
+                            "description": "Kubernetes namespace containing the PVC.",
+                        },
+                    },
+                    "required": ["pvc", "namespace"],
+                },
+            },
+        },
+    ),
+    ToolDef(
         name="navigate",
         effect="ui_only",
         dispatch="agent_navigate",

@@ -10,6 +10,12 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 from korvid.core.portforward import controller_owner
+from korvid.core.pvc_analysis import (
+    PVCBindingSnapshot,
+    StorageClassSnapshot,
+    WarningEventSnapshot,
+    analyze_pvc_binding,
+)
 from korvid.core.redaction import (
     RedactionError,
     RedactionRecord,
@@ -1067,6 +1073,9 @@ class ToolExecutor(RecordedExecution):
         "EndpointSlice": ResourceMeta(
             "EndpointSlice", "endpointslices", "discovery.k8s.io", "v1", True
         ),
+        "StorageClass": ResourceMeta(
+            "StorageClass", "storageclasses", "storage.k8s.io", "v1", False
+        ),
     }
 
     def _meta_for_kind_name(self, kind_name: str) -> ResourceMeta | None:
@@ -1127,13 +1136,13 @@ class ToolExecutor(RecordedExecution):
         if pvc_meta is not None:
             claims = pvc_names(pod)
             for claim in claims[: self._DIAGNOSE_MAX_PVCS]:
-                lines.extend(await self._diagnose_pvc(namespace, claim, pvc_meta))
+                lines.extend(await self._diagnose_pvc_related(namespace, claim, pvc_meta))
             omitted = claims[self._DIAGNOSE_MAX_PVCS :]
             if omitted:
                 lines.append(f"({len(omitted)} more claims not fetched: {', '.join(omitted)})")
         return lines
 
-    async def _diagnose_pvc(
+    async def _diagnose_pvc_related(
         self,
         namespace: str,
         claim: str,
@@ -1619,6 +1628,75 @@ class ToolExecutor(RecordedExecution):
             report = analyze_service_endpoints(service, slices)
         return dump_bounded_yaml(report.as_document(), MAX_RESULT_CHARS)
 
+    async def _pvc_event_evidence(
+        self, pvc: PVCBindingSnapshot
+    ) -> tuple[list[WarningEventSnapshot], list[EvidenceGap]]:
+        """Fetch Warning events for the PVC, catching only ApiStatusError."""
+        gaps: list[EvidenceGap] = []
+        try:
+            raw_events = await self._kube.list_events_for(
+                pvc.identity.namespace,
+                pvc.identity.name,
+                kind="PersistentVolumeClaim",
+                uid=pvc.identity.uid or None,
+            )
+        except ApiStatusError as exc:
+            gaps.append(EvidenceGap("events", _api_gap_reason(exc)))
+            return [], gaps
+        warning_events = sorted(
+            [
+                WarningEventSnapshot(
+                    reason=str(ev.get("reason") or ""),
+                    message=self._clamp_line(str(ev.get("message") or "")),
+                    count=int(ev.get("count") or 1),
+                    last_seen=str(ev.get("lastTimestamp") or ""),
+                )
+                for ev in raw_events
+                if str(ev.get("type") or "") == "Warning"
+            ],
+            key=lambda e: (e.reason, e.message),
+        )
+        return warning_events, gaps
+
+    async def _pvc_storage_classes(
+        self,
+    ) -> tuple[tuple[StorageClassSnapshot, ...], EvidenceGap | None]:
+        """Fetch cluster StorageClasses, catching only ApiStatusError."""
+        sc_meta = self._require_diagnose_meta("StorageClass")
+        try:
+            summaries = await self._kube.list_objects(sc_meta, None)
+        except ApiStatusError as exc:
+            return (), EvidenceGap("storageclasses", _api_gap_reason(exc))
+        classes = tuple(
+            StorageClassSnapshot(
+                identity=ResourceIdentity("StorageClass", "", s.name, s.uid or ""),
+                provisioner=s.provisioner,
+                volume_binding_mode=s.volume_binding_mode,
+                is_default=s.is_default,
+            )
+            for s in summaries
+            if isinstance(s, StorageClassSummary)
+        )
+        return classes, None
+
+    async def _diagnose_pvc(self, args: dict[str, Any]) -> str:
+        """One-call PVC binding diagnosis (issue #191 PVC phase 2)."""
+        name = _reject_slash_name(str(args["pvc"]), "pvc")
+        namespace = _reject_slash_name(str(args["namespace"]), "namespace")
+        pvc_meta = self._require_diagnose_meta("PersistentVolumeClaim")
+        manifest = await self._kube.get_object(pvc_meta, namespace, name)
+        pvc = _pvc_binding_snapshot(manifest, namespace, name)
+        if pvc.phase in {"Bound", "Lost"}:
+            return dump_bounded_yaml(analyze_pvc_binding(pvc).as_document(), MAX_RESULT_CHARS)
+        events, gaps = await self._pvc_event_evidence(pvc)
+        classes: tuple[StorageClassSnapshot, ...] = ()
+        if pvc.storage_class_name != "":
+            classes, class_gap = await self._pvc_storage_classes()
+            if class_gap is not None:
+                gaps.append(class_gap)
+        report = analyze_pvc_binding(pvc, classes, events, gaps)
+        return dump_bounded_yaml(report.as_document(), MAX_RESULT_CHARS)
+
 
 def _service_snapshot(manifest: dict[str, Any], namespace: str, name: str) -> ServiceSnapshot:
     """Build a ``ServiceSnapshot`` from a raw Service manifest."""
@@ -1655,6 +1733,37 @@ def _endpoint_slice_snapshot(item: EndpointSliceSummary) -> EndpointSliceSnapsho
 def _api_gap_reason(exc: ApiStatusError) -> str:
     """Human-readable gap reason from an API status error."""
     return f"HTTP {exc.status}: {exc.reason}"
+
+
+def _pvc_binding_snapshot(
+    manifest: dict[str, Any], namespace: str, name: str
+) -> PVCBindingSnapshot:
+    """Build a ``PVCBindingSnapshot`` from a raw PVC manifest."""
+    meta = manifest.get("metadata") or {}
+    uid = str(meta.get("uid") or "")
+    spec = manifest.get("spec") or {}
+    status = manifest.get("status") or {}
+    phase = str(status.get("phase") or "")
+    volume_name = str(spec.get("volumeName") or "")
+    # storageClassName: key absent → None (use cluster default); "" → explicit none
+    if "storageClassName" not in spec:
+        storage_class_name: str | None = None
+    else:
+        raw_sc = spec["storageClassName"]
+        storage_class_name = str(raw_sc) if raw_sc is not None else None
+    requested_storage = str(
+        ((spec.get("resources") or {}).get("requests") or {}).get("storage") or ""
+    )
+    raw_modes = spec.get("accessModes")
+    access_modes = tuple(str(m) for m in raw_modes) if isinstance(raw_modes, list) else ()
+    return PVCBindingSnapshot(
+        identity=ResourceIdentity("PersistentVolumeClaim", namespace, name, uid),
+        phase=phase,
+        volume_name=volume_name,
+        storage_class_name=storage_class_name,
+        requested_storage=requested_storage,
+        access_modes=access_modes,
+    )
 
 
 def _mask_manifest(manifest: dict[str, Any]) -> tuple[dict[str, Any], list[RedactionRecord]]:
