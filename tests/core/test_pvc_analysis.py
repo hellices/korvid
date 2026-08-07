@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from korvid.core.findings import EvidenceGap, ResourceIdentity
 from korvid.core.pvc_analysis import (
     PVCBindingSnapshot,
@@ -40,13 +42,21 @@ def _class(
     provisioner: str = "kubernetes.io/no-provisioner",
     volume_binding_mode: str = "Immediate",
     is_default: bool = False,
+    default_annotation_key: str = "",
+    default_annotation_value: str = "",
     created: str = "",
 ) -> StorageClassSnapshot:
+    if is_default and not default_annotation_key:
+        default_annotation_key = "storageclass.kubernetes.io/is-default-class"
+    if is_default and not default_annotation_value:
+        default_annotation_value = "true"
     return StorageClassSnapshot(
         identity=ResourceIdentity(kind="StorageClass", namespace="", name=name),
         provisioner=provisioner,
         volume_binding_mode=volume_binding_mode,
         is_default=is_default,
+        default_annotation_key=default_annotation_key,
+        default_annotation_value=default_annotation_value,
         created=created,
     )
 
@@ -426,6 +436,36 @@ def test_multiple_default_evidence_uses_actual_annotation_key_beta() -> None:
     for ev in report.findings[0].evidence:
         assert "beta" in ev.field, (
             f"Beta annotation key must be reflected in evidence field, got: {ev.field!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    ("default_annotation_key", "default_annotation_value"),
+    [
+        ("", "true"),
+        ("storageclass.kubernetes.io/is-default-class", ""),
+        ("storageclass.kubernetes.io/is-default-class", "false"),
+    ],
+)
+def test_storage_class_default_annotation_invariant_rejects_invalid_snapshot(
+    default_annotation_key: str,
+    default_annotation_value: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            "StorageClassSnapshot\\(is_default=True\\) requires "
+            "default_annotation_key to be non-empty and "
+            "default_annotation_value='true'"
+        ),
+    ):
+        StorageClassSnapshot(
+            identity=ResourceIdentity(kind="StorageClass", namespace="", name="broken"),
+            provisioner="p",
+            volume_binding_mode="Immediate",
+            is_default=True,
+            default_annotation_key=default_annotation_key,
+            default_annotation_value=default_annotation_value,
         )
 
 

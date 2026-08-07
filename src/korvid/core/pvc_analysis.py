@@ -35,6 +35,10 @@ _ANALYZER = "pvc.binding"
 _VERSION = "1"
 _RULE_VERSION = "1"
 _PROVISIONING_FAILURE_REASONS = frozenset({"ProvisioningFailed", "FailedBinding", "VolumeMismatch"})
+_STORAGE_CLASS_DEFAULT_ANNOTATION_ERROR = (
+    "StorageClassSnapshot(is_default=True) requires default_annotation_key to be non-empty "
+    "and default_annotation_value='true'."
+)
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _UTC = UTC
 
@@ -62,6 +66,12 @@ class StorageClassSnapshot:
     default_annotation_key: str = ""
     default_annotation_value: str = ""
     created: str = ""
+
+    def __post_init__(self) -> None:
+        if self.is_default and (
+            not self.default_annotation_key or self.default_annotation_value != "true"
+        ):
+            raise ValueError(_STORAGE_CLASS_DEFAULT_ANNOTATION_ERROR)
 
 
 @dataclass(frozen=True, slots=True)
