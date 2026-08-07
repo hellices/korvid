@@ -47,6 +47,15 @@ format:
   is bounded to the shared 8,000-character cap and is always parseable YAML.
   Replacement detection considers only core-v1 Service owner references;
   custom-controller owners do not invalidate manually managed slices.
+- **PVC binding diagnosis** (`diagnose_pvc`) is deterministic structured
+  YAML. For `Bound`/`Lost` claims only one GET is made. For unresolved
+  claims Warning events are fetched; StorageClasses are listed only when
+  no decisive failure event, pre-bound volume (`spec.volumeName` set), or
+  explicit-empty/static-binding evidence already determines the result.
+  RBAC denials on either secondary read become `gaps[]` entries so the
+  model can reason about incomplete evidence; transport and decoding
+  failures remain tool errors. Follow opens the `persistentvolumeclaims`
+  describe screen.
 - **Logs, events, lists, single-pod diagnoses, and helm status** get only
   their own tool-specific shaping (scoping, formatting, size caps). They
   are **not** credential-pattern masked: a token printed into a pod's log

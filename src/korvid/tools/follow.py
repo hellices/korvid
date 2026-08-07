@@ -35,6 +35,7 @@ FOLLOWABLE_TOOLS: frozenset[str] = frozenset(
         "diagnose_pod",
         "diagnose_workload",
         "diagnose_service",
+        "diagnose_pvc",
     }
 )
 
@@ -155,4 +156,9 @@ async def _mirror_diagnose(
         if service is None:
             return None
         return await ui.agent_open_describe("services", service, namespace)
+    if tool == "diagnose_pvc":
+        pvc = _str_or_none(args.get("pvc"))
+        if pvc is None:
+            return None
+        return await ui.agent_open_describe("persistentvolumeclaims", pvc, namespace)
     return None

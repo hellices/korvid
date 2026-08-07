@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from typing import cast
+
+from korvid.core.findings import AnalysisReport as SharedReport
+from korvid.core.service_analysis import (
+    AnalysisReport as ServiceReport,
+)
 from korvid.core.service_analysis import (
     EndpointSliceSnapshot,
     EvidenceGap,
+    Outcome,
     ResourceIdentity,
     ServiceSnapshot,
+    Severity,
     analyze_service_endpoints,
 )
 
@@ -158,6 +166,31 @@ def test_document_uses_stable_public_keys() -> None:
         "evidence",
         "gaps",
     )
+
+
+def test_service_analysis_reexports_shared_finding_types() -> None:
+    assert ServiceReport is SharedReport
+    assert Severity is not None
+    assert Outcome is not None
+
+
+def test_service_report_document_contract_is_unchanged() -> None:
+    report = analyze_service_endpoints(
+        _service(uid="svc-1"),
+        (_slice(service_owner_uids=("svc-1",), endpoints=1, ready_endpoints=0),),
+    )
+    document = report.as_document()
+    findings = cast(list[dict[str, object]], document["findings"])
+    assert tuple(document) == (
+        "analyzer",
+        "version",
+        "outcome",
+        "primary",
+        "findings",
+        "evidence",
+        "gaps",
+    )
+    assert findings[0]["severity"] == "warning"
 
 
 # -- service_owner_uids stale-check tests (PR #212 fix) ---------------------

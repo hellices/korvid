@@ -11,6 +11,7 @@ from korvid.k8s.models import (
     PackageManifestSummary,
     PodSummary,
     ReplicaSetSummary,
+    StorageClassSummary,
     summary_for,
 )
 
@@ -416,6 +417,73 @@ def test_summary_for_endpointslice_explicit_non_discovery_group_stays_generic() 
     }
     summary = summary_for("EndpointSlice", manifest, group="example.io")
     assert type(summary) is GenericSummary
+
+
+def test_summary_for_storage_class_without_api_version_dispatched_by_group() -> None:
+    manifest: dict[str, Any] = {
+        "metadata": {
+            "name": "managed",
+            "annotations": {"storageclass.kubernetes.io/is-default-class": "true"},
+        },
+        "provisioner": "disk.csi.azure.com",
+        "volumeBindingMode": "WaitForFirstConsumer",
+        "allowVolumeExpansion": True,
+    }
+    summary = summary_for("StorageClass", manifest, group="storage.k8s.io")
+    assert isinstance(summary, StorageClassSummary)
+    assert summary.is_default
+    assert summary.provisioner == "disk.csi.azure.com"
+    assert summary.volume_binding_mode == "WaitForFirstConsumer"
+    assert summary.allow_volume_expansion is True
+
+
+def test_summary_for_same_named_storage_class_crd_stays_generic() -> None:
+    summary = summary_for("StorageClass", {"metadata": {"name": "custom"}}, group="example.io")
+    assert type(summary) is GenericSummary
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "storageclass.kubernetes.io/is-default-class",
+        "storageclass.beta.kubernetes.io/is-default-class",
+    ],
+)
+def test_storage_class_default_annotation_exact_true_string(key: str) -> None:
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass", {"metadata": {"name": "managed", "annotations": {key: "true"}}}
+    )
+    assert summary.is_default
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "storageclass.kubernetes.io/is-default-class",
+        "storageclass.beta.kubernetes.io/is-default-class",
+    ],
+)
+@pytest.mark.parametrize("value", ["TRUE", "True"])
+def test_storage_class_non_lowercase_true_is_not_default(key: str, value: str) -> None:
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass", {"metadata": {"name": "managed", "annotations": {key: value}}}
+    )
+    assert not summary.is_default
+
+
+def test_storage_class_malformed_values_fall_back_safely() -> None:
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass",
+        {
+            "metadata": {"name": "managed"},
+            "provisioner": ["bad"],
+            "volumeBindingMode": {"bad": True},
+            "allowVolumeExpansion": "yes",
+        },
+    )
+    assert summary.provisioner == ""
+    assert summary.volume_binding_mode == "Immediate"
+    assert summary.allow_volume_expansion is False
 
 
 def test_age_5m() -> None:
@@ -1402,3 +1470,82 @@ def test_endpoint_slice_summary_no_owner_refs_gives_empty_service_owner_uids() -
     summary = summary_for("EndpointSlice", manifest)
     assert isinstance(summary, EndpointSliceSummary)
     assert summary.service_owner_uids == ()
+
+
+# ============================================================
+# PR #216 review findings — Item 4: annotation key/value preservation
+# ============================================================
+
+
+def test_storage_class_stable_annotation_key_is_preserved() -> None:
+    """Stable annotation key must be captured in default_annotation_key."""
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass",
+        {
+            "metadata": {
+                "name": "managed",
+                "annotations": {"storageclass.kubernetes.io/is-default-class": "true"},
+            }
+        },
+    )
+    assert summary.is_default
+    assert summary.default_annotation_key == "storageclass.kubernetes.io/is-default-class"
+    assert summary.default_annotation_value == "true"
+
+
+def test_storage_class_beta_annotation_key_is_preserved() -> None:
+    """Beta annotation key must be captured in default_annotation_key."""
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass",
+        {
+            "metadata": {
+                "name": "managed",
+                "annotations": {"storageclass.beta.kubernetes.io/is-default-class": "true"},
+            }
+        },
+    )
+    assert summary.is_default
+    assert summary.default_annotation_key == "storageclass.beta.kubernetes.io/is-default-class"
+    assert summary.default_annotation_value == "true"
+
+
+def test_storage_class_stable_takes_priority_when_both_set() -> None:
+    """When both stable and beta keys are set to 'true', stable wins."""
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass",
+        {
+            "metadata": {
+                "name": "managed",
+                "annotations": {
+                    "storageclass.kubernetes.io/is-default-class": "true",
+                    "storageclass.beta.kubernetes.io/is-default-class": "true",
+                },
+            }
+        },
+    )
+    assert summary.is_default
+    assert summary.default_annotation_key == "storageclass.kubernetes.io/is-default-class"
+
+
+def test_storage_class_non_default_has_empty_annotation_fields() -> None:
+    """Non-default StorageClass must have empty annotation key/value fields."""
+    summary = StorageClassSummary.from_manifest("StorageClass", {"metadata": {"name": "managed"}})
+    assert not summary.is_default
+    assert summary.default_annotation_key == ""
+    assert summary.default_annotation_value == ""
+
+
+def test_storage_class_non_true_value_produces_empty_fields() -> None:
+    """Non-'true' annotation value must produce is_default=False and empty key/value."""
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass",
+        {
+            "metadata": {
+                "name": "managed",
+                "annotations": {"storageclass.kubernetes.io/is-default-class": "True"},
+            }
+        },
+    )
+    assert not summary.is_default
+    assert summary.default_annotation_key == ""
+    assert summary.default_annotation_value == ""

@@ -143,6 +143,12 @@ SMALL_TOOL_DESCRIPTIONS: dict[str, str] = {
         "restart counts, failing conditions, Warning events, node/PVC "
         "context, and log excerpts. Prefer this first when a pod is failing."
     ),
+    "diagnose_pvc": (
+        "Deterministic PVC binding check: one GET for Bound/Lost; fetches "
+        "Warning events for unresolved claims; lists StorageClasses only when "
+        "no failure event, pre-bound volume, or empty storageClassName applies. "
+        "Prefer first for stuck PVCs."
+    ),
     "diagnose_workload": (
         "One-call diagnosis of a stuck Deployment rollout: conditions and "
         "Warning events, owned ReplicaSets, and compact diagnoses of its "

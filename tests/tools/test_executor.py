@@ -14,7 +14,7 @@ from korvid.core.secrets import MASK_PLACEHOLDER
 from korvid.k8s.discovery import PODS_META, ResourceMeta
 from korvid.k8s.errors import ApiStatusError
 from korvid.k8s.logs import LogLine
-from korvid.k8s.models import EndpointSliceSummary, GenericSummary, summary_for
+from korvid.k8s.models import EndpointSliceSummary, GenericSummary, StorageClassSummary, summary_for
 from korvid.tools.executor import (
     MAX_RESULT_CHARS,
     READ_TOOLS,
@@ -55,6 +55,7 @@ def test_read_tools_schema_names() -> None:
         "diagnose_pod",
         "diagnose_workload",
         "diagnose_service",
+        "diagnose_pvc",
     ]
 
 
@@ -3322,3 +3323,571 @@ async def test_diagnose_service_unrelated_custom_owner_only_is_healthy() -> None
         )
     )
     assert document["outcome"] == "healthy"
+
+
+# -- diagnose_pvc tests (PVC Phase 2 Task 4) ------------------------------------
+
+
+class PVCDiagnosisKube:
+    """Records cluster calls; returns scripted PVC manifest, events, and StorageClasses."""
+
+    def __init__(
+        self,
+        pvc: dict[str, Any],
+        storage_classes: list[GenericSummary] | None = None,
+        class_error: Exception | None = None,
+        events: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self._pvc = pvc
+        self._storage_classes: list[GenericSummary] = storage_classes or []
+        self._class_error = class_error
+        self._events: list[dict[str, Any]] = events or []
+        self.calls: list[tuple[str, ...]] = []
+
+    async def get_object(self, meta: Any, namespace: str | None, name: str) -> dict[str, Any]:
+        self.calls.append(("get", meta.kind, str(namespace), name))
+        return self._pvc
+
+    async def list_objects(self, meta: Any, namespace: str | None) -> list[GenericSummary]:
+        self.calls.append(("list", meta.kind, namespace))  # type: ignore[arg-type]  # None is intentional per test assertion
+        if self._class_error is not None:
+            raise self._class_error
+        return self._storage_classes
+
+    async def list_events_for(
+        self,
+        namespace: str,
+        name: str,
+        *,
+        kind: str | None = None,
+        uid: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.calls.append(("events", kind or "?", str(namespace), name, uid or ""))
+        return self._events
+
+
+def _pvc_manifest(
+    phase: str = "Pending",
+    volume_name: str = "",
+    storage_class_name: str = "managed",
+) -> dict[str, Any]:
+    spec: dict[str, Any] = {
+        "accessModes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+        "storageClassName": storage_class_name,
+    }
+    if volume_name:
+        spec["volumeName"] = volume_name
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "data", "namespace": "shop", "uid": "pvc-uid-1"},
+        "spec": spec,
+        "status": {"phase": phase},
+    }
+
+
+def _storage_class(name: str) -> StorageClassSummary:
+    return StorageClassSummary(
+        name=name,
+        namespace="",
+        kind="StorageClass",
+        created="",
+        uid="sc-uid-1",
+        owner_uids=(),
+        labels=(),
+        provisioner="kubernetes.io/aws-ebs",
+        volume_binding_mode="Immediate",
+        allow_volume_expansion=False,
+        is_default=False,
+    )
+
+
+def _pvc_executor(kube: Any) -> ToolExecutor:
+    return ToolExecutor(kube, {})
+
+
+def test_diagnose_pvc_is_shared_structured_read() -> None:
+    definition = TOOLS_BY_NAME["diagnose_pvc"]
+    assert definition.effect == "cluster_read"
+    assert definition.result_format == "structured_yaml"
+    assert definition.surfaces == frozenset({"full_agent", "small_agent", "mcp"})
+
+
+@pytest.mark.asyncio
+async def test_bound_pvc_performs_only_one_get() -> None:
+    kube = PVCDiagnosisKube(pvc=_pvc_manifest(phase="Bound", volume_name="pv-1"))
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["outcome"] == "healthy"
+    assert kube.calls == [("get", "PersistentVolumeClaim", "shop", "data")]
+
+
+@pytest.mark.asyncio
+async def test_pending_pvc_lists_events_and_storage_classes_once() -> None:
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        storage_classes=[_storage_class("managed")],
+    )
+    await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    assert kube.calls == [
+        ("get", "PersistentVolumeClaim", "shop", "data"),
+        ("events", "PersistentVolumeClaim", "shop", "data", "pvc-uid-1"),
+        ("list", "StorageClass", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_diagnose_pvc_rejects_composite_name_before_io() -> None:
+    kube = PVCDiagnosisKube(pvc=_pvc_manifest())
+    text = await _pvc_executor(kube).execute(
+        "diagnose_pvc", {"pvc": "shop/data", "namespace": "shop"}
+    )
+    assert text.startswith("ERROR:")
+    assert kube.calls == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_empty_class_skips_storage_class_list() -> None:
+    kube = PVCDiagnosisKube(pvc=_pvc_manifest(phase="Pending", storage_class_name=""))
+    await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    assert not [call for call in kube.calls if call[0] == "list"]
+
+
+@pytest.mark.asyncio
+async def test_storage_class_api_error_becomes_gap() -> None:
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        class_error=ApiStatusError(403, "Forbidden", ""),
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["gaps"][0]["source"] == "storageclasses"
+
+
+@pytest.mark.asyncio
+async def test_transport_error_remains_tool_error() -> None:
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        class_error=RuntimeError("connection reset"),
+    )
+    text = await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    assert text.startswith("ERROR:")
+
+
+# -- Finding 4: UID in call recording + integration tests --------------------
+
+
+@pytest.mark.asyncio
+async def test_pending_pvc_events_call_includes_uid() -> None:
+    """list_events_for call must be recorded with the PVC UID for scoping."""
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        storage_classes=[_storage_class("managed")],
+    )
+    await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    events_calls = [c for c in kube.calls if c[0] == "events"]
+    assert len(events_calls) == 1
+    assert events_calls[0] == ("events", "PersistentVolumeClaim", "shop", "data", "pvc-uid-1")
+
+
+@pytest.mark.asyncio
+async def test_prebound_pvc_fetches_events_but_skips_storage_class_list() -> None:
+    """Pre-bound pending PVC (volume_name set) should fetch events but NOT list StorageClasses."""
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", volume_name="my-pv", storage_class_name="managed"),
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["findings"][0]["rule_id"] == "pvc.awaiting_prebound_volume"
+    list_calls = [c for c in kube.calls if c[0] == "list"]
+    assert list_calls == [], f"Expected no LIST calls, got: {list_calls}"
+    events_calls = [c for c in kube.calls if c[0] == "events"]
+    assert len(events_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_pvc_warning_only_events_are_used() -> None:
+    """Normal events must not appear in the analysis; only Warning events matter."""
+    normal_event = {
+        "type": "Normal",
+        "reason": "ProvisioningSucceeded",
+        "message": "some message",
+        "count": 1,
+        "lastTimestamp": "2024-01-01T00:00:00Z",
+    }
+    warning_event = {
+        "type": "Warning",
+        "reason": "ProvisioningFailed",
+        "message": "quota exceeded",
+        "count": 3,
+        "lastTimestamp": "2024-06-01T00:00:00Z",
+    }
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        events=[normal_event, warning_event],
+        storage_classes=[_storage_class("managed")],
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["findings"][0]["rule_id"] == "pvc.provisioning_failed"
+
+
+@pytest.mark.asyncio
+async def test_overlong_event_message_is_clamped_to_240_chars() -> None:
+    """Event messages longer than 240 chars must be clamped."""
+    long_msg = "x" * 300
+    warning_event = {
+        "type": "Warning",
+        "reason": "ProvisioningFailed",
+        "message": long_msg,
+        "count": 1,
+        "lastTimestamp": "2024-01-01T00:00:00Z",
+    }
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        events=[warning_event],
+        storage_classes=[_storage_class("managed")],
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    # Evidence values must be no longer than 240 chars
+    for finding in document.get("findings", []):
+        for ev in finding.get("evidence", []):
+            assert len(ev.get("value", "")) <= 240, f"Evidence value too long: {ev}"
+
+
+@pytest.mark.asyncio
+async def test_events_api_status_error_produces_gap() -> None:
+    """ApiStatusError on events list must produce a gap, not crash."""
+
+    class EventErrorKube(PVCDiagnosisKube):
+        async def list_events_for(
+            self, namespace: str, name: str, *, kind: str | None = None, uid: str | None = None
+        ) -> list[dict[str, Any]]:
+            self.calls.append(("events", kind or "?", str(namespace), name, uid or ""))
+            raise ApiStatusError(403, "Forbidden", "")
+
+    kube = EventErrorKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        storage_classes=[_storage_class("managed")],
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    gap_sources = [g["source"] for g in document.get("gaps", [])]
+    assert "events" in gap_sources
+
+
+@pytest.mark.asyncio
+async def test_events_non_api_status_error_becomes_tool_error() -> None:
+    """Non-ApiStatusError on events list must bubble up as ERROR:."""
+
+    class EventRuntimeErrorKube(PVCDiagnosisKube):
+        async def list_events_for(
+            self, namespace: str, name: str, *, kind: str | None = None, uid: str | None = None
+        ) -> list[dict[str, Any]]:
+            self.calls.append(("events", kind or "?", str(namespace), name, uid or ""))
+            raise RuntimeError("connection reset")
+
+    kube = EventRuntimeErrorKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+    )
+    text = await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    assert text.startswith(ERROR_PREFIX)
+
+
+@pytest.mark.asyncio
+async def test_series_count_and_last_observed_time_reach_finding() -> None:
+    """series.count and series.lastObservedTime must be projected into the finding.
+
+    The executor must use the canonical _event_count / _event_last_seen helpers from
+    korvid.tools.diagnose so that events.k8s.io/v1 repeating-event fields are honoured.
+    """
+    series_event = {
+        "type": "Warning",
+        "reason": "ProvisioningFailed",
+        "message": "series event hit",
+        # series sub-object carries count and lastObservedTime for events.k8s.io/v1
+        "series": {
+            "count": 42,
+            "lastObservedTime": "2025-05-01T08:00:00Z",
+        },
+        # Legacy fields intentionally absent to ensure the series path is exercised
+    }
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        events=[series_event],
+        storage_classes=[_storage_class("managed")],
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["findings"][0]["rule_id"] == "pvc.provisioning_failed"
+    evidence = {e["field"]: e["value"] for e in document["findings"][0]["evidence"]}
+    assert evidence["event.count"] == "42", "series.count must be projected into event.count"
+    assert evidence["event.last_seen"] == "2025-05-01T08:00:00Z", (
+        "series.lastObservedTime must be projected into event.last_seen"
+    )
+
+
+# ============================================================
+# PR #216 review findings — RED tests
+# ============================================================
+
+# --- Item 1: non-403 ApiStatusError must re-raise, not become gap ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 404, 429, 500, 503])
+async def test_pvc_event_non_403_api_status_reraises(status_code: int) -> None:
+    """Non-403 ApiStatusError on events must not be silenced as a gap."""
+
+    class NonForbiddenEventKube(PVCDiagnosisKube):
+        async def list_events_for(
+            self, namespace: str, name: str, *, kind: str | None = None, uid: str | None = None
+        ) -> list[dict[str, Any]]:
+            self.calls.append(("events", kind or "?", str(namespace), name, uid or ""))
+            raise ApiStatusError(status_code, f"HTTP {status_code}", "")
+
+    kube = NonForbiddenEventKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        storage_classes=[_storage_class("managed")],
+    )
+    text = await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    assert text.startswith(ERROR_PREFIX), (
+        f"Expected ERROR for status {status_code} but got: {text[:80]}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 404, 429, 500, 503])
+async def test_pvc_storage_class_non_403_api_status_reraises(status_code: int) -> None:
+    """Non-403 ApiStatusError on StorageClass LIST must not be silenced as a gap."""
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        class_error=ApiStatusError(status_code, f"HTTP {status_code}", ""),
+    )
+    text = await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    assert text.startswith(ERROR_PREFIX), (
+        f"Expected ERROR for status {status_code} but got: {text[:80]}"
+    )
+
+
+# --- Item 2: decisive failure event skips StorageClass LIST ---
+
+
+@pytest.mark.asyncio
+async def test_failure_event_skips_storage_class_list() -> None:
+    """A decisive failure event must cause GET+events only; no StorageClass LIST."""
+    failure_event = {
+        "type": "Warning",
+        "reason": "ProvisioningFailed",
+        "message": "quota exceeded",
+        "count": 1,
+        "lastTimestamp": "2024-06-01T00:00:00Z",
+    }
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        events=[failure_event],
+        storage_classes=[_storage_class("managed")],
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["findings"][0]["rule_id"] == "pvc.provisioning_failed"
+    list_calls = [c for c in kube.calls if c[0] == "list"]
+    assert list_calls == [], (
+        f"Expected no StorageClass LIST when failure event present: {list_calls}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_storage_class_transport_error_cannot_mask_failure_event() -> None:
+    """Even if StorageClass LIST would fail, a failure event must produce the correct finding."""
+    failure_event = {
+        "type": "Warning",
+        "reason": "FailedBinding",
+        "message": "no available volumes",
+        "count": 2,
+        "lastTimestamp": "2024-06-01T00:00:00Z",
+    }
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        events=[failure_event],
+        class_error=RuntimeError("connection reset"),
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["findings"][0]["rule_id"] == "pvc.provisioning_failed"
+    list_calls = [c for c in kube.calls if c[0] == "list"]
+    assert list_calls == [], "StorageClass LIST must not be attempted when failure event exists"
+
+
+# ============================================================
+# PR #216 round-3 findings — RED tests
+# ============================================================
+
+# --- Issue 1: Pending PVC missing UID → ERROR before events/class calls ---
+
+
+@pytest.mark.asyncio
+async def test_pending_pvc_missing_uid_returns_error() -> None:
+    """Pending PVC with no metadata.uid must return ERROR before calling list_events_for."""
+    manifest = _pvc_manifest(phase="Pending", storage_class_name="managed")
+    manifest["metadata"].pop("uid")  # remove uid entirely
+    kube = PVCDiagnosisKube(pvc=manifest, storage_classes=[_storage_class("managed")])
+    text = await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    assert text.startswith(ERROR_PREFIX), f"Expected ERROR but got: {text[:80]}"
+    events_calls = [c for c in kube.calls if c[0] == "events"]
+    list_calls = [c for c in kube.calls if c[0] == "list"]
+    assert events_calls == [], (
+        f"Must not call list_events_for when UID is missing, got: {events_calls}"
+    )
+    assert list_calls == [], f"Must not call list_objects when UID is missing, got: {list_calls}"
+
+
+@pytest.mark.asyncio
+async def test_bound_pvc_missing_uid_still_succeeds() -> None:
+    """Bound PVC with no metadata.uid must succeed (single GET, no events call needed)."""
+    manifest = _pvc_manifest(phase="Bound", volume_name="pv-1")
+    manifest["metadata"].pop("uid")
+    kube = PVCDiagnosisKube(pvc=manifest)
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["outcome"] == "healthy"
+    assert kube.calls == [("get", "PersistentVolumeClaim", "shop", "data")]
+
+
+@pytest.mark.asyncio
+async def test_lost_pvc_missing_uid_still_succeeds() -> None:
+    """Lost PVC with no metadata.uid must succeed (single GET, no events call needed)."""
+    manifest = _pvc_manifest(phase="Lost")
+    manifest["metadata"].pop("uid")
+    kube = PVCDiagnosisKube(pvc=manifest)
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["outcome"] == "findings"
+    assert document["findings"][0]["rule_id"] == "pvc.lost"
+    assert kube.calls == [("get", "PersistentVolumeClaim", "shop", "data")]
+
+
+# --- Issue 2: StorageClass projection loss → EvidenceGap ---
+
+
+@pytest.mark.asyncio
+async def test_mixed_storage_class_rows_produce_gap() -> None:
+    """If any StorageClass LIST row cannot be projected, a storageclasses gap must be returned.
+
+    The class we are looking for is NOT in the typed rows (it may be in an untyped
+    row), so the gap prevents a false pvc.storage_class_not_found finding.
+    """
+    untyped_row = GenericSummary(
+        name="managed",  # the class the PVC needs — only available as untyped
+        namespace="",
+        kind="StorageClass",
+        created="",
+        uid="",
+        owner_uids=(),
+        labels=(),
+    )
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        storage_classes=[_storage_class("other"), untyped_row],
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    gap_sources = [g["source"] for g in document.get("gaps", [])]
+    assert "storageclasses" in gap_sources, f"Expected storageclasses gap, got gaps: {gap_sources}"
+    # Analyzer must report incomplete, not a false storage_class_not_found finding
+    assert document["outcome"] == "incomplete"
+
+
+@pytest.mark.asyncio
+async def test_all_untyped_storage_class_rows_produce_gap() -> None:
+    """If ALL StorageClass LIST rows are non-StorageClassSummary, gap + incomplete."""
+    untyped_row = GenericSummary(
+        name="untyped",
+        namespace="",
+        kind="StorageClass",
+        created="",
+        uid="",
+        owner_uids=(),
+        labels=(),
+    )
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        storage_classes=[untyped_row],
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    gap_sources = [g["source"] for g in document.get("gaps", [])]
+    assert "storageclasses" in gap_sources
+    assert document["outcome"] == "incomplete"
+
+
+@pytest.mark.asyncio
+async def test_storageclasses_gap_reason_is_count_only_no_object_content() -> None:
+    """Gap reason must contain a count but must not quote any object names or content."""
+    untyped_row = GenericSummary(
+        name="secret-class-name",
+        namespace="",
+        kind="StorageClass",
+        created="",
+        uid="",
+        owner_uids=(),
+        labels=(),
+    )
+    kube = PVCDiagnosisKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        storage_classes=[_storage_class("managed"), untyped_row],
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    sc_gap = next(g for g in document.get("gaps", []) if g["source"] == "storageclasses")
+    reason = sc_gap.get("reason", "")
+    assert "secret-class-name" not in reason, (
+        f"Gap reason must not quote object names, got: {reason!r}"
+    )
+    assert any(char.isdigit() for char in reason), (
+        f"Gap reason must include a count, got: {reason!r}"
+    )
+
+
+# --- Issue 3: events gap + Immediate → incomplete (executor-level) ---
+
+
+@pytest.mark.asyncio
+async def test_events_gap_immediate_class_executor_returns_incomplete() -> None:
+    """Executor: Immediate-class + events gap must yield outcome=incomplete, not provisioning_pending."""
+
+    class EventForbiddenKube(PVCDiagnosisKube):
+        async def list_events_for(
+            self, namespace: str, name: str, *, kind: str | None = None, uid: str | None = None
+        ) -> list[dict[str, Any]]:
+            self.calls.append(("events", kind or "?", str(namespace), name, uid or ""))
+            raise ApiStatusError(403, "Forbidden", "")
+
+    kube = EventForbiddenKube(
+        pvc=_pvc_manifest(phase="Pending", storage_class_name="managed"),
+        storage_classes=[_storage_class("managed")],
+    )
+    document = load_structured_document(
+        await _pvc_executor(kube).execute("diagnose_pvc", {"pvc": "data", "namespace": "shop"})
+    )
+    assert document["outcome"] == "incomplete", (
+        f"Expected incomplete, got: {document['outcome']}, findings: {document.get('findings')}"
+    )
+    rule_ids = [f["rule_id"] for f in document.get("findings", [])]
+    assert "pvc.provisioning_pending" not in rule_ids

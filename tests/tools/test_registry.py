@@ -83,10 +83,12 @@ def test_every_tool_declares_an_outbound_result_format() -> None:
     }
     assert registry_mod.tool_result_format("get_resource") == "structured_yaml"
     assert registry_mod.tool_result_format("diagnose_service") == "structured_yaml"
+    assert registry_mod.tool_result_format("diagnose_pvc") == "structured_yaml"
+    _structured = {"get_resource", "diagnose_service", "diagnose_pvc"}
     assert all(
         registry_mod.tool_result_format(d.name) == "untrusted_text"
         for d in TOOL_DEFS
-        if d.name not in ("get_resource", "diagnose_service")
+        if d.name not in _structured
     )
 
 
@@ -257,6 +259,7 @@ _READ_ORDER = [
     "diagnose_pod",
     "diagnose_workload",
     "diagnose_service",
+    "diagnose_pvc",
 ]
 _UI_ORDER = ["navigate", "set_filter", "open_logs", "open_describe", "drill_down"]
 _WRITE_ORDER = ["delete_resource", "scale_resource", "rollout_restart"]
@@ -591,3 +594,9 @@ def test_registry_dispatches_diagnose_service() -> None:
     validate_dispatch_targets(TOOL_DEFS, executor_cls=ToolExecutor, bridge_cls=UIBridge)
     names = {schema["function"]["name"] for schema in mcp_tool_schemas()}
     assert "diagnose_service" in names
+
+
+def test_registry_dispatches_diagnose_pvc() -> None:
+    validate_dispatch_targets(TOOL_DEFS, executor_cls=ToolExecutor, bridge_cls=UIBridge)
+    names = {schema["function"]["name"] for schema in mcp_tool_schemas()}
+    assert "diagnose_pvc" in names

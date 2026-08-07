@@ -15,6 +15,7 @@ from korvid.k8s.models import (
     PackageManifestSummary,
     PodListSummary,
     ReplicaSetSummary,
+    StorageClassSummary,
     summary_for,
 )
 from korvid.tools.executor import ToolExecutor, summary_facts
@@ -174,6 +175,24 @@ def test_endpoint_slice_facts_line() -> None:
     assert "service=api" in line
     assert "ready=2/3" in line
     assert "address_type=IPv4" in line
+
+
+def test_storage_class_facts_line() -> None:
+    s = StorageClassSummary(
+        name="managed",
+        namespace="",
+        kind="StorageClass",
+        created="",
+        provisioner="disk.csi.azure.com",
+        volume_binding_mode="WaitForFirstConsumer",
+        allow_volume_expansion=True,
+        is_default=True,
+    )
+    line = summary_facts(s)
+    assert "provisioner=disk.csi.azure.com" in line
+    assert "binding=WaitForFirstConsumer" in line
+    assert "default=true" in line
+    assert "expand=true" in line
 
 
 def test_every_typed_summary_has_a_facts_renderer() -> None:
