@@ -79,22 +79,26 @@ jobs:
             az aks start -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME"
           fi
 
-      - name: Ensure the disposable workload pool has a node
+      - name: Guard — the disposable workload pool must have a node
         run: |
           # The node-ops and resize contracts need a node labelled
-          # korvid.dev/disposable=true; they refuse to touch system nodes. A
-          # pool scaled to zero (by a perf run, a cost sweep, or a previous
-          # cleanup) makes them fail with "no disposable workload node found"
-          # or time out waiting for a pod to schedule, and nothing in the
-          # workflow put it back — the suite stayed red for days that way.
+          # korvid.dev/disposable=true; they refuse to touch system nodes. When
+          # the pool is empty they fail with "no disposable workload node
+          # found" or time out waiting for a pod to schedule — six failures
+          # spread over four files, none of which name the actual cause. The
+          # suite stayed red for eight commits that way.
+          #
+          # Checked, not repaired: the workflow identity holds a deliberately
+          # minimal role with agentPools/read and no write, so it cannot scale
+          # the pool, and widening that role to auto-heal would let this
+          # workflow reshape the system pool too. Cost at rest is handled by
+          # stopping the cluster, so an empty pool is drift, not a setting.
           count=$(az aks nodepool show -g "$AKS_RESOURCE_GROUP" \
             --cluster-name "$AKS_CLUSTER_NAME" -n "$WORKLOAD_NODEPOOL" \
             --query count -o tsv)
           if [ "$count" -lt 1 ]; then
-            echo "::notice title=Scaling workload pool::$WORKLOAD_NODEPOOL was at $count; scaling to 1 for the contract suite."
-            az aks nodepool scale -g "$AKS_RESOURCE_GROUP" \
-              --cluster-name "$AKS_CLUSTER_NAME" -n "$WORKLOAD_NODEPOOL" \
-              --node-count 1
+            echo "::error title=Workload pool is empty::$WORKLOAD_NODEPOOL has $count nodes, so the node-operation and resize contracts have nowhere to schedule. Restore it with: az aks nodepool scale -g $AKS_RESOURCE_GROUP --cluster-name $AKS_CLUSTER_NAME -n $WORKLOAD_NODEPOOL --node-count 1"
+            exit 1
           fi
 
       - uses: azure/use-kubelogin@0ce7c36141aa27d4934872cf00b0120804c98a29 # v1.3
