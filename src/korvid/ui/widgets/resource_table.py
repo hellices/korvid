@@ -636,7 +636,7 @@ class ResourceTable(DataTable[str | Text]):
         return super().clear(columns=columns)
 
     def _update_dimensions(self, new_rows: Iterable[RowKey]) -> None:
-        """Measure only the rows whose widths were absorbed above.
+        """Measure only the rows whose widths were not absorbed above.
 
         The superclass still recomputes the virtual size and handles anything
         this widget did not account for (a row added directly, or added after
