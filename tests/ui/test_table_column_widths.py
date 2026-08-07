@@ -242,8 +242,45 @@ async def test_absorption_never_skips_a_labelled_or_auto_height_row() -> None:
         first.height = 0
         second.label = Text("a-very-long-row-label")
 
-        table._widths_absorbed = True
+        table._absorbed.update(key for key in (first.key.value, second.key.value) if key)
         table._update_dimensions([first.key, second.key])
 
         assert first.height > 0, "auto-height row was skipped and stayed 0 tall"
         assert table._label_column.content_width >= len("a-very-long-row-label")
+
+
+async def test_a_repaint_that_widens_nothing_leaves_no_stale_skip() -> None:
+    """Absorption must not license skipping a row it never accounted for.
+
+    When a repaint absorbs widths but grows no column, no dimension pass is
+    scheduled. If the "widths were absorbed" state survives to whatever pass
+    runs next, that pass filters out rows this widget merely *emitted* once —
+    including a row re-added since, whose wider content then never reaches
+    the column.
+    """
+    app = _TableApp()
+    async with app.run_test(size=(120, 12)) as pilot:
+        table = app.query_one(ResourceTable)
+        await pilot.pause()
+        table.show("pods", _pods(["alpha", "beta"]), all_namespaces=False, pattern="")
+        await pilot.pause()
+
+        # A repaint that changes a cell but widens nothing: absorption runs,
+        # no column grows, so nothing schedules a dimension pass.
+        table.show(
+            "pods",
+            _pods_with_phase([("alpha", "Pending"), ("beta", "Running")]),
+            all_namespaces=False,
+            pattern="",
+        )
+
+        name_column = table.ordered_columns[1]
+        wide = "a" * (name_column.content_width + 30)
+        key = next(iter(table._emitted))
+        table.remove_row(key)
+        table.add_row(*([wide] * len(table.ordered_columns)), height=1, key=key)
+        await pilot.pause()
+
+        assert name_column.content_width >= len(wide), (
+            f"column stayed {name_column.content_width} wide, needed {len(wide)}"
+        )

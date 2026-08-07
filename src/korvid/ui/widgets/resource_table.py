@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
-from typing import Final, cast
+from typing import Final, Self, cast
 
 from rich.cells import cell_len
 from rich.text import Text
@@ -347,10 +348,17 @@ class ResourceTable(DataTable[str | Text]):
     _last_all_namespaces: bool | None = None
     _last_sort: SortSpec | None = None
     _active_view: ViewConfig | None = None
-    #: Set once this widget has folded the rows it emitted into the column
-    #: widths itself; consumed by the next `_update_dimensions`. Declared at
-    #: class level so the hook is safe before `on_mount` has run.
-    _widths_absorbed: bool = False
+    #: Row keys whose widths this widget folded into the columns itself,
+    #: pending consumption by the next `_update_dimensions`. Created lazily so
+    #: the hook is safe before `on_mount` has run.
+    _absorbed_keys: set[str] | None = None
+
+    @property
+    def _absorbed(self) -> set[str]:
+        keys = self._absorbed_keys
+        if keys is None:
+            keys = self._absorbed_keys = set()
+        return keys
 
     def on_mount(self) -> None:
         self.cursor_type = "row"
@@ -463,7 +471,7 @@ class ResourceTable(DataTable[str | Text]):
         for key, cells in pending:
             self.add_row(*cells, key=key)
         self._emitted = dict(pending)
-        self._absorb_widths(cells for _, cells in pending)
+        self._absorb_widths(pending)
         if restore is not None:
             # A background refresh must not scroll the cursor back into
             # view — the viewport restore below keeps the user's position.
@@ -546,13 +554,13 @@ class ResourceTable(DataTable[str | Text]):
         for key in doomed:
             self.remove_row(key)
         columns = self.ordered_columns
-        touched: list[list[str | Text]] = []
+        touched: list[tuple[str, list[str | Text]]] = []
         for key, cells in pending:
             if key not in current_set:
                 self.add_row(*cells, key=key)
-                touched.append(cells)
+                touched.append((key, cells))
             elif self._patch_row(key, cells, columns):
-                touched.append(cells)
+                touched.append((key, cells))
         self._emitted = dict(pending)
         if touched:
             self._absorb_widths(touched)
@@ -572,7 +580,7 @@ class ResourceTable(DataTable[str | Text]):
                 changed = True
         return changed
 
-    def _absorb_widths(self, rows: Iterable[list[str | Text]]) -> None:
+    def _absorb_widths(self, rows: Iterable[tuple[str, list[str | Text]]]) -> None:
         """Grow the column widths from cells this widget is holding anyway.
 
         `DataTable` derives column widths from `on_idle`, and to do so it
@@ -592,7 +600,9 @@ class ResourceTable(DataTable[str | Text]):
         columns = self.ordered_columns
         widths = [column.content_width for column in columns]
         limit = len(widths)
-        for cells in rows:
+        absorbed = self._absorbed
+        for key, cells in rows:
+            absorbed.add(key)
             for index, cell in enumerate(cells):
                 if index >= limit:
                     break
@@ -609,27 +619,38 @@ class ResourceTable(DataTable[str | Text]):
                 # recomputes the virtual size from the dimension pass, which
                 # `update_cell(update_width=False)` does not schedule.
                 self._require_update_dimensions = True
-        self._widths_absorbed = True
+
+    def remove_row(self, row_key: RowKey | str) -> None:
+        """Forget the absorption record for a row that is going away.
+
+        A key removed and re-added before the next dimension pass carries
+        content this widget never measured, so it must not stay on the skip
+        list.
+        """
+        self._absorbed.discard(row_key.value if isinstance(row_key, RowKey) else row_key)
+        super().remove_row(row_key)
+
+    def clear(self, columns: bool = False) -> Self:
+        """Drop the absorption record along with the rows it described."""
+        self._absorbed.clear()
+        return super().clear(columns=columns)
 
     def _update_dimensions(self, new_rows: Iterable[RowKey]) -> None:
-        """Measure only the rows whose widths were not absorbed above.
+        """Measure only the rows whose widths were absorbed above.
 
         The superclass still recomputes the virtual size and handles anything
-        this widget did not emit (a row added directly, or added after the
-        absorption and before this idle pass). Should a future Textual rename
-        the hook, this override simply stops being called and the widget falls
-        back to today's slower-but-correct measuring pass.
+        this widget did not account for (a row added directly, or added after
+        the absorption and before this idle pass). Should a future Textual
+        rename the hook, this override simply stops being called and the
+        widget falls back to today's slower-but-correct measuring pass.
         """
-        if not self._widths_absorbed:
-            super()._update_dimensions(new_rows)
-            return
-        self._widths_absorbed = False
-        absorbed = self._emitted
-        super()._update_dimensions(
-            [key for key in new_rows if not self._is_absorbed(key, absorbed)]
-        )
+        absorbed = self._absorbed_keys
+        if absorbed:
+            new_rows = [key for key in new_rows if not self._is_absorbed(key, absorbed)]
+            absorbed.clear()
+        super()._update_dimensions(new_rows)
 
-    def _is_absorbed(self, key: RowKey, absorbed: dict[str, list[str | Text]]) -> bool:
+    def _is_absorbed(self, key: RowKey, absorbed: AbstractSet[str]) -> bool:
         """Whether `_absorb_widths` fully accounted for the row behind *key*.
 
         Absorption only folds in cell *widths*. The superclass pass also sizes
