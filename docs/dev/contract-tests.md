@@ -44,8 +44,8 @@ Node pools:
 
 Because that pool is the suite's single point of failure, the workflow waits
 for **at least one** node that is Ready, uncordoned, and carries **both**
-`korvid.dev/disposable=true` and `korvid.dev/pool=workload` before installing
-anything, and fails with a named cause and the repair sequence if none appears
+`korvid.dev/disposable=true` and `korvid.dev/pool=workload` before running the
+suite, and fails with a named cause and the repair sequence if none appears
 within five minutes. Both labels are required together: the node-operation
 tests select on the first and every test pod's `nodeSelector` uses the second,
 so a node with only one of them would pass a looser check and still leave pods
