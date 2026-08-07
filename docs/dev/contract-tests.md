@@ -42,6 +42,12 @@ Node pools:
   the only node the node-operation tests (cordon/drain/evict) will touch;
   tests fail rather than fall back to a system node.
 
+Because that pool is the suite's single point of failure, the workflow scales
+it to one node when it finds it at zero. Nothing else restores it, and a pool
+left at zero — by a performance run, a cost sweep, or a cleanup — fails the
+node-operation and resize contracts with `no disposable workload node found`
+or a pod-scheduling timeout until someone notices.
+
 The cluster has AAD + Azure RBAC enabled with local accounts disabled; the
 workflow identity holds a minimal custom role (read/start/stop/list-user-
 credentials) plus AKS RBAC Cluster Admin, both scoped to the one cluster.
