@@ -271,7 +271,7 @@ def _resolve_storage_class(
     if pvc.storage_class_name is None:
         if has_sc_gap:
             return _incomplete_report(pvc_id, gaps)
-        return _resolve_default_class(pvc_id, gaps, sorted_classes)
+        return _resolve_default_class(pvc, pvc_id, gaps, sorted_classes)
 
     # Named class
     named = [sc for sc in sorted_classes if sc.identity.name == pvc.storage_class_name]
@@ -297,10 +297,11 @@ def _resolve_storage_class(
                 ),
             ),
         )
-    return _resolve_binding_mode(pvc_id, gaps, named[0])
+    return _resolve_binding_mode(pvc, pvc_id, gaps, named[0])
 
 
 def _resolve_default_class(
+    pvc: PVCBindingSnapshot,
     pvc_id: ResourceIdentity,
     gaps: tuple[EvidenceGap, ...],
     sorted_classes: list[StorageClassSnapshot],
@@ -346,10 +347,11 @@ def _resolve_default_class(
                 ),
             ),
         )
-    return _resolve_binding_mode(pvc_id, gaps, defaults[0])
+    return _resolve_binding_mode(pvc, pvc_id, gaps, defaults[0])
 
 
 def _resolve_binding_mode(
+    pvc: PVCBindingSnapshot,
     pvc_id: ResourceIdentity,
     gaps: tuple[EvidenceGap, ...],
     resolved_sc: StorageClassSnapshot,
@@ -388,11 +390,12 @@ def _resolve_binding_mode(
             "medium",
             pvc_id,
             explanation=(
-                f"PVC is Pending with StorageClass '{resolved_sc.identity.name}' "
-                "(volumeBindingMode=Immediate); provisioning has not yet completed."
+                f"PVC is not yet Bound with StorageClass '{resolved_sc.identity.name}' "
+                "(volumeBindingMode=Immediate); provisioning has not reported a "
+                "specific failure."
             ),
             evidence=(
-                _evidence(pvc_id, "status.phase", "Pending"),
+                _evidence(pvc_id, "status.phase", pvc.phase),
                 _evidence(
                     resolved_sc.identity,
                     "spec.volumeBindingMode",

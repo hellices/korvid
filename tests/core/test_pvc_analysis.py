@@ -136,6 +136,15 @@ def test_immediate_class_reports_generic_pending() -> None:
     assert finding.rule_id == "pvc.provisioning_pending"
 
 
+def test_immediate_class_preserves_empty_phase_evidence() -> None:
+    report = analyze_pvc_binding(_pvc(phase="", storage_class_name="managed"), (_class("managed"),))
+    finding = report.findings[0]
+    evidence_fields = {e.field: e.value for e in finding.evidence}
+    assert report.outcome == "findings"
+    assert finding.rule_id == "pvc.provisioning_pending"
+    assert evidence_fields["status.phase"] == ""
+
+
 def test_storage_class_gap_prevents_false_no_default_finding() -> None:
     gap = EvidenceGap("storageclasses", "forbidden (HTTP 403)")
     report = analyze_pvc_binding(_pvc(storage_class_name=None), gaps=(gap,))
