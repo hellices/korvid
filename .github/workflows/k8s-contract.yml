@@ -128,24 +128,29 @@ jobs:
             exit 1
           fi
 
-          # `kubectl wait` requires *every* matching node to satisfy the
-          # condition, but this guard needs only one somewhere to schedule. A
-          # second pool node, or one cycling through an image upgrade, would
-          # otherwise burn the whole deadline and report "no schedulable node"
-          # while a perfectly good one was sitting there.
+          # `kubectl wait` requires *every* node matching the selector to
+          # satisfy the condition, but this guard needs only one somewhere to
+          # schedule. A second pool node, or one cycling through an image
+          # upgrade, would otherwise burn the whole deadline and report "no
+          # schedulable node" while a perfectly good one was sitting there.
+          #
+          # Ready alone is not enough: a crashed node-ops test leaves the node
+          # cordoned — that is why the janitor sweeps cordons — and the janitor
+          # runs after this step, so a cordoned node would pass here and leave
+          # every test pod Pending. Require unschedulable to be unset too.
           deadline=$(( SECONDS + 300 ))
           while :; do
             if kubectl get nodes -l "$SELECTOR" \
-              -o jsonpath='{range .items[*]}{.metadata.name}{"="}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
-              2>/dev/null | grep -q '=True$'; then
+              -o jsonpath='{range .items[*]}{.metadata.name}{"=ready:"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{" unschedulable:"}{.spec.unschedulable}{"\n"}{end}' \
+              2>/dev/null | grep -q '=ready:True unschedulable:$'; then
               kubectl get nodes -l "$SELECTOR"
               exit 0
             fi
             [ "$SECONDS" -lt "$deadline" ] || break
             sleep 5
           done
-          echo "::error title=No schedulable disposable node::$AKS_CLUSTER_NAME has no Ready node matching $SELECTOR after 5 minutes, so the node-operation and resize contracts have nowhere to schedule. If the $WORKLOAD_NODEPOOL pool is empty, restore it by starting the cluster first — this run's cleanup job stops it, and Azure rejects every operation except start on a stopped cluster: az aks start -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME && az aks nodepool scale -g $AKS_RESOURCE_GROUP --cluster-name $AKS_CLUSTER_NAME -n $WORKLOAD_NODEPOOL --node-count 1 && az aks stop -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME"
-          kubectl get nodes --show-labels || true
+          echo "::error title=No schedulable disposable node::$AKS_CLUSTER_NAME has no Ready, uncordoned node matching $SELECTOR after 5 minutes, so the node-operation and resize contracts have nowhere to schedule. If a previous run left the node cordoned, uncordon it. If the $WORKLOAD_NODEPOOL pool is empty, restore it by starting the cluster first — this run's cleanup job stops it, and Azure rejects every operation except start on a stopped cluster: az aks start -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME && az aks nodepool scale -g $AKS_RESOURCE_GROUP --cluster-name $AKS_CLUSTER_NAME -n $WORKLOAD_NODEPOOL --node-count 1 && az aks stop -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME"
+          kubectl get nodes -o wide --show-labels || true
           exit 1
 
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
