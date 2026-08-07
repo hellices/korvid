@@ -542,6 +542,41 @@ def test_events_gap_with_immediate_class_returns_incomplete() -> None:
     assert gap in report.gaps
 
 
+def test_events_gap_with_immediate_class_is_incomplete_for_single_and_multiple_defaults() -> None:
+    """Immediate-class single and duplicate-default paths must both stop at incomplete."""
+    gap = EvidenceGap("events", "forbidden (HTTP 403)")
+    single_report = analyze_pvc_binding(
+        _pvc(storage_class_name=None),
+        (_class("managed", volume_binding_mode="Immediate", is_default=True),),
+        gaps=(gap,),
+    )
+    multi_report = analyze_pvc_binding(
+        _pvc(storage_class_name=None),
+        (
+            _class(
+                "a",
+                volume_binding_mode="Immediate",
+                is_default=True,
+                created="2024-01-01T00:00:00Z",
+            ),
+            _class(
+                "b",
+                volume_binding_mode="Immediate",
+                is_default=True,
+                created="2024-06-01T00:00:00Z",
+            ),
+        ),
+        gaps=(gap,),
+    )
+    assert single_report.outcome == "incomplete"
+    assert single_report.findings == ()
+    assert multi_report.outcome == "incomplete"
+    assert [finding.rule_id for finding in multi_report.findings] == [
+        "pvc.multiple_default_storage_classes"
+    ]
+    assert gap in multi_report.gaps
+
+
 def test_events_gap_with_wffc_class_emits_finding_with_gap() -> None:
     """WaitForFirstConsumer is deterministic; events gap must not suppress it."""
     gap = EvidenceGap("events", "forbidden (HTTP 403)")
@@ -592,6 +627,7 @@ def test_events_gap_with_multiple_defaults_immediate_keeps_multi_default_finding
         gaps=(gap,),
     )
     rule_ids = [f.rule_id for f in report.findings]
+    assert report.outcome == "incomplete"
     assert "pvc.multiple_default_storage_classes" in rule_ids
     assert "pvc.provisioning_pending" not in rule_ids
     assert gap in report.gaps

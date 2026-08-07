@@ -1632,7 +1632,7 @@ class ToolExecutor(RecordedExecution):
         return dump_bounded_yaml(report.as_document(), MAX_RESULT_CHARS)
 
     async def _pvc_event_evidence(
-        self, pvc: PVCBindingSnapshot
+        self, pvc: PVCBindingSnapshot, uid: str
     ) -> tuple[list[WarningEventSnapshot], list[EvidenceGap]]:
         """Fetch Warning events for the PVC, catching only ApiStatusError."""
         gaps: list[EvidenceGap] = []
@@ -1641,7 +1641,7 @@ class ToolExecutor(RecordedExecution):
                 pvc.identity.namespace,
                 pvc.identity.name,
                 kind="PersistentVolumeClaim",
-                uid=pvc.identity.uid or None,
+                uid=uid,
             )
         except ApiStatusError as exc:
             if exc.status != 403:
@@ -1722,7 +1722,7 @@ class ToolExecutor(RecordedExecution):
                 "cannot scope events to this specific claim — "
                 "a replaced claim with the same name could pollute the evidence"
             )
-        events, gaps = await self._pvc_event_evidence(pvc)
+        events, gaps = await self._pvc_event_evidence(pvc, pvc.identity.uid)
         classes: tuple[StorageClassSnapshot, ...] = ()
         # Pre-bound claims (spec.volumeName set) and explicit empty class skip StorageClass
         # resolution. Decisive failure events also skip it — the finding is already determined.

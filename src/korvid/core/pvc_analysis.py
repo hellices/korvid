@@ -352,11 +352,10 @@ def _resolve_default_class(
             related=tuple(sc.identity for sc in defaults),
             next_checks=("remove the extra default annotation",),
         )
+        has_events_gap = any(g.source == "events" for g in gaps)
+        if effective.volume_binding_mode != "WaitForFirstConsumer" and has_events_gap:
+            return _incomplete_findings_report(pvc_id, gaps, multi_finding)
         effective_finding = _resolve_binding_mode_finding(pvc, pvc_id, gaps, effective)
-        if effective.volume_binding_mode != "WaitForFirstConsumer" and any(
-            g.source == "events" for g in gaps
-        ):
-            return _findings_report(pvc_id, gaps, multi_finding)
         return _findings_report(pvc_id, gaps, multi_finding, effective_finding)
     if not defaults:
         return _findings_report(
@@ -463,6 +462,21 @@ def _incomplete_report(
         outcome="incomplete",
         primary=primary,
         findings=(),
+        gaps=gaps,
+    )
+
+
+def _incomplete_findings_report(
+    primary: ResourceIdentity,
+    gaps: tuple[EvidenceGap, ...],
+    *findings: Finding,
+) -> AnalysisReport:
+    return AnalysisReport(
+        analyzer=_ANALYZER,
+        version=_VERSION,
+        outcome="incomplete",
+        primary=primary,
+        findings=findings,
         gaps=gaps,
     )
 
