@@ -80,7 +80,11 @@ def test_bound_claim_is_healthy() -> None:
 
 def test_bound_without_volume_is_inconsistent() -> None:
     report = analyze_pvc_binding(_pvc(phase="Bound", volume_name=""))
-    assert report.findings[0].rule_id == "pvc.bound_without_volume"
+    finding = report.findings[0]
+    evidence_fields = {e.field: e.value for e in finding.evidence}
+    assert finding.rule_id == "pvc.bound_without_volume"
+    assert evidence_fields["status.phase"] == "Bound"
+    assert evidence_fields["spec.volumeName"] == ""
 
 
 def test_pending_without_default_class_warns() -> None:

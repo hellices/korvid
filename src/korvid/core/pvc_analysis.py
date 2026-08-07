@@ -155,7 +155,10 @@ def _check_phase(
                         "PVC reports phase=Bound but spec.volumeName is empty, "
                         "which is internally inconsistent."
                     ),
-                    evidence=(_evidence(pvc_id, "status.phase", "Bound"),),
+                    evidence=(
+                        _evidence(pvc_id, "status.phase", "Bound"),
+                        _evidence(pvc_id, "spec.volumeName", ""),
+                    ),
                     next_checks=("inspect PV and binding controller logs",),
                 ),
             )
