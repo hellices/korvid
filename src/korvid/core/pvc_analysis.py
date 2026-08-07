@@ -353,6 +353,10 @@ def _resolve_default_class(
             next_checks=("remove the extra default annotation",),
         )
         effective_finding = _resolve_binding_mode_finding(pvc, pvc_id, gaps, effective)
+        if effective.volume_binding_mode != "WaitForFirstConsumer" and any(
+            g.source == "events" for g in gaps
+        ):
+            return _findings_report(pvc_id, gaps, multi_finding)
         return _findings_report(pvc_id, gaps, multi_finding, effective_finding)
     if not defaults:
         return _findings_report(
@@ -383,7 +387,18 @@ def _resolve_binding_mode(
     gaps: tuple[EvidenceGap, ...],
     resolved_sc: StorageClassSnapshot,
 ) -> AnalysisReport:
-    """Emit WaitForFirstConsumer or generic provisioning-pending finding."""
+    """Emit WaitForFirstConsumer or generic provisioning-pending finding.
+
+    For Immediate-mode classes, the generic finding asserts that no specific
+    failure was reported — but that claim is false when events are unavailable.
+    Return incomplete instead so a false negative is never serialised.
+    WaitForFirstConsumer is deterministic (no event evidence required) and is
+    always emitted regardless of an events gap.
+    """
+    if resolved_sc.volume_binding_mode != "WaitForFirstConsumer" and any(
+        g.source == "events" for g in gaps
+    ):
+        return _incomplete_report(pvc_id, gaps)
     return _findings_report(
         pvc_id, gaps, _resolve_binding_mode_finding(pvc, pvc_id, gaps, resolved_sc)
     )

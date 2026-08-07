@@ -520,3 +520,101 @@ def test_multiple_defaults_retain_evidence_and_related() -> None:
     multi = next(f for f in report.findings if f.rule_id == "pvc.multiple_default_storage_classes")
     assert {item.name for item in multi.related} == {"a", "b"}
     assert len(multi.evidence) == 2
+
+
+# ============================================================
+# PR #216 round-3 findings
+# ============================================================
+
+# --- Issue 3: events gap + Immediate → incomplete ---
+
+
+def test_events_gap_with_immediate_class_returns_incomplete() -> None:
+    """Immediate-class generic pending must not claim 'no specific failure' when events are unavailable."""
+    gap = EvidenceGap("events", "forbidden (HTTP 403)")
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name="managed"),
+        (_class("managed", volume_binding_mode="Immediate"),),
+        gaps=(gap,),
+    )
+    assert report.outcome == "incomplete"
+    assert report.findings == ()
+    assert gap in report.gaps
+
+
+def test_events_gap_with_wffc_class_emits_finding_with_gap() -> None:
+    """WaitForFirstConsumer is deterministic; events gap must not suppress it."""
+    gap = EvidenceGap("events", "forbidden (HTTP 403)")
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name="managed"),
+        (_class("managed", volume_binding_mode="WaitForFirstConsumer"),),
+        gaps=(gap,),
+    )
+    assert report.outcome == "findings"
+    assert report.findings[0].rule_id == "pvc.waiting_for_first_consumer"
+    assert gap in report.gaps
+
+
+def test_events_gap_does_not_suppress_missing_class_finding() -> None:
+    """pvc.storage_class_not_found is class-independent and must coexist with events gap."""
+    gap = EvidenceGap("events", "forbidden (HTTP 403)")
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name="missing"),
+        (_class("other"),),
+        gaps=(gap,),
+    )
+    assert report.outcome == "findings"
+    assert report.findings[0].rule_id == "pvc.storage_class_not_found"
+    assert gap in report.gaps
+
+
+def test_events_gap_does_not_suppress_no_default_class_finding() -> None:
+    """pvc.no_default_storage_class is class-independent and must coexist with events gap."""
+    gap = EvidenceGap("events", "forbidden (HTTP 403)")
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name=None),
+        (),
+        gaps=(gap,),
+    )
+    assert report.outcome == "findings"
+    assert report.findings[0].rule_id == "pvc.no_default_storage_class"
+    assert gap in report.gaps
+
+
+def test_events_gap_with_multiple_defaults_immediate_keeps_multi_default_finding() -> None:
+    """Duplicate-defaults finding is deterministic; events gap must not suppress it."""
+    gap = EvidenceGap("events", "forbidden (HTTP 403)")
+    sc_a = _class("a", is_default=True, created="2024-01-01T00:00:00Z")
+    sc_b = _class("b", is_default=True, created="2024-06-01T00:00:00Z")
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name=None),
+        (sc_a, sc_b),
+        gaps=(gap,),
+    )
+    rule_ids = [f.rule_id for f in report.findings]
+    assert "pvc.multiple_default_storage_classes" in rule_ids
+    assert "pvc.provisioning_pending" not in rule_ids
+    assert gap in report.gaps
+
+
+def test_events_gap_with_multiple_defaults_wffc_keeps_both_findings() -> None:
+    """WFFC effective class is deterministic; both findings survive events gap."""
+    gap = EvidenceGap("events", "forbidden (HTTP 403)")
+    sc_old = _class(
+        "old", volume_binding_mode="Immediate", is_default=True, created="2023-01-01T00:00:00Z"
+    )
+    sc_new = _class(
+        "new",
+        volume_binding_mode="WaitForFirstConsumer",
+        is_default=True,
+        created="2024-01-01T00:00:00Z",
+    )
+    report = analyze_pvc_binding(
+        _pvc(storage_class_name=None),
+        (sc_old, sc_new),
+        gaps=(gap,),
+    )
+    rule_ids = [f.rule_id for f in report.findings]
+    assert "pvc.multiple_default_storage_classes" in rule_ids
+    assert "pvc.waiting_for_first_consumer" in rule_ids
+    assert gap in report.gaps

@@ -1674,6 +1674,25 @@ class ToolExecutor(RecordedExecution):
             if exc.status != 403:
                 raise
             return (), EvidenceGap("storageclasses", _api_gap_reason(exc))
+        typed = [s for s in summaries if isinstance(s, StorageClassSummary)]
+        untyped_count = len(summaries) - len(typed)
+        if untyped_count:
+            reason = (
+                f"{untyped_count} of {len(summaries)} StorageClass row(s) could not be projected"
+            )
+            classes = tuple(
+                StorageClassSnapshot(
+                    identity=ResourceIdentity("StorageClass", "", s.name, s.uid or ""),
+                    provisioner=s.provisioner,
+                    volume_binding_mode=s.volume_binding_mode,
+                    is_default=s.is_default,
+                    default_annotation_key=s.default_annotation_key,
+                    default_annotation_value=s.default_annotation_value,
+                    created=s.created,
+                )
+                for s in typed
+            )
+            return classes, EvidenceGap("storageclasses", reason)
         classes = tuple(
             StorageClassSnapshot(
                 identity=ResourceIdentity("StorageClass", "", s.name, s.uid or ""),
@@ -1684,8 +1703,7 @@ class ToolExecutor(RecordedExecution):
                 default_annotation_value=s.default_annotation_value,
                 created=s.created,
             )
-            for s in summaries
-            if isinstance(s, StorageClassSummary)
+            for s in typed
         )
         return classes, None
 
@@ -1698,6 +1716,12 @@ class ToolExecutor(RecordedExecution):
         pvc = _pvc_binding_snapshot(manifest, namespace, name)
         if pvc.phase in {"Bound", "Lost"}:
             return dump_bounded_yaml(analyze_pvc_binding(pvc).as_document(), MAX_RESULT_CHARS)
+        if not pvc.identity.uid:
+            raise ValueError(
+                f"PVC '{namespace}/{name}' has no metadata.uid; "
+                "cannot scope events to this specific claim — "
+                "a replaced claim with the same name could pollute the evidence"
+            )
         events, gaps = await self._pvc_event_evidence(pvc)
         classes: tuple[StorageClassSnapshot, ...] = ()
         # Pre-bound claims (spec.volumeName set) and explicit empty class skip StorageClass
