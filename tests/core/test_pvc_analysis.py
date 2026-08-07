@@ -490,7 +490,7 @@ def test_multiple_defaults_older_wffc_gives_immediate_effective_finding() -> Non
 
 
 def test_multiple_defaults_name_tiebreak_is_deterministic() -> None:
-    """Equal timestamps: name tie-break selects max-name consistently."""
+    """Equal timestamps: name tie-break selects the lexicographically smallest class."""
     sc_a = _class(
         "alpha-sc", volume_binding_mode="Immediate", is_default=True, created="2024-01-01T00:00:00Z"
     )
@@ -504,9 +504,12 @@ def test_multiple_defaults_name_tiebreak_is_deterministic() -> None:
     report2 = analyze_pvc_binding(_pvc(storage_class_name=None), (sc_z, sc_a))
     rule_ids_1 = [f.rule_id for f in report1.findings]
     rule_ids_2 = [f.rule_id for f in report2.findings]
-    # Both orderings should produce the same effective rule (max-name = "zeta-sc" → WFFC)
     assert rule_ids_1 == rule_ids_2
-    assert "pvc.waiting_for_first_consumer" in rule_ids_1
+    assert "pvc.provisioning_pending" in rule_ids_1
+    assert "pvc.waiting_for_first_consumer" not in rule_ids_1
+    effective = next(f for f in report1.findings if f.rule_id == "pvc.provisioning_pending")
+    evidence_fields = {e.field: e.value for e in effective.evidence}
+    assert evidence_fields["volumeBindingMode"] == "Immediate"
 
 
 def test_multiple_defaults_retain_evidence_and_related() -> None:

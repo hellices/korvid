@@ -326,8 +326,12 @@ def _resolve_default_class(
     """Handle PVCs that require a default StorageClass."""
     defaults = [sc for sc in sorted_classes if sc.is_default]
     if len(defaults) > 1:
-        # Kubernetes selects the most recently created default; name is a tie-break.
-        effective = max(defaults, key=lambda sc: (_sc_creation_instant(sc), sc.identity.name))
+        # Kubernetes selects the newest default; on exact timestamp ties, the
+        # lexicographically smallest name wins.
+        effective = min(
+            defaults,
+            key=lambda sc: (-_sc_creation_instant(sc).timestamp(), sc.identity.name),
+        )
         multi_finding = _finding(
             "pvc.multiple_default_storage_classes",
             "warning",
