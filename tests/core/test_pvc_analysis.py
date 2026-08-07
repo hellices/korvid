@@ -49,8 +49,10 @@ def _class(
     )
 
 
-def _event(reason: str, message: str, count: int = 1) -> WarningEventSnapshot:
-    return WarningEventSnapshot(reason=reason, message=message, count=count, last_seen="now")
+def _event(
+    reason: str, message: str, count: int = 1, last_seen: str = "2024-01-01T00:00:00Z"
+) -> WarningEventSnapshot:
+    return WarningEventSnapshot(reason=reason, message=message, count=count, last_seen=last_seen)
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +93,8 @@ def test_provisioning_failure_event_takes_precedence() -> None:
     )
     assert report.findings[0].rule_id == "pvc.provisioning_failed"
     assert report.findings[0].confidence == "high"
-    assert report.findings[0].evidence[-1].value == "quota exhausted"
+    evidence_by_field = {e.field: e.value for e in report.findings[0].evidence}
+    assert evidence_by_field["event.message"] == "quota exhausted"
 
 
 # ---------------------------------------------------------------------------
@@ -151,3 +154,102 @@ def test_event_gap_does_not_hide_storage_class_finding() -> None:
     assert report.outcome == "findings"
     assert report.findings[0].rule_id == "pvc.storage_class_not_found"
     assert report.gaps == (gap,)
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: Pre-bound PVC (spec.volumeName set, phase Pending)
+# ---------------------------------------------------------------------------
+
+
+def test_prebound_pending_pvc_emits_awaiting_prebound_volume() -> None:
+    report = analyze_pvc_binding(
+        _pvc(phase="Pending", volume_name="my-pv", storage_class_name="managed")
+    )
+    assert report.findings[0].rule_id == "pvc.awaiting_prebound_volume"
+    assert report.findings[0].severity == "warning"
+    assert report.findings[0].confidence == "high"
+
+
+def test_prebound_pending_pvc_evidence_contains_volume_name() -> None:
+    report = analyze_pvc_binding(
+        _pvc(phase="Pending", volume_name="my-pv", storage_class_name="managed")
+    )
+    fields = [e.field for e in report.findings[0].evidence]
+    assert "spec.volumeName" in fields
+    vol_evidence = next(e for e in report.findings[0].evidence if e.field == "spec.volumeName")
+    assert vol_evidence.value == "my-pv"
+
+
+def test_prebound_pending_pvc_next_checks_mention_named_pv() -> None:
+    report = analyze_pvc_binding(_pvc(phase="Pending", volume_name="my-pv"))
+    assert any("my-pv" in chk for chk in report.findings[0].next_checks)
+
+
+def test_prebound_pending_pvc_does_not_run_class_resolution() -> None:
+    # Even with no storage classes, pre-bound PVC must not emit storage class findings
+    report = analyze_pvc_binding(
+        _pvc(phase="Pending", volume_name="my-pv", storage_class_name=None), ()
+    )
+    assert report.findings[0].rule_id == "pvc.awaiting_prebound_volume"
+
+
+def test_prebound_provisioning_failure_takes_precedence_over_awaiting() -> None:
+    # ProvisioningFailed / VolumeMismatch events outrank awaiting_prebound_volume
+    report = analyze_pvc_binding(
+        _pvc(phase="Pending", volume_name="my-pv"),
+        (),
+        (_event("VolumeMismatch", "wrong size"),),
+    )
+    assert report.findings[0].rule_id == "pvc.provisioning_failed"
+
+
+def test_prebound_volume_mismatch_event_takes_precedence() -> None:
+    report = analyze_pvc_binding(
+        _pvc(phase="Pending", volume_name="my-pv"),
+        (),
+        (_event("FailedBinding", "no match"),),
+    )
+    assert report.findings[0].rule_id == "pvc.provisioning_failed"
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: Failure event selection — newest last_seen first, then count desc
+# ---------------------------------------------------------------------------
+
+
+def test_newer_provisioning_failed_outranks_older_failed_binding() -> None:
+    events = [
+        _event("FailedBinding", "old error", count=100, last_seen="2024-01-01T00:00:00Z"),
+        _event("ProvisioningFailed", "new error", count=1, last_seen="2024-06-01T00:00:00Z"),
+    ]
+    report = analyze_pvc_binding(_pvc(), (), events)
+    assert report.findings[0].rule_id == "pvc.provisioning_failed"
+    ev_messages = [e.value for e in report.findings[0].evidence if e.field == "event.message"]
+    assert ev_messages == ["new error"]
+
+
+def test_count_tiebreaker_when_last_seen_equal() -> None:
+    events = [
+        _event("ProvisioningFailed", "low count", count=1, last_seen="2024-06-01T00:00:00Z"),
+        _event("FailedBinding", "high count", count=50, last_seen="2024-06-01T00:00:00Z"),
+    ]
+    report = analyze_pvc_binding(_pvc(), (), events)
+    ev_messages = [e.value for e in report.findings[0].evidence if e.field == "event.message"]
+    assert ev_messages == ["high count"]
+
+
+def test_failure_event_evidence_includes_count_and_last_seen() -> None:
+    events = [
+        _event("ProvisioningFailed", "quota exceeded", count=5, last_seen="2024-03-15T10:00:00Z")
+    ]
+    report = analyze_pvc_binding(_pvc(), (), events)
+    evidence_fields = {e.field: e.value for e in report.findings[0].evidence}
+    assert evidence_fields["event.count"] == "5"
+    assert evidence_fields["event.last_seen"] == "2024-03-15T10:00:00Z"
+
+
+def test_failure_event_last_seen_omitted_when_empty() -> None:
+    ev = WarningEventSnapshot(reason="ProvisioningFailed", message="x", count=1, last_seen="")
+    report = analyze_pvc_binding(_pvc(), (), [ev])
+    evidence_fields = [e.field for e in report.findings[0].evidence]
+    assert "event.last_seen" not in evidence_fields

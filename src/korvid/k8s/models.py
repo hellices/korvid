@@ -320,7 +320,7 @@ def _storage_class_is_default(annotations: dict[str, Any]) -> bool:
         "storageclass.beta.kubernetes.io/is-default-class",
     ):
         value = annotations.get(key)
-        if isinstance(value, str) and value.lower() == "true":
+        if isinstance(value, str) and value == "true":
             return True
     return False
 

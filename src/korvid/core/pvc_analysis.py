@@ -73,13 +73,14 @@ def analyze_pvc_binding(
 
     Rules are evaluated in strict priority order:
     1. Bound/Lost and internally inconsistent Bound.
-    2. Any provisioning-failure Warning event.
+    2. Any provisioning-failure Warning event (ProvisioningFailed, FailedBinding, VolumeMismatch).
     3. Explicit empty class (static binding).
-    4. storageclasses gap blocks class-resolution rules (returns incomplete).
-    5. Named/default StorageClass resolution.
-    6. WaitForFirstConsumer.
-    7. Generic Immediate pending.
-    8. Fallback incomplete when gaps exist.
+    4. Pre-bound claim: spec.volumeName non-empty and phase not Bound/Lost — emit
+       pvc.awaiting_prebound_volume; class/default resolution does not run.
+    5. storageclasses gap blocks class-resolution rules (returns incomplete).
+    6. Named/default StorageClass resolution.
+    7. WaitForFirstConsumer.
+    8. Generic Immediate pending.
     """
     pvc_id = pvc.identity
     gaps_tuple = tuple(gaps)
@@ -93,6 +94,10 @@ def analyze_pvc_binding(
         return result
 
     result = _check_static_binding(pvc, pvc_id, gaps_tuple)
+    if result is not None:
+        return result
+
+    result = _check_prebound(pvc, pvc_id, gaps_tuple)
     if result is not None:
         return result
 
@@ -154,12 +159,28 @@ def _check_failure_events(
     gaps: tuple[EvidenceGap, ...],
     warning_events: Sequence[WarningEventSnapshot],
 ) -> AnalysisReport | None:
-    """Return a finding if any provisioning-failure event exists."""
-    sorted_events = sorted(warning_events, key=lambda e: (e.reason, e.message))
-    failure_events = [e for e in sorted_events if e.reason in _PROVISIONING_FAILURE_REASONS]
+    """Return a finding if any provisioning-failure event exists.
+
+    Selection: newest last_seen first, then highest count, then reason/message
+    for determinism. Evidence includes event.count and event.last_seen (omitted
+    when last_seen is empty).
+    """
+    failure_events = [e for e in warning_events if e.reason in _PROVISIONING_FAILURE_REASONS]
     if not failure_events:
         return None
+    # Sort: newest last_seen descending, count descending, reason/message ascending for determinism.
+    # Events without last_seen sort last (empty string < any ISO timestamp).
+    failure_events.sort(key=lambda e: (-e.count, e.reason, e.message))
+    failure_events.sort(key=lambda e: e.last_seen, reverse=True)
     ev = failure_events[0]
+    evidence: list[Evidence] = [
+        _evidence(pvc_id, "status.phase", pvc.phase),
+        _evidence(pvc_id, "event.reason", ev.reason),
+        _evidence(pvc_id, "event.message", ev.message),
+        _evidence(pvc_id, "event.count", str(ev.count)),
+    ]
+    if ev.last_seen:
+        evidence.append(_evidence(pvc_id, "event.last_seen", ev.last_seen))
     return _findings_report(
         pvc_id,
         gaps,
@@ -169,11 +190,7 @@ def _check_failure_events(
             "high",
             pvc_id,
             explanation=f"Provisioning failure event: {ev.reason}",
-            evidence=(
-                _evidence(pvc_id, "status.phase", pvc.phase),
-                _evidence(pvc_id, "event.reason", ev.reason),
-                _evidence(pvc_id, "event.message", ev.message),
-            ),
+            evidence=tuple(evidence),
             next_checks=("check provisioner logs", "verify quota and permissions"),
         ),
     )
@@ -201,6 +218,39 @@ def _check_static_binding(
             ),
             evidence=(_evidence(pvc_id, "spec.storageClassName", ""),),
             next_checks=("create a matching PersistentVolume",),
+        ),
+    )
+
+
+def _check_prebound(
+    pvc: PVCBindingSnapshot,
+    pvc_id: ResourceIdentity,
+    gaps: tuple[EvidenceGap, ...],
+) -> AnalysisReport | None:
+    """Return a finding if spec.volumeName is set and phase is not Bound/Lost.
+
+    Class and default-class resolution must not run for pre-bound claims.
+    Provisioning-failure events (checked earlier) still take precedence.
+    """
+    if not pvc.volume_name:
+        return None
+    return _findings_report(
+        pvc_id,
+        gaps,
+        _finding(
+            "pvc.awaiting_prebound_volume",
+            "warning",
+            "high",
+            pvc_id,
+            explanation=(
+                f"spec.volumeName is set to '{pvc.volume_name}' but the PVC is not yet Bound. "
+                "The PVC is waiting for the named PV to become available and satisfy the claim."
+            ),
+            evidence=(_evidence(pvc_id, "spec.volumeName", pvc.volume_name),),
+            next_checks=(
+                f"inspect PersistentVolume '{pvc.volume_name}'",
+                f"verify PV '{pvc.volume_name}' exists, is Available, and matches PVC requirements",
+            ),
         ),
     )
 

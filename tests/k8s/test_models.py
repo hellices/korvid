@@ -449,11 +449,26 @@ def test_summary_for_same_named_storage_class_crd_stays_generic() -> None:
         "storageclass.beta.kubernetes.io/is-default-class",
     ],
 )
-def test_storage_class_default_annotations_are_case_insensitive(key: str) -> None:
+def test_storage_class_default_annotation_exact_true_string(key: str) -> None:
     summary = StorageClassSummary.from_manifest(
-        "StorageClass", {"metadata": {"name": "managed", "annotations": {key: "TRUE"}}}
+        "StorageClass", {"metadata": {"name": "managed", "annotations": {key: "true"}}}
     )
     assert summary.is_default
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "storageclass.kubernetes.io/is-default-class",
+        "storageclass.beta.kubernetes.io/is-default-class",
+    ],
+)
+@pytest.mark.parametrize("value", ["TRUE", "True"])
+def test_storage_class_non_lowercase_true_is_not_default(key: str, value: str) -> None:
+    summary = StorageClassSummary.from_manifest(
+        "StorageClass", {"metadata": {"name": "managed", "annotations": {key: value}}}
+    )
+    assert not summary.is_default
 
 
 def test_storage_class_malformed_values_fall_back_safely() -> None:

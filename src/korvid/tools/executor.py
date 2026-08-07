@@ -1690,7 +1690,10 @@ class ToolExecutor(RecordedExecution):
             return dump_bounded_yaml(analyze_pvc_binding(pvc).as_document(), MAX_RESULT_CHARS)
         events, gaps = await self._pvc_event_evidence(pvc)
         classes: tuple[StorageClassSnapshot, ...] = ()
-        if pvc.storage_class_name != "":
+        # Pre-bound claims (spec.volumeName set) skip StorageClass resolution;
+        # also skip when storageClassName is explicitly empty (static binding).
+        is_prebound = bool(pvc.volume_name)
+        if not is_prebound and pvc.storage_class_name != "":
             classes, class_gap = await self._pvc_storage_classes()
             if class_gap is not None:
                 gaps.append(class_gap)
