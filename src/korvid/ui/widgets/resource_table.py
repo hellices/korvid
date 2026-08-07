@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
-from typing import Final, cast
+from typing import Final, Self, cast
 
 from rich.cells import cell_len
 from rich.text import Text
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable
-from textual.widgets.data_table import RowDoesNotExist
+from textual.widgets.data_table import Column, RowDoesNotExist, RowKey
 
 from korvid.core.config import ViewConfig
 from korvid.core.sorting import SortSpec, sort_rows
@@ -347,6 +348,17 @@ class ResourceTable(DataTable[str | Text]):
     _last_all_namespaces: bool | None = None
     _last_sort: SortSpec | None = None
     _active_view: ViewConfig | None = None
+    #: Row keys whose widths this widget folded into the columns itself,
+    #: pending consumption by the next `_update_dimensions`. Created lazily so
+    #: the hook is safe before `on_mount` has run.
+    _absorbed_keys: set[str] | None = None
+
+    @property
+    def _absorbed(self) -> set[str]:
+        keys = self._absorbed_keys
+        if keys is None:
+            keys = self._absorbed_keys = set()
+        return keys
 
     def on_mount(self) -> None:
         self.cursor_type = "row"
@@ -459,6 +471,7 @@ class ResourceTable(DataTable[str | Text]):
         for key, cells in pending:
             self.add_row(*cells, key=key)
         self._emitted = dict(pending)
+        self._absorb_widths(pending)
         if restore is not None:
             # A background refresh must not scroll the cursor back into
             # view — the viewport restore below keeps the user's position.
@@ -524,11 +537,15 @@ class ResourceTable(DataTable[str | Text]):
         settled by one identity check. `get_row` remains the fallback whenever
         `_emitted` has no record of a row.
 
-        Width updates are requested only for cells wider than their column:
-        `update_width=True` is not grow-only — a narrower replacement rescans
-        and *shrinks* the column, shifting the layout this path must keep
-        still. The trade-off is that a column stays at its widest-seen size
-        until the next rebuild.
+        Width updates are never handed to Textual's queue. `update_width=True`
+        is not grow-only: it defers the cell to `_update_column_widths`, which
+        runs *before* the dimension pass and re-measures every cell in the
+        column the moment the queued value looks narrower than the column —
+        both when the replacement genuinely shrank, and when another row in
+        the same repaint had already widened that column. Widths are absorbed
+        below instead, from the rows that actually changed. The trade-off is
+        unchanged: a column stays at its widest-seen size until the next
+        rebuild.
         """
         plan = self._in_place_plan(pending)
         if plan is None:
@@ -537,21 +554,115 @@ class ResourceTable(DataTable[str | Text]):
         for key in doomed:
             self.remove_row(key)
         columns = self.ordered_columns
+        touched: list[tuple[str, list[str | Text]]] = []
         for key, cells in pending:
             if key not in current_set:
                 self.add_row(*cells, key=key)
-                continue
-            old_cells = self._emitted.get(key)
-            if old_cells is cells:
-                continue  # memo hit: same list object, nothing can have changed
-            if old_cells is None:
-                old_cells = self.get_row(key)
-            for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
-                if not _cells_equal(old_cell, new_cell):
-                    grew = _cell_width(new_cell) > column.content_width
-                    self.update_cell(key, column.key, new_cell, update_width=grew)
+                touched.append((key, cells))
+            elif self._patch_row(key, cells, columns):
+                touched.append((key, cells))
         self._emitted = dict(pending)
+        if touched:
+            self._absorb_widths(touched)
         return True
+
+    def _patch_row(self, key: str, cells: list[str | Text], columns: list[Column]) -> bool:
+        """Update an existing row's changed cells; True when any cell moved."""
+        old_cells = self._emitted.get(key)
+        if old_cells is cells:
+            return False  # memo hit: same list object, nothing can have changed
+        if old_cells is None:
+            old_cells = self.get_row(key)
+        changed = False
+        for column, old_cell, new_cell in zip(columns, old_cells, cells, strict=True):
+            if not _cells_equal(old_cell, new_cell):
+                self.update_cell(key, column.key, new_cell, update_width=False)
+                changed = True
+        return changed
+
+    def _absorb_widths(self, rows: Iterable[tuple[str, list[str | Text]]]) -> None:
+        """Grow the column widths from cells this widget is holding anyway.
+
+        `DataTable` derives column widths from `on_idle`, and to do so it
+        rebuilds every new row's renderables and measures each cell — 700,000
+        renderable constructions and measurements to seed a 50,000-row view,
+        which is most of the freeze when a large kind first loads (issue
+        #210). The cells are already in hand here, so the same fourteen
+        integers are computed directly and `_update_dimensions` is told to
+        skip the rows they came from.
+
+        The `len(raw) <= width and raw.isascii()` guard settles the
+        overwhelming majority of cells without measuring: an ASCII string's
+        display width is exactly its length, and both markup parsing and the
+        newline truncation `_cell_width` performs can only shorten it — so a
+        cell that short cannot widen its column no matter how it renders.
+        """
+        columns = self.ordered_columns
+        widths = [column.content_width for column in columns]
+        limit = len(widths)
+        absorbed = self._absorbed
+        for key, cells in rows:
+            absorbed.add(key)
+            for index, cell in enumerate(cells):
+                if index >= limit:
+                    break
+                raw = cell.plain if isinstance(cell, Text) else cell
+                if len(raw) <= widths[index] and raw.isascii():
+                    continue
+                width = _cell_width(cell)
+                if width > widths[index]:
+                    widths[index] = width
+        for column, width in zip(columns, widths, strict=True):
+            if width > column.content_width:
+                column.content_width = width
+                # A wider column means a wider table; the superclass
+                # recomputes the virtual size from the dimension pass, which
+                # `update_cell(update_width=False)` does not schedule.
+                self._require_update_dimensions = True
+
+    def remove_row(self, row_key: RowKey | str) -> None:
+        """Forget the absorption record for a row that is going away.
+
+        A key removed and re-added before the next dimension pass carries
+        content this widget never measured, so it must not stay on the skip
+        list.
+        """
+        self._absorbed.discard(row_key.value if isinstance(row_key, RowKey) else row_key)
+        super().remove_row(row_key)
+
+    def clear(self, columns: bool = False) -> Self:
+        """Drop the absorption record along with the rows it described."""
+        self._absorbed.clear()
+        return super().clear(columns=columns)
+
+    def _update_dimensions(self, new_rows: Iterable[RowKey]) -> None:
+        """Measure only the rows whose widths were not absorbed above.
+
+        The superclass still recomputes the virtual size and handles anything
+        this widget did not account for (a row added directly, or added after
+        the absorption and before this idle pass). Should a future Textual
+        rename the hook, this override simply stops being called and the
+        widget falls back to today's slower-but-correct measuring pass.
+        """
+        absorbed = self._absorbed_keys
+        if absorbed:
+            new_rows = [key for key in new_rows if not self._is_absorbed(key, absorbed)]
+            absorbed.clear()
+        super()._update_dimensions(new_rows)
+
+    def _is_absorbed(self, key: RowKey, absorbed: AbstractSet[str]) -> bool:
+        """Whether `_absorb_widths` fully accounted for the row behind *key*.
+
+        Absorption only folds in cell *widths*. The superclass pass also sizes
+        the row-label column and computes auto-height rows, so a row carrying
+        either must still reach it — today this widget emits neither, but the
+        fast path must fail safe rather than silently drop them if that
+        changes.
+        """
+        if key.value not in absorbed:
+            return False
+        row = self.rows.get(key)
+        return row is not None and row.label is None and not row.auto_height
 
     def _prune_memo(self, pending: list[tuple[str, list[str | Text]]]) -> None:
         """Drop memo entries for rows no longer rendered.
