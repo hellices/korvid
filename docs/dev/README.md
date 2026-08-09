@@ -12,6 +12,10 @@ opposed to the user-facing feature docs that live directly under
   updated retroactively.
 - [`contract-tests.md`](contract-tests.md) — the live-cluster contract
   suite and the Korvid test-only AKS infrastructure it runs against.
+- [`ui-controllers.md`](ui-controllers.md) — how `ui/app.py` is being
+  decomposed (issue #187): what each controller owns, what deliberately
+  stays on the app, and why the dependency getters are late-binding. Read
+  this before extracting the next area.
 - [`agent-decisions.md`](agent-decisions.md) — why the agent is shaped the
   way it is: which capability directions were tried, measured, or
   rejected, and what evidence settled them. Read this before proposing new
