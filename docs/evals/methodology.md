@@ -163,6 +163,11 @@ results:
 }
 ```
 
+Journey runs (`korvid.evals.journeys_cli --json`) carry the same envelope
+under a `journeys` key. They cannot yet be swept from the CLI, so their
+`source` is always `default`; the digest still makes a profile or
+tool-schema change visible.
+
 `source` is `default` when the run used the prompts korvid ships, and
 `override` when `--system-prompt-file` or `--prompt-append-file` changed
 them. The eval CLI does **not** read `~/.config/korvid/config.yaml`: a

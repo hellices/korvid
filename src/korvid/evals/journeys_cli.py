@@ -110,6 +110,30 @@ async def _run(args: argparse.Namespace) -> list[JourneyReport]:
     return reports
 
 
+def journey_run_payload(reports: list[JourneyReport], *, profile_name: str) -> dict[str, Any]:
+    """Journey results with the same provenance envelope as the task pack.
+
+    Journey runs are published as scoreboard rows too, so they must record
+    which prompt and tool schemas produced them. Journeys cannot yet be
+    swept from the CLI, so `source` is always `default`; the digest still
+    makes a profile or tool-schema change visible.
+    """
+    from korvid.agent.profiles import PromptOverrides, build_profile
+    from korvid.evals.__main__ import prompt_fingerprint
+
+    overrides = PromptOverrides()
+    profile = build_profile(
+        profile_name, readonly=True, resize_supported=False, overrides=overrides
+    )
+    return {
+        "meta": {
+            "profile": profile.name,
+            "prompts": prompt_fingerprint(profile, overrides),
+        },
+        "journeys": report_payload(reports),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     reports = asyncio.run(_run(args))
@@ -118,7 +142,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.out:
         args.out.write_text(markdown + "\n")
     if args.json:
-        args.json.write_text(json.dumps(report_payload(reports), indent=2) + "\n")
+        payload = journey_run_payload(reports, profile_name=args.profile)
+        args.json.write_text(json.dumps(payload, indent=2) + "\n")
     return exit_code(reports)
 
 

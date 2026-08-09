@@ -27,7 +27,7 @@ from korvid.agent.prompts import (
     UI_DRIVE_PROMPT,
 )
 from korvid.agent.runtime import MAX_HISTORY_CHARS
-from korvid.tools.registry import TOOL_DEFS, agent_tool_schemas
+from korvid.tools.registry import AGENT_SURFACES, TOOL_DEFS, agent_tool_schemas
 
 PROFILE_NAMES = ("full", "small")
 
@@ -190,15 +190,21 @@ def build_profile(
 
 
 def _known_tool_names() -> frozenset[str]:
-    """Every tool korvid defines, armed on this cluster or not.
+    """Every tool an agent profile can offer, armed on this cluster or not.
 
     Typo detection must not use the startup surface: `resize_pod` is armed
     only where discovery found pods/resize, write tools are absent in
     read-only mode, and the same overrides are reused after a `:ctx` switch
     or a profile change. Validating against the armed set would warn that a
     perfectly valid override "has no effect".
+
+    MCP-only definitions (`propose_write` and friends) are excluded: no
+    agent profile can ever offer them, so an override naming one really
+    does have no effect and should say so.
     """
-    return frozenset(definition.name for definition in TOOL_DEFS)
+    return frozenset(
+        definition.name for definition in TOOL_DEFS if definition.surfaces & AGENT_SURFACES
+    )
 
 
 def validate_prompt_overrides(profile: AgentProfile, overrides: PromptOverrides) -> list[str]:

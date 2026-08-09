@@ -343,7 +343,11 @@ def mcp_tool_schemas(*, write_proposals: bool = False) -> list[dict[str, Any]]:
 
 _ALL_SURFACES: frozenset[Surface] = frozenset({"full_agent", "small_agent", "mcp"})
 _FULL_AND_MCP: frozenset[Surface] = frozenset({"full_agent", "mcp"})
-_AGENT_SURFACES: frozenset[Surface] = frozenset({"full_agent", "small_agent"})
+#: Surfaces an embedded-agent profile can offer. Public because callers
+#: outside this module need to tell "not armed on this cluster" apart from
+#: "no agent profile can ever offer this" (e.g. the MCP-only proposal tools).
+AGENT_SURFACES: frozenset[Surface] = frozenset({"full_agent", "small_agent"})
+_AGENT_SURFACES = AGENT_SURFACES
 
 
 TOOL_DEFS: list[ToolDef] = [

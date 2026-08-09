@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import ClassVar
 
@@ -13,7 +14,7 @@ from korvid.evals.journey_runner import (
     JourneyRun,
     JourneyTurnResult,
 )
-from korvid.evals.journeys_cli import _parse_args, _run, exit_code
+from korvid.evals.journeys_cli import _parse_args, _run, exit_code, journey_run_payload
 
 
 def test_journey_cli_defaults_to_bundled_pack_and_three_reps() -> None:
@@ -148,3 +149,14 @@ def test_journey_exit_code_prints_turn_errors(
     )
     assert exit_code([report]) == 1
     assert "triage run 1 turn 1: ReadTimeout" in capsys.readouterr().err
+
+
+def test_journey_json_records_prompt_provenance(tmp_path: Path) -> None:
+    """Journey runs become published scoreboard rows too (#176 tier 2), so
+    they must say which prompt and tool schemas produced them."""
+    payload = journey_run_payload([], profile_name="small")
+    assert payload["meta"]["profile"] == "small"
+    assert payload["meta"]["prompts"]["source"] == "default"
+    assert len(payload["meta"]["prompts"]["sha256"]) == 64
+    assert payload["journeys"] == []
+    json.dumps(payload)

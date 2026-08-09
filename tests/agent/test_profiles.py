@@ -432,3 +432,13 @@ def test_validate_accepts_a_tool_that_is_known_but_not_currently_armed() -> None
     profile = build_profile("small", readonly=True, resize_supported=False, overrides=overrides)
     assert "resize_pod" not in {t["function"]["name"] for t in profile.tools}
     assert validate_prompt_overrides(profile, overrides) == []
+
+
+def test_validate_warns_about_an_mcp_only_tool_name() -> None:
+    """`propose_write` and friends never reach an agent profile, so an
+    override naming one is guaranteed to do nothing — unlike `resize_pod`,
+    which is merely unarmed on this cluster."""
+    overrides = PromptOverrides(tool_descriptions={"propose_write": "Mine."})
+    profile = build_profile("full", readonly=False, resize_supported=True, overrides=overrides)
+    warnings = validate_prompt_overrides(profile, overrides)
+    assert any("propose_write" in w for w in warnings), warnings
