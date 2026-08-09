@@ -717,7 +717,7 @@ async def test_helm_flow_cancelled_when_context_switched_before_approval() -> No
         choices = HelmReleaseChoices(
             release="web", version="", namespace="default", edit_values=False
         )
-        ok = app._helm_context_after_preview(
+        ok = app._helm_ctl._context_after_preview(
             "helm-install", choices, upgrade=False, epoch=app._ctx_epoch - 1
         )
         assert ok is False
