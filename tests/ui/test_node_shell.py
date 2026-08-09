@@ -767,6 +767,7 @@ async def test_attach_launch_failure_still_deletes_pod_and_audits(tmp_path: Path
                 )
 
             await until(pilot, _notified, label="attach launch failure notification")
+            await _await_node_shell_outcome(pilot, audit_path)
     assert rec.deletes == [("pods", "default", DBG_POD, DBG_UID)]
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
     ours = [e for e in entries if e["action"] == "node-shell"]
@@ -857,6 +858,7 @@ async def test_suspend_not_supported_refuses_gracefully_and_cleans_up(
                 return any("does not support" in n.message for n in app._notifications)
 
             await until(pilot, _notified, label="graceful refusal notification")
+            await _await_node_shell_outcome(pilot, audit_path)
     assert call_records == []
     assert rec.deletes == [("pods", "default", DBG_POD, DBG_UID)]
     entries = [json.loads(ln) for ln in audit_path.read_text().splitlines()]
