@@ -15,7 +15,8 @@ lives in korvid.agent.prompts and evolves with observed failures).
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from korvid.agent.prompts import (
@@ -26,7 +27,7 @@ from korvid.agent.prompts import (
     UI_DRIVE_PROMPT,
 )
 from korvid.agent.runtime import MAX_HISTORY_CHARS
-from korvid.tools.registry import agent_tool_schemas
+from korvid.tools.registry import AGENT_SURFACES, TOOL_DEFS, agent_tool_schemas
 
 PROFILE_NAMES = ("full", "small")
 
@@ -47,10 +48,35 @@ SMALL_MAX_RESULT_CHARS = 3_000
 #: below only holds if the prompt's "call one tool at a time" is a rule,
 #: not a suggestion.
 SMALL_MAX_TOOL_CALLS_PER_ITERATION = 1
+#: A configured system prompt larger than this share of a profile's history
+#: budget earns a warning. `small` is sized for a 4k-token serving context,
+#: where the shipped prompt already takes ~13%; roughly doubling it starts
+#: crowding out the conversation the prompt exists to guide.
+PROMPT_BUDGET_SHARE = 0.25
 
 #: All prompt wording — the full/small role statements, UI-drive variants,
 #: and the small profile's concise tool-description overrides — lives in
 #: korvid.agent.prompts; this module owns budgets and surface selection.
+
+
+@dataclass(frozen=True, slots=True)
+class PromptOverrides:
+    """Configured prompt slots (`agent.prompts`); empty means korvid's own.
+
+    Only the role statement and per-tool descriptions are configurable. The
+    write/no-write and UI clauses are appended by `compose_system_prompt`
+    from the armed tool set, so no override can tell the model about a
+    capability it was not offered.
+    """
+
+    system: str | None = None
+    append: str | None = None
+    tool_descriptions: Mapping[str, str] = field(default_factory=dict)
+
+    def apply(self, shipped: str) -> str:
+        """The role statement for a profile whose default is *shipped*."""
+        prompt = self.system if self.system is not None else shipped
+        return f"{prompt} {self.append}" if self.append else prompt
 
 
 @dataclass(frozen=True)
@@ -80,19 +106,34 @@ class AgentProfile:
     ui_prompt: str
 
 
-def _trim(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Deep-copied schemas with concise descriptions where an override
-    exists — the shared module-level tool lists must never be mutated."""
+def _trim(
+    tools: list[dict[str, Any]],
+    *,
+    built_in: Mapping[str, str] = {},
+    overrides: Mapping[str, str] = {},
+) -> list[dict[str, Any]]:
+    """Deep-copied schemas with reworded descriptions where one applies.
+
+    Precedence is user override > built-in profile wording > the schema's
+    own text. The shared module-level tool lists must never be mutated, so
+    every profile works on its own copy.
+    """
     trimmed = copy.deepcopy(tools)
     for tool in trimmed:
         function = tool["function"]
-        override = SMALL_TOOL_DESCRIPTIONS.get(function["name"])
-        if override is not None:
-            function["description"] = override
+        description = overrides.get(function["name"]) or built_in.get(function["name"])
+        if description is not None:
+            function["description"] = description
     return trimmed
 
 
-def build_profile(name: str, *, readonly: bool, resize_supported: bool) -> AgentProfile:
+def build_profile(
+    name: str,
+    *,
+    readonly: bool,
+    resize_supported: bool,
+    overrides: PromptOverrides | None = None,
+) -> AgentProfile:
     """Build the tool surface, budgets, and prompts for one profile.
 
     Args:
@@ -101,23 +142,29 @@ def build_profile(name: str, *, readonly: bool, resize_supported: bool) -> Agent
             is never even told they exist.
         resize_supported: whether discovery found pods/resize; the resize
             tool is offered only when the cluster can honor it.
+        overrides: configured prompt overrides (`agent.prompts`). Only the
+            role statement and tool descriptions are configurable; the
+            write/no-write and UI clauses stay conditional on what is
+            actually armed, so an override can never advertise a capability
+            the model was not offered.
 
     Raises:
         ValueError: for a profile name other than `full` or `small`.
     """
+    slots = overrides or PromptOverrides()
     if name == "full":
         tools = agent_tool_schemas(
             "full_agent", readonly=readonly, resize_supported=resize_supported
         )
         return AgentProfile(
             name="full",
-            tools=tools,
+            tools=_trim(tools, overrides=slots.tool_descriptions),
             max_iterations=FULL_MAX_ITERATIONS,
             max_history_chars=MAX_HISTORY_CHARS,
             max_result_chars=None,
             max_tool_calls_per_iteration=None,
             strict_history_budget=False,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=slots.apply(SYSTEM_PROMPT),
             ui_prompt=UI_DRIVE_PROMPT,
         )
     if name == "small":
@@ -126,13 +173,59 @@ def build_profile(name: str, *, readonly: bool, resize_supported: bool) -> Agent
         )
         return AgentProfile(
             name="small",
-            tools=_trim(tools),
+            tools=_trim(
+                tools,
+                built_in=SMALL_TOOL_DESCRIPTIONS,
+                overrides=slots.tool_descriptions,
+            ),
             max_iterations=SMALL_MAX_ITERATIONS,
             max_history_chars=SMALL_MAX_HISTORY_CHARS,
             max_result_chars=SMALL_MAX_RESULT_CHARS,
             max_tool_calls_per_iteration=SMALL_MAX_TOOL_CALLS_PER_ITERATION,
             strict_history_budget=True,
-            system_prompt=SMALL_SYSTEM_PROMPT,
+            system_prompt=slots.apply(SMALL_SYSTEM_PROMPT),
             ui_prompt=SMALL_UI_PROMPT,
         )
     raise ValueError(f"unknown agent profile: {name!r} (expected one of {PROFILE_NAMES})")
+
+
+def _known_tool_names() -> frozenset[str]:
+    """Every tool an agent profile can offer, armed on this cluster or not.
+
+    Typo detection must not use the startup surface: `resize_pod` is armed
+    only where discovery found pods/resize, write tools are absent in
+    read-only mode, and the same overrides are reused after a `:ctx` switch
+    or a profile change. Validating against the armed set would warn that a
+    perfectly valid override "has no effect".
+
+    MCP-only definitions (`propose_write` and friends) are excluded: no
+    agent profile can ever offer them, so an override naming one really
+    does have no effect and should say so.
+    """
+    return frozenset(
+        definition.name for definition in TOOL_DEFS if definition.surfaces & AGENT_SURFACES
+    )
+
+
+def validate_prompt_overrides(profile: AgentProfile, overrides: PromptOverrides) -> list[str]:
+    """Warnings about a built profile's overrides — never fatal.
+
+    Takes the built profile because both checks need it: tool names are
+    checked against what was actually armed, and the size guard against the
+    already-overridden prompt and that profile's history budget.
+    """
+    warnings: list[str] = []
+    for name in sorted(set(overrides.tool_descriptions) - _known_tool_names()):
+        warnings.append(
+            f"agent.prompts.tool_descriptions: {name!r} is not a korvid tool; "
+            f"the override has no effect"
+        )
+    limit = int(profile.max_history_chars * PROMPT_BUDGET_SHARE)
+    size = len(profile.system_prompt)
+    if size > limit:
+        warnings.append(
+            f"agent.prompts: the {profile.name} system prompt is {size:,} chars, over "
+            f"{PROMPT_BUDGET_SHARE:.0%} of the {profile.max_history_chars:,}-char history "
+            f"budget; it is still used, but it crowds out the conversation"
+        )
+    return warnings

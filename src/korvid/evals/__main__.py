@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import dataclasses
+import hashlib
 import json
 import math
 import os
@@ -26,10 +28,13 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from korvid.agent.profiles import AgentProfile, PromptOverrides, build_profile
+from korvid.agent.prompts import compose_system_prompt
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.runner import (
     DEFAULT_REPETITIONS,
     ScenarioReport,
+    _eval_tools,
     render_markdown,
     run_scenario,
 )
@@ -83,6 +88,92 @@ def report_payload(reports: list[ScenarioReport]) -> list[dict[str, Any]]:
     ]
 
 
+def prompt_fingerprint(
+    profile: AgentProfile,
+    *,
+    tools: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Which prompt produced a run.
+
+    A scoreboard row that does not say which prompt it was measured under is
+    not comparable with any other row, so every run records this.
+
+    The digest covers what the model actually receives: the *composed*
+    system prompt for the surface in question — role statement plus the UI
+    and write/no-write clauses `AgentRuntime` appends — and the complete
+    tool schemas, which are retransmitted on every request. Hashing only
+    the role statement would mark behaviourally different runs as
+    comparable.
+
+    Args:
+        profile: the built profile, already carrying any overrides. It is
+            the only input: `source` is decided by comparing this profile
+            against the shipped prompts, not by inspecting what was
+            configured, so an override that reproduces korvid's own wording
+            is correctly reported as `default`.
+        tools: the schemas actually offered. Defaults to the task pack's
+            surface (`_eval_tools`, which drops the UI tools); journey runs
+            offer `profile.tools` unchanged and must pass them, or a UI
+            schema change would leave the digest untouched.
+
+    Returns:
+        `source` (`default` or `override`) and the `sha256` digest.
+        `source` reflects the *effect* of the configuration: an override
+        that reproduces the shipped prompt byte for byte still yields a
+        comparable, publishable run.
+    """
+    offered = _eval_tools(profile) if tools is None else tools
+    digest = _prompt_digest(profile.system_prompt, profile.ui_prompt, offered)
+    return {"source": _source(profile, offered, digest), "sha256": digest}
+
+
+def _source(profile: AgentProfile, offered: list[dict[str, Any]], digest: str) -> str:
+    """`default` when the configuration had no effect on what the model sees.
+
+    Compared against the shipped prompts **on the same tool set**, so the
+    answer does not depend on which tools this cluster happened to arm. An
+    override that reproduces korvid's own wording byte for byte still
+    yields a comparable, publishable run.
+    """
+    shipped = build_profile(
+        profile.name, readonly=False, resize_supported=True, overrides=PromptOverrides()
+    )
+    descriptions = {t["function"]["name"]: t["function"]["description"] for t in shipped.tools}
+    baseline_tools = copy.deepcopy(offered)
+    for tool in baseline_tools:
+        function = tool["function"]
+        shipped_description = descriptions.get(function["name"])
+        if shipped_description is not None:
+            function["description"] = shipped_description
+    baseline = _prompt_digest(shipped.system_prompt, shipped.ui_prompt, baseline_tools)
+    return "default" if digest == baseline else "override"
+
+
+def _prompt_digest(system_prompt: str, ui_prompt: str, tools: list[dict[str, Any]]) -> str:
+    composed = compose_system_prompt(tools, None, system_prompt=system_prompt, ui_prompt=ui_prompt)
+    digest = hashlib.sha256()
+    digest.update(composed.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(json.dumps(tools, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def run_payload(
+    reports: list[ScenarioReport],
+    *,
+    profile: AgentProfile,
+    overrides: PromptOverrides,
+) -> dict[str, Any]:
+    """The full JSON artifact: run metadata plus per-scenario results."""
+    return {
+        "meta": {
+            "profile": profile.name,
+            "prompts": prompt_fingerprint(profile),
+        },
+        "scenarios": report_payload(reports),
+    }
+
+
 def _positive_int(value: str) -> int:
     number = int(value)
     if number < 1:
@@ -114,6 +205,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="agent capability profile to evaluate (issue #71; default: full)",
     )
     parser.add_argument(
+        "--system-prompt-file",
+        type=Path,
+        default=None,
+        help=(
+            "replace the profile's role statement with this file's contents; "
+            "the result JSON records the override so the run is not mistaken "
+            "for a default-prompt score"
+        ),
+    )
+    parser.add_argument(
+        "--prompt-append-file",
+        type=Path,
+        default=None,
+        help="append this file's contents to the profile's role statement",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=None,
@@ -140,6 +247,7 @@ async def _run_all(
     provider_factory: Callable[[], Any],
     repetitions: int,
     profile: str,
+    overrides: PromptOverrides,
 ) -> list[ScenarioReport]:
     reports: list[ScenarioReport] = []
     for scenario in scenarios:
@@ -151,6 +259,7 @@ async def _run_all(
                 executor_factory=_executor_factory(scenario),
                 repetitions=repetitions,
                 profile=profile,
+                overrides=overrides,
             )
         )
     return reports
@@ -173,6 +282,31 @@ def exit_code(reports: list[ScenarioReport]) -> int:
     return 0
 
 
+def _sweep_overrides(args: argparse.Namespace) -> PromptOverrides:
+    """Prompt overrides for a sweep run, read from the CLI's file flags."""
+    return PromptOverrides(
+        system=_read_prompt_file(args.system_prompt_file, "--system-prompt-file"),
+        append=_read_prompt_file(args.prompt_append_file, "--prompt-append-file"),
+    )
+
+
+def _read_prompt_file(path: Path | None, flag: str) -> str | None:
+    if path is None:
+        return None
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise SystemExit(f"{flag}: cannot read {path}: {exc.strerror}") from exc
+    except UnicodeError as exc:
+        # read_text raises UnicodeDecodeError, which is not an OSError; a
+        # non-UTF-8 file must still get the actionable message, not a
+        # traceback.
+        raise SystemExit(f"{flag}: {path} is not valid UTF-8: {exc}") from exc
+    if not text:
+        raise SystemExit(f"{flag}: {path} is empty")
+    return text
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point; returns a process exit code."""
     args = _parse_args(argv)
@@ -180,13 +314,20 @@ def main(argv: list[str] | None = None) -> int:
     scenarios = load_scenarios(args.scenarios)
     if not scenarios:
         raise SystemExit(f"no scenario YAML files found in {args.scenarios}")
-    reports = asyncio.run(_run_all(scenarios, provider_factory, args.reps, args.profile))
+    overrides = _sweep_overrides(args)
+    reports = asyncio.run(_run_all(scenarios, provider_factory, args.reps, args.profile, overrides))
     markdown = render_markdown(reports)
     print(markdown)
     if args.out is not None:
         args.out.write_text(markdown + "\n")
     if args.json is not None:
-        args.json.write_text(json.dumps(report_payload(reports), indent=2) + "\n")
+        # The profile is rebuilt here purely to fingerprint the run; the
+        # scenarios above each built their own from the same inputs.
+        profile = build_profile(
+            args.profile, readonly=False, resize_supported=True, overrides=overrides
+        )
+        payload = run_payload(reports, profile=profile, overrides=overrides)
+        args.json.write_text(json.dumps(payload, indent=2) + "\n")
     return exit_code(reports)
 
 

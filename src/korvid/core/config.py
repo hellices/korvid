@@ -91,6 +91,13 @@ class KorvidConfig:
     #: `full`, but the `:ai` wizard may still suggest `small` for Ollama
     #: (an explicit `full` is never overridden by that suggestion).
     agent_profile: str | None = None
+    #: Agent prompt overrides (`agent.prompts`): the role statement, extra
+    #: house rules, and per-tool description rewording. None/empty means the
+    #: prompts korvid ships. Only these slots are configurable — the
+    #: write/no-write and UI clauses stay conditional on what is armed.
+    agent_prompt_system: str | None = None
+    agent_prompt_append: str | None = None
+    agent_prompt_tool_descriptions: dict[str, str] = field(default_factory=dict)
     #: Native Ollama tuning (issue #72): `agent.ollama.*` in config.yaml.
     agent_ollama_num_ctx: int = 16384
     agent_ollama_temperature: float = 0.0
@@ -225,6 +232,10 @@ def load_config(path: Path | None = None) -> KorvidConfig:
         debug_images = {}
     views, view_warnings = _parse_views(raw.get("views"))
     warnings = list(view_warnings)
+    prompt_system, prompt_append, prompt_tool_descriptions, prompt_warnings = _parse_prompts(
+        agent_raw.get("prompts")
+    )
+    warnings.extend(prompt_warnings)
     if agent_options_error is not None:
         warnings.append(agent_options_error)
     if "namespaces" in raw:
@@ -254,6 +265,9 @@ def load_config(path: Path | None = None) -> KorvidConfig:
             # unset state that lets the :ai wizard suggest `small`.
             _parse_profile(agent_raw["profile"]) if "profile" in agent_raw else None
         ),
+        agent_prompt_system=prompt_system,
+        agent_prompt_append=prompt_append,
+        agent_prompt_tool_descriptions=prompt_tool_descriptions,
         agent_ollama_num_ctx=_parse_num_ctx(ollama_raw.get("num_ctx")),
         agent_ollama_temperature=_parse_temperature(ollama_raw.get("temperature")),
         agent_ollama_seed=_parse_seed(ollama_raw.get("seed")),
@@ -481,6 +495,95 @@ class _AgentOptionsError(ValueError):
 
 
 _UNSUPPORTED_AGENT_OPTION = object()
+
+
+def _prompt_slot(raw: dict[str, Any], key: str, warnings: list[str]) -> str | None:
+    """Read one prompt slot from `key` or `key_file`.
+
+    Returns None and warns for every problem — an unusable override falls
+    back to the prompt korvid ships rather than stopping startup, matching
+    how the rest of this module reports configuration mistakes.
+    """
+    file_key = f"{key}_file"
+    has_inline, has_file = key in raw, file_key in raw
+    if has_inline and has_file:
+        # Preferring one silently would let a file a reader cannot see
+        # override the text sitting right there in the config.
+        warnings.append(
+            f"agent.prompts: {key} and {file_key} are both set; "
+            f"remove one — the shipped prompt is used until then"
+        )
+        return None
+    if not has_inline and not has_file:
+        return None
+    if has_file:
+        return _prompt_from_file(raw[file_key], file_key, warnings)
+    return _prompt_text(raw[key], f"agent.prompts.{key}", warnings)
+
+
+def _prompt_from_file(value: Any, file_key: str, warnings: list[str]) -> str | None:
+    label = f"agent.prompts.{file_key}"
+    if not isinstance(value, str) or not value.strip():
+        warnings.append(f"{label}: must be a non-empty path; the shipped prompt is used")
+        return None
+    path = Path(value).expanduser()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        warnings.append(f"{label}: cannot read {path}: {exc.strerror}; the shipped prompt is used")
+        return None
+    except UnicodeError as exc:
+        # read_text raises UnicodeDecodeError, which is not an OSError; an
+        # unreadable encoding must fall back like any other bad value
+        # rather than stopping startup.
+        warnings.append(f"{label}: {path} is not valid UTF-8 ({exc}); the shipped prompt is used")
+        return None
+    return _prompt_text(text, label, warnings)
+
+
+def _prompt_text(value: Any, label: str, warnings: list[str]) -> str | None:
+    if not isinstance(value, str):
+        warnings.append(f"{label}: must be a string; the shipped prompt is used")
+        return None
+    text = value.strip()
+    if not text:
+        warnings.append(f"{label}: is empty; the shipped prompt is used")
+        return None
+    return text
+
+
+def _prompt_tool_descriptions(value: Any, warnings: list[str]) -> dict[str, str]:
+    """Per-tool description overrides, dropping entries that cannot be used.
+
+    Tool *names* are not validated here: `core` may not import the tool
+    registry. `agent.profiles.validate_prompt_overrides` catches typos once
+    the armed tool set is known.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        warnings.append("agent.prompts.tool_descriptions: must be a mapping; ignored")
+        return {}
+    descriptions: dict[str, str] = {}
+    for name, description in value.items():
+        if not isinstance(name, str) or not isinstance(description, str) or not description.strip():
+            warnings.append(
+                f"agent.prompts.tool_descriptions: {name!r} must map to a non-empty string; ignored"
+            )
+            continue
+        descriptions[name] = description.strip()
+    return descriptions
+
+
+def _parse_prompts(value: Any) -> tuple[str | None, str | None, dict[str, str], list[str]]:
+    """Parse `agent.prompts` into (system, append, tool_descriptions, warnings)."""
+    if not isinstance(value, dict):
+        return None, None, {}, []
+    warnings: list[str] = []
+    system = _prompt_slot(value, "system", warnings)
+    append = _prompt_slot(value, "append", warnings)
+    descriptions = _prompt_tool_descriptions(value.get("tool_descriptions"), warnings)
+    return system, append, descriptions, warnings
 
 
 def _parse_agent_options(value: Any) -> tuple[dict[str, object], str | None]:

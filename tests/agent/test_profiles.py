@@ -8,9 +8,18 @@ from korvid.agent.profiles import (
     SMALL_MAX_HISTORY_CHARS,
     SMALL_MAX_ITERATIONS,
     AgentProfile,
+    PromptOverrides,
     build_profile,
+    validate_prompt_overrides,
 )
-from korvid.agent.prompts import SMALL_SYSTEM_PROMPT, SYSTEM_PROMPT, UI_DRIVE_PROMPT
+from korvid.agent.prompts import (
+    NO_WRITE_PROMPT,
+    SMALL_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    UI_DRIVE_PROMPT,
+    WRITE_PROMPT,
+    compose_system_prompt,
+)
 from korvid.agent.runtime import MAX_HISTORY_CHARS
 from korvid.tools.executor import READ_TOOLS, RESIZE_TOOLS, UI_TOOLS, WRITE_TOOLS
 
@@ -257,3 +266,179 @@ def test_strict_history_budget_is_small_only() -> None:
     assert small.strict_history_budget is True
     full = build_profile("full", readonly=False, resize_supported=True)
     assert full.strict_history_budget is False
+
+
+# --- prompt overrides (configurable agent prompts) --------------------------
+
+
+def _profile(name: str = "small", **kwargs: object) -> AgentProfile:
+    overrides = PromptOverrides(**kwargs)  # type: ignore[arg-type]  # kwargs are the dataclass fields
+    return build_profile(name, readonly=False, resize_supported=True, overrides=overrides)
+
+
+def test_no_overrides_leave_the_shipped_prompts_untouched() -> None:
+    """The default path must be byte-identical, override machinery or not."""
+    plain = build_profile("small", readonly=False, resize_supported=True)
+    empty = _profile("small")
+    assert empty.system_prompt == plain.system_prompt == SMALL_SYSTEM_PROMPT
+    assert empty.ui_prompt == plain.ui_prompt
+
+
+def test_system_override_replaces_the_role_statement() -> None:
+    profile = _profile("small", system="You are terse.")
+    assert profile.system_prompt == "You are terse."
+    assert SMALL_SYSTEM_PROMPT not in profile.system_prompt
+
+
+def test_append_keeps_the_shipped_role_statement() -> None:
+    profile = _profile("small", append="Never name nodes.")
+    assert profile.system_prompt.startswith(SMALL_SYSTEM_PROMPT)
+    assert profile.system_prompt.endswith("Never name nodes.")
+
+
+def test_system_and_append_compose() -> None:
+    """Replacing the role statement and adding house rules is coherent."""
+    profile = _profile("small", system="You are terse.", append="Never name nodes.")
+    assert profile.system_prompt == "You are terse. Never name nodes."
+
+
+def test_overrides_apply_to_the_full_profile_too() -> None:
+    profile = _profile("full", system="You are terse.")
+    assert profile.system_prompt == "You are terse."
+
+
+def test_tool_description_override_wins_over_the_built_in_small_wording() -> None:
+    profile = _profile("small", tool_descriptions={"get_logs": "Mine."})
+    described = {t["function"]["name"]: t["function"]["description"] for t in profile.tools}
+    assert described["get_logs"] == "Mine."
+
+
+def test_tool_description_override_applies_to_the_full_profile() -> None:
+    """`full` has no built-in overrides, but a user's wording must still land."""
+    profile = _profile("full", tool_descriptions={"get_logs": "Mine."})
+    described = {t["function"]["name"]: t["function"]["description"] for t in profile.tools}
+    assert described["get_logs"] == "Mine."
+
+
+def test_tool_description_override_leaves_other_tools_alone() -> None:
+    plain = build_profile("small", readonly=False, resize_supported=True)
+    untouched = {
+        t["function"]["name"]: t["function"]["description"]
+        for t in plain.tools
+        if t["function"]["name"] != "get_logs"
+    }
+    profile = _profile("small", tool_descriptions={"get_logs": "Mine."})
+    after = {
+        t["function"]["name"]: t["function"]["description"]
+        for t in profile.tools
+        if t["function"]["name"] != "get_logs"
+    }
+    assert after == untouched
+
+
+def test_overrides_never_mutate_the_shared_schemas() -> None:
+    """Schemas are module-level; a rewording must not leak into later builds."""
+    _profile("small", tool_descriptions={"get_logs": "Mine."})
+    plain = build_profile("small", readonly=False, resize_supported=True)
+    described = {t["function"]["name"]: t["function"]["description"] for t in plain.tools}
+    assert described["get_logs"] != "Mine."
+
+
+def test_validate_warns_about_an_unknown_tool_name() -> None:
+    """A typo would otherwise be a silent no-op."""
+    overrides = PromptOverrides(tool_descriptions={"get_logz": "Mine."})
+    profile = build_profile("small", readonly=False, resize_supported=True, overrides=overrides)
+    warnings = validate_prompt_overrides(profile, overrides)
+    assert any("get_logz" in w for w in warnings), warnings
+
+
+def test_validate_is_quiet_for_a_known_tool_name() -> None:
+    overrides = PromptOverrides(tool_descriptions={"get_logs": "Mine."})
+    profile = build_profile("small", readonly=False, resize_supported=True, overrides=overrides)
+    assert validate_prompt_overrides(profile, overrides) == []
+
+
+def test_validate_warns_when_the_prompt_crowds_the_history_budget() -> None:
+    """`small` is sized for a 4k serving context; a pasted essay starves it."""
+    overrides = PromptOverrides(system="x" * (SMALL_MAX_HISTORY_CHARS // 2))
+    profile = build_profile("small", readonly=False, resize_supported=True, overrides=overrides)
+    warnings = validate_prompt_overrides(profile, overrides)
+    assert any("budget" in w for w in warnings), warnings
+
+
+def test_validate_is_quiet_for_the_shipped_prompts() -> None:
+    """The defaults must never trip their own guard."""
+    for name in ("full", "small"):
+        profile = build_profile(name, readonly=False, resize_supported=True)
+        assert validate_prompt_overrides(profile, PromptOverrides()) == []
+
+
+# --- the conditional clauses survive an override ----------------------------
+#
+# The key invariant of this feature: configuration replaces the role-statement
+# slot, never the composed prompt. `compose_system_prompt` still decides the
+# write/no-write and UI clauses from the armed tool set, so an override can
+# neither advertise a capability the model was not offered nor drop the
+# read-only guidance a locked-down deployment depends on.
+
+
+def _composed(name: str, *, readonly: bool, **kwargs: object) -> str:
+    overrides = PromptOverrides(**kwargs)  # type: ignore[arg-type]  # kwargs are the dataclass fields
+    profile = build_profile(name, readonly=readonly, resize_supported=True, overrides=overrides)
+    return compose_system_prompt(
+        profile.tools,
+        None,
+        system_prompt=profile.system_prompt,
+        ui_prompt=profile.ui_prompt,
+    )
+
+
+def test_override_still_gets_the_no_write_clause_when_read_only() -> None:
+    """Losing this clause would make a read-only agent refuse instead of
+    offering the equivalent kubectl command."""
+    prompt = _composed("full", readonly=True, system="You are terse.")
+    assert NO_WRITE_PROMPT in prompt
+    assert WRITE_PROMPT not in prompt
+
+
+def test_override_still_gets_the_write_clause_when_writes_are_armed() -> None:
+    prompt = _composed("full", readonly=False, system="You are terse.")
+    assert WRITE_PROMPT in prompt
+    assert NO_WRITE_PROMPT not in prompt
+
+
+def test_override_cannot_advertise_unarmed_write_tools() -> None:
+    """A user telling the model it may delete pods must not make the
+    composed prompt name a tool that was never offered."""
+    prompt = _composed("full", readonly=True, system="You may delete pods with delete_resource.")
+    assert "You can request cluster writes with" not in prompt
+
+
+def test_override_keeps_the_role_statement_ahead_of_the_clauses() -> None:
+    prompt = _composed("full", readonly=True, system="You are terse.")
+    assert prompt.startswith("You are terse.")
+
+
+def test_append_lands_before_the_conditional_clauses() -> None:
+    prompt = _composed("full", readonly=True, append="Never name nodes.")
+    assert prompt.index("Never name nodes.") < prompt.index(NO_WRITE_PROMPT)
+
+
+def test_validate_accepts_a_tool_that_is_known_but_not_currently_armed() -> None:
+    """`resize_pod` is armed only on a resize-capable cluster, and the same
+    overrides are reused after a `:ctx` switch. Warning "no effect" against
+    the startup surface would cry wolf on a valid override."""
+    overrides = PromptOverrides(tool_descriptions={"resize_pod": "Mine."})
+    profile = build_profile("small", readonly=True, resize_supported=False, overrides=overrides)
+    assert "resize_pod" not in {t["function"]["name"] for t in profile.tools}
+    assert validate_prompt_overrides(profile, overrides) == []
+
+
+def test_validate_warns_about_an_mcp_only_tool_name() -> None:
+    """`propose_write` and friends never reach an agent profile, so an
+    override naming one is guaranteed to do nothing — unlike `resize_pod`,
+    which is merely unarmed on this cluster."""
+    overrides = PromptOverrides(tool_descriptions={"propose_write": "Mine."})
+    profile = build_profile("full", readonly=False, resize_supported=True, overrides=overrides)
+    warnings = validate_prompt_overrides(profile, overrides)
+    assert any("propose_write" in w for w in warnings), warnings

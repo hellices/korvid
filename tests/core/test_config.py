@@ -1510,3 +1510,108 @@ def test_canonicalize_provider_name_parity() -> None:
         assert _canonicalize_provider_name(name) == normalize_provider_name(name), (
             f"parity failed for {name!r}"
         )
+
+
+# --- agent.prompts overrides (configurable agent prompts) -------------------
+
+
+def _load_prompts_config(tmp_path: Path, prompts: object) -> KorvidConfig:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"agent": {"prompts": prompts}}, sort_keys=False))
+    return load_config(path)
+
+
+def test_prompts_absent_leaves_every_slot_unset(tmp_path: Path) -> None:
+    """No `agent.prompts` block means korvid's shipped prompts, untouched."""
+    cfg = load_config(tmp_path / "missing.yaml")
+    assert cfg.agent_prompt_system is None
+    assert cfg.agent_prompt_append is None
+    assert cfg.agent_prompt_tool_descriptions == {}
+
+
+def test_prompts_read_inline_values(tmp_path: Path) -> None:
+    cfg = _load_prompts_config(
+        tmp_path,
+        {"system": "You are terse.", "append": "Never name nodes."},
+    )
+    assert cfg.agent_prompt_system == "You are terse."
+    assert cfg.agent_prompt_append == "Never name nodes."
+    assert cfg.warnings == ()
+
+
+def test_prompts_read_a_referenced_file(tmp_path: Path) -> None:
+    prompt = tmp_path / "system.md"
+    prompt.write_text("You are terse.\n")
+    cfg = _load_prompts_config(tmp_path, {"system_file": str(prompt)})
+    assert cfg.agent_prompt_system == "You are terse."
+
+
+def test_prompts_expand_a_user_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`~/...` is how the documented example is written, so it must resolve."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    (tmp_path / "system.md").write_text("You are terse.")
+    cfg = _load_prompts_config(tmp_path, {"system_file": "~/system.md"})
+    assert cfg.agent_prompt_system == "You are terse."
+
+
+def test_prompts_reject_inline_and_file_for_the_same_slot(tmp_path: Path) -> None:
+    """Ambiguous configuration falls back rather than silently picking one."""
+    prompt = tmp_path / "system.md"
+    prompt.write_text("from the file")
+    cfg = _load_prompts_config(tmp_path, {"system": "inline", "system_file": str(prompt)})
+    assert cfg.agent_prompt_system is None
+    assert any("system" in w and "system_file" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_prompts_warn_when_the_referenced_file_is_missing(tmp_path: Path) -> None:
+    cfg = _load_prompts_config(tmp_path, {"system_file": str(tmp_path / "nope.md")})
+    assert cfg.agent_prompt_system is None
+    assert any("nope.md" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_prompts_warn_on_a_blank_value(tmp_path: Path) -> None:
+    cfg = _load_prompts_config(tmp_path, {"system": "   \n  "})
+    assert cfg.agent_prompt_system is None
+    assert any("system" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_prompts_warn_on_a_non_string_value(tmp_path: Path) -> None:
+    cfg = _load_prompts_config(tmp_path, {"append": ["a", "b"]})
+    assert cfg.agent_prompt_append is None
+    assert any("append" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_prompts_read_tool_description_overrides(tmp_path: Path) -> None:
+    cfg = _load_prompts_config(tmp_path, {"tool_descriptions": {"get_logs": "Read pod logs."}})
+    assert cfg.agent_prompt_tool_descriptions == {"get_logs": "Read pod logs."}
+
+
+def test_prompts_drop_non_string_tool_descriptions_but_keep_the_rest(
+    tmp_path: Path,
+) -> None:
+    cfg = _load_prompts_config(
+        tmp_path,
+        {"tool_descriptions": {"get_logs": "Read pod logs.", "get_events": 7}},
+    )
+    assert cfg.agent_prompt_tool_descriptions == {"get_logs": "Read pod logs."}
+    assert any("get_events" in w for w in cfg.warnings), cfg.warnings
+
+
+def test_prompts_ignore_a_non_mapping_block(tmp_path: Path) -> None:
+    """A scalar where a mapping belongs is treated as absent, as elsewhere."""
+    cfg = _load_prompts_config(tmp_path, "nonsense")
+    assert cfg.agent_prompt_system is None
+    assert cfg.agent_prompt_append is None
+
+
+def test_prompts_warn_when_the_referenced_file_is_not_utf8(tmp_path: Path) -> None:
+    """`UnicodeDecodeError` is not an `OSError`, so a non-UTF-8 prompt file
+    would otherwise crash config loading instead of falling back."""
+    prompt = tmp_path / "system.md"
+    prompt.write_bytes(b"\xff\xfe not utf-8")
+    cfg = _load_prompts_config(tmp_path, {"system_file": str(prompt)})
+    assert cfg.agent_prompt_system is None
+    assert any("system.md" in w for w in cfg.warnings), cfg.warnings

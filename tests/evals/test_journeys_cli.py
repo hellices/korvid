@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import copy
+import json
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 
+from korvid.agent.profiles import build_profile
+from korvid.evals.__main__ import prompt_fingerprint
 from korvid.evals.grader import GradeResult
 from korvid.evals.journey_runner import (
     JourneyReport,
     JourneyRun,
     JourneyTurnResult,
 )
-from korvid.evals.journeys_cli import _parse_args, _run, exit_code
+from korvid.evals.journeys_cli import _parse_args, _run, exit_code, journey_run_payload
 
 
 def test_journey_cli_defaults_to_bundled_pack_and_three_reps() -> None:
@@ -148,3 +152,29 @@ def test_journey_exit_code_prints_turn_errors(
     )
     assert exit_code([report]) == 1
     assert "triage run 1 turn 1: ReadTimeout" in capsys.readouterr().err
+
+
+def test_journey_json_records_prompt_provenance(tmp_path: Path) -> None:
+    """Journey runs become published scoreboard rows too (#176 tier 2), so
+    they must say which prompt and tool schemas produced them."""
+    payload = journey_run_payload([], profile_name="small")
+    assert payload["meta"]["profile"] == "small"
+    assert payload["meta"]["prompts"]["source"] == "default"
+    assert len(payload["meta"]["prompts"]["sha256"]) == 64
+    assert payload["journeys"] == []
+    json.dumps(payload)
+
+
+def test_journey_digest_covers_the_ui_tools_it_actually_offers() -> None:
+    """Journeys run the full profile surface, UI tools included, so a UI
+    schema change must move the digest — the task pack's surface drops
+    those tools and would not see it."""
+    profile = build_profile("small", readonly=True, resize_supported=False)
+    before = prompt_fingerprint(profile, tools=profile.tools)["sha256"]
+    # Mutate a copy: relying on `_trim`'s deepcopy would leak this edit into
+    # other tests the moment that copy is optimised away.
+    tools = copy.deepcopy(profile.tools)
+    ui = next(t for t in tools if t["function"]["name"] == "open_logs")
+    ui["function"]["description"] = "changed"
+    after = prompt_fingerprint(profile, tools=tools)["sha256"]
+    assert before != after

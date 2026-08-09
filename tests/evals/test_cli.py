@@ -8,15 +8,22 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
+from korvid.agent import prompts
+from korvid.agent.profiles import AgentProfile, PromptOverrides, build_profile
 from korvid.evals.__main__ import (
     _parse_args,
     _positive_int,
+    _sweep_overrides,
     exit_code,
+    prompt_fingerprint,
     provider_factory_from_env,
     report_payload,
+    run_payload,
 )
 from korvid.evals.grader import GradeResult
 from korvid.evals.runner import RunMetrics, ScenarioReport
@@ -133,3 +140,129 @@ def test_profile_flag_defaults_to_full_and_rejects_unknown_values() -> None:
     assert _parse_args(["--profile", "small"]).profile == "small"
     with pytest.raises(SystemExit, match="2"):
         _parse_args(["--profile", "huge"])
+
+
+# --- prompt provenance ------------------------------------------------------
+#
+# A scoreboard row that does not say which prompt produced it is not a
+# comparable score. Every run records a fingerprint.
+
+
+def _built(**kwargs: Any) -> tuple[AgentProfile, PromptOverrides]:
+    overrides = PromptOverrides(**kwargs)
+    profile = build_profile("small", readonly=True, resize_supported=False, overrides=overrides)
+    return profile, overrides
+
+
+def test_run_payload_wraps_scenarios_with_run_metadata() -> None:
+    profile, overrides = _built()
+    payload = run_payload([_report()], profile=profile, overrides=overrides)
+    assert payload["meta"]["profile"] == "small"
+    assert payload["scenarios"][0]["scenario"] == "oom-killed"
+    json.dumps(payload)
+
+
+def test_run_payload_marks_the_shipped_prompts_as_default() -> None:
+    profile, overrides = _built()
+    payload = run_payload([_report()], profile=profile, overrides=overrides)
+    assert payload["meta"]["prompts"]["source"] == "default"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"system": "You are terse."},
+        {"append": "Never name nodes."},
+        {"tool_descriptions": {"get_logs": "Mine."}},
+    ],
+)
+def test_run_payload_marks_any_override_as_override(override: dict[str, Any]) -> None:
+    profile, overrides = _built(**override)
+    payload = run_payload([_report()], profile=profile, overrides=overrides)
+    assert payload["meta"]["prompts"]["source"] == "override"
+
+
+def test_prompt_fingerprint_is_stable_and_changes_with_the_prompt() -> None:
+    first = prompt_fingerprint(_built()[0])["sha256"]
+    again = prompt_fingerprint(_built()[0])["sha256"]
+    changed = prompt_fingerprint(_built(system="You are terse.")[0])["sha256"]
+    assert first == again
+    assert first != changed
+
+
+def test_prompt_fingerprint_notices_a_reworded_tool_description() -> None:
+    """Tool wording is a measured lever, so it must be part of the identity."""
+    plain = prompt_fingerprint(_built()[0])["sha256"]
+    reworded = prompt_fingerprint(_built(tool_descriptions={"get_logs": "Mine."})[0])["sha256"]
+    assert plain != reworded
+
+
+def test_prompt_sweep_flags_default_to_unset() -> None:
+    args = _parse_args([])
+    assert args.system_prompt_file is None
+    assert args.prompt_append_file is None
+
+
+def test_prompt_sweep_flags_accept_paths() -> None:
+    args = _parse_args(["--system-prompt-file", "a.md", "--prompt-append-file", "b.md"])
+    assert args.system_prompt_file == Path("a.md")
+    assert args.prompt_append_file == Path("b.md")
+
+
+def test_prompt_fingerprint_covers_the_composed_prompt_not_just_the_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The digest must identify the actual model input.
+
+    `AgentRuntime` composes the write/no-write clause onto the role
+    statement at request time. That clause is not part of
+    `profile.system_prompt`, so a digest over the role statement alone
+    would call two behaviourally different runs comparable.
+    """
+    profile, _ = _built()
+    before = prompt_fingerprint(profile)["sha256"]
+    monkeypatch.setattr(prompts, "NO_WRITE_PROMPT", "Reworded read-only guidance.")
+    assert prompt_fingerprint(profile)["sha256"] != before
+
+
+def test_prompt_fingerprint_covers_parameter_schemas() -> None:
+    """A parameter-schema edit changes what the model sees, so it must
+    change the digest — the methodology promises exactly this."""
+    profile, _ = _built()
+    before = prompt_fingerprint(profile)["sha256"]
+    target = next(t for t in profile.tools if t["function"]["name"] == "get_logs")
+    target["function"]["parameters"]["properties"]["namespace"]["description"] = "changed"
+    assert prompt_fingerprint(profile)["sha256"] != before
+
+
+def test_prompt_sweep_file_with_invalid_utf8_exits_cleanly(tmp_path: Path) -> None:
+    """A non-UTF-8 file must produce the CLI's actionable error, not a
+    traceback: `UnicodeDecodeError` is not an `OSError`."""
+    bad = tmp_path / "prompt.md"
+    bad.write_bytes(b"\xff\xfe not utf-8")
+    args = _parse_args(["--system-prompt-file", str(bad)])
+    with pytest.raises(SystemExit, match="--system-prompt-file"):
+        _sweep_overrides(args)
+
+
+def test_source_is_default_when_an_override_reproduces_the_shipped_prompt() -> None:
+    """`source` decides publishability, so it must reflect the *effect* of
+    the configuration, not merely that some was supplied. Pointing at a
+    file holding korvid's own prompt yields a comparable run."""
+    profile, _ = _built()
+    same = PromptOverrides(system=profile.system_prompt)
+    rebuilt = build_profile("small", readonly=True, resize_supported=False, overrides=same)
+    assert prompt_fingerprint(rebuilt)["source"] == "default"
+
+
+def test_source_is_default_for_a_tool_description_that_changes_nothing() -> None:
+    profile, _ = _built()
+    current = {t["function"]["name"]: t["function"]["description"] for t in profile.tools}
+    echo = PromptOverrides(tool_descriptions={"get_logs": current["get_logs"]})
+    rebuilt = build_profile("small", readonly=True, resize_supported=False, overrides=echo)
+    assert prompt_fingerprint(rebuilt)["source"] == "default"
+
+
+def test_source_is_override_when_the_prompt_actually_differs() -> None:
+    profile, _ = _built(system="You are terse.")
+    assert prompt_fingerprint(profile)["source"] == "override"

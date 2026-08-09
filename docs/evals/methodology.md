@@ -147,6 +147,48 @@ uv run python -m korvid.evals.journeys_cli \
 - final state: contract cluster Stopped, `modeleval` zero nodes, Ollama Ready
   on its default pool.
 
+## Prompt Provenance
+
+A score is only comparable when the prompt that produced it is known.
+`--json` therefore writes a metadata envelope alongside the per-scenario
+results:
+
+```json
+{
+  "meta": {
+    "profile": "small",
+    "prompts": {"source": "default", "sha256": "9f2c…"}
+  },
+  "scenarios": [ … ]
+}
+```
+
+Journey runs (`korvid.evals.journeys_cli --json`) carry the same envelope
+under a `journeys` key. They cannot yet be swept from the CLI, so their
+`source` is always `default`; the digest still makes a profile or
+tool-schema change visible.
+
+`source` is `default` when the run used the prompts korvid ships, and
+`override` when `--system-prompt-file` or `--prompt-append-file` changed
+them. The eval CLI does **not** read `~/.config/korvid/config.yaml`: a
+configured `agent.prompts` block affects the running TUI, never this JSON,
+so a sweep is reproducible from its command line alone.
+
+The digest covers what the model actually receives — the composed system
+prompt for the eval surface, including the write/no-write clause, plus the
+complete tool schemas that are retransmitted on every request. Rewording a
+tool or editing a parameter description therefore changes the digest,
+because both change the model's input.
+
+Rules that follow from this:
+
+- a **publishable scoreboard row must carry `"source": "default"`**; a run
+  measured under an override is a tuning artifact, not a comparable score;
+- a prompt experiment reports the baseline and the variant together, from
+  two runs that differ *only* in the prompt file;
+- a changed digest with an unchanged prompt file means something else moved
+  — a profile change or a tool-schema edit — and the comparison is void.
+
 ## Interpretation Limits
 
 - Task success does not prove conversational usability.

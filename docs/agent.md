@@ -309,6 +309,87 @@ header shows `[small]` so you always know which
 mode is live. Compare the profiles on your own endpoint with the eval
 harness: `python -m korvid.evals --profile small` (see below).
 
+## Tuning the agent for your model
+
+If a local model behaves poorly, rewriting the system prompt is usually the
+*last* thing worth trying. Published evidence puts the levers in this order:
+
+1. **Pick a different model.** Small models' tool-calling weakness is mostly a
+   training property, not a prompting one, and no prompt closes that gap
+   ([ToolLLM](https://arxiv.org/abs/2307.16789)). The
+   [model scoreboard](https://github.com/hellices/korvid/issues/176) exists for
+   this choice.
+2. **Reword the tool descriptions.** Documentation quality drives tool-selection
+   accuracy more than the prompt preamble does
+   ([EasyTool](https://arxiv.org/abs/2401.06201),
+   [Tool Documentation](https://arxiv.org/abs/2308.00675)) — which matches
+   korvid's own measurement that tool and output shape move small models more
+   reliably than extra prompt text.
+3. **Fit the context.** `agent.profile: small` and `agent.ollama.num_ctx`
+   matter more than wording once the serving context is short.
+4. **Then, if a model still needs it, change the role statement.**
+
+All of it lives under `agent.prompts`:
+
+```yaml
+agent:
+  profile: small
+  prompts:
+    # Highest-leverage knob. Every request retransmits the schemas, so on a
+    # short serving context this is both an accuracy and a token lever.
+    tool_descriptions:
+      get_logs: "Read recent container logs. One pod at a time."
+
+    # Keep korvid's role statement and add your own rules after it.
+    append: |
+      House rule: never include node names in an answer.
+
+    # Last resort: replace the role statement outright. Inline, or point at
+    # a file — not both.
+    system_file: ~/.config/korvid/prompts/small-system.md
+```
+
+`system` and `append` combine: replacing the role statement and adding
+house rules is a coherent pair. Tool-description precedence is your
+override first, then the `small` profile's built-in concise wording, then
+the schema's own text.
+
+korvid ships one prompt per capability tier and deliberately does not fork
+them per model. Model *families* do need different chat templates, but that
+is message formatting handled below korvid by Ollama or the serving engine —
+not something a system prompt can fix.
+
+**What you cannot override, and why.** The clauses describing writes,
+read-only mode, and the screen tools are chosen from the tools actually
+armed, not from configuration. This keeps the agent from being told about
+a capability it was not offered, and keeps a read-only deployment offering
+the equivalent `kubectl` command instead of a bare refusal. Overrides
+replace the role statement; korvid still assembles the rest.
+
+An override is local configuration, no more privileged than
+`agent.provider`. It cannot weaken any safety behaviour: approvals, the
+audit log, and read-only enforcement live in code, so an instruction to
+"delete pods without asking" produces a model that tries and is refused.
+
+Mistakes are reported, never fatal. A missing or unreadable file, a
+non-UTF-8 file, an empty value, or both `system` and `system_file` set for
+one slot warn at startup and **fall back** to the prompt korvid ships. Two
+warnings are advisory only and leave your configuration active: an unknown
+tool name (the other overrides still apply), and a prompt large enough to
+crowd the profile's history budget — that one still uses your prompt, it
+just tells you it is squeezing the conversation.
+
+To find out whether your wording is actually better, measure it:
+
+```bash
+python -m korvid.evals --profile small --json baseline.json
+python -m korvid.evals --profile small --json tuned.json \
+  --system-prompt-file ~/.config/korvid/prompts/small-system.md
+```
+
+Each result file records which prompt produced it (see
+[the eval harness](#agent-eval-harness) below).
+
 ## Follow mode
 
 Small models rarely volunteer the screen tools (`open_describe`,
