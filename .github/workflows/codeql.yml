@@ -10,6 +10,12 @@ on:
 permissions:
   contents: read
 
+# Same policy as CI: supersede a PR's older analyses, and keep every
+# push/schedule analysis in its own group so a queued one is never displaced.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     runs-on: korvid-runners

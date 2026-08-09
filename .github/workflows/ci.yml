@@ -7,8 +7,69 @@ on:
 permissions:
   contents: read
 
+# Supersede a PR's older runs when new commits arrive. Non-PR events get a
+# unique group: GitHub cancels a *pending* run when a newer one joins the
+# group even with cancel-in-progress off, so sharing a group on main would
+# let a burst of merges discard the middle commit's verification.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Docs are load-bearing for the suite - tests assert README, SECURITY.md,
+  # docs/keybindings.md and docs/windows.md still match the code and the
+  # release workflow - so a docs edit must still be tested. It does not need
+  # testing four times: those contracts are not Python-version or OS
+  # specific. Classify the change here so the redundant legs can skip the
+  # 20-30 minute pytest step while still reporting (they are required checks,
+  # and a required check that never runs blocks the merge forever).
+  changes:
+    runs-on: ubuntu-latest
+    # Reading the PR's file list needs more than the workflow-level
+    # `contents: read`; without this the API call 404s on every PR.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - name: Classify the change
+        id: classify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          # Fail closed: anything we cannot positively identify as docs-only
+          # gets the full matrix. That includes a failed API call - exiting
+          # non-zero here would *skip* the dependent test jobs rather than run
+          # them, and a skipped required check never reports.
+          if [ -z "${PR:-}" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "not a pull request; running everything"
+            exit 0
+          fi
+          if ! files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename'); then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "could not read the file list; running everything"
+            exit 0
+          fi
+          echo "$files"
+          # Docs-only means every path is under docs/ or is a root .md file.
+          # grep must consume the whole list: `grep -q` stops at the first hit
+          # and SIGPIPEs the writer, which under pipefail fails the pipeline
+          # and would read as docs-only - skipping tests on a code change.
+          non_docs=$(printf '%s\n' "$files" | { grep -cvE '^(docs/.*|[^/]+\.md)$' || true; })
+          if [ "${non_docs:-1}" -gt 0 ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "docs-only: one full test pass instead of four"
+          fi
+
   test:
+    needs: changes
     runs-on: korvid-runners
     strategy:
       matrix:
@@ -27,9 +88,12 @@ jobs:
       - run: uv run mypy
       - run: uv run tach check
       - run: uvx deptry src/
-      - run: uv run pytest --cov --cov-fail-under=80
+      # A docs-only change still gets a full suite run, on one version.
+      - if: needs.changes.outputs.code == 'true' || matrix.python-version == '3.12'
+        run: uv run pytest --cov --cov-fail-under=80
 
   windows-test:
+    needs: changes
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -40,7 +104,9 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync --locked --dev --all-extras
-      - run: uv run pytest -q
+      # Windows verifies OS-specific behaviour; docs contracts are not that.
+      - if: needs.changes.outputs.code == 'true'
+        run: uv run pytest -q
 
   pre-commit:
     runs-on: korvid-runners
