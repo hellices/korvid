@@ -107,7 +107,13 @@ _NEGATORS = frozenset(
 
 #: How a negator's scope ends: clause punctuation splits the text before
 #: tokenization, and these coordinating tokens end the scope within one.
-_CLAUSE_SPLIT = re.compile(r"[.,;:!?\n()]")
+#: Clause boundaries for negation scoping. Dashes are included because
+#: models punctuate with them constantly: without them "the pod was not
+#: restarted — it was OOMKilled" scores as never claiming OOMKilled, while
+#: the identical sentence with a full stop passes. A spaced hyphen is the
+#: ASCII spelling of the same break; an unspaced one is left alone so
+#: hyphenated words like `oom-killed` stay a single token.
+_CLAUSE_SPLIT = re.compile(r"[.,;:!?\n()\u2014\u2013]|(?<=\s)-(?=\s)")
 
 _SCOPE_BREAKERS = frozenset(
     {

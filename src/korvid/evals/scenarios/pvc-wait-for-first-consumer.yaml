@@ -1,0 +1,70 @@
+id: pvc-wait-for-first-consumer
+question: >-
+  The PersistentVolumeClaim cache-data in namespace platform has been Pending
+  since it was created. Is provisioning broken?
+screen: "resource view: persistentvolumeclaims, namespace platform, selected: platform/cache-data (Pending)"
+root_cause: none
+grading:
+  # A negative control for the PVC analyzer: Pending is the *correct* state
+  # here. WaitForFirstConsumer defers binding until a Pod schedules, so a
+  # model that reports a provisioning fault has over-diagnosed.
+  must_mention:
+    - [waitforfirstconsumer, wait for first consumer, first consumer,
+       waits for a pod, until a pod, when a pod]
+    - [expected, normal, not broken, nothing wrong, no problem, no issue,
+       working as intended, by design, correct]
+  must_not_mention:
+    - [provisioning failed, provisioner failed, failed to provision,
+       storageclass not found, no storage class, does not exist, missing]
+    - [quota, permission denied, forbidden]
+  expected_evidence:
+    # The claim is Pending and bound to a named class.
+    - - tool: diagnose_pvc
+        args: {pvc: cache-data, namespace: platform}
+        contains: "pvc.waiting_for_first_consumer"
+      - tool: get_resource
+        args: {kind: persistentvolumeclaims, name: cache-data, namespace: platform}
+        contains: "phase: Pending"
+    # The binding mode is the decisive fact, and it lives on the class.
+    - - tool: diagnose_pvc
+        args: {pvc: cache-data, namespace: platform}
+        contains: WaitForFirstConsumer
+      - tool: get_resource
+        args: {kind: storageclasses, name: standard-delayed, namespace: ""}
+        contains: WaitForFirstConsumer
+cluster:
+  objects:
+    - kind: PersistentVolumeClaim
+      apiVersion: v1
+      metadata:
+        name: cache-data
+        namespace: platform
+        uid: pvc-cache-1
+        creationTimestamp: "2026-07-27T05:00:00Z"
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: standard-delayed
+        resources:
+          requests:
+            storage: 10Gi
+      status:
+        phase: Pending
+    - kind: StorageClass
+      apiVersion: storage.k8s.io/v1
+      metadata:
+        name: standard-delayed
+        uid: sc-standard-delayed
+        creationTimestamp: "2026-07-20T00:00:00Z"
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+      provisioner: disk.csi.azure.com
+      volumeBindingMode: WaitForFirstConsumer
+      reclaimPolicy: Delete
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+  events: []
+  logs: {}

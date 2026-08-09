@@ -1,0 +1,115 @@
+id: service-endpoints-not-ready
+question: >-
+  The checkout service in namespace shop returns connection errors, but its
+  pods are running. Why is traffic not reaching them?
+screen: "resource view: services, namespace shop, selected: shop/checkout"
+root_cause: service_endpoints_not_ready
+grading:
+  # Keywords are chosen to survive the phrasings a correct answer actually
+  # uses. The diagnosis is inherently negative ("endpoints are *not*
+  # ready"), so a bare `endpoint` requirement fails whenever the model
+  # writes "none of its endpoints are ready" — the grader correctly treats
+  # that as negated. Each alternative below either carries its own negator
+  # or is stated positively. Verified against five correct phrasings and
+  # four wrong ones: 5/5 and 0/4.
+  must_mention:
+    - [not ready, unready, no ready endpoints, none of its endpoints are ready,
+       not serving, no ready]
+    - [readiness probe, readiness, probe, "503", unhealthy]
+  must_not_mention:
+    - [selector mismatch, wrong label, no endpoints, empty endpoints]
+    - [oomkilled, imagepullbackoff, crashloopbackoff]
+  expected_evidence:
+    # The Service exists and its slice is present — the fault is readiness,
+    # not a missing or mismatched target. Either route observes it.
+    - - tool: diagnose_service
+        args: {service: checkout, namespace: shop}
+        contains: "service.no_ready_endpoints"
+      - tool: get_resource
+        args: {kind: pods, name: checkout-5d8f-1, namespace: shop}
+        contains: "ready: false"
+    # The reason the endpoint is unready, from the pod itself.
+    - - tool: diagnose_pod
+        args: {pod: checkout-5d8f-1, namespace: shop}
+        contains: "not-ready"
+      - tool: get_events
+        args: {kind: pods, name: checkout-5d8f-1, namespace: shop}
+        contains: "Readiness probe failed"
+cluster:
+  objects:
+    - kind: Service
+      apiVersion: v1
+      metadata:
+        name: checkout
+        namespace: shop
+        uid: svc-checkout-1
+      spec:
+        selector: {app: checkout}
+        ports:
+          - {port: 80, targetPort: 8080}
+    - kind: EndpointSlice
+      apiVersion: discovery.k8s.io/v1
+      metadata:
+        name: checkout-x7k2p
+        namespace: shop
+        uid: eps-checkout-1
+        labels:
+          kubernetes.io/service-name: checkout
+      addressType: IPv4
+      endpoints:
+        - addresses: ["10.0.4.21"]
+          conditions: {ready: false}
+          targetRef: {kind: Pod, name: checkout-5d8f-1, namespace: shop}
+      ports:
+        - {port: 8080}
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: checkout-5d8f-1
+        namespace: shop
+        uid: pod-checkout-1
+        creationTimestamp: "2026-07-27T06:00:00Z"
+        labels: {app: checkout}
+      spec:
+        nodeName: node-a
+        containers:
+          - name: checkout
+            image: shop/checkout:v9
+      status:
+        phase: Running
+        podIP: 10.0.4.21
+        conditions:
+          - {type: Ready, status: "False"}
+        containerStatuses:
+          - name: checkout
+            ready: false
+            restartCount: 0
+            state:
+              running: {startedAt: "2026-07-27T06:00:07Z"}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a}
+      status:
+        conditions:
+          - {type: Ready, status: "True"}
+  events:
+    - kind: Event
+      apiVersion: v1
+      metadata:
+        name: checkout-5d8f-1.readiness
+        namespace: shop
+      involvedObject:
+        kind: Pod
+        name: checkout-5d8f-1
+        namespace: shop
+        uid: pod-checkout-1
+      type: Warning
+      reason: Unhealthy
+      message: 'Readiness probe failed: HTTP probe failed with statuscode: 503'
+      count: 42
+      lastTimestamp: "2026-07-27T06:20:00Z"
+  logs:
+    shop/checkout-5d8f-1/checkout:
+      current:
+        - "checkout v9 started, waiting for downstream inventory service"
+        - "readiness: downstream inventory unreachable, reporting 503"

@@ -641,3 +641,26 @@ def test_grade_target_does_not_depend_on_argument_order(
     ]
     result = grade(scenario, "OOMKilled, exit 137.", records)
     assert result.evidence_fetched
+
+
+@pytest.mark.parametrize("dash", ["\u2014", "\u2013", " - "])
+def test_grade_treats_a_dash_as_a_clause_boundary(dash: str) -> None:
+    """A dash separates clauses, so a negator before it must not suppress
+    the claim after it.
+
+    Models punctuate with dashes constantly. Without this, "the pod was not
+    restarted — it was OOMKilled" scores as never having claimed OOMKilled,
+    and the identical sentence written with a full stop passes. That is a
+    grading artifact, not a difference in diagnosis.
+    """
+    answer = (
+        f"The container was not restarted by the operator{dash}it was OOMKilled with exit code 137."
+    )
+    result = grade(_scenario(), answer, [_record()])
+    assert result.diagnosis_success, result.missing_mentions
+
+
+def test_grade_still_scopes_a_negator_within_one_clause() -> None:
+    """The fix must not stop negation working where there is no boundary."""
+    result = grade(_scenario(), "The container was not OOMKilled at all.", [_record()])
+    assert not result.diagnosis_success
