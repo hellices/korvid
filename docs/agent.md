@@ -309,34 +309,55 @@ header shows `[small]` so you always know which
 mode is live. Compare the profiles on your own endpoint with the eval
 harness: `python -m korvid.evals --profile small` (see below).
 
-## Tuning the prompt for your model
+## Tuning the agent for your model
 
-korvid ships one prompt per capability tier and does not fork them per
-model. When a model genuinely needs different wording, or your organization
-has rules the agent must follow, override the prompt locally instead:
+If a local model behaves poorly, rewriting the system prompt is usually the
+*last* thing worth trying. Published evidence puts the levers in this order:
+
+1. **Pick a different model.** Small models' tool-calling weakness is mostly a
+   training property, not a prompting one, and no prompt closes that gap
+   ([ToolLLM](https://arxiv.org/abs/2307.16789)). The
+   [model scoreboard](https://github.com/hellices/korvid/issues/176) exists for
+   this choice.
+2. **Reword the tool descriptions.** Documentation quality drives tool-selection
+   accuracy more than the prompt preamble does
+   ([EasyTool](https://arxiv.org/abs/2401.06201),
+   [Tool Documentation](https://arxiv.org/abs/2308.00675)) — which matches
+   korvid's own measurement that tool and output shape move small models more
+   reliably than extra prompt text.
+3. **Fit the context.** `agent.profile: small` and `agent.ollama.num_ctx`
+   matter more than wording once the serving context is short.
+4. **Then, if a model still needs it, change the role statement.**
+
+All of it lives under `agent.prompts`:
 
 ```yaml
 agent:
   profile: small
   prompts:
-    # Replace the role statement. Inline, or point at a file — not both.
-    system_file: ~/.config/korvid/prompts/small-system.md
+    # Highest-leverage knob. Every request retransmits the schemas, so on a
+    # short serving context this is both an accuracy and a token lever.
+    tool_descriptions:
+      get_logs: "Read recent container logs. One pod at a time."
 
     # Keep korvid's role statement and add your own rules after it.
     append: |
       House rule: never include node names in an answer.
 
-    # Reword individual tool descriptions. Every request retransmits the
-    # schemas, so on a short serving context this is a real token cost —
-    # and measurably moves small models more than extra prompt text does.
-    tool_descriptions:
-      get_logs: "Read recent container logs. One pod at a time."
+    # Last resort: replace the role statement outright. Inline, or point at
+    # a file — not both.
+    system_file: ~/.config/korvid/prompts/small-system.md
 ```
 
 `system` and `append` combine: replacing the role statement and adding
 house rules is a coherent pair. Tool-description precedence is your
 override first, then the `small` profile's built-in concise wording, then
 the schema's own text.
+
+korvid ships one prompt per capability tier and deliberately does not fork
+them per model. Model *families* do need different chat templates, but that
+is message formatting handled below korvid by Ollama or the serving engine —
+not something a system prompt can fix.
 
 **What you cannot override, and why.** The clauses describing writes,
 read-only mode, and the screen tools are chosen from the tools actually

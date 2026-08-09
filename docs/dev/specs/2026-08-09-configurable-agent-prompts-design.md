@@ -32,6 +32,55 @@ The injection points already exist. `compose_system_prompt` accepts
 `system_prompt` and `ui_prompt`, and `build_profile` already selects them per
 tier. This design connects configuration to seams that are already there.
 
+## Evidence (added 2026-08-09, after external review)
+
+The direction was checked against comparable tools and published work rather
+than assumed.
+
+**The pattern is established.** Of seven comparable tools, four expose a
+system-prompt override: [kubectl-ai](https://github.com/GoogleCloudPlatform/kubectl-ai)
+(`promptTemplateFilePath`, `extraPromptPaths`),
+[HolmesGPT](https://github.com/HolmesGPT/holmesgpt) (`file://` prompt URIs plus
+`custom_instructions`/`global_instructions`), Continue.dev
+(`baseSystemMessage`), and Ollama itself (Modelfile `SYSTEM`). Cline allows
+append-only; Aider and k8sgpt do not expose one at all — k8sgpt sends no system
+role whatsoever.
+
+**But the prompt is the lowest-leverage layer.** Three independent papers find
+tool-description quality dominates prompt preamble for tool-calling accuracy:
+[EasyTool](https://arxiv.org/abs/2401.06201),
+[Tool Documentation](https://arxiv.org/abs/2308.00675), and
+[ToolLLM](https://arxiv.org/abs/2307.16789), which further finds small models'
+tool-use weakness is largely a fine-tuning property no prompt can close. This
+independently confirms #176's own measurement.
+
+Two consequences for this design:
+
+- `tool_descriptions` is not a nice-to-have third slot; it is the slot with the
+  strongest evidence behind it. The documentation leads with it and presents
+  role-statement replacement as a last resort, after model choice, tool wording,
+  and context budget.
+- The feature is correctly scoped as *local adaptation*, not as guidance. It
+  does not become a recommended tuning step.
+
+**The key decision is externally validated.** The effective prompt for a local
+model has three layers: chat-template formatting, tool-schema injection, and
+behavioural framing. kubectl-ai shows the hazard of merging them: under
+`--enable-tool-use-shim` the tool JSON lives *inside* the system prompt, so a
+user override that drops `{{.ToolsAsJSON}}` silently disables tool calling.
+korvid is not exposed to that failure — it sends tools as native structured
+function definitions — and this design further keeps the armed-capability
+clauses out of the override for the same reason: configuration touches framing
+only, never the tool surface.
+
+**What remains unevidenced.** No study was found quantifying prompt-wording
+variance for 1B-30B models specifically (BFCL V4 has a Format Sensitivity
+category, but its findings were not retrievable), and no project was found that
+added a prompt override and later removed it. Per-model-family *content* forks
+remain unsupported by evidence — only per-family *chat templates* are
+well-established, and those are handled below korvid by the serving engine.
+#176's "do not fork per model" stance therefore stands.
+
 ## Non-goals
 
 - Shipping per-model prompts. #176's conclusion stands.
