@@ -494,11 +494,14 @@ def _initial_profile(
     pod_resize_supported: bool,
     startup_warnings: list[str] | None,
 ) -> AgentProfile:
-    """The starting capability profile, reporting unusable prompt overrides.
+    """The starting capability profile, reporting advisory prompt warnings.
 
-    An override that cannot take effect (a typo'd tool name, a prompt that
-    crowds the history budget) is a warning, never fatal: the agent still
-    starts on the prompts korvid ships.
+    Unusable slots have already fallen back to the shipped prompt during
+    config parsing. What is reported here is advisory and leaves the
+    configured prompt **active**: an override naming an unknown tool (the
+    remaining overrides still apply), and a prompt large enough to crowd
+    the profile's history budget, which is used as configured. Neither is
+    ever fatal.
     """
     from korvid.agent.profiles import build_profile, validate_prompt_overrides
 

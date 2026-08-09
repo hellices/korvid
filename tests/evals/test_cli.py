@@ -13,10 +13,12 @@ from typing import Any
 
 import pytest
 
+from korvid.agent import prompts
 from korvid.agent.profiles import AgentProfile, PromptOverrides, build_profile
 from korvid.evals.__main__ import (
     _parse_args,
     _positive_int,
+    _sweep_overrides,
     exit_code,
     prompt_fingerprint,
     provider_factory_from_env,
@@ -205,3 +207,39 @@ def test_prompt_sweep_flags_accept_paths() -> None:
     args = _parse_args(["--system-prompt-file", "a.md", "--prompt-append-file", "b.md"])
     assert args.system_prompt_file == Path("a.md")
     assert args.prompt_append_file == Path("b.md")
+
+
+def test_prompt_fingerprint_covers_the_composed_prompt_not_just_the_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The digest must identify the actual model input.
+
+    `AgentRuntime` composes the write/no-write clause onto the role
+    statement at request time. That clause is not part of
+    `profile.system_prompt`, so a digest over the role statement alone
+    would call two behaviourally different runs comparable.
+    """
+    profile, overrides = _built()
+    before = prompt_fingerprint(profile, overrides)["sha256"]
+    monkeypatch.setattr(prompts, "NO_WRITE_PROMPT", "Reworded read-only guidance.")
+    assert prompt_fingerprint(profile, overrides)["sha256"] != before
+
+
+def test_prompt_fingerprint_covers_parameter_schemas() -> None:
+    """A parameter-schema edit changes what the model sees, so it must
+    change the digest — the methodology promises exactly this."""
+    profile, overrides = _built()
+    before = prompt_fingerprint(profile, overrides)["sha256"]
+    target = next(t for t in profile.tools if t["function"]["name"] == "get_logs")
+    target["function"]["parameters"]["properties"]["namespace"]["description"] = "changed"
+    assert prompt_fingerprint(profile, overrides)["sha256"] != before
+
+
+def test_prompt_sweep_file_with_invalid_utf8_exits_cleanly(tmp_path: Path) -> None:
+    """A non-UTF-8 file must produce the CLI's actionable error, not a
+    traceback: `UnicodeDecodeError` is not an `OSError`."""
+    bad = tmp_path / "prompt.md"
+    bad.write_bytes(b"\xff\xfe not utf-8")
+    args = _parse_args(["--system-prompt-file", str(bad)])
+    with pytest.raises(SystemExit, match="--system-prompt-file"):
+        _sweep_overrides(args)

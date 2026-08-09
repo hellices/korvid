@@ -27,7 +27,7 @@ from korvid.agent.prompts import (
     UI_DRIVE_PROMPT,
 )
 from korvid.agent.runtime import MAX_HISTORY_CHARS
-from korvid.tools.registry import agent_tool_schemas
+from korvid.tools.registry import TOOL_DEFS, agent_tool_schemas
 
 PROFILE_NAMES = ("full", "small")
 
@@ -189,6 +189,18 @@ def build_profile(
     raise ValueError(f"unknown agent profile: {name!r} (expected one of {PROFILE_NAMES})")
 
 
+def _known_tool_names() -> frozenset[str]:
+    """Every tool korvid defines, armed on this cluster or not.
+
+    Typo detection must not use the startup surface: `resize_pod` is armed
+    only where discovery found pods/resize, write tools are absent in
+    read-only mode, and the same overrides are reused after a `:ctx` switch
+    or a profile change. Validating against the armed set would warn that a
+    perfectly valid override "has no effect".
+    """
+    return frozenset(definition.name for definition in TOOL_DEFS)
+
+
 def validate_prompt_overrides(profile: AgentProfile, overrides: PromptOverrides) -> list[str]:
     """Warnings about a built profile's overrides — never fatal.
 
@@ -197,11 +209,10 @@ def validate_prompt_overrides(profile: AgentProfile, overrides: PromptOverrides)
     already-overridden prompt and that profile's history budget.
     """
     warnings: list[str] = []
-    armed = {tool["function"]["name"] for tool in profile.tools}
-    for name in sorted(set(overrides.tool_descriptions) - armed):
+    for name in sorted(set(overrides.tool_descriptions) - _known_tool_names()):
         warnings.append(
-            f"agent.prompts.tool_descriptions: {name!r} is not a tool offered to the "
-            f"{profile.name} profile; the override has no effect"
+            f"agent.prompts.tool_descriptions: {name!r} is not a korvid tool; "
+            f"the override has no effect"
         )
     limit = int(profile.max_history_chars * PROMPT_BUDGET_SHARE)
     size = len(profile.system_prompt)

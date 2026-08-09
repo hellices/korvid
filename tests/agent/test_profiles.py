@@ -422,3 +422,13 @@ def test_override_keeps_the_role_statement_ahead_of_the_clauses() -> None:
 def test_append_lands_before_the_conditional_clauses() -> None:
     prompt = _composed("full", readonly=True, append="Never name nodes.")
     assert prompt.index("Never name nodes.") < prompt.index(NO_WRITE_PROMPT)
+
+
+def test_validate_accepts_a_tool_that_is_known_but_not_currently_armed() -> None:
+    """`resize_pod` is armed only on a resize-capable cluster, and the same
+    overrides are reused after a `:ctx` switch. Warning "no effect" against
+    the startup surface would cry wolf on a valid override."""
+    overrides = PromptOverrides(tool_descriptions={"resize_pod": "Mine."})
+    profile = build_profile("small", readonly=True, resize_supported=False, overrides=overrides)
+    assert "resize_pod" not in {t["function"]["name"] for t in profile.tools}
+    assert validate_prompt_overrides(profile, overrides) == []

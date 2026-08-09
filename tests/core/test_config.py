@@ -1605,3 +1605,13 @@ def test_prompts_ignore_a_non_mapping_block(tmp_path: Path) -> None:
     cfg = _load_prompts_config(tmp_path, "nonsense")
     assert cfg.agent_prompt_system is None
     assert cfg.agent_prompt_append is None
+
+
+def test_prompts_warn_when_the_referenced_file_is_not_utf8(tmp_path: Path) -> None:
+    """`UnicodeDecodeError` is not an `OSError`, so a non-UTF-8 prompt file
+    would otherwise crash config loading instead of falling back."""
+    prompt = tmp_path / "system.md"
+    prompt.write_bytes(b"\xff\xfe not utf-8")
+    cfg = _load_prompts_config(tmp_path, {"system_file": str(prompt)})
+    assert cfg.agent_prompt_system is None
+    assert any("system.md" in w for w in cfg.warnings), cfg.warnings

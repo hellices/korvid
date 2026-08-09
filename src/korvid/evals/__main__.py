@@ -28,10 +28,12 @@ from pathlib import Path
 from typing import Any
 
 from korvid.agent.profiles import AgentProfile, PromptOverrides, build_profile
+from korvid.agent.prompts import compose_system_prompt
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.runner import (
     DEFAULT_REPETITIONS,
     ScenarioReport,
+    _eval_tools,
     render_markdown,
     run_scenario,
 )
@@ -89,15 +91,25 @@ def prompt_fingerprint(profile: AgentProfile, overrides: PromptOverrides) -> dic
     """Which prompt produced a run.
 
     A scoreboard row that does not say which prompt it was measured under is
-    not comparable with any other row, so every run records this. The digest
-    covers the role statement *and* the tool descriptions, because rewording
-    a tool is a measured lever, not cosmetic.
+    not comparable with any other row, so every run records this.
+
+    The digest covers what the model actually receives: the *composed*
+    system prompt for this eval surface — role statement plus the UI and
+    write/no-write clauses `AgentRuntime` appends — and the complete tool
+    schemas, which are retransmitted on every request. Hashing only the role
+    statement would mark behaviourally different runs as comparable.
     """
+    tools = _eval_tools(profile)
+    composed = compose_system_prompt(
+        tools,
+        None,
+        system_prompt=profile.system_prompt,
+        ui_prompt=profile.ui_prompt,
+    )
     digest = hashlib.sha256()
-    digest.update(profile.system_prompt.encode("utf-8"))
-    for tool in profile.tools:
-        function = tool["function"]
-        digest.update(f"\x00{function['name']}\x00{function['description']}".encode())
+    digest.update(composed.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(json.dumps(tools, sort_keys=True, ensure_ascii=False).encode("utf-8"))
     configured = bool(overrides.system or overrides.append or overrides.tool_descriptions)
     return {
         "source": "override" if configured else "default",
@@ -244,6 +256,11 @@ def _read_prompt_file(path: Path | None, flag: str) -> str | None:
         text = path.read_text(encoding="utf-8").strip()
     except OSError as exc:
         raise SystemExit(f"{flag}: cannot read {path}: {exc.strerror}") from exc
+    except UnicodeError as exc:
+        # read_text raises UnicodeDecodeError, which is not an OSError; a
+        # non-UTF-8 file must still get the actionable message, not a
+        # traceback.
+        raise SystemExit(f"{flag}: {path} is not valid UTF-8: {exc}") from exc
     if not text:
         raise SystemExit(f"{flag}: {path} is empty")
     return text

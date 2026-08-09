@@ -371,10 +371,13 @@ An override is local configuration, no more privileged than
 audit log, and read-only enforcement live in code, so an instruction to
 "delete pods without asking" produces a model that tries and is refused.
 
-Mistakes are reported, never fatal — a missing file, an empty value, both
-`system` and `system_file` set, an unknown tool name, or a prompt large
-enough to crowd the profile's history budget all warn at startup and fall
-back to the prompt korvid ships.
+Mistakes are reported, never fatal. A missing or unreadable file, a
+non-UTF-8 file, an empty value, or both `system` and `system_file` set for
+one slot warn at startup and **fall back** to the prompt korvid ships. Two
+warnings are advisory only and leave your configuration active: an unknown
+tool name (the other overrides still apply), and a prompt large enough to
+crowd the profile's history budget — that one still uses your prompt, it
+just tells you it is squeezing the conversation.
 
 To find out whether your wording is actually better, measure it:
 

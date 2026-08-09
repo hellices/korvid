@@ -198,10 +198,13 @@ def validate_prompt_overrides(
 ) -> list[str]: ...
 ```
 
-`validate_prompt_overrides` takes the *built* profile because both checks need
-it: unknown tool names are checked against `profile.tools`, and the size guard
-against `profile.system_prompt` (already overridden) and
-`profile.max_history_chars`. It returns warnings rather than raising, so the
+`validate_prompt_overrides` takes the *built* profile for the size guard,
+which needs `profile.system_prompt` (already overridden) and
+`profile.max_history_chars`. Tool names are checked against every tool korvid
+defines, **not** the armed surface: `resize_pod` is armed only where discovery
+found pods/resize, write tools are absent in read-only mode, and the same
+overrides are reused after a `:ctx` switch — validating against the armed set
+would warn that a valid override "has no effect". It returns warnings rather than raising, so the
 composition root decides how to surface them. It lives in `agent/` because only
 that layer may import the registry.
 
@@ -226,8 +229,8 @@ precedent, where a bad `agent.options` block is reported through
 | referenced file missing or unreadable | warning; slot falls back to the default |
 | value present but empty or whitespace | warning; slot falls back to the default |
 | non-string value | warning; slot falls back to the default |
-| `tool_descriptions` names an unknown tool | warning; other entries still apply |
-| system prompt exceeds the size guard | warning; the override still applies |
+| `tool_descriptions` names an unknown tool | warning; other entries still apply, prompt unchanged |
+| system prompt exceeds the size guard | warning only; the configured prompt is still used |
 
 Both-present is treated as an error rather than silently preferring one, so an
 ambiguous file never quietly wins over the inline text a reader can see.

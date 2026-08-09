@@ -164,10 +164,16 @@ results:
 ```
 
 `source` is `default` when the run used the prompts korvid ships, and
-`override` when `--system-prompt-file`, `--prompt-append-file`, or a
-configured `agent.prompts` block changed them. The digest covers the role
-statement *and* every tool description, because rewording a tool is a
-measured lever rather than cosmetic.
+`override` when `--system-prompt-file` or `--prompt-append-file` changed
+them. The eval CLI does **not** read `~/.config/korvid/config.yaml`: a
+configured `agent.prompts` block affects the running TUI, never this JSON,
+so a sweep is reproducible from its command line alone.
+
+The digest covers what the model actually receives — the composed system
+prompt for the eval surface, including the write/no-write clause, plus the
+complete tool schemas that are retransmitted on every request. Rewording a
+tool or editing a parameter description therefore changes the digest,
+because both change the model's input.
 
 Rules that follow from this:
 

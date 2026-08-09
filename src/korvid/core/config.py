@@ -532,6 +532,12 @@ def _prompt_from_file(value: Any, file_key: str, warnings: list[str]) -> str | N
     except OSError as exc:
         warnings.append(f"{label}: cannot read {path}: {exc.strerror}; the shipped prompt is used")
         return None
+    except UnicodeError as exc:
+        # read_text raises UnicodeDecodeError, which is not an OSError; an
+        # unreadable encoding must fall back like any other bad value
+        # rather than stopping startup.
+        warnings.append(f"{label}: {path} is not valid UTF-8 ({exc}); the shipped prompt is used")
+        return None
     return _prompt_text(text, label, warnings)
 
 
