@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Evidence, Scenario
 
@@ -379,3 +381,263 @@ def test_grade_negation_scope_ends_at_causal_conjunctions() -> None:
     answer = "The pod is not healthy because the readiness probe is failing."
     result = grade(scenario, answer, [])
     assert result.diagnosis_success
+
+
+def test_grade_credits_diagnose_service_against_name_keyed_evidence() -> None:
+    """`diagnose_service(service=...)` names the same object as `name=...`.
+
+    Evidence is written against the resource identity, not one tool's
+    parameter spelling. Without the alias a model that correctly reaches for
+    the deterministic Service tool is graded as having fetched no evidence,
+    which would make a baseline-versus-diagnostic comparison meaningless.
+    """
+    evidence = Evidence(
+        tool="get_resource",
+        contains="endpoints: 0",
+        args={"kind": "services", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_service",
+            result="outcome: findings\nendpoints: 0",
+            arguments={"service": "web", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched
+
+
+def test_grade_credits_diagnose_pvc_against_name_keyed_evidence() -> None:
+    """`diagnose_pvc(pvc=...)` names the same object as `name=...`."""
+    evidence = Evidence(
+        tool="get_resource",
+        contains="phase: Pending",
+        args={"kind": "persistentvolumeclaims", "name": "data", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nphase: Pending",
+            arguments={"pvc": "data", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched
+
+
+def test_grade_still_rejects_a_diagnostic_call_against_a_different_object() -> None:
+    """Folding the key must not fold the value: a different name is not evidence."""
+    evidence = Evidence(
+        tool="get_resource",
+        contains="endpoints: 0",
+        args={"kind": "services", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_service",
+            result="outcome: findings\nendpoints: 0",
+            arguments={"service": "api", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
+
+
+def test_grade_rejects_a_diagnostic_call_against_a_different_kind() -> None:
+    """Folding `pvc`/`service`/`pod` onto `name` must not fold away the kind.
+
+    `matches_target` compares `kind` only when both sides carry one, and a
+    diagnostic tool has no `kind` argument. Without an implied kind,
+    `diagnose_pvc(pvc="web")` satisfies evidence about a *Service* named
+    `web` whenever the report happens to contain the substring — inflating
+    both evidence and on-target metrics.
+    """
+    evidence = Evidence(
+        tool="get_resource",
+        contains="endpoints: 0",
+        args={"kind": "services", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nendpoints: 0",
+            arguments={"pvc": "web", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
+
+
+def test_grade_rejects_a_pod_read_against_deployment_evidence() -> None:
+    """The same hole existed for `pod` before the diagnostic aliases."""
+    evidence = Evidence(
+        tool="get_resource",
+        contains="readyReplicas: 0",
+        args={"kind": "deployments", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="get_logs",
+            result="readyReplicas: 0",
+            arguments={"pod": "web", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
+
+
+def test_grade_still_credits_a_diagnostic_call_for_its_own_kind() -> None:
+    """The implied kind must match its own evidence, not block it."""
+    evidence = Evidence(
+        tool="get_resource",
+        contains="phase: Pending",
+        args={"kind": "persistentvolumeclaims", "name": "data", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nphase: Pending",
+            arguments={"pvc": "data", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched
+
+
+def test_grade_prefers_the_implied_kind_over_a_conflicting_kind_argument() -> None:
+    """An identity alias determines the kind; a stray `kind` cannot override it.
+
+    Read handlers take the argument mapping directly and ignore keys they
+    do not use — `_diagnose_pvc` reads only `pvc` and `namespace` — and the
+    runner does not treat an undeclared key as malformed. So
+    `diagnose_pvc(pvc="web", kind="services")` really fetches a PVC. If the
+    explicit `kind` won, that call would canonicalize as a Service and
+    satisfy Service evidence, reopening the cross-kind hole.
+    """
+    evidence = Evidence(
+        tool="get_resource",
+        contains="endpoints: 0",
+        args={"kind": "services", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nendpoints: 0",
+            arguments={"pvc": "web", "kind": "services", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
+
+
+def test_grade_still_uses_an_explicit_kind_when_no_alias_is_present() -> None:
+    """Routes without an identity alias — `get_resource`, `get_events` —
+    must keep comparing on their own `kind` argument."""
+    evidence = Evidence(
+        tool="get_resource",
+        contains="readyReplicas: 2",
+        args={"kind": "deployments", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="get_resource",
+            result="status:\n  readyReplicas: 2",
+            arguments={"kind": "deploy", "name": "web", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched
+
+
+def test_grade_credits_diagnose_service_for_endpoint_evidence() -> None:
+    """`diagnose_service` reports on the Service *and* its endpoints, so a
+    single implied kind is too narrow.
+
+    The bundled Service scenarios express endpoint evidence as
+    `get_resource(kind: endpoints)`. Implying only `services` would leave
+    this PR's target scenario ungraded — the tool would be used correctly
+    and still score no evidence.
+    """
+    evidence = Evidence(
+        tool="get_resource",
+        contains="subsets: []",
+        args={"kind": "endpoints", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_service",
+            result="outcome: findings\nsubsets: []",
+            arguments={"service": "web", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched
+
+
+def test_grade_ignores_an_identity_key_the_tool_does_not_read() -> None:
+    """The implied kind comes from the tool, not from whichever identity-
+    shaped key happens to appear last.
+
+    `_diagnose_pvc` reads `pvc` and `namespace`; a stray `service` key is
+    inert at execution and the runner does not mark the trace malformed.
+    Letting it decide the kind would satisfy Service evidence with a PVC
+    read.
+    """
+    evidence = Evidence(
+        tool="get_resource",
+        contains="endpoints: 0",
+        args={"kind": "services", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nendpoints: 0",
+            arguments={"pvc": "web", "service": "web", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"pvc": "web", "name": "other", "namespace": "front"},
+        {"name": "other", "pvc": "web", "namespace": "front"},
+    ],
+)
+def test_grade_target_does_not_depend_on_argument_order(
+    arguments: dict[str, str],
+) -> None:
+    """A tool's identity argument decides the target, whichever order the
+    keys arrived in.
+
+    `_diagnose_pvc` reads `pvc`; a stray `name` is inert at execution. If
+    it competed for the same canonical slot, the identical call would grade
+    differently depending on JSON key order.
+    """
+    evidence = Evidence(
+        tool="get_resource",
+        contains="phase: Pending",
+        args={"kind": "persistentvolumeclaims", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nphase: Pending",
+            arguments=arguments,
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched

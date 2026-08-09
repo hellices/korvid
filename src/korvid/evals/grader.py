@@ -181,25 +181,70 @@ def _mentions_positively(keyword: str, answer_tokens: list[str], clause_ids: lis
     )
 
 
-#: Identity keys that name the same thing under different parameter names
-#: across read tools (`get_logs(pod=...)` vs `get_resource(name=...)`).
-_KEY_ALIASES = {"pod": "name"}
+#: Per-tool identity: which argument names the target, and which resource
+#: kinds that tool's result carries evidence about.
+#:
+#: Keyed by tool, not by argument name. Read handlers take the argument
+#: mapping directly and ignore keys they do not use, and the runner does
+#: not mark an undeclared key as malformed — so `diagnose_pvc(pvc=…,
+#: service=…)` really fetches a PVC, and letting a stray identity-shaped
+#: key decide the kind would let it satisfy Service evidence.
+#:
+#: The kinds are a *set* because a compound diagnostic reports across
+#: several resources: `diagnose_service` returns the Service together with
+#: its endpoint readiness, so evidence expressed against any of those is
+#: genuinely reachable through it.
+_TOOL_IDENTITY: dict[str, tuple[str, frozenset[str]]] = {
+    "get_logs": ("pod", frozenset({"pods"})),
+    "diagnose_pod": ("pod", frozenset({"pods"})),
+    "diagnose_service": (
+        "service",
+        frozenset({"services", "endpoints", "endpointslices"}),
+    ),
+    "diagnose_pvc": ("pvc", frozenset({"persistentvolumeclaims"})),
+}
 
 
-def _canonical_args(args: dict[str, Any]) -> dict[str, str]:
-    """Lowercase argument values keyed by canonical parameter name:
-    equivalent identity keys (`pod` -> `name`) are folded together, and
-    "kind" values go through the resource alias table so `deploy`,
-    `deployment` and `deployments` compare equal."""
+def _canonical_args(args: dict[str, Any], tool: str | None = None) -> dict[str, str]:
+    """Lowercase argument values keyed by canonical parameter name.
+
+    The identity argument of a known tool (`pod`, `service`, `pvc`) folds
+    onto `name`, so evidence written against a resource is satisfied
+    whichever read tool reached it. `kind` values go through the resource
+    alias table so `deploy`, `deployment` and `deployments` compare equal.
+    """
+    identity = _TOOL_IDENTITY.get(tool or "")
+    identity_key = identity[0] if identity is not None else None
     canonical: dict[str, str] = {}
     for key, value in args.items():
         text = str(value).strip().lower()
         if key == "kind":
-            meta = _ALIASES.get(text)
-            if meta is not None:
-                text = meta.plural
-        canonical[_KEY_ALIASES.get(key, key)] = text
+            canonical["kind"] = _canonical_kind(text)
+        elif key == identity_key:
+            continue  # settled after the loop, so key order cannot decide it
+        elif key == "name" and identity_key is not None:
+            continue  # the tool does not read it; it must not claim `name`
+        else:
+            canonical[key] = text
+    if identity_key is not None and identity_key in args:
+        canonical["name"] = str(args[identity_key]).strip().lower()
     return canonical
+
+
+def _kinds(args: dict[str, str], tool: str | None) -> frozenset[str] | None:
+    """Resource kinds a call or an evidence item is about, or None when it
+    places no constraint. A tool's own kinds win over a `kind` argument it
+    does not read."""
+    identity = _TOOL_IDENTITY.get(tool or "")
+    if identity is not None:
+        return identity[1]
+    kind = args.get("kind")
+    return frozenset({kind}) if kind is not None else None
+
+
+def _canonical_kind(text: str) -> str:
+    meta = _ALIASES.get(text)
+    return meta.plural if meta is not None else text
 
 
 def matches_target(evidence: Evidence, record: ToolRecord) -> bool:
@@ -211,12 +256,19 @@ def matches_target(evidence: Evidence, record: ToolRecord) -> bool:
     result-independent targeting is checked here — success and content are
     `_satisfies`' job (the runner also uses this for its on-target rate).
     """
-    expected = _canonical_args(evidence.args)
-    actual = _canonical_args(record.arguments)
-    # "kind" is route-specific (diagnose_pod has no kind argument), but when
-    # both sides name one they must agree: a deployment `web` is not
-    # evidence about a pod `web`.
-    if "kind" in expected and "kind" in actual and expected["kind"] != actual["kind"]:
+    expected = _canonical_args(evidence.args, evidence.tool)
+    actual = _canonical_args(record.arguments, record.name)
+    # Kinds are route-specific (a diagnostic has no `kind` argument), but
+    # when both sides name any, they must overlap: a deployment `web` is
+    # not evidence about a pod `web`. A compound diagnostic covers several
+    # kinds, so this is an intersection rather than equality.
+    expected_kinds = _kinds(expected, evidence.tool)
+    actual_kinds = _kinds(actual, record.name)
+    if (
+        expected_kinds is not None
+        and actual_kinds is not None
+        and not expected_kinds & actual_kinds
+    ):
         return False
     return all(actual.get(key) == value for key, value in expected.items() if key != "kind")
 
