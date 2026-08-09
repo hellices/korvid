@@ -73,8 +73,22 @@ jobs:
 
       - name: Start AKS cluster
         run: |
-          state=$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --query powerState.code -o tsv)
-          if [ "$state" != "Running" ]; then
+          # Settle first: Azure rejects a start while any operation is still
+          # running, and a preceding run's stop can still be finishing even
+          # though powerState already reads Stopped.
+          for i in $(seq 1 30); do
+            read -r power prov < <(az aks show -g "$AKS_RESOURCE_GROUP" \
+              -n "$AKS_CLUSTER_NAME" --query '[powerState.code,provisioningState]' \
+              -o tsv 2>/dev/null | tr '\n' ' ') || true
+            [ "${prov:-}" = "Succeeded" ] && break
+            echo "waiting for the cluster to settle (${power:-unknown}/${prov:-unknown})"
+            sleep 20
+          done
+          if [ "${prov:-}" != "Succeeded" ]; then
+            echo "::error title=Cluster busy::$AKS_CLUSTER_NAME is still ${prov:-unknown} after 10 minutes; another run's operation has not finished."
+            exit 1
+          fi
+          if [ "${power:-}" != "Running" ]; then
             az aks start -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME"
           fi
 
@@ -235,10 +249,19 @@ jobs:
       - name: Stop AKS cluster
         run: |
           az aks stop -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --no-wait
+          # powerState flips to Stopped as soon as Azure accepts the request,
+          # while provisioningState stays Stopping until the operation really
+          # finishes. Waiting on powerState alone let this job exit seconds
+          # after asking, so the next merge's run hit "there's an in-progress
+          # stop managed cluster operation" on its own start.
           for i in $(seq 1 30); do
-            state=$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --query powerState.code -o tsv || echo unknown)
-            [ "$state" = "Stopped" ] && exit 0
+            read -r power prov < <(az aks show -g "$AKS_RESOURCE_GROUP" \
+              -n "$AKS_CLUSTER_NAME" --query '[powerState.code,provisioningState]' \
+              -o tsv 2>/dev/null | tr '\n' ' ') || true
+            if [ "${power:-}" = "Stopped" ] && [ "${prov:-}" = "Succeeded" ]; then
+              exit 0
+            fi
             sleep 20
           done
-          echo "::error title=AKS stop failed::aks-korvid-contract-test did not reach Stopped state; idle compute may be accruing. Stop it manually: az aks stop -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME"
+          echo "::error title=AKS stop failed::aks-korvid-contract-test did not settle at Stopped/Succeeded (last seen ${power:-unknown}/${prov:-unknown}); idle compute may be accruing. Stop it manually: az aks stop -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME"
           exit 1
