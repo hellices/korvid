@@ -9,6 +9,7 @@ import pytest
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.scenario import ContainerLogs, Scenario
 from korvid.k8s.errors import ApiStatusError
+from korvid.tools.executor import ToolExecutor
 
 
 def _scenario(**overrides: Any) -> Scenario:
@@ -350,3 +351,81 @@ async def test_rebasing_handles_datetimes_parsed_from_unquoted_yaml() -> None:
         assert raw.endswith("Z"), raw
         parsed = datetime.fromisoformat(raw)
         assert abs((parsed - expected).total_seconds()) < 60
+
+
+async def test_diagnose_service_works_against_the_fake_cluster() -> None:
+    """`diagnose_service` reads EndpointSlices, so the fake cluster must
+    serve that kind — otherwise no scenario can exercise the tool."""
+    scenario = Scenario(
+        id="svc",
+        question="q",
+        screen="s",
+        root_cause="none",
+        must_mention=(),
+        must_not_mention=(),
+        objects=(
+            {
+                "kind": "Service",
+                "apiVersion": "v1",
+                "metadata": {"name": "web", "namespace": "front", "uid": "svc-1"},
+                "spec": {"selector": {"app": "web"}, "ports": [{"port": 80}]},
+            },
+            {
+                "kind": "EndpointSlice",
+                "apiVersion": "discovery.k8s.io/v1",
+                "metadata": {
+                    "name": "web-abc",
+                    "namespace": "front",
+                    "uid": "eps-1",
+                    "labels": {"kubernetes.io/service-name": "web"},
+                },
+                "addressType": "IPv4",
+                "endpoints": [{"addresses": ["10.0.3.11"], "conditions": {"ready": True}}],
+                "ports": [{"port": 8080}],
+            },
+        ),
+    )
+    executor = ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
+    result = await executor.execute("diagnose_service", {"service": "web", "namespace": "front"})
+    assert not result.startswith("ERROR:"), result
+    assert "healthy" in result, result
+
+
+async def test_endpointslices_are_readable_through_ordinary_reads() -> None:
+    """A baseline arm has no `diagnose_service`, so it must still be able to
+    observe endpoint readiness through `get_resource` / `list_resources` —
+    otherwise the matched comparison measures tool availability."""
+    scenario = Scenario(
+        id="svc",
+        question="q",
+        screen="s",
+        root_cause="none",
+        must_mention=(),
+        must_not_mention=(),
+        objects=(
+            {
+                "kind": "EndpointSlice",
+                "apiVersion": "discovery.k8s.io/v1",
+                "metadata": {
+                    "name": "web-abc",
+                    "namespace": "front",
+                    "uid": "eps-1",
+                    "labels": {"kubernetes.io/service-name": "web"},
+                },
+                "addressType": "IPv4",
+                "endpoints": [{"addresses": ["10.0.3.11"], "conditions": {"ready": False}}],
+                "ports": [{"port": 8080}],
+            },
+        ),
+    )
+    executor = ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
+    listed = await executor.execute(
+        "list_resources", {"kind": "endpointslices", "namespace": "front"}
+    )
+    assert not listed.startswith("ERROR:"), listed
+    got = await executor.execute(
+        "get_resource",
+        {"kind": "endpointslices", "name": "web-abc", "namespace": "front"},
+    )
+    assert not got.startswith("ERROR:"), got
+    assert "ready: false" in got, got

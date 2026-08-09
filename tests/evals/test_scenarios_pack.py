@@ -15,6 +15,7 @@ from datetime import datetime
 import pytest
 
 from korvid.evals.fake_kube import SCENARIO_NOW, FakeKubeClient, builtin_aliases
+from korvid.evals.grader import grade
 from korvid.evals.scenario import Scenario, bundled_scenarios_dir, load_scenarios
 from korvid.tools.executor import ToolExecutor
 
@@ -123,3 +124,121 @@ def test_fixture_owner_references_use_uids(scenario: Scenario) -> None:
                 f"{scenario.id}: {obj.get('kind')} {metadata.get('name')} "
                 f"owner {ref.get('kind')} {ref.get('name')} has no uid"
             )
+
+
+@pytest.mark.parametrize(
+    "scenario_id", ["service-endpoints-not-ready", "pvc-wait-for-first-consumer"]
+)
+async def test_diagnostic_scenarios_are_gradeable_without_the_diagnostic_tools(
+    scenario_id: str,
+) -> None:
+    """A baseline arm must be able to satisfy the same evidence.
+
+    #176 compares runs that differ only in whether `diagnose_service` and
+    `diagnose_pvc` are offered. If a scenario's evidence were reachable
+    *only* through those tools, the comparison would measure tool
+    availability rather than diagnosis quality, and the baseline would fail
+    by construction.
+    """
+    scenario = next(item for item in BUNDLED if item.id == scenario_id)
+    executor = _executor(scenario)
+    diagnostic = {"diagnose_service", "diagnose_pvc"}
+    for group in scenario.expected_evidence:
+        alternatives = [e for e in group if e.tool not in diagnostic]
+        assert alternatives, (
+            f"{scenario_id}: an evidence group is reachable only through "
+            f"{ {e.tool for e in group} } — a baseline run cannot satisfy it"
+        )
+        results = [
+            await executor.execute(evidence.tool, dict(evidence.args)) for evidence in alternatives
+        ]
+        assert any(
+            not result.startswith("ERROR:") and evidence.contains in result
+            for evidence, result in zip(alternatives, results, strict=True)
+        ), f"{scenario_id}: no non-diagnostic route satisfies {alternatives[0].contains!r}"
+
+
+#: Realistic answers for the two diagnostic scenarios: phrasings a model
+#: actually produces, plus the wrong conclusions each scenario exists to
+#: catch. Keyword lists are only as good as the phrasings they survive, so
+#: they are pinned here rather than eyeballed once.
+_GRADING_CASES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "service-endpoints-not-ready": (
+        (
+            "The checkout Service has an EndpointSlice, but its only endpoint is"
+            " not ready — the readiness probe returns 503.",
+            "Traffic never reaches checkout because none of its endpoints are"
+            " ready; the readiness probe is failing.",
+            "The endpoint for checkout-5d8f-1 is not ready: readiness probe failed with 503.",
+            "checkout has no ready endpoints. The pod fails its readiness probe"
+            " (503) because inventory is unreachable.",
+            "The pod is running but not ready, so its endpoint is not serving"
+            " traffic. Readiness probe returns 503.",
+            "No endpoints are ready; the readiness probe returns 503.",
+            "The endpoints are not ready because the readiness probe fails with 503.",
+        ),
+        (
+            "The Service selector does not match the pod labels, so there are no endpoints.",
+            "The container was OOMKilled and restarted repeatedly.",
+            "Something is wrong with the service.",
+        ),
+    ),
+    "pvc-wait-for-first-consumer": (
+        (
+            "Nothing is broken. The storage class standard-delayed uses"
+            " WaitForFirstConsumer, so the claim stays Pending by design until a"
+            " Pod that mounts it is scheduled.",
+            "This is expected: with first consumer binding the PVC waits for a"
+            " pod before it binds.",
+            "The PVC is Pending because its StorageClass uses"
+            " WaitForFirstConsumer — that is normal until a pod consumes it.",
+            "No action needed. volumeBindingMode is WaitForFirstConsumer, so"
+            " binding is deferred until a pod is scheduled; this is working as"
+            " intended.",
+            "The StorageClass uses WaitForFirstConsumer, so binding waits until"
+            " a consumer Pod exists; that Pod does not exist yet. This is"
+            " expected.",
+            "With WaitForFirstConsumer the consuming Pod is still missing, so"
+            " binding is deferred. This is normal.",
+            "The PVC is Pending because the StorageClass uses"
+            " WaitForFirstConsumer. This is expected and there is no storage"
+            " class problem.",
+            "Expected: WaitForFirstConsumer. No storage class issue here.",
+        ),
+        (
+            "Provisioning failed because the storageclass was not found.",
+            "The provisioner could not create the volume; provisioning failed.",
+            "The StorageClass standard-delayed does not exist.",
+            "There is no default storage class, so the claim cannot bind.",
+            "The pod was OOMKilled.",
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("scenario_id", sorted(_GRADING_CASES))
+def test_diagnostic_scenario_keywords_accept_every_correct_phrasing(
+    scenario_id: str,
+) -> None:
+    scenario = next(item for item in BUNDLED if item.id == scenario_id)
+    correct, _ = _GRADING_CASES[scenario_id]
+    for answer in correct:
+        result = grade(scenario, answer, [])
+        assert result.diagnosis_success, (
+            f"{scenario_id}: a correct answer was graded wrong — "
+            f"missing {result.missing_mentions}, forbidden "
+            f"{result.forbidden_mentions}\n  {answer}"
+        )
+
+
+@pytest.mark.parametrize("scenario_id", sorted(_GRADING_CASES))
+def test_diagnostic_scenario_keywords_reject_the_wrong_conclusions(
+    scenario_id: str,
+) -> None:
+    scenario = next(item for item in BUNDLED if item.id == scenario_id)
+    _, wrong = _GRADING_CASES[scenario_id]
+    for answer in wrong:
+        result = grade(scenario, answer, [])
+        assert not result.diagnosis_success, (
+            f"{scenario_id}: a wrong answer was graded correct\n  {answer}"
+        )
