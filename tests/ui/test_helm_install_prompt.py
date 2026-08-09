@@ -552,3 +552,113 @@ async def test_readme_for_a_stale_version_is_discarded() -> None:
         from korvid.ui.widgets.helm_install import ChartReadmeScreen
 
         assert not any(isinstance(s, ChartReadmeScreen) for s in app.screen_stack)
+
+
+async def test_schema_fetch_landing_without_the_section_does_not_raise() -> None:
+    """The schema section is advisory: losing the widget must not crash.
+
+    `on_mount` starts the fetch, and the worker resumes after an await into a
+    tree that may only be partly composed - `#helm-version` mounted, the
+    `#helm-required` section not yet. Querying it unguarded raises `NoMatches`
+    inside the worker, which Textual surfaces as `WorkerFailed`; observed on a
+    Windows CI run of the full UI suite, where it failed
+    `test_install_render_failure_edit_values_and_retry`.
+    """
+
+    async def schema(chart: str, version: str) -> "dict[str, object] | None":
+        return _SCHEMA
+
+    app = HostApp()
+    prompt = HelmInstallPrompt(_CHART, namespace="default", release=None, get_schema=schema)
+
+    def _done(v: object) -> None:
+        app.result = v
+
+    async with app.run_test() as pilot:
+        await app.push_screen(prompt, _done)
+        await _opened(app, pilot)
+        # Stand in for the section not being composed yet when the fetch lands.
+        await prompt.query_one("#helm-required", Static).remove()
+
+        await prompt._load_required_values(prompt._schema_seq)
+
+        assert not prompt.query("#helm-required"), "the missing section was resurrected"
+
+
+async def test_schema_fetch_without_the_version_field_does_not_raise() -> None:
+    """The same worker reads `#helm-version` before its await.
+
+    `on_mount` starts it, so that read shares the partly-composed window with
+    the section read below it - the crash just lands a few lines earlier.
+    """
+
+    fetched: list[str] = []
+
+    async def schema(chart: str, version: str) -> "dict[str, object] | None":
+        fetched.append(version)
+        return _SCHEMA
+
+    app = HostApp()
+    prompt = HelmInstallPrompt(_CHART, namespace="default", release=None, get_schema=schema)
+
+    def _done(v: object) -> None:
+        app.result = v
+
+    async with app.run_test() as pilot:
+        await app.push_screen(prompt, _done)
+        await _opened(app, pilot)
+        await prompt.query_one("#helm-version", Input).remove()
+        fetched.clear()  # ignore the mount-time fetch; only this call matters
+
+        await prompt._load_required_values(prompt._schema_seq)
+
+        assert fetched == [], "fetched a schema for a version that could not be read"
+
+
+async def test_starting_the_schema_load_before_compose_does_not_raise() -> None:
+    """`on_mount` starts the load synchronously.
+
+    Textual does not guarantee a screen's composed children are queryable by
+    the time `on_mount` runs, and this read is not inside the worker, so losing
+    the race raises straight out of `on_mount` and takes the app down rather
+    than merely failing a worker.
+    """
+
+    async def schema(chart: str, version: str) -> "dict[str, object] | None":
+        return _SCHEMA
+
+    prompt = HelmInstallPrompt(_CHART, namespace="default", release=None, get_schema=schema)
+
+    prompt._start_schema_load()
+
+    assert prompt._schema_version_requested is None, "no version can be read before compose"
+
+
+async def test_version_change_without_the_section_does_not_raise() -> None:
+    """`Input.Changed` fires at mount time for the prefilled version.
+
+    The early return that absorbs that echo relies on the mount-time fetch
+    having recorded the version, which cannot happen if the field was not
+    composed yet - so the handler can reach the section hide with the section
+    still missing.
+    """
+
+    async def schema(chart: str, version: str) -> "dict[str, object] | None":
+        return _SCHEMA
+
+    app = HostApp()
+    prompt = HelmInstallPrompt(_CHART, namespace="default", release=None, get_schema=schema)
+
+    def _done(v: object) -> None:
+        app.result = v
+
+    async with app.run_test() as pilot:
+        await app.push_screen(prompt, _done)
+        await _opened(app, pilot)
+        await prompt.query_one("#helm-required", Static).remove()
+        prompt._schema_version_requested = None  # the mount-time fetch never described one
+
+        prompt.query_one("#helm-version", Input).value = "19.0.0"
+        await until(pilot, lambda: prompt._schema_debounce is not None, label="debounce armed")
+
+        assert prompt._schema_debounce is not None, "the refetch was lost with the section"

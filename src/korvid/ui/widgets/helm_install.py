@@ -9,6 +9,7 @@ standard approval dialog before anything touches the cluster.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.timer import Timer
@@ -221,7 +223,15 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
         version, slower pull) can neither survive as a worker nor
         overwrite a newer result's section."""
         self._schema_seq += 1
-        self._schema_version_requested = self.query_one("#helm-version", Input).value.strip()
+        try:
+            field = self.query_one("#helm-version", Input)
+        except NoMatches:
+            # Called synchronously from `on_mount`, which Textual may run
+            # before the composed children are queryable. Skip rather than
+            # raise out of `on_mount` and take the app down; the section is
+            # advisory, and editing the version re-triggers the fetch.
+            return
+        self._schema_version_requested = field.value.strip()
         self.run_worker(
             self._load_required_values(self._schema_seq),
             exclusive=True,
@@ -243,7 +253,9 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
         # fetch must not complete inside the debounce window and re-display
         # stale required values over the hide below.
         self._schema_seq += 1
-        self.query_one("#helm-required", Static).display = False
+        # Nothing composed to hide yet; the refetch below still runs.
+        with contextlib.suppress(NoMatches):
+            self.query_one("#helm-required", Static).display = False
         if self._schema_debounce is not None:
             self._schema_debounce.stop()
         self._schema_debounce = self.set_timer(0.5, self._start_schema_load)
@@ -251,7 +263,10 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
     async def _load_required_values(self, seq: int) -> None:
         """Fetch values.schema.json required fields (issue #151) - advisory:
         every failure degrades to no section, never blocks the wizard."""
-        version = self.query_one("#helm-version", Input).value.strip()
+        try:
+            version = self.query_one("#helm-version", Input).value.strip()
+        except NoMatches:
+            return  # started from on_mount; the field may not be composed yet
         if self._get_schema is None:  # pragma: no cover - guarded by the caller
             return
         try:
@@ -261,7 +276,14 @@ class HelmInstallPrompt(ModalScreen["HelmReleaseChoices | None"]):
         if seq != self._schema_seq:
             return  # a newer fetch owns the section now
         rows = required_values_from_schema(schema)
-        section = self.query_one("#helm-required", Static)
+        try:
+            section = self.query_one("#helm-required", Static)
+        except NoMatches:
+            # The worker starts from `on_mount` and resumes after an await, so
+            # the tree it returns to may only be partly composed (or already
+            # torn down). This section is advisory - degrade to not showing it
+            # rather than failing the worker and taking the wizard down.
+            return
         if not rows:
             section.display = False
             return
