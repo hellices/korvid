@@ -67,6 +67,10 @@ _BUILTIN_METAS: tuple[ResourceMeta, ...] = (
     ResourceMeta("Job", "jobs", "batch", "v1", True),
     ResourceMeta("Service", "services", "", "v1", True, ("svc",)),
     ResourceMeta("Endpoints", "endpoints", "", "v1", True, ("ep",)),
+    # `diagnose_service` reads EndpointSlices, and a baseline arm with no
+    # diagnostic tools must be able to observe the same fact through
+    # ordinary reads, or the matched comparison measures tool availability.
+    ResourceMeta("EndpointSlice", "endpointslices", "discovery.k8s.io", "v1", True, ("eps",)),
     ResourceMeta("Node", "nodes", "", "v1", False, ("no",)),
     ResourceMeta("PersistentVolumeClaim", "persistentvolumeclaims", "", "v1", True, ("pvc",)),
     ResourceMeta("PersistentVolume", "persistentvolumes", "", "v1", False, ("pv",)),

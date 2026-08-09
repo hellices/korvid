@@ -10,23 +10,31 @@ grading:
   # ready"), so a bare `endpoint` requirement fails whenever the model
   # writes "none of its endpoints are ready" — the grader correctly treats
   # that as negated. Each alternative below either carries its own negator
-  # or is stated positively. Verified against five correct phrasings and
-  # four wrong ones: 5/5 and 0/4.
+  # or is stated positively. The exact phrasings this must accept and
+  # reject are pinned in `tests/evals/test_scenarios_pack.py`
+  # (`_GRADING_CASES`); no count is repeated here, so the two cannot drift.
   must_mention:
-    - [not ready, unready, no ready endpoints, none of its endpoints are ready,
+    - [not ready, unready, no ready endpoints, no endpoints are ready,
+       endpoints are not ready, none of its endpoints are ready,
        not serving, no ready]
     - [readiness probe, readiness, probe, "503", unhealthy]
+  # `no endpoints` is deliberately absent: it is the leading token run of
+  # "no endpoints are ready", a common *correct* phrasing. The selector
+  # misdiagnosis is still caught by the alternatives below, and an answer
+  # claiming the endpoints simply do not exist fails the readiness group.
   must_not_mention:
-    - [selector mismatch, wrong label, no endpoints, empty endpoints]
+    - [selector mismatch, wrong label, empty endpoints]
     - [oomkilled, imagepullbackoff, crashloopbackoff]
   expected_evidence:
-    # The Service exists and its slice is present — the fault is readiness,
-    # not a missing or mismatched target. Either route observes it.
+    # A matching EndpointSlice exists and its endpoint is not ready — the
+    # fault is readiness, not a missing or mismatched target. The baseline
+    # route reads the slice itself, so it observes the same fact rather
+    # than merely inferring it from one Pod's condition.
     - - tool: diagnose_service
         args: {service: checkout, namespace: shop}
         contains: "service.no_ready_endpoints"
       - tool: get_resource
-        args: {kind: pods, name: checkout-5d8f-1, namespace: shop}
+        args: {kind: endpointslices, name: checkout-x7k2p, namespace: shop}
         contains: "ready: false"
     # The reason the endpoint is unready, from the pod itself.
     - - tool: diagnose_pod

@@ -174,6 +174,8 @@ _GRADING_CASES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
             " (503) because inventory is unreachable.",
             "The pod is running but not ready, so its endpoint is not serving"
             " traffic. Readiness probe returns 503.",
+            "No endpoints are ready; the readiness probe returns 503.",
+            "The endpoints are not ready because the readiness probe fails with 503.",
         ),
         (
             "The Service selector does not match the pod labels, so there are no endpoints.",
@@ -193,10 +195,16 @@ _GRADING_CASES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
             "No action needed. volumeBindingMode is WaitForFirstConsumer, so"
             " binding is deferred until a pod is scheduled; this is working as"
             " intended.",
+            "The StorageClass uses WaitForFirstConsumer, so binding waits until"
+            " a consumer Pod exists; that Pod does not exist yet. This is"
+            " expected.",
+            "With WaitForFirstConsumer the consuming Pod is still missing, so"
+            " binding is deferred. This is normal.",
         ),
         (
             "Provisioning failed because the storageclass was not found.",
             "The provisioner could not create the volume; provisioning failed.",
+            "The StorageClass standard-delayed does not exist.",
             "There is no default storage class, so the claim cannot bind.",
             "The pod was OOMKilled.",
         ),

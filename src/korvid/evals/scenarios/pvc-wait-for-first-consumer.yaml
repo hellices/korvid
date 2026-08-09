@@ -13,9 +13,14 @@ grading:
        waits for a pod, until a pod, when a pod]
     - [expected, normal, not broken, nothing wrong, no problem, no issue,
        working as intended, by design, correct]
+  # Scoped to the StorageClass faults this control exists to reject. Bare
+  # `does not exist` / `missing` would reject a correct explanation — "the
+  # consumer Pod does not exist yet" is exactly why binding is deferred.
   must_not_mention:
     - [provisioning failed, provisioner failed, failed to provision,
-       storageclass not found, no storage class, does not exist, missing]
+       storageclass not found, storage class not found,
+       storageclass does not exist, storage class does not exist,
+       no storage class, missing storageclass, missing storage class]
     - [quota, permission denied, forbidden]
   expected_evidence:
     # The claim is Pending and bound to a named class.
