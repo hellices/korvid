@@ -35,8 +35,15 @@ turns:
           - tool: diagnose_workload
             args: {kind: deployments, name: api, namespace: edge}
             contains: api-7b9d
-        # The failing pod's own state names the cause.
-        - - tool: diagnose_pod
+        # The cause, by whichever route reached it. `diagnose_workload` is
+        # listed here as well as above because it embeds the pod diagnosis:
+        # it is the one-call shortcut this journey exists to measure, and
+        # the grader matches targets, so a Deployment-targeted record cannot
+        # satisfy a pod-targeted alternative.
+        - - tool: diagnose_workload
+            args: {kind: deployments, name: api, namespace: edge}
+            contains: ImagePullBackOff
+          - tool: diagnose_pod
             args: {pod: api-7b9d-x1, namespace: edge}
             contains: ImagePullBackOff
           - tool: get_events
