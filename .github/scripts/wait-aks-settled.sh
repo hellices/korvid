@@ -12,11 +12,19 @@
 # Exits 0 once provisioningState is Succeeded (and, when given, powerState
 # matches). Exits 1 if that has not happened within WAIT_AKS_TIMEOUT seconds
 # (default 600), printing the last observed pair.
+#
+# Query failures are retried through the whole budget by default, because the
+# caller after a stop is a barrier: giving up early would release the
+# workflow's concurrency group while the stop is still in flight, which is the
+# collision this exists to prevent. Set WAIT_AKS_MAX_QUERY_FAILURES to abort
+# after N consecutive failures instead - only appropriate for an advisory
+# pre-flight check whose failure does not skip anything.
 set -uo pipefail
 
 group=${1:?resource group required}
 cluster=${2:?cluster name required}
 want_power=${3:-}
+max_fails=${WAIT_AKS_MAX_QUERY_FAILURES:-0}
 
 deadline=$(( SECONDS + ${WAIT_AKS_TIMEOUT:-600} ))
 power=""
@@ -32,15 +40,15 @@ while :; do
     read -r power prov < <(printf '%s' "$out" | tr '\n' ' ') || true
   else
     # An expired login, a wrong subscription or a deleted cluster is
-    # permanent: report it, and give up after a few in a row rather than
-    # spending the whole budget to end on an unexplained unknown/unknown. A
-    # single dropped call still gets retried - this also runs in cleanup, and
-    # one flaky request must not leave the cluster running.
+    # permanent, so every failure is logged rather than hidden. Whether to
+    # give up early is the caller's call: a barrier must keep waiting, since
+    # returning early would release the concurrency group with an operation
+    # still running.
     fails=$(( fails + 1 ))
     power=""
     prov=""
     echo "az aks show failed: $(tr '\n' ' ' <"$err_file")"
-    if [ "$fails" -ge 3 ]; then
+    if [ "$max_fails" -gt 0 ] && [ "$fails" -ge "$max_fails" ]; then
       echo "::error title=Cluster query failed::az aks show failed $fails times in a row for $cluster: $(tr '\n' ' ' <"$err_file")"
       exit 1
     fi
