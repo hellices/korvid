@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import dataclasses
 import hashlib
 import json
@@ -87,34 +88,72 @@ def report_payload(reports: list[ScenarioReport]) -> list[dict[str, Any]]:
     ]
 
 
-def prompt_fingerprint(profile: AgentProfile, overrides: PromptOverrides) -> dict[str, str]:
+def prompt_fingerprint(
+    profile: AgentProfile,
+    overrides: PromptOverrides,
+    *,
+    tools: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
     """Which prompt produced a run.
 
     A scoreboard row that does not say which prompt it was measured under is
     not comparable with any other row, so every run records this.
 
     The digest covers what the model actually receives: the *composed*
-    system prompt for this eval surface — role statement plus the UI and
-    write/no-write clauses `AgentRuntime` appends — and the complete tool
-    schemas, which are retransmitted on every request. Hashing only the role
-    statement would mark behaviourally different runs as comparable.
+    system prompt for the surface in question — role statement plus the UI
+    and write/no-write clauses `AgentRuntime` appends — and the complete
+    tool schemas, which are retransmitted on every request. Hashing only
+    the role statement would mark behaviourally different runs as
+    comparable.
+
+    Args:
+        profile: the built profile, already carrying any overrides.
+        overrides: the configured slots, used to decide `source`.
+        tools: the schemas actually offered. Defaults to the task pack's
+            surface (`_eval_tools`, which drops the UI tools); journey runs
+            offer `profile.tools` unchanged and must pass them, or a UI
+            schema change would leave the digest untouched.
+
+    Returns:
+        `source` (`default` or `override`) and the `sha256` digest.
+        `source` reflects the *effect* of the configuration: an override
+        that reproduces the shipped prompt byte for byte still yields a
+        comparable, publishable run.
     """
-    tools = _eval_tools(profile)
-    composed = compose_system_prompt(
-        tools,
-        None,
-        system_prompt=profile.system_prompt,
-        ui_prompt=profile.ui_prompt,
+    offered = _eval_tools(profile) if tools is None else tools
+    digest = _prompt_digest(profile.system_prompt, profile.ui_prompt, offered)
+    return {"source": _source(profile, offered, digest), "sha256": digest}
+
+
+def _source(profile: AgentProfile, offered: list[dict[str, Any]], digest: str) -> str:
+    """`default` when the configuration had no effect on what the model sees.
+
+    Compared against the shipped prompts **on the same tool set**, so the
+    answer does not depend on which tools this cluster happened to arm. An
+    override that reproduces korvid's own wording byte for byte still
+    yields a comparable, publishable run.
+    """
+    shipped = build_profile(
+        profile.name, readonly=False, resize_supported=True, overrides=PromptOverrides()
     )
+    descriptions = {t["function"]["name"]: t["function"]["description"] for t in shipped.tools}
+    baseline_tools = copy.deepcopy(offered)
+    for tool in baseline_tools:
+        function = tool["function"]
+        shipped_description = descriptions.get(function["name"])
+        if shipped_description is not None:
+            function["description"] = shipped_description
+    baseline = _prompt_digest(shipped.system_prompt, shipped.ui_prompt, baseline_tools)
+    return "default" if digest == baseline else "override"
+
+
+def _prompt_digest(system_prompt: str, ui_prompt: str, tools: list[dict[str, Any]]) -> str:
+    composed = compose_system_prompt(tools, None, system_prompt=system_prompt, ui_prompt=ui_prompt)
     digest = hashlib.sha256()
     digest.update(composed.encode("utf-8"))
     digest.update(b"\x00")
     digest.update(json.dumps(tools, sort_keys=True, ensure_ascii=False).encode("utf-8"))
-    configured = bool(overrides.system or overrides.append or overrides.tool_descriptions)
-    return {
-        "source": "override" if configured else "default",
-        "sha256": digest.hexdigest(),
-    }
+    return digest.hexdigest()
 
 
 def run_payload(

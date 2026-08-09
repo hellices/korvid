@@ -243,3 +243,26 @@ def test_prompt_sweep_file_with_invalid_utf8_exits_cleanly(tmp_path: Path) -> No
     args = _parse_args(["--system-prompt-file", str(bad)])
     with pytest.raises(SystemExit, match="--system-prompt-file"):
         _sweep_overrides(args)
+
+
+def test_source_is_default_when_an_override_reproduces_the_shipped_prompt() -> None:
+    """`source` decides publishability, so it must reflect the *effect* of
+    the configuration, not merely that some was supplied. Pointing at a
+    file holding korvid's own prompt yields a comparable run."""
+    profile, _ = _built()
+    same = PromptOverrides(system=profile.system_prompt)
+    rebuilt = build_profile("small", readonly=True, resize_supported=False, overrides=same)
+    assert prompt_fingerprint(rebuilt, same)["source"] == "default"
+
+
+def test_source_is_default_for_a_tool_description_that_changes_nothing() -> None:
+    profile, _ = _built()
+    current = {t["function"]["name"]: t["function"]["description"] for t in profile.tools}
+    echo = PromptOverrides(tool_descriptions={"get_logs": current["get_logs"]})
+    rebuilt = build_profile("small", readonly=True, resize_supported=False, overrides=echo)
+    assert prompt_fingerprint(rebuilt, echo)["source"] == "default"
+
+
+def test_source_is_override_when_the_prompt_actually_differs() -> None:
+    profile, overrides = _built(system="You are terse.")
+    assert prompt_fingerprint(profile, overrides)["source"] == "override"

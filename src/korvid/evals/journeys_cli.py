@@ -128,7 +128,9 @@ def journey_run_payload(reports: list[JourneyReport], *, profile_name: str) -> d
     return {
         "meta": {
             "profile": profile.name,
-            "prompts": prompt_fingerprint(profile, overrides),
+            # Journeys offer the full profile surface, UI tools included,
+            # so the digest must cover those schemas too.
+            "prompts": prompt_fingerprint(profile, overrides, tools=profile.tools),
         },
         "journeys": report_payload(reports),
     }
