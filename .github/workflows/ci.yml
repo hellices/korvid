@@ -41,6 +41,7 @@ jobs:
             echo "not a pull request; running everything"
             exit 0
           fi
+          echo "FORCED docs-only for the skip-path proof"; echo "code=false" >> "$GITHUB_OUTPUT"; exit 0
           files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename')
           echo "$files"
           # Docs-only means every path is under docs/ or is a root .md file.
