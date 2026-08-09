@@ -200,6 +200,10 @@ _GRADING_CASES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
             " expected.",
             "With WaitForFirstConsumer the consuming Pod is still missing, so"
             " binding is deferred. This is normal.",
+            "The PVC is Pending because the StorageClass uses"
+            " WaitForFirstConsumer. This is expected and there is no storage"
+            " class problem.",
+            "Expected: WaitForFirstConsumer. No storage class issue here.",
         ),
         (
             "Provisioning failed because the storageclass was not found.",

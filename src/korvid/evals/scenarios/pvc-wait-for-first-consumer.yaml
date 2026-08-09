@@ -16,11 +16,16 @@ grading:
   # Scoped to the StorageClass faults this control exists to reject. Bare
   # `does not exist` / `missing` would reject a correct explanation — "the
   # consumer Pod does not exist yet" is exactly why binding is deferred.
+  # `no storage class` is excluded for the same reason: it is the leading
+  # token run of "no storage class problem", and token-run matching cannot
+  # see the word that flips the meaning. The misdiagnosis it would have
+  # caught ("there is no default storage class, so the claim cannot bind")
+  # already fails both required groups.
   must_not_mention:
     - [provisioning failed, provisioner failed, failed to provision,
        storageclass not found, storage class not found,
        storageclass does not exist, storage class does not exist,
-       no storage class, missing storageclass, missing storage class]
+       missing storageclass, missing storage class]
     - [quota, permission denied, forbidden]
   expected_evidence:
     # The claim is Pending and bound to a named class.
