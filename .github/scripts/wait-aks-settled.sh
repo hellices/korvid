@@ -56,6 +56,14 @@ while :; do
   if [ "${prov:-}" = "Succeeded" ] && { [ -z "$want_power" ] || [ "${power:-}" = "$want_power" ]; }; then
     exit 0
   fi
+  case "${prov:-}" in
+    Failed|Canceled)
+      # Terminal: nothing is in flight, so polling to the deadline would only
+      # delay the report and then blame the wrong thing.
+      echo "::error title=Cluster in a terminal state::$cluster provisioningState=$prov (power=${power:-unknown}); no operation is in flight."
+      exit 1
+      ;;
+  esac
   # Poll once more *at* the deadline rather than sleeping past it and failing
   # on a stale read: an operation that settles during the final sleep still
   # counts as settled within the advertised budget.
