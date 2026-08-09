@@ -18,8 +18,11 @@ turns:
            could not pull, pull the image, failed to pull, fails to pull,
            unable to pull, manifest not found]
         - [api-7b9d]
+        # `manifest not found` deliberately appears only in the symptom
+        # group above: listing it here too would let that one phrase satisfy
+        # both, which is the failure this split exists to prevent.
         - [v27, wrong tag, bad tag, tag does not exist, nonexistent tag,
-           typo, manifest not found, no such tag]
+           typo, no such tag]
       must_not_mention:
         - [oomkilled, out of memory]
         - [readiness probe, liveness probe]

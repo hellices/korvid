@@ -300,6 +300,10 @@ _ROLLOUT_CASES: tuple[tuple[int, tuple[str, ...], tuple[str, ...]], ...] = (
             # incomplete, and it passed before the groups were split.
             "api-7b9d is in ImagePullBackOff.",
             "The new ReplicaSet api-7b9d cannot pull its image.",
+            # Names the symptom in words that once appeared in both the
+            # symptom and cause groups, satisfying each without ever
+            # identifying which tag is wrong.
+            "The pod in api-7b9d shows manifest not found.",
             "The pod was OOMKilled and restarted.",
             "The readiness probe is failing on the new pod.",
             "The namespace is out of CPU quota.",
