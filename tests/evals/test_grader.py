@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Evidence, Scenario
 
@@ -605,3 +607,37 @@ def test_grade_ignores_an_identity_key_the_tool_does_not_read() -> None:
     ]
     result = grade(scenario, "OOMKilled, exit 137.", records)
     assert not result.evidence_fetched
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"pvc": "web", "name": "other", "namespace": "front"},
+        {"name": "other", "pvc": "web", "namespace": "front"},
+    ],
+)
+def test_grade_target_does_not_depend_on_argument_order(
+    arguments: dict[str, str],
+) -> None:
+    """A tool's identity argument decides the target, whichever order the
+    keys arrived in.
+
+    `_diagnose_pvc` reads `pvc`; a stray `name` is inert at execution. If
+    it competed for the same canonical slot, the identical call would grade
+    differently depending on JSON key order.
+    """
+    evidence = Evidence(
+        tool="get_resource",
+        contains="phase: Pending",
+        args={"kind": "persistentvolumeclaims", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nphase: Pending",
+            arguments=arguments,
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched

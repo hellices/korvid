@@ -221,9 +221,13 @@ def _canonical_args(args: dict[str, Any], tool: str | None = None) -> dict[str, 
         if key == "kind":
             canonical["kind"] = _canonical_kind(text)
         elif key == identity_key:
-            canonical["name"] = text
+            continue  # settled after the loop, so key order cannot decide it
+        elif key == "name" and identity_key is not None:
+            continue  # the tool does not read it; it must not claim `name`
         else:
             canonical[key] = text
+    if identity_key is not None and identity_key in args:
+        canonical["name"] = str(args[identity_key]).strip().lower()
     return canonical
 
 
