@@ -73,6 +73,13 @@ jobs:
 
       - name: Start AKS cluster
         run: |
+          # A preceding run's stop can still be finishing even though
+          # powerState already reads Stopped; Azure rejects a start until it
+          # settles. Not a barrier - failing here fails this job and cleanup
+          # still runs - so give up early on a broken query rather than
+          # burning ten minutes on it.
+          WAIT_AKS_MAX_QUERY_FAILURES=3 \
+            .github/scripts/wait-aks-settled.sh "$AKS_RESOURCE_GROUP" "$AKS_CLUSTER_NAME"
           state=$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --query powerState.code -o tsv)
           if [ "$state" != "Running" ]; then
             az aks start -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME"
@@ -218,6 +225,11 @@ jobs:
       AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
       AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
     steps:
+      # The settle helper lives in the repo, so this job needs the tree too.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
       - name: Guard — refuse any target other than the documented test cluster
         run: |
           if [ "$AKS_RESOURCE_GROUP" != "$EXPECTED_RESOURCE_GROUP" ] || \
@@ -234,11 +246,41 @@ jobs:
 
       - name: Stop AKS cluster
         run: |
-          az aks stop -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --no-wait
-          for i in $(seq 1 30); do
-            state=$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --query powerState.code -o tsv || echo unknown)
-            [ "$state" = "Stopped" ] && exit 0
-            sleep 20
-          done
-          echo "::error title=AKS stop failed::aks-korvid-contract-test did not reach Stopped state; idle compute may be accruing. Stop it manually: az aks stop -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME"
+          # A test may have left an operation in flight (a nodepool scale, a
+          # failed run mid-write) and Azure would reject the stop outright.
+          # Advisory only: it must never prevent the stop, because a step that
+          # dies here leaves the cluster running with no recovery hint - so a
+          # failed or timed-out wait falls through and lets the stop try
+          # anyway, and its own error is the report.
+          WAIT_AKS_TIMEOUT=300 WAIT_AKS_MAX_QUERY_FAILURES=3 \
+          .github/scripts/wait-aks-settled.sh "$AKS_RESOURCE_GROUP" "$AKS_CLUSTER_NAME" \
+          || echo "cluster did not settle before the stop; attempting it anyway"
+          # Azure rejects a stop on a cluster that is not running, which is the
+          # normal state when the contract job failed before starting it.
+          state=$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --query powerState.code -o tsv 2>/dev/null || echo unknown)
+          if [ "$state" = "Stopped" ]; then
+          echo "$AKS_CLUSTER_NAME is already stopped"
+          elif ! az aks stop -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --no-wait; then
+          # The state read above can be `unknown` when the query itself
+          # failed, so a rejection here may just mean it was already stopped.
+          # Check before crying wolf: a red cleanup job for a cluster that is
+          # costing nothing trains people to ignore this error.
+          recheck=$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --query powerState.code -o tsv 2>/dev/null || echo unknown)
+          if [ "$recheck" = "Stopped" ]; then
+            echo "$AKS_CLUSTER_NAME was already stopped"
+          else
+            echo "::error title=AKS stop rejected::aks-korvid-contract-test would not accept a stop and reads $recheck; idle compute may be accruing. Stop it manually once its current operation finishes: az aks stop -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME"
+            exit 1
+          fi
+          fi
+          # powerState flips to Stopped as soon as Azure accepts the request,
+          # while provisioningState stays Stopping until the operation really
+          # finishes. Waiting on powerState alone let this job exit seconds
+          # after asking, so the next merge's run hit "there's an in-progress
+          # stop managed cluster operation" on its own start. This one is a
+          # barrier, so it retries query failures through the whole budget.
+          if ! WAIT_AKS_TIMEOUT=600 .github/scripts/wait-aks-settled.sh \
+            "$AKS_RESOURCE_GROUP" "$AKS_CLUSTER_NAME" Stopped; then
+          echo "::error title=AKS stop failed::aks-korvid-contract-test did not settle at Stopped; idle compute may be accruing. Stop it manually: az aks stop -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME"
           exit 1
+          fi
