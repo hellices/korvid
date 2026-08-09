@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Wait until the AKS cluster has no operation in flight.
+#
+# Azure flips `powerState.code` as soon as it accepts a start/stop request,
+# while `provisioningState` stays Starting/Stopping/Updating until the
+# operation actually completes. Any other operation issued in that window is
+# rejected with "there's an in-progress ... operation", so both the start and
+# the stop paths have to wait for the real thing.
+#
+# Usage: wait-aks-settled.sh <resource-group> <cluster> [expected-power-state]
+#
+# Exits 0 once provisioningState is Succeeded (and, when given, powerState
+# matches). Exits 1 if that has not happened within WAIT_AKS_TIMEOUT seconds
+# (default 600), printing the last observed pair.
+set -uo pipefail
+
+group=${1:?resource group required}
+cluster=${2:?cluster name required}
+want_power=${3:-}
+
+deadline=$(( SECONDS + ${WAIT_AKS_TIMEOUT:-600} ))
+power=""
+prov=""
+
+while :; do
+  read -r power prov < <(
+    az aks show -g "$group" -n "$cluster" \
+      --query '[powerState.code,provisioningState]' -o tsv 2>/dev/null | tr '\n' ' '
+  ) || true
+  if [ "${prov:-}" = "Succeeded" ] && { [ -z "$want_power" ] || [ "${power:-}" = "$want_power" ]; }; then
+    exit 0
+  fi
+  # Poll once more *at* the deadline rather than sleeping past it and failing
+  # on a stale read: an operation that settles during the final sleep still
+  # counts as settled within the advertised budget.
+  [ "$SECONDS" -lt "$deadline" ] || break
+  echo "waiting for $cluster to settle (${power:-unknown}/${prov:-unknown})"
+  sleep 20
+done
+
+echo "::error title=Cluster busy::$cluster is ${power:-unknown}/${prov:-unknown} after ${WAIT_AKS_TIMEOUT:-600}s; another operation has not finished."
+exit 1
