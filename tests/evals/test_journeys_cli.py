@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import ClassVar
@@ -170,7 +171,10 @@ def test_journey_digest_covers_the_ui_tools_it_actually_offers() -> None:
     those tools and would not see it."""
     profile = build_profile("small", readonly=True, resize_supported=False)
     before = prompt_fingerprint(profile, tools=profile.tools)["sha256"]
-    ui = next(t for t in profile.tools if t["function"]["name"] == "open_logs")
+    # Mutate a copy: relying on `_trim`'s deepcopy would leak this edit into
+    # other tests the moment that copy is optimised away.
+    tools = copy.deepcopy(profile.tools)
+    ui = next(t for t in tools if t["function"]["name"] == "open_logs")
     ui["function"]["description"] = "changed"
-    after = prompt_fingerprint(profile, tools=profile.tools)["sha256"]
+    after = prompt_fingerprint(profile, tools=tools)["sha256"]
     assert before != after
