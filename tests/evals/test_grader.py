@@ -379,3 +379,66 @@ def test_grade_negation_scope_ends_at_causal_conjunctions() -> None:
     answer = "The pod is not healthy because the readiness probe is failing."
     result = grade(scenario, answer, [])
     assert result.diagnosis_success
+
+
+def test_grade_credits_diagnose_service_against_name_keyed_evidence() -> None:
+    """`diagnose_service(service=...)` names the same object as `name=...`.
+
+    Evidence is written against the resource identity, not one tool's
+    parameter spelling. Without the alias a model that correctly reaches for
+    the deterministic Service tool is graded as having fetched no evidence,
+    which would make a baseline-versus-diagnostic comparison meaningless.
+    """
+    evidence = Evidence(
+        tool="get_resource",
+        contains="endpoints: 0",
+        args={"kind": "services", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_service",
+            result="outcome: findings\nendpoints: 0",
+            arguments={"service": "web", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched
+
+
+def test_grade_credits_diagnose_pvc_against_name_keyed_evidence() -> None:
+    """`diagnose_pvc(pvc=...)` names the same object as `name=...`."""
+    evidence = Evidence(
+        tool="get_resource",
+        contains="phase: Pending",
+        args={"kind": "persistentvolumeclaims", "name": "data", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nphase: Pending",
+            arguments={"pvc": "data", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched
+
+
+def test_grade_still_rejects_a_diagnostic_call_against_a_different_object() -> None:
+    """Folding the key must not fold the value: a different name is not evidence."""
+    evidence = Evidence(
+        tool="get_resource",
+        contains="endpoints: 0",
+        args={"kind": "services", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_service",
+            result="outcome: findings\nendpoints: 0",
+            arguments={"service": "api", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched

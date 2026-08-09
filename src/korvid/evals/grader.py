@@ -182,15 +182,18 @@ def _mentions_positively(keyword: str, answer_tokens: list[str], clause_ids: lis
 
 
 #: Identity keys that name the same thing under different parameter names
-#: across read tools (`get_logs(pod=...)` vs `get_resource(name=...)`).
-_KEY_ALIASES = {"pod": "name"}
+#: across read tools (`get_logs(pod=...)`, `diagnose_service(service=...)`,
+#: `diagnose_pvc(pvc=...)` vs `get_resource(name=...)`). Evidence is written
+#: against the resource identity, so a tool that spells the target
+#: differently must still be credited for reaching it.
+_KEY_ALIASES = {"pod": "name", "service": "name", "pvc": "name"}
 
 
 def _canonical_args(args: dict[str, Any]) -> dict[str, str]:
     """Lowercase argument values keyed by canonical parameter name:
-    equivalent identity keys (`pod` -> `name`) are folded together, and
-    "kind" values go through the resource alias table so `deploy`,
-    `deployment` and `deployments` compare equal."""
+    equivalent identity keys (`pod`, `service`, `pvc` -> `name`) are folded
+    together, and "kind" values go through the resource alias table so
+    `deploy`, `deployment` and `deployments` compare equal."""
     canonical: dict[str, str] = {}
     for key, value in args.items():
         text = str(value).strip().lower()
