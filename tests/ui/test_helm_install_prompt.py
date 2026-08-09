@@ -582,6 +582,8 @@ async def test_schema_fetch_landing_without_the_section_does_not_raise() -> None
 
         await prompt._load_required_values(prompt._schema_seq)
 
+        assert not prompt.query("#helm-required"), "the missing section was resurrected"
+
 
 async def test_schema_fetch_without_the_version_field_does_not_raise() -> None:
     """The same worker reads `#helm-version` before its await.
@@ -590,7 +592,10 @@ async def test_schema_fetch_without_the_version_field_does_not_raise() -> None:
     the section read below it - the crash just lands a few lines earlier.
     """
 
+    fetched: list[str] = []
+
     async def schema(chart: str, version: str) -> "dict[str, object] | None":
+        fetched.append(version)
         return _SCHEMA
 
     app = HostApp()
@@ -603,8 +608,11 @@ async def test_schema_fetch_without_the_version_field_does_not_raise() -> None:
         await app.push_screen(prompt, _done)
         await _opened(app, pilot)
         await prompt.query_one("#helm-version", Input).remove()
+        fetched.clear()  # ignore the mount-time fetch; only this call matters
 
         await prompt._load_required_values(prompt._schema_seq)
+
+        assert fetched == [], "fetched a schema for a version that could not be read"
 
 
 async def test_starting_the_schema_load_before_compose_does_not_raise() -> None:
@@ -652,3 +660,5 @@ async def test_version_change_without_the_section_does_not_raise() -> None:
 
         prompt.query_one("#helm-version", Input).value = "19.0.0"
         await until(pilot, lambda: prompt._schema_debounce is not None, label="debounce armed")
+
+        assert prompt._schema_debounce is not None, "the refetch was lost with the section"
