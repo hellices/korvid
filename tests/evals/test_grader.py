@@ -553,3 +553,55 @@ def test_grade_still_uses_an_explicit_kind_when_no_alias_is_present() -> None:
     ]
     result = grade(scenario, "OOMKilled, exit 137.", records)
     assert result.evidence_fetched
+
+
+def test_grade_credits_diagnose_service_for_endpoint_evidence() -> None:
+    """`diagnose_service` reports on the Service *and* its endpoints, so a
+    single implied kind is too narrow.
+
+    The bundled Service scenarios express endpoint evidence as
+    `get_resource(kind: endpoints)`. Implying only `services` would leave
+    this PR's target scenario ungraded — the tool would be used correctly
+    and still score no evidence.
+    """
+    evidence = Evidence(
+        tool="get_resource",
+        contains="subsets: []",
+        args={"kind": "endpoints", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_service",
+            result="outcome: findings\nsubsets: []",
+            arguments={"service": "web", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched
+
+
+def test_grade_ignores_an_identity_key_the_tool_does_not_read() -> None:
+    """The implied kind comes from the tool, not from whichever identity-
+    shaped key happens to appear last.
+
+    `_diagnose_pvc` reads `pvc` and `namespace`; a stray `service` key is
+    inert at execution and the runner does not mark the trace malformed.
+    Letting it decide the kind would satisfy Service evidence with a PVC
+    read.
+    """
+    evidence = Evidence(
+        tool="get_resource",
+        contains="endpoints: 0",
+        args={"kind": "services", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nendpoints: 0",
+            arguments={"pvc": "web", "service": "web", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
