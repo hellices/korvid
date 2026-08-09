@@ -506,3 +506,50 @@ def test_grade_still_credits_a_diagnostic_call_for_its_own_kind() -> None:
     ]
     result = grade(scenario, "OOMKilled, exit 137.", records)
     assert result.evidence_fetched
+
+
+def test_grade_prefers_the_implied_kind_over_a_conflicting_kind_argument() -> None:
+    """An identity alias determines the kind; a stray `kind` cannot override it.
+
+    Read handlers take the argument mapping directly and ignore keys they
+    do not use — `_diagnose_pvc` reads only `pvc` and `namespace` — and the
+    runner does not treat an undeclared key as malformed. So
+    `diagnose_pvc(pvc="web", kind="services")` really fetches a PVC. If the
+    explicit `kind` won, that call would canonicalize as a Service and
+    satisfy Service evidence, reopening the cross-kind hole.
+    """
+    evidence = Evidence(
+        tool="get_resource",
+        contains="endpoints: 0",
+        args={"kind": "services", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nendpoints: 0",
+            arguments={"pvc": "web", "kind": "services", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
+
+
+def test_grade_still_uses_an_explicit_kind_when_no_alias_is_present() -> None:
+    """Routes without an identity alias — `get_resource`, `get_events` —
+    must keep comparing on their own `kind` argument."""
+    evidence = Evidence(
+        tool="get_resource",
+        contains="readyReplicas: 2",
+        args={"kind": "deployments", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="get_resource",
+            result="status:\n  readyReplicas: 2",
+            arguments={"kind": "deploy", "name": "web", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched

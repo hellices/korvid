@@ -216,9 +216,12 @@ def _canonical_args(args: dict[str, Any]) -> dict[str, str]:
             implied = kind
             continue
         canonical[key] = text
-    # An explicit `kind` argument always wins: it is what the call actually
-    # asked for, while the implied kind is only a property of the parameter.
-    if implied is not None and "kind" not in canonical:
+    # The implied kind wins over an explicit `kind`. Read handlers take the
+    # argument mapping directly and ignore keys they do not use, and the
+    # runner does not count an undeclared key as malformed, so
+    # `diagnose_pvc(pvc=…, kind="services")` really does fetch a PVC —
+    # honouring the stray argument would let it satisfy Service evidence.
+    if implied is not None:
         canonical["kind"] = _canonical_kind(implied)
     return canonical
 
