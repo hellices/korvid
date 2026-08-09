@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# Same policy as CI: supersede a PR's older analyses, keep main's.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     runs-on: korvid-runners

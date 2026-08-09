@@ -7,6 +7,12 @@ on:
 permissions:
   contents: read
 
+# Supersede a PR's older runs when new commits arrive; never cancel a run on
+# main, where the result is the record that a merged commit was verified.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: korvid-runners
