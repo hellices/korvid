@@ -265,3 +265,15 @@ Patterns that have already cost this project time:
   optimization was dropped. cProfile inflates per-call overhead; confirm hot
   paths with a direct benchmark before acting.
 - **Assuming the instrument works.** See §3.
+- **Writing eval keywords for a negative diagnosis.** When the correct answer
+  is itself negative ("endpoints are *not* ready", "this is *not* a storage
+  class problem"), two grader behaviours bite. A negator suppresses every
+  keyword after it in the same clause, so a bare positive noun like `endpoint`
+  fails on "none of its endpoints are ready". And `must_not_mention` matches
+  token *runs*, so `no endpoints` fires on the correct "no endpoints are
+  ready", and `no storage class` on "no storage class problem" — the word that
+  flips the meaning is never seen. Three review rounds on #227 found one
+  instance each. Write required keywords that carry their own negator or are
+  stated positively, keep forbidden keywords specific enough that no correct
+  sentence starts with them, and validate against several real phrasings
+  before trusting the list.
