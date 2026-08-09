@@ -8,15 +8,20 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
+from korvid.agent.profiles import AgentProfile, PromptOverrides, build_profile
 from korvid.evals.__main__ import (
     _parse_args,
     _positive_int,
     exit_code,
+    prompt_fingerprint,
     provider_factory_from_env,
     report_payload,
+    run_payload,
 )
 from korvid.evals.grader import GradeResult
 from korvid.evals.runner import RunMetrics, ScenarioReport
@@ -133,3 +138,70 @@ def test_profile_flag_defaults_to_full_and_rejects_unknown_values() -> None:
     assert _parse_args(["--profile", "small"]).profile == "small"
     with pytest.raises(SystemExit, match="2"):
         _parse_args(["--profile", "huge"])
+
+
+# --- prompt provenance ------------------------------------------------------
+#
+# A scoreboard row that does not say which prompt produced it is not a
+# comparable score. Every run records a fingerprint.
+
+
+def _built(**kwargs: Any) -> tuple[AgentProfile, PromptOverrides]:
+    overrides = PromptOverrides(**kwargs)
+    profile = build_profile("small", readonly=True, resize_supported=False, overrides=overrides)
+    return profile, overrides
+
+
+def test_run_payload_wraps_scenarios_with_run_metadata() -> None:
+    profile, overrides = _built()
+    payload = run_payload([_report()], profile=profile, overrides=overrides)
+    assert payload["meta"]["profile"] == "small"
+    assert payload["scenarios"][0]["scenario"] == "oom-killed"
+    json.dumps(payload)
+
+
+def test_run_payload_marks_the_shipped_prompts_as_default() -> None:
+    profile, overrides = _built()
+    payload = run_payload([_report()], profile=profile, overrides=overrides)
+    assert payload["meta"]["prompts"]["source"] == "default"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"system": "You are terse."},
+        {"append": "Never name nodes."},
+        {"tool_descriptions": {"get_logs": "Mine."}},
+    ],
+)
+def test_run_payload_marks_any_override_as_override(override: dict[str, Any]) -> None:
+    profile, overrides = _built(**override)
+    payload = run_payload([_report()], profile=profile, overrides=overrides)
+    assert payload["meta"]["prompts"]["source"] == "override"
+
+
+def test_prompt_fingerprint_is_stable_and_changes_with_the_prompt() -> None:
+    first = prompt_fingerprint(*_built())["sha256"]
+    again = prompt_fingerprint(*_built())["sha256"]
+    changed = prompt_fingerprint(*_built(system="You are terse."))["sha256"]
+    assert first == again
+    assert first != changed
+
+
+def test_prompt_fingerprint_notices_a_reworded_tool_description() -> None:
+    """Tool wording is a measured lever, so it must be part of the identity."""
+    plain = prompt_fingerprint(*_built())["sha256"]
+    reworded = prompt_fingerprint(*_built(tool_descriptions={"get_logs": "Mine."}))["sha256"]
+    assert plain != reworded
+
+
+def test_prompt_sweep_flags_default_to_unset() -> None:
+    args = _parse_args([])
+    assert args.system_prompt_file is None
+    assert args.prompt_append_file is None
+
+
+def test_prompt_sweep_flags_accept_paths() -> None:
+    args = _parse_args(["--system-prompt-file", "a.md", "--prompt-append-file", "b.md"])
+    assert args.system_prompt_file == Path("a.md")
+    assert args.prompt_append_file == Path("b.md")

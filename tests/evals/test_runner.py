@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+from korvid.agent.profiles import PromptOverrides
+from korvid.agent.prompts import SYSTEM_PROMPT
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.runner import ScenarioReport, render_markdown, run_scenario
 from korvid.evals.scenario import ContainerLogs, Evidence, Scenario
@@ -878,3 +880,50 @@ async def test_the_eval_recorder_is_the_composition_point_for_a_plain_executor()
 
     assert isinstance(recording, RecordedExecution)
     assert [r.result for r in recording.records] == ["restarts=7"]
+
+
+class _PromptSpy(ScriptedProvider):
+    """Records the system message each turn was given."""
+
+    def __init__(self, script: list[list[dict[str, Any]]], seen: list[str]) -> None:
+        super().__init__(script)
+        self._seen = seen
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> Any:
+        self._seen.append(str(messages[0]["content"]))
+        async for event in super().complete(messages, tools, **kwargs):
+            yield event
+
+
+async def test_run_scenario_applies_prompt_overrides() -> None:
+    """A sweep flag that parses but never reaches the model would make every
+    prompt experiment silently measure the default."""
+    scenario = _oom_scenario()
+    seen: list[str] = []
+    await run_scenario(
+        scenario,
+        provider_factory=lambda: _PromptSpy(_good_script(), seen),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+        overrides=PromptOverrides(system="You are terse."),
+    )
+    assert seen
+    assert all(prompt.startswith("You are terse.") for prompt in seen), seen
+
+
+async def test_run_scenario_without_overrides_uses_the_shipped_prompt() -> None:
+    scenario = _oom_scenario()
+    seen: list[str] = []
+    await run_scenario(
+        scenario,
+        provider_factory=lambda: _PromptSpy(_good_script(), seen),
+        executor_factory=lambda: _executor_factory(scenario),
+        repetitions=1,
+    )
+    assert seen
+    assert all(prompt.startswith(SYSTEM_PROMPT) for prompt in seen), seen

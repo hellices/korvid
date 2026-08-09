@@ -147,6 +147,37 @@ uv run python -m korvid.evals.journeys_cli \
 - final state: contract cluster Stopped, `modeleval` zero nodes, Ollama Ready
   on its default pool.
 
+## Prompt Provenance
+
+A score is only comparable when the prompt that produced it is known.
+`--json` therefore writes a metadata envelope alongside the per-scenario
+results:
+
+```json
+{
+  "meta": {
+    "profile": "small",
+    "prompts": {"source": "default", "sha256": "9f2c…"}
+  },
+  "scenarios": [ … ]
+}
+```
+
+`source` is `default` when the run used the prompts korvid ships, and
+`override` when `--system-prompt-file`, `--prompt-append-file`, or a
+configured `agent.prompts` block changed them. The digest covers the role
+statement *and* every tool description, because rewording a tool is a
+measured lever rather than cosmetic.
+
+Rules that follow from this:
+
+- a **publishable scoreboard row must carry `"source": "default"`**; a run
+  measured under an override is a tuning artifact, not a comparable score;
+- a prompt experiment reports the baseline and the variant together, from
+  two runs that differ *only* in the prompt file;
+- a changed digest with an unchanged prompt file means something else moved
+  — a profile change or a tool-schema edit — and the comparison is void.
+
 ## Interpretation Limits
 
 - Task success does not prove conversational usability.

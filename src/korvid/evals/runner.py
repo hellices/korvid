@@ -22,7 +22,7 @@ from korvid.agent.events import (
     ToolCallStarted,
 )
 from korvid.agent.outbound import sanitize_recorded_tool_result
-from korvid.agent.profiles import AgentProfile, build_profile
+from korvid.agent.profiles import AgentProfile, PromptOverrides, build_profile
 from korvid.agent.runtime import AgentRuntime
 from korvid.evals.grader import GradeResult, ToolRecord, grade, matches_target
 from korvid.evals.scenario import Scenario
@@ -232,10 +232,13 @@ async def _run_once(
     provider_factory: Callable[[], Any],
     executor_factory: Callable[[], Any],
     profile_name: str = "full",
+    overrides: PromptOverrides | None = None,
 ) -> RunMetrics:
     raw_provider = provider_factory()
     try:
-        return await _drive_turn(scenario, raw_provider, executor_factory(), profile_name)
+        return await _drive_turn(
+            scenario, raw_provider, executor_factory(), profile_name, overrides
+        )
     finally:
         # Live providers own an httpx client; close it per repetition or a
         # full pack run leaks one client per run (the app calls aclose()
@@ -280,9 +283,12 @@ async def _drive_turn(
     raw_provider: Any,
     raw_executor: Any,
     profile_name: str = "full",
+    overrides: PromptOverrides | None = None,
 ) -> RunMetrics:
     provider = _CountingProvider(raw_provider)
-    profile = build_profile(profile_name, readonly=False, resize_supported=True)
+    profile = build_profile(
+        profile_name, readonly=False, resize_supported=True, overrides=overrides
+    )
     executor = _RecordingExecutor(raw_executor, max_result_chars=profile.max_result_chars)
     runtime = AgentRuntime(
         provider,
@@ -358,10 +364,11 @@ async def run_scenario(
     executor_factory: Callable[[], Any],
     repetitions: int = DEFAULT_REPETITIONS,
     profile: str = "full",
+    overrides: PromptOverrides | None = None,
 ) -> ScenarioReport:
     """Run one scenario ``repetitions`` times with fresh state per run."""
     runs = [
-        await _run_once(scenario, provider_factory, executor_factory, profile)
+        await _run_once(scenario, provider_factory, executor_factory, profile, overrides)
         for _ in range(repetitions)
     ]
     return ScenarioReport(scenario_id=scenario.id, root_cause=scenario.root_cause, runs=runs)

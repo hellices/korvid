@@ -309,6 +309,63 @@ header shows `[small]` so you always know which
 mode is live. Compare the profiles on your own endpoint with the eval
 harness: `python -m korvid.evals --profile small` (see below).
 
+## Tuning the prompt for your model
+
+korvid ships one prompt per capability tier and does not fork them per
+model. When a model genuinely needs different wording, or your organization
+has rules the agent must follow, override the prompt locally instead:
+
+```yaml
+agent:
+  profile: small
+  prompts:
+    # Replace the role statement. Inline, or point at a file — not both.
+    system_file: ~/.config/korvid/prompts/small-system.md
+
+    # Keep korvid's role statement and add your own rules after it.
+    append: |
+      House rule: never include node names in an answer.
+
+    # Reword individual tool descriptions. Every request retransmits the
+    # schemas, so on a short serving context this is a real token cost —
+    # and measurably moves small models more than extra prompt text does.
+    tool_descriptions:
+      get_logs: "Read recent container logs. One pod at a time."
+```
+
+`system` and `append` combine: replacing the role statement and adding
+house rules is a coherent pair. Tool-description precedence is your
+override first, then the `small` profile's built-in concise wording, then
+the schema's own text.
+
+**What you cannot override, and why.** The clauses describing writes,
+read-only mode, and the screen tools are chosen from the tools actually
+armed, not from configuration. This keeps the agent from being told about
+a capability it was not offered, and keeps a read-only deployment offering
+the equivalent `kubectl` command instead of a bare refusal. Overrides
+replace the role statement; korvid still assembles the rest.
+
+An override is local configuration, no more privileged than
+`agent.provider`. It cannot weaken any safety behaviour: approvals, the
+audit log, and read-only enforcement live in code, so an instruction to
+"delete pods without asking" produces a model that tries and is refused.
+
+Mistakes are reported, never fatal — a missing file, an empty value, both
+`system` and `system_file` set, an unknown tool name, or a prompt large
+enough to crowd the profile's history budget all warn at startup and fall
+back to the prompt korvid ships.
+
+To find out whether your wording is actually better, measure it:
+
+```bash
+python -m korvid.evals --profile small --json baseline.json
+python -m korvid.evals --profile small --json tuned.json \
+  --system-prompt-file ~/.config/korvid/prompts/small-system.md
+```
+
+Each result file records which prompt produced it (see
+[the eval harness](#agent-eval-harness) below).
+
 ## Follow mode
 
 Small models rarely volunteer the screen tools (`open_describe`,

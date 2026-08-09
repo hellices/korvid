@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import hashlib
 import json
 import math
 import os
@@ -26,6 +27,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from korvid.agent.profiles import AgentProfile, PromptOverrides, build_profile
 from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.runner import (
     DEFAULT_REPETITIONS,
@@ -83,6 +85,42 @@ def report_payload(reports: list[ScenarioReport]) -> list[dict[str, Any]]:
     ]
 
 
+def prompt_fingerprint(profile: AgentProfile, overrides: PromptOverrides) -> dict[str, str]:
+    """Which prompt produced a run.
+
+    A scoreboard row that does not say which prompt it was measured under is
+    not comparable with any other row, so every run records this. The digest
+    covers the role statement *and* the tool descriptions, because rewording
+    a tool is a measured lever, not cosmetic.
+    """
+    digest = hashlib.sha256()
+    digest.update(profile.system_prompt.encode("utf-8"))
+    for tool in profile.tools:
+        function = tool["function"]
+        digest.update(f"\x00{function['name']}\x00{function['description']}".encode())
+    configured = bool(overrides.system or overrides.append or overrides.tool_descriptions)
+    return {
+        "source": "override" if configured else "default",
+        "sha256": digest.hexdigest(),
+    }
+
+
+def run_payload(
+    reports: list[ScenarioReport],
+    *,
+    profile: AgentProfile,
+    overrides: PromptOverrides,
+) -> dict[str, Any]:
+    """The full JSON artifact: run metadata plus per-scenario results."""
+    return {
+        "meta": {
+            "profile": profile.name,
+            "prompts": prompt_fingerprint(profile, overrides),
+        },
+        "scenarios": report_payload(reports),
+    }
+
+
 def _positive_int(value: str) -> int:
     number = int(value)
     if number < 1:
@@ -114,6 +152,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="agent capability profile to evaluate (issue #71; default: full)",
     )
     parser.add_argument(
+        "--system-prompt-file",
+        type=Path,
+        default=None,
+        help=(
+            "replace the profile's role statement with this file's contents; "
+            "the result JSON records the override so the run is not mistaken "
+            "for a default-prompt score"
+        ),
+    )
+    parser.add_argument(
+        "--prompt-append-file",
+        type=Path,
+        default=None,
+        help="append this file's contents to the profile's role statement",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=None,
@@ -140,6 +194,7 @@ async def _run_all(
     provider_factory: Callable[[], Any],
     repetitions: int,
     profile: str,
+    overrides: PromptOverrides,
 ) -> list[ScenarioReport]:
     reports: list[ScenarioReport] = []
     for scenario in scenarios:
@@ -151,6 +206,7 @@ async def _run_all(
                 executor_factory=_executor_factory(scenario),
                 repetitions=repetitions,
                 profile=profile,
+                overrides=overrides,
             )
         )
     return reports
@@ -173,6 +229,26 @@ def exit_code(reports: list[ScenarioReport]) -> int:
     return 0
 
 
+def _sweep_overrides(args: argparse.Namespace) -> PromptOverrides:
+    """Prompt overrides for a sweep run, read from the CLI's file flags."""
+    return PromptOverrides(
+        system=_read_prompt_file(args.system_prompt_file, "--system-prompt-file"),
+        append=_read_prompt_file(args.prompt_append_file, "--prompt-append-file"),
+    )
+
+
+def _read_prompt_file(path: Path | None, flag: str) -> str | None:
+    if path is None:
+        return None
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise SystemExit(f"{flag}: cannot read {path}: {exc.strerror}") from exc
+    if not text:
+        raise SystemExit(f"{flag}: {path} is empty")
+    return text
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point; returns a process exit code."""
     args = _parse_args(argv)
@@ -180,13 +256,20 @@ def main(argv: list[str] | None = None) -> int:
     scenarios = load_scenarios(args.scenarios)
     if not scenarios:
         raise SystemExit(f"no scenario YAML files found in {args.scenarios}")
-    reports = asyncio.run(_run_all(scenarios, provider_factory, args.reps, args.profile))
+    overrides = _sweep_overrides(args)
+    reports = asyncio.run(_run_all(scenarios, provider_factory, args.reps, args.profile, overrides))
     markdown = render_markdown(reports)
     print(markdown)
     if args.out is not None:
         args.out.write_text(markdown + "\n")
     if args.json is not None:
-        args.json.write_text(json.dumps(report_payload(reports), indent=2) + "\n")
+        # The profile is rebuilt here purely to fingerprint the run; the
+        # scenarios above each built their own from the same inputs.
+        profile = build_profile(
+            args.profile, readonly=False, resize_supported=True, overrides=overrides
+        )
+        payload = run_payload(reports, profile=profile, overrides=overrides)
+        args.json.write_text(json.dumps(payload, indent=2) + "\n")
     return exit_code(reports)
 
 

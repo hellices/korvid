@@ -1883,3 +1883,113 @@ def test_github_copilot_variant_loads_oauth_token(monkeypatch: object) -> None:
     # No token stored → provider is None.
     assert runtime is None
     assert provider_box[0] is None
+
+
+def test_configured_prompt_overrides_reach_the_runtime(monkeypatch: object) -> None:
+    """`agent.prompts` must actually change the prompt the model receives."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+        agent_prompt_system="You are terse.",
+        agent_prompt_append="Never name nodes.",
+        agent_prompt_tool_descriptions={"get_logs": "Mine."},
+    )
+    kube_stub = cast("Any", object())
+    runtime, _, _, _, _, _, _ = _build_agent_wiring(config, kube_stub, {})
+    assert runtime is not None
+    prompt = cast("Any", runtime)._system_prompt_override
+    assert prompt.startswith("You are terse. Never name nodes.")
+    described = {t["function"]["name"]: t["function"]["description"] for t in runtime._tools}
+    assert described["get_logs"] == "Mine."
+
+
+def test_unusable_prompt_override_is_reported_not_fatal(monkeypatch: object) -> None:
+    """A typo'd tool name warns instead of silently doing nothing."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+        agent_prompt_tool_descriptions={"get_logz": "Mine."},
+    )
+    kube_stub = cast("Any", object())
+    warnings: list[str] = []
+    runtime, _, _, _, _, _, _ = _build_agent_wiring(
+        config, kube_stub, {}, startup_warnings=warnings
+    )
+    assert runtime is not None
+    assert any("get_logz" in w for w in warnings), warnings
+
+
+async def test_prompt_overrides_survive_a_wizard_rebuild_and_a_context_switch(
+    monkeypatch: object,
+) -> None:
+    """A `:ai` model change or `:ctx` switch must not silently drop the
+    configured prompt back to the shipped default."""
+    import pytest
+
+    mp = monkeypatch
+    assert isinstance(mp, pytest.MonkeyPatch)
+    mp.setenv("KORVID_TEST_KEY", "k")
+
+    from korvid.__main__ import _build_agent_wiring
+    from korvid.agent.setup import AgentSettings
+    from korvid.core.config import KorvidConfig
+
+    config = KorvidConfig(
+        agent_enabled=True,
+        agent_provider="openai",
+        agent_auth_method="api_key",
+        agent_base_url="http://localhost:9999/v1",
+        agent_model="m",
+        agent_api_key_env="KORVID_TEST_KEY",
+        agent_prompt_system="You are terse.",
+        agent_prompt_tool_descriptions={"get_logs": "Mine."},
+    )
+    kube_stub = cast("Any", object())
+    runtime, _, rebuild, retarget, _, _, _ = _build_agent_wiring(config, kube_stub, {})
+    assert runtime is not None
+    assert rebuild is not None
+
+    rebuilt = rebuild(
+        AgentSettings(
+            provider="openai",
+            auth_method="api_key",
+            base_url="http://localhost:9999/v1",
+            model="m",
+            api_key_env="KORVID_TEST_KEY",
+        )
+    )
+    assert rebuilt is not None
+    assert rebuilt._messages[0]["content"].startswith("You are terse.")
+    described = {t["function"]["name"]: t["function"]["description"] for t in rebuilt._tools}
+    assert described["get_logs"] == "Mine."
+
+    retarget(rebuilt, True, "This cluster runs on AWS (EKS managed).")
+    assert rebuilt._messages[0]["content"].startswith("You are terse.")
+    after = {t["function"]["name"]: t["function"]["description"] for t in rebuilt._tools}
+    assert after["get_logs"] == "Mine."

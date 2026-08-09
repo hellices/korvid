@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     # Embedded-agent types appear only in annotations here: an MCP-only or
     # base install must never import the agent runtime or provider ABC at
     # startup (issue #73 acceptance criterion).
+    from korvid.agent.profiles import AgentProfile, PromptOverrides
     from korvid.agent.provider import LLMProvider
     from korvid.agent.runtime import AgentRuntime
 
@@ -476,6 +477,42 @@ def _create_initial_provider(
         return None
 
 
+def _prompt_overrides(config: KorvidConfig) -> PromptOverrides:
+    """Configured prompt slots (`agent.prompts`) as the agent layer wants them."""
+    from korvid.agent.profiles import PromptOverrides
+
+    return PromptOverrides(
+        system=config.agent_prompt_system,
+        append=config.agent_prompt_append,
+        tool_descriptions=config.agent_prompt_tool_descriptions,
+    )
+
+
+def _initial_profile(
+    config: KorvidConfig,
+    overrides: PromptOverrides,
+    pod_resize_supported: bool,
+    startup_warnings: list[str] | None,
+) -> AgentProfile:
+    """The starting capability profile, reporting unusable prompt overrides.
+
+    An override that cannot take effect (a typo'd tool name, a prompt that
+    crowds the history budget) is a warning, never fatal: the agent still
+    starts on the prompts korvid ships.
+    """
+    from korvid.agent.profiles import build_profile, validate_prompt_overrides
+
+    profile = build_profile(
+        config.agent_profile or "full",
+        readonly=config.readonly,
+        resize_supported=pod_resize_supported,
+        overrides=overrides,
+    )
+    if startup_warnings is not None:
+        startup_warnings.extend(validate_prompt_overrides(profile, overrides))
+    return profile
+
+
 def _build_agent_wiring(
     config: KorvidConfig,
     kube: KubeClient,
@@ -528,12 +565,11 @@ def _build_agent_wiring(
     # prompts come from one place so the initial build and every wizard
     # rebuild stay consistent. In readonly mode the model is never even
     # told write tools exist; resize is offered only when discovery found
-    # pods/resize (1.35 GA).
-    profile = build_profile(
-        config.agent_profile or "full",
-        readonly=config.readonly,
-        resize_supported=pod_resize_supported,
-    )
+    # pods/resize (1.35 GA). `agent.prompts` swaps the role statement and
+    # tool wording only — the write/no-write and UI clauses stay conditional
+    # on what is actually armed.
+    prompt_overrides = _prompt_overrides(config)
+    profile = _initial_profile(config, prompt_overrides, pod_resize_supported, startup_warnings)
     oauth = token_store.load("github-oauth") if config.agent_provider == "github-copilot" else None
     ollama_options = OllamaOptions(
         num_ctx=config.agent_ollama_num_ctx,
@@ -626,6 +662,7 @@ def _build_agent_wiring(
                 settings.profile,
                 readonly=config.readonly,
                 resize_supported=resize_box[0],
+                overrides=prompt_overrides,
             )
             new_runtime = AgentRuntime(
                 new_provider,
@@ -673,6 +710,7 @@ def _build_agent_wiring(
                 profile_box[0],
                 readonly=config.readonly,
                 resize_supported=pod_resize_supported,
+                overrides=prompt_overrides,
             )
             runtime.retarget(tools=retarget_profile.tools, cluster_context=cluster_context)
 
