@@ -120,3 +120,5 @@ The contract pattern every test follows:
    ServiceAccounts; never legacy token Secrets.
 5. Label every created object with `conftest.run_labels()` and create it in
    the per-test `namespace` fixture so teardown and the janitor can find it.
+
+<!-- docs-only classifier proof for PR #218; branch is deleted after the run -->
