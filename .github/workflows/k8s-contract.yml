@@ -222,6 +222,11 @@ jobs:
       AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
       AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
     steps:
+      # The settle helper lives in the repo, so this job needs the tree too.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
       - name: Guard — refuse any target other than the documented test cluster
         run: |
           if [ "$AKS_RESOURCE_GROUP" != "$EXPECTED_RESOURCE_GROUP" ] || \
@@ -241,14 +246,19 @@ jobs:
           # A test may have left an operation in flight (a nodepool scale, a
           # failed run mid-write). Azure would reject the stop outright, the
           # step would fail, and the cluster would stay up accruing cost.
-          .github/scripts/wait-aks-settled.sh "$AKS_RESOURCE_GROUP" "$AKS_CLUSTER_NAME"
+          #
+          # The two budgets are split so their sum stays under this job's
+          # timeout-minutes: otherwise GitHub kills the job first and the
+          # manual-recovery hint below never gets printed.
+          WAIT_AKS_TIMEOUT=300 .github/scripts/wait-aks-settled.sh "$AKS_RESOURCE_GROUP" "$AKS_CLUSTER_NAME"
           az aks stop -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --no-wait
           # powerState flips to Stopped as soon as Azure accepts the request,
           # while provisioningState stays Stopping until the operation really
           # finishes. Waiting on powerState alone let this job exit seconds
           # after asking, so the next merge's run hit "there's an in-progress
           # stop managed cluster operation" on its own start.
-          if ! .github/scripts/wait-aks-settled.sh "$AKS_RESOURCE_GROUP" "$AKS_CLUSTER_NAME" Stopped; then
+          if ! WAIT_AKS_TIMEOUT=600 .github/scripts/wait-aks-settled.sh \
+            "$AKS_RESOURCE_GROUP" "$AKS_CLUSTER_NAME" Stopped; then
           echo "::error title=AKS stop failed::aks-korvid-contract-test did not settle at Stopped; idle compute may be accruing. Stop it manually: az aks stop -g $AKS_RESOURCE_GROUP -n $AKS_CLUSTER_NAME"
           exit 1
           fi

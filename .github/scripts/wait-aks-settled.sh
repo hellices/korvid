@@ -21,20 +21,29 @@ want_power=${3:-}
 deadline=$(( SECONDS + ${WAIT_AKS_TIMEOUT:-600} ))
 power=""
 prov=""
+fails=0
 err_file=$(mktemp)
 trap 'rm -f "$err_file"' EXIT
 
 while :; do
   if out=$(az aks show -g "$group" -n "$cluster" \
       --query '[powerState.code,provisioningState]' -o tsv 2>"$err_file"); then
+    fails=0
     read -r power prov < <(printf '%s' "$out" | tr '\n' ' ') || true
   else
-    # Do not swallow this: an expired login, a wrong subscription or a deleted
-    # cluster is permanent, and silently retrying it for the whole budget
-    # ends in an unexplained "unknown/unknown".
+    # An expired login, a wrong subscription or a deleted cluster is
+    # permanent: report it, and give up after a few in a row rather than
+    # spending the whole budget to end on an unexplained unknown/unknown. A
+    # single dropped call still gets retried - this also runs in cleanup, and
+    # one flaky request must not leave the cluster running.
+    fails=$(( fails + 1 ))
     power=""
     prov=""
     echo "az aks show failed: $(tr '\n' ' ' <"$err_file")"
+    if [ "$fails" -ge 3 ]; then
+      echo "::error title=Cluster query failed::az aks show failed $fails times in a row for $cluster: $(tr '\n' ' ' <"$err_file")"
+      exit 1
+    fi
   fi
   if [ "${prov:-}" = "Succeeded" ] && { [ -z "$want_power" ] || [ "${power:-}" = "$want_power" ]; }; then
     exit 0
