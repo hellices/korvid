@@ -21,12 +21,21 @@ want_power=${3:-}
 deadline=$(( SECONDS + ${WAIT_AKS_TIMEOUT:-600} ))
 power=""
 prov=""
+err_file=$(mktemp)
+trap 'rm -f "$err_file"' EXIT
 
 while :; do
-  read -r power prov < <(
-    az aks show -g "$group" -n "$cluster" \
-      --query '[powerState.code,provisioningState]' -o tsv 2>/dev/null | tr '\n' ' '
-  ) || true
+  if out=$(az aks show -g "$group" -n "$cluster" \
+      --query '[powerState.code,provisioningState]' -o tsv 2>"$err_file"); then
+    read -r power prov < <(printf '%s' "$out" | tr '\n' ' ') || true
+  else
+    # Do not swallow this: an expired login, a wrong subscription or a deleted
+    # cluster is permanent, and silently retrying it for the whole budget
+    # ends in an unexplained "unknown/unknown".
+    power=""
+    prov=""
+    echo "az aks show failed: $(tr '\n' ' ' <"$err_file")"
+  fi
   if [ "${prov:-}" = "Succeeded" ] && { [ -z "$want_power" ] || [ "${power:-}" = "$want_power" ]; }; then
     exit 0
   fi
