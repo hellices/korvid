@@ -7,10 +7,12 @@ on:
 permissions:
   contents: read
 
-# Supersede a PR's older runs when new commits arrive; never cancel a run on
-# main, where the result is the record that a merged commit was verified.
+# Supersede a PR's older runs when new commits arrive. Non-PR events get a
+# unique group: GitHub cancels a *pending* run when a newer one joins the
+# group even with cancel-in-progress off, so sharing a group on main would
+# let a burst of merges discard the middle commit's verification.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -23,6 +25,11 @@ jobs:
   # and a required check that never runs blocks the merge forever).
   changes:
     runs-on: ubuntu-latest
+    # Reading the PR's file list needs more than the workflow-level
+    # `contents: read`; without this the API call 404s on every PR.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       code: ${{ steps.classify.outputs.code }}
     steps:
@@ -33,18 +40,28 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
-          set -euo pipefail
-          # Fail closed: anything that is not a pull request whose file list we
-          # can read is treated as a code change and gets the full matrix.
+          set -uo pipefail
+          # Fail closed: anything we cannot positively identify as docs-only
+          # gets the full matrix. That includes a failed API call - exiting
+          # non-zero here would *skip* the dependent test jobs rather than run
+          # them, and a skipped required check never reports.
           if [ -z "${PR:-}" ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"
             echo "not a pull request; running everything"
             exit 0
           fi
-          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename')
+          if ! files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename'); then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "could not read the file list; running everything"
+            exit 0
+          fi
           echo "$files"
           # Docs-only means every path is under docs/ or is a root .md file.
-          if printf '%s\n' "$files" | grep -qvE '^(docs/.*|[^/]+\.md)$'; then
+          # grep must consume the whole list: `grep -q` stops at the first hit
+          # and SIGPIPEs the writer, which under pipefail fails the pipeline
+          # and would read as docs-only - skipping tests on a code change.
+          non_docs=$(printf '%s\n' "$files" | { grep -cvE '^(docs/.*|[^/]+\.md)$' || true; })
+          if [ "${non_docs:-1}" -gt 0 ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
