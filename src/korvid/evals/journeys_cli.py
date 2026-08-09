@@ -130,7 +130,7 @@ def journey_run_payload(reports: list[JourneyReport], *, profile_name: str) -> d
             "profile": profile.name,
             # Journeys offer the full profile surface, UI tools included,
             # so the digest must cover those schemas too.
-            "prompts": prompt_fingerprint(profile, overrides, tools=profile.tools),
+            "prompts": prompt_fingerprint(profile, tools=profile.tools),
         },
         "journeys": report_payload(reports),
     }

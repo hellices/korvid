@@ -8,7 +8,7 @@ from typing import ClassVar
 
 import pytest
 
-from korvid.agent.profiles import PromptOverrides, build_profile
+from korvid.agent.profiles import build_profile
 from korvid.evals.__main__ import prompt_fingerprint
 from korvid.evals.grader import GradeResult
 from korvid.evals.journey_runner import (
@@ -169,9 +169,8 @@ def test_journey_digest_covers_the_ui_tools_it_actually_offers() -> None:
     schema change must move the digest — the task pack's surface drops
     those tools and would not see it."""
     profile = build_profile("small", readonly=True, resize_supported=False)
-    overrides = PromptOverrides()
-    before = prompt_fingerprint(profile, overrides, tools=profile.tools)["sha256"]
+    before = prompt_fingerprint(profile, tools=profile.tools)["sha256"]
     ui = next(t for t in profile.tools if t["function"]["name"] == "open_logs")
     ui["function"]["description"] = "changed"
-    after = prompt_fingerprint(profile, overrides, tools=profile.tools)["sha256"]
+    after = prompt_fingerprint(profile, tools=profile.tools)["sha256"]
     assert before != after

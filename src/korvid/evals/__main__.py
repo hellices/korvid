@@ -90,7 +90,6 @@ def report_payload(reports: list[ScenarioReport]) -> list[dict[str, Any]]:
 
 def prompt_fingerprint(
     profile: AgentProfile,
-    overrides: PromptOverrides,
     *,
     tools: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
@@ -107,8 +106,11 @@ def prompt_fingerprint(
     comparable.
 
     Args:
-        profile: the built profile, already carrying any overrides.
-        overrides: the configured slots, used to decide `source`.
+        profile: the built profile, already carrying any overrides. It is
+            the only input: `source` is decided by comparing this profile
+            against the shipped prompts, not by inspecting what was
+            configured, so an override that reproduces korvid's own wording
+            is correctly reported as `default`.
         tools: the schemas actually offered. Defaults to the task pack's
             surface (`_eval_tools`, which drops the UI tools); journey runs
             offer `profile.tools` unchanged and must pass them, or a UI
@@ -166,7 +168,7 @@ def run_payload(
     return {
         "meta": {
             "profile": profile.name,
-            "prompts": prompt_fingerprint(profile, overrides),
+            "prompts": prompt_fingerprint(profile),
         },
         "scenarios": report_payload(reports),
     }

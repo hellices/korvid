@@ -183,17 +183,17 @@ def test_run_payload_marks_any_override_as_override(override: dict[str, Any]) ->
 
 
 def test_prompt_fingerprint_is_stable_and_changes_with_the_prompt() -> None:
-    first = prompt_fingerprint(*_built())["sha256"]
-    again = prompt_fingerprint(*_built())["sha256"]
-    changed = prompt_fingerprint(*_built(system="You are terse."))["sha256"]
+    first = prompt_fingerprint(_built()[0])["sha256"]
+    again = prompt_fingerprint(_built()[0])["sha256"]
+    changed = prompt_fingerprint(_built(system="You are terse.")[0])["sha256"]
     assert first == again
     assert first != changed
 
 
 def test_prompt_fingerprint_notices_a_reworded_tool_description() -> None:
     """Tool wording is a measured lever, so it must be part of the identity."""
-    plain = prompt_fingerprint(*_built())["sha256"]
-    reworded = prompt_fingerprint(*_built(tool_descriptions={"get_logs": "Mine."}))["sha256"]
+    plain = prompt_fingerprint(_built()[0])["sha256"]
+    reworded = prompt_fingerprint(_built(tool_descriptions={"get_logs": "Mine."})[0])["sha256"]
     assert plain != reworded
 
 
@@ -219,20 +219,20 @@ def test_prompt_fingerprint_covers_the_composed_prompt_not_just_the_role(
     `profile.system_prompt`, so a digest over the role statement alone
     would call two behaviourally different runs comparable.
     """
-    profile, overrides = _built()
-    before = prompt_fingerprint(profile, overrides)["sha256"]
+    profile, _ = _built()
+    before = prompt_fingerprint(profile)["sha256"]
     monkeypatch.setattr(prompts, "NO_WRITE_PROMPT", "Reworded read-only guidance.")
-    assert prompt_fingerprint(profile, overrides)["sha256"] != before
+    assert prompt_fingerprint(profile)["sha256"] != before
 
 
 def test_prompt_fingerprint_covers_parameter_schemas() -> None:
     """A parameter-schema edit changes what the model sees, so it must
     change the digest — the methodology promises exactly this."""
-    profile, overrides = _built()
-    before = prompt_fingerprint(profile, overrides)["sha256"]
+    profile, _ = _built()
+    before = prompt_fingerprint(profile)["sha256"]
     target = next(t for t in profile.tools if t["function"]["name"] == "get_logs")
     target["function"]["parameters"]["properties"]["namespace"]["description"] = "changed"
-    assert prompt_fingerprint(profile, overrides)["sha256"] != before
+    assert prompt_fingerprint(profile)["sha256"] != before
 
 
 def test_prompt_sweep_file_with_invalid_utf8_exits_cleanly(tmp_path: Path) -> None:
@@ -252,7 +252,7 @@ def test_source_is_default_when_an_override_reproduces_the_shipped_prompt() -> N
     profile, _ = _built()
     same = PromptOverrides(system=profile.system_prompt)
     rebuilt = build_profile("small", readonly=True, resize_supported=False, overrides=same)
-    assert prompt_fingerprint(rebuilt, same)["source"] == "default"
+    assert prompt_fingerprint(rebuilt)["source"] == "default"
 
 
 def test_source_is_default_for_a_tool_description_that_changes_nothing() -> None:
@@ -260,9 +260,9 @@ def test_source_is_default_for_a_tool_description_that_changes_nothing() -> None
     current = {t["function"]["name"]: t["function"]["description"] for t in profile.tools}
     echo = PromptOverrides(tool_descriptions={"get_logs": current["get_logs"]})
     rebuilt = build_profile("small", readonly=True, resize_supported=False, overrides=echo)
-    assert prompt_fingerprint(rebuilt, echo)["source"] == "default"
+    assert prompt_fingerprint(rebuilt)["source"] == "default"
 
 
 def test_source_is_override_when_the_prompt_actually_differs() -> None:
-    profile, overrides = _built(system="You are terse.")
-    assert prompt_fingerprint(profile, overrides)["source"] == "override"
+    profile, _ = _built(system="You are terse.")
+    assert prompt_fingerprint(profile)["source"] == "override"
