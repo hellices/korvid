@@ -1,0 +1,223 @@
+id: rollout-owner-chain
+root_cause: image_pull_typo
+turns:
+  - user: >-
+      The api Deployment in namespace edge has been rolling out for a while
+      and never finishes. Start from the Deployment and find out why.
+    screen: "resource view: deployments, namespace edge, selected: edge/api"
+    grading:
+      # The rollout is stalled because the new ReplicaSet's pod cannot pull
+      # its image. Reaching that requires the ownership chain — Deployment,
+      # then the new ReplicaSet, then its Pod — which is exactly the
+      # multi-hop traversal small models are weakest at.
+      must_mention:
+        - [imagepullbackoff, errimagepull, image pull, cannot pull,
+           could not pull, pull the image, failed to pull, fails to pull,
+           unable to pull, manifest not found]
+        - [api-7b9d, v27, wrong tag, bad tag, tag does not exist,
+           nonexistent tag, typo]
+      must_not_mention:
+        - [oomkilled, out of memory]
+        - [readiness probe, liveness probe]
+        - [quota, insufficient cpu, insufficient memory]
+      expected_evidence:
+        # The stalled rollout is visible on the Deployment itself.
+        - - tool: get_resource
+            args: {kind: deployments, name: api, namespace: edge}
+            contains: "unavailableReplicas: 1"
+          - tool: diagnose_workload
+            args: {kind: deployments, name: api, namespace: edge}
+            contains: api-7b9d
+        # The failing pod's own state names the cause.
+        - - tool: diagnose_pod
+            args: {pod: api-7b9d-x1, namespace: edge}
+            contains: ImagePullBackOff
+          - tool: get_events
+            args: {kind: pods, name: api-7b9d-x1, namespace: edge}
+            contains: "not found"
+      max_tool_calls: 6
+  - user: >-
+      Which ReplicaSet does that pod belong to, and is the previous one
+      still serving traffic?
+    screen: "resource view: pods, namespace edge, selected: edge/api-7b9d-x1"
+    grading:
+      # The old ReplicaSet is still up, which is why there is no outage —
+      # a model that reports a total failure has misread the rollout.
+      must_mention:
+        - [api-7b9d]
+        - [api-5c2f, previous, old replicaset, still serving, still running,
+           still available]
+      must_not_mention:
+        - [outage, total failure, all pods are down, no pods running]
+      expected_evidence:
+        - - tool: get_resource
+            args: {kind: replicasets, name: api-5c2f, namespace: edge}
+            contains: "readyReplicas: 2"
+          - tool: list_resources
+            args: {kind: replicasets, namespace: edge}
+            contains: api-5c2f
+      max_tool_calls: 4
+cluster:
+  objects:
+    - kind: Deployment
+      apiVersion: apps/v1
+      metadata:
+        name: api
+        namespace: edge
+        uid: deploy-api-1
+        creationTimestamp: "2026-07-27T04:00:00Z"
+      spec:
+        replicas: 3
+        selector:
+          matchLabels: {app: api}
+      status:
+        replicas: 3
+        readyReplicas: 2
+        availableReplicas: 2
+        unavailableReplicas: 1
+        updatedReplicas: 1
+        conditions:
+          - type: Available
+            status: "True"
+          - type: Progressing
+            status: "False"
+            reason: ProgressDeadlineExceeded
+            message: ReplicaSet "api-7b9d" has timed out progressing.
+    - kind: ReplicaSet
+      apiVersion: apps/v1
+      metadata:
+        name: api-5c2f
+        namespace: edge
+        uid: rs-api-old
+        creationTimestamp: "2026-07-27T04:00:00Z"
+        labels: {app: api}
+        ownerReferences:
+          - {apiVersion: apps/v1, kind: Deployment, name: api, uid: deploy-api-1, controller: true}
+      spec:
+        replicas: 2
+        selector:
+          matchLabels: {app: api, pod-template-hash: 5c2f}
+      status:
+        replicas: 2
+        readyReplicas: 2
+        availableReplicas: 2
+    - kind: ReplicaSet
+      apiVersion: apps/v1
+      metadata:
+        name: api-7b9d
+        namespace: edge
+        uid: rs-api-new
+        creationTimestamp: "2026-07-27T05:30:00Z"
+        labels: {app: api}
+        ownerReferences:
+          - {apiVersion: apps/v1, kind: Deployment, name: api, uid: deploy-api-1, controller: true}
+      spec:
+        replicas: 1
+        selector:
+          matchLabels: {app: api, pod-template-hash: 7b9d}
+      status:
+        replicas: 1
+        readyReplicas: 0
+        availableReplicas: 0
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: api-7b9d-x1
+        namespace: edge
+        uid: pod-api-new
+        creationTimestamp: "2026-07-27T05:30:00Z"
+        labels: {app: api, pod-template-hash: 7b9d}
+        ownerReferences:
+          - {apiVersion: apps/v1, kind: ReplicaSet, name: api-7b9d, uid: rs-api-new, controller: true}
+      spec:
+        nodeName: node-a
+        containers:
+          - name: api
+            image: edge/api:v27
+      status:
+        phase: Pending
+        conditions:
+          - {type: Ready, status: "False"}
+        containerStatuses:
+          - name: api
+            ready: false
+            restartCount: 0
+            state:
+              waiting:
+                reason: ImagePullBackOff
+                message: 'Back-off pulling image "edge/api:v27"'
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: api-5c2f-a1
+        namespace: edge
+        uid: pod-api-old-1
+        creationTimestamp: "2026-07-27T04:00:00Z"
+        labels: {app: api, pod-template-hash: 5c2f}
+        ownerReferences:
+          - {apiVersion: apps/v1, kind: ReplicaSet, name: api-5c2f, uid: rs-api-old, controller: true}
+      spec:
+        nodeName: node-a
+        containers:
+          - name: api
+            image: edge/api:v26
+      status:
+        phase: Running
+        conditions:
+          - {type: Ready, status: "True"}
+        containerStatuses:
+          - name: api
+            ready: true
+            restartCount: 0
+            state: {running: {startedAt: "2026-07-27T04:00:06Z"}}
+    - kind: Pod
+      apiVersion: v1
+      metadata:
+        name: api-5c2f-a2
+        namespace: edge
+        uid: pod-api-old-2
+        creationTimestamp: "2026-07-27T04:00:00Z"
+        labels: {app: api, pod-template-hash: 5c2f}
+        ownerReferences:
+          - {apiVersion: apps/v1, kind: ReplicaSet, name: api-5c2f, uid: rs-api-old, controller: true}
+      spec:
+        nodeName: node-b
+        containers:
+          - name: api
+            image: edge/api:v26
+      status:
+        phase: Running
+        conditions:
+          - {type: Ready, status: "True"}
+        containerStatuses:
+          - name: api
+            ready: true
+            restartCount: 0
+            state: {running: {startedAt: "2026-07-27T04:00:07Z"}}
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-a}
+      status:
+        conditions: [{type: Ready, status: "True"}]
+    - kind: Node
+      apiVersion: v1
+      metadata: {name: node-b}
+      status:
+        conditions: [{type: Ready, status: "True"}]
+  events:
+    - kind: Event
+      apiVersion: v1
+      metadata:
+        name: api-7b9d-x1.pullfail
+        namespace: edge
+      involvedObject:
+        kind: Pod
+        name: api-7b9d-x1
+        namespace: edge
+        uid: pod-api-new
+      type: Warning
+      reason: Failed
+      message: 'Failed to pull image "edge/api:v27": manifest for edge/api:v27 not found'
+      count: 9
+      lastTimestamp: "2026-07-27T06:00:00Z"
+  logs: {}

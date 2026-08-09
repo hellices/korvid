@@ -6,9 +6,17 @@ from pathlib import Path
 
 import pytest
 
+from korvid.evals.fake_kube import FakeKubeClient, builtin_aliases
 from korvid.evals.grader import grade
-from korvid.evals.journey import bundled_journeys_dir, load_journey, load_journeys
+from korvid.evals.journey import (
+    ConversationJourney,
+    JourneyTurn,
+    bundled_journeys_dir,
+    load_journey,
+    load_journeys,
+)
 from korvid.evals.scenario import Scenario
+from korvid.tools.executor import UI_TOOL_NAMES, ToolExecutor
 
 
 def _write(path: Path, text: str) -> Path:
@@ -197,14 +205,58 @@ cluster: {objects: [], events: [], logs: {}}
         load_journeys(tmp_path)
 
 
-def test_bundled_journey_pack_has_three_conversational_behaviors() -> None:
+def test_bundled_journey_pack_covers_the_planned_conversational_behaviors() -> None:
     journeys = load_journeys(bundled_journeys_dir())
     assert {journey.id for journey in journeys} == {
         "healthy-stop",
         "logs-to-events",
+        "rollout-owner-chain",
         "triage-and-correct",
     }
     assert all(len(journey.turns) >= 2 for journey in journeys)
+
+
+@pytest.mark.parametrize("journey", load_journeys(bundled_journeys_dir()), ids=lambda j: j.id)
+async def test_bundled_journey_evidence_is_reachable_through_the_real_tools(
+    journey: ConversationJourney,
+) -> None:
+    """Every declared evidence item must be fetchable from the fixture.
+
+    The scenario pack has had this guard since #69; journeys did not, so a
+    fixture that drifted from its assertions would only surface as an
+    unexplained model failure during a paid live run.
+    """
+    scenario = Scenario(
+        id=journey.id,
+        question="q",
+        screen="s",
+        root_cause=journey.root_cause,
+        must_mention=(),
+        must_not_mention=(),
+        objects=journey.objects,
+        events=journey.events,
+        logs=journey.logs,
+    )
+    executor = ToolExecutor(FakeKubeClient(scenario), builtin_aliases())
+    for index, turn in enumerate(journey.turns, start=1):
+        assert turn.expected_evidence, f"{journey.id} turn {index} declares no evidence"
+        for group in turn.expected_evidence:
+            # UI tools need a live bridge this fixture-only executor does
+            # not have; their reachability is a runner concern, not a
+            # fixture one.
+            cluster_reads = [e for e in group if e.tool not in UI_TOOL_NAMES]
+            if not cluster_reads:
+                continue
+            results = [
+                await executor.execute(evidence.tool, dict(evidence.args))
+                for evidence in cluster_reads
+            ]
+            assert any(
+                not result.startswith("ERROR:") and evidence.contains in result
+                for evidence, result in zip(cluster_reads, results, strict=True)
+            ), f"{journey.id} turn {index}: no route satisfies {group[0].contains!r}\n" + "\n".join(
+                r[:200] for r in results
+            )
 
 
 def test_triage_requires_an_explicit_priority_not_just_both_names() -> None:
@@ -227,3 +279,65 @@ def test_triage_requires_an_explicit_priority_not_just_both_names() -> None:
         [],
     )
     assert result.diagnosis_success is False
+
+
+#: Per-turn phrasings the rollout journey must accept and reject. Keyword
+#: lists are only as good as the phrasings they survive, so they are pinned
+#: rather than eyeballed once (the same lesson as the scenario pack).
+_ROLLOUT_CASES: tuple[tuple[int, tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        0,
+        (
+            "The rollout is stalled: the new ReplicaSet api-7b9d has a pod stuck"
+            " in ImagePullBackOff because the image tag v27 does not exist.",
+            "api-7b9d cannot pull the image edge/api:v27 \u2014 the tag looks like"
+            " a typo, so the rollout never completes.",
+            "The new pod fails to pull edge/api:v27 (manifest not found)."
+            " api-7b9d is the wrong tag rollout.",
+        ),
+        (
+            "The pod was OOMKilled and restarted.",
+            "The readiness probe is failing on the new pod.",
+            "The namespace is out of CPU quota.",
+        ),
+    ),
+    (
+        1,
+        (
+            "It belongs to ReplicaSet api-7b9d. The previous ReplicaSet api-5c2f"
+            " still has 2 ready pods, so traffic is still served.",
+            "That pod is owned by api-7b9d; api-5c2f is the old ReplicaSet and is"
+            " still running with 2 replicas.",
+        ),
+        ("This is a total outage; all pods are down.",),
+    ),
+)
+
+
+def _turn_scenario(turn: JourneyTurn) -> Scenario:
+    return Scenario(
+        id="x",
+        question="q",
+        screen="s",
+        root_cause="r",
+        must_mention=turn.must_mention,
+        must_not_mention=turn.must_not_mention,
+    )
+
+
+@pytest.mark.parametrize(("index", "correct", "wrong"), _ROLLOUT_CASES)
+def test_rollout_journey_keywords_discriminate(
+    index: int, correct: tuple[str, ...], wrong: tuple[str, ...]
+) -> None:
+    journey = next(
+        item for item in load_journeys(bundled_journeys_dir()) if item.id == "rollout-owner-chain"
+    )
+    scenario = _turn_scenario(journey.turns[index])
+    for answer in correct:
+        assert grade(scenario, answer, []).diagnosis_success, (
+            f"turn {index + 1}: a correct answer was graded wrong\n  {answer}"
+        )
+    for answer in wrong:
+        assert not grade(scenario, answer, []).diagnosis_success, (
+            f"turn {index + 1}: a wrong answer was graded correct\n  {answer}"
+        )
