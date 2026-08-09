@@ -182,27 +182,50 @@ def _mentions_positively(keyword: str, answer_tokens: list[str], clause_ids: lis
 
 
 #: Identity keys that name the same thing under different parameter names
-#: across read tools (`get_logs(pod=...)`, `diagnose_service(service=...)`,
-#: `diagnose_pvc(pvc=...)` vs `get_resource(name=...)`). Evidence is written
-#: against the resource identity, so a tool that spells the target
-#: differently must still be credited for reaching it.
-_KEY_ALIASES = {"pod": "name", "service": "name", "pvc": "name"}
+#: across read tools, with the resource kind each one implies.
+#: `get_logs(pod=…)`, `diagnose_service(service=…)` and
+#: `diagnose_pvc(pvc=…)` all name a resource that evidence expresses as
+#: `get_resource(kind=…, name=…)`. The implied kind must survive the fold:
+#: without it a `kind`-less diagnostic call would satisfy evidence about a
+#: different kind that happens to share a name, inflating both the evidence
+#: and on-target counts.
+_KEY_ALIASES = {
+    "pod": ("name", "pods"),
+    "service": ("name", "services"),
+    "pvc": ("name", "persistentvolumeclaims"),
+}
 
 
 def _canonical_args(args: dict[str, Any]) -> dict[str, str]:
     """Lowercase argument values keyed by canonical parameter name:
     equivalent identity keys (`pod`, `service`, `pvc` -> `name`) are folded
-    together, and "kind" values go through the resource alias table so
-    `deploy`, `deployment` and `deployments` compare equal."""
+    together and contribute the kind they imply, and "kind" values go
+    through the resource alias table so `deploy`, `deployment` and
+    `deployments` compare equal."""
     canonical: dict[str, str] = {}
+    implied: str | None = None
     for key, value in args.items():
         text = str(value).strip().lower()
         if key == "kind":
-            meta = _ALIASES.get(text)
-            if meta is not None:
-                text = meta.plural
-        canonical[_KEY_ALIASES.get(key, key)] = text
+            canonical["kind"] = _canonical_kind(text)
+            continue
+        alias = _KEY_ALIASES.get(key)
+        if alias is not None:
+            name_key, kind = alias
+            canonical[name_key] = text
+            implied = kind
+            continue
+        canonical[key] = text
+    # An explicit `kind` argument always wins: it is what the call actually
+    # asked for, while the implied kind is only a property of the parameter.
+    if implied is not None and "kind" not in canonical:
+        canonical["kind"] = _canonical_kind(implied)
     return canonical
+
+
+def _canonical_kind(text: str) -> str:
+    meta = _ALIASES.get(text)
+    return meta.plural if meta is not None else text
 
 
 def matches_target(evidence: Evidence, record: ToolRecord) -> bool:

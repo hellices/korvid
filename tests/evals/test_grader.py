@@ -442,3 +442,67 @@ def test_grade_still_rejects_a_diagnostic_call_against_a_different_object() -> N
     ]
     result = grade(scenario, "OOMKilled, exit 137.", records)
     assert not result.evidence_fetched
+
+
+def test_grade_rejects_a_diagnostic_call_against_a_different_kind() -> None:
+    """Folding `pvc`/`service`/`pod` onto `name` must not fold away the kind.
+
+    `matches_target` compares `kind` only when both sides carry one, and a
+    diagnostic tool has no `kind` argument. Without an implied kind,
+    `diagnose_pvc(pvc="web")` satisfies evidence about a *Service* named
+    `web` whenever the report happens to contain the substring — inflating
+    both evidence and on-target metrics.
+    """
+    evidence = Evidence(
+        tool="get_resource",
+        contains="endpoints: 0",
+        args={"kind": "services", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nendpoints: 0",
+            arguments={"pvc": "web", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
+
+
+def test_grade_rejects_a_pod_read_against_deployment_evidence() -> None:
+    """The same hole existed for `pod` before the diagnostic aliases."""
+    evidence = Evidence(
+        tool="get_resource",
+        contains="readyReplicas: 0",
+        args={"kind": "deployments", "name": "web", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="get_logs",
+            result="readyReplicas: 0",
+            arguments={"pod": "web", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert not result.evidence_fetched
+
+
+def test_grade_still_credits_a_diagnostic_call_for_its_own_kind() -> None:
+    """The implied kind must match its own evidence, not block it."""
+    evidence = Evidence(
+        tool="get_resource",
+        contains="phase: Pending",
+        args={"kind": "persistentvolumeclaims", "name": "data", "namespace": "front"},
+    )
+    scenario = _scenario(expected_evidence=((evidence,),))
+    records = [
+        _record(
+            name="diagnose_pvc",
+            result="outcome: findings\nphase: Pending",
+            arguments={"pvc": "data", "namespace": "front"},
+        )
+    ]
+    result = grade(scenario, "OOMKilled, exit 137.", records)
+    assert result.evidence_fetched
