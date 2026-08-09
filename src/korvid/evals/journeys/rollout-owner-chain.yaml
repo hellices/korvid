@@ -11,11 +11,15 @@ turns:
       # then the new ReplicaSet, then its Pod — which is exactly the
       # multi-hop traversal small models are weakest at.
       must_mention:
+        # Three separate requirements: the symptom, *which* ReplicaSet, and
+        # *why*. As one merged group, "api-7b9d is in ImagePullBackOff"
+        # would pass without ever identifying the bad tag — measured.
         - [imagepullbackoff, errimagepull, image pull, cannot pull,
            could not pull, pull the image, failed to pull, fails to pull,
            unable to pull, manifest not found]
-        - [api-7b9d, v27, wrong tag, bad tag, tag does not exist,
-           nonexistent tag, typo]
+        - [api-7b9d]
+        - [v27, wrong tag, bad tag, tag does not exist, nonexistent tag,
+           typo, manifest not found, no such tag]
       must_not_mention:
         - [oomkilled, out of memory]
         - [readiness probe, liveness probe]
@@ -45,8 +49,9 @@ turns:
       # a model that reports a total failure has misread the rollout.
       must_mention:
         - [api-7b9d]
-        - [api-5c2f, previous, old replicaset, still serving, still running,
-           still available]
+        - [api-5c2f, previous replicaset, old replicaset, previous rs, old rs]
+        - [still serving, still served, still running, still available,
+           still ready, still up, serving traffic, unaffected]
       must_not_mention:
         - [outage, total failure, all pods are down, no pods running]
       expected_evidence:

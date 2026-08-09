@@ -296,6 +296,10 @@ _ROLLOUT_CASES: tuple[tuple[int, tuple[str, ...], tuple[str, ...]], ...] = (
             " api-7b9d is the wrong tag rollout.",
         ),
         (
+            # Names the ReplicaSet and the symptom but never the bad tag —
+            # incomplete, and it passed before the groups were split.
+            "api-7b9d is in ImagePullBackOff.",
+            "The new ReplicaSet api-7b9d cannot pull its image.",
             "The pod was OOMKilled and restarted.",
             "The readiness probe is failing on the new pod.",
             "The namespace is out of CPU quota.",
@@ -309,7 +313,11 @@ _ROLLOUT_CASES: tuple[tuple[int, tuple[str, ...], tuple[str, ...]], ...] = (
             "That pod is owned by api-7b9d; api-5c2f is the old ReplicaSet and is"
             " still running with 2 replicas.",
         ),
-        ("This is a total outage; all pods are down.",),
+        (
+            "This is a total outage; all pods are down.",
+            # Names the owning ReplicaSet only; says nothing about the old one.
+            "It belongs to api-7b9d.",
+        ),
     ),
 )
 
