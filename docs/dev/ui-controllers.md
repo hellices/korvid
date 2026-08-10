@@ -14,10 +14,13 @@ KorvidApp  (ui/app.py)
 │         navigation and scope, the write-approval perimeter, run_worker
 │         ownership, and the audited execution path
 │
-├── HelmController      (ui/helm_controller.py)   install/upgrade/rollback/uninstall
-├── TransferController  (ui/transfer.py)          post-approval file transfer
-├── DebugController     (ui/debug.py)             gated kubectl debug runs
-└── ...                                           further extractions pending
+│  reached through: WriteGate, ViewState, UiSurface
+│
+├── HelmController      (ui/helm_controller.py)      install/upgrade/rollback/uninstall
+├── OperatorController  (ui/operator_controller.py)  OLM subscribe/approve/uninstall
+├── TransferController  (ui/transfer.py)             post-approval file transfer
+├── DebugController     (ui/debug.py)                gated kubectl debug runs
+└── ...                                              further extractions pending
 ```
 
 Controllers do **not** import `app.py`. Dependencies arrive in the
@@ -48,8 +51,24 @@ So the boundaries that matter are named:
 - **`WriteGate`** (`ui/write_gate.py`) — approval, revalidation, the
   fail-closed audit precondition, and the context epoch. One implementation,
   `AppWriteGate`, adapting the app.
-- `ViewState` and `UiSurface` — planned, same treatment for "what is the user
-  looking at" and "the Textual capabilities a controller may use".
+- **`ViewState`** (`ui/view_state.py`) — what the user is currently looking
+  at: the focused kind and scope, alias resolution, the selected row, and a
+  `resources(kind, scope)` query. Read-only structurally, not just by
+  convention: there are no setters, `aliases()` returns a `Mapping` view,
+  and the `ResourceStore` is *not* exposed, so no controller can reach
+  `clear`, `clear_all` or `apply_event` and erase the view. Implemented by
+  `AppViewState`.
+- **`UiSurface`** (`ui/ui_surface.py`) — the Textual capabilities a
+  controller may use: `notify`, `push_screen`, `run_worker`, `progress` and
+  screen inspection. `push_screen` is generic over the screen's result type,
+  so a callback written for a different screen is a type error. Implemented
+  by `AppUiSurface`.
+
+`UiSurface.run_worker` gives supervision, not context safety: a `:ctx`
+switch cancels only the `hint-events` group, so a worker started before the
+switch keeps running against the cluster it captured. Controllers that
+outlive an await revalidate through `WriteGate.context_intact` or the epoch
+they captured.
 
 `AppWriteGate` is an adapter rather than the app inheriting `WriteGate`
 because Textual's `App` metaclass conflicts with `ABCMeta` — the same reason
@@ -92,10 +111,14 @@ Least coupled first, one responsibility per change, with characterization
 tests added before the move where the behaviour is not already pinned.
 
 1. ~~Helm workflows~~ — done (#187)
-2. OLM / operator workflows — the next most self-contained
-3. Logs, shell, port-forward session operations
-4. Agent, follow mode, MCP bridge
-5. Navigation, scope, pane lifecycle
+2. ~~OLM / operator workflows~~ — done (#187)
+3. ~~The `WriteGate` / `ViewState` / `UiSurface` seams~~ — done (#187);
+   this is what dropped `HelmController` from 21 dependencies to 6
+4. Port-forward, then logs, then shell / debug session operations
+5. Manual write actions — folds the audit precondition currently repeated
+   six times in `app.py` into one place
+6. Agent, follow mode, MCP bridge
 
-The remaining areas are more entangled with navigation state than helm was,
-so each needs its own responsibility map before it moves.
+Navigation, scope and pane lifecycle stay on the app: composing panes and
+owning the focused view *is* the app's job, so moving it would relocate the
+coupling rather than remove it.

@@ -17,9 +17,10 @@ metaclass conflicts with `ABCMeta`.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 
 from korvid.core.config import KorvidConfig
-from korvid.core.store import ResourceStore
+from korvid.core.store import Summary
 from korvid.k8s.discovery import ResourceMeta
 
 
@@ -48,12 +49,22 @@ class ViewState(ABC):
         """
 
     @abstractmethod
-    def aliases(self) -> dict[str, ResourceMeta]:
-        """The discovered alias table. Rebuilt by a `:ctx` switch."""
+    def aliases(self) -> Mapping[str, ResourceMeta]:
+        """The discovered alias table. Rebuilt by a `:ctx` switch.
+
+        A `Mapping` view, not the table itself: rewriting an alias would
+        retarget every later write the app makes, which is the app's
+        decision to take on a `:ctx` switch and no controller's.
+        """
 
     @abstractmethod
-    def store(self) -> ResourceStore:
-        """The resource store backing the current cluster."""
+    def resources(self, kind: str, scope: str) -> list[Summary]:
+        """Objects the watch has loaded for (kind, scope), sorted.
+
+        A query rather than the `ResourceStore`, whose `clear`, `clear_all`
+        and `apply_event` would let a controller erase or fabricate the
+        view the user is looking at.
+        """
 
     @abstractmethod
     def config(self) -> KorvidConfig:

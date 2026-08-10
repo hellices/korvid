@@ -20,7 +20,17 @@ from __future__ import annotations
 import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import Any, TypeVar
+
+from textual.await_complete import AwaitComplete
+from textual.screen import Screen
+from textual.widget import AwaitMount
+from textual.worker import Worker
+
+#: Result a modal returns through its callback. Binding it makes the
+#: screen and the callback agree, so a handler written for the wrong
+#: screen no longer type-checks.
+ScreenResultT = TypeVar("ScreenResultT")
 
 
 class UiSurface(ABC):
@@ -38,8 +48,21 @@ class UiSurface(ABC):
         """Show a toast. The only way a controller talks to the user directly."""
 
     @abstractmethod
-    def push_screen(self, screen: Any, callback: Any = None) -> Any:
-        """Open a modal and, optionally, route its result to `callback`."""
+    def push_screen(
+        self,
+        screen: Screen[ScreenResultT],
+        callback: Callable[[ScreenResultT | None], None] | None = None,
+    ) -> AwaitMount | AwaitComplete:
+        """Open a modal and, optionally, route its result to `callback`.
+
+        The callback takes the screen's own result type, so a handler
+        written against a different screen is a type error rather than a
+        runtime surprise. `None` is included because Textual passes it
+        when a screen is dismissed without a result.
+
+        The return value awaits the mount, not the dismissal - callers that
+        need the result take it through `callback`.
+        """
 
     @abstractmethod
     def run_worker(
@@ -49,12 +72,18 @@ class UiSurface(ABC):
         exclusive: bool = False,
         group: str = "default",
         name: str = "",
-    ) -> Any:
+    ) -> Worker[Any]:
         """Run work off the message pump.
 
-        Ownership stays with the app: it is the app's workers that get
-        cancelled on shutdown and on a `:ctx` switch, so a controller must
-        not spawn bare `asyncio` tasks that nothing supervises.
+        Ownership stays with the app, so a controller must not spawn bare
+        `asyncio` tasks that nothing supervises: app workers are cancelled
+        on shutdown and are visible to the test pilot.
+
+        A `:ctx` switch is *not* a cancellation point. It cancels only the
+        `hint-events` group; every other worker keeps running against the
+        cluster it was started for. A controller whose work outlives a
+        context switch must revalidate through `WriteGate.context_intact`
+        or the epoch it captured - the surface will not do it for you.
         """
 
     @abstractmethod

@@ -18,10 +18,11 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Mapping
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Literal, ParamSpec, TypeVar
 
 if TYPE_CHECKING:
@@ -33,11 +34,14 @@ if TYPE_CHECKING:
 import yaml
 from rich.text import Text
 from textual.app import App, ComposeResult, ScreenStackError, SuspendNotSupported
+from textual.await_complete import AwaitComplete
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
 from textual.events import DescendantBlur, DescendantFocus, Key
+from textual.screen import Screen
+from textual.widget import AwaitMount
 from textual.widgets import DataTable, Static
 from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from textual.worker import Worker, get_current_worker
@@ -140,7 +144,7 @@ from korvid.ui.shell import (
     parse_debug_pod_name,
 )
 from korvid.ui.transfer import TransferController, TransferProgress
-from korvid.ui.ui_surface import UiSurface
+from korvid.ui.ui_surface import ScreenResultT, UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.agent_panel import AgentPanel
 from korvid.ui.widgets.agent_setup_screen import AgentSetupScreen
@@ -9135,11 +9139,11 @@ class AppViewState(ViewState):
     def canonical_kind(self, kind: str) -> str:
         return self._app._canonical_kind(kind)
 
-    def aliases(self) -> dict[str, ResourceMeta]:
-        return self._app.aliases
+    def aliases(self) -> Mapping[str, ResourceMeta]:
+        return MappingProxyType(self._app.aliases)
 
-    def store(self) -> ResourceStore:
-        return self._app.store
+    def resources(self, kind: str, scope: str) -> list[Summary]:
+        return self._app.store.get(kind, scope)
 
     def config(self) -> KorvidConfig:
         return self._app.config
@@ -9161,8 +9165,13 @@ class AppUiSurface(UiSurface):
     """Nominal `UiSurface` adapter over `KorvidApp` (issue #187).
 
     Adapter for the same metaclass reason as the others. `run_worker` stays
-    the app's: its workers are what get cancelled on shutdown and on a `:ctx`
-    switch, so a controller spawning unsupervised tasks would escape that.
+    the app's, so controller work is supervised and cancelled on shutdown
+    rather than left as a bare task.
+
+    It does not make controller work context-safe: `_teardown_context`
+    cancels only the `hint-events` group, so a worker started before a
+    `:ctx` switch keeps running against the cluster it captured. Controllers
+    revalidate explicitly through the epoch or `WriteGate.context_intact`.
     """
 
     def __init__(self, app: KorvidApp) -> None:
@@ -9178,7 +9187,11 @@ class AppUiSurface(UiSurface):
     ) -> None:
         self._app.notify(message, title=title, severity=severity, timeout=timeout)  # type: ignore[arg-type]  # Textual types severity as a Literal
 
-    def push_screen(self, screen: Any, callback: Any = None) -> Any:
+    def push_screen(
+        self,
+        screen: Screen[ScreenResultT],
+        callback: Callable[[ScreenResultT | None], None] | None = None,
+    ) -> AwaitMount | AwaitComplete:
         return self._app.push_screen(screen, callback)
 
     def run_worker(
@@ -9188,7 +9201,7 @@ class AppUiSurface(UiSurface):
         exclusive: bool = False,
         group: str = "default",
         name: str = "",
-    ) -> Any:
+    ) -> Worker[Any]:
         return self._app.run_worker(work, exclusive=exclusive, group=group, name=name)
 
     def progress(self, label: str) -> contextlib.AbstractContextManager[None]:

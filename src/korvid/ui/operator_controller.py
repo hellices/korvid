@@ -611,7 +611,7 @@ class OperatorController:
         row = next(
             (
                 obj
-                for obj in self._view.store().get(
+                for obj in self._view.resources(
                     self._view.canonical_kind(sub_key), self._view.current_scope()
                 )
                 if getattr(obj, "installed_csv", "") == name and (ns is None or obj.namespace == ns)

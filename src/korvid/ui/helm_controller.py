@@ -9,13 +9,16 @@ What it deliberately does *not* own is the security perimeter. Approval
 still goes through the app's `push_write_confirmation`, context
 revalidation through `write_context_intact`, and the mutation itself
 through the app's `_run_write` worker — so the approval gate and the
-fail-closed audit rule keep exactly one implementation each. The
-controller receives narrow callables rather than the app, which is what
-stops it reaching back for anything it was not given.
+fail-closed audit rule keep exactly one implementation each.
 
-The dependency getters (`helm`, `audit`, `config`, the scope readers) are
-read at call time because a `:ctx` switch retargets the helm wrapper and
-the active scope after construction.
+The controller receives named boundaries — `WriteGate`, `ViewState`,
+`UiSurface` — plus the few helm-specific getters, rather than the app. That
+is what stops it reaching back for anything it was not given, and unlike a
+bag of `Callable[..., Any]` it keeps the argument contract checkable.
+
+The helm-specific getters are read at call time because a `:ctx` switch
+retargets the helm wrapper after construction. `ViewState` reads are live
+for the same reason.
 """
 
 from __future__ import annotations
@@ -736,7 +739,7 @@ class HelmController:
         return _clip_preview(text)
 
     def release_row(self, ns: str | None, name: str) -> HelmReleaseSummary | None:
-        for obj in self._view.store().get("helmreleases", self._view.current_scope()):
+        for obj in self._view.resources("helmreleases", self._view.current_scope()):
             if (
                 obj.name == name
                 and (ns is None or obj.namespace == ns)
@@ -746,7 +749,7 @@ class HelmController:
         return None
 
     def revision_row(self, ns: str | None, name: str) -> HelmRevisionSummary | None:
-        for obj in self._view.store().get("helmrevisions", self._view.current_scope()):
+        for obj in self._view.resources("helmrevisions", self._view.current_scope()):
             if (
                 obj.name == name
                 and (ns is None or obj.namespace == ns)
