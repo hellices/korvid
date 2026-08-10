@@ -1,15 +1,19 @@
 {
   "campaign": "2026-08-10 local-model matrix (#176)",
+  "korvid_commit": "bdfb645",
   "cluster": "aks-shared-runners / ollama namespace",
   "node_sku": "Standard_D32s_v5 (Spot)",
   "profile": "small",
-  "task_pack": "23 scenarios x 3 repetitions",
+  "tool_surface": "16 tools (includes diagnose_service and diagnose_pvc)",
+  "task_pack": "25 scenarios x 3 repetitions (23 pre-#227 scenarios re-scored separately)",
   "journey_pack": "3 journeys, 7 turns, 1 repetition",
   "prompts_source": "default",
-  "korvid_commit": "bdfb645",
+  "models": 9,
   "notes": [
-    "ollama memory limit raised from 10Gi to 100Gi: the 30B models OOMKilled at 10Gi and the symptom presented as connection errors",
-    "Spot eviction mid-campaign destroyed one qwen3:30b run and contaminated one devstral run; both re-run",
-    "qwen3-30b and qwen3-32b files are the first (clean) attempt; the second attempt was cancelled as redundant"
+    "The three 2026-08-05 models (qwen3:1.7b, qwen3:8b, qwen3-coder:30b) were re-measured here on the current revision; files are suffixed -v2",
+    "ollama memory limit raised from 10Gi to 100Gi and CPU to 31 cores: the 30B models OOMKill at 10Gi and the symptom presents as connection errors",
+    "Spot eviction destroyed one qwen3:30b run and contaminated a devstral run; both re-run and only the clean results are included",
+    "A 3-way parallel run was attempted and abandoned: throughput was 2.5x WORSE than sequential (memory-bandwidth contention), despite CPU rising from 15.8 to 28 cores",
+    "Wall times are sequential-run measurements and are comparable with each other"
   ]
 }
