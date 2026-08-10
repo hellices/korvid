@@ -476,6 +476,10 @@ async def test_uninstall_write_slot_released_when_coroutine_never_runs(
         )
         assert app._active_cluster_writes == 1
         coro.close()  # unstarted coroutine: the body's finally never executes
+        # Deliberately still referenced and not collected: `close()` alone
+        # must release, or a caller holding the closed coroutine wedges
+        # every future `:ctx` switch (#237).
+        assert app._active_cluster_writes == 0, "the reservation leaked"
         del coro
         gc.collect()
         assert app._active_cluster_writes == 0, "the reservation leaked"

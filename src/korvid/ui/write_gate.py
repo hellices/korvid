@@ -200,7 +200,14 @@ class ReservedWrite(Coroutine[Any, Any, _ResultT]):
             self._release()
 
     def __await__(self) -> Any:
-        return self._coro.__await__()
+        # `yield from`, not `return self._coro.__await__()`: `await` keeps
+        # only the iterator this returns, and that iterator would reference
+        # the inner coroutine alone. A direct `await app._run_write(...)`
+        # never names the wrapper, so it could be collected mid-flight and
+        # fire its finalizer - releasing the slot underneath a running
+        # mutation. A generator frame holds `self` for the whole await.
+        result = yield from self._coro.__await__()
+        return result
 
     def __repr__(self) -> str:
         return f"ReservedWrite({self._coro!r})"

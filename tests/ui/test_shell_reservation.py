@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gc
+import weakref
 from typing import Any
 
+import pytest
 from textual.app import SuspendNotSupported
 
 from korvid.ui.shell_controller import ShellController, ShellSettings
@@ -259,6 +261,45 @@ async def test_reserved_write_propagates_a_thrown_exception() -> None:
 
     reserved = ReservedWrite(work(), lambda: None)
     reserved.send(None)
-    with contextlib.suppress(ValueError):
+    with pytest.raises(ValueError, match="boom"):
         reserved.throw(ValueError("boom"))
     assert seen == ["caught"]
+
+
+async def test_direct_await_holds_the_reservation_while_suspended() -> None:
+    """The wrapper must survive its own `__await__` (#237 review).
+
+    `await` keeps the iterator `__await__` returns, not the object it came
+    from, and a direct `await app._run_write(...)` never binds the wrapper
+    to a name. Returning the inner coroutine's iterator therefore left
+    nothing referencing the wrapper: a collection while the write was
+    suspended mid-flight would fire the finalizer and release the slot
+    underneath a running mutation.
+    """
+    import gc
+
+    from korvid.ui.write_gate import ReservedWrite
+
+    released: list[str] = []
+    resume = asyncio.Event()
+
+    async def work() -> str:
+        await resume.wait()
+        return "done"
+
+    def build() -> Any:
+        reserved = ReservedWrite(work(), lambda: released.append("release"))
+        weakref.finalize(reserved, released.append, "finalize")
+        return reserved
+
+    async def consume() -> str:
+        # The wrapper is a temporary: nothing names it, exactly like
+        # `await app._run_write(...)`.
+        return await build()  # type: ignore[no-any-return]  # test double
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    gc.collect()
+    assert released == [], "reservation released while the write was in flight"
+    resume.set()
+    assert await task == "done"

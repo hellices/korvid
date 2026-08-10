@@ -42,7 +42,7 @@ from korvid.k8s.writes import WriteOps
 from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.operator_install import OperatorInstallPrompt
-from korvid.ui.write_gate import WriteGate
+from korvid.ui.write_gate import ReservedWrite, WriteGate
 
 logger = logging.getLogger(__name__)
 
@@ -528,10 +528,12 @@ class OperatorController:
             finally:
                 release()
 
-        coro = run()
         # The reservation must not leak if the coroutine is closed or
         # collected without ever running (worker cancelled before start,
-        # app shutdown): release is idempotent, so this is safe to add.
+        # app shutdown). `ReservedWrite` makes close() a release point so
+        # this does not wait for the collector; the finalizer stays as a
+        # backstop and release is idempotent, so both are safe.
+        coro = ReservedWrite(run(), release)
         weakref.finalize(coro, release)
         return coro
 
