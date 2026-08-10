@@ -6,15 +6,26 @@ Nine models on the task pack ×3, run on `main` revision `bdfb645` under the
 standard AKS/Ollama protocol (`Standard_D32s_v5`, `small` profile,
 `prompts.source: default`).
 
-**Protocol conformance (#176).** The standard for a publishable row has seven
-requirements. This matrix meets five — shared AKS environment, profile, node
-SKU, scenario set fixed by revision `bdfb645`, task pack ×3 with mean and
-variance published. It does **not** meet two: the serving engine, quantization,
-context length and warm-up are unpinned (below), and the journey pack ran at
-**1** repetition, not 3. **Treat the journey column as provisional** and the
-task column as standard-protocol apart from the serving pins. #235 tracks the
-capture that would close the first gap; a journey re-run at ×3 closes the
-second.
+**Protocol conformance (#176).** Against the standard for a publishable row:
+
+| Condition | This matrix |
+|---|---|
+| Shared AKS environment | met |
+| Pin profile | met (`small`) |
+| Pin scenario SHA | met (revision `bdfb645`) |
+| Pin node SKU | met (`Standard_D32s_v5`) |
+| Pin serving engine/version | **missing** |
+| Pin quantization | **missing** |
+| Pin context length | **missing** |
+| Pin warm-up procedure | **missing** (no warm-up performed) |
+| Task pack ×3 | met |
+| Journey pack ×3 | **missing** (ran once) |
+| Publish mean and variance | met |
+
+Four of the seven pinning fields are absent, so **this matrix is not a
+fully standard-protocol run**. **Treat the journey column as provisional.**
+#235 tracks the capture that closes the pinning gaps; a journey re-run at ×3
+closes the other.
 
 **What is and is not pinned.** Pinned: the korvid revision (`bdfb645`), the
 16-tool surface, the node SKU, the profile, and the composed-prompt fingerprint
@@ -75,14 +86,15 @@ denominator is 3, not the 4 journeys present at `bdfb645`:
 
 The three re-run models all scored differently on the current surface:
 
-| Model | 14 tools (`124b1aa`) | 16 tools (`bdfb645`) | Δ | published σ |
-|---|---:|---:|---:|---:|
-| Qwen3 1.7B | 72.5% | **79.7%** | **+7.2pp** | 4.10pp |
-| Qwen3 8B | 88.4% | **92.8%** | +4.3pp | 5.42pp |
-| Qwen3-Coder 30B-A3B | 81.2% | 81.2% | 0.0pp | 4.10pp |
+| Model | 14 tools (`124b1aa`) | 16 tools (`bdfb645`) | Δ | σ then | σ now |
+|---|---:|---:|---:|---:|---:|
+| Qwen3 1.7B | 72.5% | **79.7%** | **+7.2pp** | 4.10pp | 5.42pp |
+| Qwen3 8B | 88.4% | **92.8%** | +4.3pp | 5.42pp | 4.10pp |
+| Qwen3-Coder 30B-A3B | 81.2% | 81.2% | 0.0pp | 4.10pp | 5.42pp |
 
-None regressed. Only the 1.7B's gain clears its own noise floor, so this is
-directional rather than conclusive — but it is the first same-model evidence on
+None regressed. Only the 1.7B's Δ exceeds both of its spreads, and with three
+repetitions a side that is still descriptive, so this is directional rather
+than conclusive — but it is the first same-model evidence on
 both tool surfaces, and it argues against the concern in #221 that adding two
 tools would degrade small-model selection. See #221 for the caveats; a
 controlled answer still needs a flag to drop the tools within one binary.
@@ -95,12 +107,13 @@ controlled answer still needs a flag to drop the tools within one binary.
 (63/75, matching the 32B) in **100 minutes against the 32B's 367** — 3.7×
 faster for a higher score.
 
-Read the σ column before ranking adjacent rows. The 4B clears the 32B by
-4.3 pp against a 2.05 pp spread on both, which is the one size-inversion the
-data actually separates. The 4B-over-8B ordering (1.4 pp, 8B σ 4.10 pp) and
-the 8B-over-32B ordering (2.9 pp) are **within noise** — the supported claim
-is that the small models are not beaten by the large ones, not that this exact
-order would reproduce. Qwen3-Coder 30B-A3B retrieves the *most* evidence of any model (65/75)
+Read the σ column before ranking adjacent rows, and read it as description
+rather than as a test: three repetitions per model cannot establish pairwise
+significance. Observed mean gaps — 4B over 8B 1.4 pp (8B σ 4.10 pp), 8B over
+32B 2.9 pp, 4B over 32B 4.3 pp (σ 2.05 pp on both) — are all of the same order
+as the spreads. **Every ordering here is directional.** The claim the data
+supports is that the small models were not beaten by the large ones in this
+campaign, not that this exact order would reproduce. Qwen3-Coder 30B-A3B retrieves the *most* evidence of any model (65/75)
 and converts it into the sixth-best score, so retrieval and diagnosis are
 clearly separate abilities.
 
