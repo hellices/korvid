@@ -612,7 +612,7 @@ async def test_node_shell_cancelled_worker_still_deletes_pod(tmp_path: Path) -> 
         async with app.run_test():
             loop_box.append(asyncio.get_running_loop())
             task = asyncio.ensure_future(
-                app._run_node_shell(rec, "worker-1", "default", DEBUG_IMAGE, None)
+                app._shell._run_node_shell(rec, "worker-1", "default", DEBUG_IMAGE, None)
             )
             await asyncio.wait_for(wait_entered.wait(), timeout=5)
             task.cancel()
@@ -678,7 +678,7 @@ async def test_node_shell_cancelled_during_create_still_deletes_pod(tmp_path: Pa
         async with app.run_test():
             loop_box.append(asyncio.get_running_loop())
             task = asyncio.ensure_future(
-                app._run_node_shell(rec, "worker-1", "default", DEBUG_IMAGE, None)
+                app._shell._run_node_shell(rec, "worker-1", "default", DEBUG_IMAGE, None)
             )
             await asyncio.wait_for(create_entered.wait(), timeout=5)
             task.cancel()
@@ -703,14 +703,14 @@ async def test_create_failure_outcomes_distinguish_launch_error_from_timeout(
     app = make_app(DeleteRecorder(), tmp_path / "audit.jsonl")
     async with app.run_test():
         with patch("korvid.ui.app.subprocess.run", side_effect=OSError("kubectl vanished")):
-            outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
+            outcome = await app._shell._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == "error: kubectl could not be launched; no pod created"
 
         with patch(
             "korvid.ui.app.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["kubectl"], timeout=30),
         ):
-            outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
+            outcome = await app._shell._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == "error: pod creation timed out; cleanup skipped: check namespace default"
 
 
@@ -725,7 +725,7 @@ async def test_ambiguous_create_failure_keeps_namespace_hint(tmp_path: Path) -> 
             returncode=1, stdout=b"", stderr=b"error: unexpected EOF reading response"
         )
         with patch("korvid.ui.app.subprocess.run", return_value=failure):
-            outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
+            outcome = await app._shell._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == "error: pod creation failed; cleanup skipped: check namespace default"
 
         def _hinted() -> bool:
@@ -739,7 +739,7 @@ async def test_ambiguous_create_failure_keeps_namespace_hint(tmp_path: Path) -> 
             returncode=1, stdout=b"", stderr=b'error: watch of pod "forbidden-checker" failed'
         )
         with patch("korvid.ui.app.subprocess.run", return_value=failure):
-            outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
+            outcome = await app._shell._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == "error: pod creation failed; cleanup skipped: check namespace default"
 
 
@@ -787,7 +787,7 @@ async def test_non_psa_rejection_omits_namespace_remediation(tmp_path: Path) -> 
             b' cannot create resource "pods"',
         )
         with patch("korvid.ui.app.subprocess.run", return_value=failure):
-            outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
+            outcome = await app._shell._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == "error: pod creation rejected"
 
         def _notified() -> bool:
@@ -811,7 +811,7 @@ async def test_valid_json_with_scalar_metadata_is_unidentifiable(tmp_path: Path)
         create_ok = SimpleNamespace(returncode=0, stdout=_create_msg(), stderr=b"")
         weird = SimpleNamespace(returncode=0, stdout=b'{"metadata": "unexpected"}', stderr=b"")
         with patch("korvid.ui.app.subprocess.run", side_effect=[create_ok, weird]):
-            outcome = await app._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
+            outcome = await app._shell._create_node_debug_pod("worker-1", "default", DEBUG_IMAGE)
         assert outcome == (
             "error: created pod could not be identified; cleanup skipped: check namespace default"
         )

@@ -18,6 +18,8 @@ KorvidApp  (ui/app.py)
 │
 ├── HelmController      (ui/helm_controller.py)      install/upgrade/rollback/uninstall
 ├── OperatorController  (ui/operator_controller.py)  OLM subscribe/approve/uninstall
+├── ForwardController   (ui/forward_controller.py)   port-forward sessions
+├── ShellController     (ui/shell_controller.py)     pod exec, debug fallback, node shell
 ├── TransferController  (ui/transfer.py)             post-approval file transfer
 ├── DebugController     (ui/debug.py)                gated kubectl debug runs
 └── ...                                              further extractions pending
@@ -63,7 +65,9 @@ So the boundaries that matter are named:
   `AppViewState`.
 - **`UiSurface`** (`ui/ui_surface.py`) — the Textual capabilities a
   controller may use: `notify`, `push_screen`, `run_worker`, `progress` and
-  screen inspection. `push_screen` is generic over the screen's result type,
+  screen inspection, plus the terminal capabilities an interactive child
+  process needs (`suspend`, `refresh`, `call_from_thread`).
+  `push_screen` is generic over the screen's result type,
   so a callback written for a different screen is a type error; `notify`
   takes the `Literal` severity Textual accepts rather than a bare `str`;
   and screens are *asked about* rather than handed over — `screen_depth()`
@@ -122,10 +126,26 @@ tests added before the move where the behaviour is not already pinned.
 2. ~~OLM / operator workflows~~ — done (#187)
 3. ~~The `WriteGate` / `ViewState` / `UiSurface` seams~~ — done (#187);
    this is what dropped `HelmController` from 21 dependencies to 6
-4. Port-forward, then logs, then shell / debug session operations
-5. Manual write actions — folds the audit precondition currently repeated
-   six times in `app.py` into one place
-6. Agent, follow mode, MCP bridge
+4. ~~Port-forward~~ — done (#187)
+5. ~~Shell / debug / node shell~~ — done (#187)
+
+Stopping here is a proposal, not a completed criterion. #187 as written
+asks for `app.py` at most 5,000 lines; it is 7,885. Classifying all of
+`KorvidApp` shows that target cannot be met without also moving
+navigation and pane composition, which the same issue says stay on the
+app — extracting every remaining candidate lands at ~5,700.
+
+The argument for stopping is that the property worth having is coupling,
+not line count, and that property is already achieved. Measuring the
+remaining areas against the seams:
+
+- **logs** and **describe** reach into pane composition (`_pane`,
+  `_describe_pane`, `_focused_table`, `query_one`). Extracting them behind
+  the current seams would relocate that coupling rather than remove it;
+  they need a pane seam first, or they should stay.
+- **agent + MCP** needs 64 distinct app attributes. At that level an
+  extraction is a rewrite, and the approval perimeter is exactly where a
+  rewrite is least welcome.
 
 Navigation, scope and pane lifecycle stay on the app: composing panes and
 owning the focused view *is* the app's job, so moving it would relocate the
