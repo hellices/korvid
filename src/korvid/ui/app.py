@@ -9210,8 +9210,8 @@ class AppUiSurface(UiSurface):
     def progress(self, label: str) -> contextlib.AbstractContextManager[None]:
         return self._app._progress(label)
 
-    def screen(self) -> Any:
-        return self._app.screen
+    def is_current_screen(self, screen: Screen[Any]) -> bool:
+        return self._app.screen is screen
 
     def screen_depth(self) -> int:
         return len(self._app.screen_stack)

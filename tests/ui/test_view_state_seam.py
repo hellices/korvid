@@ -124,3 +124,18 @@ def test_notify_severity_is_a_closed_set() -> None:
     """`str` lets an invalid severity pass strict mypy and fail at runtime."""
     severity = UiSurface.notify.__annotations__["severity"]
     assert severity != "str"
+
+
+def test_ui_surface_hands_out_no_untyped_screen() -> None:
+    """Returning a live `Screen` as `Any` type-checks anything done to it.
+
+    The only real need is "is this still the screen I opened", but `Any`
+    also admits `Screen.dismiss` and `Screen.app`, which is app access
+    routed around the named surface.
+    """
+    offenders = [
+        name
+        for name, member in inspect.getmembers(UiSurface, inspect.isfunction)
+        if not name.startswith("_") and member.__annotations__.get("return") == "Any"
+    ]
+    assert offenders == []

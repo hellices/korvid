@@ -265,7 +265,7 @@ class HelmController:
         def _picked(repo: str | None) -> None:
             if repo is None or browse_in is None:
                 return
-            if self._ui.screen() is browse_in:
+            if self._ui.is_current_screen(browse_in):
                 browse_in.browse_repo(repo)
 
         self._ui.push_screen(

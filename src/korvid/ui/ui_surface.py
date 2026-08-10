@@ -95,12 +95,13 @@ class UiSurface(ABC):
         """Status-bar progress scoped exactly to the wrapped await."""
 
     @abstractmethod
-    def screen(self) -> Any:
-        """The screen currently on top.
+    def is_current_screen(self, screen: Screen[Any]) -> bool:
+        """Whether *screen* is still the one on top.
 
-        Read to check what the user is looking at *now* - a flow that
-        awaited must not push a dialog over a modal the user opened during
-        the gap.
+        A flow that awaited must not act on a screen the user has since
+        covered or dismissed. The question is asked rather than the screen
+        handed over: a live `Screen` also carries `dismiss` and `app`,
+        which is app access routed around this surface.
         """
 
     @abstractmethod

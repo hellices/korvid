@@ -66,9 +66,11 @@ So the boundaries that matter are named:
   screen inspection. `push_screen` is generic over the screen's result type,
   so a callback written for a different screen is a type error; `notify`
   takes the `Literal` severity Textual accepts rather than a bare `str`;
-  and the modal stack is inspected through `screen_depth()`, because the
-  live list would let a controller `pop` or reorder screens outside
-  Textual's lifecycle. Implemented by `AppUiSurface`.
+  and screens are *asked about* rather than handed over — `screen_depth()`
+  and `is_current_screen(screen)` — because the live stack would let a
+  controller `pop` or reorder screens, and a live `Screen` carries
+  `dismiss` and `app`, which is app access routed around the surface.
+  Implemented by `AppUiSurface`.
 
 `UiSurface.run_worker` gives supervision, not context safety: a `:ctx`
 switch cancels only the `hint-events` group, so a worker started before the
