@@ -116,12 +116,12 @@ def _tracks_cluster_write(
             finally:
                 release()
 
-        # Release when the coroutine is closed or collected without ever
-        # running - a worker cancelled before its first step, or app
-        # shutdown. A leaked reservation would block every later `:ctx`
-        # switch. `ReservedWrite` makes close() a release point so this
-        # does not depend on the collector; the finalizer remains for a
-        # coroutine that is neither closed nor awaited.
+        # Release when the coroutine never runs, or a leaked reservation
+        # blocks every later `:ctx` switch. `ReservedWrite` covers the
+        # three ways that happens - a worker Task cancelled before its
+        # first step (which arrives as a thrown CancelledError, not a
+        # close), an explicit close, and app shutdown - so this does not
+        # depend on the collector. The finalizer remains as a backstop.
         coro = ReservedWrite(run(), release)
         weakref.finalize(coro, release)
         return coro

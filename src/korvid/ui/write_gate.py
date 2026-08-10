@@ -165,10 +165,13 @@ class ReservedWrite(Coroutine[Any, Any, _ResultT]):
     CPython refcounting the two coincide, which is precisely what makes the
     guarantee easy to break and hard to notice.
 
-    Wrapping the coroutine makes `close()` a release point that does not
-    depend on the garbage collector. Priming the coroutine to arm its
-    `finally` was tried instead and rejected: a primed coroutine cannot be
-    consumed by `await` at all.
+    Wrapping the coroutine puts release on every way a write can end
+    without its body running: a cancelled worker Task (which arrives as a
+    thrown `CancelledError`, not a `close()`), an explicit `close()`, and a
+    `send` that terminates the coroutine. None of these depend on the
+    garbage collector. Priming the coroutine to arm its `finally` was tried
+    instead and rejected: a primed coroutine cannot be consumed by `await`
+    at all.
 
     It is a `collections.abc.Coroutine`, so `inspect.isawaitable` — what
     Textual's worker dispatches on — and `await` both accept it.
@@ -183,10 +186,33 @@ class ReservedWrite(Coroutine[Any, Any, _ResultT]):
         self._release = release
 
     def send(self, value: Any) -> Any:
-        return self._coro.send(value)
+        try:
+            return self._coro.send(value)
+        except BaseException:
+            # The coroutine terminated - returned, raised, or was thrown
+            # into and did not catch. A body that ran has already released
+            # from its own `finally`; this covers the one that never did.
+            self._release()
+            raise
 
     def throw(self, *args: Any, **kwargs: Any) -> Any:
-        return self._coro.throw(*args, **kwargs)
+        """Delegate, and release if the coroutine did not survive it.
+
+        This is the path that matters most. A worker Task cancelled before
+        its first step never reaches `close()`: the loop throws
+        `CancelledError` in, and an unstarted coroutine propagates it
+        without entering the body, so the body's `finally` never runs. The
+        finished Task can keep the wrapper referenced, so the finalizer
+        does not fire either.
+
+        A coroutine that *catches* the exception and suspends again is
+        still running, so it keeps its reservation.
+        """
+        try:
+            return self._coro.throw(*args, **kwargs)
+        except BaseException:
+            self._release()
+            raise
 
     def close(self) -> None:
         """Close the wrapped coroutine, then release either way.

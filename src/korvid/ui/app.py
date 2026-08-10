@@ -335,9 +335,10 @@ def _tracks_cluster_write(
             finally:
                 release()
 
-        # Wrapped so close() releases without waiting for collection; the
-        # finalizer stays as a backstop for a coroutine that is neither
-        # closed nor awaited.
+        # Wrapped so a coroutine that never runs releases without waiting
+        # for collection - including the cancelled worker Task, which
+        # arrives as a thrown CancelledError rather than a close. The
+        # finalizer stays as a backstop.
         coro = ReservedWrite(run(), release)
         weakref.finalize(coro, release)
         return coro

@@ -528,11 +528,11 @@ class OperatorController:
             finally:
                 release()
 
-        # The reservation must not leak if the coroutine is closed or
-        # collected without ever running (worker cancelled before start,
-        # app shutdown). `ReservedWrite` makes close() a release point so
-        # this does not wait for the collector; the finalizer stays as a
-        # backstop and release is idempotent, so both are safe.
+        # The reservation must not leak if the coroutine never runs.
+        # `ReservedWrite` releases on the three ways that happens: a
+        # cancelled worker Task (throw), an explicit close, and app
+        # shutdown. The finalizer stays as a backstop for an object that
+        # is none of those, and release is idempotent, so all are safe.
         coro = ReservedWrite(run(), release)
         weakref.finalize(coro, release)
         return coro

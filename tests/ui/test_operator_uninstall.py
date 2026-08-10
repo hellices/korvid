@@ -455,8 +455,9 @@ async def test_uninstall_write_slot_released_when_coroutine_never_runs(
     The controller reserves synchronously while *building* the coroutine, so
     the release cannot live only in the body's `finally` - a worker cancelled
     before start, or an app shutdown, would leave a `+1` behind and wedge
-    every future `:ctx` switch. The weakref finalizer covers that path, and
-    without this test deleting it would still leave the suite green.
+    every future `:ctx` switch. `close()` releases deterministically; the
+    weakref finalizer is only the backstop for an object that is never
+    closed, awaited, or thrown into, which the deletion below covers.
     """
     import gc
 
