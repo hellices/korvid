@@ -14,7 +14,8 @@ dialog, the `_run_write` worker, and the fail-closed intent audit.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any
 
 from korvid.k8s.discovery import ResourceMeta
 
@@ -64,6 +65,59 @@ class WriteGate(ABC):
         started or completed during the gap invalidates it, because a
         same-named row on another cluster would otherwise pass the
         selection checks.
+        """
+
+    @abstractmethod
+    async def permitted(
+        self, action: str, meta: ResourceMeta, namespace: str | None, name: str
+    ) -> bool:
+        """SubjectAccessReview pre-check, run before the dialog is pushed.
+
+        Advisory by design: with no checker injected this is True and the
+        write still passes the approval gate and the audit. It exists so a
+        missing permission is reported before a failed mutation, not instead
+        of the gate.
+        """
+
+    @abstractmethod
+    def run(
+        self,
+        action: str,
+        meta: ResourceMeta,
+        namespace: str | None,
+        name: str,
+        op_factory: Callable[[], Awaitable[None]],
+        detail: str = "",
+    ) -> Coroutine[Any, Any, str]:
+        """Build the coroutine for an already-approved, fail-closed write.
+
+        Synchronous on purpose, returning an unstarted coroutine: the
+        in-flight cluster write is reserved *here*, so a `:ctx` queued
+        between the confirmation callback and `run_worker` starting the
+        coroutine already sees it. Wrapping this in an async adapter
+        reintroduces exactly that gap.
+
+        The intent record must persist *before* the mutation; if it cannot,
+        the write is blocked. Only for flows that own their own approval
+        step (the operator install dialog re-checks the UID inside its
+        callback) - everything else goes through `confirm`, which calls this
+        internally. Returns a short outcome string.
+        """
+
+    @abstractmethod
+    def reserve_write(self) -> Callable[[], None]:
+        """Reserve an in-flight cluster mutation; returns the release.
+
+        `:ctx` switching consults this count, so the reservation must be
+        taken **synchronously** at the point the write coroutine is
+        *constructed*, not when it starts running: a confirmation callback
+        builds the coroutine and hands it to `run_worker`, which only starts
+        it on a later event-loop iteration, and a `:ctx` processed in that
+        gap must already see the write as in flight.
+
+        The returned release is idempotent, so a coroutine that is closed or
+        collected without ever running cannot leak a reservation and wedge
+        every future `:ctx` switch.
         """
 
     @abstractmethod

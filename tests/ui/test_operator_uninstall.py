@@ -248,7 +248,7 @@ async def test_apply_uninstall_reserves_the_cluster_write_slot_synchronously(
     ops = Recorder()
     app = make_app({}, {}, tmp_path / "audit.jsonl", write_ops=ops)
     async with app.run_test():
-        coro = app._operator_apply_uninstall(
+        coro = app._olm._operator_apply_uninstall(
             ops,
             SUB_META,
             "operators",
@@ -418,3 +418,64 @@ async def test_ctrl_d_on_csv_without_known_subscription_is_a_plain_delete(
         await pilot.press("y")
         await until(pilot, lambda: len(ops.calls) == 1, label="plain delete ran")
         assert ops.calls[0][:2] == ("delete", "clusterserviceversions")
+
+
+async def test_gate_run_reserves_the_cluster_write_slot_synchronously(
+    tmp_path: Path,
+) -> None:
+    """`WriteGate.run` must reserve before it returns, like `_run_write` does.
+
+    The install dialog owns its own approval, so it calls the gate's run
+    directly from the confirmation callback and hands the coroutine to
+    `run_worker`. An adapter that only reserves once the coroutine starts
+    leaves a gap in which a queued `:ctx` sees zero active writes, switches,
+    and lets the approved install execute against the previous cluster
+    (issue #36).
+    """
+    app = make_app({}, {}, tmp_path / "audit.jsonl", write_ops=Recorder())
+    async with app.run_test():
+
+        async def op() -> None:
+            return None
+
+        coro = app._olm._gate.run("operator-install", SUB_META, "operators", "x", op)
+        try:
+            assert app._active_cluster_writes == 1, "reserved before the worker starts"
+            await coro
+        finally:
+            coro.close()  # keep a failed assert from leaking the coroutine
+        assert app._active_cluster_writes == 0, "the reservation outlived the write"
+
+
+async def test_uninstall_write_slot_released_when_coroutine_never_runs(
+    tmp_path: Path,
+) -> None:
+    """A reserved uninstall whose coroutine never starts must not leak.
+
+    The controller reserves synchronously while *building* the coroutine, so
+    the release cannot live only in the body's `finally` - a worker cancelled
+    before start, or an app shutdown, would leave a `+1` behind and wedge
+    every future `:ctx` switch. The weakref finalizer covers that path, and
+    without this test deleting it would still leave the suite green.
+    """
+    import gc
+
+    ops = Recorder()
+    app = make_app({}, {}, tmp_path / "audit.jsonl", write_ops=ops)
+    async with app.run_test():
+        coro = app._olm._operator_apply_uninstall(
+            ops,
+            SUB_META,
+            "operators",
+            "cert-manager",
+            "sub-cert-manager",
+            fetch_kind="subscriptions",
+            csv_meta=None,
+            csv_name="",
+            csv_uid=None,
+        )
+        assert app._active_cluster_writes == 1
+        coro.close()  # unstarted coroutine: the body's finally never executes
+        del coro
+        gc.collect()
+        assert app._active_cluster_writes == 0, "the reservation leaked"

@@ -944,3 +944,9 @@ class PodSummary:
             ready_transition_at=_ready_transition_at(status),
             created=str(meta.get("creationTimestamp") or ""),
         )
+
+
+def manifest_uid(manifest: dict[str, Any]) -> str | None:
+    """The metadata.uid of a fetched manifest, or None when absent."""
+    raw = (manifest.get("metadata") or {}).get("uid")
+    return str(raw) if raw else None
