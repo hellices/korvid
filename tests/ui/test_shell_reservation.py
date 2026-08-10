@@ -200,3 +200,65 @@ def test_pod_shell_reports_a_missing_kubectl_instead_of_raising() -> None:
 
 def _raise_oserror(argv: list[str], banner: str) -> int:
     raise OSError(2, "No such file or directory")
+
+
+async def test_reserved_write_is_still_consumable_by_await() -> None:
+    """The rejected alternative broke exactly this (#237).
+
+    Priming the coroutine to arm its `finally` made it unawaitable, so the
+    wrapper has to stay transparent to `await`, not only to worker Tasks.
+    """
+    from korvid.ui.write_gate import ReservedWrite
+
+    released: list[int] = []
+
+    async def work() -> str:
+        return "done"
+
+    reserved = ReservedWrite(work(), lambda: released.append(1))
+    assert await reserved == "done"
+
+
+async def test_closing_a_finished_reserved_write_does_not_double_release() -> None:
+    """A completed write already released from its own `finally`."""
+    from korvid.ui.write_gate import ReservedWrite
+
+    calls: list[int] = []
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if not released:
+            released = True
+            calls.append(1)
+
+    async def work() -> None:
+        try:
+            return None
+        finally:
+            release()
+
+    reserved = ReservedWrite(work(), release)
+    await reserved
+    reserved.close()
+    assert calls == [1]
+
+
+async def test_reserved_write_propagates_a_thrown_exception() -> None:
+    """`throw` must reach the wrapped coroutine, not be swallowed."""
+    from korvid.ui.write_gate import ReservedWrite
+
+    seen: list[str] = []
+
+    async def work() -> None:
+        try:
+            await asyncio.sleep(0)
+        except ValueError:
+            seen.append("caught")
+            raise
+
+    reserved = ReservedWrite(work(), lambda: None)
+    reserved.send(None)
+    with contextlib.suppress(ValueError):
+        reserved.throw(ValueError("boom"))
+    assert seen == ["caught"]

@@ -15,9 +15,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Coroutine
-from typing import Any
+from typing import Any, TypeVar
 
 from korvid.k8s.discovery import ResourceMeta
+
+_ResultT = TypeVar("_ResultT")
 
 
 class WriteGate(ABC):
@@ -145,3 +147,60 @@ class WriteGate(ABC):
     @abstractmethod
     def switching(self) -> bool:
         """Whether a context switch is in flight right now."""
+
+
+class ReservedWrite(Coroutine[Any, Any, _ResultT]):
+    """A write coroutine that releases its reservation deterministically.
+
+    The slot is reserved synchronously at the call, because a confirmation
+    callback builds the coroutine and hands it to `run_worker`, which starts
+    it on a later loop iteration — a `:ctx` queued in that gap must already
+    see the write in flight.
+
+    Releasing it is the harder half. A coroutine that never started ignores
+    `close()`: it never reaches its own `finally`. Relying on
+    `weakref.finalize` instead ties the release to *collection*, so a closed
+    coroutine that is still referenced holds the reservation, and a leaked
+    `+1` blocks every later `:ctx` switch for the session's lifetime. Under
+    CPython refcounting the two coincide, which is precisely what makes the
+    guarantee easy to break and hard to notice.
+
+    Wrapping the coroutine makes `close()` a release point that does not
+    depend on the garbage collector. Priming the coroutine to arm its
+    `finally` was tried instead and rejected: a primed coroutine cannot be
+    consumed by `await` at all.
+
+    It is a `collections.abc.Coroutine`, so `inspect.isawaitable` — what
+    Textual's worker dispatches on — and `await` both accept it.
+    """
+
+    def __init__(
+        self,
+        coro: Coroutine[Any, Any, _ResultT],
+        release: Callable[[], None],
+    ) -> None:
+        self._coro = coro
+        self._release = release
+
+    def send(self, value: Any) -> Any:
+        return self._coro.send(value)
+
+    def throw(self, *args: Any, **kwargs: Any) -> Any:
+        return self._coro.throw(*args, **kwargs)
+
+    def close(self) -> None:
+        """Close the wrapped coroutine, then release either way.
+
+        The release is idempotent, so a coroutine that did run — and has
+        already released from its own `finally` — is unaffected.
+        """
+        try:
+            self._coro.close()
+        finally:
+            self._release()
+
+    def __await__(self) -> Any:
+        return self._coro.__await__()
+
+    def __repr__(self) -> str:
+        return f"ReservedWrite({self._coro!r})"

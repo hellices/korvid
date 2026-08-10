@@ -61,7 +61,7 @@ from korvid.ui.ui_surface import UiSurface
 from korvid.ui.view_state import ViewState
 from korvid.ui.widgets.confirm_screen import ConfirmScreen, ImagePrompt
 from korvid.ui.widgets.pick_screen import PickScreen
-from korvid.ui.write_gate import WriteGate
+from korvid.ui.write_gate import ReservedWrite, WriteGate
 
 logger = logging.getLogger(__name__)
 
@@ -116,16 +116,13 @@ def _tracks_cluster_write(
             finally:
                 release()
 
-        coro = run()
-        # Release when the coroutine is collected without ever running -
-        # a worker cancelled before its first step, or app shutdown. A
-        # leaked reservation would block every later `:ctx` switch.
-        #
-        # This fires on collection rather than on close(): a coroutine
-        # that never started ignores close(), and priming it to arm the
-        # `finally` instead makes it unawaitable
-        # ("coroutine is being awaited already") wherever a decorated
-        # method is consumed by `await` rather than by a worker Task.
+        # Release when the coroutine is closed or collected without ever
+        # running - a worker cancelled before its first step, or app
+        # shutdown. A leaked reservation would block every later `:ctx`
+        # switch. `ReservedWrite` makes close() a release point so this
+        # does not depend on the collector; the finalizer remains for a
+        # coroutine that is neither closed nor awaited.
+        coro = ReservedWrite(run(), release)
         weakref.finalize(coro, release)
         return coro
 
